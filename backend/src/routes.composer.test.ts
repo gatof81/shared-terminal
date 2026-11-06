@@ -458,3 +458,49 @@ describe("admin resolve / panes and the host CLI (§8.1.11)", () => {
 		expect(err[0]).toMatch(/backend not reachable|ECONNREFUSED|fetch failed/);
 	});
 });
+
+describe("v1.9 §8.1.12 audit round 1 S3: job records resolve whatever the background flag says", () => {
+	it("with no background transport configured, a leftover job:<short> record is listed and can be declared and drained", async () => {
+		await start();
+		expect(composer.bgEnabled).toBe(false);
+		const at = new Date().toISOString();
+		await new PaneRecordStore(root).write({
+			v: 1,
+			sid: SID,
+			pane_id: "job:dda484d8",
+			pane_pid: 900,
+			container_id: "cont-1",
+			cid: CID,
+			client_message_id: ID1,
+			text_hash: "h",
+			prepared_at: at,
+			state: "uncertain",
+			result: "pending",
+			phase: "completed",
+			execs: [{ id: "e-old", step: "reply", created_at: at, settled: { exit_code: 0, at } }],
+			job: {
+				short: "dda484d8",
+				pid: 900,
+				start: "5000",
+				exe: "/x/claude.exe",
+				nonce: "n",
+				pty_host_pid: 850,
+				daemon_pid: 800,
+				daemon_start: "4000",
+				daemon_exe: "/x/claude.exe",
+				version: "2.1.318",
+				uid: 1000,
+				config_dir: "/home/developer/.claude",
+			},
+			updated_at: at,
+		});
+		const r = await post(
+			`/api/admin/sessions/${SID}/composer/resolve`,
+			{ paneId: "job:dda484d8", clientMessageId: ID1, outcome: "discarded" },
+			"admin-1",
+		);
+		expect(r.status).toBe(200);
+		expect(await r.json()).toMatchObject({ result: "resolved", released: true });
+		expect((await new PaneRecordStore(root).list(SID)).records).toEqual([]);
+	});
+});

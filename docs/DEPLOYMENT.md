@@ -487,6 +487,42 @@ Both variables are forwarded by `docker-compose.yml` with empty defaults
 (before this, setting them in `.env` did nothing under compose — the same
 trap `CONVERSATION_ENABLED` had before 3.0d).
 
+#### Composer for CLI background sessions (EXPERIMENTAL, `CONVERSATION.md` §8.1.12, not approved)
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `CONVERSATION_COMPOSER_BG_ENABLED` | unset (`false`) | With the composer on, a send to a conversation the fresh probe reports as `kind: background` goes through the CLI daemon's `reply` op (`nextTurn: true`), never a pane. Off ⇒ today's `409 not-interactive`. |
+| `COMPOSER_BG_CLI_VERSIONS` | **empty** | Exact list (no minimum) of CLI versions whose `composerBg.smoke.ts` (Session Image `cli-variants`) is green. Empty ⇒ every background send is `409 cli-unvalidated`. |
+| `COMPOSER_BG_SESSIONS` | **empty** | Session ids the transport applies to (comma-separated). Empty ⇒ no session, even with the flag on. With the flag off, a malformed value (or a malformed version list) only warns; with it on, it stops the boot. Canary plan: `docs/design/composer-background-sessions.md`. |
+
+A background send's durable record is `<WORKSPACE_ROOT>/.st-control/<sid>/composer/job-<short>.json`;
+it is listed, reconciled and resolved like a pane record, with `job:<short>` as the pane id:
+
+```bash
+npm run composer:resolve -- <sessionId> --list --user <admin>
+npm run composer:resolve -- <sessionId> job:<short> <clientMessageId> reconcile --user <admin>
+npm run composer:resolve -- <sessionId> job:<short> <clientMessageId> discarded|sent-manually --user <admin>
+```
+
+Resolving a `job:` record works whatever `CONVERSATION_COMPOSER_BG_ENABLED`
+says (it settles or declares; it never sends).
+
+**Rollback / turning the flag off — drain job records first.** A backend
+without background-transport support (main before this feature) does not
+know `job-<short>.json`: it reports it as an unexpected file and makes the
+**whole session** unverifiable for the composer (every pane refused
+`send-in-progress{unverifiable}`). Before rolling back to such a backend:
+
+1. Turn `CONVERSATION_COMPOSER_BG_ENABLED` off and restart (no new job
+   records; the existing ones keep settling by evidence, an `accepted` one
+   ends `delivered`/`misdelivered`/`unconfirmed` within 10 min).
+2. List every session's records (`--list`) and resolve what is left
+   (`reconcile`; then `discarded`/`sent-manually` for an `uncertain` one the
+   operator verified in the Terminal) until no `job-*.json` remains under
+   `.st-control/*/composer/`.
+3. Only then deploy the older backend. A record that cannot be drained is
+   evidence: move it aside by hand (never delete it unread) and note why.
+
 #### Composer pilot (disposable `pilot-captura` session only)
 
 Each step needs its own authorization; none of this touches a real session.

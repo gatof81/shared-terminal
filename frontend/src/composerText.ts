@@ -118,6 +118,17 @@ export function explainCode(code: string, detail?: string): string {
 			return "Delivery failed part-way. Part of the text may be in the terminal's input — check the Terminal before sending again.";
 		case "audit-failed":
 			return "The audit record could not be written; nothing was sent.";
+		// v1.9 §8.1.12 (background sessions, experimental)
+		case "duplicate-pending":
+			return detail === "unconfirmed-unacknowledged"
+				? "An identical message sent earlier was not confirmed — it may still be queued or have run. Check the Terminal, confirm below, then send again."
+				: detail === "queue-pending"
+					? "The same text is already waiting in Claude Code's queue for this conversation; a second one could not be told apart. Check the Terminal."
+					: "The same message from Chat is still pending in this conversation; wait for its outcome.";
+		case "transcript-unavailable":
+			return "Chat cannot read this conversation's transcript, so it could not confirm a delivery. Nothing was sent; type in the Terminal.";
+		case "unsupported-config-dir":
+			return "This background session runs Claude Code with a custom CLAUDE_CONFIG_DIR. Sending from Chat only supports the default ~/.claude location; type in the Terminal instead.";
 		default:
 			return `Send refused (${code}).`;
 	}

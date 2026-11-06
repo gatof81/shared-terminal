@@ -219,6 +219,9 @@ export function gapText(data: Record<string, unknown>, ts: string): string {
 export function composerSendText(
 	data: Record<string, unknown>,
 ): { tone: "info" | "warn"; text: string } | null {
+	// v1.9 §8.1.12.8: a send to a background session has its own words for
+	// every state — none of them may read like another one.
+	if (data.transport === "background") return backgroundSendText(data);
 	switch (str(data.state)) {
 		case "failed":
 			return {
@@ -247,6 +250,52 @@ export function composerSendText(
 			return {
 				tone: "info",
 				text: `An operator marked a send from Chat as ${str(data.outcome) || "resolved"}.`,
+			};
+		default:
+			return null;
+	}
+}
+
+/** The background transport's states (§8.1.12.6), in the person's words. */
+export const BG_TEXT = {
+	notice:
+		"This conversation runs in the background. A message accepted by Claude Code can't be cancelled from Chat; while it waits it can be edited or removed from the Terminal (↑).",
+	accepted: "Accepted by Claude Code — not yet delivered to Claude.",
+	delivered: "Delivered to Claude.",
+	unconfirmed:
+		"Not confirmed: it may have been lost or still be queued. Check the Terminal before resending.",
+	duplicated:
+		"Strong evidence this message ran twice: Claude Code restarted the session and the same text was submitted again. Check the Terminal.",
+	possibleDuplicate:
+		"Claude Code resumed the session and the same text appeared again — this message may have run twice (not confirmed).",
+	uncertain:
+		"The outcome of a message to this background session is unknown; nothing is resent. Check the Terminal.",
+	failed: "Claude Code did not take the message; nothing was delivered.",
+	misdelivered: "A message from Chat landed in another conversation of this background session.",
+} as const;
+
+function backgroundSendText(
+	data: Record<string, unknown>,
+): { tone: "info" | "warn"; text: string } | null {
+	switch (str(data.state)) {
+		case "accepted":
+			return { tone: "info", text: BG_TEXT.accepted };
+		case "unconfirmed":
+			return { tone: "warn", text: BG_TEXT.unconfirmed };
+		case "duplicated":
+			return { tone: "warn", text: BG_TEXT.duplicated };
+		case "possible-duplicate":
+			return { tone: "warn", text: BG_TEXT.possibleDuplicate };
+		case "uncertain":
+			return { tone: "warn", text: BG_TEXT.uncertain };
+		case "failed":
+			return { tone: "info", text: BG_TEXT.failed };
+		case "misdelivered":
+			return { tone: "info", text: BG_TEXT.misdelivered };
+		case "resolved":
+			return {
+				tone: "info",
+				text: `An operator marked a message to this background session as ${str(data.outcome) || "resolved"}.`,
 			};
 		default:
 			return null;
@@ -539,8 +588,11 @@ export function buildThread(events: readonly ConversationEvent[]): ThreadModel {
 				// failed, uncertain, unconfirmed, misdelivered or resolved send
 				// is a marker, once per state. A delivered send is the
 				// `user_prompt` that follows it.
+				// v1.9: an `accepted` background send that reached its final
+				// state is that state, not "accepted" any more.
 				const superseded =
-					d.state === "uncertain" && composerFinal.has(String(d.client_message_id ?? ""));
+					(d.state === "uncertain" || d.state === "accepted") &&
+					composerFinal.has(String(d.client_message_id ?? ""));
 				const line = superseded ? null : composerSendText(d);
 				if (line) {
 					items.push({

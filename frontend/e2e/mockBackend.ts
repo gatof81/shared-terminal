@@ -71,6 +71,14 @@ interface Conversation {
 	statusEvidence?: string;
 	/** null = the conversation has no pane (binding lost). */
 	paneId?: string | null;
+	/**
+	 * v1.9 §8.1.12 (EXPERIMENTAL): a background session reachable through
+	 * the CLI daemon. A send answers 202 `accepted`; `bgOutcome` then plays
+	 * the send's own `composer_send` events (and the CLI's user_prompt for a
+	 * delivery) over the socket.
+	 */
+	transport?: "background";
+	bgOutcome?: "delivered" | "unconfirmed" | "duplicated" | "possible-duplicate";
 	/** The tmux tab the conversation's pane lives in (default "tab-1"). */
 	tabId?: string | null;
 	/** Lost-event gaps reported in the list (default 0). */
@@ -870,6 +878,46 @@ export class MockBackend {
 				const conv = this.conversations.find((c) => c.cid === decodeURIComponent(msg[1]!));
 				const body = req.postDataJSON() as { text: string; clientMessageId: string };
 				if (!conv || !conv.canSendInput) return json(409, { error: "needs-terminal" });
+				if (conv.transport === "background") {
+					const id = body.clientMessageId;
+					const cs = (state: string, extra: Record<string, unknown> = {}) =>
+						this.pushConversationEvent(conv.cid, {
+							ts: new Date().toISOString(),
+							ev: "composer_send",
+							prompt_id: null,
+							turn_id: null,
+							agent_id: null,
+							pane: null,
+							data: { state, client_message_id: id, transport: "background", ...extra },
+						});
+					setTimeout(() => cs("accepted"), 30);
+					setTimeout(() => {
+						if (conv.bgOutcome === "unconfirmed") {
+							cs("unconfirmed", { detail: "t-ack-bg" });
+							return;
+						}
+						cs("delivered", { prompt_id: `p-${id}` });
+						this.pushConversationEvent(conv.cid, {
+							ts: new Date().toISOString(),
+							ev: "user_prompt",
+							prompt_id: `p-${id}`,
+							turn_id: null,
+							agent_id: null,
+							pane: null,
+							data: { prompt: body.text },
+						});
+						if (conv.bgOutcome === "duplicated" || conv.bgOutcome === "possible-duplicate")
+							setTimeout(
+								() =>
+									cs(conv.bgOutcome as string, {
+										prompt_id: `p2-${id}`,
+										first_prompt_id: `p-${id}`,
+									}),
+								200,
+							);
+					}, 1500);
+					return json(202, { result: "accepted", clientMessageId: id });
+				}
 				// Delivered: the CLI's own user_prompt follows over the socket.
 				setTimeout(() => {
 					this.pushConversationEvent(conv.cid, {
@@ -958,6 +1006,7 @@ export class MockBackend {
 			gapsCount: c.gapsCount ?? 0,
 			claudeVersion: "2.1.314",
 			canSendInput: c.canSendInput,
+			...(c.transport ? { transport: c.transport } : {}),
 			customTitle: this.metaUnavailable ? null : (c.customTitle ?? null),
 			archivedAt: this.metaUnavailable ? null : (c.archivedAt ?? null),
 		};

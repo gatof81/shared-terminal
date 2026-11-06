@@ -59,7 +59,12 @@ export function registerConversationRoutes(router: Router, ctx: RouteContext): v
 		if (capture) composer.noteCapture(sid, capture.effective);
 		const av = await composer.availability(
 			sid,
-			summaries.map((s) => ({ cid: s.sessionId, kind: s.kind, paneId: s.paneId })),
+			summaries.map((s) => ({
+				cid: s.sessionId,
+				kind: s.kind,
+				paneId: s.paneId,
+				endedAt: s.endedAt,
+			})),
 			{
 				captureEffective: capture?.effective ?? composer.lastCaptureEffective(sid),
 				callerMayOperate: true,

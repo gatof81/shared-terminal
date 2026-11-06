@@ -28,6 +28,7 @@ import {
 	parsePolicy as parseCliPolicy,
 } from "./conversation/cliPolicy.js";
 import { ComposerService, composerFlagEnabled } from "./conversation/composer.js";
+import { bgConfigFromEnv, workspaceTranscripts } from "./conversation/composerBg.js";
 import { IngestOriginVerifier } from "./conversation/ingestOrigin.js";
 import { createIngestHandler } from "./conversation/ingestRoute.js";
 import { PaneRecordStore } from "./conversation/paneRecord.js";
@@ -221,6 +222,13 @@ const COMPOSER_ENABLED = composerFlagEnabled(process.env.CONVERSATION_COMPOSER_E
 // §8.1.9: exact list + optional open minimum + deny list. A malformed
 // setting throws here and the backend refuses to start.
 const COMPOSER_CLI_POLICY = parseCliPolicy(process.env);
+// v1.9 §8.1.12 (EXPERIMENTAL): the background-session transport, through the
+// CLI daemon's `reply` op. Off unless `true`/`1`, only with the composer on,
+// and only for the sessions in COMPOSER_BG_SESSIONS (empty ⇒ none). Its
+// version list is EXACT with an EMPTY default (nothing validated ⇒ every send
+// is `cli-unvalidated`). With the flag on a malformed list stops the boot;
+// with it off a malformed list only warns (bgConfigFromEnv).
+const COMPOSER_BG = bgConfigFromEnv(process.env, COMPOSER_ENABLED);
 const composer = new ComposerService({
 	enabled: COMPOSER_ENABLED,
 	cliPolicy: COMPOSER_CLI_POLICY,
@@ -233,6 +241,12 @@ const composer = new ComposerService({
 	sessions,
 	docker: docker.composerPort(),
 	records: new PaneRecordStore(WORKSPACE_ROOT_FOR_CONVERSATION),
+	bg: {
+		enabled: COMPOSER_BG.enabled,
+		versions: COMPOSER_BG.versions,
+		sessions: COMPOSER_BG.sessions,
+		transcripts: workspaceTranscripts,
+	},
 });
 logger.info(
 	COMPOSER_ENABLED
@@ -245,6 +259,9 @@ if (COMPOSER_ENABLED) {
 	logger.info(`[server] composer CLI policy: ${describeCliPolicy(COMPOSER_CLI_POLICY)}`);
 	for (const w of cliPolicyWarnings(COMPOSER_CLI_POLICY)) logger.warn(`[server] ${w}`);
 }
+// Nothing at all with the flag unset (boot logs unchanged), except a warning
+// for a malformed experimental variable that is being ignored.
+for (const w of COMPOSER_BG.warnings) logger.warn(`[server] ${w}`);
 // Single shared bootstrap broadcaster (PR 185b2b). Owned at the server
 // scope so the route's runAsyncBootstrap and the WS handler's
 // /ws/bootstrap subscriber see the same per-session listener sets and

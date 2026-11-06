@@ -22,6 +22,7 @@ import { PANE_ID_RE } from "./composerText.js";
 export type OperationState =
 	| "prepared"
 	| "entered"
+	| "accepted"
 	| "failed"
 	| "uncertain"
 	| "delivered"
@@ -37,7 +38,36 @@ export type OperationResult =
 	| "failed"
 	| "resolved";
 export type OperationPhase = "active" | "completed" | "cancelled";
-export type ExecStep = "precheck" | "paste" | "newline" | "enter";
+export type ExecStep = "precheck" | "paste" | "newline" | "enter" | "reply";
+
+/**
+ * v1.9 §8.1.12 (EXPERIMENTAL): the target of a background-session send — a
+ * CLI daemon job, not a pane. A job record lives at `job-<short>.json` next
+ * to the pane records, with `pane_id = "job:<short>"` (the exclusion key
+ * `composer:<sid>:job:<short>`) and `pane_pid` = the job worker's pid, so
+ * every rule of §8.1.4 (format, fsync chain, strict parse, identity-checked
+ * removal) applies unchanged. Every identity the preconditions verified is
+ * recorded: the ack, the recovery and the admin surface need nothing else.
+ */
+export interface JobTarget {
+	short: string;
+	/** The worker's pid, `/proc/<pid>/stat` starttime and exe the preconditions read. */
+	pid: number;
+	start: string;
+	exe: string;
+	/** The job's `nonce` and pty-host pid from the daemon's `list`. */
+	nonce: string;
+	pty_host_pid: number;
+	daemon_pid: number;
+	daemon_start: string;
+	daemon_exe: string;
+	/** The live version of the worker (= the daemon's), §8.1.9 pattern. */
+	version: string;
+	/** The worker's uid (every in-container read and the reply run as it, never root). */
+	uid: number;
+	/** The CLI config dir the worker runs with (locates the daemon after the worker is gone). */
+	config_dir: string;
+}
 
 export interface ExecEntry {
 	id: string;
@@ -62,6 +92,8 @@ export interface PaneRecord {
 	cancelled_at?: string;
 	cancel_reason?: string;
 	execs: ExecEntry[];
+	/** v1.9 §8.1.12: present only on a job record (`pane_id = "job:<short>"`). */
+	job?: JobTarget;
 	/** How effects got settled when they did (§8.1.4 regla 7). */
 	evidence?: "inspected" | "container-gone" | "none-created";
 	/** The HTTP answer recorded for replay once `result` is final. */
@@ -90,6 +122,7 @@ const KEYS = new Set([
 	"cancelled_at",
 	"cancel_reason",
 	"execs",
+	"job",
 	"evidence",
 	"http",
 	"updated_at",
@@ -97,6 +130,7 @@ const KEYS = new Set([
 const STATES: ReadonlySet<string> = new Set([
 	"prepared",
 	"entered",
+	"accepted",
 	"failed",
 	"uncertain",
 	"delivered",
@@ -114,9 +148,58 @@ const RESULTS: ReadonlySet<string> = new Set([
 	"resolved",
 ]);
 const PHASES: ReadonlySet<string> = new Set(["active", "completed", "cancelled"]);
-const STEPS: ReadonlySet<string> = new Set(["precheck", "paste", "newline", "enter"]);
+const STEPS: ReadonlySet<string> = new Set(["precheck", "paste", "newline", "enter", "reply"]);
 
-function parseRecord(raw: string, sid: string, paneDigits: string): PaneRecord {
+/** A job record's key: `job:<short>` (the short is `sessionId[0:8]`, lowercase hex). */
+export const JOB_KEY_RE = /^job:[0-9a-f]{8}$/;
+export const jobKey = (short: string): string => `job:${short}`;
+const isJobKey = (k: string): boolean => JOB_KEY_RE.test(k);
+
+function parseJob(v: unknown): JobTarget {
+	const j = v as Record<string, unknown>;
+	if (!j || typeof j !== "object" || Array.isArray(j)) throw new Error("bad job");
+	const keys = new Set([
+		"short",
+		"pid",
+		"start",
+		"exe",
+		"nonce",
+		"pty_host_pid",
+		"daemon_pid",
+		"daemon_start",
+		"daemon_exe",
+		"version",
+		"uid",
+		"config_dir",
+	]);
+	for (const k of Object.keys(j)) if (!keys.has(k)) throw new Error(`unknown job key ${k}`);
+	const s = (k: string) => {
+		if (typeof j[k] !== "string" || (j[k] as string).length === 0) throw new Error(`bad job.${k}`);
+		return j[k] as string;
+	};
+	const n = (k: string) => {
+		if (typeof j[k] !== "number" || !Number.isInteger(j[k]) || (j[k] as number) < 1)
+			throw new Error(`bad job.${k}`);
+		return j[k] as number;
+	};
+	return {
+		short: s("short"),
+		pid: n("pid"),
+		start: s("start"),
+		exe: s("exe"),
+		nonce: s("nonce"),
+		pty_host_pid: n("pty_host_pid"),
+		daemon_pid: n("daemon_pid"),
+		daemon_start: s("daemon_start"),
+		daemon_exe: s("daemon_exe"),
+		version: s("version"),
+		uid: n("uid"),
+		config_dir: s("config_dir"),
+	};
+}
+
+/** `fileKey`: the pane's digits, or `job:<short>` for a job record. */
+function parseRecord(raw: string, sid: string, fileKey: string): PaneRecord {
 	const r = JSON.parse(raw) as Record<string, unknown>;
 	if (!r || typeof r !== "object" || Array.isArray(r)) throw new Error("not an object");
 	for (const k of Object.keys(r)) if (!KEYS.has(k)) throw new Error(`unknown key ${k}`);
@@ -127,7 +210,9 @@ function parseRecord(raw: string, sid: string, paneDigits: string): PaneRecord {
 	if (r.v !== 1) throw new Error("unknown version");
 	if (str("sid") !== sid) throw new Error("record names another session");
 	const pane_id = str("pane_id");
-	if (!PANE_ID_RE.test(pane_id) || pane_id.slice(1) !== paneDigits)
+	if (isJobKey(fileKey)) {
+		if (pane_id !== fileKey) throw new Error("job mismatch");
+	} else if (!PANE_ID_RE.test(pane_id) || pane_id.slice(1) !== fileKey)
 		throw new Error("pane mismatch");
 	if (typeof r.pane_pid !== "number" || !Number.isInteger(r.pane_pid) || r.pane_pid < 1)
 		throw new Error("bad pane_pid");
@@ -178,6 +263,11 @@ function parseRecord(raw: string, sid: string, paneDigits: string): PaneRecord {
 		execs,
 		updated_at: str("updated_at"),
 	};
+	if (isJobKey(pane_id)) {
+		// A job record without its target, or a pane record with one, is not ours.
+		out.job = parseJob(r.job);
+		if (out.job.short !== pane_id.slice(4)) throw new Error("job short mismatch");
+	} else if (r.job !== undefined) throw new Error("job on a pane record");
 	if (r.cancelled_at !== undefined) out.cancelled_at = str("cancelled_at");
 	if (r.cancel_reason !== undefined) out.cancel_reason = str("cancel_reason");
 	if (r.evidence !== undefined) {
@@ -218,8 +308,13 @@ export class PaneRecordStore {
 	}
 
 	file(sid: string, paneId: string): string {
+		if (isJobKey(paneId)) return path.join(this.dir(sid), `job-${paneId.slice(4)}.json`);
 		if (!PANE_ID_RE.test(paneId)) throw new Error("[composer] unsafe pane id");
 		return path.join(this.dir(sid), `${paneId.slice(1)}.json`);
+	}
+
+	private static fileKey(paneId: string): string {
+		return isJobKey(paneId) ? paneId : paneId.slice(1);
 	}
 
 	async read(sid: string, paneId: string): Promise<PaneRecordRead> {
@@ -232,7 +327,7 @@ export class PaneRecordStore {
 			return { kind: "unreadable", error: (err as NodeJS.ErrnoException).code ?? "read error" };
 		}
 		try {
-			return { kind: "ok", record: parseRecord(raw, sid, paneId.slice(1)) };
+			return { kind: "ok", record: parseRecord(raw, sid, PaneRecordStore.fileKey(paneId)) };
 		} catch (err) {
 			return { kind: "unreadable", error: (err as Error).message };
 		}
@@ -256,11 +351,13 @@ export class PaneRecordStore {
 		for (const name of names) {
 			if (name.startsWith(".") || name.endsWith(".tmp")) continue;
 			const m = name.match(/^(\d{1,9})\.json$/);
-			if (!m) {
+			// v1.9 §8.1.12: `job-<short>.json`, a background-session send.
+			const jm = name.match(/^job-([0-9a-f]{8})\.json$/);
+			if (!m && !jm) {
 				unreadable.push(`${name}:unexpected-file`);
 				continue;
 			}
-			const r = await this.read(sid, `%${m[1]}`);
+			const r = await this.read(sid, m ? `%${m[1]}` : `job:${jm?.[1]}`);
 			if (r.kind === "ok") records.push(r.record);
 			else if (r.kind === "unreadable") unreadable.push(`${name}:${r.error}`);
 		}
@@ -344,7 +441,7 @@ export class PaneRecordStore {
 		}
 		let owner: string;
 		try {
-			owner = parseRecord(raw, sid, paneId.slice(1)).client_message_id;
+			owner = parseRecord(raw, sid, PaneRecordStore.fileKey(paneId)).client_message_id;
 		} catch {
 			return "other";
 		}

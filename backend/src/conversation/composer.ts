@@ -40,11 +40,28 @@ import { logger } from "../logger.js";
 import { SessionBusyError, SessionLifecycleLock } from "../sessionLifecycleLock.js";
 import type { SessionMeta } from "../types.js";
 import {
+	abortHttpCode,
+	BG_CLIENT_ARGV,
+	type InspectResult,
+	inspectFault,
+	inspectStdin,
+	parseInspectOutput,
+	parseReplyOutput,
+	type ReplyOutcome,
+	replyStdin,
+	SHORT_RE,
+} from "./bgTransport.js";
+import {
 	exeInodeArgv,
+	exeLinkArgv,
 	type LiveVersion,
 	LiveVersionCache,
 	parseInode,
+	parseStarttime,
+	parseUids,
 	readLiveCliVersion,
+	statArgv,
+	statusArgv,
 } from "./cliIdentity.js";
 
 /** Host-side bound per live-version exec (in-container: `timeout -k 1 3` / `-k 2 5`). */
@@ -72,6 +89,24 @@ import {
 	ruleText,
 } from "./cliPolicy.js";
 import {
+	BG_ACK_POLL_MS,
+	BG_EVENT_SCAN,
+	BG_JOB_CHECK_MS,
+	type BgCandidate,
+	DEFAULT_BG_CONFIG_DIR,
+	duplicateAfter,
+	hookCandidates,
+	ourEnqueueLatencyMs,
+	parseTranscript,
+	pendingSameContent,
+	T_ACK_BG_MS,
+	TRANSCRIPT_TAIL_BYTES,
+	type TranscriptPort,
+	transcriptConfirms,
+	transcriptPathOf,
+	unacknowledgedUnconfirmed,
+} from "./composerBg.js";
+import {
 	CONSUME_MAX_POLLS,
 	CONSUME_POLL_MS,
 	captureArgv,
@@ -80,6 +115,7 @@ import {
 	IDEMPOTENCY_WINDOW,
 	inputRegion,
 	inputRegionPlain,
+	isClaudeExe,
 	normalizeText,
 	paneFactsArgv,
 	parsePaneFacts,
@@ -89,14 +125,17 @@ import {
 	T_ACK_MS,
 	T_HTTP_MS,
 	textHash,
+	UUID_V4_RE,
 	validateBody,
 } from "./composerText.js";
-import type {
-	ExecStep,
-	OperationResult,
-	OperationState,
-	PaneRecord,
-	PaneRecordStore,
+import {
+	type ExecStep,
+	type JobTarget,
+	jobKey,
+	type OperationResult,
+	type OperationState,
+	type PaneRecord,
+	type PaneRecordStore,
 } from "./paneRecord.js";
 import type { ProbeEntry } from "./probe.js";
 import type { ConversationIndex, ConversationStore, PersistedEvent } from "./store.js";
@@ -156,6 +195,36 @@ export interface ComposerDeps {
 	userRatePerMinute?: number;
 	/** Host-side bound per live-version exec (§8.1.9); tests shorten it. */
 	liveExecDeadlineMs?: number;
+	/**
+	 * v1.9 §8.1.12 (EXPERIMENTAL): the background-session transport. Absent
+	 * or `enabled: false` ⇒ a pane-less conversation is refused exactly as
+	 * before (`not-interactive`) and nothing below runs.
+	 */
+	bg?: BgDeps;
+}
+
+export interface BgDeps {
+	enabled: boolean;
+	/** `COMPOSER_BG_CLI_VERSIONS`: exact, no minimum, default empty. */
+	versions: ReadonlySet<string>;
+	transcripts: TranscriptPort;
+	/**
+	 * `COMPOSER_BG_SESSIONS` (round 2, canary): the st session ids the
+	 * transport applies to. Empty ⇒ none (fail closed): the global flag alone
+	 * never opens it for every session.
+	 */
+	sessions: ReadonlySet<string>;
+	/**
+	 * The only CLI config dir supported (D3): the container's default
+	 * `~/.claude` (`/home/developer/.claude`). A worker running with another
+	 * CLAUDE_CONFIG_DIR is refused (`unsupported-config-dir`); nothing is
+	 * inferred. The sandbox smoke passes its own.
+	 */
+	configDir?: string;
+	/** Test seams. */
+	tAckBgMs?: number;
+	pollMs?: number;
+	jobCheckMs?: number;
 }
 
 // ── Results ─────────────────────────────────────────────────────────────────
@@ -199,6 +268,12 @@ export interface PaneView {
 
 export interface ComposerAvailability {
 	canSendInput: boolean;
+	/**
+	 * v1.9 §8.1.12.8: present (only with the background transport on) for a
+	 * pane-less conversation, where a send goes through the CLI daemon if the
+	 * fresh probe confirms a background session. Orientative, like the rest.
+	 */
+	transport?: "background";
 	composer: {
 		blocked: boolean;
 		reason?: "in-progress" | "effects-pending" | "unverifiable";
@@ -280,6 +355,29 @@ interface LiveOp {
 	/** Resolves when the executor leaves the active phase (entered / failed / cancelled). */
 	activeDone: Promise<void>;
 	markActiveDone: () => void;
+	/** v1.9 §8.1.12: the background transport's ack watch (job records only). */
+	bg?: BgWatch;
+	/** A reply exec that answered after the executor was cancelled (evidence, this process only). */
+	bgLate?: ReplyOutcome;
+}
+
+type BgVerdict =
+	| { kind: "delivered"; promptId: string; seq: number; enqueueMs?: number | null }
+	| { kind: "misdelivered"; conversation: string }
+	| { kind: "unconfirmed"; detail: string }
+	| { kind: "none"; pending: boolean; transcriptMissing?: boolean };
+
+interface BgWatch {
+	t0Ms: number;
+	/** `accepted` with no ack by then ⇒ `unconfirmed`. null = no expiry (uncertain). */
+	deadlineMs: number | null;
+	timers: Array<ReturnType<typeof setTimeout>>;
+	evaluating: boolean;
+	again: boolean;
+	stopped: boolean;
+	lastJobCheckMs: number;
+	/** The last evaluation found a hook candidate but could not read its transcript (D2). */
+	transcriptMissing?: boolean;
 }
 
 function newLiveOp(
@@ -305,6 +403,12 @@ function newLiveOp(
 		activeDone,
 		markActiveDone,
 	};
+}
+
+/** D1: the unconfirmed send a new background send acknowledges (`acknowledgeUnconfirmed`, a UUID). */
+function ackOf(body: unknown): string | null {
+	const v = (body as { acknowledgeUnconfirmed?: unknown } | null)?.acknowledgeUnconfirmed;
+	return typeof v === "string" && UUID_V4_RE.test(v) ? v.toLowerCase() : null;
 }
 
 const effectsOf = (r: PaneRecord): "settled" | "pending" =>
@@ -350,6 +454,11 @@ export class ComposerService {
 		return this.deps.enabled;
 	}
 
+	/** v1.9 §8.1.12 (EXPERIMENTAL): the background transport is on. */
+	get bgEnabled(): boolean {
+		return this.deps.enabled && this.deps.bg?.enabled === true;
+	}
+
 	private key(sid: string, paneId: string): string {
 		return `${sid}\u0000${paneId}`;
 	}
@@ -368,7 +477,9 @@ export class ComposerService {
 	/** Per conversation: `canSendInput` and the `composer` block. No probe, no exec. */
 	async availability(
 		stSessionId: string,
-		indexes: Array<Pick<ConversationIndex, "cid" | "kind" | "paneId">>,
+		indexes: Array<
+			Pick<ConversationIndex, "cid" | "kind" | "paneId"> & { endedAt?: string | null }
+		>,
 		opts: { captureEffective: boolean | null; callerMayOperate: boolean },
 	): Promise<Map<string, ComposerAvailability>> {
 		const out = new Map<string, ComposerAvailability>();
@@ -380,8 +491,17 @@ export class ComposerService {
 		await this.recover(stSessionId).catch(() => undefined);
 		const { records, unreadable } = await this.deps.records.list(stSessionId);
 		const byPane = new Map(records.map((r) => [r.pane_id, r]));
+		const bgOn = this.deps.bg?.enabled === true && this.deps.bg.sessions.has(stSessionId);
 		for (const i of indexes) {
-			const rec = i.paneId ? byPane.get(i.paneId) : undefined;
+			// v1.9 §8.1.12: a pane-less conversation can only be blocked by a job
+			// record naming it (the job's short is known only to a probe).
+			const bgCandidate =
+				bgOn && !i.paneId && (i.kind === "interactive" || i.kind === "unknown") && !i.endedAt;
+			const rec = i.paneId
+				? byPane.get(i.paneId)
+				: bgCandidate
+					? records.find((r) => r.job && r.cid === i.cid)
+					: undefined;
 			let composer: ComposerAvailability["composer"] = { blocked: false };
 			if (unreadable.length > 0) composer = { blocked: true, reason: "unverifiable" };
 			else if (rec) {
@@ -397,6 +517,15 @@ export class ComposerService {
 					result: rec.result,
 					since: rec.prepared_at,
 				};
+			}
+			if (bgCandidate) {
+				out.set(i.cid, {
+					canSendInput:
+						opts.captureEffective === true && !composer.blocked && opts.callerMayOperate,
+					transport: "background",
+					composer,
+				});
+				continue;
 			}
 			const canSendInput =
 				i.kind === "interactive" &&
@@ -444,6 +573,32 @@ export class ComposerService {
 			this.recentFinals.get(`${cid}/${clientMessageId}`) ?? index.composerSends?.[clientMessageId];
 		if (replay) return { status: replay.status, body: replay.body as Record<string, unknown> };
 
+		// v1.9 §8.1.12 (EXPERIMENTAL, flag-gated): a pane-less conversation may
+		// be a CLI background session; only the fresh probe can say so. With
+		// the flag off this branch does not exist and the refusal below is
+		// today's, byte for byte.
+		if (
+			this.deps.bg?.enabled &&
+			this.deps.bg.sessions.has(sid) &&
+			!index.paneId &&
+			(index.kind === "interactive" || index.kind === "unknown")
+		) {
+			return this.sendBackground({
+				sid,
+				cid,
+				callerId,
+				meta,
+				index,
+				records,
+				clientMessageId,
+				normalized: v.normalized,
+				bytes: v.bytes,
+				segments: v.segments,
+				audit: input.audit,
+				startedAt,
+				acknowledge: ackOf(input.body),
+			});
+		}
 		if (index.kind !== "interactive" || !index.paneId) return this.reject("not-interactive", 409);
 		const paneId = index.paneId;
 		let blocker = records.find((r) => r.pane_id === paneId);
@@ -551,6 +706,20 @@ export class ComposerService {
 	}
 
 	private uncertainAnswer(r: PaneRecord): HttpResult {
+		// v1.9 §8.1.12.6: a job record handed to the worker is `accepted` — the
+		// same id asked again learns exactly that, never `uncertain`. Pane
+		// records never reach this state.
+		if (r.job && r.state === "accepted") {
+			return {
+				status: 202,
+				body: {
+					result: "accepted",
+					clientMessageId: r.client_message_id,
+					effects: effectsOf(r),
+					state: r.state,
+				},
+			};
+		}
 		return {
 			status: 202,
 			body: {
@@ -929,7 +1098,10 @@ export class ComposerService {
 		for (const op of this.live.values()) {
 			op.unlisten?.();
 			op.unlisten = null;
+			if (op.bg) this.stopBgWatch(op);
 		}
+		for (const w of this.dupWatches) w.stop();
+		this.dupWatches.clear();
 	}
 
 	// ── Effects (§8.1.5, §8.1.6) ────────────────────────────────────────────
@@ -1089,7 +1261,7 @@ export class ComposerService {
 	/** A state event that must not fail the operation: logged, counted, never thrown. */
 	private async persistSafe(
 		op: LiveOp,
-		state: OperationState,
+		state: OperationState | "duplicated",
 		extra: Record<string, unknown>,
 	): Promise<void> {
 		try {
@@ -1111,6 +1283,7 @@ export class ComposerService {
 		step: ExecStep,
 		argv: string[],
 		stdin: Buffer | null,
+		opts?: { user?: string },
 	): Promise<
 		| { kind: "settled"; exitCode: number; stdout: string }
 		| { kind: "pending" }
@@ -1120,42 +1293,48 @@ export class ComposerService {
 		let refused = false;
 		let recordedId: string | null = null;
 		const mayAct = () => !op.cancelled && !op.cancelRequested && !this.stopping;
-		const res = await this.deps.docker.exec(r.container_id, argv, stdin, async (execId) => {
-			// mayAct: our lock, no cancellation — then the id is durable BEFORE start.
-			if (!mayAct()) {
-				refused = true;
-				return false;
-			}
-			r.execs.push({ id: execId, step, created_at: this.isoNow(), settled: null });
-			recordedId = execId;
-			try {
-				await this.writeRecord(op);
-			} catch (err) {
-				// The id may not be durable: do not start, and fail closed.
-				logger.error(`[composer] record write before start failed: ${(err as Error).message}`);
-				refused = true;
-				return false;
-			}
-			// The authorization is re-validated AFTER the write: a cancellation
-			// (T_http, shutdown) that landed during it — `cancelled` is set
-			// synchronously before any of its own awaits — means this exec must
-			// never start. It was created but never run, and we hold its only
-			// start path, so the id is withdrawn from the record (nothing to
-			// reconcile) and the cancelled state is rewritten on top.
-			if (!mayAct()) {
-				// Withdrawn in memory only: this continuation may be running
-				// after the operation lost the pane (released, successor live),
-				// so it writes nothing here. The state reaches the disk through
-				// `afterCancelled` / `toCancelled`, which write under the lock
-				// after proving the op still owns the record — or not at all.
-				const i = r.execs.findIndex((e) => e.id === execId);
-				if (i >= 0) r.execs.splice(i, 1);
-				recordedId = null;
-				refused = true;
-				return false;
-			}
-			return true;
-		});
+		const res = await this.deps.docker.exec(
+			r.container_id,
+			argv,
+			stdin,
+			async (execId) => {
+				// mayAct: our lock, no cancellation — then the id is durable BEFORE start.
+				if (!mayAct()) {
+					refused = true;
+					return false;
+				}
+				r.execs.push({ id: execId, step, created_at: this.isoNow(), settled: null });
+				recordedId = execId;
+				try {
+					await this.writeRecord(op);
+				} catch (err) {
+					// The id may not be durable: do not start, and fail closed.
+					logger.error(`[composer] record write before start failed: ${(err as Error).message}`);
+					refused = true;
+					return false;
+				}
+				// The authorization is re-validated AFTER the write: a cancellation
+				// (T_http, shutdown) that landed during it — `cancelled` is set
+				// synchronously before any of its own awaits — means this exec must
+				// never start. It was created but never run, and we hold its only
+				// start path, so the id is withdrawn from the record (nothing to
+				// reconcile) and the cancelled state is rewritten on top.
+				if (!mayAct()) {
+					// Withdrawn in memory only: this continuation may be running
+					// after the operation lost the pane (released, successor live),
+					// so it writes nothing here. The state reaches the disk through
+					// `afterCancelled` / `toCancelled`, which write under the lock
+					// after proving the op still owns the record — or not at all.
+					const i = r.execs.findIndex((e) => e.id === execId);
+					if (i >= 0) r.execs.splice(i, 1);
+					recordedId = null;
+					refused = true;
+					return false;
+				}
+				return true;
+			},
+			opts,
+		);
 		if (refused) return { kind: "refused" };
 		const entry = r.execs.find((e) => e.id === (recordedId ?? res.execId));
 		if (res.exitCode === null) return { kind: "pending" };
@@ -1474,7 +1653,7 @@ export class ComposerService {
 
 	private async persist(
 		op: LiveOp,
-		state: OperationState,
+		state: OperationState | "duplicated" | "possible-duplicate",
 		extra: Record<string, unknown>,
 		opts: { confirmed?: boolean } = {},
 	): Promise<void> {
@@ -1492,6 +1671,8 @@ export class ComposerService {
 			bytes: op.bytes,
 			segments: op.segments,
 			actor: op.actor,
+			// v1.9 §8.1.12: a job record says so; its `pane_id` is the job key.
+			...(r.job ? { transport: "background", job: r.job.short } : {}),
 			...extra,
 		};
 		const pending = {
@@ -1499,7 +1680,8 @@ export class ComposerService {
 			prompt_id: null,
 			turn_id: null,
 			agent_id: null,
-			pane: r.pane_id,
+			// A job has no tmux pane: nothing may read `job:<short>` as one.
+			pane: r.job ? null : r.pane_id,
 			data,
 		};
 		await this.deps.store.open(r.sid, r.cid);
@@ -1624,6 +1806,14 @@ export class ComposerService {
 		if (this.recovered.has(sid) && !opts.force) return;
 		const { records } = await this.deps.records.list(sid);
 		this.recovered.add(sid);
+		// v1.9 §8.1.12.5 (audit round 1, S4): the `duplicated` watch of a
+		// background send delivered before this process started.
+		if (this.deps.bg?.enabled && this.deps.bg.sessions.has(sid))
+			await this.rearmDupWatches(sid).catch((err) =>
+				logger.warn(
+					`[composer-bg] duplicate watch re-arm failed for ${sid}: ${(err as Error).message}`,
+				),
+			);
 		for (const record of records) {
 			if (this.live.has(this.key(sid, record.pane_id))) continue; // ours, live
 			const key = this.key(sid, record.pane_id);
@@ -1680,6 +1870,7 @@ export class ComposerService {
 	 * `entered` one, and release when everything allows it.
 	 */
 	private async settleAndConclude(op: LiveOp): Promise<void> {
+		if (op.record.job) return this.settleAndConcludeBg(op);
 		const r = op.record;
 		await this.drainWrites(op);
 		const changed = await this.settleEffects(r);
@@ -1809,6 +2000,1184 @@ export class ComposerService {
 		await this.persist(op, d.result, { ...d.data, http: d.http, deferred: true }).catch(
 			() => undefined,
 		);
+	}
+
+	// ── Background sessions (v1.9 §8.1.12, EXPERIMENTAL) ─────────────────────
+
+	/**
+	 * A send to a pane-less conversation with the background transport on.
+	 * The job's `short` (its exclusion key) is known only from the fresh
+	 * probe, so the probe runs before the job lock is taken — it is the ONE
+	 * probe of this request and every later check uses it (§8.1.12.4 step 1).
+	 * Same T_http race as a pane send (§8.1.4), measured from the request.
+	 */
+	private async sendBackground(a: {
+		sid: string;
+		cid: string;
+		callerId: string;
+		meta: SessionMeta;
+		index: ConversationIndex;
+		records: PaneRecord[];
+		clientMessageId: string;
+		normalized: string;
+		bytes: number;
+		segments: number;
+		audit: () => Promise<void>;
+		startedAt: number;
+		/** The unconfirmed send the person confirmed they checked in the Terminal (D1). */
+		acknowledge: string | null;
+	}): Promise<HttpResult> {
+		const { sid, cid, meta, clientMessageId } = a;
+		if (meta.status !== "running" || !meta.containerId)
+			return this.reject("session-not-running", 409);
+		if (!(await this.deps.conversation.captureEffective(sid)))
+			return this.reject("capture-inactive", 409);
+		const probe = await this.deps.conversation.probeSession(sid);
+		const entry = probe?.find((e) => e.sessionId === cid);
+		if (!probe || !entry) return this.reject("probe-failed", 409);
+		// Two processes claiming the same conversation: which one would read
+		// the text is not provable (audit round 1, NIT).
+		if (probe.filter((e) => e.sessionId === cid).length > 1)
+			return this.reject("binding-stale", 409, { detail: "ambiguous" });
+		// Only a CLI background session goes this way: an interactive process
+		// without a bound pane is refused as it always was (§8.1.3), never
+		// "found" through the daemon.
+		if (entry.kind !== "background")
+			return this.reject("not-interactive", 409, { detail: `kind:${entry.kind}` });
+		if (typeof entry.id !== "string" || !SHORT_RE.test(entry.id))
+			return this.reject("binding-stale", 409, { detail: "job-id" });
+		if (typeof entry.pid !== "number" || !Number.isInteger(entry.pid) || entry.pid < 2)
+			return this.reject("binding-stale", 409, { detail: "pid" });
+		const short = entry.id;
+		const jk = jobKey(short);
+		const key = this.key(sid, jk);
+		let blocker = a.records.find((r) => r.pane_id === jk);
+		if (blocker) {
+			const live = this.live.get(key);
+			if (
+				live &&
+				live.record.client_message_id === blocker.client_message_id &&
+				live.record.phase !== "active" &&
+				isFinalResult(live.record.result) &&
+				effectsOf(live.record) === "settled"
+			)
+				blocker = undefined;
+		}
+		if (blocker) {
+			return this.reject("send-in-progress", 409, {
+				detail:
+					blocker.phase === "active"
+						? "in-progress"
+						: effectsOf(blocker) === "pending"
+							? "effects-pending"
+							: "in-progress",
+				clientMessageId: blocker.client_message_id,
+			});
+		}
+		let announce!: (op: LiveOp) => void;
+		const opReady = new Promise<LiveOp>((r) => {
+			announce = r;
+		});
+		const ctl = { expired: false };
+		const deadline = this.after(Math.max(0, this.tHttp - (this.now() - a.startedAt))).then(() => ({
+			kind: "deadline" as const,
+		}));
+		const run: Promise<HttpResult | LiveOp> = this.lock
+			.run(
+				key,
+				"composer-send",
+				() => this.activePhaseBg({ ...a, entry, short, jk, announce, ctl }),
+				{ mode: "fail" },
+			)
+			.catch((err) => {
+				if (err instanceof SessionBusyError) {
+					return this.reject("send-in-progress", 409, { detail: "in-progress" });
+				}
+				throw err;
+			});
+		const first = await Promise.race([
+			run.then((r) => ({ kind: "run" as const, r })),
+			opReady.then((op) => ({ kind: "op" as const, op })),
+			deadline,
+		]);
+		if (first.kind === "deadline") {
+			ctl.expired = true;
+			this.stats.sendsByState.uncertain = (this.stats.sendsByState.uncertain ?? 0) + 1;
+			run.catch((err) =>
+				logger.error(`[composer-bg] active phase failed: ${(err as Error).message}`),
+			);
+			return { status: 202, body: { result: "uncertain", clientMessageId } };
+		}
+		if (first.kind === "op") {
+			run.catch((err) =>
+				logger.error(`[composer-bg] active phase failed: ${(err as Error).message}`),
+			);
+			return first.op.http;
+		}
+		return "http" in first.r ? first.r.http : first.r;
+	}
+
+	/** §8.1.12.3 + §8.1.12.4 under the job lock, then `prepared` and the one effect. */
+	private async activePhaseBg(a: {
+		sid: string;
+		cid: string;
+		callerId: string;
+		meta: SessionMeta;
+		index: ConversationIndex;
+		clientMessageId: string;
+		normalized: string;
+		bytes: number;
+		segments: number;
+		audit: () => Promise<void>;
+		startedAt: number;
+		acknowledge: string | null;
+		entry: ProbeEntry;
+		short: string;
+		jk: string;
+		announce: (op: LiveOp) => void;
+		ctl: { expired: boolean };
+	}): Promise<HttpResult | LiveOp> {
+		const { sid, cid, clientMessageId, entry, short, jk } = a;
+		const bg = this.deps.bg as BgDeps;
+		let again = await this.deps.records.read(sid, jk);
+		if (again.kind === "ok") {
+			const live = this.live.get(this.key(sid, jk));
+			if (live && live.record.client_message_id === again.record.client_message_id) {
+				if (await this.tryRelease(live, true)) again = await this.deps.records.read(sid, jk);
+			}
+		}
+		if (again.kind === "unreadable")
+			return this.reject("send-in-progress", 409, { detail: "unverifiable" });
+		if (again.kind === "ok") {
+			return this.reject("send-in-progress", 409, {
+				detail: "in-progress",
+				clientMessageId: again.record.client_message_id,
+			});
+		}
+		const containerId = a.meta.containerId as string;
+		const pid = entry.pid as number;
+
+		// §8.1.12.3: v1 never queues on purpose. The fresh probe must say idle
+		// with no waitingFor; the in-exec re-read repeats it before the reply.
+		if (entry.status === "busy") return this.reject("busy", 409);
+		if (entry.status === "waiting" || entry.waitingFor !== undefined)
+			return this.reject("needs-terminal", 409, {
+				detail: entry.waitingFor ?? "waiting-unspecified",
+			});
+		if (entry.status !== "idle")
+			return this.reject("needs-terminal", 409, { detail: "status-unknown" });
+
+		// §8.1.12.4 step 2: the job's process, by /proc.
+		const proc = await this.readProc(containerId, pid);
+		if (!proc) return this.reject("binding-stale", 409, { detail: "process" });
+		if (!isClaudeExe(proc.exe)) return this.reject("binding-stale", 409, { detail: "process-exe" });
+		// Steps 3–4 and the job's own session file, read INSIDE the container
+		// as the worker's uid (the roster holds tokens: only pids leave it).
+		const ins = await this.bgInspect(containerId, proc.uid, { pid, short });
+		// D3: only the container's default config dir (where the transcript the
+		// ack needs is known to live). No inferred path, no fallback.
+		if (ins && ins.configDir !== (bg.configDir ?? DEFAULT_BG_CONFIG_DIR)) {
+			logger.info(
+				`[composer-bg] ${sid} ${jk}: not sending, the job runs with CLAUDE_CONFIG_DIR=${JSON.stringify(ins.configDir)} (only ${bg.configDir ?? DEFAULT_BG_CONFIG_DIR} is supported)`,
+			);
+			return this.reject("unsupported-config-dir", 409);
+		}
+		const fault = ins
+			? inspectFault(ins, { cid, short, start: proc.start, exe: proc.exe })
+			: { error: "binding-stale", detail: "inspect" };
+		if (fault || !ins) {
+			const f = fault ?? { error: "binding-stale", detail: "inspect" };
+			logger.info(`[composer-bg] ${sid} ${jk}: not sending (${f.error}: ${f.detail})`);
+			return this.reject(f.error, 409, { detail: f.detail });
+		}
+		const daemon = ins.daemon as {
+			statusPid: number;
+			start: string;
+			exe: string;
+		};
+		const job = ins.job as { nonce: string; pid: number; cliVersion: string | null };
+
+		// §8.1.9 pattern, twice: the worker's version and the daemon's, asked of
+		// their own binaries; equal, and both in the exact list.
+		const jobV = await this.liveVersion(containerId, pid, proc.start, proc.exe);
+		if (!jobV.ok)
+			return this.reject("cli-unvalidated", 409, {
+				version: null,
+				detail: `unverifiable:${jobV.why}`,
+			});
+		const daemonV = await this.liveVersion(containerId, daemon.statusPid, daemon.start, daemon.exe);
+		if (!daemonV.ok)
+			return this.reject("cli-unvalidated", 409, {
+				version: jobV.version,
+				detail: `unverifiable:daemon:${daemonV.why}`,
+			});
+		if (
+			daemonV.version !== jobV.version ||
+			(job.cliVersion !== null && job.cliVersion !== jobV.version)
+		) {
+			return this.reject("cli-unvalidated", 409, {
+				version: jobV.version,
+				daemonVersion: daemonV.version,
+				detail: "daemon-skew",
+			});
+		}
+		if (!bg.versions.has(jobV.version)) {
+			logger.info(
+				`[composer-bg] ${sid} ${jk}: not sending, CLI ${jobV.version} is not in COMPOSER_BG_CLI_VERSIONS (${[...bg.versions].join(", ") || "empty"})`,
+			);
+			return this.reject("cli-unvalidated", 409, {
+				version: jobV.version,
+				detail: "not-allowed",
+			});
+		}
+
+		// §8.1.12.5 cond. 3 (owner decision D1): refuse an identical text only
+		// while something makes it AMBIGUOUS — never because it was once sent.
+		// (The earlier "same-hash human prompt in the last 10 min" rule is
+		// gone: a prompt before t0 can never be taken for ours, since the ack
+		// needs a new prompt_id after t0 paired with OUR enqueue.)
+		const hash = textHash(a.normalized);
+		// (a) one of OUR sends of the same text to this conversation is still
+		// unresolved (a job record — accepted, uncertain, in flight).
+		const own = (await this.deps.records.list(sid)).records.find(
+			(r) => r.job && r.cid === cid && r.text_hash === hash,
+		);
+		if (own)
+			return this.reject("duplicate-pending", 409, {
+				detail: "own-pending",
+				clientMessageId: own.client_message_id,
+			});
+		// (b) one ended `unconfirmed` and the person has not said they checked
+		// the Terminal: it may still be queued or have run.
+		const events = await this.readCidEvents(sid, cid);
+		const unack = unacknowledgedUnconfirmed(events, hash);
+		if (unack && unack !== a.acknowledge)
+			return this.reject("duplicate-pending", 409, {
+				detail: "unconfirmed-unacknowledged",
+				clientMessageId: unack,
+			});
+		// Without the transcript there is no ack at all: nothing is sent (D2).
+		const tp = transcriptPathOf(events) ?? (await this.transcriptPathFromHead(sid, cid));
+		const tail = tp ? await bg.transcripts.readTail(sid, tp, TRANSCRIPT_TAIL_BYTES) : null;
+		if (tail === null) return this.reject("transcript-unavailable", 409);
+		// (c) the same content is waiting in the CLI's queue, or taken and not
+		// yet run: a new identical text could not be told apart from it.
+		if (pendingSameContent(parseTranscript(tail), { cid, hash }))
+			return this.reject("duplicate-pending", 409, { detail: "queue-pending" });
+		if (unack) {
+			try {
+				await this.persistAcknowledged(sid, cid, unack, a.callerId);
+			} catch (err) {
+				logger.error(`[composer-bg] acknowledgement not persisted: ${(err as Error).message}`);
+				return this.reject("persist-failed", 503);
+			}
+		}
+		logger.info(
+			`[composer-bg] ${sid} ${jk} ${clientMessageId}: CLI ${jobV.version} (job pid ${pid}, daemon pid ${daemon.statusPid}) authorized by COMPOSER_BG_CLI_VERSIONS`,
+		);
+
+		if (this.stopping) return this.reject("shutting-down", 503);
+		const actor: "owner" | "admin" = a.meta.userId === a.callerId ? "owner" : "admin";
+		if (actor === "admin") {
+			try {
+				await a.audit();
+			} catch (err) {
+				logger.error(`[composer-bg] operate audit failed, nothing sent: ${(err as Error).message}`);
+				return this.reject("audit-failed", 500);
+			}
+		}
+		if (a.ctl.expired) return this.reject("timeout", 409);
+		if (this.stopping) return this.reject("shutting-down", 503);
+
+		// ── prepared: the job record, then the confirmed event (§8.1.12.6) ──
+		const at = this.isoNow();
+		const target: JobTarget = {
+			short,
+			pid,
+			start: proc.start,
+			exe: proc.exe,
+			nonce: job.nonce,
+			pty_host_pid: job.pid,
+			daemon_pid: daemon.statusPid,
+			daemon_start: daemon.start,
+			daemon_exe: daemon.exe,
+			version: jobV.version,
+			uid: proc.uid,
+			config_dir: ins.configDir,
+		};
+		const record: PaneRecord = {
+			v: 1,
+			sid,
+			pane_id: jk,
+			pane_pid: pid,
+			container_id: containerId,
+			cid,
+			client_message_id: clientMessageId,
+			text_hash: hash,
+			prepared_at: at,
+			state: "prepared",
+			result: "pending",
+			phase: "active",
+			execs: [],
+			job: target,
+			updated_at: at,
+		};
+		const op = newLiveOp({
+			key: this.key(sid, jk),
+			record,
+			bytes: a.bytes,
+			segments: a.segments,
+			actor,
+			cancelled: false,
+			candidates: new Map(),
+			resolveAck: null,
+			unlisten: null,
+		});
+		this.live.set(op.key, op);
+		const withdraw = async () => {
+			if (this.live.get(op.key) === op) this.live.delete(op.key);
+			await this.deps.records.remove(sid, jk, clientMessageId).catch(() => undefined);
+		};
+		try {
+			await this.deps.records.write(record);
+		} catch (err) {
+			logger.error(`[composer-bg] job record write failed: ${(err as Error).message}`);
+			await withdraw();
+			return this.reject("persist-failed", 503);
+		}
+		try {
+			await this.persist(op, "prepared", {}, { confirmed: true });
+		} catch (err) {
+			logger.error(`[composer-bg] prepared event persist failed: ${(err as Error).message}`);
+			await withdraw();
+			return this.reject("persist-failed", 503);
+		}
+		a.announce(op);
+		if (this.stopping || op.cancelled) {
+			if (!op.cancelled) await this.cancelActive(op, "shutdown");
+			else
+				await this.writeRecord(op).catch((err) =>
+					logger.error(`[composer-bg] record write failed: ${(err as Error).message}`),
+				);
+			return op;
+		}
+		void this.after(Math.max(0, this.tHttp - (this.now() - a.startedAt))).then(() =>
+			this.onTHttp(op).catch((err) =>
+				logger.error(`[composer-bg] T_http handling failed: ${(err as Error).message}`),
+			),
+		);
+		void this.runReply(op, a.normalized, a.startedAt).catch((err) => {
+			logger.error(`[composer-bg] reply failed: ${(err as Error).message}`);
+		});
+		await op.activeDone;
+		return op;
+	}
+
+	/**
+	 * The one effect: the reply exec. Its id is in the job record before it
+	 * starts (`effect()`, same critical section as `mayAct`), its end is
+	 * known only from its own inspect, and NOTHING is retried — not on a
+	 * daemon error, not on an unknown, not after a restart (§8.1.12.6).
+	 */
+	private async runReply(op: LiveOp, text: string, startedAt: number): Promise<void> {
+		const r = op.record;
+		const j = r.job as JobTarget;
+		const finish = () => op.markActiveDone();
+		try {
+			const res = await this.effect(
+				op,
+				"reply",
+				[...BG_CLIENT_ARGV],
+				replyStdin({
+					pid: j.pid,
+					short: j.short,
+					start: j.start,
+					exe: j.exe,
+					cid: r.cid,
+					nonce: j.nonce,
+					ptyHostPid: j.pty_host_pid,
+					daemonPid: j.daemon_pid,
+					daemonStart: j.daemon_start,
+					daemonExe: j.daemon_exe,
+					text,
+				}),
+				{ user: String(j.uid) },
+			);
+			if (r.phase !== "active") {
+				// T_http or shutdown completed the cancellation meanwhile: the
+				// answer is still evidence (recorded under the lock), nothing starts.
+				if (res.kind === "settled") op.bgLate = parseReplyOutput(res.exitCode, res.stdout);
+				return this.afterCancelled(op);
+			}
+			if (res.kind === "refused") return this.toCancelled(op, "reply", 0, finish);
+			if (res.kind === "pending") return this.toUncertain(op, "reply", finish);
+			const outcome = parseReplyOutput(res.exitCode, res.stdout);
+			logger.info(
+				`[composer-bg] ${r.sid} ${r.pane_id} ${r.client_message_id}: reply exec ${outcome.kind}${"code" in outcome ? ` ${outcome.code}` : ""}${"why" in outcome ? ` ${outcome.why}` : ""}`,
+			);
+			switch (outcome.kind) {
+				case "accepted":
+					return this.toAccepted(op, finish, startedAt);
+				case "rejected":
+					return this.toFailed(op, "reply", 0, finish, {
+						status: 502,
+						body: {
+							error: "delivery-failed",
+							stage: "reply",
+							segmentsSent: 0,
+							segments: op.segments,
+							detail: outcome.code,
+						},
+					});
+				case "aborted": {
+					const h = abortHttpCode(outcome.code);
+					return this.toFailed(op, "precheck", 0, finish, {
+						status: h.status,
+						body: {
+							error: h.error,
+							...(h.detail ? { detail: h.detail } : {}),
+							...(h.status === 502
+								? { stage: "reply", segmentsSent: 0, segments: op.segments }
+								: {}),
+						},
+					});
+				}
+				case "unknown":
+					return this.toBgUncertainSettled(op, outcome.why, finish);
+			}
+		} catch (err) {
+			// The exec could not be CREATED: no process exists, nothing was sent.
+			logger.warn(`[composer-bg] reply exec creation failed: ${(err as Error).message}`);
+			await this.toFailed(op, "reply", 0, finish, {
+				status: 502,
+				body: {
+					error: "delivery-failed",
+					stage: "reply",
+					segmentsSent: 0,
+					segments: op.segments,
+					detail: "exec-rejected",
+				},
+			});
+		}
+	}
+
+	/**
+	 * `accepted`: the daemon handed the text to the worker — NOT delivered
+	 * (§8.1.12.2). The record keeps the job blocked; the ack watch runs until
+	 * T_ack_bg. The HTTP waits a little for a complete ack (an idle job
+	 * answers in ~60 ms) and otherwise says `accepted`.
+	 */
+	private async toAccepted(op: LiveOp, finish: () => void, startedAt: number): Promise<void> {
+		const r = op.record;
+		r.phase = "completed";
+		r.state = "accepted";
+		await this.writeRecord(op).catch((err) =>
+			logger.error(`[composer-bg] record write failed: ${(err as Error).message}`),
+		);
+		finish();
+		await this.persistSafe(op, "accepted", {});
+		this.startBgWatch(op, Date.parse(r.prepared_at) + this.tAckBg);
+		const wait = Math.min(this.tAck, Math.max(0, this.tHttp - (this.now() - startedAt) - 250));
+		void this.after(wait).then(() =>
+			this.decideHttp(op, {
+				status: 202,
+				body: { result: "accepted", clientMessageId: r.client_message_id },
+			}),
+		);
+	}
+
+	/**
+	 * The exec ended (numeric exit) but whether the daemon took the text is
+	 * unknown — the line may have been written (a lost connection after the
+	 * write, unparseable output). `uncertain`, never resent: only a complete
+	 * ack (→ delivered/misdelivered) or an admin resolution ends it.
+	 */
+	private async toBgUncertainSettled(op: LiveOp, why: string, finish: () => void): Promise<void> {
+		const r = op.record;
+		r.phase = "completed";
+		r.state = "uncertain";
+		await this.writeRecord(op).catch((err) =>
+			logger.error(`[composer-bg] record write failed: ${(err as Error).message}`),
+		);
+		finish();
+		await this.persistSafe(op, "uncertain", { stage: "reply", detail: why, pending: [] });
+		this.decideHttp(op, {
+			status: 202,
+			body: { result: "uncertain", clientMessageId: r.client_message_id, effects: "settled" },
+		});
+		this.startBgWatch(op, null);
+	}
+
+	private get tAckBg(): number {
+		return this.deps.bg?.tAckBgMs ?? T_ACK_BG_MS;
+	}
+
+	/**
+	 * Watch for the ack (§8.1.12.5) while `accepted` or `uncertain`: on every
+	 * persisted user_prompt / session_start of the session and every poll
+	 * (the transcript may trail the hook). `deadlineMs` (accepted) ⇒
+	 * `unconfirmed` when it passes; null (uncertain) ⇒ the watch just ends
+	 * at t0 + T_ack_bg and the record waits for an admin resolution.
+	 */
+	private startBgWatch(op: LiveOp, deadlineMs: number | null): void {
+		if (op.bg && !op.bg.stopped) return;
+		const r = op.record;
+		const t0Ms = Date.parse(r.prepared_at);
+		const w: BgWatch = {
+			t0Ms,
+			deadlineMs,
+			timers: [],
+			evaluating: false,
+			again: false,
+			stopped: false,
+			lastJobCheckMs: this.now(),
+		};
+		op.bg = w;
+		op.unlisten?.();
+		op.unlisten = this.deps.conversation.onPersistedEvent((st, _cid, ev) => {
+			if (st !== r.sid) return;
+			if (ev.ev === "user_prompt" || ev.ev === "session_start") this.kickBg(op);
+		});
+		const poll = this.deps.bg?.pollMs ?? BG_ACK_POLL_MS;
+		const until = deadlineMs ?? t0Ms + this.tAckBg;
+		const tick = () => {
+			if (w.stopped) return;
+			if (this.now() >= until) {
+				void this.bgDeadline(op);
+				return;
+			}
+			this.kickBg(op);
+			void this.after(poll).then(tick);
+		};
+		void this.after(poll).then(tick);
+		this.kickBg(op);
+	}
+
+	private stopBgWatch(op: LiveOp): void {
+		if (!op.bg) return;
+		op.bg.stopped = true;
+		op.unlisten?.();
+		op.unlisten = null;
+	}
+
+	private kickBg(op: LiveOp): void {
+		const w = op.bg;
+		if (!w || w.stopped) return;
+		if (w.evaluating) {
+			w.again = true;
+			return;
+		}
+		w.evaluating = true;
+		void (async () => {
+			try {
+				do {
+					w.again = false;
+					await this.evaluateBg(op);
+				} while (w.again && !w.stopped);
+			} catch (err) {
+				logger.warn(`[composer-bg] ack evaluation failed: ${(err as Error).message}`);
+			} finally {
+				w.evaluating = false;
+			}
+		})();
+	}
+
+	private async evaluateBg(op: LiveOp): Promise<void> {
+		const r = op.record;
+		const w = op.bg as BgWatch;
+		if (w.stopped) return;
+		// Concluded elsewhere (an admin resolution, a recovery pass) or no
+		// longer the job's live op: the watch ends here, listener included.
+		if (isFinalResult(r.result) || this.live.get(op.key) !== op) {
+			this.stopBgWatch(op);
+			return;
+		}
+		const v = await this.bgVerdict(r);
+		if (v.kind !== "none") return this.concludeBg(op, v);
+		w.transcriptMissing = v.transcriptMissing === true;
+		// The transcript may trail the hook by a few ms: look again soon.
+		if (v.pending) void this.after(500).then(() => this.kickBg(op));
+		if (r.state !== "accepted") return;
+		const every = this.deps.bg?.jobCheckMs ?? BG_JOB_CHECK_MS;
+		if (this.now() - w.lastJobCheckMs < every) return;
+		w.lastJobCheckMs = this.now();
+		const gone = await this.bgJobGone(r);
+		if (gone) return this.concludeBg(op, { kind: "unconfirmed", detail: gone });
+	}
+
+	private async bgDeadline(op: LiveOp): Promise<void> {
+		const w = op.bg;
+		if (!w || w.stopped) return;
+		await this.evaluateBg(op).catch(() => undefined);
+		if (w.stopped) return;
+		if (isFinalResult(op.record.result) || this.live.get(op.key) !== op) {
+			this.stopBgWatch(op);
+			return;
+		}
+		if (op.record.state === "accepted" && w.deadlineMs !== null) {
+			// D2: delivery could not be proven. If the transcript was unreadable
+			// the detail says so; it is never `failed` and never retried.
+			await this.concludeBg(op, {
+				kind: "unconfirmed",
+				detail: w.transcriptMissing ? "transcript-unavailable" : "t-ack-bg",
+			});
+			return;
+		}
+		// `uncertain`: the watch ends; the record stays for an admin resolution.
+		this.stopBgWatch(op);
+	}
+
+	/**
+	 * §8.1.12.5 over every conversation of the session with events after t0:
+	 * a hook candidate (new prompt_id, same hash, after t0) that the
+	 * conversation's own transcript confirms (enqueue ≤ 2 s after t0 and a
+	 * `queued` entry with that promptId). One confirmed in `cid` ⇒ delivered;
+	 * one in another conversation OF THE SAME JOB (a probe names the job's
+	 * short with the recorded pid on that conversation) ⇒ misdelivered; more
+	 * than one ⇒ no unequivocal attribution ⇒ unconfirmed.
+	 */
+	private async bgVerdict(r: PaneRecord): Promise<BgVerdict> {
+		const t0Ms = Date.parse(r.prepared_at);
+		const confirmed = new Map<string, BgCandidate>();
+		let pending = false;
+		let transcriptMissing = false;
+		const enqueueMs = new Map<string, number | null>();
+		const cids = await this.deps.store.listConversationIds(r.sid).catch(() => [] as string[]);
+		for (const cid of cids) {
+			const idx = await this.deps.store.peekIndex(r.sid, cid).catch(() => null);
+			if (!idx || idx.lastEventAt < r.prepared_at) continue;
+			const events = await this.readCidEvents(r.sid, cid);
+			const cands = hookCandidates(events, { cid, t0: r.prepared_at, hash: r.text_hash });
+			if (cands.length === 0) continue;
+			const tp = transcriptPathOf(events) ?? (await this.transcriptPathFromHead(r.sid, cid));
+			const tail = tp
+				? // No transcript port (flag off, a leftover record being drained):
+					// no ack evidence, never a guess.
+					((await this.deps.bg?.transcripts.readTail(r.sid, tp, TRANSCRIPT_TAIL_BYTES)) ?? null)
+				: null;
+			if (tail === null) transcriptMissing = true;
+			const entries = tail ? parseTranscript(tail) : [];
+			const c = cands.find((x) =>
+				transcriptConfirms(entries, { cid, t0Ms, hash: r.text_hash, promptId: x.promptId }),
+			);
+			if (c) {
+				confirmed.set(cid, c);
+				enqueueMs.set(cid, ourEnqueueLatencyMs(entries, { cid, t0Ms, hash: r.text_hash }));
+			} else pending = true;
+		}
+		if (confirmed.size === 0) return { kind: "none", pending, transcriptMissing };
+		if (confirmed.size > 1) return { kind: "unconfirmed", detail: "ambiguous" };
+		const [cid, c] = [...confirmed.entries()][0] as [string, BgCandidate];
+		if (cid === r.cid)
+			return {
+				kind: "delivered",
+				promptId: c.promptId,
+				seq: c.seq,
+				enqueueMs: enqueueMs.get(cid) ?? null,
+			};
+		const j = r.job as JobTarget;
+		const probe = await this.deps.conversation.probeSession(r.sid).catch(() => null);
+		const sameJob = probe?.some((e) => e.id === j.short && e.pid === j.pid && e.sessionId === cid);
+		// Not provably this job's next conversation: not ours to claim.
+		if (!sameJob) return { kind: "none", pending };
+		return { kind: "misdelivered", conversation: cid };
+	}
+
+	/** The final result from a verdict (caller holds the job lock). */
+	private async applyBgVerdict(
+		op: LiveOp,
+		v: Exclude<BgVerdict, { kind: "none" }>,
+		extra: Record<string, unknown> = {},
+	): Promise<void> {
+		const r = op.record;
+		const id = r.client_message_id;
+		let data: Record<string, unknown>;
+		let http: HttpResult;
+		if (v.kind === "delivered") {
+			http = {
+				status: 202,
+				body: { result: "delivered", clientMessageId: id, promptId: v.promptId, seq: v.seq },
+			};
+			// enqueue − t0 (t0 = the ingest of our own `prepared`, §8.1.7):
+			// evidence of how much of the 2 s window the delivery used.
+			data = { prompt_id: v.promptId, seq: v.seq, enqueue_ms: v.enqueueMs ?? null };
+			logger.info(
+				`[composer-bg] ${r.sid} ${r.pane_id} ${id}: delivered (prompt ${v.promptId}; enqueue − t0 = ${v.enqueueMs ?? "?"} ms)`,
+			);
+		} else if (v.kind === "misdelivered") {
+			http = {
+				status: 202,
+				body: { result: "misdelivered", clientMessageId: id, conversation: v.conversation },
+			};
+			data = { misdelivered_to: v.conversation };
+		} else {
+			http = {
+				status: 202,
+				body: { result: "unconfirmed", clientMessageId: id, detail: v.detail },
+			};
+			data = { detail: v.detail };
+		}
+		r.result = v.kind;
+		r.state = v.kind;
+		r.http = http;
+		await this.writeRecord(op).catch((err) =>
+			logger.error(`[composer-bg] record write failed: ${(err as Error).message}`),
+		);
+		await this.persistSafe(op, v.kind, { ...data, ...extra, http });
+		this.decideHttp(op, http);
+		this.stopBgWatch(op);
+		if (v.kind === "delivered") this.startDupWatch({ ...r }, { promptId: v.promptId, seq: v.seq });
+	}
+
+	private async concludeBg(op: LiveOp, v: Exclude<BgVerdict, { kind: "none" }>): Promise<void> {
+		const r = op.record;
+		try {
+			await this.lock.run(
+				op.key,
+				"composer-send",
+				async () => {
+					if (this.live.get(op.key) !== op) {
+						this.stopBgWatch(op);
+						this.decideHttp(op, r.http ?? this.uncertainAnswer(r));
+						return;
+					}
+					if (isFinalResult(r.result)) {
+						this.stopBgWatch(op);
+						this.decideHttp(op, r.http ?? this.uncertainAnswer(r));
+						await this.tryRelease(op, true);
+						return;
+					}
+					// `unconfirmed` is a verdict on an `accepted` text; an
+					// `uncertain` one never expires into it (§8.1.12.6).
+					if (v.kind === "unconfirmed" && v.detail !== "ambiguous" && r.state !== "accepted")
+						return;
+					await this.applyBgVerdict(op, v);
+					await this.tryRelease(op, true);
+				},
+				{ mode: "wait" },
+			);
+		} catch (err) {
+			if (err instanceof SessionBusyError) {
+				logger.warn(`[composer-bg] conclusion deferred: ${op.key} busy`);
+				return;
+			}
+			throw err;
+		}
+	}
+
+	/** Has the job gone (`unconfirmed` early, §8.1.12.6)? null = no evidence either way. */
+	private async bgJobGone(r: PaneRecord): Promise<string | null> {
+		const j = r.job as JobTarget;
+		const cs = await this.deps.docker.containerState(r.container_id).catch(() => null);
+		if (cs === "stopped" || cs === "gone") return "container-down";
+		if (cs !== "running") return null;
+		const ins = await this.bgInspect(r.container_id, j.uid, {
+			pid: j.pid,
+			short: j.short,
+			configDir: j.config_dir,
+		});
+		if (!ins) return null;
+		if (ins.job && ins.job.absent === true) return "job-gone";
+		if (ins.job && ins.job.absent !== true && ins.job.nonce !== j.nonce) return "job-relaunched";
+		// No daemon answers and the worker we handed the text to is gone: the
+		// daemon's shutdown reaps its workers, and nothing persists a queue.
+		if (ins.job === null && ins.worker.start !== j.start) return "daemon-gone";
+		return null;
+	}
+
+	/**
+	 * Recovery / late evidence / admin pass for a job record (§8.1.12.6):
+	 * effects by evidence, the ack by events + transcript, nothing resent.
+	 */
+	private async settleAndConcludeBg(op: LiveOp): Promise<void> {
+		const r = op.record;
+		await this.drainWrites(op);
+		const changed = await this.settleEffects(r);
+		if (changed) await this.writeRecord(op).catch(() => undefined);
+		// The reply answered after T_http / shutdown cancelled the executor:
+		// in THIS process its output is evidence.
+		const late = op.bgLate;
+		op.bgLate = undefined;
+		if (late && !isFinalResult(r.result) && r.state !== "accepted") {
+			if (late.kind === "accepted") {
+				r.state = "accepted";
+				await this.writeRecord(op).catch(() => undefined);
+				await this.persistSafe(op, "accepted", { late: true });
+			} else if (late.kind === "rejected" || late.kind === "aborted") {
+				const http: HttpResult = {
+					status: late.kind === "aborted" ? abortHttpCode(late.code).status : 502,
+					body: {
+						error: late.kind === "aborted" ? abortHttpCode(late.code).error : "delivery-failed",
+						stage: "reply",
+						detail: late.code,
+					},
+				};
+				r.state = "failed";
+				r.result = "failed";
+				r.http = http;
+				await this.writeRecord(op).catch(() => undefined);
+				await this.persistSafe(op, "failed", { stage: "reply", http, late: true });
+			}
+		}
+		// Nothing was ever created: nothing was sent.
+		if (
+			r.phase === "cancelled" &&
+			!isFinalResult(r.result) &&
+			r.state !== "accepted" &&
+			r.execs.length === 0
+		) {
+			const http: HttpResult = {
+				status: 502,
+				body: { error: "delivery-failed", stage: "reply", segmentsSent: 0, detail: "cancelled" },
+			};
+			r.state = "failed";
+			r.result = "failed";
+			r.http = http;
+			await this.writeRecord(op).catch(() => undefined);
+			await this.persistSafe(op, "failed", { stage: "reply", http });
+		}
+		if (!isFinalResult(r.result) && (r.state === "accepted" || r.state === "uncertain")) {
+			const live = this.live.get(op.key);
+			if (live && live !== op) return; // the live executor owns its ack
+			const v = await this.bgVerdict(r);
+			const t0Ms = Date.parse(r.prepared_at);
+			const gone =
+				v.kind === "none" && r.state === "accepted" && this.now() < t0Ms + this.tAckBg
+					? await this.bgJobGone(r)
+					: null;
+			if (v.kind !== "none") {
+				if (v.kind !== "unconfirmed" || r.state === "accepted" || v.detail === "ambiguous")
+					await this.applyBgVerdict(op, v, { deferred: true });
+			} else if (r.state === "accepted" && this.now() >= t0Ms + this.tAckBg) {
+				await this.applyBgVerdict(
+					op,
+					{
+						kind: "unconfirmed",
+						detail: v.transcriptMissing ? "transcript-unavailable" : "t-ack-bg",
+					},
+					{ deferred: true },
+				);
+			} else if (gone) {
+				await this.applyBgVerdict(op, { kind: "unconfirmed", detail: gone }, { deferred: true });
+			} else if (this.now() < t0Ms + this.tAckBg && !(op.bg && !op.bg.stopped)) {
+				this.live.set(op.key, op);
+				op.bg = undefined;
+				this.startBgWatch(op, r.state === "accepted" ? t0Ms + this.tAckBg : null);
+			}
+		}
+		await this.tryRelease(op, true);
+	}
+
+	/**
+	 * §8.1.12.5 "duplicado por re-lanzamiento", after `delivered` (the record
+	 * is already released): until t0 + T_ack_bg, a `session_start resume`
+	 * then a second same-hash human prompt with a new prompt_id, and a probe
+	 * naming the job with ANOTHER pid ⇒ one `composer_send{state:
+	 * duplicated}` event — a visible marker, never a new ack. In-process
+	 * only: a restart ends the watch (declared in the PR).
+	 */
+	private readonly dupWatches = new Set<{ stop(): void }>();
+	/** client_message_ids with a live duplicate watch in this process. */
+	private readonly dupWatched = new Set<string>();
+
+	/**
+	 * After a restart (audit round 1, S4): every background send `delivered`
+	 * less than T_ack_bg ago (its `prepared` event's ts), with no
+	 * `duplicated` marker yet, gets its watch back — rebuilt from its own
+	 * `composer_send` events, which carry the job short, the worker pid
+	 * (`pane_pid`), the hash and the ack's prompt_id/seq. The watch first
+	 * checks the events persisted while no process was watching.
+	 */
+	private async rearmDupWatches(sid: string): Promise<void> {
+		const cids = await this.deps.store.listConversationIds(sid).catch(() => [] as string[]);
+		// Only conversations with events in the last day are scanned (cost);
+		// the window itself is judged on the evidence's timestamps below.
+		const horizon = new Date(this.now() - 24 * 60 * 60_000).toISOString();
+		for (const cid of cids) {
+			const idx = await this.deps.store.peekIndex(sid, cid).catch(() => null);
+			if (!idx || idx.lastEventAt < horizon) continue;
+			const events = await this.readCidEvents(sid, cid);
+			const byId = new Map<
+				string,
+				{ prepared?: PersistedEvent; delivered?: PersistedEvent; dup?: boolean }
+			>();
+			for (const ev of events) {
+				if (ev.ev !== "composer_send" || ev.data.transport !== "background") continue;
+				const id = ev.data.client_message_id;
+				if (typeof id !== "string") continue;
+				const e = byId.get(id) ?? {};
+				if (ev.data.state === "prepared") e.prepared = ev;
+				if (ev.data.state === "delivered") e.delivered = ev;
+				if (ev.data.state === "duplicated") e.dup = true;
+				byId.set(id, e);
+			}
+			for (const [id, e] of byId) {
+				if (!e.prepared || !e.delivered || e.dup || this.dupWatched.has(id)) continue;
+				const d = e.delivered.data;
+				const short = d.job;
+				const pid = d.pane_pid;
+				const promptId = d.prompt_id;
+				const ackSeq = d.seq;
+				if (
+					typeof short !== "string" ||
+					typeof pid !== "number" ||
+					typeof promptId !== "string" ||
+					typeof ackSeq !== "number" ||
+					typeof d.text_hash !== "string"
+				)
+					continue;
+				// In-memory only (never written): the fields the watch and the
+				// marker event read.
+				const r: PaneRecord = {
+					v: 1,
+					sid,
+					pane_id: jobKey(short),
+					pane_pid: pid,
+					container_id: typeof d.container_id === "string" ? d.container_id : "",
+					cid,
+					client_message_id: id,
+					text_hash: d.text_hash,
+					prepared_at: e.prepared.ts,
+					state: "released",
+					result: "delivered",
+					phase: "completed",
+					execs: [],
+					job: {
+						short,
+						pid,
+						start: "",
+						exe: "",
+						nonce: "",
+						pty_host_pid: 1,
+						daemon_pid: 1,
+						daemon_start: "",
+						daemon_exe: "",
+						version: "",
+						uid: 1,
+						config_dir: "",
+					},
+					updated_at: e.delivered.ts,
+				};
+				this.startDupWatch(r, { promptId, seq: ackSeq });
+			}
+		}
+	}
+
+	private startDupWatch(r: PaneRecord, ack: { promptId: string; seq: number }): void {
+		const j = r.job as JobTarget;
+		// The window is t0 + T_ack_bg on the EVIDENCE's clock (the resume's ts),
+		// not "now": a backend that was down during it still judges what
+		// happened inside it (one catch-up check, no listener).
+		const until = Date.parse(r.prepared_at) + this.tAckBg;
+		const live = this.now() < until;
+		if (this.dupWatched.has(r.client_message_id)) return;
+		this.dupWatched.add(r.client_message_id);
+		let stopped = false;
+		let busy = false;
+		const check = async (retry: boolean): Promise<void> => {
+			if (stopped || busy) return;
+			busy = true;
+			try {
+				const events = await this.readCidEvents(r.sid, r.cid);
+				const d = duplicateAfter(events, {
+					hash: r.text_hash,
+					ackSeq: ack.seq,
+					ackPromptId: ack.promptId,
+				});
+				if (!d || Date.parse(d.resumeTs) > until) return;
+				const ids = { prompt_id: d.promptId, seq: d.seq, first_prompt_id: ack.promptId };
+				// Round 3.1 (SF-1): anything between the ack and the repeat that a
+				// manual repeat could explain (a gap, a turn end — whatever its
+				// prompt_id —, another human prompt) means it is never "proven",
+				// at most possible, with the reasons.
+				if (d.blockers.length > 0) {
+					watch.stop();
+					await this.emitDupMarker(r, "possible-duplicate", {
+						...ids,
+						reason: d.blockers.join(","),
+					});
+					return;
+				}
+				const probe = await this.deps.conversation.probeSession(r.sid).catch(() => null);
+				const e = probe?.find((x) => x.id === j.short);
+				if (e && typeof e.pid === "number" && e.pid !== j.pid) {
+					// STRONG EVIDENCE (D4), never certainty: a resume of the job with
+					// another process, and the same text again under a new prompt_id —
+					// both ids recorded. A voluntary stop mid-turn + resume + the same
+					// words retyped next looks identical (declared, §8.1.12.5).
+					watch.stop();
+					await this.emitDupMarker(r, "duplicated", { ...ids, job_pid: e.pid });
+					logger.warn(
+						`[composer-bg] ${r.sid} ${r.pane_id} ${r.client_message_id}: the job was relaunched (pid ${j.pid} → ${e.pid}) and the same text was submitted again — marked duplicated (strong evidence, not certainty)`,
+					);
+				} else if (e && e.pid === j.pid) {
+					// The same process resumed and got the same words: not a relaunch
+					// of ours (e.g. the person typed them again). No marker.
+				} else if (retry) void this.after(3_000).then(() => check(false));
+				else {
+					// D4: the same text ran again after a resume, but no probe can
+					// show the relaunch: a POSSIBLE repetition, said as such.
+					await this.emitDupMarker(r, "possible-duplicate", {
+						...ids,
+						reason: probe ? "job-not-listed" : "probe-failed",
+					});
+				}
+			} finally {
+				busy = false;
+			}
+		};
+		const unlisten = this.deps.conversation.onPersistedEvent((st, cid, ev) => {
+			if (st === r.sid && cid === r.cid && ev.ev === "user_prompt") void check(true);
+		});
+		const watch = {
+			stop: () => {
+				stopped = true;
+				unlisten();
+				this.dupWatches.delete(watch);
+				this.dupWatched.delete(r.client_message_id);
+			},
+		};
+		this.dupWatches.add(watch);
+		// Events persisted before the watch existed (a restart in between).
+		void check(live);
+		if (!live) {
+			// Past the window: only the catch-up above; nothing new is watched.
+			unlisten();
+			return;
+		}
+		void this.after(until - this.now()).then(() => watch.stop());
+	}
+
+	/** Markers already written by this process: `<client_message_id>/<kind>`. */
+	private readonly dupMarkers = new Set<string>();
+
+	/**
+	 * D4: one `composer_send{state: duplicated | possible-duplicate}` per send
+	 * and kind, ever — idempotent across restarts: the conversation's own
+	 * events are read before writing, and the marker is confirmed in the file
+	 * (it is what a reload and the next process see).
+	 */
+	private async emitDupMarker(
+		r: PaneRecord,
+		kind: "duplicated" | "possible-duplicate",
+		extra: Record<string, unknown>,
+	): Promise<void> {
+		const key = `${r.client_message_id}/${kind}`;
+		if (this.dupMarkers.has(key)) return;
+		this.dupMarkers.add(key);
+		const events = await this.readCidEvents(r.sid, r.cid);
+		if (
+			events.some(
+				(ev) =>
+					ev.ev === "composer_send" &&
+					ev.data.client_message_id === r.client_message_id &&
+					ev.data.state === kind,
+			)
+		)
+			return;
+		const op = this.adoptRecord({ ...r, execs: [...r.execs] });
+		try {
+			await this.persist(op, kind, extra, { confirmed: true });
+		} catch (err) {
+			// Not on disk: a later check (or the next process) may try again.
+			this.dupMarkers.delete(key);
+			logger.error(`[composer-bg] ${kind} marker not persisted: ${(err as Error).message}`);
+		}
+	}
+
+	/**
+	 * D1: the person confirmed they checked the Terminal for an `unconfirmed`
+	 * send (and are sending the same text again). A durable marker on THAT
+	 * send, so the acknowledgement survives restarts and reloads. Confirmed in
+	 * the file before the new send goes on: if it cannot be written, the new
+	 * send would be refused again next time, never the reverse.
+	 */
+	private async persistAcknowledged(
+		sid: string,
+		cid: string,
+		id: string,
+		by: string,
+	): Promise<void> {
+		await this.deps.store.open(sid, cid);
+		const outcome = this.deps.store.enqueue(sid, cid, {
+			ev: "composer_send",
+			prompt_id: null,
+			turn_id: null,
+			agent_id: null,
+			pane: null,
+			data: { client_message_id: id, state: "acknowledged", transport: "background", by },
+		});
+		if (outcome !== "queued") throw new Error(`acknowledged not queued (${outcome})`);
+		// "Confirmed" as persist({confirmed}) means it: the store reports a failed
+		// append as a drop, so the proof is the failure counter not moving.
+		const failuresBefore = this.deps.store.stats.appendFailures;
+		await this.deps.store.flush(sid, cid);
+		if (this.deps.store.stats.appendFailures !== failuresBefore)
+			throw new Error("append failed while confirming the acknowledgement");
+	}
+
+	private async readCidEvents(sid: string, cid: string): Promise<PersistedEvent[]> {
+		const idx = await this.deps.store.peekIndex(sid, cid).catch(() => null);
+		const after = Math.max(0, (idx?.lastSeq ?? 0) - BG_EVENT_SCAN);
+		return this.deps.store
+			.readEvents(sid, cid, after, BG_EVENT_SCAN, { archive: true })
+			.catch(() => [] as PersistedEvent[]);
+	}
+
+	/** A long conversation's SessionStart may be older than the scanned tail. */
+	private async transcriptPathFromHead(sid: string, cid: string): Promise<string | null> {
+		const head = await this.deps.store
+			.readEvents(sid, cid, 0, 256, { archive: true })
+			.catch(() => [] as PersistedEvent[]);
+		return transcriptPathOf(head);
+	}
+
+	/** uid (real = effective, not root), starttime and exe of `pid`, by /proc. */
+	private async readProc(
+		containerId: string,
+		pid: number,
+	): Promise<{ uid: number; start: string; exe: string } | null> {
+		const run = (argv: string[]) =>
+			withDeadline(
+				this.deps.docker.exec(containerId, argv, null, async () => true),
+				this.deps.liveExecDeadlineMs ?? LIVE_EXEC_DEADLINE_MS,
+			);
+		try {
+			const st = await run(statusArgv(pid));
+			const uids = st.exitCode === 0 ? parseUids(st.stdout) : null;
+			if (!uids || uids.real !== uids.effective || uids.real === 0) return null;
+			const stat = await run(statArgv(pid));
+			const start = stat.exitCode === 0 ? parseStarttime(stat.stdout) : null;
+			const link = await run(exeLinkArgv(pid));
+			const exe = link.exitCode === 0 ? link.stdout.replace(/\n$/, "") : "";
+			if (!start || !exe) return null;
+			return { uid: uids.real, start, exe };
+		} catch {
+			return null;
+		}
+	}
+
+	/** The in-container inspect (no effect), as the worker's uid. */
+	private async bgInspect(
+		containerId: string,
+		uid: number,
+		input: { pid: number; short: string; configDir?: string },
+	): Promise<InspectResult | null> {
+		try {
+			const res = await withDeadline(
+				this.deps.docker.exec(
+					containerId,
+					[...BG_CLIENT_ARGV],
+					inspectStdin(input),
+					async () => true,
+					{ user: String(uid) },
+				),
+				this.deps.liveExecDeadlineMs ?? LIVE_EXEC_DEADLINE_MS,
+			);
+			return parseInspectOutput(res.exitCode, res.stdout);
+		} catch {
+			return null;
+		}
 	}
 
 	// ── Admin (§8.1.11) ─────────────────────────────────────────────────────
@@ -1944,6 +3313,7 @@ export class ComposerService {
 			effectsPendingNow: pending,
 			unverifiableSessionsNow: unverifiable,
 			persistFailuresSinceBoot: this.stats.persistFailures,
+			...(this.bgEnabled ? { background: { enabled: true } } : {}),
 		};
 	}
 }

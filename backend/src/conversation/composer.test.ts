@@ -2190,3 +2190,97 @@ describe("availability (§6, orientative)", () => {
 		expect(av3.get(CID)?.canSendInput).toBe(false);
 	});
 });
+
+describe("v1.9 §8.1.12 flag-off evidence: the background transport configured but OFF changes nothing on the pane path", () => {
+	const trace = async (bg: Parameters<typeof makeService>[0]["bg"]) => {
+		const service = makeService({ bg });
+		const p = send(service, "hello\n\nworld");
+		await until(() => docker.effectSteps().length === 5, "effects");
+		// Deterministic order (round 3): the prompt is injected only once
+		// `entered` is on disk, as it would be from a real CLI after the Enter.
+		await until(async () => (await composerStates()).includes("entered"), "entered on disk");
+		const promptId = await promptArrives("hello\n\nworld");
+		const r = await p;
+		await until(recordGone, "release");
+		const events = (await eventsOf()).filter((x) => x.ev === "composer_send");
+		return {
+			// Seq values are positions in the log, not behaviour: compared by role.
+			http: {
+				...r,
+				body: { ...r.body, promptId: r.body.promptId === promptId, seq: typeof r.body.seq },
+			},
+			execs: docker.calls.map((c) => [c.step, c.cmd.join(" "), c.stdin, c.user ?? null]),
+			// The prompt ids are random per run (promptArrives): compared by role, not value.
+			events: events.map((e) =>
+				JSON.parse(
+					JSON.stringify(e.data)
+						.split(promptId)
+						.join("<prompt>")
+						.replace(/"client_message_id":"[^"]*",?/, "")
+						.replace(/"seq":\d+/g, '"seq":"<n>"'),
+				),
+			),
+			files: (
+				await fs.readdir(path.join(root, ".st-control", SID, "composer")).catch(() => [])
+			).sort(),
+		};
+	};
+	it("identical execs (argv, stdin, user), events, HTTP answer and record files: no bg deps vs bg { enabled: false } vs bg on but session not listed", async () => {
+		const none = await trace(undefined);
+		for (const bg of [
+			{
+				enabled: false,
+				versions: new Set(["2.1.318"]),
+				sessions: new Set([SID]),
+				transcripts: { readTail: async () => "" },
+			},
+			{
+				enabled: true,
+				versions: new Set(["2.1.318"]),
+				sessions: new Set<string>(),
+				transcripts: { readTail: async () => "" },
+			},
+		]) {
+			// A fresh pane and store state for each configuration.
+			await fs.rm(root, { recursive: true, force: true });
+			root = await fs.mkdtemp(path.join(os.tmpdir(), "st-composer-"));
+			store = new ConversationStore({ workspaceRoot: root, now: () => now });
+			records = new PaneRecordStore(root);
+			docker = new FakeDocker();
+			await seedConversation();
+			expect(await trace(bg)).toEqual(none);
+		}
+	});
+	it("a pane-less conversation with the transport off: not-interactive, no probe, no exec — as before", async () => {
+		await seedConversation("conv-nopane", { paneId: null });
+		let probed = 0;
+		const service = makeService({
+			bg: {
+				enabled: false,
+				versions: new Set(),
+				sessions: new Set([SID]),
+				transcripts: { readTail: async () => "" },
+			},
+			conversation: {
+				probeSession: async () => {
+					probed++;
+					return probe;
+				},
+				onPersistedEvent: (l) => store.onEvent(l),
+				captureEffective: async () => true,
+			},
+		});
+		expect(await send(service, "hi", ID1, "conv-nopane")).toEqual({
+			status: 409,
+			body: { error: "not-interactive" },
+		});
+		expect(probed).toBe(0);
+		expect(docker.calls).toEqual([]);
+		const av = await service.availability(
+			SID,
+			[{ cid: "conv-nopane", kind: "interactive", paneId: null }],
+			{ captureEffective: true, callerMayOperate: true },
+		);
+		expect(av.get("conv-nopane")).toEqual({ canSendInput: false, composer: { blocked: false } });
+	});
+});

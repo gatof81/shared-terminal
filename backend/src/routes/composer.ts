@@ -17,6 +17,7 @@ import type { Request, Response, Router } from "express";
 import type { AuthedRequest } from "../auth.js";
 import { requireAdmin, requireAuth } from "../auth.js";
 import { PANE_ID_RE, UUID_V4_RE } from "../conversation/composerText.js";
+import { JOB_KEY_RE } from "../conversation/paneRecord.js";
 import { logger } from "../logger.js";
 import * as observeLog from "../observeLog.js";
 import { handleSessionError, type RouteContext } from "./shared.js";
@@ -92,9 +93,14 @@ export function registerComposerAdminRoutes(router: Router, ctx: RouteContext): 
 				clientMessageId?: unknown;
 				outcome?: unknown;
 			};
+			// v1.9 §8.1.12: a job record (`job:<short>`) is resolved the same way —
+			// WHATEVER the background flag says (audit round 1, S3): a record left
+			// by a flag-on period keeps the job blocked after the flag goes off,
+			// and resolving / draining it is the only way out. Nothing here
+			// delivers anything; it only settles or declares what exists.
 			if (
 				typeof b.paneId !== "string" ||
-				!PANE_ID_RE.test(b.paneId) ||
+				!(PANE_ID_RE.test(b.paneId) || JOB_KEY_RE.test(b.paneId)) ||
 				typeof b.clientMessageId !== "string" ||
 				!UUID_V4_RE.test(b.clientMessageId) ||
 				(b.outcome !== "discarded" && b.outcome !== "sent-manually" && b.outcome !== "reconcile")

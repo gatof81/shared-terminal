@@ -96,6 +96,10 @@ services:
       - COMPOSER_CLI_VERSIONS=${COMPOSER_CLI_VERSIONS:-}
       - COMPOSER_CLI_MIN_VERSION=${COMPOSER_CLI_MIN_VERSION:-}
       - COMPOSER_CLI_DENY=${COMPOSER_CLI_DENY:-}
+      # §8.1.12 EXPERIMENTAL background transport: empty ⇒ OFF, no version validated.
+      - CONVERSATION_COMPOSER_BG_ENABLED=${CONVERSATION_COMPOSER_BG_ENABLED:-}
+      - COMPOSER_BG_CLI_VERSIONS=${COMPOSER_BG_CLI_VERSIONS:-}
+      - COMPOSER_BG_SESSIONS=${COMPOSER_BG_SESSIONS:-}
       # §2.7.7 carry-over recreation: a path inside this container on the same
       # filesystem as Docker's data root (DEPLOYMENT.md "Activating an
       # existing session"). Unset ⇒ carry-overs refuse (disk-space-unknown).

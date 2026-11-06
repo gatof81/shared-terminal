@@ -14,6 +14,12 @@ export interface ProbeEntry {
 	waitingFor?: string;
 	name?: string;
 	cwd?: string;
+	/**
+	 * v1.9 §8.1.12.4: a background session's daemon job `short` (`id` in the
+	 * CLI's serializer — the same in 2.1.314/316/318). Read for the
+	 * background transport only; nothing else looks at it.
+	 */
+	id?: string;
 }
 
 /** Parse `claude agents --json` stdout. Returns null when unparseable. */
@@ -40,6 +46,7 @@ export function parseAgentsJson(stdout: string): ProbeEntry[] | null {
 		if (typeof r.waitingFor === "string") entry.waitingFor = r.waitingFor;
 		if (typeof r.name === "string") entry.name = r.name;
 		if (typeof r.cwd === "string") entry.cwd = r.cwd;
+		if (typeof r.id === "string") entry.id = r.id;
 		out.push(entry);
 	}
 	return out;

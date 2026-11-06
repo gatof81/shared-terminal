@@ -1713,13 +1713,23 @@ export interface ConversationSummary {
 		result?: string;
 		since?: string;
 	};
+	/**
+	 * v1.9 §8.1.12 (EXPERIMENTAL): "background" when a send here would go
+	 * through the CLI daemon (a pane-less conversation, background transport
+	 * on). Orientative like canSendInput; absent otherwise.
+	 */
+	transport?: "background";
 }
 
 /** `POST …/messages` (CONVERSATION.md §8.1): the answer, 2xx or not, with its status. */
 export interface ComposerSendResult {
 	status: number;
 	body: {
-		result?: "delivered" | "unconfirmed" | "misdelivered" | "uncertain";
+		/**
+		 * `accepted` (v1.9 §8.1.12, background sessions only): Claude Code's
+		 * daemon handed the text to the session — NOT delivered to Claude yet.
+		 */
+		result?: "delivered" | "unconfirmed" | "misdelivered" | "uncertain" | "accepted";
 		error?: string;
 		detail?: string;
 		clientMessageId?: string;
@@ -1744,10 +1754,24 @@ export async function sendConversationMessage(
 	cid: string,
 	text: string,
 	clientMessageId: string,
+	/**
+	 * v1.9 §8.1.12 (D1): the earlier `unconfirmed` background send of the
+	 * same text the person confirmed they checked in the Terminal.
+	 */
+	opts: { acknowledgeUnconfirmed?: string } = {},
 ): Promise<ComposerSendResult> {
 	const res = await apiFetch(
 		`/sessions/${encodeURIComponent(sessionId)}/conversations/${encodeURIComponent(cid)}/messages`,
-		{ method: "POST", body: JSON.stringify({ text, clientMessageId }) },
+		{
+			method: "POST",
+			body: JSON.stringify({
+				text,
+				clientMessageId,
+				...(opts.acknowledgeUnconfirmed
+					? { acknowledgeUnconfirmed: opts.acknowledgeUnconfirmed }
+					: {}),
+			}),
+		},
 	);
 	const body = (await res.json().catch(() => ({}))) as ComposerSendResult["body"];
 	return { status: res.status, body };
