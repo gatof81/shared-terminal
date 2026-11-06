@@ -134,6 +134,7 @@ const dbStubs = vi.hoisted(() => ({
 vi.mock("../db.js", () => dbStubs);
 
 import { hooksFilePath } from "./activation.js";
+import { IngestOriginVerifier, type SessionNetworkView } from "./ingestOrigin.js";
 import { generateIngestToken, hashIngestToken } from "./registry.js";
 import { writeGlobalRevocation, writeSessionRevocation } from "./revocation.js";
 import { ConversationService } from "./service.js";
@@ -1277,5 +1278,266 @@ describe("§4.6 turn correlation survives late persistence and restarts (Work P2
 			"c1",
 		);
 		expect([i4.lastPromptId, i4.persistedPromptId]).toEqual([null, null]);
+	});
+});
+
+describe("authorize — §3.1.1 network origin (v1.8.6)", () => {
+	const IP = "172.18.0.5";
+	function originService(views: Record<string, SessionNetworkView | Error>) {
+		const port = {
+			inspectSessionNetwork: vi.fn(async (cid: string): Promise<SessionNetworkView> => {
+				const v = views[cid];
+				if (v instanceof Error) throw v;
+				return v ?? { exists: false };
+			}),
+		};
+		const svc = new ConversationService({
+			workspaceRoot: root,
+			enabled: true,
+			port: 3001,
+			store,
+			now: () => now,
+			ingestOrigin: new IngestOriginVerifier(port, { now: () => now }),
+		});
+		return { svc, port };
+	}
+	const up = (id: string, addresses = [IP]): SessionNetworkView => ({
+		exists: true,
+		id,
+		running: true,
+		addresses,
+	});
+
+	it("flag off (no verifier): the route ignores the peer entirely — identical to before", async () => {
+		session("s1");
+		expect(await service.authorize(H({ remoteAddress: "8.8.8.8" }))).toEqual({
+			ok: true,
+			stSessionId: "s1",
+		});
+		expect(await service.authorize(H({ remoteAddress: undefined }))).toEqual({
+			ok: true,
+			stSessionId: "s1",
+		});
+		expect(service.stats.originRejected).toEqual({});
+		expect(service.stats.rejected.wrong_origin).toBeUndefined();
+	});
+
+	it("flag on: the session's current container passes; any other peer is wrong_origin", async () => {
+		session("s1");
+		const { svc, port } = originService({ "cid-s1": up("cid-s1") });
+		try {
+			expect(await svc.authorize(H({ remoteAddress: `::ffff:${IP}` }))).toEqual({
+				ok: true,
+				stSessionId: "s1",
+			});
+			expect(await svc.authorize(H({ remoteAddress: "172.18.0.6" }))).toEqual({
+				accepted: false,
+				reason: "wrong_origin",
+			});
+			expect(await svc.authorize(H({ remoteAddress: "127.0.0.1" }))).toEqual({
+				accepted: false,
+				reason: "wrong_origin",
+			});
+			expect(port.inspectSessionNetwork).toHaveBeenCalledWith("cid-s1");
+			expect(svc.stats.rejected.wrong_origin).toBe(2);
+			expect(svc.stats.originRejected).toEqual({ mismatch: 1, loopback: 1 });
+			// counters carry causes only — never an address
+			expect(JSON.stringify(svc.stats.originRejected)).not.toContain("172.18");
+		} finally {
+			await svc.shutdown();
+		}
+	});
+
+	it("the token rows run first: a bad token never reaches Docker", async () => {
+		session("s1", { ingest_token_hash: hashIngestToken(generateIngestToken()) });
+		const { svc, port } = originService({ "cid-s1": up("cid-s1") });
+		try {
+			expect(await svc.authorize(H({ remoteAddress: IP }))).toEqual({
+				accepted: false,
+				reason: "bad_token",
+			});
+			expect(port.inspectSessionNetwork).not.toHaveBeenCalled();
+		} finally {
+			await svc.shutdown();
+		}
+	});
+
+	it("the expected container is D1's current one: after a recreation only N's address passes", async () => {
+		session("s1");
+		const N = { id: "cid-new", ip: "172.18.0.9" };
+		const views: Record<string, SessionNetworkView> = { "cid-s1": up("cid-s1") };
+		const { svc } = originService(views);
+		try {
+			expect((await svc.authorize(H({ remoteAddress: IP }))) as unknown).toEqual({
+				ok: true,
+				stSessionId: "s1",
+			});
+			// recreation: D1 moves container_id, O is gone; teardown invalidated the token cache
+			session("s1", { container_id: N.id });
+			delete views["cid-s1"];
+			views[N.id] = up(N.id, [N.ip]);
+			svc.invalidateToken("s1");
+			expect(await svc.authorize(H({ remoteAddress: IP }))).toEqual({
+				accepted: false,
+				reason: "wrong_origin",
+			});
+			expect(await svc.authorize(H({ remoteAddress: N.ip }))).toEqual({
+				ok: true,
+				stSessionId: "s1",
+			});
+		} finally {
+			await svc.shutdown();
+		}
+	});
+
+	it("session teardown drops the origin view: a stopped container is re-inspected and refused", async () => {
+		session("s1");
+		const views: Record<string, SessionNetworkView> = { "cid-s1": up("cid-s1") };
+		const { svc, port } = originService(views);
+		try {
+			expect(await svc.authorize(H({ remoteAddress: IP }))).toEqual({
+				ok: true,
+				stSessionId: "s1",
+			});
+			views["cid-s1"] = { exists: true, id: "cid-s1", running: false, addresses: [] };
+			await svc.onSessionDown("s1");
+			expect(await svc.authorize(H({ remoteAddress: IP }))).toEqual({
+				accepted: false,
+				reason: "wrong_origin",
+			});
+			expect(port.inspectSessionNetwork).toHaveBeenCalledTimes(2);
+			expect(svc.stats.originRejected).toEqual({ not_running: 1 });
+		} finally {
+			await svc.shutdown();
+		}
+	});
+
+	it("a Docker failure is a rejection, never a pass", async () => {
+		session("s1");
+		const { svc } = originService({ "cid-s1": new Error("ECONNREFUSED /var/run/docker.sock") });
+		try {
+			expect(await svc.authorize(H({ remoteAddress: IP }))).toEqual({
+				accepted: false,
+				reason: "wrong_origin",
+			});
+			expect(svc.stats.originRejected).toEqual({ inspect_failed: 1 });
+		} finally {
+			await svc.shutdown();
+		}
+	});
+});
+
+describe("authorize — §3.1.1 observe mode (activation gate)", () => {
+	const IP = "172.18.0.5";
+	function svcWith(mode: "observe" | "enforce" | undefined, view: SessionNetworkView) {
+		const port = { inspectSessionNetwork: vi.fn(async () => view) };
+		return new ConversationService({
+			workspaceRoot: root,
+			enabled: true,
+			port: 3001,
+			store,
+			now: () => now,
+			ingestOrigin: new IngestOriginVerifier(port, { now: () => now }),
+			ingestOriginMode: mode,
+		});
+	}
+	const up: SessionNetworkView = { exists: true, id: "cid-s1", running: true, addresses: [IP] };
+
+	it("never refuses: a non-matching peer is accepted and only counted", async () => {
+		session("s1");
+		session("s2", { container_id: "cid-s1" }); // s2's request will come from another container
+		const svc = svcWith("observe", up);
+		try {
+			expect(await svc.authorize(H({ remoteAddress: IP }))).toEqual({
+				ok: true,
+				stSessionId: "s1",
+			});
+			expect(await svc.authorize(H({ stSession: "s2", remoteAddress: "172.18.0.77" }))).toEqual({
+				ok: true,
+				stSessionId: "s2",
+			});
+			expect(svc.stats.rejected.wrong_origin).toBeUndefined();
+			expect(svc.stats.originObserved).toEqual({ match: 1, mismatch: 1 });
+			const stats = await svc.adminStats();
+			expect(stats.originObservedSinceBoot).toEqual({
+				byCause: { match: 1, mismatch: 1 },
+				sessionsMatched: 1,
+				sessionsNotMatched: 1,
+			});
+			expect(stats.originRejectedSinceBoot).toBeUndefined();
+			// counts only: no session id, address or token in the exposed block
+			const exposed = JSON.stringify(stats.originObservedSinceBoot);
+			for (const secret of ["s1", "s2", IP, "172.18.0.77", TOKEN])
+				expect(exposed).not.toContain(secret);
+		} finally {
+			await svc.shutdown();
+		}
+	});
+
+	it("still runs after the token rows: an unauthenticated request is never observed", async () => {
+		session("s1", { ingest_token_hash: hashIngestToken(generateIngestToken()) });
+		const svc = svcWith("observe", up);
+		try {
+			expect(await svc.authorize(H({ remoteAddress: IP }))).toEqual({
+				accepted: false,
+				reason: "bad_token",
+			});
+			expect(svc.stats.originObserved).toEqual({});
+		} finally {
+			await svc.shutdown();
+		}
+	});
+
+	it("enforce exposes rejections and no observe block; flag off exposes neither", async () => {
+		session("s1");
+		const enforce = svcWith("enforce", up);
+		try {
+			await enforce.authorize(H({ remoteAddress: "172.18.0.77" }));
+			const st = await enforce.adminStats();
+			expect(st.originRejectedSinceBoot).toEqual({ byCause: { mismatch: 1 } });
+			expect(st.originObservedSinceBoot).toBeUndefined();
+		} finally {
+			await enforce.shutdown();
+		}
+		const off = await service.adminStats();
+		expect(off.originRejectedSinceBoot).toBeUndefined();
+		expect(off.originObservedSinceBoot).toBeUndefined();
+	});
+});
+
+describe("authorize — §3.1.1 observe mode with Docker hung (P2 bound)", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+	it("traffic past the deadline never piles up inspections, and observe still never refuses", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		session("s1");
+		const port = {
+			inspectSessionNetwork: vi.fn(() => new Promise<SessionNetworkView>(() => undefined)),
+		};
+		const svc = new ConversationService({
+			workspaceRoot: root,
+			enabled: true,
+			port: 3001,
+			store,
+			now: () => now,
+			ingestOrigin: new IngestOriginVerifier(port, { now: () => now }),
+			ingestOriginMode: "observe",
+		});
+		try {
+			for (let burst = 0; burst < 4; burst++) {
+				const all = Promise.all(
+					Array.from({ length: 5 }, () => svc.authorize(H({ remoteAddress: "172.18.0.5" }))),
+				);
+				await vi.advanceTimersByTimeAsync(500);
+				expect((await all).every((r) => "ok" in r && r.ok)).toBe(true);
+				await vi.advanceTimersByTimeAsync(700);
+			}
+			expect(port.inspectSessionNetwork).toHaveBeenCalledTimes(1);
+			expect(svc.stats.originObserved).toEqual({ inspect_timeout: 5, inspect_pending: 15 });
+		} finally {
+			vi.useRealTimers();
+			await svc.shutdown();
+		}
 	});
 });

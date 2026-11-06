@@ -43,6 +43,7 @@ import {
 import { ancestryArgv, EXEC_TIMEOUT_S, paneStateArgv, parsePaneState } from "./composerText.js";
 import { DedupeTable, identityKey, payloadHash } from "./dedupe.js";
 import { isSafeClaudeSessionId, isSafeStSessionId } from "./ids.js";
+import type { IngestOriginVerifier } from "./ingestOrigin.js";
 import {
 	L2_MESSAGE_BYTES,
 	RATE_LIMIT_GAP_WINDOW_MS,
@@ -109,12 +110,19 @@ export type RejectReason =
 	| "backpressure"
 	| "malformed"
 	| "owner_unverified"
-	| "truncated";
+	| "truncated"
+	/** §3.1.1 — only with INGEST_REQUIRE_SESSION_ORIGIN; the cause is in `originRejected`. */
+	| "wrong_origin";
 
 export interface IngestHeaders {
 	authorization?: string;
 	stSession?: string;
 	tmuxPane?: string;
+	/**
+	 * §3.1.1 — the TCP peer of the request, `req.socket.remoteAddress`. Never
+	 * a header (X-Forwarded-For, X-Real-IP, Forwarded) nor `req.ip`.
+	 */
+	remoteAddress?: string;
 }
 
 /** §3.2.1 — what the in-container relay could not deliver before this event. */
@@ -173,6 +181,19 @@ export interface ConversationAdminStats {
 	effectiveSessions: number;
 	eventsSinceBoot: number;
 	rejectedSinceBoot: { byReason: Record<string, number> };
+	/** §3.1.1 — present only while INGEST_REQUIRE_SESSION_ORIGIN=true (enforce). */
+	originRejectedSinceBoot?: { byCause: Record<string, number> };
+	/**
+	 * §3.1.1 — present only while INGEST_REQUIRE_SESSION_ORIGIN=observe: what
+	 * the check WOULD have decided for each authenticated request (`match` =
+	 * would accept), and how many distinct sessions matched / did not. Counts
+	 * only — no session id, address or token.
+	 */
+	originObservedSinceBoot?: {
+		byCause: Record<string, number>;
+		sessionsMatched: number;
+		sessionsNotMatched: number;
+	};
 	gapsSinceBoot: number;
 	unattributedGaps: number;
 	bytesOnDisk: number;
@@ -205,6 +226,19 @@ export interface ServiceDeps extends ActivationDeps {
 	 * image rule alone decides.
 	 */
 	captureAttestationKey?: () => Buffer;
+	/**
+	 * §3.1.1 — network-origin check of the ingest. Wired ONLY when
+	 * INGEST_REQUIRE_SESSION_ORIGIN is on; absent ⇒ the route is exactly
+	 * the pre-v1.8.6 one (no inspection, no new dependency).
+	 */
+	ingestOrigin?: IngestOriginVerifier;
+	/**
+	 * §3.1.1 — `enforce` (flag `true`, the default when a verifier is wired)
+	 * refuses a non-matching origin; `observe` (flag `observe`, the activation
+	 * gate) runs the same check on real authenticated requests and only counts
+	 * the outcome — it never refuses.
+	 */
+	ingestOriginMode?: "enforce" | "observe";
 }
 
 const NO_DOCKER: CaptureDockerPort = {
@@ -217,6 +251,8 @@ interface TokenCacheEntry {
 	status: string;
 	requested: boolean;
 	hash: string | null;
+	/** §3.1.1 — the session's current container per D1 (same row as the hash). */
+	containerId: string | null;
 	expiresAt: number;
 }
 
@@ -331,6 +367,12 @@ export class ConversationService {
 	readonly stats = {
 		eventsSinceBoot: 0,
 		rejected: {} as Record<string, number>,
+		/** §3.1.1 — causes behind `rejected.wrong_origin`. Never an address. */
+		originRejected: {} as Record<string, number>,
+		/** §3.1.1 observe mode — would-be outcomes (`match` or a cause). */
+		originObserved: {} as Record<string, number>,
+		originObservedMatched: new Set<string>(),
+		originObservedNotMatched: new Set<string>(),
 		duplicates: 0,
 		gaps: 0,
 		unattributedGaps: 0,
@@ -405,6 +447,7 @@ export class ConversationService {
 
 	invalidateToken(stSessionId: string): void {
 		this.tokenCache.delete(stSessionId);
+		this.deps.ingestOrigin?.invalidate(stSessionId);
 	}
 
 	private reject(reason: RejectReason | "duplicate"): IngestOutcome {
@@ -434,6 +477,26 @@ export class ConversationService {
 		if (!entry.requested) return this.reject("disabled");
 		if (!entry.hash || !tokenMatchesHash(token, entry.hash)) return this.reject("bad_token");
 		if (entry.status !== "running") return this.reject("not_running");
+		// §3.1.1 — after the cheap rows: the TCP peer must be the session's
+		// CURRENT container on sessions-net. Off ⇒ never reached.
+		const origin = this.deps.ingestOrigin;
+		if (origin) {
+			const verdict = await origin.verify(stSessionId, entry.containerId, headers.remoteAddress);
+			if (this.deps.ingestOriginMode === "observe") {
+				// Activation gate: the evidence is exactly "requests that
+				// authenticated as S came from S's container". Never refuses.
+				const key = verdict.ok ? "match" : verdict.cause;
+				this.stats.originObserved[key] = (this.stats.originObserved[key] ?? 0) + 1;
+				(verdict.ok ? this.stats.originObservedMatched : this.stats.originObservedNotMatched).add(
+					stSessionId,
+				);
+			} else if (!verdict.ok) {
+				this.stats.originRejected[verdict.cause] =
+					(this.stats.originRejected[verdict.cause] ?? 0) + 1;
+				return this.reject("wrong_origin");
+			}
+			if (this.isDead(stSessionId)) return this.reject("not_running");
+		}
 		return { ok: true, stSessionId };
 	}
 
@@ -453,6 +516,7 @@ export class ConversationService {
 			status: row.status,
 			requested: row.conversation_requested === 1,
 			hash: row.ingest_token_hash,
+			containerId: row.container_id ?? null,
 			expiresAt: now + TOKEN_CACHE_TTL_MS,
 		};
 		this.tokenCache.set(stSessionId, entry);
@@ -588,6 +652,7 @@ export class ConversationService {
 			return this.reject("not_running");
 		if (revocation !== "none") {
 			this.tokenCache.delete(stSessionId);
+			this.deps.ingestOrigin?.invalidate(stSessionId);
 			// Converge even if the CLI was interrupted before its step 3.
 			await removeHooksFile(this.deps.workspaceRoot, stSessionId).catch(() => undefined);
 			// 3.0d: the authorization marker never outlives the authorization.
@@ -1317,6 +1382,7 @@ export class ConversationService {
 		// callers must not join it.
 		this.probing.delete(stSessionId);
 		this.tokenCache.delete(stSessionId);
+		this.deps.ingestOrigin?.invalidate(stSessionId);
 		this.rate.forget(stSessionId);
 		for (const rt of Array.from(this.runtime.values())) {
 			if (rt.stSessionId !== stSessionId) continue;
@@ -1453,6 +1519,7 @@ export class ConversationService {
 		this.tombstone(stSessionId);
 		this.purgeEpoch.set(stSessionId, this.epochOf(stSessionId) + 1);
 		this.tokenCache.delete(stSessionId);
+		this.deps.ingestOrigin?.invalidate(stSessionId);
 		this.rate.forget(stSessionId);
 		// Admission is closed (tombstone), so the in-flight set can only
 		// shrink: wait until every ingest that was already running for this
@@ -1539,6 +1606,18 @@ export class ConversationService {
 			effectiveSessions: effective,
 			eventsSinceBoot: this.stats.eventsSinceBoot,
 			rejectedSinceBoot: { byReason: { ...this.stats.rejected } },
+			...(this.deps.ingestOrigin && this.deps.ingestOriginMode !== "observe"
+				? { originRejectedSinceBoot: { byCause: { ...this.stats.originRejected } } }
+				: {}),
+			...(this.deps.ingestOrigin && this.deps.ingestOriginMode === "observe"
+				? {
+						originObservedSinceBoot: {
+							byCause: { ...this.stats.originObserved },
+							sessionsMatched: this.stats.originObservedMatched.size,
+							sessionsNotMatched: this.stats.originObservedNotMatched.size,
+						},
+					}
+				: {}),
 			gapsSinceBoot: this.stats.gaps,
 			unattributedGaps: this.stats.unattributedGaps,
 			bytesOnDisk: await disk,

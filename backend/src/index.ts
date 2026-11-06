@@ -28,6 +28,7 @@ import {
 	parsePolicy as parseCliPolicy,
 } from "./conversation/cliPolicy.js";
 import { ComposerService, composerFlagEnabled } from "./conversation/composer.js";
+import { IngestOriginVerifier } from "./conversation/ingestOrigin.js";
 import { createIngestHandler } from "./conversation/ingestRoute.js";
 import { PaneRecordStore } from "./conversation/paneRecord.js";
 import { ConversationService } from "./conversation/service.js";
@@ -117,6 +118,23 @@ const docker = new DockerManager(sessions);
 // service rejects everything as `disabled`, writes no file, injects no
 // token and mounts no bind — behaviour-neutral by construction.
 const CONVERSATION_ENABLED = process.env.CONVERSATION_ENABLED === "true";
+// CONVERSATION.md §3.1.1 (v1.8.6) — bind hook ingest to the session container's
+// network origin. Off by default and kept off until the operator has verified,
+// read-only, that the backend sees the containers' sessions-net addresses:
+// on a deployment where it doesn't (a proxy/NAT in between), turning it on
+// would reject all capture.
+// Values: unset/`false` = off (no inspection at all); `observe` = run the check
+// on every authenticated request and only COUNT the outcome (the activation
+// gate, DEPLOYMENT.md); `true` = enforce. Anything else is treated as off and
+// logged, so a typo can never enforce by accident.
+const INGEST_ORIGIN_FLAG = process.env.INGEST_REQUIRE_SESSION_ORIGIN ?? "";
+const INGEST_ORIGIN_MODE: "enforce" | "observe" | null =
+	INGEST_ORIGIN_FLAG === "true" ? "enforce" : INGEST_ORIGIN_FLAG === "observe" ? "observe" : null;
+if (INGEST_ORIGIN_MODE === null && !["", "false"].includes(INGEST_ORIGIN_FLAG)) {
+	logger.warn(
+		`[conversation] INGEST_REQUIRE_SESSION_ORIGIN=${JSON.stringify(INGEST_ORIGIN_FLAG)} is not true|observe|false: origin check OFF`,
+	);
+}
 // 3.0d (§7): owners whose NEW sessions are born with capture requested.
 const CONVERSATION_ALLOW_USERS = parseAllowUsers(process.env.CONVERSATION_ALLOW_USERS);
 const WORKSPACE_ROOT_FOR_CONVERSATION =
@@ -152,6 +170,13 @@ const conversation = new ConversationService({
 	},
 	// §2.7.5.1 — capability attestations survive the loss of a container's image.
 	captureAttestationKey: () => deriveSubkey(ATTESTATION_KEY_INFO),
+	// §3.1.1 — absent unless the flag is on: off is the exact pre-v1.8.6 route.
+	ingestOrigin: INGEST_ORIGIN_MODE
+		? new IngestOriginVerifier({
+				inspectSessionNetwork: (cid) => docker.inspectSessionNetwork(cid),
+			})
+		: undefined,
+	ingestOriginMode: INGEST_ORIGIN_MODE ?? undefined,
 });
 docker.setConversationHooks({
 	prepareSpawn: async (sid) => {

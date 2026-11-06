@@ -68,6 +68,7 @@ import {
 	RELAY_PROBE_TIMEOUT_MS,
 	RELAY_STATUS_URL,
 } from "./conversation/captureAuth.js";
+import type { SessionNetworkView } from "./conversation/ingestOrigin.js";
 import type { LayerChange, PathKind } from "./recreate/layer.js";
 import {
 	type ExecResult,
@@ -3271,6 +3272,15 @@ export class DockerManager {
 		return inspectCaptureWith(this.docker, containerId);
 	}
 
+	/**
+	 * CONVERSATION.md §3.1.1 — the container's identity and addresses on
+	 * SESSIONS_NETWORK, inspected BY ID (no image lookup: this sits on the
+	 * ingest path). Throws on a daemon error; `{exists:false}` only for a 404.
+	 */
+	inspectSessionNetwork(containerId: string): Promise<SessionNetworkView> {
+		return inspectSessionNetworkWith(this.docker, containerId, SESSIONS_NETWORK);
+	}
+
 	/** The image a spawn would use now (by its immutable ID), or null if missing. */
 	async currentSessionImage(): Promise<{ imageId: string; relay2: boolean } | null> {
 		// One inspect of the tag gives both the ID and its labels, read now (no
@@ -4374,6 +4384,25 @@ export async function imageRelayInfoWith(
 		exists: true,
 		relay2: info.Config?.Labels?.[RELAY_IMAGE_LABEL] === RELAY_IMAGE_LABEL_VALUE,
 	};
+}
+
+export async function inspectSessionNetworkWith(
+	docker: Dockerode,
+	containerId: string,
+	network: string,
+): Promise<SessionNetworkView> {
+	let info: Dockerode.ContainerInspectInfo;
+	try {
+		info = await docker.getContainer(containerId).inspect();
+	} catch (err) {
+		if ((err as { statusCode?: number }).statusCode === 404) return { exists: false };
+		throw err;
+	}
+	const ep = info.NetworkSettings?.Networks?.[network];
+	const addresses = [ep?.IPAddress, ep?.GlobalIPv6Address].filter(
+		(a): a is string => typeof a === "string" && a.length > 0,
+	);
+	return { exists: true, id: info.Id, running: info.State?.Running === true, addresses };
 }
 
 export async function inspectCaptureWith(

@@ -400,11 +400,39 @@ session emits anything.
 | --- | --- | --- |
 | `CONVERSATION_ENABLED` | unset (`false`) | Master switch. Off: `POST /ingest/claude/hook` answers 204 and discards (`ingest_rejected{disabled}`), no session gets a hooks file, an ingest token, `relay.enabled` or the extra read-only bind mounts, and boot `reconcile` deletes every stale `conversation.json` and `relay.enabled`. On: capture is still **per-session opt-in** (`sessions.conversation_requested`). |
 | `CONVERSATION_ALLOW_USERS` | unset | Comma-separated user ids whose **new** sessions are born with capture requested (`conversation_requested=1`); the owner decides, also for an admin create on behalf of someone. Existing sessions are never touched. Requested is not effective: the flag, no revocation and an image with the relay still apply. Entries that are not user ids are ignored with a warning. Keep it **empty until the pilot has passed** (stage 3 is a separate decision). |
+| `INGEST_REQUIRE_SESSION_ORIGIN` | unset (`false`) | CONVERSATION.md §3.1.1 (v1.8.6). `true`: a hook-ingest request is accepted only if its TCP peer (`req.socket.remoteAddress`, never a header) is an address of the session's **current** container on `SESSIONS_NETWORK`, inspected by id (≤ 500 ms); anything else is `ingest_rejected{wrong_origin}` (still 204). `observe`: the same check on every authenticated request, **never refusing**, counted in admin stats — the activation gate below. `false`/unset: identical to before, no Docker inspection; any other value is treated as off and logged. |
 | `PORT` | `3001` | Passed to capturing session containers as `ST_BACKEND_PORT`: the relay forwards to `http://st-backend:<PORT>/ingest/claude/hook`. The hooks file itself always targets the relay, `http://127.0.0.1:47613/ingest/claude/hook`. |
 
-Both variables are forwarded by `docker-compose.yml` with empty defaults
+These variables are forwarded by `docker-compose.yml` with empty defaults
 (before 3.0d `CONVERSATION_ENABLED` was not, so setting it in `.env` did
 nothing under compose).
+
+#### Ingest network origin — activation gate before `INGEST_REQUIRE_SESSION_ORIGIN=true`
+
+The flag is only safe if each request that authenticates as session S reaches the backend from S's
+own container on `sessions-net`. A proxy, NAT, `network_mode: host` or a published port in between
+would make every peer look like a gateway, and `true` would then reject **all** capture. Sampling
+sockets cannot prove this: short-lived hook connections are easy to miss, and a socket does not say
+which session's token it carried. The gate therefore measures the real ingest requests, at the
+point where they are authenticated, with the `observe` mode, which **never refuses** anything:
+
+1. Set `INGEST_REQUIRE_SESSION_ORIGIN=observe` and restart the backend. Capture keeps working
+   exactly as before; the only addition is one `docker inspect` per capturing container every 10 s.
+2. Let every capturing session produce hooks for a while (normal use, or one prompt in each).
+3. Read the counters (admin only; counts, never session ids, addresses or tokens):
+
+   ```bash
+   curl -s -b "st_token=<admin JWT>" https://<api-host>/api/admin/stats \
+     | jq '.conversation.originObservedSinceBoot'
+   ```
+
+4. **PASS** only if `byCause` has `match` and nothing else, `sessionsNotMatched` is `0`, and
+   `sessionsMatched` equals the number of sessions that produced hooks during the window. Any other
+   cause (`mismatch` above all, or `inspect_timeout`, `inspect_pending` or `inspect_failed`) is a **FAIL**: stay on
+   `observe` or go back to `false`, and investigate before trying again.
+5. Only after a PASS: set `true`, restart, and confirm that
+   `.conversation.originRejectedSinceBoot` stays empty while capture keeps working. Any
+   `wrong_origin` on a legitimate session ⇒ go back to `observe` (or `false`) and restart.
 
 ### Composer (3.2, `docs/CONVERSATION.md` §8)
 
