@@ -1297,6 +1297,217 @@ describe("Composer", () => {
 		expect(buttonNamed($("chat-thread"), "Open it")).toBeTruthy();
 	});
 
+	// ── v1.9 §8.1.12 (EXPERIMENTAL): background sessions ──
+
+	const bg = {
+		canSendInput: true,
+		transport: "background",
+		paneId: null,
+		composer: { blocked: false },
+	};
+
+	it("background: a one-time notice comes before the first send; nothing is sent until 'I understand'", async () => {
+		await openSendable({ ...bg, sessionId: "bg0" });
+		api.sendConversationMessage.mockResolvedValue({
+			status: 202,
+			body: { result: "accepted", clientMessageId: "x" },
+		});
+		type("first to bg");
+		sendBtn().click();
+		await flush();
+		expect(api.sendConversationMessage).not.toHaveBeenCalled();
+		expect(status().textContent).toMatch(/runs in the background/);
+		expect(status().textContent).toMatch(/can't be cancelled from Chat/);
+		buttonNamed($("chat-thread"), "I understand — send")?.click();
+		await flush();
+		expect(api.sendConversationMessage).toHaveBeenCalledTimes(1);
+	});
+
+	it("background: `accepted` has its own words and indicator — never the delivered ✓ — and the draft stays, locked", async () => {
+		await openSendable({ ...bg, sessionId: "bg1" });
+		api.sendConversationMessage.mockResolvedValueOnce({
+			status: 202,
+			body: { result: "accepted", clientMessageId: "x" },
+		});
+		type("to bg");
+		sendBtn().click();
+		await flush();
+		buttonNamed($("chat-thread"), "I understand — send")?.click();
+		await flush();
+		const [, , , id] = api.sendConversationMessage.mock.calls[0] as string[];
+		expect(status().textContent).toContain("Accepted by Claude Code — not yet delivered to Claude");
+		expect(status().textContent).not.toContain("✓");
+		expect(status().querySelector(".chat-composer-accepted")?.textContent).toBe("◷");
+		expect(composerTextarea().value).toBe("to bg");
+		expect(composerTextarea().disabled).toBe(true);
+		expect(sendBtn().disabled).toBe(true);
+		const pending = $("chat-thread").querySelector(".chat-pending");
+		expect(pending?.textContent).toContain("not yet delivered");
+		// The same words typed in the Terminal never stand in for the ack.
+		sock.onFrame?.({
+			type: "event",
+			conv: "bg1",
+			event: ev("user_prompt", { prompt: "to bg" }, { prompt_id: "typed" }),
+		});
+		await flush();
+		expect($("chat-thread").querySelector(".chat-pending")).toBeTruthy();
+		// The send's own final state arrives: delivered clears the draft.
+		sock.onFrame?.({
+			type: "event",
+			conv: "bg1",
+			event: ev("composer_send", {
+				state: "delivered",
+				client_message_id: id,
+				prompt_id: "p-ack",
+				transport: "background",
+			}),
+		});
+		await flush();
+		expect(composerTextarea().value).toBe("");
+		expect(status().textContent).toContain("Delivered to Claude");
+		sock.onFrame?.({
+			type: "event",
+			conv: "bg1",
+			event: ev("user_prompt", { prompt: "to bg" }, { prompt_id: "p-ack" }),
+		});
+		await flush();
+		expect($("chat-thread").querySelector(".chat-pending")).toBeNull();
+	});
+
+	it("background: accepted → unconfirmed keeps the draft and asks to check the Terminal", async () => {
+		await openSendable({ ...bg, sessionId: "bg2" });
+		api.sendConversationMessage.mockResolvedValueOnce({
+			status: 202,
+			body: { result: "accepted", clientMessageId: "x" },
+		});
+		type("lost maybe");
+		sendBtn().click();
+		await flush();
+		buttonNamed($("chat-thread"), "I understand — send")?.click();
+		await flush();
+		const [, , , id] = api.sendConversationMessage.mock.calls[0] as string[];
+		sock.onFrame?.({
+			type: "event",
+			conv: "bg2",
+			event: ev("composer_send", {
+				state: "unconfirmed",
+				client_message_id: id,
+				transport: "background",
+			}),
+		});
+		await flush();
+		expect(status().textContent).toContain(
+			"Not confirmed: it may have been lost or still be queued. Check the Terminal before resending.",
+		);
+		expect(composerTextarea().value).toBe("lost maybe");
+		expect(composerTextarea().disabled).toBe(true);
+		buttonNamed($("chat-thread"), "I checked the Terminal")?.click();
+		await flush();
+		expect(composerTextarea().disabled).toBe(false);
+	});
+
+	it("background: an immediate unconfirmed / failed keeps the draft and requires the Terminal check", async () => {
+		await openSendable({ ...bg, sessionId: "bg3" });
+		api.sendConversationMessage.mockResolvedValueOnce({
+			status: 502,
+			body: { error: "delivery-failed", stage: "reply", detail: "ENOJOB" },
+		});
+		type("refused");
+		sendBtn().click();
+		await flush();
+		buttonNamed($("chat-thread"), "I understand — send")?.click();
+		await flush();
+		expect(status().textContent).toContain("nothing was delivered");
+		expect(composerTextarea().value).toBe("refused");
+		expect(buttonNamed($("chat-thread"), "I checked the Terminal")).toBeTruthy();
+	});
+
+	it("background D1: an earlier identical send unconfirmed ⇒ refused until checked; the resend acknowledges it", async () => {
+		await openSendable({ ...bg, sessionId: "bgd1" });
+		api.sendConversationMessage.mockResolvedValueOnce({
+			status: 409,
+			body: {
+				error: "duplicate-pending",
+				detail: "unconfirmed-unacknowledged",
+				clientMessageId: "old-id",
+			},
+		});
+		type("continue");
+		sendBtn().click();
+		await flush();
+		buttonNamed($("chat-thread"), "I understand — send")?.click();
+		await flush();
+		expect(status().textContent).toContain("An identical message sent earlier was not confirmed");
+		expect(composerTextarea().value).toBe("continue");
+		expect(sendBtn().disabled).toBe(true);
+		buttonNamed($("chat-thread"), "I checked the Terminal")?.click();
+		await flush();
+		api.sendConversationMessage.mockResolvedValueOnce({
+			status: 202,
+			body: { result: "accepted", clientMessageId: "x" },
+		});
+		sendBtn().click();
+		await flush();
+		const last = api.sendConversationMessage.mock.calls.at(-1) as unknown[];
+		expect(last[4]).toEqual({ acknowledgeUnconfirmed: "old-id" });
+	});
+
+	it("background D3: a custom CLAUDE_CONFIG_DIR is explained in the person's words", async () => {
+		await openSendable({ ...bg, sessionId: "bgd3" });
+		api.sendConversationMessage.mockResolvedValueOnce({
+			status: 409,
+			body: { error: "unsupported-config-dir" },
+		});
+		type("hi");
+		sendBtn().click();
+		await flush();
+		buttonNamed($("chat-thread"), "I understand — send")?.click();
+		await flush();
+		expect(status().textContent).toContain("custom CLAUDE_CONFIG_DIR");
+		expect(status().textContent).toContain("default ~/.claude");
+	});
+
+	it("background markers: accepted (superseded by its final state), unconfirmed and duplicated have their own words", async () => {
+		await openChat();
+		await openThread([
+			ev("composer_send", { state: "accepted", client_message_id: "a", transport: "background" }),
+			ev("composer_send", { state: "delivered", client_message_id: "a", transport: "background" }),
+			ev("composer_send", { state: "duplicated", client_message_id: "a", transport: "background" }),
+			ev("composer_send", {
+				state: "possible-duplicate",
+				client_message_id: "d",
+				transport: "background",
+			}),
+			ev("composer_send", {
+				state: "acknowledged",
+				client_message_id: "c",
+				transport: "background",
+			}),
+			ev("composer_send", { state: "accepted", client_message_id: "b", transport: "background" }),
+			ev("composer_send", {
+				state: "unconfirmed",
+				client_message_id: "c",
+				transport: "background",
+			}),
+		]);
+		const markers = [...$("chat-thread").querySelectorAll(".chat-marker")].map(
+			(m) => m.textContent ?? "",
+		);
+		expect(markers.filter((t) => t.includes("Accepted by Claude Code"))).toHaveLength(1);
+		// Proven and possible repetition read differently (D4); the acknowledgement is silent.
+		expect(
+			markers.some((t) =>
+				t.includes(
+					"Strong evidence this message ran twice: Claude Code restarted the session and the same text was submitted again. Check the Terminal.",
+				),
+			),
+		).toBe(true);
+		expect(markers.some((t) => t.includes("may have run twice (not confirmed)"))).toBe(true);
+		expect(markers).toHaveLength(4);
+		expect(markers.some((t) => t.includes("may have been lost or still be queued"))).toBe(true);
+		expect(markers.some((t) => t.includes("Delivered"))).toBe(false);
+	});
+
 	it("composer_send events render as markers: failed/uncertain warn, delivered is silent", async () => {
 		await openChat();
 		await openThread([

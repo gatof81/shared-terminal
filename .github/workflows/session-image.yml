@@ -148,7 +148,7 @@ jobs:
   cli-variants:
     name: CLI ${{ matrix.cli }} — control dir, recreation and composer smokes
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -196,3 +196,17 @@ jobs:
         env:
           ST_NATIVE_LAYOUT: "1"
         run: npx tsx src/conversation/composer.smoke.ts docker shared-terminal-session:cli-${{ matrix.cli }}
+
+      # The background transport's client is `/usr/bin/env -i /usr/bin/python3 -I -S -c`:
+      # the image must keep an absolute-path python3 (§8.1.12.7).
+      - name: Image has /usr/bin/python3 for the background-session client (CLI ${{ matrix.cli }})
+        run: docker run --rm --network none --entrypoint /usr/bin/env shared-terminal-session:cli-${{ matrix.cli }} -i /usr/bin/python3 -I -S -c 'import hashlib, json, os, socket, struct, sys; print("python3 ok")'
+
+      # v1.9 §8.1.12 (EXPERIMENTAL, flag off in production): the bg-reply smoke
+      # of the background-session transport, the §8.1.12.9 list against this
+      # CLI's real daemon inside a disposable container (--network none). A
+      # version enters COMPOSER_BG_CLI_VERSIONS only with this green. Case 9
+      # (ESKEW) needs two versions and reports NOT-REPRODUCED here.
+      - name: Composer background-session smoke test (bg-reply, CLI ${{ matrix.cli }})
+        working-directory: backend
+        run: npx tsx src/conversation/composerBg.smoke.ts docker shared-terminal-session:cli-${{ matrix.cli }}

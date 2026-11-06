@@ -134,3 +134,72 @@ describe("Work round 1 (#488)", () => {
 		expect(await store.remove(SID, "%3", record().client_message_id)).toBe("absent");
 	});
 });
+
+describe("v1.9 §8.1.12 job records (EXPERIMENTAL background transport)", () => {
+	const job = {
+		short: "dda484d8",
+		pid: 900,
+		start: "5000",
+		exe: "/x/claude.exe",
+		nonce: "1b7b6e46",
+		pty_host_pid: 850,
+		daemon_pid: 800,
+		daemon_start: "4000",
+		daemon_exe: "/x/claude.exe",
+		version: "2.1.318",
+		uid: 1000,
+		config_dir: "/home/developer/.claude",
+	};
+	const jr = (over: Partial<PaneRecord> = {}) =>
+		record({
+			pane_id: "job:dda484d8",
+			pane_pid: 900,
+			job,
+			state: "accepted",
+			phase: "completed",
+			execs: [{ id: "e1", step: "reply", created_at: "t", settled: { exit_code: 0, at: "t" } }],
+			...over,
+		});
+	it("lives at job-<short>.json beside the pane records, round-trips and is listed", async () => {
+		const r = jr();
+		await store.write(r);
+		await store.write(record());
+		expect(store.file(SID, "job:dda484d8")).toBe(
+			path.join(root, ".st-control", SID, "composer", "job-dda484d8.json"),
+		);
+		expect(await store.read(SID, "job:dda484d8")).toEqual({ kind: "ok", record: r });
+		const l = await store.list(SID);
+		expect(l.unreadable).toEqual([]);
+		expect(l.records.map((x) => x.pane_id).sort()).toEqual(["%3", "job:dda484d8"]);
+		expect(await store.remove(SID, "job:dda484d8", "other-id")).toBe("other");
+		expect(await store.remove(SID, "job:dda484d8", r.client_message_id)).toBe("removed");
+	});
+	it("a job record without its target, with a foreign key, or naming another short is unreadable", async () => {
+		const dir = path.join(root, ".st-control", SID, "composer");
+		await fs.mkdir(dir, { recursive: true });
+		const bad = [
+			{ ...jr(), job: undefined },
+			{ ...jr(), job: { ...job, extra: 1 } },
+			{ ...jr(), job: { ...job, short: "ffffffff" } },
+			{ ...jr(), job: { ...job, uid: 0 } },
+			{ ...jr(), pane_id: "job:ffffffff" },
+		];
+		for (const [i, b] of bad.entries()) {
+			await fs.writeFile(path.join(dir, "job-dda484d8.json"), JSON.stringify(b));
+			const r = await store.read(SID, "job:dda484d8");
+			expect(r.kind, `case ${i}`).toBe("unreadable");
+		}
+		// And a pane record may not carry a job target.
+		await fs.writeFile(path.join(dir, "3.json"), JSON.stringify({ ...record(), job }));
+		expect((await store.read(SID, "%3")).kind).toBe("unreadable");
+	});
+	it("an unexpected file name is still unreadable (the whole session fails closed)", async () => {
+		const dir = path.join(root, ".st-control", SID, "composer");
+		await fs.mkdir(dir, { recursive: true });
+		await fs.writeFile(path.join(dir, "job-DDA484D8.json"), "{}");
+		expect((await store.list(SID)).unreadable).toEqual(["job-DDA484D8.json:unexpected-file"]);
+	});
+	it("refuses an unsafe job key", () => {
+		expect(() => store.file(SID, "job:../../x")).toThrow();
+	});
+});

@@ -61,6 +61,7 @@ import { promptDialog } from "./components/dialog.js";
 import { explainCode, normalizeText, validateText } from "./composerText.js";
 import {
 	type AgentView,
+	BG_TEXT,
 	buildThread,
 	clock,
 	EventWindow,
@@ -1929,6 +1930,10 @@ interface ComposerNotice {
 	blockUntilChecked?: boolean;
 	/** `misdelivered`: the conversation the text landed in. */
 	conversation?: string;
+	/** v1.9 §8.1.12.8: the one-time background notice — Send waits for "I understand". */
+	confirmBackground?: boolean;
+	/** v1.9: `accepted` has its own indicator, never the delivered ✓. */
+	indicator?: "accepted";
 }
 interface ComposerState {
 	/** The project the conversation belongs to: the stored draft's key. */
@@ -1939,7 +1944,28 @@ interface ComposerState {
 	/** The optimistic bubble: shown until the matching `user_prompt` arrives or the send is not delivered. */
 	pending: { id: string; text: string; sentAt: number } | null;
 	checked: boolean;
+	/**
+	 * v1.9 §8.1.12.6: a background send Claude Code ACCEPTED (not delivered).
+	 * The draft is kept and locked until the send's final state arrives as a
+	 * `composer_send` event: delivered/misdelivered clear it; unconfirmed,
+	 * failed or uncertain keep it and ask to check the Terminal.
+	 */
+	accepted: { id: string } | null;
+	/** The send in flight goes through the background transport. */
+	background: boolean;
+	/**
+	 * D1: a background send of this text that ended `unconfirmed`. The next
+	 * send, once the person confirmed they checked the Terminal, carries its
+	 * id so the server records the acknowledgement (durable, server-side).
+	 */
+	unconfirmedId: string | null;
 }
+
+/**
+ * v1.9 §8.1.12.8: the background notice is shown once per conversation (per
+ * page life — a reload shows it again, which errs on the side of saying it).
+ */
+const backgroundNoticeSeen = new Set<string>();
 const composerStates = new Map<string, ComposerState>();
 function composerStateFor(cid: string): ComposerState {
 	let st = composerStates.get(cid);
@@ -1948,7 +1974,17 @@ function composerStateFor(cid: string): ComposerState {
 		// A draft left on this browser (a reload, a closed tab) comes back as
 		// text in the box — never as a send.
 		const draft = sessionId !== null ? readDraft(sessionId, cid) : "";
-		st = { sessionId, draft, sending: false, notice: null, pending: null, checked: false };
+		st = {
+			sessionId,
+			draft,
+			sending: false,
+			notice: null,
+			pending: null,
+			checked: false,
+			accepted: null,
+			background: false,
+			unconfirmedId: null,
+		};
 		composerStates.set(cid, st);
 	}
 	return st;
@@ -1962,6 +1998,7 @@ function setDraft(cid: string, st: ComposerState, text: string): void {
 /** Logout: the next account on this browser starts with no composer state at all. */
 export function forgetComposerState(): void {
 	composerStates.clear();
+	backgroundNoticeSeen.clear();
 	forgetAllDrafts();
 }
 
@@ -2014,6 +2051,7 @@ function composerBlockReason(c: ConversationSummary | undefined, st: ComposerSta
 			return "This conversation is not at its prompt.";
 	}
 	if (st.sending) return "Sending…";
+	if (st.accepted) return BG_TEXT.accepted;
 	if (st.notice?.blockUntilChecked && !st.checked)
 		return "Check the Terminal for partial text, then confirm below.";
 	return null;
@@ -2031,6 +2069,8 @@ function composerBlockReason(c: ConversationSummary | undefined, st: ComposerSta
  */
 function composerDraftable(c: ConversationSummary | undefined, st: ComposerState): boolean {
 	if (!c || st.sending) return false;
+	// Accepted by Claude Code: the draft stays, locked, until the outcome is known.
+	if (st.accepted) return false;
 	if (st.notice?.blockUntilChecked && !st.checked) return false;
 	if (
 		c.status === "ended" ||
@@ -2141,7 +2181,22 @@ function composerStatus(
 	const can = reason === null;
 	if (st?.notice) {
 		status.classList.add(st.notice.tone);
+		if (st.notice.indicator === "accepted") {
+			status.classList.add("accepted");
+			// Its own mark: a clock, never the delivered check.
+			status.appendChild(el("span", "chat-composer-accepted", "◷"));
+		}
 		status.appendChild(el("span", undefined, st.notice.text));
+		if (st.notice.confirmBackground) {
+			const cidNow = selectedCid;
+			status.appendChild(
+				button("I understand — send", "chat-link", () => {
+					if (cidNow) backgroundNoticeSeen.add(cidNow);
+					st.notice = null;
+					void submitComposer();
+				}),
+			);
+		}
 		if (st.notice.conversation) {
 			const target = st.notice.conversation;
 			status.appendChild(button("Open it", "chat-link", () => void openConversation(target)));
@@ -2239,6 +2294,18 @@ async function submitComposer(): Promise<void> {
 		renderComposer();
 		return;
 	}
+	// v1.9 §8.1.12.8: before the first send to a background session, say
+	// what "accepted" means and that it can't be cancelled from Chat; the
+	// send waits for the person's "I understand".
+	const background = selected()?.transport === "background";
+	if (background && !backgroundNoticeSeen.has(cid)) {
+		st.notice = { tone: "info", text: BG_TEXT.notice, confirmBackground: true };
+		renderComposer();
+		return;
+	}
+	st.background = background;
+	// D1: decided before `checked` is reset for this send.
+	const ack = st.checked && st.unconfirmedId ? st.unconfirmedId : undefined;
 	// One id per click (§8.1.4): a resend is the person's new action.
 	const id = crypto.randomUUID();
 	st.sending = true;
@@ -2248,7 +2315,14 @@ async function submitComposer(): Promise<void> {
 	renderComposer();
 	renderPendingBubble();
 	try {
-		const r = await sendConversationMessage(sid, cid, st.draft, id);
+		const r = await sendConversationMessage(
+			sid,
+			cid,
+			st.draft,
+			id,
+			ack ? { acknowledgeUnconfirmed: ack } : {},
+		);
+		if (ack && r.status >= 200 && r.status < 300) st.unconfirmedId = null;
 		applyComposerResult(cid, r.status, r.body);
 	} catch (err) {
 		st.pending = null;
@@ -2272,8 +2346,13 @@ function applyComposerResult(
 		switch (body.result) {
 			case "delivered":
 				setDraft(cid, st, "");
-				st.notice = null;
+				st.notice = st.background ? { tone: "info", text: BG_TEXT.delivered } : null;
 				// The bubble stays until the real `user_prompt` arrives over the socket.
+				return;
+			case "accepted":
+				// NOT delivered: the draft stays (locked), the bubble says so.
+				st.accepted = { id: st.pending?.id ?? body.clientMessageId ?? "" };
+				st.notice = { tone: "info", text: BG_TEXT.accepted, indicator: "accepted" };
 				return;
 			case "misdelivered":
 				setDraft(cid, st, "");
@@ -2285,22 +2364,51 @@ function applyComposerResult(
 				};
 				return;
 			case "unconfirmed":
+				if (st.background) st.unconfirmedId = body.clientMessageId ?? st.pending?.id ?? null;
 				st.pending = null;
-				st.notice = {
-					tone: "warn",
-					text: "Claude Code did not confirm the message — check the Terminal. It was not retried.",
-				};
+				st.notice = st.background
+					? { tone: "warn", text: BG_TEXT.unconfirmed, blockUntilChecked: true }
+					: {
+							tone: "warn",
+							text: "Claude Code did not confirm the message — check the Terminal. It was not retried.",
+						};
 				return;
 			case "uncertain":
 				st.pending = null;
-				st.notice = {
-					tone: "warn",
-					text: "The outcome is not known yet; the pane stays blocked until it is verified. Nothing is retried.",
-				};
+				st.notice = st.background
+					? { tone: "warn", text: BG_TEXT.uncertain, blockUntilChecked: true }
+					: {
+							tone: "warn",
+							text: "The outcome is not known yet; the pane stays blocked until it is verified. Nothing is retried.",
+						};
 				return;
 		}
 	}
 	st.pending = null;
+	// D1: an earlier identical background send is unconfirmed: the person
+	// checks the Terminal, confirms, and the next send acknowledges it.
+	if (
+		status === 409 &&
+		body.error === "duplicate-pending" &&
+		body.detail === "unconfirmed-unacknowledged" &&
+		body.clientMessageId
+	) {
+		st.unconfirmedId = body.clientMessageId;
+		st.notice = {
+			tone: "warn",
+			text: explainCode("duplicate-pending", body.detail),
+			blockUntilChecked: true,
+		};
+		return;
+	}
+	if (status === 502 && body.error === "delivery-failed" && st.background) {
+		st.notice = {
+			tone: "error",
+			text: `${BG_TEXT.failed} (${body.detail ?? "refused"})`,
+			blockUntilChecked: true,
+		};
+		return;
+	}
 	if (status === 502 && body.error === "delivery-failed") {
 		st.notice = {
 			tone: "error",
@@ -2313,6 +2421,55 @@ function applyComposerResult(
 }
 
 /**
+ * v1.9 §8.1.12.6: an `accepted` background send learns its outcome from its
+ * own `composer_send` events in the window. delivered / misdelivered clear
+ * the draft; unconfirmed / failed / uncertain keep it and the next send asks
+ * to check the Terminal. Returns whether anything changed.
+ */
+function settleAccepted(cid: string, st: ComposerState): boolean {
+	if (!st.accepted || !cur || cur.cid !== cid) return false;
+	const id = st.accepted.id;
+	let final: string | null = null;
+	let target: string | undefined;
+	for (const e of cur.window.events) {
+		if (e.ev !== "composer_send") continue;
+		const d = e.data as Record<string, unknown>;
+		if (d.client_message_id !== id) continue;
+		const s = typeof d.state === "string" ? d.state : "";
+		if (
+			["delivered", "misdelivered", "unconfirmed", "failed", "uncertain", "resolved"].includes(s)
+		) {
+			final = s;
+			if (typeof d.misdelivered_to === "string") target = d.misdelivered_to;
+		}
+	}
+	if (final === null) return false;
+	st.accepted = null;
+	if (final === "delivered" || final === "misdelivered") {
+		setDraft(cid, st, "");
+		st.notice =
+			final === "delivered"
+				? { tone: "info", text: BG_TEXT.delivered }
+				: { tone: "info", text: BG_TEXT.misdelivered, conversation: target };
+		if (final === "misdelivered") st.pending = null;
+		return true;
+	}
+	st.pending = null;
+	if (final === "unconfirmed") st.unconfirmedId = id;
+	st.notice = {
+		tone: "warn",
+		text:
+			final === "unconfirmed"
+				? BG_TEXT.unconfirmed
+				: final === "failed"
+					? BG_TEXT.failed
+					: BG_TEXT.uncertain,
+		blockUntilChecked: true,
+	};
+	return true;
+}
+
+/**
  * The optimistic bubble (§10 "3.2 composer"): appended under the thread
  * while a send is in flight or delivered-but-not-yet-seen, removed as soon
  * as a `user_prompt` with the same normalized text is in the window.
@@ -2321,14 +2478,31 @@ function renderPendingBubble(): void {
 	const sc = threadScroller();
 	if (!sc || !cur) return;
 	const st = composerStates.get(cur.cid);
+	if (st && settleAccepted(cur.cid, st)) renderComposer();
 	sc.querySelector(".chat-pending")?.remove();
 	if (!st?.pending) return;
 	// The CLI's own prompt for this send: a human `user_prompt` with the same
 	// normalized text, not older than the send. Scanned on the raw events,
 	// newest first — never a second thread build per live event.
 	const pending = st.pending;
+	const background = st.background;
 	const seen = (() => {
 		const evs = cur.window.events;
+		// v1.9 §8.1.12.8: a background send's bubble yields ONLY to the
+		// user_prompt of its own ack (the prompt_id its `delivered` names) —
+		// never to the same words typed in the Terminal.
+		if (background) {
+			const acked = evs.find(
+				(e) =>
+					e.ev === "composer_send" &&
+					(e.data as Record<string, unknown>).client_message_id === pending.id &&
+					(e.data as Record<string, unknown>).state === "delivered",
+			);
+			const pid = acked ? (acked.data as Record<string, unknown>).prompt_id : undefined;
+			return (
+				typeof pid === "string" && evs.some((e) => e.ev === "user_prompt" && e.prompt_id === pid)
+			);
+		}
 		for (let i = evs.length - 1; i >= 0; i--) {
 			const e = evs[i]!;
 			if (Date.parse(e.ts) < pending.sentAt - 60_000) break;
@@ -2349,8 +2523,12 @@ function renderPendingBubble(): void {
 	bubble.appendChild(
 		el(
 			"div",
-			"chat-pending-state",
-			st.sending ? "Sending…" : "Delivered — waiting for it to appear",
+			st.accepted ? "chat-pending-state accepted" : "chat-pending-state",
+			st.sending
+				? "Sending…"
+				: st.accepted
+					? BG_TEXT.accepted
+					: "Delivered — waiting for it to appear",
 		),
 	);
 	sc.appendChild(bubble);

@@ -34,6 +34,23 @@ describe("parseAgentsJson", () => {
 			{ sessionId: "c2", kind: "interactive" },
 		]);
 	});
+	it("v1.9 §8.1.12: keeps a background job's `id` (its daemon short)", () => {
+		const out = parseAgentsJson(
+			JSON.stringify([
+				{
+					pid: 9,
+					id: "dda484d8",
+					kind: "background",
+					sessionId: "c3",
+					status: "idle",
+					state: "blocked",
+				},
+			]),
+		);
+		expect(out).toEqual([
+			{ sessionId: "c3", kind: "background", pid: 9, id: "dda484d8", status: "idle" },
+		]);
+	});
 	it("returns null for non-JSON or non-array output", () => {
 		expect(parseAgentsJson("not json")).toBeNull();
 		expect(parseAgentsJson('{"a":1}')).toBeNull();
