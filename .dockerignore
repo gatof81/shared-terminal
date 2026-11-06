@@ -1,0 +1,14 @@
+# Build context of the backend image (root Dockerfile; docker-compose `app`).
+# ALLOWLIST: only what the build stage compiles from may enter the context.
+# The deploy checkout is a working tree: a local backend/dist (and
+# node_modules, .env) accumulate there, and tsc never deletes an output whose
+# source is gone — a dist/ringBuffer.js from a months-old local build rode
+# into production this way (2026-11-06). Anything not listed below can no
+# longer reach the image, whatever the host has. The session image builds
+# from ./session-image, its own context; this file does not apply to it.
+# CI's `backend-image` job proves it with a contaminated tree.
+*
+!backend/package.json
+!backend/package-lock.json
+!backend/tsconfig.json
+!backend/src/
