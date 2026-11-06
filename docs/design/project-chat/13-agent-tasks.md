@@ -1,7 +1,8 @@
 # Project Chat — tareas independientes por agente (propuesta de diseño, sin implementar)
 
-Estado: **propuesta, 2026-11-06. Sólo diseño.** No hay backend, UI ni migraciones de tareas, y nada
-de esto se implementa sin la aprobación de las decisiones de §8. Cambia un no-objetivo del RFC
+Estado: **diseño documental consolidado, 2026-11-06 (GO del responsable para consolidar el diseño;
+NO hay GO de implementación).** Aprobadas TD1, TD2, TD5, TD6, TD7, TD9, TD10 y TD11; TD3, TD4 y TD8
+revisadas según las condiciones del responsable (§8). No hay backend, UI ni migraciones de tareas. Cambia un no-objetivo del RFC
 («tareas tipo Jira», 02 §2) **sólo en lo que dice §1**: no es un Jira, y no amplía G3-2, que sigue en
 NO-GO. Los gates de Channels (G1–G12, G3, PASS-A/PASS-B, R8) no cambian. Los que siguen siendo
 obligatorios están en §9.
@@ -38,7 +39,7 @@ La propuesta tiene tres capas, que se aprueban y se implementan por separado:
 | Capa | Contenido | Depende de |
 | --- | --- | --- |
 | **A — contrato mínimo** (§2) | identidad, direccionamiento, estados, versiones, idempotencia, los tres niveles de confirmación | sólo de esta aprobación; se fija como texto |
-| **B — cola y ejecución** (§3, §5, §6) | cola persistente, despacho, puntos seguros, `CHANGE`/`STOP` de tareas activas, recuperación; tareas creadas por el owner | GO de Channels (P6 del roadmap) y gates TG1–TG4 |
+| **B — cola y ejecución** (§3, §5, §6) | cola persistente, despacho, puntos seguros, `CHANGE`/`STOP` de tareas activas, recuperación; tareas creadas por el owner | GO de Channels (P6 del roadmap) y gates TG1–TG5 |
 | **C — instrucciones de agentes** (§4) | un agente crea o pide cambiar/detener tareas de otro, siempre con aprobación humana | capa B **y** GO de G3-2 (hoy NO-GO) |
 
 ## 2. Contrato mínimo de identidad y direccionamiento (capa A)
@@ -138,9 +139,23 @@ sin efecto. La UI muestra los tres niveles por separado: «STOP recibido», «ST
   conversación activa: espera.
 - **Una tarea activa por agente** en v1 (decisión TD2). El CLI interactivo procesa un turno por vez, y
   dos tareas activas en el mismo proceso mezclarían contexto y atribución.
+- **Modo de la cola, por agente:** `paused` (por defecto, y **siempre** para un agente que ya existe o
+  que ya está trabajando) o `auto`. En `paused` no se despacha nada solo: la persona inicia cada
+  tarea. Ninguna tarea nueva se despacha silenciosamente a un agente como A trabajando en #547.
+- **`auto` exige una acreditación vigente de «sin trabajo ajeno al sistema»** (TD3). Estar en el
+  prompt **no** prueba que un trabajo no registrado haya terminado. La acreditación:
+  1. la otorga la persona, explícitamente, por agente y por runtime (`queue_clean_mark{by, at,
+     runtime}` en el log), declarando que el agente no tiene trabajo fuera del sistema;
+  2. se **pierde sola** (la cola vuelve a `paused`, con la causa visible) ante cualquier evidencia de
+     trabajo no registrado después de la marca: un `user_prompt` del Terminal o un envío del Composer
+     que no sea un mensaje libre registrado (TD8), un `internal_prompt` (tarea en background del CLI),
+     un turno que no se pueda atribuir a una tarea o a un mensaje registrado, pérdidas de hooks (`gap`)
+     o un runtime nuevo (salida del CLI, `--resume`, recreación);
+  3. nunca se infiere del estado `waiting_input` ni de un plazo de silencio.
 - **Despacho:** la siguiente tarea `queued` se presta como una entrega más del monitor (03 §3), con
   `task_id`, `attempt_id` y `version` en la `meta`, sólo si se cumplen **todas** las condiciones de
-  RFC §5.5 **y** el agente no tiene ninguna tarea `active` ni `dispatching`/`dispatch_uncertain`. El
+  RFC §5.5, el agente no tiene ninguna tarea `active` ni `dispatching`/`dispatch_uncertain`, **y**
+  (cola `auto` con acreditación vigente) o (cola `paused` y la persona pidió iniciar **esa** tarea). El
   contenido entregado es la definición en esa `version`; un `UPDATE` posterior ya no la alcanza
   (regla 2 de §2.2).
 - El despacho usa las mismas reglas de entrega: sin reintentos automáticos. Sin `channel_prompt` ⇒
@@ -191,7 +206,14 @@ Una tarea pasa a `stopped` sólo con las tres cosas, persistidas:
    condiciones de atribución de 03 §3.1);
 3. después, el agente en su prompt con identidad verificada (probe), sin entrega de esa tarea en vuelo.
 
-Es «lo que reporta el contenedor del agente», con la misma consecuencia aceptada que 03 §7. Si el
+**Alcance de la confirmación (TD6).** `stopped` es evidencia de que **el agente reportó** haber
+detenido el trabajo de esa tarea, con un turno limpio y vuelta al prompt; es «lo que reporta el
+contenedor del agente», con la misma consecuencia aceptada que 03 §7. **No certifica** que no queden
+efectos externos pendientes: procesos en background que el agente lanzó, jobs remotos, CI en curso,
+pushes, deploys u operaciones en otros sistemas. El `task_report{stopped}` incluye
+`external_effects` (lo que el agente declara que dejó en curso, o `none`) y la UI lo muestra como
+«detenida según el agente», con esa declaración. Verificar esos efectos es trabajo humano o de otra
+tarea, nunca una inferencia del sistema. Si el
 runtime muere antes, la tarea pasa a `interrupted` y el `STOP` a `superseded{runtime-retired}`: **un
 STOP pedido nunca se convierte en un STOP confirmado** por un plazo, un reinicio o una intervención
 manual.
@@ -224,6 +246,34 @@ Un agente sólo informa sobre **sus** tareas (asignado = su `agent_id`).
 - Las instrucciones emitidas por un agente dependen de la autenticidad del emisor: **están bloqueadas
   mientras G3-2 esté en NO-GO.** Esta propuesta no la amplía ni la adelanta.
 
+### 4.1 MVP y política futura de delegación (TD4)
+
+**MVP:** toda instrucción emitida por un agente (`CREATE`, `UPDATE`, pedido de `CHANGE`/`STOP`)
+requiere aprobación humana, y además el GO de G3-2.
+
+**Futuro (sólo diseño; el modelo lo admite sin cambiar la capa A):** un **permiso delegado** que la
+persona otorga a un agente creador para actuar sin pedir aprobación cada vez, con la forma de un
+permiso de Colaboración (RFC §5.6):
+
+| Campo | Regla |
+| --- | --- |
+| `grant_id`, `grantor` | lo crea **sólo** la persona (`user:<id>`); nunca un agente |
+| `grantee` | **un** agente creador |
+| `scope` | tareas concretas (`task_id[]`) o «las que `grantee` creó para `assignee` X», dentro del proyecto |
+| `verbs` | subconjunto de {`UPDATE`, `CHANGE`, `STOP`}; `CREATE` sólo si se aprueba explícitamente aparte |
+| `budget`, `expires_at` | obligatorios, con topes; agotado o vencido ⇒ vuelve la aprobación humana |
+| revocación | inmediata, por la persona; una instrucción ya `received` bajo un permiso revocado vuelve a `awaiting_approval` |
+
+Invariantes de cualquier delegación, *MUST*:
+1. **No autoriza deploys, operaciones destructivas ni acciones sensibles.** Una tarea nunca otorga
+   permisos (§4), así que el permiso sólo cubre **editar o detener la definición de una tarea**, no
+   lo que el agente haga para cumplirla. Esas acciones siguen con la aprobación humana de siempre,
+   fuera del sistema de tareas.
+2. **No amplía privilegios:** no se re-delega, no se extiende ni se amplía a sí mismo, no cambia el
+   asignado, no saca una tarea de `awaiting_approval` y no alcanza tareas marcadas por la persona como
+   `requires_human` (marca que sólo la persona pone o quita).
+3. Toda instrucción hecha bajo un permiso lleva su `grant_id` en el log y descuenta presupuesto.
+
 ## 5. Concurrencia
 
 - **Escritor único:** el backend, bajo un candado por proyecto en el proceso, como el log de la
@@ -234,9 +284,20 @@ Un agente sólo informa sobre **sus** tareas (asignado = su `agent_id`).
   `superseded{completed}`).
 - **Intentos:** cada despacho tiene su `attempt_id`; acks e informes de un intento anterior no cambian
   estados.
-- **Mensajes libres con una tarea activa:** se entregan sólo en SP1, como hoy, y el turno que procesan
-  queda **fuera** de la tarea. Si comparten turno con trabajo de la tarea, ese turno queda
-  `ended_unattributed{mixed-input}` (03 §3.1). La UI avisa antes de enviar (decisión TD8).
+- **Tres tipos de envío, siempre explícitos (TD8):** `chat` (conversación libre), `task.create`
+  (tarea nueva) y `task.change` (`CHANGE` de la tarea activa, §3.3). El servidor nunca convierte uno en
+  otro ni lo deduce del texto.
+- **Un mensaje libre no interrumpe por defecto una tarea activa:** mientras el agente tenga una tarea
+  `active` o `dispatching`, un `chat` queda **retenido** (`held{task-active}`) y se presta recién
+  cuando la tarea termina, o lo retira la persona.
+- **Intercalar es una elección explícita por mensaje** (`interleave: true`, con confirmación en la
+  UI): se presta sólo en SP1, marcado para el agente como «mensaje libre, **no** es una instrucción
+  sobre T-101»; no cambia `version` ni `rev` de la tarea y no cuenta como `UPDATE`/`CHANGE`. Ese turno
+  queda fuera de la tarea; si comparte turno con trabajo de la tarea, termina
+  `ended_unattributed{mixed-input}` (03 §3.1).
+- Un envío por Control Directo (Composer) o una escritura en el Terminal durante una tarea activa es
+  trabajo no registrado: no es una instrucción de tarea (TD10) y, si la cola estaba en `auto`, la
+  devuelve a `paused` (§3.1).
 
 ## 6. Persistencia y recuperación
 
@@ -267,21 +328,24 @@ automáticos; interrupción forzada de un turno; tareas entre proyectos; comenta
 notificaciones push propias; permisos por tarea más allá de owner/creador/asignado; integración con
 Jira, Linear o GitHub Issues; agentes que crean tareas sin aprobación humana.
 
-## 8. Decisiones que requieren aprobación del responsable
+## 8. Decisiones del responsable (2026-11-06)
 
-| # | Decisión | Recomendación |
+| # | Decisión | Estado |
 | --- | --- | --- |
-| TD1 | Reemplazar el no-objetivo «tareas tipo Jira» por «tareas direccionables mínimas (§1), sin gestión de proyectos (§7)» en 01 y 02 | sí, con el límite de §7 |
-| TD2 | Una tarea activa por agente en v1 | sí |
-| TD3 | Despacho: automático FIFO cuando el agente está libre (tareas del owner o aprobadas), con un control «frenar cola» por agente; alternativa: siempre manual («Iniciar») | automático con freno, y la cola se frena sola ante `dispatch_uncertain` o `interrupted` |
-| TD4 | Toda tarea creada por un agente, y todo `CHANGE`/`STOP` que un agente pida, requieren aprobación humana; sin aristas `allow` para tareas en v1 | sí (coherente con R4/R13); además, bloqueado hasta el GO de G3-2 |
-| TD5 | Puntos seguros = SP1 (fin de turno) + SP2 (`task_checkpoint`); ninguna interrupción forzada; la vía manual (Terminal) queda fuera del contrato | sí |
-| TD6 | Definición de «detenida» de §3.5 (informe + `turn_end` limpio + prompt verificado), aceptando que es lo que reporta el contenedor | sí |
-| TD7 | Almacén: log por proyecto + snapshot, sin tabla D1 en el MVP | sí; una tabla D1 sólo si hace falta listar tareas entre proyectos |
-| TD8 | Mensajes libres al agente con una tarea activa: permitidos sólo en SP1, fuera de la tarea, con aviso en la UI; alternativa: exigir elegir «como `CHANGE` de T-101» o «como tarea nueva» | permitidos con aviso |
-| TD9 | `task_key` = `T-<n>` por proyecto, nunca reutilizado | sí |
-| TD10 | El Composer/Control Directo no es un canal de instrucciones de tareas; un envío manual durante una tarea activa es un mensaje libre (TD8) | sí |
-| TD11 | Reanudar `stopped`/`interrupted` queda fuera del MVP | sí |
+| TD1 | El no-objetivo «tareas tipo Jira» pasa a «tareas direccionables mínimas (§1), sin gestión de proyectos (§7)» en 01 y 02 | **aprobada** |
+| TD2 | Una tarea activa por agente en v1 | **aprobada** |
+| TD3 | Despacho FIFO automático sólo con la cola `auto` habilitada explícitamente y una acreditación vigente de que el agente no tiene trabajo ajeno al sistema; el prompt no lo prueba. Agentes existentes (como A en #547) empiezan en `paused` y nada se despacha en silencio (§3.1) | **condicionada**, aplicada así |
+| TD4 | MVP: toda instrucción de un agente con aprobación humana y G3-2. Futuro: permisos delegados acotados (alcance, verbos, presupuesto, vencimiento, revocables) que nunca autorizan deploys, operaciones destructivas ni amplían privilegios (§4.1) | **revisada**; la delegación es sólo diseño y necesitará su propia aprobación |
+| TD5 | Puntos seguros = SP1 + SP2; sin interrupción forzada; la vía manual queda fuera del contrato | **aprobada** |
+| TD6 | «Detenida» = informe + `turn_end` limpio + prompt verificado; certifica lo que el agente reportó, **no** la ausencia de efectos externos pendientes (§3.5) | **aprobada**, con la aclaración |
+| TD7 | Log por proyecto + snapshot, sin tabla D1 en el MVP | **aprobada** |
+| TD8 | Tres envíos explícitos (`chat`, `task.create`, `task.change`); un `chat` queda retenido mientras haya una tarea activa; intercalar en SP1 es una elección explícita por mensaje y nunca un `UPDATE`/`CHANGE` (§5) | **revisada** (más conservadora), pendiente de confirmar |
+| TD9 | `task_key` = `T-<n>` por proyecto, nunca reutilizado | **aprobada** |
+| TD10 | El Composer/Control Directo no es un canal de instrucciones de tareas | **aprobada** |
+| TD11 | Reanudar `stopped`/`interrupted` queda fuera del MVP | **aprobada** |
+
+Abiertas para el responsable: la confirmación del texto de TD3, TD4 y TD8 tal como quedó aplicado;
+la delegación de TD4 se decidirá aparte cuando haya implementación de la capa C.
 
 ## 9. Gates de la POC que siguen siendo obligatorios
 
@@ -302,6 +366,7 @@ Gates **nuevos** que la propuesta agrega a la POC (sin ejecutar; necesitan su pr
 | TG1 | Una herramienta MCP de `st-channel` llamada **dentro** de un turno largo devuelve instrucciones nuevas (SP2) | el resultado llega en el mismo turno y el agente lo acusa con `task_ack` |
 | TG2 | Una entrega de control en SP1 se distingue de una tarea nueva y el agente la aplica a la tarea correcta | `task_ack` con el `instruction_id` y la `version` correctos, sin efectos sobre otra tarea |
 | TG3 | Un `STOP` en SP2 termina el turno con un informe y deja el agente en su prompt | las tres condiciones de §3.5, con el proceso `claude` y el contenedor intactos |
+| TG5 | La pérdida de la acreditación de §3.1 detecta trabajo no registrado: un `user_prompt` del Terminal, un envío del Composer y un `internal_prompt` después de la marca | cada caso devuelve la cola a `paused` antes del siguiente despacho |
 | TG4 | Reinicio del backend y salida del CLI con un `STOP` pedido | ninguna tarea perdida, ninguna instrucción aplicada dos veces, ningún `STOP` confirmado sin evidencia nueva |
 
 Si TG1 falla, SP2 se cae y sólo queda SP1: un `CHANGE`/`STOP` de una tarea en un turno largo espera

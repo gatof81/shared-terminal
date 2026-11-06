@@ -1,7 +1,9 @@
 # Release de G3-1 — informe de alcance (diagnóstico, nada ejecutado)
 
 Estado: **diagnóstico preparado desde el repositorio. Actualizado el 2026-11-06 con el preflight de
-sólo lectura de Claude A (§7): candidato `D` = clase `1befd89`, digest todavía NO VERIFICADO.** Claude no tiene ni debe
+sólo lectura de Claude A (§7). El digest efectivo NO coincide con la tabla (`1b116d5a…`, 104 archivos):
+diagnosticado en §7.4 como `1befd89` + un artefacto huérfano identificado; el gate de §1 sigue
+fallando hasta que el responsable decida §7.4 D1.** Claude no tiene ni debe
 tener acceso a VM100. Lo que exige el host lo hace un operador autorizado, **sólo con lecturas**: sin
 backup, deploy, build, recreación, cambio de variables ni operación que altere contenedores o
 sesiones. `observe` no se inicia. G3-2 sigue en NO-GO. Destino propuesto: `a93232f` (#545). Hoy
@@ -198,9 +200,7 @@ en `1befd89` no se toma como prueba.
 Ninguna requiere escribir, reiniciar ni tocar sesiones. Se pide cuando el responsable lo coordine,
 sin interrumpir #547.
 
-1. **Digest efectivo (bloqueante).** El comando 2 de §1 sobre el contenedor `da75082e`. Esperado:
-   `3f1816a2feea8a6ed7e0aadb915388f840091fdd000234a41429a969367db252`. Cualquier otro valor ⇒ NO-GO
-   de este procedimiento.
+1. ~~Digest efectivo~~ **hecho** (`1b116d5a…`, §7.4). No se repite.
 2. **Imagen de rollback.** `docker image inspect 221e6851 --format '{{.Id}} {{json .RepoTags}} {{.Size}}'`
    y `docker compose config --images` (nombre de la imagen del servicio `app`; no imprime secretos).
 3. **Excepción del Dockerfile.** `git rev-parse HEAD`, `git symbolic-ref -q HEAD || echo detached`,
@@ -222,20 +222,93 @@ sin interrumpir #547.
 Las lecturas 1–6 deciden si el procedimiento puede aprobarse. La 7 se repite de todos modos en la
 ventana del deploy.
 
-### 7.3 Condiciones de §6 con la evidencia actual
+### 7.4 Discrepancia del digest (2026-11-06): diagnóstico y dos decisiones separadas
+
+**Lo que dio VM100** (A, contenedor `da75082e`): `1b116d5aa878d1ca34a2d8c614efa0a4598be744f729ffbb7dfe8ff7db7c2836`,
+104 archivos `.js`. Los 103 de `1befd89` coinciden byte a byte; sobra `dist/ringBuffer.js`. **El gate
+de §1 falla**: ese valor no está en la tabla. Esta prueba no se vuelve a pedir.
+
+**Causa** (repo): el `Dockerfile` raíz hace `COPY backend/ .` en la etapa de build, no hay
+`.dockerignore` en la raíz (ni en ningún lado), y `tsc` no borra salidas cuyo fuente ya no existe. Un
+`backend/dist` local del checkout de deploy entra en la imagen y sus huérfanos sobreviven al build.
+
+**Comprobación de B, sin pedir nada nuevo a VM100:**
+
+1. `backend/src/ringBuffer.ts` existió en `e61910d` (commit inicial) y `f96f4c2`, y se borró en
+   `9b86c46` (#84).
+2. Compilado con el `tsconfig.json` de esa época y el mismo `tsc` 5.9.3: la versión de `e61910d` da
+   `dist/ringBuffer.js` = `236c9aa6…`; la de `f96f4c2`, `ff8e49d0…`.
+3. **El manifiesto de referencia de `1befd89` (103 líneas) más la línea `236c9aa6…  dist/ringBuffer.js`,
+   ordenado igual, da exactamente `1b116d5a…`.** Como el valor de A es el sha256 del manifiesto
+   completo, eso fija **cada** ruta y **cada** hash: son los 103 de `1befd89` más ese único archivo,
+   con procedencia identificada (el `ringBuffer.ts` del commit inicial), y nada más entre los `.js`.
+4. Es inerte: ningún archivo de `backend/` en `1befd89` menciona `ringBuffer` (`git grep -i` vacío,
+   tests incluidos), no hay `require`/`import()` dinámicos en `backend/src`, y el archivo sólo define y
+   exporta una clase, sin `require` ni efectos al cargarse. Node no lo carga nunca.
+5. Límite declarado: el manifiesto cubre sólo `*.js`. Los `.map`, `.d.ts` y `.json` del `dist` no
+   están cubiertos; ninguno es código que Node ejecute aquí (el backend no importa `.json`, `git grep`
+   vacío), pero no se afirma nada sobre ellos.
+
+#### D1 — Cómo aceptar la identidad del backend anterior
+
+| Opción | Qué significa | Ventaja | Costo |
+| --- | --- | --- | --- |
+| **D1-a (recomendada)** | Agregar a la tabla de §1 una fila **enumerada** `1befd89+R1` = `1b116d5a…`, donde R1 = {`dist/ringBuffer.js` `236c9aa6efbf944a8c21eed7318cf4580ff138d050784dd8e6c4a34c892f992c` ← `e61910d:backend/src/ringBuffer.ts`}. La regla sigue siendo **igualdad exacta** con un manifiesto completo: cualquier otro archivo extra, faltante o distinto ⇒ no verificado | no ignora nada desconocido: el único extra aceptado está nombrado, hasheado y con procedencia; es reproducible por cualquiera | la tabla gana una fila con residuo; queda registrado como deuda de build |
+| D1-b | Aceptar «103 coinciden, extras inertes» como regla general | simple | **rechazada**: es justo ignorar archivos desconocidos |
+| D1-c | No aceptar hasta tener una imagen limpia | máximo rigor | exige reconstruir o tocar VM100 (prohibido) y no cambia lo que corre hoy |
+
+Con D1-a, la identidad de la imagen de rollback (`221e6851`) es la misma fila, así que el rollback
+se verifica contra `1b116d5a…` (11 §4), no contra `3f1816a2…`.
+
+#### D2 — ¿La corrección del build obliga a cambiar el SHA candidato?
+
+**Hecho que obliga a decidir:** si se construye `a93232f` en el mismo checkout, el `backend/dist`
+del host vuelve a entrar. La imagen nueva daría `a93232f+R1` (`886281d971e5798a3d1336a03d633118defe0d3afabed8911b0e5bfdc16182fa`
+si el residuo es sólo R1) y **la verificación de 11 §3 paso 4 (`d1f310d8…`) fallaría**. Seguir con
+`a93232f` sin nada más no pasa el gate.
+
+| Opción | Candidato | Qué hace falta | Ventaja | Costo |
+| --- | --- | --- | --- | --- |
+| D2-A | `a93232f`; aceptar `a93232f+R1` = `886281d9…` | nada en el repo | sin cambiar el SHA | perpetúa el residuo en la imagen nueva; cualquier otro huérfano del host lo hace fallar igual (fail-closed) |
+| D2-B | `a93232f`; en la etapa de deploy, **mover** `backend/dist` del checkout fuera del repo (no borrarlo) antes del build | una escritura más en VM100 dentro del deploy autorizado | imagen limpia, `d1f310d8…` exacto; el SHA no cambia | paso manual; el próximo build manual en el host vuelve a crear el riesgo |
+| **D2-C (recomendada)** | un commit nuevo de `main` con la corrección de higiene (PR propio) | PR revisado, checks verdes (incluido el job nuevo, que tiene que fallar antes del arreglo), alcance aprobado de nuevo | la imagen no depende del host nunca más, y CI lo prueba en cada PR; el `dist` compilado sigue siendo `d1f310d8…` | nuevo ciclo de revisión; el alcance suma #550 (docs), #552 (frontend) y el PR de higiene, ninguno con runtime del backend |
+
+**Recomendación:** D1-a ahora (sólo documentación), y D2-C. Si el responsable prefiere no esperar
+el PR, D2-B es aceptable; D2-A no se recomienda. Hasta que se decida, el procedimiento de 11 queda en
+NO-GO.
+
+**Propuesta de corrección (rama local `fix/backend-image-hygiene`, sin push, sin PR, sin merge):**
+
+- `.dockerignore` raíz como **allowlist**: `*` y luego sólo `backend/package.json`,
+  `backend/package-lock.json`, `backend/tsconfig.json` y `backend/src/`. No afecta la imagen de sesión
+  (su contexto es `./session-image`). De paso deja fuera `.env`, `.git` y `node_modules` del contexto.
+- `Dockerfile`: la etapa de build copia `backend/tsconfig.json` y `backend/src` por nombre, en vez
+  de `COPY backend/ .` (defensa doble si el `.dockerignore` se aflojara).
+- `backend/package.json`: `prebuild` borra `dist` antes de `tsc`. Sirve también al host: un
+  `npm run build` local ya no acumula huérfanos.
+- Job de CI `backend-image`, **en un commit anterior al arreglo** para que se vea fallar: compila
+  limpio como referencia (todos los archivos de `dist`, no sólo `.js`), contamina el árbol como estaba
+  el host (`backend/dist/planted-orphan.js`, `backend/node_modules/.planted`, `backend/.env`),
+  construye el `Dockerfile` real y exige que el `dist` de la imagen sea idéntico a la referencia y
+  que la etapa de build no tenga nada del host.
+- Verificado en local sin Docker: con un `dist/ringBuffer.js` plantado, `npm run build` lo elimina y
+  el digest sigue siendo `d1f310d8…` (104 archivos). La prueba con Docker sólo puede correr en CI: hace
+  falta tu autorización para pushear la rama y abrir un PR **draft**.
+
+### 7.5 Condiciones de §6 con la evidencia actual
 
 | # | Condición | Estado |
 | --- | --- | --- |
-| 1 | `D` verificado por digest, imagen registrada | **pendiente** (imagen registrada; digest no) |
+| 1 | `D` verificado por digest, imagen registrada | **falla** contra la tabla; diagnosticado como `1befd89+R1` (§7.4). Se cumple sólo si el responsable aprueba D1-a |
 | 2 | Lista de PRs aprobada | lista confirmada (7.1); **falta la aprobación del responsable** |
 | 3 | Variables registradas | `INGEST_REQUIRE_SESSION_ORIGIN` ausente; el delta no cambia ninguna otra variable |
 | 4 | Migraciones | no aplica: ninguna en el rango |
 | 5 | Nada en vuelo | recreaciones cumplida; Composer pendiente de método (7.2 punto 5). Se repite en la ventana |
 | 6 | Alias de Pages | no condiciona este release: el backend del rango no cambia ninguna ruta que use el frontend |
 
-**Propuesta:** release **acotado a G3-1**, a `a93232f` fijo, con el procedimiento de
-[11-g3-1-deploy-plan.md](./11-g3-1-deploy-plan.md) §1–§4. Sigue en NO-GO hasta: (a) el digest de 7.2
-punto 1, (b) las lecturas 2–6, y (c) la aprobación del procedimiento y de cada etapa de escritura.
+**Propuesta:** release **acotado a G3-1**, con el SHA candidato según D2 (§7.4), con el procedimiento de
+[11-g3-1-deploy-plan.md](./11-g3-1-deploy-plan.md) §1–§4. Sigue en NO-GO hasta: (a) las decisiones D1 y D2 de §7.4, (b) las lecturas 2–6 de §7.2 (la 1 ya
+está hecha y no se repite), y (c) la aprobación del procedimiento y de cada etapa de escritura.
 
 ## Apéndice A — matriz de decisión por clase de `D` (precalculada; `D` lo aporta el operador)
 
