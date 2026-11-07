@@ -17,6 +17,14 @@ A y qué falta). Referencias: CONVERSATION.md §3.1.1 (v1.8.6), DEPLOYMENT.md (�
 `R` = el commit de `main` que resulte del merge (squash) de **#555**. Se fija en este documento en el
 momento del merge; hasta entonces el procedimiento no se puede ejecutar.
 
+**Fijado (2026-11-07): `R = e198b07`** (#555 mergeado por el responsable). Entre `a93232f` y `R` entran
+también #550 y #542 (docs) y #552 y #553 (frontend, que Pages publica por su cuenta). El delta de
+backend, imagen y Compose es sólo el de #555 (`.dockerignore`, `Dockerfile`, `prebuild`). Build limpio
+de `backend/` en `e198b07` (B, local): `dist/**/*.js` = `d1f310d8…` (104) y `dist` completo =
+`0e50e8fd…` (416), idénticos a `a93232f`. `main` ya avanzó (`166ff78`, #547 con su bandera apagada):
+**el checkout del deploy es `e198b07`, no la punta de `main`**. Sigue en NO-GO hasta la autorización
+del responsable y el resto del preflight (12 §7.2).
+
 | | Valor | Fuente |
 | --- | --- | --- |
 | Backend en producción (`D`) | **`1befd89+R1`** (D1-a): `dist/**/*.js` = `1b116d5a…` (104) = los 103 de `1befd89` + `dist/ringBuffer.js` `236c9aa6…` (compilado de `e61910d`, inerte). Imagen `221e6851`, contenedor `da75082e` | A (medición) + B (reproducción exacta, 12 §7.4) |
