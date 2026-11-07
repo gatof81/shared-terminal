@@ -9,20 +9,30 @@
  * with the texts the classifier reads, and answers a refusal in a shape
  * `isD1Envelope` recognises.
  *
- *   cd backend && CLOUDFLARE_ACCOUNT_ID=… CLOUDFLARE_API_TOKEN=… \
- *     D1_DATABASE_ID=<disposable db> P3A_D1_LIVE_CONFIRM=<same id> \
- *     npx tsx src/projects/d1Live.smoke.ts
+ * Run it only against a DEDICATED test account (never the production one):
  *
- * Refuses to run unless P3A_D1_LIVE_CONFIRM repeats D1_DATABASE_ID AND the
- * database holds no table at all: production (or any used database) can
- * never be the target, by construction rather than by care. It writes test
- * rows and leaves them; the database is meant to be deleted afterwards.
- * Prints PASS / FAIL / INFO per check and the raw shape of every refusal;
- * exits 1 on any FAIL. Nothing here is a vitest test or part of the build.
+ *   cd backend && npx tsx --env-file=<file outside the repo, mode 600> src/projects/d1Live.smoke.ts
+ *
+ *   CLOUDFLARE_ACCOUNT_ID=<test account>   CLOUDFLARE_API_TOKEN=<D1:Edit on that account only>
+ *   P3A_D1_LIVE_EXPECT_ACCOUNT=<same test account id, typed twice on purpose>
+ *   P3A_D1_LIVE_FORBID_ACCOUNTS=<production account id[,…]>   (the token must NOT reach them)
+ *   P3A_D1_LIVE_CREATE=1   — create a fresh `st-p3a-smoke-<ms>` database, run, delete it, prove it gone
+ *   (or D1_DATABASE_ID + P3A_D1_LIVE_CONFIRM=<same id> + P3A_D1_LIVE_EXPECT_NAME=<its name>)
+ *
+ * Before ANY statement, the target is identified and refused unless every
+ * guard holds (G1–G4 below): the token reaches the expected account and none
+ * of the forbidden ones, every database already in that account is a smoke
+ * database (`st-p3a-smoke-` prefix: the account is dedicated), and the target's
+ * id AND name are the expected ones. The empty-database check (C0) is kept as
+ * one more guard, not the only one. Nothing prints the token. Checks are
+ * MANDATORY (PASS/FAIL, they decide the result) or DIAGNOSTIC (recorded,
+ * never gate — e.g. the CRLF probe and the raw refusal envelopes). Exits 1 on
+ * any mandatory FAIL, 2 on a refused target. Not a vitest test, not built.
  */
 
 import { randomUUID } from "node:crypto";
 
+// ok: true/false = mandatory PASS/FAIL; null = diagnostic (recorded, never gates).
 type Check = { id: string; ok: boolean | null; detail: string };
 const checks: Check[] = [];
 const pass = (id: string, detail: string) => checks.push({ id, ok: true, detail });
@@ -56,13 +66,125 @@ globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
 	return new Response(body, { status: res.status, headers: res.headers });
 }) as typeof fetch;
 
-async function main(): Promise<void> {
-	const dbId = process.env.D1_DATABASE_ID;
-	if (!dbId || process.env.P3A_D1_LIVE_CONFIRM !== dbId) {
-		console.error("refused: set P3A_D1_LIVE_CONFIRM to the same value as D1_DATABASE_ID");
-		process.exit(2);
+// ── Target identity (G1–G4), before any SQL ────────────────────────────────
+
+const API = "https://api.cloudflare.com/client/v4";
+const PREFIX = "st-p3a-smoke-";
+const redact = (id: string) => `${id.slice(0, 6)}…`;
+let created: { account: string; id: string } | null = null;
+
+/** A refused target: thrown (not process.exit) so a database this run created is still deleted. */
+class Refused extends Error {}
+function refuse(why: string): never {
+	throw new Refused(why);
+}
+
+async function cf(method: string, path: string, body?: unknown) {
+	const res = await realFetch(`${API}${path}`, {
+		method,
+		headers: {
+			Authorization: `Bearer ${process.env.CLOUDFLARE_API_TOKEN ?? ""}`,
+			"Content-Type": "application/json",
+		},
+		body: body === undefined ? undefined : JSON.stringify(body),
+		signal: AbortSignal.timeout(15_000),
+	});
+	const json = (await res.json().catch(() => null)) as {
+		success?: boolean;
+		result?: unknown;
+	} | null;
+	return { status: res.status, ok: res.ok && json?.success === true, result: json?.result };
+}
+
+async function identifyTarget(): Promise<void> {
+	const account = process.env.CLOUDFLARE_ACCOUNT_ID ?? "";
+	if (!account || !process.env.CLOUDFLARE_API_TOKEN)
+		refuse("CLOUDFLARE_ACCOUNT_ID / _API_TOKEN unset");
+	if (process.env.P3A_D1_LIVE_EXPECT_ACCOUNT !== account) {
+		refuse("P3A_D1_LIVE_EXPECT_ACCOUNT must repeat CLOUDFLARE_ACCOUNT_ID");
 	}
-	// Imported after the env check: db.ts reads the D1 config at module load.
+	const forbidden = (process.env.P3A_D1_LIVE_FORBID_ACCOUNTS ?? "")
+		.split(",")
+		.map((x) => x.trim())
+		.filter(Boolean);
+	if (forbidden.includes(account)) refuse("the target account is in P3A_D1_LIVE_FORBID_ACCOUNTS");
+
+	// G1 — the token's reach. Either listing shows exactly the test account, or
+	// (a D1-only token may not list accounts) every forbidden account refuses it.
+	// At least one of the two proofs is required.
+	const listed = await cf("GET", "/accounts?per_page=50");
+	const ids = Array.isArray(listed.result)
+		? (listed.result as Array<{ id: string }>).map((a) => a.id)
+		: null;
+	let reachProven = false;
+	if (listed.ok && ids) {
+		if (ids.length !== 1 || ids[0] !== account) {
+			refuse(`the token reaches ${ids.length} account(s), expected only the test account`);
+		}
+		pass("G1 token reach (listing)", `exactly one account: ${redact(account)}`);
+		reachProven = true;
+	} else {
+		info("G1 token reach (listing)", `account listing not permitted (HTTP ${listed.status})`);
+	}
+	for (const f of forbidden) {
+		const probe = await cf("GET", `/accounts/${f}/d1/database?per_page=1`);
+		if (probe.ok) refuse(`the token CAN read D1 of forbidden account ${redact(f)}`);
+		pass("G1 token reach (forbidden)", `${redact(f)} refuses it (HTTP ${probe.status})`);
+		reachProven = true;
+	}
+	if (!reachProven) {
+		refuse("no proof the token is limited to the test account (set P3A_D1_LIVE_FORBID_ACCOUNTS)");
+	}
+
+	// G2 — the account is dedicated: every database in it is a smoke database.
+	const dbs = await cf("GET", `/accounts/${account}/d1/database?per_page=100`);
+	if (!dbs.ok || !Array.isArray(dbs.result))
+		refuse(`cannot list D1 databases (HTTP ${dbs.status})`);
+	const names = (dbs.result as Array<{ name: string }>).map((d) => d.name);
+	const foreign = names.filter((n) => !n.startsWith(PREFIX));
+	if (foreign.length > 0) refuse(`the account holds non-smoke databases (${foreign.length})`);
+	pass("G2 dedicated account", `${names.length} database(s), all ${PREFIX}*`);
+
+	// G3 — the target: a fresh one, or the named one confirmed twice.
+	let id: string;
+	let expectName: string;
+	if (process.env.P3A_D1_LIVE_CREATE === "1") {
+		expectName = `${PREFIX}${Date.now()}`;
+		const c = await cf("POST", `/accounts/${account}/d1/database`, { name: expectName });
+		const uuid = (c.result as { uuid?: string } | undefined)?.uuid;
+		if (!c.ok || !uuid) refuse(`could not create ${expectName} (HTTP ${c.status})`);
+		id = uuid;
+		created = { account, id };
+		process.env.D1_DATABASE_ID = id;
+	} else {
+		id = process.env.D1_DATABASE_ID ?? "";
+		expectName = process.env.P3A_D1_LIVE_EXPECT_NAME ?? "";
+		if (!id || process.env.P3A_D1_LIVE_CONFIRM !== id) {
+			refuse("set P3A_D1_LIVE_CONFIRM to the same value as D1_DATABASE_ID");
+		}
+		if (!expectName.startsWith(PREFIX)) refuse(`P3A_D1_LIVE_EXPECT_NAME must start with ${PREFIX}`);
+	}
+	const got = await cf("GET", `/accounts/${account}/d1/database/${id}`);
+	const name = (got.result as { name?: string } | undefined)?.name;
+	// G4 — id and name both match before the first statement.
+	if (!got.ok || name !== expectName) refuse(`database ${id} is not ${expectName} (got ${name})`);
+	pass("G3 target", `account ${redact(account)} · database ${name} · id ${id}`);
+}
+
+async function cleanup(): Promise<void> {
+	if (!created) return;
+	const del = await cf("DELETE", `/accounts/${created.account}/d1/database/${created.id}`);
+	const after = await cf("GET", `/accounts/${created.account}/d1/database/${created.id}`);
+	verdict(
+		"Z cleanup",
+		del.ok && !after.ok && after.status === 404,
+		`DELETE HTTP ${del.status}; GET afterwards HTTP ${after.status}`,
+	);
+}
+
+async function main(): Promise<void> {
+	await identifyTarget();
+	// Imported after the identity checks: db.ts reads the D1 config at module load.
 	const { d1Query, migrateDb, MIGRATIONS, PROJECT_DIRECTORY_DDL, D1StatementError } = await import(
 		"../db.js"
 	);
@@ -75,10 +197,7 @@ async function main(): Promise<void> {
 		"SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' AND name NOT LIKE 'd1_%'",
 	);
 	if (tables.results.length > 0) {
-		console.error(
-			`refused: database is not empty (${tables.results.map((t) => t.name).join(", ")})`,
-		);
-		process.exit(2);
+		refuse(`database is not empty (${tables.results.map((t) => t.name).join(", ")})`);
 	}
 	pass("C0 empty-target", "no table before the run");
 
@@ -473,13 +592,26 @@ async function main(): Promise<void> {
 	);
 }
 
+let refused: string | null = null;
 main()
-	.catch((err) => fail("ABORT", (err as Error).stack ?? String(err)))
-	.finally(() => {
-		for (const c of checks) {
-			console.log(`${c.ok === null ? "INFO" : c.ok ? "PASS" : "FAIL"}  ${c.id} — ${c.detail}`);
+	.catch((err) => {
+		if (err instanceof Refused) refused = err.message;
+		else fail("ABORT", (err as Error).stack ?? String(err));
+	})
+	.finally(async () => {
+		await cleanup().catch((err) => fail("Z cleanup", (err as Error).message));
+		console.log("── MANDATORY ──");
+		for (const c of checks.filter((x) => x.ok !== null)) {
+			console.log(`${c.ok ? "PASS" : "FAIL"}  ${c.id} — ${c.detail}`);
 		}
+		console.log("── DIAGNOSTIC (recorded, never gates) ──");
+		for (const c of checks.filter((x) => x.ok === null)) console.log(`INFO  ${c.id} — ${c.detail}`);
 		const failed = checks.filter((c) => c.ok === false).length;
+		if (refused !== null) {
+			console.log(`RESULT: REFUSED — ${refused}`);
+			process.exitCode = 2;
+			return;
+		}
 		console.log(failed === 0 ? "RESULT: PASS" : `RESULT: FAIL (${failed})`);
 		process.exitCode = failed === 0 ? 0 : 1;
 	});
