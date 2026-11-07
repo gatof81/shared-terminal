@@ -71,7 +71,12 @@ globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
 const API = "https://api.cloudflare.com/client/v4";
 const PREFIX = "st-p3a-smoke-";
 const redact = (id: string) => `${id.slice(0, 6)}…`;
-let created: { account: string; id: string } | null = null;
+/**
+ * What this run may have created. `name` is set BEFORE the create request, so a
+ * create whose answer is lost (timeout, broken connection) is still found by
+ * name and deleted; `id` is filled once known.
+ */
+let created: { account: string; name: string; id: string | null } | null = null;
 
 /** A refused target: thrown (not process.exit) so a database this run created is still deleted. */
 class Refused extends Error {}
@@ -93,7 +98,12 @@ async function cf(method: string, path: string, body?: unknown) {
 		success?: boolean;
 		result?: unknown;
 	} | null;
-	return { status: res.status, ok: res.ok && json?.success === true, result: json?.result };
+	return {
+		status: res.status,
+		ok: res.ok && json?.success === true,
+		result: json?.result,
+		info: (json as { result_info?: { total_count?: number } } | null)?.result_info,
+	};
 }
 
 async function identifyTarget(): Promise<void> {
@@ -129,6 +139,14 @@ async function identifyTarget(): Promise<void> {
 	for (const f of forbidden) {
 		const probe = await cf("GET", `/accounts/${f}/d1/database?per_page=1`);
 		if (probe.ok) refuse(`the token CAN read D1 of forbidden account ${redact(f)}`);
+		// Only an explicit authorization refusal proves anything: a 404 (a mistyped id),
+		// a 429 or a 5xx says nothing about the token. The id must be copied from the
+		// production dashboard; a token that can list accounts is the stronger proof.
+		if (probe.status !== 401 && probe.status !== 403) {
+			refuse(
+				`forbidden account ${redact(f)} answered HTTP ${probe.status}: not a proof of refusal`,
+			);
+		}
 		pass("G1 token reach (forbidden)", `${redact(f)} refuses it (HTTP ${probe.status})`);
 		reachProven = true;
 	}
@@ -141,6 +159,9 @@ async function identifyTarget(): Promise<void> {
 	if (!dbs.ok || !Array.isArray(dbs.result))
 		refuse(`cannot list D1 databases (HTTP ${dbs.status})`);
 	const names = (dbs.result as Array<{ name: string }>).map((d) => d.name);
+	if ((dbs.info?.total_count ?? names.length) > names.length) {
+		refuse(`the account holds more databases than one page lists (${dbs.info?.total_count})`);
+	}
 	const foreign = names.filter((n) => !n.startsWith(PREFIX));
 	if (foreign.length > 0) refuse(`the account holds non-smoke databases (${foreign.length})`);
 	pass("G2 dedicated account", `${names.length} database(s), all ${PREFIX}*`);
@@ -150,11 +171,12 @@ async function identifyTarget(): Promise<void> {
 	let expectName: string;
 	if (process.env.P3A_D1_LIVE_CREATE === "1") {
 		expectName = `${PREFIX}${Date.now()}`;
+		created = { account, name: expectName, id: null };
 		const c = await cf("POST", `/accounts/${account}/d1/database`, { name: expectName });
 		const uuid = (c.result as { uuid?: string } | undefined)?.uuid;
 		if (!c.ok || !uuid) refuse(`could not create ${expectName} (HTTP ${c.status})`);
 		id = uuid;
-		created = { account, id };
+		created.id = id;
 		process.env.D1_DATABASE_ID = id;
 	} else {
 		id = process.env.D1_DATABASE_ID ?? "";
@@ -167,19 +189,53 @@ async function identifyTarget(): Promise<void> {
 	const got = await cf("GET", `/accounts/${account}/d1/database/${id}`);
 	const name = (got.result as { name?: string } | undefined)?.name;
 	// G4 — id and name both match before the first statement.
-	if (!got.ok || name !== expectName) refuse(`database ${id} is not ${expectName} (got ${name})`);
-	pass("G3 target", `account ${redact(account)} · database ${name} · id ${id}`);
+	if (!got.ok || name !== expectName) {
+		refuse(`database ${redact(id)} is not ${expectName} (got ${name})`);
+	}
+	pass("G3 target", `account ${redact(account)} · database ${name} · id ${redact(id)}`);
 }
 
 async function cleanup(): Promise<void> {
 	if (!created) return;
-	const del = await cf("DELETE", `/accounts/${created.account}/d1/database/${created.id}`);
-	const after = await cf("GET", `/accounts/${created.account}/d1/database/${created.id}`);
-	verdict(
-		"Z cleanup",
-		del.ok && !after.ok && after.status === 404,
-		`DELETE HTTP ${del.status}; GET afterwards HTTP ${after.status}`,
-	);
+	const c = created;
+	created = null; // once: the signal handler and .finally may both call it
+	// The id may be unknown (lost create answer): find the database by its exact name.
+	let id = c.id;
+	if (!id) {
+		const list = await cf("GET", `/accounts/${c.account}/d1/database?name=${c.name}&per_page=100`);
+		const hit = Array.isArray(list.result)
+			? (list.result as Array<{ uuid: string; name: string }>).find((d) => d.name === c.name)
+			: undefined;
+		if (!hit) {
+			verdict("Z cleanup", list.ok, `${c.name}: not created (lookup HTTP ${list.status})`);
+			if (!list.ok) console.error(`CLEANUP UNCONFIRMED: check for database ${c.name}`);
+			return;
+		}
+		id = hit.uuid;
+	}
+	let gone = false;
+	let last = "";
+	for (let attempt = 1; attempt <= 3 && !gone; attempt++) {
+		const del = await cf("DELETE", `/accounts/${c.account}/d1/database/${id}`).catch(
+			(e: Error) => ({ status: 0, ok: false, e }),
+		);
+		const after = await cf("GET", `/accounts/${c.account}/d1/database/${id}`).catch(() => ({
+			status: 0,
+			ok: false,
+		}));
+		gone = !after.ok && after.status === 404;
+		last = `DELETE HTTP ${del.status}; GET afterwards HTTP ${after.status} (attempt ${attempt})`;
+	}
+	verdict("Z cleanup", gone, `${c.name}: ${last}`);
+	if (!gone) console.error(`CLEANUP FAILED: delete database ${c.name} by hand`);
+}
+
+for (const sig of ["SIGINT", "SIGTERM"] as const) {
+	process.once(sig, () => {
+		cleanup()
+			.catch(() => console.error(`CLEANUP UNCONFIRMED after ${sig}: check the smoke database`))
+			.finally(() => process.exit(130));
+	});
 }
 
 async function main(): Promise<void> {
@@ -607,9 +663,10 @@ main()
 		console.log("── DIAGNOSTIC (recorded, never gates) ──");
 		for (const c of checks.filter((x) => x.ok === null)) console.log(`INFO  ${c.id} — ${c.detail}`);
 		const failed = checks.filter((c) => c.ok === false).length;
+		const cleanupFailed = checks.some((c) => c.id === "Z cleanup" && c.ok === false);
 		if (refused !== null) {
-			console.log(`RESULT: REFUSED — ${refused}`);
-			process.exitCode = 2;
+			console.log(`RESULT: REFUSED${cleanupFailed ? " + CLEANUP FAILED" : ""} — ${refused}`);
+			process.exitCode = cleanupFailed ? 1 : 2;
 			return;
 		}
 		console.log(failed === 0 ? "RESULT: PASS" : `RESULT: FAIL (${failed})`);
