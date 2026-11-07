@@ -73,7 +73,7 @@ let jitterMs = 0;
 /** HTTP status of a refused statement's answer: real D1 may use a 4xx with the same envelope. */
 let refusalStatus = 200;
 /** Called by the Docker fake's kill() / purgeWorkspace(): lets a test land a write mid-delete. */
-let onKill: (() => void | Promise<void>) | null = null;
+let onKill: ((sid: string) => void | Promise<void>) | null = null;
 let onPurge: ((sid: string) => void | Promise<void>) | null = null;
 
 function run(sql: string, params: unknown[]) {
@@ -233,7 +233,7 @@ async function startServer(withDirectory: boolean) {
 		gatherStats: async () => new Map(),
 		kill: async (sid: string) => {
 			dockerCalls.push(`kill ${sid}`);
-			await onKill?.();
+			await onKill?.(sid);
 		},
 		purgeWorkspace: async (sid: string) => {
 			dockerCalls.push(`purge ${sid}`);
@@ -1276,11 +1276,19 @@ describe("hard delete vs a failing bootstrap (PROJECTS.md §6)", () => {
 		expect(status(S.qa)).toBeNull();
 	});
 
-	it("randomised interleavings of hard delete ∥ bootstrap flip ∥ agent creation: never a purge with a live binding, never terminated → failed", async () => {
-		jitterMs = 4;
+	it("randomised interleavings of hard delete ∥ bootstrap flip ∥ agent creation: a 204 never leaves a live binding, a purge never runs on one", async () => {
+		// The racers are aimed at the window that matters: the flip lands after the
+		// delete's kill (so around its terminate), the creation either right away
+		// (it can win the first check) or after the kill too (so around the second
+		// check, the purge and the row drop). With markFailed reverted to the
+		// unconditional UPDATE this test fails: a flip after the terminate re-opens
+		// binding and a creation then lands between the second check and the drop.
+		jitterMs = 3;
 		const ins = db.prepare(
 			"INSERT INTO sessions (session_id, user_id, name, container_name, status) VALUES (?, ?, ?, ?, 'running')",
 		);
+		const killed = new Map<string, () => void>();
+		onKill = (sid) => killed.get(sid)?.();
 		const purgedWithLive: string[] = [];
 		const purgedNotTerminated: string[] = [];
 		onPurge = async (sid) => {
@@ -1289,18 +1297,26 @@ describe("hard delete vs a failing bootstrap (PROJECTS.md §6)", () => {
 			if (liveOn(sid) > 0) purgedWithLive.push(sid);
 			if (status(sid) !== "terminated") purgedNotTerminated.push(sid);
 		};
+		const sleep = (ms: number) => new Promise((r) => setTimeout(r, Math.random() * ms));
 		const outcomes = { deleted: 0, refused: 0 };
-		for (let i = 0; i < 40; i++) {
+		for (let i = 0; i < 60; i++) {
 			const sid = uuid();
 			ins.run(sid, OWNER, `race-${i}`, `st-${sid.slice(0, 12)}`);
+			const afterKill = new Promise<void>((r) => killed.set(sid, r));
+			const early = Math.random() < 0.3;
 			const [del, , create] = await Promise.all([
-				api("DELETE", `/sessions/${sid}?hard=true`, OWNER),
-				markFailed(sid).catch(() => false),
-				api("POST", `/projects/${pid}/agents`, OWNER, agentBody(`race-${i}`, sid)),
+				// A delete refused before its kill never fires the hook: release the racers anyway.
+				api("DELETE", `/sessions/${sid}?hard=true`, OWNER).finally(() => killed.get(sid)?.()),
+				afterKill.then(() => sleep(8)).then(() => markFailed(sid).catch(() => false)),
+				(early ? Promise.resolve() : afterKill.then(() => sleep(14))).then(() =>
+					api("POST", `/projects/${pid}/agents`, OWNER, agentBody(`race-${i}`, sid)),
+				),
 			]);
 			if (del.status === 204) {
 				outcomes.deleted++;
 				expect(status(sid)).toBeNull();
+				expect(create.status).not.toBe(201);
+				expect(liveOn(sid)).toBe(0);
 			} else {
 				// Refused by the guard: an ordinary soft delete, the agent got it first.
 				expect({ status: del.status, code: del.json.error }).toEqual({
@@ -1308,20 +1324,17 @@ describe("hard delete vs a failing bootstrap (PROJECTS.md §6)", () => {
 					code: "agent-active",
 				});
 				expect(create.status).toBe(201);
+				expect(liveOn(sid)).toBe(1);
 				// Refused at the first check: no effect at all, the row is whatever
 				// the bootstrap left. At the second (after the kill): a soft delete.
-				const killed = dockerCalls.includes(`kill ${sid}`);
-				expect(killed ? ["terminated"] : ["running", "failed"]).toContain(status(sid));
+				const wasKilled = dockerCalls.includes(`kill ${sid}`);
+				expect(wasKilled ? ["terminated"] : ["running", "failed"]).toContain(status(sid));
 				expect(dockerCalls).not.toContain(`purge ${sid}`);
 				outcomes.refused++;
 			}
-			// Whatever the order, a terminated row never went back to failed.
-			expect(status(sid) === "failed" && del.status === 204).toBe(false);
-			expect(liveOn(sid)).toBeLessThanOrEqual(1);
 		}
 		expect(purgedWithLive).toEqual([]);
 		expect(purgedNotTerminated).toEqual([]);
-		expect(outcomes.deleted + outcomes.refused).toBe(40);
 		// Both branches were exercised (a guard that refused everything, or nothing, is not a race).
 		expect(outcomes.deleted).toBeGreaterThan(0);
 		expect(outcomes.refused).toBeGreaterThan(0);

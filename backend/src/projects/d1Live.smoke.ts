@@ -145,7 +145,16 @@ async function main(): Promise<void> {
 	const sForeign = await session(OTHER, "running");
 
 	const dir = new ProjectDirectory();
-	const refusal = async (id: string, p: Promise<unknown>, status: number, code: string) => {
+	// Callers pass a thunk: `lastAnswer` is cleared BEFORE the call, so the raw line printed after
+	// a check is that check's refusal or "none", never an earlier one.
+	const refusal = async (
+		id: string,
+		call: () => Promise<unknown>,
+		status: number,
+		code: string,
+	) => {
+		lastAnswer = null;
+		const p = call();
 		try {
 			await p;
 			fail(id, `expected ${status} ${code}, got success`);
@@ -199,7 +208,7 @@ async function main(): Promise<void> {
 	);
 	await refusal(
 		"C5 idempotency-conflict",
-		dir.createAgent(OWNER, pid, { ...aBody, role: "Other" }),
+		() => dir.createAgent(OWNER, pid, { ...aBody, role: "Other" }),
 		409,
 		"idempotency-conflict",
 	);
@@ -208,46 +217,50 @@ async function main(): Promise<void> {
 	const before = await n("SELECT COUNT(*) AS n FROM project_agents");
 	await refusal(
 		"C6 session-taken (UNIQUE)",
-		dir.createAgent(OWNER, pid, { ...aBody, handle: "beta", clientRequestId: randomUUID() }),
+		() => dir.createAgent(OWNER, pid, { ...aBody, handle: "beta", clientRequestId: randomUUID() }),
 		409,
 		"session-taken",
 	);
-	info("C6 session-taken raw", JSON.stringify(lastAnswer));
+	info("C6 session-taken raw", lastAnswer ? JSON.stringify(lastAnswer) : "none");
 	await refusal(
 		"C6 handle-taken (UNIQUE)",
-		dir.createAgent(OWNER, pid, { ...aBody, sessionId: sRun2, clientRequestId: randomUUID() }),
+		() =>
+			dir.createAgent(OWNER, pid, { ...aBody, sessionId: sRun2, clientRequestId: randomUUID() }),
 		409,
 		"handle-taken",
 	);
-	info("C6 handle-taken raw", JSON.stringify(lastAnswer));
+	info("C6 handle-taken raw", lastAnswer ? JSON.stringify(lastAnswer) : "none");
 	await refusal(
 		"C6 session-not-found (RAISE, terminated)",
-		dir.createAgent(OWNER, pid, {
-			handle: "gamma",
-			sessionId: sTerm,
-			clientRequestId: randomUUID(),
-		}),
+		() =>
+			dir.createAgent(OWNER, pid, {
+				handle: "gamma",
+				sessionId: sTerm,
+				clientRequestId: randomUUID(),
+			}),
 		404,
 		"session-not-found",
 	);
-	info("C6 RAISE raw", JSON.stringify(lastAnswer));
+	info("C6 RAISE raw", lastAnswer ? JSON.stringify(lastAnswer) : "none");
 	await refusal(
 		"C6 session-not-found (RAISE, foreign owner)",
-		dir.createAgent(OWNER, pid, {
-			handle: "gamma",
-			sessionId: sForeign,
-			clientRequestId: randomUUID(),
-		}),
+		() =>
+			dir.createAgent(OWNER, pid, {
+				handle: "gamma",
+				sessionId: sForeign,
+				clientRequestId: randomUUID(),
+			}),
 		404,
 		"session-not-found",
 	);
 	await refusal(
 		"C6 project-not-found (RAISE, foreign project)",
-		dir.createAgent(OTHER, pid, {
-			handle: "gamma",
-			sessionId: sForeign,
-			clientRequestId: randomUUID(),
-		}),
+		() =>
+			dir.createAgent(OTHER, pid, {
+				handle: "gamma",
+				sessionId: sForeign,
+				clientRequestId: randomUUID(),
+			}),
 		404,
 		"project-not-found",
 	);
@@ -370,13 +383,15 @@ async function main(): Promise<void> {
 			clientRequestId: randomUUID(),
 		});
 	}
+	const overSession = await session(OWNER, "running");
 	await refusal(
 		"C10 agent-limit (RAISE)",
-		dir.createAgent(OWNER, pid, {
-			handle: "over",
-			sessionId: await session(OWNER, "running"),
-			clientRequestId: randomUUID(),
-		}),
+		() =>
+			dir.createAgent(OWNER, pid, {
+				handle: "over",
+				sessionId: overSession,
+				clientRequestId: randomUUID(),
+			}),
 		409,
 		"agent-limit",
 	);
@@ -428,10 +443,11 @@ async function main(): Promise<void> {
 	);
 	// The previous backend (≤ v18) finds every one of its versions recorded and applies nothing.
 	const have = new Set(versions);
-	verdict(
+	// Not a test of older code: main's migrateDb skips every version already in the ledger
+	// (`applied.has(m.version)`), so with 1–18 recorded it applies nothing. Recorded as context.
+	info(
 		"C12 previous backend boot",
-		MIGRATIONS.filter((m) => m.version <= 18).every((m) => have.has(m.version)),
-		"versions 1–18 recorded ⇒ an older migrateDb is a no-op",
+		`versions 1–18 recorded: ${MIGRATIONS.filter((m) => m.version <= 18).every((m) => have.has(m.version))} (an older migrateDb skips recorded versions)`,
 	);
 
 	// ── C13 (INFO): a CRLF trigger body through /query ─────────────────────

@@ -15,7 +15,7 @@ its capture, its composer or its CLI conversations.
 
 | `PROJECT_CHAT_ENABLED` | Behaviour |
 | --- | --- |
-| unset / anything but `true`/`1` (default) | `/api/projects*` do not exist (the same 404 as any unknown path, also unauthenticated — never 401). `GET /api/auth/status` has exactly its previous keys. `GET /api/sessions` rows have no `binding` key and the request reads nothing of the directory. Boot logs are unchanged. The hard-delete guard (§6) stays armed: with no binding the delete is the previous one plus one D1 read. |
+| unset / anything but `true`/`1` (default) | `/api/projects*` do not exist (the same 404 as any unknown path, also unauthenticated — never 401). `GET /api/auth/status` has exactly its previous keys. `GET /api/sessions` rows have no `binding` key and the request reads nothing of the directory. Boot logs are unchanged. The hard-delete guard (§6) stays armed: with no binding the delete is the previous one plus two D1 reads (before the kill and before the purge). |
 | `true` / `1` | The routes of §4 are mounted; `features: {projectChat: true}` on `/api/auth/status`; `binding` on `/api/sessions` rows (§4.6); the hard-delete guard (§6). |
 
 **Migration v19 runs at boot whatever the flag says.** The flag gates the API, not the schema. Deploying
@@ -25,7 +25,9 @@ tables, three indexes, two triggers; no existing column touched), idempotent (ev
 backend: that code never reads the new tables, and nothing in them references `sessions`, so its hard
 delete keeps working (§2). There is no down-migration; rolling the code back leaves the tables inert.
 Turning the flag off after agents exist keeps every row, and **this** backend keeps refusing a hard delete
-of a bound session (§6) with the flag off: turning the flag off is a safe kill switch. Rolling the
+of a bound session (§6) with the flag off: turning the flag off is a safe kill switch. While it is off
+the agent routes do not exist, so such a session cannot be hard-deleted at all; the way out is to turn
+the flag back on and remove the agent. Rolling the
 **code** back is not the same thing: the previous backend does not know the bindings (§8).
 
 ## 2. Schema (D1 v19)
@@ -232,7 +234,8 @@ at every container stop, so a bound pane is the current start), the one with the
 `agent-active`** while the session has a live binding, checked under the session lifecycle lock **before
 any effect** (no kill, no purge, row kept). The guard is armed **whatever the flag says**: bindings created
 while it was on outlive turning it off, and v19 exists from the first boot of this code. The check is
-uncached and fail-closed: a failed read refuses the delete (500). The owner removes the agent first. Soft
+uncached and fail-closed: a failed read refuses the delete (500). The owner removes the agent first (with
+the flag off that needs the flag back on, §1). Soft
 deletes are not refused and read nothing of the directory: the row stays, the binding stays readable
 (`disconnected · session-terminated`).
 
@@ -250,8 +253,9 @@ purged). After the second check no binding can appear, because two rules hold to
 
 So a purge never runs while a live binding exists, and a deleted session never comes back as `failed`.
 `directory.sqlite.test.ts` (“hard delete vs a failing bootstrap”) lands the flip and a creation inside
-the kill and inside the purge, races all three 40 times with jitter, and a control test shows the old
-unconditional flip re-opening the window. `markFailed` changes the flag-off behaviour in exactly one
+the kill and inside the purge, and races all three 60 times with the racers aimed after the kill. With
+`markFailed` reverted to the unconditional UPDATE, those tests fail (the race in 8 of 8 runs); a control
+test shows the old flip re-opening the window. `markFailed` changes the flag-off behaviour in exactly one
 case, the bug it fixes: a bootstrap failing after a delete no longer rewrites `terminated` to `failed`.
 
 Residual (pre-existing, not P3a's): the create route's rollback drops a session row whose spawn failed.

@@ -869,7 +869,8 @@ export class ProjectDirectory {
  * flag was on outlive turning it off. Without the flag the routes do not
  * exist, so no binding can appear — the guard only protects what an earlier
  * flag-on run left (PROJECTS.md §6, §8). With no binding the delete is the
- * same as before; the cost is one D1 read per hard delete, never per soft one.
+ * same as before; the cost is two D1 reads per hard delete (each route checks
+ * before the kill and before the purge), none per soft one.
  */
 export async function assertNoLiveBinding(sessionId: string): Promise<void> {
 	const r = await d1Query(
