@@ -31,6 +31,7 @@ import { registerFileRoutes } from "./routes/files.js";
 import { registerGitRoutes } from "./routes/git.js";
 import { registerGroupRoutes } from "./routes/groups.js";
 import { registerInviteRoutes } from "./routes/invites.js";
+import { registerProjectRoutes } from "./routes/projects.js";
 import { registerPushRoutes } from "./routes/push.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
 import type { RouteContext, RouteIdleSweeper } from "./routes/shared.js";
@@ -53,7 +54,11 @@ export function buildRouter(
 	conversation?: ConversationService,
 	// 3.0d — the recreation engine and `CONVERSATION_ALLOW_USERS`; optional
 	// for the same reason.
-	conversationExtras: Pick<RouteContext, "recreation" | "conversationAllowUsers" | "composer"> = {},
+	// P3a — `projects` too (PROJECT_CHAT_ENABLED); optional for the same reason.
+	conversationExtras: Pick<
+		RouteContext,
+		"recreation" | "conversationAllowUsers" | "composer" | "projects"
+	> = {},
 ): Router {
 	const router = Router();
 
@@ -143,6 +148,7 @@ export function buildRouter(
 	registerComposerAdminRoutes(router, ctx);
 	registerExecRoutes(router, ctx);
 	registerTemplateRoutes(router, ctx);
+	registerProjectRoutes(router, ctx);
 
 	return router;
 }

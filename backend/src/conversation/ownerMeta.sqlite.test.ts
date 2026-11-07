@@ -112,7 +112,7 @@ describe("migration v18", () => {
 		]);
 		expect(cols.filter((c) => c.pk > 0).map((c) => c.name)).toEqual(["st_session_id", "cid"]);
 		const v = db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get() as { v: number };
-		expect(v.v).toBe(18);
+		expect(v.v).toBeGreaterThanOrEqual(18);
 		const { dbm } = await load();
 		await dbm.migrateDb(); // idempotent on a migrated DB
 	});

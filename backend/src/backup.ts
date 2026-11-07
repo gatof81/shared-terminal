@@ -90,6 +90,14 @@ const TABLES: ReadonlyArray<{ name: string; orderBy: string; sinceSchema?: numbe
 	{ name: "templates", orderBy: "id" },
 	{ name: "invite_codes", orderBy: "code_hash" },
 	{ name: "session_observe_log", orderBy: "id" },
+	// P3a — in FK order. `agent_bindings.st_session_id` references no table
+	// (history outlives a hard-deleted session), and the creation records go
+	// LAST: their trigger skips an agent that already exists, so replaying
+	// them after the agents re-creates nothing.
+	{ name: "projects", orderBy: "project_id", sinceSchema: 19 },
+	{ name: "project_agents", orderBy: "agent_id", sinceSchema: 19 },
+	{ name: "agent_bindings", orderBy: "binding_id", sinceSchema: 19 },
+	{ name: "project_agent_creations", orderBy: "owner_user_id, client_request_id", sinceSchema: 19 },
 ];
 
 export interface BackupManifest {

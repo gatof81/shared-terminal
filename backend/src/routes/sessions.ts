@@ -94,7 +94,7 @@ function externalRefError(value: unknown): string | null {
 const TAB_SEARCH_QUERY_MAX_LEN = 256;
 
 export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
-	const { sessions, docker, broadcaster, idleSweeper } = ctx;
+	const { sessions, docker, broadcaster, idleSweeper, projects } = ctx;
 	// `execIp` covers the tab-search route too (#357): search and exec
 	// are the same abuse surface — an authed caller driving docker execs
 	// into a container (each search = 1-2 tmux execs + a D1 ownership
@@ -604,7 +604,7 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			// the (slower) Docker stats fan-out.
 			const ids = list.map((row) => row.sessionId);
 			const running = list.filter((row) => row.status === "running");
-			const [caps, stats] = await Promise.all([
+			const [caps, stats, bindings] = await Promise.all([
 				listResourceCaps(ids),
 				docker.gatherStats(
 					running.map((row) => ({
@@ -612,6 +612,15 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 						containerId: row.containerId,
 					})),
 				),
+				// P3a (E-4): only with the directory on. A failed read leaves
+				// `binding` OUT of every row (= unknown), never `null` (= not
+				// bound), and never fails the list.
+				projects
+					? projects.liveBindingsForOwner(userId).catch((err) => {
+							logger.warn(`[routes] session bindings read failed: ${(err as Error).message}`);
+							return undefined;
+						})
+					: Promise.resolve(undefined),
 			]);
 			res.json(
 				list.map((row) => {
@@ -622,6 +631,7 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 						cpuLimit: sCaps?.cpuLimit ?? null,
 						memLimit: sCaps?.memLimit ?? null,
 						usage,
+						...(bindings ? { binding: bindings.get(row.sessionId) ?? null } : {}),
 					};
 				}),
 			);
@@ -768,6 +778,11 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			await sessionLifecycleLock.run(req.params.id, hard ? "delete-hard" : "delete", async () => {
 				const meta = await sessions.get(req.params.id);
 				if (!meta) throw new NotFoundError("Session not found");
+				// P3a (03 §2.1): a hard delete of a session bound to a project
+				// agent is refused BEFORE any effect (409 agent-active). Only with
+				// the directory on; a soft delete keeps the row, so the binding
+				// stays readable and is not refused.
+				if (hard) await projects?.assertNoLiveBinding(req.params.id);
 
 				// kill() runs on EVERY delete, `terminated` rows included
 				// (P1-C): a row can say terminated while Docker still holds

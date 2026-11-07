@@ -8,6 +8,7 @@ import { DEFAULT_MEMORY_BYTES, DEFAULT_NANO_CPUS } from "../dockerManager.js";
 import { logger } from "../logger.js";
 import * as observeLog from "../observeLog.js";
 import { getDispatcherStats } from "../portDispatcher.js";
+import { AgentActiveError } from "../projects/directory.js";
 import { RecreateRetainedError, RecreateUnresolvedError } from "../recreateAttempt.js";
 import {
 	EFFECTIVE_CPU_NANO_MAX,
@@ -36,7 +37,7 @@ import {
 } from "./shared.js";
 
 export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
-	const { sessions, docker, idleSweeper, conversation, recreation } = ctx;
+	const { sessions, docker, idleSweeper, conversation, recreation, projects } = ctx;
 	const { adminStatsIp, adminActionIp } = ctx.limiters;
 	// ── Admin routes (#241) ────────────────────────────────────────────────
 	// Cross-user observability for operators. Gated by `requireAdmin`
@@ -365,6 +366,8 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 				await sessionLifecycleLock.run(req.params.id, hard ? "delete-hard" : "delete", async () => {
 					const current = await sessions.get(req.params.id);
 					if (!current) return;
+					// P3a (03 §2.1): same guard as the owner's hard delete.
+					if (hard) await projects?.assertNoLiveBinding(req.params.id);
 					// Idempotent soft branch — only kill + terminate if not
 					// already torn down.
 					// Same shape as the owner route: kill on every delete (a
@@ -395,6 +398,10 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 					res
 						.status(500)
 						.json({ error: "teardown-failed", stage: err.stage, message: err.message });
+					return;
+				}
+				if (err instanceof AgentActiveError) {
+					res.status(409).json({ error: "agent-active" });
 					return;
 				}
 				if (err instanceof SessionBusyError) {

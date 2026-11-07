@@ -821,6 +821,132 @@ export const MIGRATIONS: readonly Migration[] = [
 			);
 		},
 	},
+	{
+		// P3a — project & agent directory (docs/PROJECTS.md). Additive: four
+		// new tables, two triggers, no existing column touched. Applied at
+		// boot whatever PROJECT_CHAT_ENABLED says (the flag only mounts the
+		// routes), so an older backend that later boots on this schema just
+		// ignores it.
+		version: 19,
+		description: "projects, project_agents, agent_bindings (P3a directory)",
+		apply: async () => {
+			for (const sql of PROJECT_DIRECTORY_DDL) await d1Query(sql);
+		},
+	},
+];
+
+/**
+ * v19's statements, in order; each is idempotent (IF NOT EXISTS) so a crash
+ * between two of them, or between apply() and the ledger INSERT, converges
+ * on the next boot. Exported for the migration tests.
+ *
+ * Load-bearing choices (PROJECTS.md §2):
+ *
+ * - `agent_bindings.st_session_id` has NO foreign key to `sessions`. D1
+ *   enforces foreign keys, so a reference would make every hard delete of a
+ *   session that was ever bound fail (history is never deleted), and
+ *   `ON DELETE CASCADE` would erase the history the agent page shows. The
+ *   live-binding guard on hard delete lives in the routes instead.
+ *
+ * - D1 over HTTP has no transaction across calls, so an agent and its first
+ *   binding are created by ONE statement: the INSERT into
+ *   `project_agent_creations` (the durable idempotency record of the
+ *   request) fires `trg_project_agent_creation`, which checks the
+ *   preconditions and inserts the agent and the binding. SQLite runs a
+ *   trigger inside its statement: any failure (a RAISE, the handle UNIQUE,
+ *   the live-session index) rolls back the record, the agent and the
+ *   binding together. There is no state "agent without its binding".
+ *   The trigger's WHEN skips an agent that already exists, so a restore
+ *   (which replays the agents and bindings before this table) inserts the
+ *   records without re-running the creation.
+ *
+ * - Removing an agent is likewise one statement: the UPDATE that sets
+ *   `removed_at` fires `trg_project_agent_removed`, which retires its live
+ *   binding in the same statement.
+ *
+ * - The two partial unique indexes ARE the MVP rule "one live binding per
+ *   agent and per session" (AD2): two concurrent creations on one session
+ *   cannot both commit, whatever the application checked before.
+ */
+export const PROJECT_DIRECTORY_DDL: readonly string[] = [
+	`CREATE TABLE IF NOT EXISTS projects (
+		project_id        TEXT PRIMARY KEY,
+		owner_user_id     TEXT NOT NULL REFERENCES users(id),
+		name              TEXT NOT NULL,
+		client_request_id TEXT NOT NULL,
+		request_hash      TEXT NOT NULL,
+		created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+		archived_at       TEXT
+	)`,
+	"CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_request ON projects(owner_user_id, client_request_id)",
+	`CREATE TABLE IF NOT EXISTS project_agents (
+		agent_id         TEXT PRIMARY KEY,
+		project_id       TEXT NOT NULL REFERENCES projects(project_id),
+		handle           TEXT NOT NULL,
+		provider         TEXT NOT NULL DEFAULT 'claude-code' CHECK (provider IN ('claude-code')),
+		role             TEXT,
+		template_id      TEXT,
+		template_version INTEGER,
+		created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+		removed_at       TEXT,
+		UNIQUE (project_id, handle)
+	)`,
+	`CREATE TABLE IF NOT EXISTS agent_bindings (
+		binding_id    TEXT PRIMARY KEY,
+		agent_id      TEXT NOT NULL REFERENCES project_agents(agent_id),
+		epoch         INTEGER NOT NULL,
+		st_session_id TEXT NOT NULL,
+		state         TEXT NOT NULL CHECK (state IN ('active','draining','retired')),
+		created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+		retired_at    TEXT,
+		retire_reason TEXT,
+		UNIQUE (agent_id, epoch)
+	)`,
+	"CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_bindings_live_agent ON agent_bindings(agent_id) WHERE state IN ('active','draining')",
+	"CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_bindings_live_session ON agent_bindings(st_session_id) WHERE state IN ('active','draining')",
+	`CREATE TABLE IF NOT EXISTS project_agent_creations (
+		owner_user_id     TEXT NOT NULL,
+		client_request_id TEXT NOT NULL,
+		request_hash      TEXT NOT NULL,
+		project_id        TEXT NOT NULL,
+		agent_id          TEXT NOT NULL,
+		binding_id        TEXT NOT NULL,
+		st_session_id     TEXT NOT NULL,
+		handle            TEXT NOT NULL,
+		role              TEXT,
+		created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+		PRIMARY KEY (owner_user_id, client_request_id)
+	)`,
+	// The limit (32 live agents per project) is MAX_AGENTS_PER_PROJECT in
+	// projects/directory.ts; a change there needs a new migration that
+	// re-creates this trigger.
+	`CREATE TRIGGER IF NOT EXISTS trg_project_agent_creation
+	AFTER INSERT ON project_agent_creations
+	WHEN NOT EXISTS (SELECT 1 FROM project_agents WHERE agent_id = NEW.agent_id)
+	BEGIN
+		SELECT RAISE(ABORT, 'st:project-not-found') WHERE NOT EXISTS (
+			SELECT 1 FROM projects
+			WHERE project_id = NEW.project_id AND owner_user_id = NEW.owner_user_id AND archived_at IS NULL
+		);
+		SELECT RAISE(ABORT, 'st:session-not-found') WHERE NOT EXISTS (
+			SELECT 1 FROM sessions
+			WHERE session_id = NEW.st_session_id AND user_id = NEW.owner_user_id AND status != 'terminated'
+		);
+		SELECT RAISE(ABORT, 'st:agent-limit') WHERE (
+			SELECT COUNT(*) FROM project_agents WHERE project_id = NEW.project_id AND removed_at IS NULL
+		) >= 32;
+		INSERT INTO project_agents (agent_id, project_id, handle, role, created_at)
+		VALUES (NEW.agent_id, NEW.project_id, NEW.handle, NEW.role, NEW.created_at);
+		INSERT INTO agent_bindings (binding_id, agent_id, epoch, st_session_id, state, created_at)
+		VALUES (NEW.binding_id, NEW.agent_id, 1, NEW.st_session_id, 'active', NEW.created_at);
+	END`,
+	`CREATE TRIGGER IF NOT EXISTS trg_project_agent_removed
+	AFTER UPDATE OF removed_at ON project_agents
+	WHEN OLD.removed_at IS NULL AND NEW.removed_at IS NOT NULL
+	BEGIN
+		UPDATE agent_bindings SET state = 'retired', retired_at = NEW.removed_at, retire_reason = 'agent-removed'
+		WHERE agent_id = NEW.agent_id AND state IN ('active','draining');
+	END`,
 ];
 
 /**
