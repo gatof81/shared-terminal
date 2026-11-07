@@ -6,8 +6,8 @@ responsable (D1-a) **sólo** para ese artefacto; candidato = `main` con la corre
 (D2-C).** Claude no tiene ni debe
 tener acceso a VM100. Lo que exige el host lo hace un operador autorizado, **sólo con lecturas**: sin
 backup, deploy, build, recreación, cambio de variables ni operación que altere contenedores o
-sesiones. `observe` no se inicia. G3-2 sigue en NO-GO. **Destino vigente: `R` = `main` tras el merge
-de #555** (D2-C, §7.4), con el mismo backend compilado que `a93232f`. Las menciones a `a93232f` como
+sesiones. `observe` no se inicia. G3-2 sigue en NO-GO. **Destino vigente: `R` = `e198b07`
+(squash de #555)** (D2-C, §7.4), con el mismo backend compilado que `a93232f`. Las menciones a `a93232f` como
 destino en §1–§6 y en el Apéndice A son el análisis anterior a esa decisión.
 
 ## 1. SHA efectivo `D` del backend e identidad de su imagen
@@ -289,7 +289,7 @@ si el residuo es sólo R1) y **la verificación de 11 §3 paso 4 (`d1f310d8…`)
 el PR, D2-B es aceptable; D2-A no se recomienda. Hasta que se decida, el procedimiento de 11 queda en
 NO-GO.
 
-**Corrección: PR #555** (`fix/backend-image-hygiene`; draft, sin merge). El estado de sus checks y de su
+**Corrección: PR #555** (`fix/backend-image-hygiene`; **mergeado el 2026-11-07 como `e198b07`**, todos los checks verdes en ese commit). El estado de sus checks y de su
 revisión está en el informe de release. Contenido:
 
 - `.dockerignore` raíz como **allowlist**: `*` y luego sólo `backend/package.json`,
@@ -320,7 +320,7 @@ revisión está en el informe de release. Contenido:
 | 5 | Nada en vuelo | recreaciones cumplida; Composer pendiente de método (7.2 punto 5). Se repite en la ventana |
 | 6 | Alias de Pages | no condiciona este release: el backend del rango no cambia ninguna ruta que use el frontend |
 
-**Propuesta:** release **G3-1 + higiene de la imagen**, al SHA `R` de `main` tras el merge de #555, con el procedimiento de
+**Propuesta:** release **G3-1 + higiene de la imagen**, al SHA `R` = `e198b07` (squash de #555), con el procedimiento de
 [11-g3-1-deploy-plan.md](./11-g3-1-deploy-plan.md) §1–§4. Pendiente para el deploy: (a) el merge de #555, que fija `R`; (b) las lecturas 2–8 de §7.2 (la 1 ya
 está hecha y no se repite); (c) la autorización del deploy y de cada etapa de escritura.
 

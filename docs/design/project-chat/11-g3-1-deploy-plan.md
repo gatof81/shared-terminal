@@ -2,7 +2,7 @@
 
 Estado: **procedimiento final, nada ejecutado (2026-11-06).** Decisiones del responsable: D1-a
 (identidad `1befd89+R1`) y D2-C (candidato = `main` con la corrección de higiene, PR #555). El deploy
-necesita el merge de #555 y la autorización explícita del responsable; cada etapa de escritura (§2
+necesita la autorización explícita del responsable (#555 ya está mergeado: `R = e198b07`, §0); cada etapa de escritura (§2
 backup, §3 deploy, §5 `observe`) necesita además su propia autorización. La lista única para el
 operador está en §8. G3-2 sigue en NO-GO y el preflight de F1 es una tarea
 independiente del operador.
@@ -28,7 +28,7 @@ del responsable y el resto del preflight (12 §7.2).
 | | Valor | Fuente |
 | --- | --- | --- |
 | Backend en producción (`D`) | **`1befd89+R1`** (D1-a): `dist/**/*.js` = `1b116d5a…` (104) = los 103 de `1befd89` + `dist/ringBuffer.js` `236c9aa6…` (compilado de `e61910d`, inerte). Imagen `221e6851`, contenedor `da75082e` | A (medición) + B (reproducción exacta, 12 §7.4) |
-| Destino `R` | `main` tras #555. `dist/**/*.js` = **`d1f310d8…` (104)**; `dist` completo = **`0e50e8fd…` (416)**, idénticos a `a93232f` | repo (build reproducible) y CI de #555 |
+| Destino `R` | **`e198b07`** (squash de #555; no la punta de `main`). `dist/**/*.js` = **`d1f310d8…` (104)**; `dist` completo = **`0e50e8fd…` (416)**, idénticos a `a93232f` | repo (build reproducible) y CI de #555 |
 | Cambios de runtime del backend `D → R` | **sólo #545** (G3-1, apagado por defecto) | repo |
 | Cambios de build | **#555**: `.dockerignore` raíz (allowlist), `COPY` por nombre en el `Dockerfile`, `prebuild` que limpia `dist`, job de CI `backend-image` | repo |
 | Resto de `1befd89..R` | #548, #551, #552, #553 (frontend); #544 (tests); #550, #542 (docs) | repo |
