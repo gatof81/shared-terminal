@@ -133,6 +133,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_participants_live
   ON chat_participants(chat_id, agent_id) WHERE state IN ('invited','awaiting_approval','active');
 ```
 
+**Implementación P3a (#557, 2026-11-07; 15 §4.2):** `agent_bindings.st_session_id` se crea **sin**
+`REFERENCES sessions` (N-1), con la tabla de idempotencia `project_agent_creations` y un trigger que crea
+agente y vínculo en una sola sentencia (N-2, N-3). `project_agent_edges`, `chats` y `chat_participants`
+siguen siendo P3. Contrato vinculante de P3a: `docs/PROJECTS.md`.
+
 Borrado: "quitar" un agente pone `removed_at` (y sus participaciones pasan a `removed`); un proyecto
 se archiva; una conversación anfitriona se archiva (`archived_at`). Nada se borra en v1 salvo el hard
 delete de la sesión, que **MUST** fallar con 409 `agent-active` mientras la sesión tenga un vínculo

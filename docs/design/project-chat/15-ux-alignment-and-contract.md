@@ -1,6 +1,8 @@
 # Project Chat — alineación de arquitectura y UX (#512 ↔ #554) y contrato backend/frontend
 
-Estado: **revisión y propuesta, 2026-11-06. Nada implementado ni autorizado.** Contrasta la
+Estado: **revisión 2026-11-06; decisiones D-UX0–D-UX10 y enmiendas E-1–E-9 APROBADAS el 2026-11-07
+(§4.1).** P3a está en desarrollo en el PR draft #557 (sin merge ni deploy), con contrato vinculante en
+`docs/PROJECTS.md` de esa rama; el resumen para A es [16](./16-p3a-interfaces-for-a.md). Contrasta la
 propuesta UX de Claude A (PR draft #554, `docs/design/ux-projects-agents.md` en `ab00778`) con la
 arquitectura de este directorio:
 
@@ -9,8 +11,9 @@ arquitectura de este directorio:
 - 13 (tareas, TD1–TD11 aprobadas como arquitectura) y 14 (equipos, AD1–AD12 aprobadas como
   arquitectura).
 
-No modifica #554 ni los contratos aprobados. Todo lo que cambiaría un texto aprobado figura como
-**enmienda (pendiente de aprobación)**, con lo vigente y lo propuesto lado a lado (§3.8). G3-2 sigue en
+No modifica #554. Lo que cambia un texto aprobado figura como **enmienda** (§3.8), con lo vigente y lo
+propuesto lado a lado; las nueve quedaron aprobadas el 2026-11-07 como contratos de diseño, cada una en
+su fase. G3-2 sigue en
 NO-GO, y los gates de Channels, G3, PASS-A/PASS-B, R8 y TG1–TG5 no cambian.
 
 Lo revisó un revisor independiente (una ronda, veredicto SHOULD-FIX); sus hallazgos están incorporados
@@ -313,7 +316,7 @@ completo.
 - Nada se agrupa por nombre: una sesión entra a un proyecto sólo por una acción del owner.
 - Las conversaciones del CLI se muestran en el agente a través del vínculo, sin copiarlas.
 
-### 3.8 Enmiendas a textos aprobados (todas pendientes de aprobación)
+### 3.8 Enmiendas a textos aprobados (aprobadas 2026-11-07, cada una en su fase)
 
 | Id | Texto vigente | Propuesta |
 | --- | --- | --- |
@@ -327,7 +330,10 @@ completo.
 | E-8 | 06 §1: conversación en `#/sessions/<sid>/chat/<chatId>`; 05 P7: «no es una pantalla de proyecto» | ver D-UX2 |
 | E-9 | 03 §6.1 `POST /api/projects {name}` | `{name, clientRequestId}` |
 
-## 4. Decisiones que necesitan aprobación
+## 4. Decisiones (aprobadas 2026-11-07)
+
+Las recomendaciones de la tabla quedaron aprobadas tal cual; las precisiones del responsable están en
+§4.1.
 
 | # | Decisión | Opciones | Recomendación |
 | --- | --- | --- | --- |
@@ -342,6 +348,43 @@ completo.
 | D-UX8 | Directorio P3a antes del GO de la POC | (a) P3 entero tras el GO, como hoy; (b) **P3a** ahora, detrás de la bandera, sin conversaciones, entregas, tareas ni Channels | **(b)**: identidad y vínculo no dependen del transporte. P3a **no** satisface la dependencia P3 de T1, que sigue tras el GO |
 | D-UX9 (B6) | Acceso de admin, lead y observe; quién crea los agentes | (a) sólo el owner en v1 (R5); (b) los tiers de hoy | **(a)** |
 | D-UX10 | Enmiendas E-1 a E-9 | aprobar o ajustar | aprobarlas junto con lo anterior |
+
+### 4.1 Registro de la aprobación (2026-11-07)
+
+El responsable (con ChatGPT) aprobó D-UX0–D-UX10 según las recomendaciones, con estas precisiones:
+
+- TD1–TD11, AD1–AD12 y R5 son los contratos canónicos (D-UX0 = a).
+- Los 10 estados de tarea de 13 son los reales; los grupos de la UI son sólo presentación.
+- La conversación pertenece al agente lógico: ruta canónica por proyecto/agente, compatibilidad con las
+  rutas existentes.
+- Roles libres, plantillas copiadas, sin herencia de permisos en vivo.
+- Proyectos owner-only en v1: sin `members[]` ni accesos admin/lead/observe.
+- Las evidencias que reporta un agente siguen siendo `claimed`, nunca verificadas.
+- Las tareas requieren asignado en el MVP.
+- Los agentes internos del CLI se llaman «Subagentes».
+- Aprobaciones de deploy fuera del flujo de tareas en el MVP, sin impedir una integración futura con
+  autorizaciones específicas.
+- E-1–E-9 aprobadas como contratos de diseño, respetando fases y dependencias.
+
+**GO de desarrollo de P3a** en rama propia (no en #512), PR draft contra main, sin merge, deploy ni
+migración en producción. P3a es una excepción acotada a la dependencia del GO de Channels y **no**
+desbloquea P3 completo, T1, T2 ni T3.
+
+### 4.2 Notas de implementación de P3a (#557)
+
+No cambian el significado de la API; quedan registradas porque difieren del texto de 03 §2.1 o lo
+precisan:
+
+| Id | Nota | Motivo |
+| --- | --- | --- |
+| N-1 | `agent_bindings.st_session_id` **sin FK** a `sessions` | D1 aplica las FK: bloquearía para siempre el hard delete de toda sesión vinculada alguna vez; `CASCADE` borraría el historial |
+| N-2 | Tabla `project_agent_creations` y columnas `client_request_id`/`request_hash` en `projects` | registros durables de idempotencia (E-1, E-9) |
+| N-3 | Alta de agente + vínculo en **una** sentencia (trigger), baja con trigger que retira el vínculo | D1 por HTTP no tiene transacciones entre llamadas (condición A del GO) |
+| N-4 | 503 `outcome-unknown` cuando la respuesta se pierde y la relectura no encuentra el registro | una escritura tardía todavía puede aplicarse; el cliente reintenta con el mismo id |
+| N-5 | La guardia 409 `agent-active` del hard delete actúa sólo con la bandera encendida | con la bandera apagada la API existente no cambia (condición B); un vínculo a una sesión borrada se lee `session-gone` |
+| N-6 | Los handles de agentes quitados quedan reservados | 03 `UNIQUE (project_id, handle)` sin cambios |
+| N-7 | `binding` ausente en `/api/sessions` = lectura fallida; `features` ausente = bandera apagada | respuestas byte-idénticas con la bandera apagada |
+| N-8 | `project_agent_edges`, `chats` y `chat_participants` no se crean | son P3 |
 
 ## 5. Roadmap de la próxima etapa
 

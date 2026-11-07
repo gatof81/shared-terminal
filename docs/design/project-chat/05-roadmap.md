@@ -38,6 +38,10 @@ Actualización 2026-11-06 (b): **P3a — directorio de proyecto** (`projects`, `
 Channels) se propone desacoplada del GO de la POC: [15](./15-ux-alignment-and-contract.md) §5,
 decisión **D-UX8, pendiente de aprobación**. Hasta esa decisión, P3 sigue detrás del GO.
 
+Actualización 2026-11-07: D-UX8 aprobada (con D-UX0–D-UX10 y E-1–E-9). **P3a en desarrollo** en el PR
+draft #557 detrás de `PROJECT_CHAT_ENABLED` (apagada), sin merge, deploy ni migración en producción.
+No desbloquea P3 completo, T1, T2 ni T3.
+
 Actualización 2026-11-06: se agrega la línea **T** de tareas por agente
 ([13-agent-tasks.md](./13-agent-tasks.md)), **sólo como propuesta**: nada de T1 en adelante empieza sin
 la aprobación de TD1–TD11 y sus dependencias. No cambia P1–P10 ni la POC.
