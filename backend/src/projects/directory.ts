@@ -276,17 +276,17 @@ function classifyAgentCreateFailure(message: string): ProjectError | null {
 }
 
 /**
- * True when D1 itself refused the statement, so it was NOT applied. d1Query
- * raises D1StatementError only for a 2xx carrying `success: false`; the
- * Cloudflare v4 API may instead answer a refused statement with a 4xx and the
- * same envelope, which d1Query reports as a plain "D1 API error (4xx): <body>".
- * That is just as definite (the request was evaluated and failed; nothing
- * ran), and treating it as ambiguous would turn every taken handle or session
- * into a 503 that a retry can never resolve. Kept local to the directory:
- * d1Query's callers elsewhere (the recreation CAS) rely on its stricter rule.
- * A 5xx, a timeout, or a body that is not the envelope stays ambiguous.
+ * True when the error carries D1's own `success: false` answer: d1Query's
+ * D1StatementError (a 2xx envelope), or "D1 API error (4xx): <envelope>" —
+ * the Cloudflare v4 API may answer a refused statement with a 4xx. An
+ * envelope alone does NOT prove "not applied": D1 reports its transient
+ * failures (connection lost, storage reset) in the same shape, and for a
+ * write those leave the outcome unknown. Only a refusal the classifier
+ * RECOGNISES — SQLite's own abort of this statement (a trigger RAISE, a
+ * UNIQUE) — is definite; see resolveFailedCreate. Kept local to the
+ * directory: d1Query's callers elsewhere (the recreation CAS) keep their rule.
  */
-export function isDefiniteRefusal(err: unknown): boolean {
+export function isD1Envelope(err: unknown): boolean {
 	if (err instanceof D1StatementError) return true;
 	const m = /^D1 API error \((4\d\d)\): ([\s\S]*)$/.exec((err as Error | undefined)?.message ?? "");
 	if (!m) return false;
@@ -560,16 +560,19 @@ export class ProjectDirectory {
 	/**
 	 * A creation statement threw. First, ALWAYS, look for the record: if it
 	 * is there (an earlier attempt with this id, or this one landing despite
-	 * the error) the creation happened. Otherwise a D1StatementError proves
-	 * nothing was applied and is classified; any other error leaves the
-	 * outcome unknown (503) — the write may still land.
+	 * the error) the creation happened. Otherwise only a refusal the
+	 * classifier recognises in D1's own answer proves nothing was applied and
+	 * is answered with its code; ANY other error — a timeout, a 5xx, or an
+	 * envelope it does not recognise (D1's transient write errors use the
+	 * same shape) — leaves the outcome unknown: 503, and the client retries
+	 * with the same id, which is safe whatever happened.
 	 */
 	private async resolveFailedCreate<T>(
 		err: unknown,
 		readBack: () => Promise<Created<T> | null>,
 		classify: (message: string) => ProjectError | null,
 	): Promise<Created<T>> {
-		const definite = isDefiniteRefusal(err);
+		const known = isD1Envelope(err) ? classify((err as Error).message) : null;
 		let earlier: Created<T> | null;
 		try {
 			earlier = await readBack();
@@ -578,20 +581,13 @@ export class ProjectDirectory {
 			logger.warn(
 				`[projects] read-back after a failed create failed: ${(readErr as Error).message}`,
 			);
-			if (definite) {
-				const known = classify((err as Error).message);
-				if (known) throw known;
-			}
+			if (known) throw known;
 			throw outcomeUnknown();
 		}
 		if (earlier) return earlier;
-		if (!definite) {
-			logger.warn(`[projects] create outcome unknown: ${(err as Error).message}`);
-			throw outcomeUnknown();
-		}
-		const known = classify((err as Error).message);
 		if (known) throw known;
-		throw err;
+		logger.warn(`[projects] create outcome unknown: ${(err as Error).message}`);
+		throw outcomeUnknown();
 	}
 
 	async listAgents(
@@ -733,7 +729,9 @@ export class ProjectDirectory {
 			);
 			changes = r.meta.changes;
 		} catch (err) {
-			if (isDefiniteRefusal(err)) throw err;
+			// No refusal of this UPDATE is expected, and removal is idempotent:
+			// whatever the error, the read-back decides.
+			logger.warn(`[projects] remove agent: ${(err as Error).message}`);
 			const now = await state().catch(() => null);
 			if (now === "removed") return;
 			if (now === "missing") throw new ProjectError(404, "agent-not-found");

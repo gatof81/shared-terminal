@@ -83,10 +83,14 @@ D1 over HTTP runs each call as its own statement; no property spans two calls.
   without D1's own refusal), the backend reads the record back: found ⇒ the creation happened and is
   answered (201, `replayed: true`); not found ⇒ **503 `outcome-unknown`**, because the lost write can
   still land later. The client retries with the **same** `clientRequestId`; that is safe in every case.
-  The backend itself never retries. A D1 refusal proves "not applied" and is classified (§4.7) — the
-  `success: false` envelope with a 2xx **or a 4xx** status (the Cloudflare API may answer a failed
-  statement with 400); a 5xx, a timeout or a body that is not the envelope stays ambiguous. An
-  unclassified refusal is a 500 that created nothing.
+  The backend itself never retries. Only a refusal the backend **recognises** proves "not applied":
+  D1's `success: false` envelope (with a 2xx or a 4xx status — the Cloudflare API may answer a failed
+  statement with 400) whose message is SQLite's own abort of this statement (the trigger's `st:<code>`,
+  the handle UNIQUE, the live-session index) — answered with its code (§4.7). Anything else — a
+  timeout, a 5xx, an envelope it does not recognise (D1 reports transient write errors such as
+  "Network connection lost" in the same shape, and the write may have committed) — is resolved by the
+  read-back and otherwise answered 503 `outcome-unknown`. Removal never trusts an error: it always
+  reads back.
 - **Restart.** No in-memory state is needed for correctness. The only process-local state is the 30 s
   binding cache of §4.6, rebuilt on demand.
 - **Restore.** `backup.ts` carries the four tables (`sinceSchema: 19`), creation records last; the
@@ -193,8 +197,8 @@ that raced a write never stores its result.
 | 404 | `project-not-found`, `agent-not-found`, `session-not-found` | missing, foreign, or (session) soft-deleted |
 | 409 | `handle-taken`, `session-taken`, `agent-limit`, `project-limit`, `idempotency-conflict` | §4.1/§4.3 |
 | 409 | `agent-active` | hard delete of a bound session (§6) |
-| 503 | `outcome-unknown` | retry with the same `clientRequestId` |
-| 500 | `internal` | unclassified; nothing was created |
+| 503 | `outcome-unknown` | the outcome could not be proven; retry with the same `clientRequestId` (also for `DELETE`, which is idempotent) |
+| 500 | `internal` | a failure outside the write (e.g. a read of the directory) |
 
 Bodies are `{ "error": "<code>", "message": "<text>" }`. The UI branches on `error`, never on `message`.
 
@@ -229,7 +233,14 @@ Agent creation does not take the session lock, so the check runs **twice**: befo
 after the session is `terminated` and before the purge. Once terminated, the creation trigger refuses
 the session, so no binding can appear after the second check; one that landed in between is caught there
 and the delete stops as an ordinary soft delete (409 `agent-active`, row kept as `terminated`, nothing
-purged). Bindings to a gone session can then only come from a hard delete made with the flag off (§1).
+purged).
+
+Residual window (pre-existing, not P3a's): a bootstrap failing at that moment can rewrite the row from
+`terminated` to `failed` outside the session lock (`failSession`), which re-opens binding during the
+purge; and a hard delete made with the flag off is never guarded (§1). Either way the outcome is a
+binding to a gone session: it reads `disconnected · session-gone`, the agent can be removed, and nothing
+operates on bindings in P3a. Closing it (a row drop conditional on no live binding, and `failSession`
+never rewriting `terminated`) is a precondition for P3/T1, which will act on bindings.
 
 ## 7. Isolation limits
 

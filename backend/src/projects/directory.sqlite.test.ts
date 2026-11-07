@@ -58,6 +58,8 @@ let db: DatabaseSyncT;
 const realFetch = globalThis.fetch;
 type Fault =
 	| { kind: "d1-error"; message: string; status?: number }
+	/** The statement runs, then D1 answers with its error envelope anyway (a transient write error). */
+	| { kind: "applied-then-d1-error"; message: string; status?: number }
 	/** The statement runs, then the answer is lost (client-side timeout). */
 	| { kind: "applied-then-timeout" }
 	/** Nothing runs before the timeout; the statement lands later, when `release()` is called. */
@@ -135,6 +137,16 @@ beforeAll(() => {
 				if (--f.times <= 0) faults.splice(i, 1);
 				switch (f.fault.kind) {
 					case "d1-error":
+						return new Response(
+							JSON.stringify({
+								success: false,
+								errors: [{ message: f.fault.message }],
+								result: [],
+							}),
+							{ status: f.fault.status ?? refusalStatus },
+						);
+					case "applied-then-d1-error":
+						run(sql, params ?? []);
 						return new Response(
 							JSON.stringify({
 								success: false,
@@ -773,7 +785,11 @@ describe("agents: concurrency and idempotency (PROJECTS.md §3)", () => {
 		);
 		const body = agentBody("developer-hz", S.dev);
 		const r = await api("POST", `/projects/${pid}/agents`, OWNER, body);
-		expect(r.status).toBe(500);
+		// Not a refusal the classifier knows ⇒ not provably "not applied" ⇒ 503.
+		expect({ status: r.status, code: r.json.error }).toEqual({
+			status: 503,
+			code: "outcome-unknown",
+		});
 		expect(count("SELECT COUNT(*) AS n FROM project_agents")).toBe(0);
 		expect(count("SELECT COUNT(*) AS n FROM project_agent_creations")).toBe(0);
 		expect(count("SELECT COUNT(*) AS n FROM agent_bindings")).toBe(0);
@@ -803,15 +819,16 @@ describe("agents: concurrency and idempotency (PROJECTS.md §3)", () => {
 			status: 404,
 			code: "project-not-found",
 		});
-		// An unknown refusal at 400 is a 500 (definite, nothing created), never outcome-unknown.
+		// An envelope the classifier does not recognise proves nothing (D1's transient
+		// write errors use it): ambiguous, 503 — never "nothing was created".
 		faults.push({
 			match: /INSERT INTO project_agent_creations/,
 			fault: { kind: "d1-error", message: "new", status: 400 },
 			times: 1,
 		});
 		expect(
-			(await api("POST", `/projects/${pid}/agents`, OWNER, agentBody("qa-hz", S.qa))).status,
-		).toBe(500);
+			(await api("POST", `/projects/${pid}/agents`, OWNER, agentBody("qa-hz", S.qa))).json.error,
+		).toBe("outcome-unknown");
 		// A 5xx with the envelope proves nothing: ambiguous.
 		faults.push({
 			match: /INSERT INTO project_agent_creations/,
@@ -824,15 +841,41 @@ describe("agents: concurrency and idempotency (PROJECTS.md §3)", () => {
 		expect(count("SELECT COUNT(*) AS n FROM project_agents")).toBe(1);
 	});
 
-	it("a D1 refusal the classifier does not know is a 500 that created nothing", async () => {
+	it("a transient D1 error in the refusal envelope whose write DID land: the read-back answers 201, never a false 500", async () => {
+		// D1 "Network connection lost" / storage reset arrive as success:false; the
+		// statement may still have committed.
 		faults.push({
 			match: /INSERT INTO project_agent_creations/,
-			fault: { kind: "d1-error", message: "something new" },
+			fault: { kind: "applied-then-d1-error", message: "Network connection lost.", status: 400 },
 			times: 1,
 		});
-		const r = await api("POST", `/projects/${pid}/agents`, OWNER, agentBody("developer-hz", S.dev));
-		expect(r.status).toBe(500);
-		expect(count("SELECT COUNT(*) AS n FROM project_agents")).toBe(0);
+		const body = agentBody("developer-hz", S.dev);
+		const r = await api("POST", `/projects/${pid}/agents`, OWNER, body);
+		expect(r.status).toBe(201);
+		expect(r.json.replayed).toBe(true);
+		// …and when it did NOT land: 503, and the same-id retry creates it once.
+		faults.push({
+			match: /INSERT INTO project_agent_creations/,
+			fault: { kind: "d1-error", message: "Network connection lost.", status: 400 },
+			times: 1,
+		});
+		const body2 = agentBody("qa-hz", S.qa);
+		const r2 = await api("POST", `/projects/${pid}/agents`, OWNER, body2);
+		expect(r2.json.error).toBe("outcome-unknown");
+		expect((await api("POST", `/projects/${pid}/agents`, OWNER, body2)).status).toBe(201);
+		expect(count("SELECT COUNT(*) AS n FROM project_agents")).toBe(2);
+	});
+
+	it("a removal whose UPDATE comes back with an unrecognised D1 refusal is decided by the read-back", async () => {
+		const qa = (await api("POST", `/projects/${pid}/agents`, OWNER, agentBody("qa-hz", S.qa))).json;
+		faults.push({
+			match: /UPDATE project_agents SET removed_at/,
+			fault: { kind: "d1-error", message: "Network connection lost.", status: 400 },
+			times: 1,
+		});
+		const r = await api("DELETE", `/projects/${pid}/agents/${qa.agentId}`, OWNER);
+		expect(r.json.error).toBe("outcome-unknown");
+		expect((await api("DELETE", `/projects/${pid}/agents/${qa.agentId}`, OWNER)).status).toBe(204);
 	});
 
 	it("after a restart (new process: new directory, empty caches) a retry replays, the state is the same", async () => {
