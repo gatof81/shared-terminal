@@ -227,47 +227,134 @@ producir hooks (por lo menos un prompt).
 **Ante un FAIL:** se vuelve a `false` (§4, sin reconstruir), se conserva toda la evidencia y se
 informa. No se reintenta ni se ajusta nada sobre la marcha.
 
-### 5.1 Ventana limitada a la sesión B (pedido del 2026-11-07)
+### 5.1 Ventana O1: B como única sesión con captura (criterio consolidado, 2026-11-07)
 
-A programó una ventana `observe` de 24 h «para la sesión B», con una línea de base comparable y un
-rollback automático si falla. **La evidencia de §6 alcanza para evaluarla, sin ninguna lectura
-adicional**, con estos límites, que salen del código de `R` (`index.ts`, `conversation/service.ts`
-`authorize` y `adminStats`):
+A preparó una ventana `observe` de 24 h (O1) con B como única sesión efectiva, con una línea de base
+comparable y un rollback automático. La versión anterior de esta sección exigía 3/3 sesiones para un
+PASS de B: suponía las tres sesiones con captura del preflight. Esta versión la reemplaza. **HA y HZ no
+se tocan para cumplir el gate.**
 
-1. **La bandera no se puede limitar a una sesión.** `INGEST_REQUIRE_SESSION_ORIGIN` se lee una vez y
-   vale para todo el proceso. Con `observe`, cada request **autenticada** (token, `requested`,
-   `running`) de cada sesión con captura pasa por la comprobación, con su plazo de 500 ms y sin rechazar
-   nunca. Lo que falla antes (token, sesión detenida) va a `rejectedSinceBoot`, y lo que el relay
-   descarta, a P6. La ventana cubre siempre las tres sesiones con captura. «Limitada a B» sólo puede
-   querer decir que B es la sesión cuya presencia en la muestra se exige.
-2. **Los contadores no dicen qué sesión.** `originObservedSinceBoot` da `byCause`, `sessionsMatched` y
-   `sessionsNotMatched`. Los dos últimos son conteos de sesiones distintas, sin ids.
-3. **B está en la muestra ⇔ `enabledSessions = effectiveSessions = 3` en la lectura del principio
-   y en la del final, `sessionsMatched = 3` y `sessionsNotMatched = 0`.** Así:
-   - todo `match` con esos valores ⇒ PASS, también para B;
-   - cualquier otra combinación (menos de 3, más de 3, o una cantidad de sesiones con captura que
-     cambió durante la ventana) sin otra causa ⇒ **INCONCLUSIVE para B**, no PASS. No se puede saber si B
-     produjo hooks, y averiguarlo necesita otra autorización (§7). Contar líneas de los archivos de
-     eventos de B no lo prueba: el backend también escribe ahí sin hooks de B (`gap backend_restart`
-     al reiniciar, probes, transiciones de silencio, rotación);
-   - cualquier otra causa ⇒ FAIL, sin saber de qué sesión.
-4. **El rollback automático es una escritura en VM100** y va dentro de la autorización de la ventana.
-   Antes de reiniciar tiene que:
-   - comprobar **P8** (recreaciones `resolved`, Composer sin panes). Si algo está en vuelo, no reinicia:
-     registra y avisa (§4 paso 1). Un reinicio sobre una recreación sin resolver la deja sin resolución
-     posible (D8);
-   - leer y registrar con la hora `GET /api/admin/stats → .conversation` completo y los conteos de P6.
-     Los contadores son del proceso, y volver a `false` (`up --force-recreate`) los pone en cero.
+**Lo que dice el código de `R`** (`index.ts`, `conversation/service.ts` `authorize` y `adminStats`,
+`conversation/registry.ts`):
 
-   **Disparadores automáticos:** sólo los criterios que se pueden decidir en cualquier momento:
-   cualquier `byCause` distinto de `match`, `sessionsNotMatched > 0`, o cualquier `inspect_*`. Las
-   comparaciones con la línea de base (pérdidas, ritmo de `eventsSinceBoot`) y las regresiones que juzga
-   una persona se evalúan al final de la ventana, no a mitad de ella.
-5. **Precondiciones que no constan aquí:** el deploy de `R` con V1–V10 en PASS (§3.1) y la ventana de
-   línea de base con la bandera apagada, de igual duración. Este documento no supone que ya ocurrieron.
+1. La bandera es del proceso. Con `observe`, cada request **autenticada** de cada sesión pasa por la
+   comprobación de origen (plazo de 500 ms, nunca rechaza). Lo que falla antes va a
+   `rejectedSinceBoot`, y lo que descarta el relay, a P6.
+2. Sólo una sesión con `conversation_requested = 1`, `running` y un hash de token autorizado puede
+   autenticarse. Las demás se rechazan **antes** de la comprobación (`disabled`, `bad_token`,
+   `not_running`). `enabledSessions` cuenta exactamente las sesiones con `conversation_requested = 1`.
+3. `sessionsMatched` y `sessionsNotMatched` cuentan sesiones distintas, sin ids.
 
-**Un PASS de esta ventana no autoriza `true`** en general (§6 pide la evidencia completa y la decisión
-del responsable) ni cambia ningún gate de G3-2, que sigue en NO-GO.
+**Consecuencia, bajo precondiciones:** si durante **toda** la ventana B es la única sesión con
+`conversation_requested = 1`, todo lo que cuentan `originObservedSinceBoot` y sus dos conteos es de B.
+Dos lecturas puntuales no ven una sesión que se pidió y se dejó de pedir entre ellas. Por eso la
+exactitud depende de congelar lo que cambia ese indicador:
+
+**Precondiciones de O1** (todas; si una falla al principio, O1 no da PASS-B):
+- `CONVERSATION_ALLOW_USERS` vacía en el backend en ejecución: `docker compose exec app printenv
+  CONVERSATION_ALLOW_USERS` ⇒ vacío, leído después del `up` que activa `observe`. Si no está vacía, una
+  sesión nueva de esos owners (también las creadas en su nombre, #420) nace con la captura pedida;
+- congelamiento de la captura durante toda la ventana: ningún `PATCH /api/admin/sessions/:id/conversation`,
+  ningún `conversation:enable-all`, ninguna recreación y ningún `restore`. Ponen
+  `conversation_requested` en 1 el `PATCH` admin (enable), el create con `CONVERSATION_ALLOW_USERS` y
+  `restore`; `enable-all` y la recreación se congelan además porque cambian la revocación global o el
+  token y el contenedor. El `conversation:disable` de emergencia **nunca** se prohíbe: si
+  se usa, el resultado pasa a PASS-observado o INCONCLUSIVE;
+- `enabledSessions = effectiveSessions = 1` y B es esa sesión.
+
+**`<inicio>`** es el origen de los contadores: `docker inspect -f '{{.Id}} {{.State.StartedAt}} {{.RestartCount}}' <contenedor app>`
+del contenedor que arrancó con `observe` (`<inicio>` = su `StartedAt`), registrado con las lecturas del
+principio. **Al final se repite la misma lectura y tiene que ser idéntica.** `app` tiene
+`restart: unless-stopped`: tras un crash Docker reinicia el **mismo** contenedor, los contadores vuelven
+a cero y el log se conserva, así que sólo esta lectura muestra el reinicio. Si cambió, hubo un reinicio
+dentro de la ventana (INCONCLUSIVE, o FAIL si se vio un FAIL antes). Los contadores son
+de ese proceso, así que la ventana empieza ahí, no en la hora de las lecturas.
+
+**Lecturas** (al principio y al final, con la hora; todas existentes y de sólo lectura):
+- P5: `GET /api/admin/stats → .conversation` completo;
+- P9: la lista `sessionId → status`;
+- el contenedor de B: `docker inspect -f '{{.Id}} {{.State.StartedAt}}' <contenedor st- de B>` (como en P7).
+  Si el `Id` o el `StartedAt` cambian, hubo al menos un evento de ciclo de vida;
+- **sólo al final**, que el congelamiento se cumplió (lecturas existentes, sin contenido):
+  - `docker logs --since <inicio> <contenedor app> 2>&1 | grep -cE '\[admin\] (conversation (enabled|disabled)|recreate)'` ⇒ 0,
+    **sólo si el log cubre toda la ventana**: la primera línea retenida tiene que ser del arranque de
+    este contenedor, con su hora a ≤ 60 s de `<inicio>` (`docker logs -t <contenedor app> 2>&1 | head -1`
+    da la hora de Docker en RFC 3339). El log del `app` rota a 3 × 10 MB; si ya no conserva el arranque,
+    la lectura falta (INCONCLUSIVE). Es la única
+    evidencia de un enable seguido de un hard delete, que no deja `REVOKED` ni fila;
+  - `find <WORKSPACE_ROOT>/.conversations -maxdepth 2 -name REVOKED -newermt '<inicio>'` ⇒ vacío;
+
+  si alguna da otra cosa, la precondición se incumplió;
+- el bloque `capture` de B. Lo da `GET /api/sessions/<B>/conversations`, que es **owner-only** (con la
+  identidad del dueño de B) y devuelve también títulos, así que se proyecta en el cliente:
+  `jq '.capture | {requested, effective, pendingReasons, checkedAt}'`. No se guarda nada más. Cuesta un
+  probe del relay de B y, como todo pedido autenticado bajo `/api/sessions/:id`, renueva el reloj de
+  inactividad de B.
+
+**Veredictos.** Se aplica **el primero de esta lista que corresponda**: FAIL > INCONCLUSIVE >
+PASS-observado > PASS-B. Un FAIL visto antes de un reinicio sigue siendo FAIL.
+
+| Veredicto | Condiciones |
+| --- | --- |
+| **FAIL** | cualquier `byCause` distinto de `match`, `sessionsNotMatched > 0`, cualquier `inspect_*`, o un FAIL de latencia, pérdidas o regresiones de §5. Con las precondiciones cumplidas es de B; si no, no se sabe de qué sesión (§7) |
+| **INCONCLUSIVE** | `sessionsMatched = 0` (no hubo tráfico autenticado); un reinicio del backend dentro de la ventana sin un FAIL previo; una lectura que falta; B sin `requested` o sin `effective` en alguna lectura; con `enabledSessions = 1`, `effectiveSessions` ≠ 1 en alguna lectura |
+| **PASS-observado** | ninguna de las anteriores, pero `enabledSessions` ≠ 1 en alguna lectura, o una precondición incumplida. Dice que ninguna sesión autenticada falló la comprobación, no que B estuvo en la muestra |
+| **PASS-B** | todas las precondiciones; en las dos lecturas `enabledSessions = effectiveSessions = 1` y B con `requested` y `effective`; `byCause` sólo `match`; `sessionsMatched = 1`, `sessionsNotMatched = 0`; latencia, pérdidas frente a la línea de base y regresiones de §5 en PASS |
+
+**Qué demuestra un PASS-B:**
+- en 24 h de uso real, cada request autenticada de B salió de la dirección de **su** contenedor actual
+  en `sessions-net`. Con `true` no se habría descartado ningún hook legítimo de B;
+- las inspecciones de Docker respondieron dentro del plazo con el tráfico real de B, y no hubo más
+  pérdidas que en la línea de base;
+- lo anterior, a través de los eventos de ciclo de vida de B que muestre la lectura de su contenedor
+  (`Id` / `StartedAt`). Si no cambiaron, no se afirma nada sobre un reinicio o una recreación.
+
+**Qué no demuestra:**
+- nada sobre HA ni HZ: sus contenedores, su antigüedad o su configuración de red no se ejercitaron;
+- el comportamiento con varias sesiones a la vez (caché e inspecciones concurrentes);
+- el camino de rechazo (token usado desde otro contenedor, loopback, Internet): el uso normal no lo
+  ejercita y sólo lo prueban los tests de CI;
+- una recreación o un reinicio del contenedor de B, si no ocurrió en la ventana;
+- la latencia directa de la ingesta (no hay métrica; §7);
+- nada de G3-2.
+
+**Qué permite decidir:** un PASS-B **no** autoriza `true`. Es evidencia para que el responsable
+considere `true` **mientras B sea la única sesión con captura pedida**. Bajo `true`, habilitar la
+captura en otra sesión (HA, HZ o una nueva) necesita antes su propia ventana `observe`, o volver a
+`observe`. Si no, un desajuste suyo descartaría sus hooks: es fail-closed y no un riesgo de seguridad,
+pero pierde captura. G3-2 sigue en NO-GO.
+
+**Recomendación:** O1 tiene valor diagnóstico formal sólo con las precondiciones de arriba
+(`CONVERSATION_ALLOW_USERS` vacía, captura congelada, `enabledSessions = 1` y B como esa sesión). En ese
+caso, seguir adelante. Si A encuentra `enabledSessions` > 1 al principio, O1 sólo puede
+dar PASS-observado, INCONCLUSIVE o FAIL: sigue sirviendo para detectar un problema, pero no para un PASS de B, y no
+se cambia HA ni HZ para corregirlo. Si el responsable quiere O1 sólo por el PASS-B, en ese caso se
+**suspende**.
+
+**Rollback ante un FAIL.** `observe` nunca rechaza, así que esperar no cuesta captura. Lo automático
+es sólo **registrar y avisar**: leer y guardar con la hora las lecturas de arriba (volver a `false` pone
+los contadores en cero) y notificar. El reinicio a `false` es una escritura en VM100 dentro de la
+autorización de la ventana, y se hace sólo cuando se cumplen las mismas guardas que cualquier reinicio
+de este procedimiento:
+- **P8**: recreaciones `resolved` y Composer sin panes. Un reinicio sobre una recreación sin resolver la
+  deja sin resolución posible (D8);
+- §3 paso 5: ninguna sesión con `createdAt` en los últimos 15 minutos (un reinicio aborta el bootstrap
+  y la sesión queda `failed`);
+- ningún cliente de la API de exec activo (Agent Hub en pausa). **No hay lectura que lo compruebe** (el
+  registro de execs es del proceso y no se lista), así que es una **confirmación humana** del
+  responsable o de A antes del reinicio;
+- si alguna guarda no se cumple, no reinicia: registra y espera.
+
+Si A automatiza el reinicio, la automatización comprueba P8 y los 15 minutos en cada intento, y
+reinicia sólo con la confirmación humana del exec ya dada. Después del reinicio se verifica la vuelta:
+`printenv INGEST_REQUIRE_SESSION_ORIGIN` vacío o `false`, y V3 (no aparecen `originObservedSinceBoot` ni
+`originRejectedSinceBoot`). Los disparadores
+son sólo las condiciones de FAIL que se pueden decidir en cualquier momento (`byCause`,
+`sessionsNotMatched`, `inspect_*`); las comparaciones con la línea de base y las regresiones se juzgan
+al final.
+
+**Precondiciones que no constan aquí:** el deploy de `R` con V1–V10 en PASS (§3.1) y la línea de base
+con la bandera apagada de igual duración. Este documento no supone que ya ocurrieron.
 
 ## 6. Evidencia mínima antes de considerar `true`
 
@@ -279,7 +366,8 @@ El operador devuelve, sin tokens, cookies ni contenido de conversaciones:
    `.conversation.originObservedSinceBoot`, `eventsSinceBoot`, `rejectedSinceBoot`, `gapsSinceBoot`,
    y los conteos de P6.
 4. La muestra de latencia de `docker inspect` (los 20 tiempos y la p95).
-5. La confirmación de que no hubo reinicios del backend dentro de la ventana (o, si los hubo, su hora
+5. La confirmación, con la lectura `docker inspect -f '{{.Id}} {{.State.StartedAt}} {{.RestartCount}}'` del
+   contenedor `app` idéntica al principio y al final (§5.1), de que no hubo reinicios del backend dentro de la ventana (o, si los hubo, su hora
    y que la ventana se reinició).
 6. La confirmación de que el inventario de contenedores se mantuvo (P7 contra el final) y de que no se
    tocaron VM100 más allá del deploy aprobado, las sesiones ni los contenedores retenidos.
