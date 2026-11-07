@@ -812,6 +812,11 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 				}
 
 				if (hard) {
+					// Again after the terminate: an agent creation that landed between the
+					// first check and here is seen now, and none can land later (the
+					// creation trigger refuses a terminated session). A hit leaves an
+					// ordinary soft delete: row kept, nothing purged.
+					await projects?.assertNoLiveBinding(req.params.id);
 					// Wipe workspace files, then drop the row. The row is the
 					// only reference that lets a retry purge the workspace,
 					// uploads, `.st-control` and conversation data: a failed

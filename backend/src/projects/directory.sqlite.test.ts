@@ -57,7 +57,7 @@ vi.mock("../auth.js", async (orig) => {
 let db: DatabaseSyncT;
 const realFetch = globalThis.fetch;
 type Fault =
-	| { kind: "d1-error"; message: string }
+	| { kind: "d1-error"; message: string; status?: number }
 	/** The statement runs, then the answer is lost (client-side timeout). */
 	| { kind: "applied-then-timeout" }
 	/** Nothing runs before the timeout; the statement lands later, when `release()` is called. */
@@ -68,6 +68,10 @@ const faults: Array<{ match: RegExp; fault: Fault; times: number }> = [];
 const statements: string[] = [];
 /** Optional jitter (ms) before each statement: interleaves concurrent requests. */
 let jitterMs = 0;
+/** HTTP status of a refused statement's answer: real D1 may use a 4xx with the same envelope. */
+let refusalStatus = 200;
+/** Called by the Docker fake's kill(): lets a test land a write mid-delete. */
+let onKill: (() => void) | null = null;
 
 function run(sql: string, params: unknown[]) {
 	try {
@@ -137,6 +141,7 @@ beforeAll(() => {
 								errors: [{ message: f.fault.message }],
 								result: [],
 							}),
+							{ status: f.fault.status ?? refusalStatus },
 						);
 					case "applied-then-timeout":
 						run(sql, params ?? []);
@@ -150,7 +155,8 @@ beforeAll(() => {
 						throw timeoutError();
 				}
 			}
-			return new Response(JSON.stringify(run(sql, params ?? [])), { status: 200 });
+			const answer = run(sql, params ?? []);
+			return new Response(JSON.stringify(answer), { status: answer.success ? 200 : refusalStatus });
 		}),
 	);
 });
@@ -214,6 +220,7 @@ async function startServer(withDirectory: boolean) {
 		gatherStats: async () => new Map(),
 		kill: async (sid: string) => {
 			dockerCalls.push(`kill ${sid}`);
+			onKill?.();
 		},
 		purgeWorkspace: async (sid: string) => {
 			dockerCalls.push(`purge ${sid}`);
@@ -286,6 +293,8 @@ beforeEach(async () => {
 	statements.length = 0;
 	dockerCalls.length = 0;
 	jitterMs = 0;
+	refusalStatus = 200;
+	onKill = null;
 	await freshDb();
 });
 afterEach(async () => {
@@ -774,6 +783,47 @@ describe("agents: concurrency and idempotency (PROJECTS.md §3)", () => {
 		expect(retry.status).toBe(201);
 	});
 
+	it("D1 answering its refusals with HTTP 400 (same envelope): still classified, never 503", async () => {
+		refusalStatus = 400;
+		expect(
+			(await api("POST", `/projects/${pid}/agents`, OWNER, agentBody("developer-hz", S.dev)))
+				.status,
+		).toBe(201);
+		for (const [body, status, code] of [
+			[agentBody("developer-hz", S.qa), 409, "handle-taken"],
+			[agentBody("qa-hz", S.dev), 409, "session-taken"],
+			[agentBody("qa-hz", S.foreign), 404, "session-not-found"],
+		] as const) {
+			const r = await api("POST", `/projects/${pid}/agents`, OWNER, body);
+			expect({ status: r.status, code: r.json.error }).toEqual({ status, code });
+		}
+		const other = await project("Theirs", OTHER);
+		const r = await api("POST", `/projects/${other}/agents`, OWNER, agentBody("qa-hz", S.qa));
+		expect({ status: r.status, code: r.json.error }).toEqual({
+			status: 404,
+			code: "project-not-found",
+		});
+		// An unknown refusal at 400 is a 500 (definite, nothing created), never outcome-unknown.
+		faults.push({
+			match: /INSERT INTO project_agent_creations/,
+			fault: { kind: "d1-error", message: "new", status: 400 },
+			times: 1,
+		});
+		expect(
+			(await api("POST", `/projects/${pid}/agents`, OWNER, agentBody("qa-hz", S.qa))).status,
+		).toBe(500);
+		// A 5xx with the envelope proves nothing: ambiguous.
+		faults.push({
+			match: /INSERT INTO project_agent_creations/,
+			fault: { kind: "d1-error", message: "x", status: 502 },
+			times: 1,
+		});
+		expect(
+			(await api("POST", `/projects/${pid}/agents`, OWNER, agentBody("qa-hz", S.qa))).json.error,
+		).toBe("outcome-unknown");
+		expect(count("SELECT COUNT(*) AS n FROM project_agents")).toBe(1);
+	});
+
 	it("a D1 refusal the classifier does not know is a 500 that created nothing", async () => {
 		faults.push({
 			match: /INSERT INTO project_agent_creations/,
@@ -1028,6 +1078,25 @@ describe("agents: reads, boundary and removal", () => {
 		// The agent's history still names the session.
 		const d = await api("GET", `/projects/${pid}/agents/${dev.agentId}`, OWNER);
 		expect(d.json.bindings[0].sessionId).toBe(S.dev);
+	});
+
+	it("an agent bound WHILE the hard delete runs (after the first check) is caught before the purge", async () => {
+		onKill = () => {
+			db.prepare(
+				`INSERT INTO project_agent_creations (owner_user_id, client_request_id, request_hash, project_id, agent_id, binding_id, st_session_id, handle, created_at)
+				 VALUES (?, ?, 'h', ?, ?, ?, ?, 'qa-hz', '2026-11-10 13:00:00')`,
+			).run(OWNER, uuid(), pid, uuid(), uuid(), S.qa);
+		};
+		const r = await api("DELETE", `/sessions/${S.qa}?hard=true`, OWNER);
+		expect({ status: r.status, code: r.json.error }).toEqual({ status: 409, code: "agent-active" });
+		expect(dockerCalls).toEqual([`kill ${S.qa}`]); // never purged
+		const row = db.prepare("SELECT status FROM sessions WHERE session_id = ?").get(S.qa) as {
+			status: string;
+		};
+		expect(row.status).toBe("terminated"); // an ordinary soft delete
+		// …and once terminated, no creation can bind it any more.
+		const late = await api("POST", `/projects/${pid}/agents`, OWNER, agentBody("late-hz", S.qa));
+		expect(late.json.error).toBe("session-not-found");
 	});
 
 	it("the admin force hard delete has the same guard", async () => {

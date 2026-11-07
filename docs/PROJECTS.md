@@ -83,8 +83,10 @@ D1 over HTTP runs each call as its own statement; no property spans two calls.
   without D1's own refusal), the backend reads the record back: found ⇒ the creation happened and is
   answered (201, `replayed: true`); not found ⇒ **503 `outcome-unknown`**, because the lost write can
   still land later. The client retries with the **same** `clientRequestId`; that is safe in every case.
-  The backend itself never retries. A D1 refusal (`success: false`) proves "not applied" and is
-  classified (§4.7); an unclassified one is a 500 that created nothing.
+  The backend itself never retries. A D1 refusal proves "not applied" and is classified (§4.7) — the
+  `success: false` envelope with a 2xx **or a 4xx** status (the Cloudflare API may answer a failed
+  statement with 400); a 5xx, a timeout or a body that is not the envelope stays ambiguous. An
+  unclassified refusal is a 500 that created nothing.
 - **Restart.** No in-memory state is needed for correctness. The only process-local state is the 30 s
   binding cache of §4.6, rebuilt on demand.
 - **Restore.** `backup.ts` carries the four tables (`sinceSchema: 19`), creation records last; the
@@ -221,9 +223,13 @@ With the flag on, `DELETE /api/sessions/:id?hard=true` and `DELETE /api/admin/se
 answer **409 `agent-active`** while the session has a live binding, checked under the session lifecycle
 lock **before any effect** (no kill, no purge, row kept). The check is uncached and fail-closed: a failed
 read refuses the delete (500). The owner removes the agent first. Soft deletes are not refused: the row
-stays, the binding stays readable (`disconnected · session-terminated`). Known window: an agent created
-between the guard and the row drop of a concurrent hard delete ends bound to a gone session — it reads
-`session-gone` and can be removed; nothing can operate on it in P3a.
+stays, the binding stays readable (`disconnected · session-terminated`).
+
+Agent creation does not take the session lock, so the check runs **twice**: before the kill, and again
+after the session is `terminated` and before the purge. Once terminated, the creation trigger refuses
+the session, so no binding can appear after the second check; one that landed in between is caught there
+and the delete stops as an ordinary soft delete (409 `agent-active`, row kept as `terminated`, nothing
+purged). Bindings to a gone session can then only come from a hard delete made with the flag off (§1).
 
 ## 7. Isolation limits
 

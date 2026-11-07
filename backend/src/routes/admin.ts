@@ -382,6 +382,11 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 						idleSweeper?.forget(req.params.id);
 					}
 					if (hard) {
+						// Again after the terminate: an agent creation that landed between the
+						// first check and here is seen now, and none can land later (the
+						// creation trigger refuses a terminated session). A hit leaves an
+						// ordinary soft delete: row kept, nothing purged.
+						await projects?.assertNoLiveBinding(req.params.id);
 						await docker.purgeWorkspace(req.params.id).catch((err) => {
 							throw new TeardownFailedError("purge", err);
 						});

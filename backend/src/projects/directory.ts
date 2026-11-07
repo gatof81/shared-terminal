@@ -275,6 +275,29 @@ function classifyAgentCreateFailure(message: string): ProjectError | null {
 	return null;
 }
 
+/**
+ * True when D1 itself refused the statement, so it was NOT applied. d1Query
+ * raises D1StatementError only for a 2xx carrying `success: false`; the
+ * Cloudflare v4 API may instead answer a refused statement with a 4xx and the
+ * same envelope, which d1Query reports as a plain "D1 API error (4xx): <body>".
+ * That is just as definite (the request was evaluated and failed; nothing
+ * ran), and treating it as ambiguous would turn every taken handle or session
+ * into a 503 that a retry can never resolve. Kept local to the directory:
+ * d1Query's callers elsewhere (the recreation CAS) rely on its stricter rule.
+ * A 5xx, a timeout, or a body that is not the envelope stays ambiguous.
+ */
+export function isDefiniteRefusal(err: unknown): boolean {
+	if (err instanceof D1StatementError) return true;
+	const m = /^D1 API error \((4\d\d)\): ([\s\S]*)$/.exec((err as Error | undefined)?.message ?? "");
+	if (!m) return false;
+	try {
+		const body = JSON.parse(m[2]) as { success?: unknown; errors?: unknown };
+		return body.success === false && Array.isArray(body.errors) && body.errors.length > 0;
+	} catch {
+		return false;
+	}
+}
+
 function outcomeUnknown(): ProjectError {
 	return new ProjectError(
 		503,
@@ -546,7 +569,7 @@ export class ProjectDirectory {
 		readBack: () => Promise<Created<T> | null>,
 		classify: (message: string) => ProjectError | null,
 	): Promise<Created<T>> {
-		const definite = err instanceof D1StatementError;
+		const definite = isDefiniteRefusal(err);
 		let earlier: Created<T> | null;
 		try {
 			earlier = await readBack();
@@ -710,7 +733,7 @@ export class ProjectDirectory {
 			);
 			changes = r.meta.changes;
 		} catch (err) {
-			if (err instanceof D1StatementError) throw err;
+			if (isDefiniteRefusal(err)) throw err;
 			const now = await state().catch(() => null);
 			if (now === "removed") return;
 			if (now === "missing") throw new ProjectError(404, "agent-not-found");
