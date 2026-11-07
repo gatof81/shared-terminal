@@ -180,8 +180,10 @@ async function identifyTarget(): Promise<void> {
 		created = { account, name: expectName, id: null, settled: false };
 		// A throw (timeout, broken connection) leaves `settled` false: the server may still create it.
 		const c = await cf("POST", `/accounts/${account}/d1/database`, { name: expectName });
-		created.settled = true;
 		const uuid = (c.result as { uuid?: string } | undefined)?.uuid;
+		// Definite only: a success with its id, or a 4xx refusal. A 5xx/524 (or a 2xx without an
+		// id) says nothing about whether the database exists, so it stays unsettled and is polled.
+		created.settled = (c.ok && !!uuid) || (c.status >= 400 && c.status < 500);
 		if (!c.ok || !uuid) refuse(`could not create ${expectName} (HTTP ${c.status})`);
 		id = uuid;
 		created.id = id;
@@ -216,6 +218,9 @@ async function cleanup(): Promise<void> {
 	if (!created) return;
 	const c = created;
 	let id = c.id;
+	console.error(
+		`cleaning up ${c.name} (up to 60 s; interrupting again abandons it — then check by hand)`,
+	);
 	try {
 		if (!id) {
 			// The id is unknown: the create was refused, or its answer was lost. Only a refused
@@ -294,7 +299,14 @@ function report(): void {
 }
 
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
-	process.once(sig, () => {
+	process.on(sig, () => {
+		if (interrupted !== null) {
+			// A second signal: give up on the cleanup in flight, but say what may be left.
+			if (created) console.error(`CLEANUP ABANDONED: check for database ${created.name}`);
+			fail("Z cleanup", "abandoned by a second signal");
+			report();
+			process.exit();
+		}
 		fail("INTERRUPTED", sig);
 		interrupted = sig === "SIGINT" ? 130 : 143;
 		cleanupOnce().finally(() => {
