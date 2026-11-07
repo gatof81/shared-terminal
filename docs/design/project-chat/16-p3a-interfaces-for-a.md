@@ -84,7 +84,8 @@ interface SessionBinding { projectId: string; agentId: string; handle: string; b
 4. **Idempotencia:** generar un `clientRequestId` (UUID v4, `crypto.randomUUID()`) **por acción del
    usuario** y reutilizarlo sólo para reintentar esa misma acción. Ante **503 `outcome-unknown`**:
    ofrecer «Reintentar» con el **mismo** id (seguro siempre); nunca reintentar solo. Una respuesta
-   `replayed: true` es éxito.
+   `replayed: true` es éxito. Si después de un 503 llega un rechazo (409/404) para el mismo id,
+   **recargar la lista de agentes** antes de mostrar el error: el intento perdido pudo aplicarse.
 5. **Errores:** decidir por `error`, nunca por `message`.
 
    | `error` | Texto sugerido |
