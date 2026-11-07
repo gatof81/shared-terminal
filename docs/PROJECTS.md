@@ -91,6 +91,11 @@ D1 over HTTP runs each call as its own statement; no property spans two calls.
   "Network connection lost" in the same shape, and the write may have committed) — is resolved by the
   read-back and otherwise answered 503 `outcome-unknown`. Removal never trusts an error: it always
   reads back.
+- **After a 503, a later refusal is final only for that attempt.** The lost attempt can still land
+  after a retry with the same id was refused (e.g. `session-taken` while another agent held the
+  session, which was then removed). Whenever a refusal follows a 503 for the same `clientRequestId`, the
+  client re-reads the agent list (or retries once more with the same id: it replays if the earlier
+  attempt landed). The database stays consistent either way; only that answer can be stale.
 - **Restart.** No in-memory state is needed for correctness. The only process-local state is the 30 s
   binding cache of §4.6, rebuilt on demand.
 - **Restore.** `backup.ts` carries the four tables (`sinceSchema: 19`), creation records last; the
