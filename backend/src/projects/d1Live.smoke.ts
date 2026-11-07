@@ -76,7 +76,13 @@ const redact = (id: string) => `${id.slice(0, 6)}…`;
  * create whose answer is lost (timeout, broken connection) is still found by
  * name and deleted; `id` is filled once known.
  */
-let created: { account: string; name: string; id: string | null } | null = null;
+let created: {
+	account: string;
+	name: string;
+	id: string | null;
+	/** false until the create got a definite answer (success, or an HTTP refusal). */
+	settled: boolean;
+} | null = null;
 
 /** A refused target: thrown (not process.exit) so a database this run created is still deleted. */
 class Refused extends Error {}
@@ -171,8 +177,10 @@ async function identifyTarget(): Promise<void> {
 	let expectName: string;
 	if (process.env.P3A_D1_LIVE_CREATE === "1") {
 		expectName = `${PREFIX}${Date.now()}`;
-		created = { account, name: expectName, id: null };
+		created = { account, name: expectName, id: null, settled: false };
+		// A throw (timeout, broken connection) leaves `settled` false: the server may still create it.
 		const c = await cf("POST", `/accounts/${account}/d1/database`, { name: expectName });
+		created.settled = true;
 		const uuid = (c.result as { uuid?: string } | undefined)?.uuid;
 		if (!c.ok || !uuid) refuse(`could not create ${expectName} (HTTP ${c.status})`);
 		id = uuid;
@@ -195,46 +203,104 @@ async function identifyTarget(): Promise<void> {
 	pass("G3 target", `account ${redact(account)} · database ${name} · id ${redact(id)}`);
 }
 
+const LOOKUP_WINDOW_MS = 60_000;
+
+async function findByName(account: string, name: string): Promise<string | null> {
+	const list = await cf("GET", `/accounts/${account}/d1/database?name=${name}&per_page=100`);
+	if (!list.ok || !Array.isArray(list.result)) throw new Error(`lookup HTTP ${list.status}`);
+	const hit = (list.result as Array<{ uuid: string; name: string }>).find((d) => d.name === name);
+	return hit?.uuid ?? null;
+}
+
 async function cleanup(): Promise<void> {
 	if (!created) return;
 	const c = created;
-	created = null; // once: the signal handler and .finally may both call it
-	// The id may be unknown (lost create answer): find the database by its exact name.
 	let id = c.id;
-	if (!id) {
-		const list = await cf("GET", `/accounts/${c.account}/d1/database?name=${c.name}&per_page=100`);
-		const hit = Array.isArray(list.result)
-			? (list.result as Array<{ uuid: string; name: string }>).find((d) => d.name === c.name)
-			: undefined;
-		if (!hit) {
-			verdict("Z cleanup", list.ok, `${c.name}: not created (lookup HTTP ${list.status})`);
-			if (!list.ok) console.error(`CLEANUP UNCONFIRMED: check for database ${c.name}`);
-			return;
+	try {
+		if (!id) {
+			// The id is unknown: the create was refused, or its answer was lost. Only a refused
+			// create is proof of "nothing created"; a lost one may still land, so poll by name.
+			const deadline = Date.now() + (c.settled ? 0 : LOOKUP_WINDOW_MS);
+			for (;;) {
+				id = await findByName(c.account, c.name);
+				if (id || Date.now() >= deadline) break;
+				await new Promise((r) => setTimeout(r, 5_000));
+			}
+			if (!id) {
+				if (c.settled) pass("Z cleanup", `${c.name}: create refused, nothing to delete`);
+				else {
+					fail(
+						"Z cleanup",
+						`${c.name}: create outcome unknown, not found after 60 s; check by hand`,
+					);
+					console.error(`CLEANUP UNCONFIRMED: check for database ${c.name}`);
+				}
+				return;
+			}
 		}
-		id = hit.uuid;
+		let gone = false;
+		let last = "";
+		for (let attempt = 1; attempt <= 3 && !gone; attempt++) {
+			const del = await cf("DELETE", `/accounts/${c.account}/d1/database/${id}`).catch(() => ({
+				status: 0,
+			}));
+			const after = await cf("GET", `/accounts/${c.account}/d1/database/${id}`).catch(() => ({
+				status: 0,
+				ok: false,
+			}));
+			gone = !after.ok && after.status === 404;
+			last = `DELETE HTTP ${del.status}; GET afterwards HTTP ${after.status} (attempt ${attempt})`;
+		}
+		verdict("Z cleanup", gone, `${c.name}: ${last}`);
+		if (!gone) console.error(`CLEANUP FAILED: delete database ${c.name} by hand`);
+	} catch (err) {
+		fail("Z cleanup", `${c.name}: ${(err as Error).message}; check by hand`);
+		console.error(`CLEANUP UNCONFIRMED: check for database ${c.name}`);
 	}
-	let gone = false;
-	let last = "";
-	for (let attempt = 1; attempt <= 3 && !gone; attempt++) {
-		const del = await cf("DELETE", `/accounts/${c.account}/d1/database/${id}`).catch(
-			(e: Error) => ({ status: 0, ok: false, e }),
-		);
-		const after = await cf("GET", `/accounts/${c.account}/d1/database/${id}`).catch(() => ({
-			status: 0,
-			ok: false,
-		}));
-		gone = !after.ok && after.status === 404;
-		last = `DELETE HTTP ${del.status}; GET afterwards HTTP ${after.status} (attempt ${attempt})`;
+}
+
+/** Memoised: a signal during the final cleanup waits for it instead of starting a second one. */
+let cleaning: Promise<void> | null = null;
+const cleanupOnce = () => {
+	cleaning ??= cleanup();
+	return cleaning;
+};
+
+let refused: string | null = null;
+/** Exit code of a signal that interrupted the run (130 SIGINT, 143 SIGTERM), whoever reports first. */
+let interrupted: number | null = null;
+let reported = false;
+function report(): void {
+	if (reported) return;
+	reported = true;
+	console.log("── MANDATORY ──");
+	for (const c of checks.filter((x) => x.ok !== null)) {
+		console.log(`${c.ok ? "PASS" : "FAIL"}  ${c.id} — ${c.detail}`);
 	}
-	verdict("Z cleanup", gone, `${c.name}: ${last}`);
-	if (!gone) console.error(`CLEANUP FAILED: delete database ${c.name} by hand`);
+	console.log("── DIAGNOSTIC (recorded, never gates) ──");
+	for (const c of checks.filter((x) => x.ok === null)) console.log(`INFO  ${c.id} — ${c.detail}`);
+	const failed = checks.filter((c) => c.ok === false).length;
+	const cleanupFailed = checks.some((c) => c.id === "Z cleanup" && c.ok === false);
+	if (interrupted !== null) {
+		console.log(`RESULT: INTERRUPTED${cleanupFailed ? " + CLEANUP FAILED" : ""}`);
+		process.exitCode = interrupted;
+	} else if (refused !== null) {
+		console.log(`RESULT: REFUSED${cleanupFailed ? " + CLEANUP FAILED" : ""} — ${refused}`);
+		process.exitCode = cleanupFailed ? 1 : 2;
+	} else {
+		console.log(failed === 0 ? "RESULT: PASS" : `RESULT: FAIL (${failed})`);
+		process.exitCode = failed === 0 ? 0 : 1;
+	}
 }
 
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
 	process.once(sig, () => {
-		cleanup()
-			.catch(() => console.error(`CLEANUP UNCONFIRMED after ${sig}: check the smoke database`))
-			.finally(() => process.exit(130));
+		fail("INTERRUPTED", sig);
+		interrupted = sig === "SIGINT" ? 130 : 143;
+		cleanupOnce().finally(() => {
+			report();
+			process.exit();
+		});
 	});
 }
 
@@ -648,27 +714,12 @@ async function main(): Promise<void> {
 	);
 }
 
-let refused: string | null = null;
 main()
 	.catch((err) => {
 		if (err instanceof Refused) refused = err.message;
 		else fail("ABORT", (err as Error).stack ?? String(err));
 	})
 	.finally(async () => {
-		await cleanup().catch((err) => fail("Z cleanup", (err as Error).message));
-		console.log("── MANDATORY ──");
-		for (const c of checks.filter((x) => x.ok !== null)) {
-			console.log(`${c.ok ? "PASS" : "FAIL"}  ${c.id} — ${c.detail}`);
-		}
-		console.log("── DIAGNOSTIC (recorded, never gates) ──");
-		for (const c of checks.filter((x) => x.ok === null)) console.log(`INFO  ${c.id} — ${c.detail}`);
-		const failed = checks.filter((c) => c.ok === false).length;
-		const cleanupFailed = checks.some((c) => c.id === "Z cleanup" && c.ok === false);
-		if (refused !== null) {
-			console.log(`RESULT: REFUSED${cleanupFailed ? " + CLEANUP FAILED" : ""} — ${refused}`);
-			process.exitCode = cleanupFailed ? 1 : 2;
-			return;
-		}
-		console.log(failed === 0 ? "RESULT: PASS" : `RESULT: FAIL (${failed})`);
-		process.exitCode = failed === 0 ? 0 : 1;
+		await cleanupOnce();
+		report();
 	});
