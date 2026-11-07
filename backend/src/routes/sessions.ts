@@ -16,6 +16,7 @@ import { EnvVarValidationError, validateEnvVars } from "../envVarValidation.js";
 import { logger } from "../logger.js";
 import * as observeLog from "../observeLog.js";
 import { mappingsFromConfig, setPortMappings } from "../portMappings.js";
+import { assertNoLiveBinding } from "../projects/directory.js";
 import {
 	encryptAuthCredentials,
 	encryptSecretEntries,
@@ -779,10 +780,11 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 				const meta = await sessions.get(req.params.id);
 				if (!meta) throw new NotFoundError("Session not found");
 				// P3a (03 §2.1): a hard delete of a session bound to a project
-				// agent is refused BEFORE any effect (409 agent-active). Only with
-				// the directory on; a soft delete keeps the row, so the binding
-				// stays readable and is not refused.
-				if (hard) await projects?.assertNoLiveBinding(req.params.id);
+				// agent is refused BEFORE any effect (409 agent-active), flag on
+				// or off (bindings outlive the flag, PROJECTS.md §6). A soft
+				// delete keeps the row, so the binding stays readable and is
+				// not refused.
+				if (hard) await assertNoLiveBinding(req.params.id);
 
 				// kill() runs on EVERY delete, `terminated` rows included
 				// (P1-C): a row can say terminated while Docker still holds
@@ -816,7 +818,7 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 					// first check and here is seen now, and none can land later (the
 					// creation trigger refuses a terminated session). A hit leaves an
 					// ordinary soft delete: row kept, nothing purged.
-					await projects?.assertNoLiveBinding(req.params.id);
+					await assertNoLiveBinding(req.params.id);
 					// Wipe workspace files, then drop the row. The row is the
 					// only reference that lets a retry purge the workspace,
 					// uploads, `.st-control` and conversation data: a failed

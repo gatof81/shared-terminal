@@ -1131,8 +1131,10 @@ does not gate the schema. v19 is additive (four tables, three indexes, two trigg
 column changes), idempotent, and harmless to the previous backend (no foreign key to `sessions`, so
 its hard delete is unaffected) — rolling the code back needs no schema step and leaves the tables
 inert. Take a backup before the first boot that applies it, as for any migration. Turning the flag on
-is a separate decision; with it on, a hard delete of a session bound to a project agent answers 409
-`agent-active` until the agent is removed.
+is a separate decision. A hard delete of a session bound to a project agent answers 409 `agent-active`
+until the agent is removed, with the flag on or off (bindings outlive the flag). **Rollback after the
+flag has been on is not free:** the previous backend does not guard bound sessions and its backup does
+not export the directory — prefer turning the flag off, and see PROJECTS.md §8 for the conditions.
 
 ## Backup & restore (#240)
 

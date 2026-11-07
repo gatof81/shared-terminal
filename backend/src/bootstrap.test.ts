@@ -250,14 +250,14 @@ describe("runAsyncBootstrap", () => {
 		broadcaster: BootstrapBroadcaster;
 		final: BootstrapMessage[];
 		spies: {
-			updateStatus: ReturnType<typeof vi.fn>;
+			markFailed: ReturnType<typeof vi.fn>;
 			kill: ReturnType<typeof vi.fn>;
 			runPostCreate: ReturnType<typeof vi.fn>;
 			runPostStart: ReturnType<typeof vi.fn>;
 			setBootstrapLog: ReturnType<typeof vi.fn>;
 		};
 	} {
-		const updateStatus = vi.fn(async () => undefined);
+		const markFailed = vi.fn(async () => true);
 		const kill = vi.fn(async () => undefined);
 		const runPostCreate = vi.fn();
 		const runPostStart = vi.fn(async () => undefined);
@@ -267,7 +267,7 @@ describe("runAsyncBootstrap", () => {
 		// #198 — the readiness stage resolves the container name via
 		// getOrThrow; a fixed fake keeps every test deterministic.
 		const getOrThrow = vi.fn(async () => ({ containerName: "st-sess1" }));
-		const sessions = { updateStatus, setBootstrapLog, getOrThrow } as unknown as SessionManager;
+		const sessions = { markFailed, setBootstrapLog, getOrThrow } as unknown as SessionManager;
 		const docker = { kill, runPostCreate, runPostStart } as unknown as DockerManager;
 		const broadcaster = new BootstrapBroadcaster();
 		const final: BootstrapMessage[] = [];
@@ -279,7 +279,7 @@ describe("runAsyncBootstrap", () => {
 			docker,
 			broadcaster,
 			final,
-			spies: { updateStatus, kill, runPostCreate, runPostStart, setBootstrapLog },
+			spies: { markFailed, kill, runPostCreate, runPostStart, setBootstrapLog },
 		};
 	}
 
@@ -307,12 +307,32 @@ describe("runAsyncBootstrap", () => {
 		);
 		await settle();
 
-		expect(spies.updateStatus).not.toHaveBeenCalled();
+		expect(spies.markFailed).not.toHaveBeenCalled();
 		expect(spies.kill).not.toHaveBeenCalled();
 		expect(spies.runPostStart).toHaveBeenCalledWith("sess-1", "npm run dev");
 		// markBootstrapped fired the UPDATE on session_configs.
 		expect(dbStubs.d1Query).toHaveBeenCalled();
 		expect(final).toEqual([{ type: "done", success: true }]);
+	});
+
+	// P3a (PROJECTS.md §6): a hard delete may have terminated the row before
+	// the bootstrap failed. markFailed then changes nothing, and the kill
+	// (idempotent, under the session lock) still runs.
+	it("fail path on a row a delete already terminated: status kept, kill still runs, fail broadcast", async () => {
+		const { sessions, docker, broadcaster, final, spies } = makeFakes();
+		spies.markFailed.mockResolvedValue(false);
+		spies.runPostCreate.mockImplementation(async () => ({ exitCode: 1 }));
+
+		await runAsyncBootstrap(
+			"sess-1",
+			{ postCreateCmd: "false" },
+			{ sessions, docker, broadcaster },
+		);
+		await settle();
+
+		expect(spies.markFailed).toHaveBeenCalledWith("sess-1");
+		expect(spies.kill).toHaveBeenCalledWith("sess-1");
+		expect(final.map((m) => m.type)).toEqual(["fail"]);
 	});
 
 	// Round-5 of PR 185b2a settled the order: status flip BEFORE kill,
@@ -321,8 +341,8 @@ describe("runAsyncBootstrap", () => {
 	it("fail path: flips status to failed BEFORE kill, broadcasts fail with exitCode", async () => {
 		const { sessions, docker, broadcaster, final, spies } = makeFakes();
 		const order: string[] = [];
-		spies.updateStatus.mockImplementation(async () => {
-			order.push("updateStatus");
+		spies.markFailed.mockImplementation(async () => {
+			order.push("markFailed");
 		});
 		spies.kill.mockImplementation(async () => {
 			order.push("kill");
@@ -341,10 +361,10 @@ describe("runAsyncBootstrap", () => {
 		);
 		await settle();
 
-		expect(spies.updateStatus).toHaveBeenCalledWith("sess-1", "failed");
+		expect(spies.markFailed).toHaveBeenCalledWith("sess-1");
 		expect(spies.kill).toHaveBeenCalledWith("sess-1");
 		// Ordering invariant — status flip lands BEFORE kill.
-		expect(order).toEqual(["updateStatus", "kill"]);
+		expect(order).toEqual(["markFailed", "kill"]);
 		expect(spies.runPostStart).not.toHaveBeenCalled();
 		// #252: fail message includes the stage label so the frontend
 		// can render an accurate error (rather than the legacy hard-
@@ -363,7 +383,7 @@ describe("runAsyncBootstrap", () => {
 		);
 		await settle();
 
-		expect(spies.updateStatus).toHaveBeenCalledWith("sess-1", "failed");
+		expect(spies.markFailed).toHaveBeenCalledWith("sess-1");
 		expect(spies.kill).toHaveBeenCalledWith("sess-1");
 		expect(final).toHaveLength(1);
 		expect(final[0]).toMatchObject({ type: "fail", exitCode: -1 });
@@ -458,8 +478,8 @@ describe("runAsyncBootstrap", () => {
 	it("fail path: clone non-zero exit flips status, kills, broadcasts fail (postCreate not run)", async () => {
 		const { sessions, docker, broadcaster, final, spies } = makeFakes();
 		const order: string[] = [];
-		spies.updateStatus.mockImplementation(async () => {
-			order.push("updateStatus");
+		spies.markFailed.mockImplementation(async () => {
+			order.push("markFailed");
 		});
 		spies.kill.mockImplementation(async () => {
 			order.push("kill");
@@ -478,9 +498,9 @@ describe("runAsyncBootstrap", () => {
 		);
 		await settle();
 
-		expect(spies.updateStatus).toHaveBeenCalledWith("sess-1", "failed");
+		expect(spies.markFailed).toHaveBeenCalledWith("sess-1");
 		expect(spies.kill).toHaveBeenCalledWith("sess-1");
-		expect(order).toEqual(["updateStatus", "kill"]);
+		expect(order).toEqual(["markFailed", "kill"]);
 		expect(spies.runPostCreate).not.toHaveBeenCalled();
 		expect(final).toEqual([{ type: "fail", exitCode: 128, stage: "clone" }]);
 	});
@@ -501,7 +521,7 @@ describe("runAsyncBootstrap", () => {
 		);
 		await settle();
 
-		expect(spies.updateStatus).toHaveBeenCalledWith("sess-1", "failed");
+		expect(spies.markFailed).toHaveBeenCalledWith("sess-1");
 		expect(spies.kill).toHaveBeenCalledWith("sess-1");
 		expect(spies.runPostCreate).not.toHaveBeenCalled();
 		expect(final).toHaveLength(1);
@@ -757,7 +777,7 @@ describe("runAsyncBootstrap", () => {
 
 		// Status flipped to failed + container killed — these are the
 		// `failSession` calls; without them, the session is a zombie.
-		expect(spies.updateStatus).toHaveBeenCalledWith("sess-1", "failed");
+		expect(spies.markFailed).toHaveBeenCalledWith("sess-1");
 		expect(spies.kill).toHaveBeenCalledWith("sess-1");
 		// postCreate never runs because the pipeline short-circuits.
 		expect(spies.runPostCreate).not.toHaveBeenCalled();
@@ -846,7 +866,7 @@ describe("runAsyncBootstrap", () => {
 		);
 		await settle();
 
-		expect(spies.updateStatus).not.toHaveBeenCalled();
+		expect(spies.markFailed).not.toHaveBeenCalled();
 		expect(spies.kill).not.toHaveBeenCalled();
 		expect(final).toEqual([{ type: "done", success: true }]);
 	});
@@ -874,7 +894,7 @@ describe("runAsyncBootstrap", () => {
 		);
 		await settle();
 
-		expect(spies.updateStatus).toHaveBeenCalledWith("sess-1", "failed");
+		expect(spies.markFailed).toHaveBeenCalledWith("sess-1");
 		expect(spies.kill).toHaveBeenCalledWith("sess-1");
 		expect(spies.runPostCreate).not.toHaveBeenCalled();
 		expect(final).toEqual([{ type: "fail", exitCode: 13, stage: "writeEnvFile" }]);
@@ -900,7 +920,7 @@ describe("runAsyncBootstrap", () => {
 		);
 		await settle();
 
-		expect(spies.updateStatus).toHaveBeenCalledWith("sess-1", "failed");
+		expect(spies.markFailed).toHaveBeenCalledWith("sess-1");
 		expect(spies.kill).toHaveBeenCalledWith("sess-1");
 		expect(agentSeedStubs.runAgentSeed).not.toHaveBeenCalled();
 		expect(spies.runPostCreate).not.toHaveBeenCalled();
@@ -1001,7 +1021,7 @@ describe("runAsyncBootstrap", () => {
 			await vi.advanceTimersByTimeAsync(10 * 60 * 1000 + 100);
 			await runPromise;
 
-			expect(spies.updateStatus).toHaveBeenCalledWith("sess-1", "failed");
+			expect(spies.markFailed).toHaveBeenCalledWith("sess-1");
 			expect(spies.kill).toHaveBeenCalledWith("sess-1");
 			expect(spies.runPostCreate).not.toHaveBeenCalled();
 			// Final terminal message is `fail` with the timeout error
@@ -1078,9 +1098,9 @@ describe("runAsyncBootstrap", () => {
 		const [_sid, log] = spies.setBootstrapLog.mock.calls[0]!;
 		expect(log).toContain("missing .env file");
 		// Failure path also flipped status — both writes are present.
-		expect(spies.updateStatus).toHaveBeenCalledWith("sess-1", "failed");
+		expect(spies.markFailed).toHaveBeenCalledWith("sess-1");
 		// Order is the load-bearing invariant: setBootstrapLog MUST
-		// land before updateStatus(failed) so a GET /bootstrap-log
+		// land before markFailed so a GET /bootstrap-log
 		// racing the flip sees populated content. Vitest's
 		// `invocationCallOrder` is monotonically increasing across all
 		// mocks in the test run, so a strict `<` comparison pins the
@@ -1088,8 +1108,8 @@ describe("runAsyncBootstrap", () => {
 		// future refactor that moved persistLog after failSession)
 		// would flip this comparison and fail the test loudly.
 		const setLogOrder = spies.setBootstrapLog.mock.invocationCallOrder[0]!;
-		const updateStatusOrder = spies.updateStatus.mock.invocationCallOrder[0]!;
-		expect(setLogOrder).toBeLessThan(updateStatusOrder);
+		const markFailedOrder = spies.markFailed.mock.invocationCallOrder[0]!;
+		expect(setLogOrder).toBeLessThan(markFailedOrder);
 	});
 
 	it("survives a D1 hiccup on setBootstrapLog without crashing the runner (best-effort persistence)", async () => {
@@ -1166,7 +1186,7 @@ describe("runAsyncBootstrap", () => {
 // registered run and awaits its teardown (status flip + log persist + kill).
 describe("drainInFlightBootstraps (#348)", () => {
 	function makeFakes() {
-		const updateStatus = vi.fn(async () => undefined);
+		const markFailed = vi.fn(async () => true);
 		const kill = vi.fn(async () => undefined);
 		const runPostCreate = vi.fn();
 		const runPostStart = vi.fn(async () => undefined);
@@ -1174,14 +1194,14 @@ describe("drainInFlightBootstraps (#348)", () => {
 		// #198 — the readiness stage resolves the container name via
 		// getOrThrow; a fixed fake keeps every test deterministic.
 		const getOrThrow = vi.fn(async () => ({ containerName: "st-sess1" }));
-		const sessions = { updateStatus, setBootstrapLog, getOrThrow } as unknown as SessionManager;
+		const sessions = { markFailed, setBootstrapLog, getOrThrow } as unknown as SessionManager;
 		const docker = { kill, runPostCreate, runPostStart } as unknown as DockerManager;
 		const broadcaster = new BootstrapBroadcaster();
 		const final: BootstrapMessage[] = [];
 		broadcaster.subscribe("sess-1", (m) => {
 			if (m.type === "done" || m.type === "fail") final.push(m);
 		});
-		return { sessions, docker, broadcaster, final, updateStatus, kill, setBootstrapLog };
+		return { sessions, docker, broadcaster, final, markFailed, kill, setBootstrapLog };
 	}
 	const settle = () => new Promise<void>((r) => setImmediate(r));
 
@@ -1190,8 +1210,7 @@ describe("drainInFlightBootstraps (#348)", () => {
 	});
 
 	it("aborts a hung stage: status→failed, kill, shutdown reason in broadcast AND persisted log", async () => {
-		const { sessions, docker, broadcaster, final, updateStatus, kill, setBootstrapLog } =
-			makeFakes();
+		const { sessions, docker, broadcaster, final, markFailed, kill, setBootstrapLog } = makeFakes();
 		// Stage that hangs until the run's signal aborts — the shape of a
 		// long `npm install` interrupted by a deploy.
 		(docker.runPostCreate as ReturnType<typeof vi.fn>).mockImplementation(
@@ -1211,7 +1230,7 @@ describe("drainInFlightBootstraps (#348)", () => {
 		await drainInFlightBootstraps();
 		await run;
 
-		expect(updateStatus).toHaveBeenCalledWith("sess-1", "failed");
+		expect(markFailed).toHaveBeenCalledWith("sess-1");
 		expect(kill).toHaveBeenCalledWith("sess-1");
 		// The abort must be reported as a SHUTDOWN, not misattributed to
 		// the 10-min cap ("bootstrap timeout") — the discriminator keys
@@ -1228,7 +1247,7 @@ describe("drainInFlightBootstraps (#348)", () => {
 	});
 
 	it("is a no-op for runs that already completed (registry cleaned up)", async () => {
-		const { sessions, docker, broadcaster, updateStatus } = makeFakes();
+		const { sessions, docker, broadcaster, markFailed } = makeFakes();
 		(docker.runPostCreate as ReturnType<typeof vi.fn>).mockImplementation(async () => ({
 			exitCode: 0,
 		}));
@@ -1240,7 +1259,7 @@ describe("drainInFlightBootstraps (#348)", () => {
 		await runAsyncBootstrap("sess-1", { postCreateCmd: "true" }, { sessions, docker, broadcaster });
 		await drainInFlightBootstraps();
 		// No late abort machinery fired against the finished run.
-		expect(updateStatus).not.toHaveBeenCalled();
+		expect(markFailed).not.toHaveBeenCalled();
 	});
 });
 

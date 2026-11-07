@@ -72,8 +72,9 @@ const statements: string[] = [];
 let jitterMs = 0;
 /** HTTP status of a refused statement's answer: real D1 may use a 4xx with the same envelope. */
 let refusalStatus = 200;
-/** Called by the Docker fake's kill(): lets a test land a write mid-delete. */
-let onKill: (() => void) | null = null;
+/** Called by the Docker fake's kill() / purgeWorkspace(): lets a test land a write mid-delete. */
+let onKill: (() => void | Promise<void>) | null = null;
+let onPurge: ((sid: string) => void | Promise<void>) | null = null;
 
 function run(sql: string, params: unknown[]) {
 	try {
@@ -232,10 +233,11 @@ async function startServer(withDirectory: boolean) {
 		gatherStats: async () => new Map(),
 		kill: async (sid: string) => {
 			dockerCalls.push(`kill ${sid}`);
-			onKill?.();
+			await onKill?.();
 		},
 		purgeWorkspace: async (sid: string) => {
 			dockerCalls.push(`purge ${sid}`);
+			await onPurge?.(sid);
 		},
 	};
 	const app = express();
@@ -307,6 +309,7 @@ beforeEach(async () => {
 	jitterMs = 0;
 	refusalStatus = 200;
 	onKill = null;
+	onPurge = null;
 	await freshDb();
 });
 afterEach(async () => {
@@ -462,7 +465,7 @@ describe("PROJECT_CHAT_ENABLED off", () => {
 		expect(statements.some((s) => /agent_bindings|project_agents|projects\b/.test(s))).toBe(false);
 	});
 
-	it("a hard delete is not guarded (no directory read) — the pre-P3a behaviour", async () => {
+	it("a hard delete is still guarded: bindings left by a flag-on run outlive the flag (PROJECTS.md §6)", async () => {
 		db.prepare(
 			"INSERT INTO projects (project_id, owner_user_id, name, client_request_id, request_hash) VALUES ('p', ?, 'x', 'c', 'h')",
 		).run(OWNER);
@@ -472,10 +475,25 @@ describe("PROJECT_CHAT_ENABLED off", () => {
 		db.prepare(
 			"INSERT INTO agent_bindings (binding_id, agent_id, epoch, st_session_id, state) VALUES ('b', 'a', 1, ?, 'active')",
 		).run(S.dev);
+		const bound = await api("DELETE", `/sessions/${S.dev}?hard=true`, OWNER);
+		expect({ status: bound.status, code: bound.json.error }).toEqual({
+			status: 409,
+			code: "agent-active",
+		});
+		expect(dockerCalls).toEqual([]);
+		const admin = await api("DELETE", `/admin/sessions/${S.dev}?hard=true`, ADMIN);
+		expect(admin.status).toBe(409);
+		// An unbound session: the pre-P3a delete, plus the one guard read before and after.
 		statements.length = 0;
-		const r = await api("DELETE", `/sessions/${S.dev}?hard=true`, OWNER);
-		expect(r.status).toBe(204);
-		expect(statements.some((s) => /agent_bindings/.test(s))).toBe(false);
+		const free = await api("DELETE", `/sessions/${S.qa}?hard=true`, OWNER);
+		expect(free.status).toBe(204);
+		expect(dockerCalls).toEqual([`kill ${S.qa}`, `purge ${S.qa}`]);
+		expect(statements.filter((q) => /agent_bindings/.test(q))).toHaveLength(2);
+		expect(statements.some((q) => /project_agents|projects\b/.test(q))).toBe(false);
+		// A soft delete reads nothing from the directory.
+		statements.length = 0;
+		expect((await api("DELETE", `/sessions/${S.architect}`, OWNER)).status).toBe(204);
+		expect(statements.some((q) => /agent_bindings/.test(q))).toBe(false);
 	});
 });
 
@@ -1142,6 +1160,19 @@ describe("agents: reads, boundary and removal", () => {
 		expect(late.json.error).toBe("session-not-found");
 	});
 
+	it("the admin force hard delete re-checks after the terminate too", async () => {
+		onKill = () => {
+			db.prepare(
+				`INSERT INTO project_agent_creations (owner_user_id, client_request_id, request_hash, project_id, agent_id, binding_id, st_session_id, handle, created_at)
+				 VALUES (?, ?, 'h', ?, ?, ?, ?, 'qa-hz', '2026-11-10 13:00:00')`,
+			).run(OWNER, uuid(), pid, uuid(), uuid(), S.qa);
+		};
+		const r = await api("DELETE", `/admin/sessions/${S.qa}?hard=true`, ADMIN);
+		expect({ status: r.status, code: r.json.error }).toEqual({ status: 409, code: "agent-active" });
+		expect(dockerCalls).toEqual([`kill ${S.qa}`]);
+		expect(count("SELECT COUNT(*) AS n FROM sessions WHERE session_id = ?", S.qa)).toBe(1);
+	});
+
 	it("the admin force hard delete has the same guard", async () => {
 		const r = await api("DELETE", `/admin/sessions/${S.dev}?hard=true`, ADMIN);
 		expect({ status: r.status, code: r.json.error }).toEqual({ status: 409, code: "agent-active" });
@@ -1171,6 +1202,129 @@ describe("agents: reads, boundary and removal", () => {
 		const before = row(S.qa);
 		await api("POST", `/projects/${pid}/agents`, OWNER, agentBody("qa-hz", S.qa));
 		expect(row(S.qa)).toEqual(before);
+	});
+});
+
+describe("hard delete vs a failing bootstrap (PROJECTS.md §6)", () => {
+	let pid: string;
+	beforeEach(async () => {
+		await startServer(true);
+		pid = await project();
+	});
+	const status = (sid: string) =>
+		(
+			db.prepare("SELECT status FROM sessions WHERE session_id = ?").get(sid) as
+				| { status: string }
+				| undefined
+		)?.status ?? null;
+	const liveOn = (sid: string) =>
+		count(
+			"SELECT COUNT(*) AS n FROM agent_bindings WHERE st_session_id = ? AND state IN ('active','draining')",
+			sid,
+		);
+	const markFailed = async (sid: string) => {
+		const { SessionManager } = await load();
+		return new SessionManager().markFailed(sid);
+	};
+
+	it("markFailed never rewrites terminated; it still flips a live row", async () => {
+		expect(await markFailed(S.terminated)).toBe(false);
+		expect(status(S.terminated)).toBe("terminated");
+		expect(await markFailed(S.qa)).toBe(true);
+		expect(status(S.qa)).toBe("failed");
+		expect(await markFailed(uuid())).toBe(false); // a row already dropped
+	});
+
+	it("the bootstrap's flip landing during the purge leaves the row terminated, and no binding can appear", async () => {
+		let attempt: Awaited<ReturnType<typeof api>> | null = null;
+		onPurge = async (sid) => {
+			expect(await markFailed(sid)).toBe(false);
+			attempt = await api("POST", `/projects/${pid}/agents`, OWNER, agentBody("late-hz", sid));
+			expect(status(sid)).toBe("terminated");
+			expect(liveOn(sid)).toBe(0);
+		};
+		const r = await api("DELETE", `/sessions/${S.qa}?hard=true`, OWNER);
+		expect(r.status).toBe(204);
+		expect(attempt).not.toBeNull();
+		expect(attempt!.json.error).toBe("session-not-found");
+		expect(status(S.qa)).toBeNull();
+		expect(count("SELECT COUNT(*) AS n FROM project_agents")).toBe(0);
+	});
+
+	it("control: the old unconditional flip WOULD re-open binding during the purge", async () => {
+		// What `updateStatus(sid, "failed")` did before markFailed: this is the
+		// window the conditional statement closes.
+		onPurge = async (sid) => {
+			db.prepare("UPDATE sessions SET status = 'failed' WHERE session_id = ?").run(sid);
+			const late = await api("POST", `/projects/${pid}/agents`, OWNER, agentBody("late-hz", sid));
+			expect(late.status).toBe(201);
+		};
+		await api("DELETE", `/sessions/${S.qa}?hard=true`, OWNER);
+		expect(liveOn(S.qa)).toBe(1); // a live binding to a purged, dropped session
+	});
+
+	it("the flip landing before the terminate (during the kill) is overwritten by it; the purge still sees no binding", async () => {
+		onKill = async () => {
+			expect(await markFailed(S.qa)).toBe(true);
+		};
+		onPurge = async (sid) => {
+			expect(status(sid)).toBe("terminated");
+			const late = await api("POST", `/projects/${pid}/agents`, OWNER, agentBody("late-hz", sid));
+			expect(late.json.error).toBe("session-not-found");
+		};
+		expect((await api("DELETE", `/sessions/${S.qa}?hard=true`, OWNER)).status).toBe(204);
+		expect(status(S.qa)).toBeNull();
+	});
+
+	it("randomised interleavings of hard delete ∥ bootstrap flip ∥ agent creation: never a purge with a live binding, never terminated → failed", async () => {
+		jitterMs = 4;
+		const ins = db.prepare(
+			"INSERT INTO sessions (session_id, user_id, name, container_name, status) VALUES (?, ?, ?, ?, 'running')",
+		);
+		const purgedWithLive: string[] = [];
+		const purgedNotTerminated: string[] = [];
+		onPurge = async (sid) => {
+			// The purge is long: give the racers time to land inside it.
+			await new Promise((r) => setTimeout(r, Math.random() * 6));
+			if (liveOn(sid) > 0) purgedWithLive.push(sid);
+			if (status(sid) !== "terminated") purgedNotTerminated.push(sid);
+		};
+		const outcomes = { deleted: 0, refused: 0 };
+		for (let i = 0; i < 40; i++) {
+			const sid = uuid();
+			ins.run(sid, OWNER, `race-${i}`, `st-${sid.slice(0, 12)}`);
+			const [del, , create] = await Promise.all([
+				api("DELETE", `/sessions/${sid}?hard=true`, OWNER),
+				markFailed(sid).catch(() => false),
+				api("POST", `/projects/${pid}/agents`, OWNER, agentBody(`race-${i}`, sid)),
+			]);
+			if (del.status === 204) {
+				outcomes.deleted++;
+				expect(status(sid)).toBeNull();
+			} else {
+				// Refused by the guard: an ordinary soft delete, the agent got it first.
+				expect({ status: del.status, code: del.json.error }).toEqual({
+					status: 409,
+					code: "agent-active",
+				});
+				expect(create.status).toBe(201);
+				// Refused at the first check: no effect at all, the row is whatever
+				// the bootstrap left. At the second (after the kill): a soft delete.
+				const killed = dockerCalls.includes(`kill ${sid}`);
+				expect(killed ? ["terminated"] : ["running", "failed"]).toContain(status(sid));
+				expect(dockerCalls).not.toContain(`purge ${sid}`);
+				outcomes.refused++;
+			}
+			// Whatever the order, a terminated row never went back to failed.
+			expect(status(sid) === "failed" && del.status === 204).toBe(false);
+			expect(liveOn(sid)).toBeLessThanOrEqual(1);
+		}
+		expect(purgedWithLive).toEqual([]);
+		expect(purgedNotTerminated).toEqual([]);
+		expect(outcomes.deleted + outcomes.refused).toBe(40);
+		// Both branches were exercised (a guard that refused everything, or nothing, is not a race).
+		expect(outcomes.deleted).toBeGreaterThan(0);
+		expect(outcomes.refused).toBeGreaterThan(0);
 	});
 });
 

@@ -15,7 +15,7 @@ its capture, its composer or its CLI conversations.
 
 | `PROJECT_CHAT_ENABLED` | Behaviour |
 | --- | --- |
-| unset / anything but `true`/`1` (default) | `/api/projects*` do not exist (the same 404 as any unknown path, also unauthenticated — never 401). `GET /api/auth/status` has exactly its previous keys. `GET /api/sessions` rows have no `binding` key and the request reads nothing of the directory. Hard deletes are not guarded. Boot logs are unchanged. |
+| unset / anything but `true`/`1` (default) | `/api/projects*` do not exist (the same 404 as any unknown path, also unauthenticated — never 401). `GET /api/auth/status` has exactly its previous keys. `GET /api/sessions` rows have no `binding` key and the request reads nothing of the directory. Boot logs are unchanged. The hard-delete guard (§6) stays armed: with no binding the delete is the previous one plus one D1 read. |
 | `true` / `1` | The routes of §4 are mounted; `features: {projectChat: true}` on `/api/auth/status`; `binding` on `/api/sessions` rows (§4.6); the hard-delete guard (§6). |
 
 **Migration v19 runs at boot whatever the flag says.** The flag gates the API, not the schema. Deploying
@@ -24,9 +24,9 @@ tables, three indexes, two triggers; no existing column touched), idempotent (ev
 `IF NOT EXISTS`; a boot that dies part-way converges on the next), and compatible with the previous
 backend: that code never reads the new tables, and nothing in them references `sessions`, so its hard
 delete keeps working (§2). There is no down-migration; rolling the code back leaves the tables inert.
-Turning the flag off after agents exist keeps every row; while it is off, a session hard delete is not
-guarded and can leave a binding to a session row that no longer exists, which reads
-`disconnected · session-gone` (§5) once the flag is back on, and the agent can then be removed.
+Turning the flag off after agents exist keeps every row, and **this** backend keeps refusing a hard delete
+of a bound session (§6) with the flag off: turning the flag off is a safe kill switch. Rolling the
+**code** back is not the same thing: the previous backend does not know the bindings (§8).
 
 ## 2. Schema (D1 v19)
 
@@ -228,27 +228,67 @@ at every container stop, so a bound pane is the current start), the one with the
 
 ## 6. Hard delete of a bound session
 
-With the flag on, `DELETE /api/sessions/:id?hard=true` and `DELETE /api/admin/sessions/:id?hard=true`
-answer **409 `agent-active`** while the session has a live binding, checked under the session lifecycle
-lock **before any effect** (no kill, no purge, row kept). The check is uncached and fail-closed: a failed
-read refuses the delete (500). The owner removes the agent first. Soft deletes are not refused: the row
-stays, the binding stays readable (`disconnected · session-terminated`).
+`DELETE /api/sessions/:id?hard=true` and `DELETE /api/admin/sessions/:id?hard=true` answer **409
+`agent-active`** while the session has a live binding, checked under the session lifecycle lock **before
+any effect** (no kill, no purge, row kept). The guard is armed **whatever the flag says**: bindings created
+while it was on outlive turning it off, and v19 exists from the first boot of this code. The check is
+uncached and fail-closed: a failed read refuses the delete (500). The owner removes the agent first. Soft
+deletes are not refused and read nothing of the directory: the row stays, the binding stays readable
+(`disconnected · session-terminated`).
 
 Agent creation does not take the session lock, so the check runs **twice**: before the kill, and again
-after the session is `terminated` and before the purge. Once terminated, the creation trigger refuses
-the session, so no binding can appear after the second check; one that landed in between is caught there
-and the delete stops as an ordinary soft delete (409 `agent-active`, row kept as `terminated`, nothing
-purged).
+after the session is `terminated` and before the purge. One that landed in between is caught there and
+the delete stops as an ordinary soft delete (409 `agent-active`, row kept as `terminated`, nothing
+purged). After the second check no binding can appear, because two rules hold together:
 
-Residual window (pre-existing, not P3a's): a bootstrap failing at that moment can rewrite the row from
-`terminated` to `failed` outside the session lock (`failSession`), which re-opens binding during the
-purge; and a hard delete made with the flag off is never guarded (§1). Either way the outcome is a
-binding to a gone session: it reads `disconnected · session-gone`, the agent can be removed, and nothing
-operates on bindings in P3a. Closing it (a row drop conditional on no live binding, and `failSession`
-never rewriting `terminated`) is a precondition for P3/T1, which will act on bindings.
+1. the creation trigger refuses a `terminated` session (§3), inside the INSERT statement itself;
+2. nothing turns a `terminated` row back: the only status writer that runs outside the session lock is
+   the bootstrap's hard-fail flip (`failSession`), and it is **one conditional statement**
+   (`SessionManager.markFailed`: `… SET status = 'failed' WHERE session_id = ? AND status != 'terminated'`).
+   Every other writer (start, stop, kill, terminate, recreate) holds the lock the delete holds, and
+   `reconcile()` runs before the server listens.
+
+So a purge never runs while a live binding exists, and a deleted session never comes back as `failed`.
+`directory.sqlite.test.ts` (“hard delete vs a failing bootstrap”) lands the flip and a creation inside
+the kill and inside the purge, races all three 40 times with jitter, and a control test shows the old
+unconditional flip re-opening the window. `markFailed` changes the flag-off behaviour in exactly one
+case, the bug it fixes: a bootstrap failing after a delete no longer rewrites `terminated` to `failed`.
+
+Residual (pre-existing, not P3a's): the create route's rollback drops a session row whose spawn failed.
+The row is visible while the spawn runs, so an agent created on it in those seconds is left bound to a
+session that no longer exists. It reads `disconnected · session-gone` (§5), the agent can be removed, and
+nothing operates on bindings in P3a. A row drop conditional on no live binding there is a precondition
+for P3/T1, which will act on bindings.
 
 ## 7. Isolation limits
 
 No agent can belong to two projects or reach another project's agents or bindings through this API.
 This is **API isolation only**: every session container still joins the shared `sessions-net` and can
 reach other session containers by name (CLAUDE.md, #291). Projects do not isolate networks.
+
+## 8. Rollback
+
+There is no down-migration and none is needed: the previous backend's `migrateDb()` finds every version
+it knows (1–18) in the ledger and applies nothing; it never reads the four tables, and nothing in them
+references `sessions`. **Never drop the v19 tables or edit the ledger** to "undo" v19: re-upgrading would
+recreate them empty and the binding history would be lost.
+
+| Case | What the previous backend does with it | Safe rollback |
+| --- | --- | --- |
+| **A.** v19 applied, flag never on, no project created | nothing: the tables are empty and unread | yes, no precondition. A later re-upgrade finds v19 recorded and applies nothing |
+| **B.** flag was on, agents with live bindings exist | ignores them. (1) Its hard delete is **not** guarded: a bound session can be purged and its row dropped. (2) Its `failSession` rewrites `terminated` to `failed` again. (3) Its `npm run backup` does not export the four tables, so a backup taken under it has no directory. | only under the conditions below |
+
+Conditions for a rollback in case B, in order of preference:
+
+1. **Do not roll back the code; turn the flag off.** This backend with the flag off keeps every row,
+   keeps the hard-delete guard and keeps `markFailed`. It is the kill switch for the directory.
+2. If the code must go back: **before** the rollback, take `npm run backup` with **this** backend (it
+   exports the four tables) and keep it as the directory's recovery point; then either
+   - remove every agent through the API (`DELETE /api/projects/:pid/agents/:aid`): their bindings retire,
+     no session is protected any more, and the rollback is case A plus inert history rows; or
+   - keep the agents and impose, for as long as the previous backend runs, an **operator rule: no hard
+     delete of a bound session**. The bound sessions are
+     `SELECT st_session_id FROM agent_bindings WHERE state IN ('active','draining')` (a read).
+3. After re-upgrading, a binding whose session was purged in between reads
+   `disconnected · session-gone` (§5) and its agent can be removed; nothing else acts on it in P3a.
+

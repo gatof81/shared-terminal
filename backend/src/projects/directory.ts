@@ -859,10 +859,22 @@ export class ProjectDirectory {
 	 * it through.
 	 */
 	async assertNoLiveBinding(sessionId: string): Promise<void> {
-		const r = await d1Query(
-			`SELECT 1 AS live FROM agent_bindings WHERE st_session_id = ? AND state IN ${LIVE} LIMIT 1`,
-			[sessionId],
-		);
-		if (r.results.length > 0) throw new AgentActiveError();
+		await assertNoLiveBinding(sessionId);
 	}
+}
+
+/**
+ * The hard-delete guard, armed whatever PROJECT_CHAT_ENABLED says: v19
+ * exists from the first boot of this code, and bindings created while the
+ * flag was on outlive turning it off. Without the flag the routes do not
+ * exist, so no binding can appear — the guard only protects what an earlier
+ * flag-on run left (PROJECTS.md §6, §8). With no binding the delete is the
+ * same as before; the cost is one D1 read per hard delete, never per soft one.
+ */
+export async function assertNoLiveBinding(sessionId: string): Promise<void> {
+	const r = await d1Query(
+		`SELECT 1 AS live FROM agent_bindings WHERE st_session_id = ? AND state IN ${LIVE} LIMIT 1`,
+		[sessionId],
+	);
+	if (r.results.length > 0) throw new AgentActiveError();
 }

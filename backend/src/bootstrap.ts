@@ -845,7 +845,11 @@ async function failSession(
 	docker: DockerManager,
 ): Promise<void> {
 	try {
-		await sessions.updateStatus(sessionId, "failed");
+		if (!(await sessions.markFailed(sessionId))) {
+			logger.info(
+				`[bootstrap] session ${sessionId} was already terminated (or gone) when its bootstrap failed; status kept`,
+			);
+		}
 	} catch (err) {
 		logger.error(
 			`[bootstrap] CRITICAL: could not flip session ${sessionId} to failed: ${(err as Error).message}. ` +
