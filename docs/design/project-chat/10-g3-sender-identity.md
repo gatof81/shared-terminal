@@ -7,6 +7,10 @@ roadmap), G3.4 sigue bloqueado.** Revisa el diseño de este directorio (en parti
 el código de `main` en `1ec4d6c`. No cambia R1–R15, G1–G12 ni el roadmap; donde propone un cambio de
 contrato, lo dice. No toca UI, Composer, F1/F2/N14/N17, VM100 ni el kit auditado.
 
+> **Nombres posteriores (2026-11-07):** el 409 `previous-agent-in-flight` de este informe se llama
+> `binding-draining` (14 §3.2, 15 §3.6); la regla es la misma. PR-G3-1 se mergeó como `a93232f`.
+> Este informe conserva los nombres con los que se aprobó.
+
 ## 0. Resumen
 
 - **G3, tal como lo define la POC, es la evidencia de aceptación del lado del receptor**: el

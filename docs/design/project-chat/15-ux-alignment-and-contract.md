@@ -1,7 +1,8 @@
 # Project Chat — alineación de arquitectura y UX (#512 ↔ #554) y contrato backend/frontend
 
 Estado: **revisión 2026-11-06; decisiones D-UX0–D-UX10 y enmiendas E-1–E-9 APROBADAS el 2026-11-07
-(§4.1).** P3a está en desarrollo en el PR draft #557 (sin merge ni deploy), con contrato vinculante en
+(§4.1). Los cinco conflictos de la revisión de compatibilidad de A y el vocabulario único: §6
+(2026-11-07).** P3a está en desarrollo en el PR draft #557 (sin merge ni deploy), con contrato vinculante en
 `docs/PROJECTS.md` de esa rama; el resumen para A es [16](./16-p3a-interfaces-for-a.md). Contrasta la
 propuesta UX de Claude A (PR draft #554, `docs/design/ux-projects-agents.md` en `ab00778`) con la
 arquitectura de este directorio:
@@ -56,7 +57,7 @@ en esta versión.
 | 3 | `agent_bindings` y cambios futuros | `epoch`; estados `active`/`draining`/`retired`; cambio de vínculo no implementado (AD2) | eventos `session.attached`/`detached` | **compatible**; eventos `binding.*` (**C1**) |
 | 4 | Roles, plantillas, varios agentes del mismo rol | rol libre (AD3); plantilla copiada con versión, sin referencia viva y sin permisos sin confirmación del owner (AD4, 14 D-T) | `roleTemplateId` como referencia; «los roles vienen de plantillas» | **B4** + **D-UX0** |
 | 5 | Chat, Task y Authorization separados | tres sobres (14 §4.1) | Chat ≠ Task; «crear tarea desde un mensaje» explícito; aprobación de deploy humana | **compatible**; el deploy queda en **D-UX5** |
-| 6 | Tareas en cola sin interrumpir | cola `paused` por defecto, `auto` explícito con acreditación (TD3); `chat` retenido (TD8) | `queued`, una tarea activa; sin control de la cola | **C3** |
+| 6 | Tareas en cola sin interrumpir | cola `paused` por defecto, `auto` explícito con acreditación (TD3); `message` retenido (TD8) | `queued`, una tarea activa; sin control de la cola | **C3** |
 | 7 | Entrega, ejecución, incertidumbre, recuperación | entregas (03 §3, 06 §3); tareas: 10 estados (13 §2.3); instrucciones (13 §2.4) | 5 estados de tarea; `interrupted` no terminal («queued → active → blocked/interrupted → completed»); instrucción con tres marcas de tiempo | **B1** + **D-UX0** |
 | 8 | Permisos delegados futuros | 13 §4.1 | `permissions` (resumen) y `can` | **compatible** (**C2**) |
 | 9 | Agentes desconectados, ocupados, detenidos | presencia de 06 §5; el monitor nunca arranca contenedores | working, waiting, blocked, disconnected, con evidencia; nada se inicia solo | **compatible**; usar el vocabulario de 06 §5 (**C4**) |
@@ -94,7 +95,7 @@ Coincidencias sin acción:
 | **C3** | Cola visible: `queue: {mode, accreditation, lostReason, depth}` (T2), y mensajes `held{task-active}` con un «intercalar ahora» explícito (TD8, P6) |
 | **C4** | Presencia con el vocabulario **de 06 §5** (§3.3), sin inventar uno nuevo |
 | **C5** | Rutas anidadas bajo el proyecto: un solo chequeo de propiedad, un 404 uniforme y el `projectId` siempre disponible para `viewPolicy` |
-| **C6** | «Crear tarea desde este mensaje» envía `task.create` con `refs: [{kind: message, chatId, msgId}]`. No copia la autoría ni la autorización del mensaje |
+| **C6** | «Crear tarea desde este mensaje» envía un `work_request{verb: CREATE}` con `refs: [{kind: message, chatId, msgId}]`. No copia la autoría ni la autorización del mensaje |
 
 ### 2.3 Futuro
 
@@ -190,8 +191,8 @@ comentados. *Fixtures*: [`fixtures/educacion-hz.json`](./fixtures/educacion-hz.j
 | `waiting_input` | esperando input | `waiting_input` fresco; **verificado sólo si `source: probe`** (`hook:Stop` lo pone sin comprobar identidad, CONVERSATION.md §5.3) | P3a | «listo», no «necesita atención» |
 | `needs_attention` | esperando permiso | `waiting_permission`, indicado en `detail`. `needs-terminal` es una precondición que el Composer comprueba en cada envío (3.2): nunca se muestra como presencia | P3a | necesita atención |
 | `disconnected` | desconectado | la sesión del vínculo no está `running`, o la conversación que decide (ver abajo) está `disconnected` o `ended` (por hook `SessionEnd` o por `probe:absent`) | P3a | — |
-| `no_channel` | sin canal | runtime no registrado | **P6** | — |
-| `degraded` | canal sin respuesta | runtime `degraded` | **P6** | necesita atención |
+| `no_channel` | mensajería no disponible | runtime no registrado | **P6** | — |
+| `degraded` | la mensajería no responde | runtime `degraded` | **P6** | necesita atención |
 | `ambiguous` | ambiguo | dos runtimes | **P6** | necesita atención |
 | `unknown` | — | sin evidencia, con evidencia vieja, o estados de captura `error`/`ending` | P3a | nunca cuenta como cero |
 
@@ -216,8 +217,8 @@ directamente de la lista:
 | Terminada | `completed`, `stopped`, `cancelled`, `failed`, `interrupted` | «completada según el agente» / «detenida según el agente» / «cancelada antes de empezar» / «falló» / ⚠ «interrumpida: el runtime terminó sin informe» (terminal, TD11) |
 
 **Avisos** (`notices[]`): no cambian el grupo ni reemplazan estados. Son `waiting_safe_point` y
-`awaiting_stop_report` (instrucciones, 13 §2.4 y §3.5), `agent-offline` (14 §5) y `queue-paused`
-(13 §3.1).
+`awaiting_stop_report` (instrucciones, 13 §2.4 y §3.5), `agent-offline` (14 §5), `queue-paused`
+(13 §3.1) y `blocked` (§6.2: sólo con evidencia y un motivo explícito; **no** es un estado).
 
 ```jsonc
 // GET /api/projects/:pid/tasks/:tid   (lectura nueva E-5, de T1; este ejemplo muestra datos de T2:
@@ -288,8 +289,7 @@ y la tarea **referencia** ese mensaje.
 | --- | --- | --- | --- |
 | 404 | ajeno, inexistente, o bandera apagada | 03 / 02 §8 | «no encontrado» |
 | 409 `handle-taken` / `session-taken` | alta de agente | 03 | explica |
-| 409 `previous-agent-in-flight` | la sesión tuvo un agente anterior con entregas no terminales | 03 (R-G6) | espera |
-| 409 `binding-draining` | cambio de vínculo (E4) | 14 §3.2 | — (no existe en P3a) |
+| 409 `binding-draining` | cambio de vínculo o reasignación de una sesión con algo en vuelo del vínculo anterior (E4); reemplaza a `previous-agent-in-flight` de 10 (R-G6) | 14 §3.2 | — (no existe en P3a) |
 | 409 `agent-active` | hard delete de una sesión con vínculo vivo | 03 §2.1 | «quitá el agente primero» |
 | 409 `stale-rev` | `ifRev` viejo | 13 | recarga y conserva el borrador |
 | 409 `task-active` / `task-not-active` | el verbo no corresponde al estado | 13 | ofrece el verbo correcto sin convertirlo |
@@ -298,6 +298,11 @@ y la tarea **referencia** ese mensaje.
 | 409 `idempotency-conflict` | mismo id de cliente con otro cuerpo | 13 | error de cliente |
 | 409 `tasks-unverifiable` | log de tareas ilegible | 13 §6 | «no se puede verificar; nada se despacha» |
 | 409 `participants-changed` | 03 §6.1 | 03 | conserva el borrador |
+| 409 `agent-limit` / `project-limit` | 32 agentes / 50 proyectos | PROJECTS.md §4.7 (P3a) | «llegaste al máximo» |
+| 503 `outcome-unknown` | resultado no confirmado | PROJECTS.md §3 (P3a) | «Reintentar» con el mismo id |
+| 400 `not-a-participant` | un destinatario (`to`) fuera de la conversación, en `POST /api/chats/:cid/messages` | 03 §6.1 | explica y conserva el borrador |
+| 403 `not-a-participant` / `not-bound` | lado del agente: no participa / no tiene vínculo vivo | 03 §6.2–§6.3 | (no llega a la UI de la persona) |
+| 403 `not-task-creator` / `not-task-assignee` | verbo sobre una tarea ajena | 13, 03 §10 | explica |
 
 **Idempotencia:** cada `POST` **nuevo o enmendado en este documento** lleva un id de cliente
 (`clientRequestId`, `clientInstructionId`; `clientMessageId` ya existe en 03), creado en cada clic.
@@ -454,3 +459,111 @@ sobre un D1 con un *fixture* realista.
 | T3 y cualquier solicitud entre agentes | P8 + GO de G3-2 |
 | `true` de G3-1 | el release desplegado y la ventana `observe` de ≥ 24 h con PASS (11 §5–§6) |
 | Aislamiento entre proyectos | redes por proyecto (#291, E7) |
+
+## 6. Revisión de compatibilidad de A (#554, 2026-11-07): decisiones y vocabulario único
+
+A comparó #554 con este directorio y lo publicó en #554. El responsable decidió los cinco conflictos el
+mismo día. Esta sección los registra y fija **un solo vocabulario**. Para el backend, el modelo y el
+protocolo de este directorio son la fuente de verdad, y A adapta #554 a esto. No se implementa nada
+nuevo.
+
+### 6.1 Decisiones del responsable
+
+| # | Conflicto | Decisión | Qué implica para la UI |
+| --- | --- | --- | --- |
+| 1 | Modelo de Project Chat | **Conversaciones anfitrionas por agente**, con invitados y destinatarios explícitos (`to[]`; el servidor nunca lee `@`). **Project Activity** es una proyección de sólo lectura sobre conversaciones y tareas, sin otro almacén de mensajes (AD7) | En el MVP no hay conversación de proyecto con hilos. A futuro puede existir una conversación a nivel proyecto (AD7: un tipo propio, en su propio log) sin cambiar las identidades de los agentes ni copiar mensajes existentes |
+| 2 | Estado `blocked` | **No hay estado persistente `blocked`.** Los 10 estados de 13 §2.3 son los canónicos | La UI puede mostrar «bloqueada» sólo como **aviso**, con evidencia y un motivo explícito (§6.2). Nunca lo deduce del silencio o de la falta de eventos |
+| 3 | Deploy y autorizaciones | Los deploys siguen **fuera** del protocolo de tareas. A tiene autorización permanente del owner para deploys GREEN que cumplan los gates; YELLOW y RED conservan sus restricciones. **Una tarea nunca autoriza un deploy** | No hay botón de aprobación de producción mientras no exista un contrato `authorization` específico para deploys. Una tarea puede pedir un deploy como texto, y la UI muestra «requiere autorización humana fuera del sistema»; ese texto no es una autorización ni activa la autorización permanente de A |
+| 4 | Permisos | **Owner-only** para Projects, Agents y Project Chat (R5). Los permisos de las sesiones no cambian, y no hay permisos por proyecto para otros usuarios | admin, lead y observe reciben 404 en las superficies de proyecto; observe/operate siguen sólo en el workbench de la sesión |
+| 5 | Terminología | **Channels** es sólo el transporte interno (`st-channel`, `/ingest/channel/*`) | La UI dice **Project Chat**, **Conversation** y **Project Activity**, nunca «canal» ni «channel» |
+
+### 6.2 «Bloqueada»: un aviso, no un estado
+
+Tiene la misma forma que el resto de `notices[]` (§3.4), con su evidencia:
+
+```jsonc
+{ "kind": "blocked", "reason": "waiting_permission",   // motivo explícito, nunca vacío
+  "evidence": { "source": "hook", "at": "2026-11-10T14:03:00Z", "bindingId": "b0…b2" } }
+```
+
+| Fuente admitida | `reason` | `evidence.source` | Desde |
+| --- | --- | --- | --- |
+| La presencia del agente es `needs_attention` con `detail: "waiting_permission"` (§3.3), en el vínculo del intento en curso | `waiting_permission` | la de la presencia (`hook` o `probe`) | T2 (necesita despacho e intento) |
+| El propio agente informa que está bloqueado en esa tarea y da un motivo (`task_report`, capa B) | el texto del agente | `agent`; como toda evidencia de agente, `verification: "claimed"` (14 §4.4) | capa B |
+
+Reglas:
+
+- el aviso va **sólo** en la tarea `active` del agente, y sólo cuando el `bindingId` del intento es el
+  del vínculo cuya presencia lo indica. Una tarea `queued` de ese agente, o una presencia que viene de
+  trabajo fuera de la tarea (por ejemplo, Direct control), no la muestra «bloqueada»;
+- no hay ninguna otra fuente. Tres situaciones parecidas **no** son «bloqueada»: una instrucción que
+  espera un punto seguro es `waiting_safe_point` (su propio aviso, con su antigüedad); un agente sin
+  vínculo vivo es `agent-offline`; una presencia vieja es `unknown · stale`;
+- el aviso no cambia el grupo de la tarea ni su estado, y desaparece cuando su evidencia deja de valer.
+
+### 6.3 Vocabulario único
+
+**Entidades e ids** (los nombres de #554 quedan reemplazados):
+
+| Concepto | Nombre canónico (API / UI) | Antes en #554 | Fuente |
+| --- | --- | --- | --- |
+| Proyecto | `projectId`, `name` · «Project» | — | PROJECTS.md §4 |
+| Agente | `agentId` (la identidad) + `handle` (alias `@handle`, no identifica) + `role` (texto libre) + `provider` · «Agent». La tabla es `project_agents` | `name` | 03 §2.1, PROJECTS.md §2 |
+| Plantilla | `template{templateId, templateVersion}`, copiada al crear; `null` hasta que existan las plantillas | `RoleTemplate`, `roleTemplateId` | AD4, E-3 |
+| Vínculo | `binding{bindingId, epoch, sessionId, state}`, con el historial en `bindings[]` | `currentSessionId`, `sessions[]` | AD1, PROJECTS.md §4.5 |
+| Cambio de vínculo | eventos de vínculo (`active` → `draining` → `retired`) | `session.attached/detached` | 14 §3.2 (sin implementar) |
+| Conversación | `chatId` · «Conversation»; su anfitrión es un agente | `threadId` | 03 §1 |
+| Autor | `author{kind: human\|agent, agentId?}` | `authorId` | 03 §2.2 |
+| Destinatarios | `to[]` (`agentId`s, siempre explícitos) | `recipients[]` | 03 §6.1 |
+| Referencias de un **mensaje** | `evidence[]{…, verification: "claimed"}` (afirmaciones del agente), `taskRefs[]` (contexto; nunca cambian una tarea), `context[]` (mensajes que cita la persona) | `refs[]` del mensaje | 14 §4.2–§4.3 |
+| Referencias de una **tarea** | `refs[]` se queda: `{kind: message, chatId, msgId}` o, en las de evidencia, con `verification`, `claimedBy` y `bindingId` (B3) | `refs[]` de la tarea | §3.4, C6 |
+| Subagente | «Subagentes»: los agentes internos del CLI | — | D-UX7 |
+
+**Tipos de envío: los tres sobres de AD6, y ninguno más.** TD8 usaba otros nombres para lo mismo;
+desde el 2026-11-07 valen estos:
+
+| Sobre | Qué hace | Ruta | Antes |
+| --- | --- | --- | --- |
+| `message` | conversación. `kind: request\|info\|progress\|result\|question` es una **etiqueta** para mostrar, nunca un verbo: un `kind: request` no crea ni cambia nada | `POST /api/chats/:cid/messages` | `chat` (TD8) |
+| `work_request{verb}` | `CREATE` crea una tarea; `UPDATE`, `CHANGE` y `STOP` actúan sobre una (13 §2.2) | `POST /api/projects/:pid/tasks` (`CREATE`), `POST …/tasks/:tid/instructions` (los otros tres) | `task.create` y `task.change` (TD8); `kind: update/change/stop` en #554 |
+| `authorization` | aprueba o rechaza una solicitud; otorga o revoca un permiso | **[FUTURO]**: en el MVP no tiene ruta, y ninguna autoriza deploys | — |
+
+Una instrucción (un `work_request` sobre una tarea) recorre `received → waiting_safe_point →
+delivered → acknowledged → applied | refused | superseded | rejected` (13 §2.4). Cada paso lleva su
+hora (`receivedAt`, `deliveredAt`, `acknowledgedAt`, …, como en el ejemplo de §3.4). Las tres de #554
+corresponden así: `receivedAt` = `received`; `appliedAt` = el estado `applied`; `stoppedAt` = la
+evidencia de `STOP` de 13 §3.5 (las tres confirmaciones de 03 §10).
+
+**Errores:** el índice único es §3.6. Desde hoy `previous-agent-in-flight` no existe; se llama
+`binding-draining`. Los errores de P3a, con su texto, están en 16 §4.
+
+**Palabras de la UI:** Project Chat, Conversation, Project Activity, Agent y Subagentes. «Channel» y
+«canal» no aparecen en la UI: `no_channel` se muestra como «mensajería no disponible» y `degraded`
+como «la mensajería no responde».
+
+### 6.4 Lo que #554 suponía y este directorio no especificaba
+
+| Supuesto de #554 | Estado | Dónde |
+| --- | --- | --- |
+| `can` y descubrimiento de capacidades | **especificado; implementado en el PR draft #557 (sin merge)**: `features.projectChat`; `can.createProject`, `can.createAgent` y `can.remove` como `{allowed, reason?}` | 16 §1 y §3; PROJECTS.md §4 |
+| Endpoints de actividad, WS y nombres de eventos | **diseñado, sin implementar**: `WS /ws/project/<pid>` con `task.state` y `task.instruction` desde T1; presencia y vínculos como *snapshot* más deltas. En P3a, *polling* | §3.5 «Tiempo real»; E-7 |
+| Rutas REST de tareas | **diseñadas (E-5), sin implementar** | §3.5 |
+| Estado `blocked` | **decidido: no existe**; es un aviso con evidencia | §6.2 |
+| Forma y frescura de la evidencia de estado | **especificado; implementado en #557 (draft)**: `presence{value, detail?, source, at, verified?}`; una afirmación cuya evidencia tiene ≥ 10 min se muestra como `unknown · stale` | 16 §3–§4; PROJECTS.md §5 |
+| Historial de vínculos y «sesiones sin asignar» | **especificado; implementado en #557 (draft)**: `GET …/agents/:aid` → `bindings[]`; `GET /api/sessions` → `binding` (objeto; `null` = sin asignar; ausente = desconocido) | 16 §2 y §4 |
+| `members`, `repos` y `policies` del proyecto | **fuera del MVP** (D-UX4, R5). `repos` y `policies` no forman parte del modelo | §4 |
+
+### 6.5 Contradicciones internas corregidas (las cuatro que señaló A)
+
+1. La tabla se llama `project_agents` en todos los documentos (14 §2 y §6, AD1). Se agrega que
+   `agent_bindings` no tiene FK a `sessions` (03 §2.1, 14 §2), como en la v19 de #557 (02 §9 y 14 D-T incluidos).
+2. Los tipos de envío son los tres sobres de AD6 (13 §5 y TD8; 02 §9; 15 §1 y C6; 03 §10).
+3. `previous-agent-in-flight` pasa a llamarse `binding-draining` (03 §6.1, 15 §3.6, con una nota en 10).
+4. 14 §9 agrega 403 `not-task-assignee`, 409 `tasks-unverifiable` y 409 `stop-pending`, y remite al
+   índice de §3.6.
+
+Otros cambios del mismo paso:
+
+- 03 §6.1 tiene ahora las formas que implementó P3a (`clientRequestId`, lecturas del agente);
+- 03 §10 dice que TD1–TD11 son arquitectura aprobada;
+- 06 §5 y 03 (`runtime`, `channel/retry`) dejaron de usar «canal» como texto de la UI; la ruta conserva su nombre interno.

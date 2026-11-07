@@ -79,7 +79,7 @@ Referencias: [01](./01-vision.md), [02](./02-architecture-rfc.md) §5.2, §5.5, 
 | D-ID | Identidad en el protocolo | toda evidencia, entrega, runtime e intento lleva `binding_id`. La autoridad de un request de agente se deriva **del vínculo activo de la sesión autenticada**, nunca del cuerpo (las tres comprobaciones de 03 §6.2, sin cambios) | **[AHORA]** |
 | D-MSG | Tipos de envío | tres sobres: `message`, `work_request`, `authorization` (§4) | **[AHORA]** |
 | D-R | Rol | texto libre del owner; ningún comportamiento del backend depende del rol | **[AHORA]**: ya es así, se agrega como invariante |
-| D-T | Plantillas de agente | objeto del usuario (`agent_templates`) con instrucciones, referencia a una plantilla de sesión #195, capacidades requeridas y un perfil de permisos sugerido. Se **copia** al crear el agente (`template_id`, `template_version`); no hay herencia en vivo | **[PREPARAR]**: en el MVP basta con reservar `template_id`/`template_version` en `agents` |
+| D-T | Plantillas de agente | objeto del usuario (`agent_templates`) con instrucciones, referencia a una plantilla de sesión #195, capacidades requeridas y un perfil de permisos sugerido. Se **copia** al crear el agente (`template_id`, `template_version`); no hay herencia en vivo | **[PREPARAR]**: en el MVP basta con reservar `template_id`/`template_version` en `project_agents` |
 | D-P | Permisos | **capacidades** (lo que el adaptador puede hacer, 02 §5.2) separadas de los **permisos** (lo que el owner autoriza en el proyecto: aristas, permisos delegados de 13 §4.1). El MVP mantiene owner-only, aprobación humana y aristas `allow` | **[AHORA]** la separación conceptual; **[FUTURO]** el perfil por agente |
 | D-V | Vista de proyecto | **proyección** de solo lectura sobre las conversaciones anfitrionas y los eventos de tareas existentes, ordenada por tiempo. No es un almacén de mensajes | **[PREPARAR]**: ningún dato nuevo; la decisión es que no habrá otra fuente de verdad |
 | D-PJ | Pertenencia | un agente pertenece a **un** proyecto, para siempre; no hay agentes entre proyectos | **[AHORA]**: ya es así, se agrega como invariante |
@@ -121,14 +121,15 @@ erDiagram
 Esquema de diseño (no es una migración):
 
 ```sql
--- reemplaza a project_agents.st_session_id
-CREATE TABLE agents (agent_id PK, project_id, handle, provider, role, template_id NULL,
-                     template_version NULL, created_at, archived_at NULL, UNIQUE(project_id, handle));
+-- la tabla se llama project_agents (03 §2.1; así está en la migración v19 del PR draft #557, sin merge);
+-- la columna project_agents.st_session_id de la versión anterior de 03 desaparece
+CREATE TABLE project_agents (agent_id PK, project_id, handle, provider, role, template_id NULL,
+                     template_version NULL, created_at, removed_at NULL, UNIQUE(project_id, handle));
 CREATE TABLE agent_bindings (
   binding_id    TEXT PRIMARY KEY,           -- UUID v4
-  agent_id      TEXT NOT NULL REFERENCES agents(agent_id),
+  agent_id      TEXT NOT NULL REFERENCES project_agents(agent_id),
   epoch         INTEGER NOT NULL,           -- 1, 2, … por agente; nunca se reutiliza
-  st_session_id TEXT NOT NULL REFERENCES sessions(session_id),
+  st_session_id TEXT NOT NULL,              -- sin FK: D1 aplica las FKs y bloquearía el hard delete (PROJECTS.md §2)
   state         TEXT NOT NULL CHECK (state IN ('active','draining','retired')),
   created_at, retired_at NULL, retire_reason NULL,
   UNIQUE (agent_id, epoch));
@@ -156,7 +157,7 @@ CREATE UNIQUE INDEX one_live_binding_per_session ON agent_bindings(st_session_id
 
    Esto mantiene la regla de 10 (409 `previous-agent-in-flight`) con otro nombre: 409
    `binding-draining`.
-5. Lo que espera en cola (mensajes `queued`, tareas `queued`, `chat` retenidos) **no** se pierde: apunta
+5. Lo que espera en cola (mensajes `queued`, tareas `queued`, `message` retenidos) **no** se pierde: apunta
    al agente y se presta con el vínculo nuevo, siempre bajo las condiciones normales de elegibilidad.
 6. Reasignar **una sesión** a otro agente es lo mismo visto del otro lado: se retira el vínculo de la
    sesión con A y se crea uno con A′. Ninguna evidencia de A pasa a A′ (10 T12).
@@ -280,7 +281,7 @@ contenedor del agente.
 ## 6. Evolución compatible
 
 1. **Hoy** no hay datos de Project Chat en producción, así que no hay nada que migrar. El cambio [AHORA]
-   es de texto: 03 §1 y §2.1 pasan a `agents` + `agent_bindings` antes de que P3 escriba la migración.
+   es de texto: 03 §1 y §2.1 pasan a `project_agents` + `agent_bindings` (hecho en el texto; la migración v19 está en el PR draft #557, sin merge).
 2. **Las sesiones Docker existentes no cambian.** Convertir una sesión en agente = crear `agent` +
    `agent_binding{epoch: 1}`. La sesión conserva su id, su contenedor, su token, su captura y sus
    conversaciones del CLI. La captura existente (conversaciones del CLI) sigue siendo la fuente de los
@@ -296,7 +297,7 @@ contenedor del agente.
 | Bloque | Contenido | Etiqueta | Depende de |
 | --- | --- | --- | --- |
 | E0 | Este documento; decisiones AD1–AD12 (§10) | — | revisión con ChatGPT |
-| E1 | Cambio de texto en 03 §1 y §2.1: `agents` + `agent_bindings`, `binding_id` en evidencias, invariantes D-R y D-PJ, y los tres sobres de §4.1 (sólo nombres y reglas) | **[AHORA]** | aprobación de AD1, AD2 y AD6 |
+| E1 | Cambio de texto en 03 §1 y §2.1: `project_agents` + `agent_bindings`, `binding_id` en evidencias, invariantes D-R y D-PJ, y los tres sobres de §4.1 (sólo nombres y reglas) | **[AHORA]** | aprobación de AD1, AD2 y AD6 |
 | P3–P9 | Project Chat tal como está planeado, con un vínculo activo por agente | MVP | sin cambios en sus gates |
 | T0–T3 | Tareas (13) | MVP / capa C | TD aprobadas, P6, G3-2 |
 | E2 | `template_id`/`template_version` reservados; `evidence[]` con `verification: claimed`; `task_refs[]` en mensajes | **[PREPARAR]** | E1 |
@@ -365,7 +366,9 @@ Nada de E2 en adelante bloquea el chat actual.
 - **Errores que la UI explica con palabras:**
   - 409: `stale-rev`, `task-active`, `task-not-active`, `change-pending`, `idempotency-conflict`,
     `participants-changed`, `binding-draining`;
-  - 403: `not-a-participant`, `not-bound`, `not-task-creator`.
+  - 409 también: `stop-pending`, `tasks-unverifiable`;
+  - 403: `not-a-participant`, `not-bound`, `not-task-creator`, `not-task-assignee`.
+  - El índice único de códigos, con su fase y su texto, es 15 §3.6.
 - **Operaciones:**
   - en el MVP no hay ninguna operación nueva sobre VM100;
   - un cambio de vínculo futuro es una acción del owner con su verificación previa (nada en vuelo,
@@ -378,7 +381,7 @@ Nada de E2 en adelante bloquea el chat actual.
 
 | # | Decisión | Alternativas | Ventajas / costos | Recomendación |
 | --- | --- | --- | --- | --- |
-| AD1 | Agente ↔ sesión | (a) 1:1 y reasignar = agente nuevo (actual); (b) `agents` + `agent_bindings` versionado; (c) `st_session_id` mutable + columna `binding_epoch` | (a) simple, pero la identidad muere en cada cambio; (b) historial explícito, apto para varias sesiones; cuesta una tabla más; (c) intermedia, sin historial consultable | **(b)**, [AHORA], antes de P3 |
+| AD1 | Agente ↔ sesión | (a) 1:1 y reasignar = agente nuevo (actual); (b) `project_agents` + `agent_bindings` versionado; (c) `st_session_id` mutable + columna `binding_epoch` | (a) simple, pero la identidad muere en cada cambio; (b) historial explícito, apto para varias sesiones; cuesta una tabla más; (c) intermedia, sin historial consultable | **(b)**, [AHORA], antes de P3 |
 | AD2 | Política del MVP | permitir cambiar el vínculo desde el MVP / sólo definir las reglas | implementarlo ahora suma UI y pruebas; definirlo evita deuda | **definir las reglas (§3.2) y no implementar la operación** (E4) |
 | AD3 | Roles | texto libre / catálogo de roles por proyecto | el catálogo agrega gestión sin beneficio actual | **texto libre**, sin comportamiento por rol |
 | AD4 | Plantillas | copia al crear / herencia en vivo | la herencia cambia agentes existentes en silencio (también sus permisos) | **copia + `template_version`** |

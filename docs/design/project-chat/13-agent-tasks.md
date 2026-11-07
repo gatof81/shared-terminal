@@ -284,11 +284,12 @@ Invariantes de cualquier delegación, *MUST*:
   `superseded{completed}`).
 - **Intentos:** cada despacho tiene su `attempt_id`; acks e informes de un intento anterior no cambian
   estados.
-- **Tres tipos de envío, siempre explícitos (TD8):** `chat` (conversación libre), `task.create`
-  (tarea nueva) y `task.change` (`CHANGE` de la tarea activa, §3.3). El servidor nunca convierte uno en
-  otro ni lo deduce del texto.
+- **Tipos de envío, siempre explícitos (TD8, con los nombres de AD6 desde el 2026-11-07):** un
+  `message` (conversación libre) y un `work_request` con su verbo: `CREATE` (tarea nueva) o `CHANGE`
+  (de la tarea activa, §3.3); `UPDATE` y `STOP` son también `work_request`. El servidor nunca convierte
+  uno en otro ni lo deduce del texto. (Antes de unificar: `chat`, `task.create`, `task.change`.)
 - **Un mensaje libre no interrumpe por defecto una tarea activa:** mientras el agente tenga una tarea
-  `active` o `dispatching`, un `chat` queda **retenido** (`held{task-active}`) y se presta recién
+  `active` o `dispatching`, un `message` queda **retenido** (`held{task-active}`) y se presta recién
   cuando la tarea termina, o lo retira la persona.
 - **Intercalar es una elección explícita por mensaje** (`interleave: true`, con confirmación en la
   UI): se presta sólo en SP1, marcado para el agente como «mensaje libre, **no** es una instrucción
@@ -339,7 +340,7 @@ Jira, Linear o GitHub Issues; agentes que crean tareas sin aprobación humana.
 | TD5 | Puntos seguros = SP1 + SP2; sin interrupción forzada; la vía manual queda fuera del contrato | **aprobada** |
 | TD6 | «Detenida» = informe + `turn_end` limpio + prompt verificado; certifica lo que el agente reportó, **no** la ausencia de efectos externos pendientes (§3.5) | **aprobada**, con la aclaración |
 | TD7 | Log por proyecto + snapshot, sin tabla D1 en el MVP | **aprobada** |
-| TD8 | Tres envíos explícitos (`chat`, `task.create`, `task.change`); un `chat` queda retenido mientras haya una tarea activa; intercalar en SP1 es una elección explícita por mensaje y nunca un `UPDATE`/`CHANGE` (§5) | **aprobada** (redacción revisada) |
+| TD8 | Envíos explícitos (`message`, `work_request{CREATE}`, `work_request{CHANGE}`; antes `chat`, `task.create`, `task.change`); un `message` queda retenido mientras haya una tarea activa; intercalar en SP1 es una elección explícita por mensaje y nunca un `UPDATE`/`CHANGE` (§5) | **aprobada** (redacción revisada) |
 | TD9 | `task_key` = `T-<n>` por proyecto, nunca reutilizado | **aprobada** |
 | TD10 | El Composer/Control Directo no es un canal de instrucciones de tareas | **aprobada** |
 | TD11 | Reanudar `stopped`/`interrupted` queda fuera del MVP | **aprobada** |

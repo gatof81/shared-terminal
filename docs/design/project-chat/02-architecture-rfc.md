@@ -620,6 +620,6 @@ G3, PASS-A/PASS-B, R8 y el NO-GO de G3-2 no cambian.
 
 | # | Decisión | Resolución |
 | --- | --- | --- |
-| TD1–TD11 | Tareas independientes por agente ([13](./13-agent-tasks.md) §8) | aprobadas; TD3 (cola `paused`, `auto` explícito con acreditación que se pierde fail-closed, TG5), TD4 (aprobación humana + G3-2 en el MVP; delegación sólo diseño) y TD8 (`chat` separado de `task.*`, retenido ante una tarea activa, intercalar explícito sólo en SP1) con la redacción revisada |
+| TD1–TD11 | Tareas independientes por agente ([13](./13-agent-tasks.md) §8) | aprobadas; TD3 (cola `paused`, `auto` explícito con acreditación que se pierde fail-closed, TG5), TD4 (aprobación humana + G3-2 en el MVP; delegación sólo diseño) y TD8 (`message` separado de `work_request`, retenido ante una tarea activa; antes `chat`/`task.*`; intercalar explícito sólo en SP1) con la redacción revisada |
 | AD1–AD12 | Equipos de agentes ([14](./14-agent-teams-research.md) §10) | aprobadas según la recomendación: `project_agents` + `agent_bindings` antes de P3 (03 §2.1); un vínculo vivo por agente en el MVP; roles libres; plantillas por copia; tres sobres (mensaje, solicitud de trabajo, autorización); vista de proyecto como proyección; sin afirmar aislamiento de red mientras `sessions-net` sea compartida; evidencias = afirmaciones; ninguna solicitud entre agentes antes de G3-2. No se implementan cambios de vínculo, varias sesiones, delegaciones ni activación de agentes detenidos |
 

@@ -227,6 +227,48 @@ producir hooks (por lo menos un prompt).
 **Ante un FAIL:** se vuelve a `false` (§4, sin reconstruir), se conserva toda la evidencia y se
 informa. No se reintenta ni se ajusta nada sobre la marcha.
 
+### 5.1 Ventana limitada a la sesión B (pedido del 2026-11-07)
+
+A programó una ventana `observe` de 24 h «para la sesión B», con una línea de base comparable y un
+rollback automático si falla. **La evidencia de §6 alcanza para evaluarla, sin ninguna lectura
+adicional**, con estos límites, que salen del código de `R` (`index.ts`, `conversation/service.ts`
+`authorize` y `adminStats`):
+
+1. **La bandera no se puede limitar a una sesión.** `INGEST_REQUIRE_SESSION_ORIGIN` se lee una vez y
+   vale para todo el proceso. Con `observe`, cada request **autenticada** (token, `requested`,
+   `running`) de cada sesión con captura pasa por la comprobación, con su plazo de 500 ms y sin rechazar
+   nunca. Lo que falla antes (token, sesión detenida) va a `rejectedSinceBoot`, y lo que el relay
+   descarta, a P6. La ventana cubre siempre las tres sesiones con captura. «Limitada a B» sólo puede
+   querer decir que B es la sesión cuya presencia en la muestra se exige.
+2. **Los contadores no dicen qué sesión.** `originObservedSinceBoot` da `byCause`, `sessionsMatched` y
+   `sessionsNotMatched`. Los dos últimos son conteos de sesiones distintas, sin ids.
+3. **B está en la muestra ⇔ `enabledSessions = effectiveSessions = 3` en la lectura del principio
+   y en la del final, `sessionsMatched = 3` y `sessionsNotMatched = 0`.** Así:
+   - todo `match` con esos valores ⇒ PASS, también para B;
+   - cualquier otra combinación (menos de 3, más de 3, o una cantidad de sesiones con captura que
+     cambió durante la ventana) sin otra causa ⇒ **INCONCLUSIVE para B**, no PASS. No se puede saber si B
+     produjo hooks, y averiguarlo necesita otra autorización (§7). Contar líneas de los archivos de
+     eventos de B no lo prueba: el backend también escribe ahí sin hooks de B (`gap backend_restart`
+     al reiniciar, probes, transiciones de silencio, rotación);
+   - cualquier otra causa ⇒ FAIL, sin saber de qué sesión.
+4. **El rollback automático es una escritura en VM100** y va dentro de la autorización de la ventana.
+   Antes de reiniciar tiene que:
+   - comprobar **P8** (recreaciones `resolved`, Composer sin panes). Si algo está en vuelo, no reinicia:
+     registra y avisa (§4 paso 1). Un reinicio sobre una recreación sin resolver la deja sin resolución
+     posible (D8);
+   - leer y registrar con la hora `GET /api/admin/stats → .conversation` completo y los conteos de P6.
+     Los contadores son del proceso, y volver a `false` (`up --force-recreate`) los pone en cero.
+
+   **Disparadores automáticos:** sólo los criterios que se pueden decidir en cualquier momento:
+   cualquier `byCause` distinto de `match`, `sessionsNotMatched > 0`, o cualquier `inspect_*`. Las
+   comparaciones con la línea de base (pérdidas, ritmo de `eventsSinceBoot`) y las regresiones que juzga
+   una persona se evalúan al final de la ventana, no a mitad de ella.
+5. **Precondiciones que no constan aquí:** el deploy de `R` con V1–V10 en PASS (§3.1) y la ventana de
+   línea de base con la bandera apagada, de igual duración. Este documento no supone que ya ocurrieron.
+
+**Un PASS de esta ventana no autoriza `true`** en general (§6 pide la evidencia completa y la decisión
+del responsable) ni cambia ningún gate de G3-2, que sigue en NO-GO.
+
 ## 6. Evidencia mínima antes de considerar `true`
 
 El operador devuelve, sin tokens, cookies ni contenido de conversaciones:

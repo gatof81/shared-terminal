@@ -86,7 +86,7 @@ CREATE TABLE IF NOT EXISTS agent_bindings (
   binding_id     TEXT PRIMARY KEY,
   agent_id       TEXT NOT NULL REFERENCES project_agents(agent_id),
   epoch          INTEGER NOT NULL,
-  st_session_id  TEXT NOT NULL REFERENCES sessions(session_id),
+  st_session_id  TEXT NOT NULL,              -- sin FK a sessions: D1 aplica las FKs y bloquearía todo hard delete de una sesión vinculada alguna vez; lo protege la guarda de PROJECTS.md §6
   state          TEXT NOT NULL CHECK (state IN ('active','draining','retired')),
   created_at     TEXT NOT NULL DEFAULT (datetime('now')),
   retired_at     TEXT,
@@ -193,7 +193,7 @@ su efecto.
 | `message` | `msg_id`, `chat_id`, `client_message_id`, `author{kind: human\|agent, user_id?\|agent_id?, participation_id?}`, `to[]` (agent_ids resueltos), `routing: default-host\|explicit`, `participants_version`, `context[]` (`msg_id`s elegidos por la persona; vacío por defecto), `kind: request\|info\|progress\|result\|question`, `text` (≤ **M1**), `in_reply_to?`, `chain{chain_id, depth}` (siempre el de la cadena de `in_reply_to`, con cualquier autorización; los contadores de §8 se derivan del log por `chain_id`) | `author` + `client_message_id` |
 | `delivery` | `msg_id`, `chat_id`, `agent_id`, `participation_id` (del destinatario), `state` (§3), `reason?`, `authorized_by?` (`approval`\|`edge`\|`collab:<grant_id>`, sólo autor agente), `collab_n?` (unidad consumida, en `transporting`), `marks?` (`after_removal`, `after_collab_end`), `lease_id?`, `endpoint_id?`, `start_gen?`, `relay{generation, dropped}?` (lectura de base, en `transporting`/`transported`), `cid?`, `prompt_id?`, `turn_seq?`, `by?` | `msg_id` + `agent_id` + `state` |
 | `approval` | `msg_id`, `agent_id`, `decision: approved\|denied`, `context[]?` (agregado por la persona al aprobar), `by` (user_id) | `msg_id` + `agent_id` |
-| `runtime` | `agent_id`, `endpoint_id`, `event: registered\|retired\|ambiguous\|degraded\|cleared`, `start_gen`, `pane`, `claude_pid`, `claude_start_time`, `cli_version`, `reason?`, `trigger_msg_id?` (la entrega que causó `degraded`), `by?` (usuario que pulsó "Probar el canal otra vez" en `cleared`) | `endpoint_id` + `event` + `trigger_msg_id` (o `seq` del evento para `cleared`): un segundo `degraded` tras un `cleared` no se descarta como repetido |
+| `runtime` | `agent_id`, `endpoint_id`, `event: registered\|retired\|ambiguous\|degraded\|cleared`, `start_gen`, `pane`, `claude_pid`, `claude_start_time`, `cli_version`, `reason?`, `trigger_msg_id?` (la entrega que causó `degraded`), `by?` (usuario que pulsó "Probar la mensajería otra vez" en `cleared`) | `endpoint_id` + `event` + `trigger_msg_id` (o `seq` del evento para `cleared`): un segundo `degraded` tras un `cleared` no se descarta como repetido |
 | `gap` | como §4.5 | — |
 
 Orden en el log: `participant{invited}` se escribe **antes** del `message` que invita; un
@@ -456,9 +456,10 @@ con el Terminal y está marcada.
 
 | Método | Ruta | Cuerpo / respuesta |
 | --- | --- | --- |
-| `POST` | `/api/projects` | `{name}` → `{projectId}` |
+| `POST` | `/api/projects` | `{name, clientRequestId}` → 201 `{projectId, …}` (P3a: forma exacta y errores en PROJECTS.md §4, que es la que vale) |
 | `GET` | `/api/projects` | lista del owner |
-| `POST` | `/api/projects/:pid/agents` | `{handle, sessionId}` → 201; 409 `session-taken` / `handle-taken`; 409 `previous-agent-in-flight` si la sesión tuvo un agente anterior con entregas no terminales (R-G6); la sesión debe ser del owner |
+| `POST` | `/api/projects/:pid/agents` | `{handle, role?, sessionId, clientRequestId}` → 201; 409 `session-taken` / `handle-taken` / `agent-limit`; 404 `session-not-found` (ajena o `terminated`); 503 `outcome-unknown` (PROJECTS.md §3–§4). **[P3+]** 409 `binding-draining` si la sesión tuvo un agente anterior con algo en vuelo (14 §3.2; antes `previous-agent-in-flight`, R-G6). En P3a no hay entregas, así que una sesión cuyo agente se quitó se puede vincular a otro |
+| `GET` | `/api/projects/:pid/agents`, `/api/projects/:pid/agents/:aid` | directorio y página del agente con `bindings[]` (P3a, PROJECTS.md §4.4–§4.5) |
 | `DELETE` | `/api/projects/:pid/agents/:aid` | quita (`removed_at`); entregas no terminales ⇒ `failed{agent-removed}` |
 | `PUT` | `/api/projects/:pid/edges` | `[{from, to}]` (modo `allow`) |
 | `POST` | `/api/projects/:pid/agents/:aid/chats` | crea la conversación anfitriona de ese agente → 201 `{chatId, participantsVersion}`; 409 `host-chat-active` si ya tiene una activa (R10) |
@@ -474,7 +475,7 @@ con el Terminal y está marcada.
 | `POST` | `/api/chats/:cid/messages/:mid/cancel` | sólo `awaiting_approval`/`queued` |
 | `POST` | `/api/chats/:cid/collab` | `{participants: [participationId], maxDeliveries?, expiresInSec?, participantsVersion}` → 201 `{grantId, …}` con el alcance registrado tal como se mostró; por defecto 6 entregas y 30 min, topes M11/M12 ⇒ 400; ≥ 2 participantes activos; 409 `collab-active` (ya hay uno vivo), `participants-changed`, `chat-archived` |
 | `DELETE` | `/api/chats/:cid/collab/:grantId` | "Detener" ⇒ `collab_revoked{by}`; colas bajo el permiso ⇒ `cancelled{collab-ended}`; idempotente |
-| `POST` | `/api/projects/:pid/agents/:aid/channel/retry` | "Probar el canal otra vez": owner-only; 409 `not-degraded` salvo con el runtime `degraded`; escribe `runtime cleared{by}`; no toca ninguna entrega (el `unconfirmed` no se reenvía); la siguiente entrega en cola vuelve a ser elegible |
+| `POST` | `/api/projects/:pid/agents/:aid/channel/retry` | "Probar la mensajería otra vez" (la ruta conserva el nombre interno): owner-only; 409 `not-degraded` salvo con el runtime `degraded`; escribe `runtime cleared{by}`; no toca ninguna entrega (el `unconfirmed` no se reenvía); la siguiente entrega en cola vuelve a ser elegible |
 | `GET` | `/api/projects/:pid/agents` | directorio con disponibilidad (`handle`, `provider`, `role`, `state`, `statusEvidence`, `runtime: {registered, degraded?, reason?}`, `queueDepth`) para el selector `@` |
 | `WS` | `/ws/project/<pid>` | protocolo de §6.1 de CONVERSATION.md con `subscribe{chat, after}` (como `subscribe{conv, after}`) → replay sin huecos + vivo de esa conversación; nueva ruta en `WS_PATH_PREFIXES` con test en `wsUpgrade.test.ts` |
 
@@ -565,13 +566,13 @@ sí se garantiza:
    espera "en su prompt" y sin ningún evento de la conversación entre medias; y la lectura del relay
    fue limpia. Un `unconfirmed{relay-loss}` o `{not-transported}` **no** degrada. También
    `degraded{source-absent}` (§5). Un runtime `degraded` no
-   recibe ninguna entrega. La UI muestra el agente como "canal sin respuesta" con la causa, y cada
-   mensaje en cola dice "retenido: canal degradado".
+   recibe ninguna entrega. La UI muestra el agente como "la mensajería no responde" con la causa, y cada
+   mensaje en cola dice "retenido: la mensajería no responde".
 3. **`degraded` es del proceso, no del endpoint**: se guarda en el log de runtimes del proyecto (§2.2) con la clave
    (`st_session_id`, `claude_pid`, `claude_start_time`) y sobrevive a un reinicio del backend y a los
    `hello` repetidos del mismo proceso (410 tras un reinicio, red cortada). Sólo lo levantan: un
-   proceso `claude` **distinto** (otro `pid` u otro `start_time`), o el botón del owner "Probar el
-   canal otra vez", que reactiva el canal para el **siguiente** mensaje en cola (nunca reenvía el que
+   proceso `claude` **distinto** (otro `pid` u otro `start_time`), o el botón del owner "Probar la
+   mensajería otra vez", que reactiva el canal para el **siguiente** mensaje en cola (nunca reenvía el que
    quedó `unconfirmed`). No hay temporizador ni reconexión que lo levante sola.
 4. **Ningún fallback automático.** *MUST NOT*: el módulo del monitor (`backend/src/projectChat/**`)
    importa `conversation/composer*`, construye argv de `tmux`, o llama a `execCapture`/`streamExec`
@@ -689,10 +690,11 @@ fuente de la evidencia de §5.
      como siempre.
    - Ninguna entrega se presta a una participación que no esté `active` en D1 **y** en el log.
 
-## 10. Tareas por agente (propuesta 2026-11-06, no vinculante)
+## 10. Tareas por agente (arquitectura aprobada, TD1–TD11; sin implementar)
 
-Diseño completo en [13-agent-tasks.md](./13-agent-tasks.md); nada de esto está aprobado ni
-implementado. Lo que se propone fijar en este protocolo es **sólo la capa A** (13 §2):
+Diseño completo en [13-agent-tasks.md](./13-agent-tasks.md); aprobado como arquitectura, no
+implementado. Los envíos son los sobres de 14 §4.1: un `work_request{verb}` para todo lo de tareas,
+un `message` para la conversación (15 §6.3). Lo que se propone fijar en este protocolo es **sólo la capa A** (13 §2):
 
 - Identidades nuevas: `task_id` (UUID v4, la identidad), `task_key` (`T-<n>` por proyecto, alias),
   `assignee_agent_id` (no se reasigna en v1), `creator` (`user:`/`agent:`, estampado por el backend),
@@ -702,8 +704,8 @@ implementado. Lo que se propone fijar en este protocolo es **sólo la capa A** (
   salvo en `CREATE`. El servidor **nunca** interpreta instrucciones de tareas escritas en el texto de un
   mensaje.
 - Errores: 409 `stale-rev`, `task-active` (un `UPDATE` sobre una activa), `task-not-active` (un
-  `CHANGE` sobre una pendiente), `change-pending`, `idempotency-conflict`, `tasks-unverifiable`; 403
-  `not-task-creator` / `not-task-assignee`.
+  `CHANGE` sobre una pendiente), `change-pending`, `idempotency-conflict`, `tasks-unverifiable`, `stop-pending` (E-5); 403
+  `not-task-creator` / `not-task-assignee`. Índice completo, con el texto de la UI: 15 §6.3 y §3.6.
 - Tres confirmaciones: `received` (persistida), `applied` (CAS del backend sobre una pendiente, o
   `task_ack` del agente sobre una activa) y, para `STOP`, `stopped` sólo con la evidencia de 13 §3.5.
 - La meta de una entrega gana `task_id`, `attempt_id`, `version` y, en las de control,
