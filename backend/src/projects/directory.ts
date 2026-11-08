@@ -765,6 +765,8 @@ export class ProjectDirectory {
 		let conversationsRead = true;
 		if (running.length > 0) {
 			try {
+				// One `?` per running bound session: ≤ MAX_AGENTS_PER_PROJECT (32), well under
+				// D1's 100 bound parameters per query. Raising the cap must keep it under that.
 				const r = await d1Query<ConversationPresenceRow>(
 					`SELECT st_session_id, status, status_evidence, status_at, last_event_at, pane_id
 					 FROM claude_conversations
