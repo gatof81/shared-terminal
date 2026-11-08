@@ -134,8 +134,12 @@ async function identifyTarget(): Promise<void> {
 	}
 	// A Cloudflare account id is 32 lowercase hex: a malformed entry (a name, a
 	// stray quote) would be refused by the API for the wrong reason and pass as a proof.
-	for (const id of [account, ...forbidden]) {
-		if (!/^[0-9a-f]{32}$/.test(id)) refuse(`${redact(id)} is not a Cloudflare account id`);
+	// A value that fails is never echoed, not even redacted: the likeliest wrong paste is the token.
+	for (const [i, id] of [account, ...forbidden].entries()) {
+		if (!/^[0-9a-f]{32}$/.test(id)) {
+			const where = i === 0 ? "CLOUDFLARE_ACCOUNT_ID" : `P3A_D1_LIVE_FORBID_ACCOUNTS entry ${i}`;
+			refuse(`${where} is not a Cloudflare account id (length ${id.length})`);
+		}
 	}
 	if (forbidden.includes(account)) refuse("the target account is in P3A_D1_LIVE_FORBID_ACCOUNTS");
 
