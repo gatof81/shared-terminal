@@ -227,12 +227,18 @@ producir hooks (por lo menos un prompt).
 **Ante un FAIL:** se vuelve a `false` (§4, sin reconstruir), se conserva toda la evidencia y se
 informa. No se reintenta ni se ajusta nada sobre la marcha.
 
-### 5.1 Ventana O1: B como única sesión con captura (criterio consolidado, 2026-11-07)
+### 5.1 Ventana O1: B como única sesión con captura (criterio consolidado, 2026-11-07; aceptado como validación limitada de B, 2026-11-08)
 
 A preparó una ventana `observe` de 24 h (O1) con B como única sesión efectiva, con una línea de base
 comparable y un rollback automático. La versión anterior de esta sección exigía 3/3 sesiones para un
-PASS de B: suponía las tres sesiones con captura del preflight. Esta versión la reemplaza. **HA y HZ no
-se tocan para cumplir el gate.**
+PASS de B: suponía las tres sesiones con captura del preflight. Esta sección define además un
+resultado **limitado a B** (PASS-B); **no reemplaza** el criterio de cobertura 3/3 para HA y HZ, que
+sigue vigente para cualquier conclusión sobre ellas. **HA y HZ no se tocan para cumplir el gate**, ni
+ninguna otra sesión.
+
+**Decisión del responsable (2026-11-08):** acepta este criterio como **validación limitada de B**, no
+como sustituto del criterio de cobertura de HA y HZ ni como autorización de `true`. No se modifica
+ninguna otra sesión para conseguir un PASS-B.
 
 **Lo que dice el código de `R`** (`index.ts`, `conversation/service.ts` `authorize` y `adminStats`,
 `conversation/registry.ts`):
