@@ -15,13 +15,14 @@
  *
  *   CLOUDFLARE_ACCOUNT_ID=<test account>   CLOUDFLARE_API_TOKEN=<D1:Edit on that account only>
  *   P3A_D1_LIVE_EXPECT_ACCOUNT=<same test account id, typed twice on purpose>
- *   P3A_D1_LIVE_FORBID_ACCOUNTS=<production account id[,…]>   (the token must NOT reach them)
+ *   P3A_D1_LIVE_FORBID_ACCOUNTS=<production account id[,…]>   REQUIRED: each must refuse the token (401/403)
  *   P3A_D1_LIVE_CREATE=1   — create a fresh `st-p3a-smoke-<ms>` database, run, delete it, prove it gone
  *   (or D1_DATABASE_ID + P3A_D1_LIVE_CONFIRM=<same id> + P3A_D1_LIVE_EXPECT_NAME=<its name>)
  *
  * Before ANY statement, the target is identified and refused unless every
- * guard holds (G1–G4 below): the token reaches the expected account and none
- * of the forbidden ones, every database already in that account is a smoke
+ * guard holds (G1–G4 below): the token reaches the expected account and every
+ * forbidden (production) account — at least one is required — explicitly
+ * refuses it, every database already in that account is a smoke
  * database (`st-p3a-smoke-` prefix: the account is dedicated), and the target's
  * id AND name are the expected ones. The empty-database check (C0) is kept as
  * one more guard, not the only one. Nothing prints the token. Checks are
@@ -123,41 +124,49 @@ async function identifyTarget(): Promise<void> {
 		.split(",")
 		.map((x) => x.trim())
 		.filter(Boolean);
+	// The production account id is required, always (owner decision 2026-11-08):
+	// the account listing alone is not enough, because it proves what the token
+	// reaches only if Cloudflare lists every account a token can act on, and a
+	// D1-only token may not be allowed to list at all. An explicit refusal by the
+	// production account is the one proof that names the account we must not touch.
+	if (forbidden.length === 0) {
+		refuse("P3A_D1_LIVE_FORBID_ACCOUNTS is required (the production account id)");
+	}
+	// A Cloudflare account id is 32 lowercase hex: a malformed entry (a name, a
+	// stray quote) would be refused by the API for the wrong reason and pass as a proof.
+	for (const id of [account, ...forbidden]) {
+		if (!/^[0-9a-f]{32}$/.test(id)) refuse(`${redact(id)} is not a Cloudflare account id`);
+	}
 	if (forbidden.includes(account)) refuse("the target account is in P3A_D1_LIVE_FORBID_ACCOUNTS");
 
-	// G1 — the token's reach. Either listing shows exactly the test account, or
-	// (a D1-only token may not list accounts) every forbidden account refuses it.
-	// At least one of the two proofs is required.
+	// G1 — the token's reach. Every forbidden account must refuse it (mandatory);
+	// when the token may list accounts, the listing must show exactly the test
+	// account as well (an extra proof, never a substitute).
 	const listed = await cf("GET", "/accounts?per_page=50");
 	const ids = Array.isArray(listed.result)
 		? (listed.result as Array<{ id: string }>).map((a) => a.id)
 		: null;
-	let reachProven = false;
 	if (listed.ok && ids) {
 		if (ids.length !== 1 || ids[0] !== account) {
 			refuse(`the token reaches ${ids.length} account(s), expected only the test account`);
 		}
 		pass("G1 token reach (listing)", `exactly one account: ${redact(account)}`);
-		reachProven = true;
 	} else {
 		info("G1 token reach (listing)", `account listing not permitted (HTTP ${listed.status})`);
 	}
 	for (const f of forbidden) {
 		const probe = await cf("GET", `/accounts/${f}/d1/database?per_page=1`);
 		if (probe.ok) refuse(`the token CAN read D1 of forbidden account ${redact(f)}`);
-		// Only an explicit authorization refusal proves anything: a 404 (a mistyped id),
-		// a 429 or a 5xx says nothing about the token. The id must be copied from the
-		// production dashboard; a token that can list accounts is the stronger proof.
+		// Only an explicit authorization refusal proves anything: a 404, a 429 or a
+		// 5xx says nothing about the token. The limit of this proof: Cloudflare also
+		// refuses a well-formed id that is not the production one, so the id must be
+		// copied from the production dashboard — the script cannot tell a typo apart.
 		if (probe.status !== 401 && probe.status !== 403) {
 			refuse(
 				`forbidden account ${redact(f)} answered HTTP ${probe.status}: not a proof of refusal`,
 			);
 		}
 		pass("G1 token reach (forbidden)", `${redact(f)} refuses it (HTTP ${probe.status})`);
-		reachProven = true;
-	}
-	if (!reachProven) {
-		refuse("no proof the token is limited to the test account (set P3A_D1_LIVE_FORBID_ACCOUNTS)");
 	}
 
 	// G2 — the account is dedicated: every database in it is a smoke database.
