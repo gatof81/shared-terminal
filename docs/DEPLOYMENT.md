@@ -1296,6 +1296,29 @@ A table created by a migration newer than the source D1's schema (e.g.
 before upgrading) is skipped and absent from `tables`; restore treats it
 as empty. At or past that version a missing table fails the backup.
 
+**Web Push subscriptions (#560).** `push_subscriptions` is backed up
+from v14 on. Backups taken before #560 do not have it: restore logs
+`no push_subscriptions.jsonl although the backup is schema vN` and every
+browser has to subscribe again, as before. A row holds the browser's
+endpoint and its payload keys (`p256dh`, `auth`). These are not enough to
+push: a push service only accepts a message signed with the deployment's
+`VAPID_PRIVATE_KEY`, which lives in `.env` and never in a backup. So the
+subscriptions only work on a target with the **same VAPID keypair**:
+- the manifest records `VAPID_PUBLIC_KEY` (`vapidPublicKey`);
+- restore still restores the rows, but warns when the target's key differs
+  or is unset. Pushes to them are then refused with 403, which is not a
+  "gone" status, so nothing prunes them;
+- the fix is to install the source's VAPID keys, or to let the browsers
+  subscribe again and clear the dead rows.
+
+**File permissions.** The backup directory and its files are created with
+the process umask (typically 0755/0644), so anyone on the host who can
+reach `<WORKSPACE_ROOT>/.backups` can read them. The dump already holds
+password hashes, invite-code hashes and ciphertext; the push rows add
+nothing that sends a notification. Tightening the permissions is tracked
+separately, because the nightly off-host copy reads these files as a
+non-root user.
+
 Restore guards:
 
 - **Non-empty target** (any `users`/`sessions` rows) refuses without

@@ -88,8 +88,17 @@ const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 // missing table still fails loudly. Restore reads a missing .jsonl as
 // zero rows, and its migrateDb() creates the table on the target; it warns
 // when the manifest's schema says the table should have been exported.
-const TABLES: ReadonlyArray<{ name: string; orderBy: string; sinceSchema?: number }> = [
+export const TABLES: ReadonlyArray<{ name: string; orderBy: string; sinceSchema?: number }> = [
 	{ name: "users", orderBy: "id" },
+	// #355 — no FK (user_id is a plain column). Each row is a browser's
+	// PushSubscription: `endpoint` (an unguessable URL) and `p256dh`/`auth`
+	// (the keys that encrypt a payload for that browser). They are NOT enough
+	// to push: every subscription is bound to this deployment's VAPID key, and
+	// a push service only accepts a message signed with VAPID_PRIVATE_KEY,
+	// which lives in the environment and never in a backup. A backup holds
+	// them at the same level as the password hashes it already holds. Before
+	// #560 the table was missing here, so every restore emptied it.
+	{ name: "push_subscriptions", orderBy: "id", sinceSchema: 14 },
 	{ name: "user_groups", orderBy: "id" },
 	{ name: "user_group_members", orderBy: "group_id, user_id" },
 	{ name: "sessions", orderBy: "session_id" },
@@ -124,6 +133,10 @@ export interface BackupManifest {
 	globalRevocation?: true;
 	/** `.projects/<pid>` logs and artifacts (PROJECT_CONVERSATION.md §8). Absent ⇔ none on disk. */
 	projects?: Record<string, ProjectBackupEntry>;
+	/** VAPID_PUBLIC_KEY when the backup was taken (public; absent = push not
+	 *  configured, or a backup older than #560). The subscriptions only work
+	 *  under the keypair they were created for: restore warns on a mismatch. */
+	vapidPublicKey?: string;
 }
 
 export interface WorkspaceEntry {
@@ -202,6 +215,9 @@ export async function runBackup(outDir: string): Promise<BackupManifest> {
 		schemaVersion,
 		tables: {},
 		workspaces: {},
+		...(process.env.VAPID_PUBLIC_KEY?.trim()
+			? { vapidPublicKey: process.env.VAPID_PUBLIC_KEY.trim() }
+			: {}),
 	};
 
 	for (const t of TABLES) {
@@ -558,7 +574,8 @@ async function restoreAll(
 		// A table the backup's schema already had but whose .jsonl is absent was
 		// not exported: a backend older than the table took the backup after a
 		// rollback (manifest = the D1 ledger, e.g. v19, while its TABLES list
-		// stops at v18). It restores as zero rows; say so instead of hiding it.
+		// stops at v18), or one that never exported it (push_subscriptions
+		// before #560). It restores as zero rows; say so instead of hiding it.
 		if (
 			(t.sinceSchema ?? 0) <= manifest.schemaVersion &&
 			!(await fs.stat(path.join(inDir, `${t.name}.jsonl`)).then(
@@ -588,6 +605,24 @@ async function restoreAll(
 			);
 		}
 		logger.info(`[restore] ${t.name}: ${rows.length} row(s)`);
+		// Restored either way (the operator may still install the source's keys),
+		// but a subscription only accepts pushes signed by the keypair it was
+		// created under: another key gets 403 from the push service, which is not
+		// a "gone" status, so sendToUser never prunes them on its own.
+		const here = process.env.VAPID_PUBLIC_KEY?.trim() || undefined;
+		if (
+			t.name === "push_subscriptions" &&
+			rows.length > 0 &&
+			manifest.vapidPublicKey !== undefined &&
+			manifest.vapidPublicKey !== here
+		) {
+			logger.warn(
+				`[restore] push_subscriptions: ${rows.length} subscription(s) were created for another VAPID key ` +
+					`(${here ? "this deployment's VAPID_PUBLIC_KEY differs" : "VAPID is not configured here"}) — ` +
+					"pushes to them will be refused until the source's VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY are " +
+					"installed, or until each browser subscribes again",
+			);
+		}
 	}
 
 	// The destination host has none of the source's containers — land
