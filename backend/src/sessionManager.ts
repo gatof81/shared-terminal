@@ -585,6 +585,24 @@ export class SessionManager {
 		await d1Query("UPDATE sessions SET status = ? WHERE session_id = ?", [status, sessionId]);
 	}
 
+	/**
+	 * The bootstrap's hard-fail flip (`failSession`). It runs outside the
+	 * session lock — the flip must land before the kill, and the kill is what
+	 * takes the lock — so a hard delete can terminate the row first. The
+	 * condition, evaluated inside this one statement, keeps `terminated`
+	 * final: a deleted session never comes back as `failed`, and while a
+	 * hard delete purges the workspace the row stays `terminated`, which is
+	 * what the P3a creation trigger refuses (PROJECTS.md §6). Returns whether
+	 * the row was flipped.
+	 */
+	async markFailed(sessionId: string): Promise<boolean> {
+		const r = await d1Query(
+			"UPDATE sessions SET status = 'failed' WHERE session_id = ? AND status != 'terminated'",
+			[sessionId],
+		);
+		return r.meta.changes === 1;
+	}
+
 	// Atomic "container was removed out-of-band" write. Collapsing the two
 	// fields into one UPDATE closes the crash window where nulling the id
 	// would succeed but the status flip wouldn't — leaving the row at

@@ -40,6 +40,7 @@ import { DockerManager } from "./dockerManager.js";
 import { IdleSweeper, listRunningSessionIds } from "./idleSweeper.js";
 import { logger } from "./logger.js";
 import { createPortDispatcher, validatePortProxyBaseDomain } from "./portDispatcher.js";
+import { ProjectDirectory, projectChatFlagEnabled } from "./projects/directory.js";
 import { conversationRecreatePort } from "./recreate/capturePort.js";
 import { d1RecreatePort } from "./recreate/d1.js";
 import { RecreationEngine } from "./recreate/engine.js";
@@ -262,6 +263,13 @@ if (COMPOSER_ENABLED) {
 // Nothing at all with the flag unset (boot logs unchanged), except a warning
 // for a malformed experimental variable that is being ignored.
 for (const w of COMPOSER_BG.warnings) logger.warn(`[server] ${w}`);
+// P3a — the project & agent directory (docs/PROJECTS.md). Off by default:
+// with the flag off nothing is constructed, its routes are not mounted and
+// every existing answer is unchanged. Its migration (v19) runs at boot either
+// way — the flag gates the surface, not the schema.
+const PROJECT_CHAT_ENABLED = projectChatFlagEnabled(process.env.PROJECT_CHAT_ENABLED);
+const projectDirectory = PROJECT_CHAT_ENABLED ? new ProjectDirectory() : undefined;
+if (PROJECT_CHAT_ENABLED) logger.info("[server] project directory ENABLED (P3a)");
 // Single shared bootstrap broadcaster (PR 185b2b). Owned at the server
 // scope so the route's runAsyncBootstrap and the WS handler's
 // /ws/bootstrap subscriber see the same per-session listener sets and
@@ -480,6 +488,7 @@ app.use(
 		recreation,
 		conversationAllowUsers: CONVERSATION_ALLOW_USERS,
 		composer,
+		projects: projectDirectory,
 	}),
 );
 app.get("/health", (_req, res) => res.json({ ok: true }));

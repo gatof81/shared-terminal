@@ -1123,6 +1123,19 @@ A soft delete (`DELETE /api/sessions/:id` without `?hard=true`) followed by
 `POST /start` also re-creates the container with the same losses, passing
 through `terminated`; prefer the steps above.
 
+## Project & agent directory (P3a, `docs/PROJECTS.md`)
+
+Off by default (`PROJECT_CHAT_ENABLED` unset). **Its migration (v19) is applied by `migrateDb()` on
+the first boot of a backend that contains it, whatever the flag says**: the flag mounts the routes, it
+does not gate the schema. v19 is additive (four tables, three indexes, two triggers; no existing
+column changes), idempotent, and harmless to the previous backend (no foreign key to `sessions`, so
+its hard delete is unaffected) — rolling the code back needs no schema step and leaves the tables
+inert. Take a backup before the first boot that applies it, as for any migration. Turning the flag on
+is a separate decision. A hard delete of a session bound to a project agent answers 409 `agent-active`
+until the agent is removed, with the flag on or off (bindings outlive the flag). **Rollback after the
+flag has been on is not free:** the previous backend does not guard bound sessions and its backup does
+not export the directory — prefer turning the flag off, and see PROJECTS.md §8 for the conditions.
+
 ## Backup & restore (#240)
 
 Operator-level, host-shell only (deliberately not API surface — a dump

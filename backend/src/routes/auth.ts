@@ -106,6 +106,9 @@ export function registerAuthRoutes(router: Router, ctx: RouteContext): void {
 			isLead,
 			resourceCaps,
 			uiShell: UI_SHELL,
+			// P3a (E-6): present only with PROJECT_CHAT_ENABLED on, so with the
+			// flag off this answer stays byte-identical. Absent ⇒ false.
+			...(ctx.projects ? { features: { projectChat: true } } : {}),
 		});
 	});
 
