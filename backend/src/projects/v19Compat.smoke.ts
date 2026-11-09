@@ -175,6 +175,7 @@ async function identifyTarget(): Promise<void> {
 const targets: Array<{ name: string; id: string; settled: boolean }> = [];
 /** Creates a disposable database, tracked for cleanup BEFORE the request leaves. */
 async function createDb(suffix: string): Promise<string> {
+	if (stopping) throw new Error("stopping: no new database");
 	const name = `${PREFIX}v19c-${suffix}-${Date.now()}`;
 	const t = { name, id: "", settled: false };
 	targets.push(t);
@@ -223,6 +224,7 @@ const cleanupOnce = () => {
 	return cleanupPromise;
 };
 async function cleanup(): Promise<void> {
+	stopping = true;
 	for (const c of children) if (c.exitCode === null) c.kill("SIGKILL");
 	fakeDocker?.close();
 	for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true });
@@ -312,6 +314,15 @@ function build(label: string, sha: string): { dir: string; sha: string } {
 // ── Child processes ────────────────────────────────────────────────────────
 
 const children: ChildProcess[] = [];
+/** Set first thing by cleanup: nothing new may start (no child, no database) once it is. */
+let stopping = false;
+function track(c: ChildProcess): ChildProcess {
+	children.push(c);
+	// An 'error' without a listener would be an uncaught exception that skips cleanup.
+	c.on("error", () => {});
+	if (stopping) c.kill("SIGKILL");
+	return c;
+}
 const baseEnv = (): NodeJS.ProcessEnv => ({
 	PATH: process.env.PATH,
 	HOME: process.env.HOME,
@@ -329,13 +340,14 @@ function runNode(
 	args: string[],
 	env: NodeJS.ProcessEnv,
 ): Promise<{ code: number | null; out: string }> {
+	if (stopping) return Promise.reject(new Error("stopping: no new child"));
 	return new Promise((resolve) => {
 		const c = spawn(process.execPath, nodeArgs(args), {
 			cwd,
 			env,
 			stdio: ["ignore", "pipe", "pipe"],
 		});
-		children.push(c);
+		track(c);
 		let out = "";
 		c.stdout?.on("data", (b) => (out += b));
 		c.stderr?.on("data", (b) => (out += b));
@@ -383,6 +395,7 @@ async function startFakeDocker(): Promise<string> {
 
 type Backend = { url: string; proc: ChildProcess; log: () => string; stop: () => Promise<void> };
 async function startBackend(label: string, be: string, extra: NodeJS.ProcessEnv): Promise<Backend> {
+	if (stopping) throw new Error("stopping: no new backend");
 	const port = await new Promise<number>((r) => {
 		const s = http.createServer().listen(0, "127.0.0.1", () => {
 			const p = (s.address() as AddressInfo).port;
@@ -395,7 +408,7 @@ async function startBackend(label: string, be: string, extra: NodeJS.ProcessEnv)
 		env,
 		stdio: ["ignore", "pipe", "pipe"],
 	});
-	children.push(proc);
+	track(proc);
 	let out = "";
 	proc.stdout?.on("data", (b) => (out += b));
 	proc.stderr?.on("data", (b) => (out += b));
@@ -498,11 +511,11 @@ async function seed(): Promise<void> {
 	await q("INSERT INTO user_group_members (group_id, user_id) VALUES (?, ?)", [group, bob]);
 	await q(
 		"INSERT INTO invite_codes (code_hash, code_prefix, created_by, expires_at) VALUES (?, 'abcd', ?, '2099-01-01 00:00:00')",
-		[createHash("sha256").update("invite-1").digest("hex"), admin],
+		[createHash("sha256").update(randomBytes(16).toString("hex")).digest("hex"), admin],
 	);
 	await q(
 		"INSERT INTO invite_codes (code_hash, code_prefix, created_by, used_by, used_at) VALUES (?, 'efgh', ?, ?, datetime('now'))",
-		[createHash("sha256").update("invite-2").digest("hex"), admin, bob],
+		[createHash("sha256").update(randomBytes(16).toString("hex")).digest("hex"), admin, bob],
 	);
 	await q(
 		"INSERT INTO templates (id, owner_user_id, name, description, config) VALUES (?, ?, 'v19c tpl', 'qa', ?)",
@@ -611,6 +624,7 @@ const tableLine = (s: Snapshot) =>
 // ── Main ───────────────────────────────────────────────────────────────────
 
 let interrupted = 0;
+let signals = 0;
 async function main(): Promise<void> {
 	const mainSha = process.env.V19C_MAIN_SHA ?? refuse("V19C_MAIN_SHA unset");
 	const prSha = process.env.V19C_PR_SHA ?? refuse("V19C_PR_SHA unset");
@@ -656,8 +670,36 @@ async function main(): Promise<void> {
 		one: (await http_(b0, "GET", `/api/sessions/${shared.ids["s-stopped"]}`, undefined, c0)).text,
 	};
 	await b0.stop();
+	// b0's boot reconcile stopped the seeded running session (its container is
+	// gone) and cleared its port mapping. Put a running session with a mapping
+	// back, owned by bob — GET /api/sessions is per user, so admin's baseline
+	// is unaffected — so v19 migrates over every status and a non-empty mapping.
+	const runningBob = randomUUID();
+	shared.ids["s-running-bob"] = runningBob;
+	await q(
+		"INSERT INTO sessions (session_id, user_id, name, status, container_id, container_name, env_vars) VALUES (?, ?, 'v19c running', 'running', ?, ?, '{}')",
+		[runningBob, shared.ids.bob, `c0ffee${"0".repeat(57)}2`, `st-${runningBob.slice(0, 12)}`],
+	);
+	await q("INSERT INTO session_configs (session_id, ports_json) VALUES (?, ?)", [
+		runningBob,
+		JSON.stringify([{ port: 8080, public: true }]),
+	]);
+	await q(
+		"INSERT INTO sessions_port_mappings (session_id, container_port, host_port, is_public) VALUES (?, 8080, 8080, 1)",
+		[runningBob],
+	);
 
 	const before = await snapshot();
+	const statuses = await q<{ status: string }>(
+		"SELECT DISTINCT status FROM sessions ORDER BY status",
+	);
+	const statusSet = statuses.map((r) => r.status);
+	verdict(
+		"S1.2 representative data at migration time",
+		["failed", "running", "stopped", "terminated"].every((x) => statusSet.includes(x)) &&
+			(before.tables.get("sessions_port_mappings")?.count ?? 0) >= 1,
+		`session statuses ${statusSet.join(",")}; port mappings ${before.tables.get("sessions_port_mappings")?.count}`,
+	);
 	info("S1.2 before (table=count/digest)", tableLine(before));
 	await migrate("pr", v19.dir);
 	const after = await snapshot();
@@ -850,6 +892,7 @@ async function main(): Promise<void> {
 		},
 	);
 	raw.push(`── main backup (exit ${bk18.code}) ──\n${bk18.out.trim()}`);
+	const atBackup = await q<{ n: number }>("SELECT COUNT(*) AS n FROM sessions");
 	const files18 = fs.existsSync(path.join(shared.workspace, ".backups", "v18"))
 		? fs.readdirSync(path.join(shared.workspace, ".backups", "v18")).sort()
 		: [];
@@ -987,7 +1030,13 @@ async function main(): Promise<void> {
 		rs18.code !== 0 && /NEWER than this code's v18/.test(rs18.out) && users18[0]?.n === 0,
 		`exit ${rs18.code}; users on target ${users18[0]?.n}`,
 	);
-	const rs19 = await runNode(v19.dir, ["dist/backup.js", "restore", backupDir], restoreEnv);
+	// #557's restore on a FRESH database (main's refusal above already left a
+	// v18 schema on the first one).
+	const restoreDb2 = await createDb("restore2");
+	const rs19 = await runNode(v19.dir, ["dist/backup.js", "restore", backupDir], {
+		...restoreEnv,
+		D1_DATABASE_ID: restoreDb2,
+	});
 	raw.push(`── pr restore of main backup (exit ${rs19.code}) ──\n${rs19.out.trim()}`);
 	const warned = NEW_TABLES.filter((t) =>
 		new RegExp(`\\[restore\\] ${t}: no ${t}\\.jsonl although the backup is schema v19`).test(
@@ -997,16 +1046,16 @@ async function main(): Promise<void> {
 	const restored = await q<{ u: number; s: number; m: number }>(
 		"SELECT (SELECT COUNT(*) FROM users) AS u, (SELECT COUNT(*) FROM sessions) AS s, (SELECT MAX(version) FROM schema_migrations) AS m",
 		[],
-		restoreDb,
+		restoreDb2,
 	);
-	const sourceSessions = await q<{ n: number }>("SELECT COUNT(*) AS n FROM sessions");
 	verdict(
 		"S2.7 pr restores it and warns for the four tables",
 		rs19.code === 0 &&
 			warned.length === NEW_TABLES.length &&
 			restored[0]?.u === 2 &&
+			restored[0]?.s === atBackup[0]?.n &&
 			restored[0]?.m === 19,
-		`exit ${rs19.code}; WARN for ${warned.join(", ") || "none"}; target users ${restored[0]?.u}, sessions ${restored[0]?.s} (source now ${sourceSessions[0]?.n}), ledger max ${restored[0]?.m}`,
+		`exit ${rs19.code}; WARN for ${warned.join(", ") || "none"}; target users ${restored[0]?.u}, sessions ${restored[0]?.s} (source at backup ${atBackup[0]?.n}), ledger max ${restored[0]?.m}`,
 	);
 	info("S2 fake Docker calls", JSON.stringify(Object.fromEntries(dockerCalls)));
 }
@@ -1025,7 +1074,9 @@ function report(result: string): void {
 
 const onSignal = (sig: NodeJS.Signals) => {
 	interrupted = sig === "SIGINT" ? 130 : 143;
-	if (cleanupPromise) {
+	// Count signals: a cleanup already running (the normal end of the run) is
+	// joined by the first one, never abandoned by it.
+	if (++signals > 1) {
 		console.error(
 			"second signal: CLEANUP ABANDONED — check the account for st-p3a-smoke-v19c-* by hand",
 		);
@@ -1039,6 +1090,17 @@ const onSignal = (sig: NodeJS.Signals) => {
 };
 process.on("SIGINT", onSignal);
 process.on("SIGTERM", onSignal);
+const onCrash = (e: unknown) => {
+	if (interrupted) return;
+	interrupted = 1;
+	fail("X crashed", mask(String((e as Error)?.stack ?? e)).slice(0, 2000));
+	void cleanupOnce().then(() => {
+		report("FAIL");
+		process.exit(1);
+	});
+};
+process.on("uncaughtException", onCrash);
+process.on("unhandledRejection", onCrash);
 
 main()
 	.then(
