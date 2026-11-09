@@ -636,14 +636,17 @@ async function restoreAll(
 		// created under: another key gets 403 from the push service, which is not
 		// a "gone" status, so sendToUser never prunes them on its own.
 		const here = process.env.VAPID_PUBLIC_KEY?.trim() || undefined;
+		// Only the rows this restore inserted: the ones kept from the target
+		// (same endpoint already there) belong to the target's own key.
+		const inserted = rows.length - keptFromTarget;
 		if (
 			t.name === "push_subscriptions" &&
-			rows.length > 0 &&
+			inserted > 0 &&
 			manifest.vapidPublicKey !== undefined &&
 			manifest.vapidPublicKey !== here
 		) {
 			logger.warn(
-				`[restore] push_subscriptions: ${rows.length} subscription(s) were created for another VAPID key — ` +
+				`[restore] push_subscriptions: ${inserted} restored subscription(s) were created for another VAPID key — ` +
 					(here
 						? "this deployment's VAPID_PUBLIC_KEY differs, so push services will refuse them (403, never pruned)"
 						: "VAPID is not configured here, so nothing will be sent to them") +

@@ -483,6 +483,25 @@ describe("push_subscriptions (#560)", () => {
 		}
 	});
 
+	it("the key warning counts only the rows this restore inserted, not those kept from the target", async () => {
+		await backupWithSub("BKeyA");
+		vi.stubEnv("VAPID_PUBLIC_KEY", "BKeyB");
+		dbState.pushConflicts.add(SUB.endpoint); // the only row is already there: nothing inserted
+		const warn = vi.spyOn(logger, "warn");
+		try {
+			await runRestore(outDir, { force: true });
+			expect(pushWarnings(warn)).toHaveLength(0);
+			dbState.pushConflicts.clear();
+			warn.mockClear();
+			await runRestore(outDir, { force: true });
+			expect(pushWarnings(warn)[0]).toMatch(
+				/^\[restore\] push_subscriptions: 1 restored subscription\(s\)/,
+			);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
 	it("does not warn about keys when the backup recorded none", async () => {
 		await backupWithSub(undefined);
 		const warn = vi.spyOn(logger, "warn");
