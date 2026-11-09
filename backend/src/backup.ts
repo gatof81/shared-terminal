@@ -40,6 +40,7 @@ import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
+import { backupPerms, hardenBackups, secure } from "./backupPerms.js";
 import {
 	ATTESTATION_FILE_PREFIX,
 	ATTESTATION_KEY_INFO,
@@ -131,11 +132,25 @@ export type ConcurrentChangeKind = "changed" | "removed" | "shrank";
 // ── Backup ──────────────────────────────────────────────────────────────────
 
 export async function runBackup(outDir: string): Promise<BackupManifest> {
+	// Before anything is created: a malformed BACKUP_GROUP_GID refuses here.
+	const perms = backupPerms();
+	// The parent (normally `.backups`) is secured only when this run creates
+	// it; an existing one is the operator's (hardenBackups brings it in line).
+	const parent = path.dirname(path.resolve(outDir));
+	const parentExisted = await fs.lstat(parent).then(
+		() => true,
+		() => false,
+	);
 	await fs.mkdir(outDir, { recursive: true });
 	if ((await fs.readdir(outDir)).length > 0) {
 		throw new Error(`backup dir ${outDir} is not empty — refusing to mix with an existing backup`);
 	}
+	if (!parentExisted) await secure(parent, "dir", perms);
+	// The backup dir is closed BEFORE anything is written into it: a file
+	// created with the umask (tar, copyFile) is never reachable through it.
+	await secure(outDir, "dir", perms);
 	await fs.mkdir(path.join(outDir, "workspaces"));
+	await secure(path.join(outDir, "workspaces"), "dir", perms);
 
 	const versionRow = await d1Query<{ v: number | null }>(
 		"SELECT MAX(version) AS v FROM schema_migrations",
@@ -161,7 +176,9 @@ export async function runBackup(outDir: string): Promise<BackupManifest> {
 			`SELECT * FROM ${t.name} ORDER BY ${t.orderBy}`,
 		);
 		const lines = rows.results.map((r) => JSON.stringify(r)).join("\n");
-		await fs.writeFile(path.join(outDir, `${t.name}.jsonl`), lines === "" ? "" : `${lines}\n`);
+		const jsonl = path.join(outDir, `${t.name}.jsonl`);
+		await fs.writeFile(jsonl, lines === "" ? "" : `${lines}\n`, { mode: perms.fileMode });
+		await secure(jsonl, "file", perms);
 		manifest.tables[t.name] = rows.results.length;
 		logger.info(`[backup] ${t.name}: ${rows.results.length} row(s)`);
 	}
@@ -196,6 +213,7 @@ export async function runBackup(outDir: string): Promise<BackupManifest> {
 		if (members.length === 0) continue;
 		const tarPath = path.join(outDir, "workspaces", `${session_id}.tar.gz`);
 		const changes = await createTarball(tarPath, members);
+		await secure(tarPath, "file", perms);
 		// Structural check of what was just written: gzip CRC + every tar
 		// header, end to end. The listing is also the manifest's count.
 		const fileCount = (await verifyTarball(tarPath)).length;
@@ -219,6 +237,7 @@ export async function runBackup(outDir: string): Promise<BackupManifest> {
 	// The global emergency cut is not inside any session's tarball.
 	try {
 		await fs.copyFile(revokedAllPath(WORKSPACE_ROOT), path.join(outDir, REVOKED_ALL_FILE));
+		await secure(path.join(outDir, REVOKED_ALL_FILE), "file", perms);
 		manifest.globalRevocation = true;
 		logger.warn("[backup] global conversation revocation (REVOKED_ALL) is in effect — carried");
 	} catch (err) {
@@ -230,7 +249,9 @@ export async function runBackup(outDir: string): Promise<BackupManifest> {
 	await fs.writeFile(
 		path.join(outDir, "manifest.json"),
 		`${JSON.stringify(manifest, null, "\t")}\n`,
+		{ mode: perms.fileMode },
 	);
+	await secure(path.join(outDir, "manifest.json"), "file", perms);
 	logger.info(`[backup] complete → ${outDir}`);
 	return manifest;
 }
@@ -818,7 +839,8 @@ async function publishNoClobber(file: string, bytes: string): Promise<boolean> {
 if (typeof require !== "undefined" && require.main === module) {
 	const [mode, dir, ...rest] = process.argv.slice(2);
 	const force = rest.includes("--force");
-	const usage = "usage: node dist/backup.js backup [outDir] | restore <inDir> [--force]";
+	const usage =
+		"usage: node dist/backup.js backup [outDir] | restore <inDir> [--force] | harden [backupsDir] [--write]";
 	const run = async (): Promise<void> => {
 		if (mode === "backup") {
 			const out =
@@ -828,6 +850,23 @@ if (typeof require !== "undefined" && require.main === module) {
 		} else if (mode === "restore") {
 			if (!dir) throw new Error(usage);
 			await runRestore(dir, { force });
+		} else if (mode === "harden") {
+			// #562 — existing backups. Dry run unless --write; `dir` may be the
+			// flag itself when no directory is given.
+			const root = dir && dir !== "--write" ? dir : path.join(WORKSPACE_ROOT, ".backups");
+			const write = process.argv.includes("--write");
+			const perms = backupPerms();
+			const r = await hardenBackups(root, perms, { write });
+			for (const c of r.changes) {
+				console.log(
+					`${write ? "changed" : "would change"} ${c.kind} ${c.path}: ` +
+						`${c.from.mode.toString(8)}:${c.from.gid} → ${c.to.mode.toString(8)}:${c.to.gid}`,
+				);
+			}
+			for (const k of r.skipped) console.log(`skipped ${k.path} (${k.reason})`);
+			console.log(
+				`${r.changes.length} entr${r.changes.length === 1 ? "y" : "ies"} ${write ? "changed" : "to change (dry run; --write applies)"}, ${r.skipped.length} skipped`,
+			);
 		} else {
 			throw new Error(usage);
 		}

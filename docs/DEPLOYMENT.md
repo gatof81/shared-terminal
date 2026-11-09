@@ -1153,6 +1153,37 @@ docker compose exec app npm run restore -- <backupDir>
 docker compose exec app npm run restore -- <backupDir> --force   # non-empty target
 ```
 
+**Who can read a backup (#562).** A dump holds password and token hashes,
+secret ciphertext, conversation titles and every workspace, including a
+`.env` written by `writeEnvFile`. `npm run backup` therefore never creates
+anything readable by "others". The backup directory is closed before
+anything is written into it, and every directory and file is then given:
+
+| `BACKUP_GROUP_GID` | Directories | Files | Who reads them |
+| --- | --- | --- | --- |
+| unset (default) | 0700 | 0600 | root only. The off-host copy must run as root |
+| a numeric GID | 0750 | 0640, group = that GID | root and that group, e.g. a dedicated `st-backup` group that the mirror's user belongs to |
+
+A malformed value refuses the backup before anything is written.
+`<WORKSPACE_ROOT>/.backups` itself is set only when the backup creates it.
+
+- **Before deploying this change,** make sure the nightly copy can still read
+  the backups. If it runs as a non-root user, create the group, add that user
+  to it, and set `BACKUP_GROUP_GID` in `.env` *before* the first backup under
+  the new code. Otherwise the mirror fails to read the new files.
+- **Existing backups** keep their old modes until
+  `docker compose exec app npm run backup:harden` brings them in line.
+  - Without `-- --write` it is a **dry run** that only lists what would change.
+  - With `-- --write` it applies the same modes and group to everything under
+    `.backups`, the directory itself included.
+  - It never follows a symlink and refuses a root that is one.
+- **The off-host copy** keeps its own permissions:
+  - `rsync -a` carries the modes;
+  - on a CIFS mount, the mount's `file_mode`/`dir_mode`/`uid`/`gid` options
+    decide instead;
+  - check the NAS side separately: its share's ACLs decide who can read it there.
+- **Restore** runs as root, so it reads both modes.
+
 A backup dir holds one `<table>.jsonl` per table (deterministic order —
 two backups of identical data are diffable), `workspaces/<sid>.tar.gz`
 (workspace + uploads dir, gzip because the image already ships it), and

@@ -197,6 +197,90 @@ describe("runBackup", () => {
 	});
 });
 
+describe("backup permissions (#562)", () => {
+	afterEach(() => {
+		vi.unstubAllEnvs();
+	});
+	async function entries(
+		dir: string,
+	): Promise<Array<{ p: string; dir: boolean; mode: number; gid: number }>> {
+		const out: Array<{ p: string; dir: boolean; mode: number; gid: number }> = [];
+		const walk = async (p: string) => {
+			const st = await fs.lstat(p);
+			out.push({
+				p: path.relative(dir, p) || ".",
+				dir: st.isDirectory(),
+				mode: st.mode & 0o7777,
+				gid: st.gid,
+			});
+			if (st.isDirectory()) for (const n of await fs.readdir(p)) await walk(path.join(p, n));
+		};
+		await walk(dir);
+		return out;
+	}
+	async function fullBackup(): Promise<void> {
+		dbState.tables.set("users", [{ id: "u1", username: "diego" }]);
+		dbState.tables.set("sessions", [{ session_id: "s1", user_id: "u1", status: "stopped" }]);
+		await seedWorkspace("s1", { "s1/hello.txt": "hola" });
+		await runBackup(outDir);
+	}
+
+	it("without BACKUP_GROUP_GID every entry is 0700/0600: nothing for group or others", async () => {
+		vi.stubEnv("BACKUP_GROUP_GID", "");
+		await fullBackup();
+		const all = await entries(outDir);
+		expect(all.some((e) => e.p.endsWith(".tar.gz"))).toBe(true);
+		expect(all.some((e) => e.p === "manifest.json")).toBe(true);
+		for (const e of all) expect([e.p, e.mode]).toEqual([e.p, e.dir ? 0o700 : 0o600]);
+	});
+
+	it("with BACKUP_GROUP_GID every entry is 0750/0640 in that group", async () => {
+		// A supplementary group when the runner has one (CI does), so a missing
+		// chown shows; and a 077 umask, under which every create lands at
+		// 0700/0600, so a missing chmod shows on every single entry.
+		const primary = process.getgid?.() ?? 0;
+		const gid = (process.getgroups?.() ?? []).find((g) => g !== primary) ?? primary;
+		vi.stubEnv("BACKUP_GROUP_GID", String(gid));
+		const prev = process.umask(0o077);
+		try {
+			await fullBackup();
+		} finally {
+			process.umask(prev);
+		}
+		for (const e of await entries(outDir)) {
+			expect([e.p, e.mode, e.gid]).toEqual([e.p, e.dir ? 0o750 : 0o640, gid]);
+		}
+	});
+
+	it("a malformed BACKUP_GROUP_GID refuses before anything is created", async () => {
+		vi.stubEnv("BACKUP_GROUP_GID", "backup");
+		await expect(runBackup(outDir)).rejects.toThrow(/numeric group id/);
+		await expect(fs.access(outDir)).rejects.toThrow();
+		expect(dbState.selected).toHaveLength(0);
+	});
+
+	it("secures the parent it creates, and leaves an existing parent alone", async () => {
+		vi.stubEnv("BACKUP_GROUP_GID", "");
+		const parent = path.join(outDir, ".backups");
+		await runBackup(path.join(parent, "a"));
+		expect((await fs.lstat(parent)).mode & 0o7777).toBe(0o700);
+		await fs.chmod(parent, 0o755);
+		await runBackup(path.join(parent, "b"));
+		expect((await fs.lstat(parent)).mode & 0o7777).toBe(0o755);
+		expect((await fs.lstat(path.join(parent, "b"))).mode & 0o7777).toBe(0o700);
+	});
+
+	it("a secured backup restores as before", async () => {
+		vi.stubEnv("BACKUP_GROUP_GID", "");
+		await fullBackup();
+		dbState.tables.clear();
+		await fs.rm(path.join(WORKSPACE_ROOT, "s1"), { recursive: true });
+		await runRestore(outDir);
+		expect(dbState.inserts.some((i) => /INTO users /.test(i.sql))).toBe(true);
+		expect(await fs.readFile(path.join(WORKSPACE_ROOT, "s1", "hello.txt"), "utf-8")).toBe("hola");
+	});
+});
+
 describe("runRestore", () => {
 	async function makeBackup(): Promise<void> {
 		dbState.tables.set("users", [{ id: "u1", username: "diego" }]);

@@ -1,0 +1,151 @@
+import { execFileSync } from "node:child_process";
+import { promises as fs, mkdtempSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { backupPerms, hardenBackups, secure } from "./backupPerms.js";
+
+const gid = process.getgid?.() ?? 0;
+let root: string;
+const mode = async (p: string) => (await fs.lstat(p)).mode & 0o7777;
+
+beforeEach(() => {
+	root = mkdtempSync(path.join(os.tmpdir(), "st-backup-perms-"));
+});
+afterEach(async () => {
+	await fs.rm(root, { recursive: true, force: true });
+});
+
+describe("backupPerms", () => {
+	it("is root-only without BACKUP_GROUP_GID", () => {
+		expect(backupPerms({})).toEqual({ dirMode: 0o700, fileMode: 0o600, gid: null });
+		expect(backupPerms({ BACKUP_GROUP_GID: "  " })).toEqual({
+			dirMode: 0o700,
+			fileMode: 0o600,
+			gid: null,
+		});
+	});
+
+	it("opens to one group with a numeric BACKUP_GROUP_GID, never to others", () => {
+		expect(backupPerms({ BACKUP_GROUP_GID: "1001" })).toEqual({
+			dirMode: 0o750,
+			fileMode: 0o640,
+			gid: 1001,
+		});
+		for (const p of [backupPerms({}), backupPerms({ BACKUP_GROUP_GID: "0" })]) {
+			expect(p.dirMode & 0o007).toBe(0);
+			expect(p.fileMode & 0o007).toBe(0);
+		}
+	});
+
+	it.each([
+		"backup",
+		"-1",
+		"1.5",
+		"0x10",
+		"99999999999",
+		"1001 1002",
+	])("refuses BACKUP_GROUP_GID=%j", (v) => {
+		expect(() => backupPerms({ BACKUP_GROUP_GID: v })).toThrow(/numeric group id/);
+	});
+});
+
+describe("secure", () => {
+	it("sets the mode (and group) on a file and a directory", async () => {
+		const f = path.join(root, "f");
+		await fs.writeFile(f, "x", { mode: 0o644 });
+		await fs.chmod(f, 0o644);
+		await secure(f, "file", { dirMode: 0o750, fileMode: 0o640, gid });
+		expect(await mode(f)).toBe(0o640);
+		expect((await fs.stat(f)).gid).toBe(gid);
+		await fs.chmod(root, 0o755);
+		await secure(root, "dir", backupPerms({}));
+		expect(await mode(root)).toBe(0o700);
+	});
+
+	it("refuses a symlink and leaves its target alone", async () => {
+		const target = path.join(root, "target");
+		await fs.writeFile(target, "x");
+		await fs.chmod(target, 0o644);
+		const link = path.join(root, "link");
+		await fs.symlink(target, link);
+		await expect(secure(link, "file", backupPerms({}))).rejects.toThrow(/symlink/);
+		expect(await mode(target)).toBe(0o644);
+	});
+
+	it("refuses an entry of the wrong kind (a FIFO does not hang it)", async () => {
+		const fifo = path.join(root, "fifo");
+		execFileSync("mkfifo", [fifo]);
+		await expect(secure(fifo, "file", backupPerms({}))).rejects.toThrow(/not a regular file/);
+		await expect(secure(root, "file", backupPerms({}))).rejects.toThrow(/not a regular file/);
+	});
+});
+
+describe("hardenBackups (existing backups)", () => {
+	async function legacyTree(): Promise<void> {
+		// What every backup before #562 looks like: umask modes.
+		for (const d of ["", "2026-11-01", "2026-11-01/workspaces", "pre-abc"]) {
+			await fs.mkdir(path.join(root, d), { recursive: true });
+			await fs.chmod(path.join(root, d), 0o755);
+		}
+		for (const f of [
+			"2026-11-01/users.jsonl",
+			"2026-11-01/manifest.json",
+			"2026-11-01/workspaces/s1.tar.gz",
+			"pre-abc/manifest.json",
+		]) {
+			await fs.writeFile(path.join(root, f), "x");
+			await fs.chmod(path.join(root, f), 0o644);
+		}
+	}
+
+	it("dry run reports every entry and changes nothing", async () => {
+		await legacyTree();
+		const r = await hardenBackups(root, backupPerms({}), { write: false });
+		expect(r.written).toBe(false);
+		expect(r.changes).toHaveLength(8);
+		expect(await mode(path.join(root, "2026-11-01/users.jsonl"))).toBe(0o644);
+		expect(await mode(root)).toBe(0o755);
+	});
+
+	it("--write brings the tree to the modes, and a second pass finds nothing", async () => {
+		await legacyTree();
+		const perms = { dirMode: 0o750, fileMode: 0o640, gid };
+		await hardenBackups(root, perms, { write: true });
+		expect(await mode(root)).toBe(0o750);
+		expect(await mode(path.join(root, "2026-11-01/workspaces"))).toBe(0o750);
+		expect(await mode(path.join(root, "2026-11-01/workspaces/s1.tar.gz"))).toBe(0o640);
+		expect(await mode(path.join(root, "pre-abc/manifest.json"))).toBe(0o640);
+		expect((await hardenBackups(root, perms, { write: false })).changes).toHaveLength(0);
+	});
+
+	it("never follows a symlink: reported, target untouched", async () => {
+		await legacyTree();
+		const outside = mkdtempSync(path.join(os.tmpdir(), "st-outside-"));
+		try {
+			await fs.chmod(outside, 0o755);
+			await fs.writeFile(path.join(outside, "secret"), "x");
+			await fs.chmod(path.join(outside, "secret"), 0o644);
+			await fs.symlink(outside, path.join(root, "2026-11-01", "evil-dir"));
+			await fs.symlink(path.join(outside, "secret"), path.join(root, "evil-file"));
+			const r = await hardenBackups(root, backupPerms({}), { write: true });
+			expect(r.skipped.map((k) => path.basename(k.path)).sort()).toEqual(["evil-dir", "evil-file"]);
+			expect(await mode(path.join(outside, "secret"))).toBe(0o644);
+			expect(await mode(outside)).toBe(0o755);
+		} finally {
+			await fs.rm(outside, { recursive: true, force: true });
+		}
+	});
+
+	it("refuses a root that is a symlink", async () => {
+		const link = `${root}-link`;
+		await fs.symlink(root, link);
+		try {
+			await expect(hardenBackups(link, backupPerms({}), { write: true })).rejects.toThrow(
+				/not a real directory/,
+			);
+		} finally {
+			await fs.rm(link);
+		}
+	});
+});
