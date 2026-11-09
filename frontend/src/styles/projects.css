@@ -60,7 +60,7 @@
   background: var(--c-border-soft);
 }
 .project-item[aria-current="page"] {
-  background: #1f3348;
+  background: var(--c-accent-bg);
 }
 .project-item:focus-visible {
   outline: 2px solid var(--c-accent);
@@ -155,12 +155,14 @@ body.project-page-on #actions-btn {
   font-weight: 600;
   overflow-wrap: anywhere;
 }
-.pv-title:focus {
-  outline: none;
-}
+/* The title is focused by script on every page change (projectsView.ts
+   sync) so a screen reader announces the page — it is not a control.
+   Chromium matches :focus-visible on a programmatic focus that follows a
+   keyboard interaction, which drew a text-field-like ring around a
+   heading; the controls keep their own :focus-visible rings below. */
+.pv-title:focus,
 .pv-title:focus-visible {
-  outline: 2px solid var(--c-accent);
-  outline-offset: 2px;
+  outline: none;
 }
 .pv-back {
   flex-basis: 100%;
@@ -170,6 +172,16 @@ body.project-page-on #actions-btn {
 }
 .pv-back:hover {
   text-decoration: underline;
+}
+.pv-back:focus-visible,
+.pv-agent-handle:focus-visible,
+.pv-session-link:focus-visible,
+.session-agent-link:focus-visible,
+.pv-btn:focus-visible,
+.pv-close:focus-visible,
+#new-project-btn:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
 }
 .pv-tools {
   display: flex;
@@ -432,6 +444,42 @@ body.project-page-on #actions-btn {
 }
 
 @media (max-width: 768px) {
+  /* Touch targets: 44px (the app's narrow-screen rule, mobile.css).
+     Height comes from min-height/line-height, never from a bigger font. */
+  #new-project-btn {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
+  .project-item {
+    align-items: center;
+    min-height: 2.75rem;
+  }
+  /* A one-line ellipsised link: line-height, not flex (a flex box would
+     drop the ellipsis). */
+  .session-agent-link {
+    line-height: 2.75rem;
+  }
+  .pv-back {
+    display: flex;
+    align-items: center;
+    min-height: 2.75rem;
+  }
+  .pv-agent-handle,
+  .pv-session-link {
+    display: inline-flex;
+    align-items: center;
+    min-height: 2.75rem;
+    min-width: 2.75rem;
+  }
+  .pv-btn {
+    min-height: 2.75rem;
+  }
+  .pv-icon,
+  .pv-close,
+  .pv-dialog .modal-close {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
   .pv-page {
     padding: var(--s-3) var(--s-4) var(--s-6);
   }
