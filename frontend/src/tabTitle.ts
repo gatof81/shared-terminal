@@ -30,16 +30,31 @@ export function composeTabTitle(p: TitleParts): string {
 }
 
 const parts: TitleParts = { project: null, view: null };
+// A project directory page (P3a) shown over the session: its title wins
+// while it is up — the project's and agent's NAMES only, same rule.
+let page: string | null = null;
+
+function apply(): void {
+	const p = page?.trim();
+	document.title = p ? `${p} — ${APP_TITLE}` : composeTabTitle(parts);
+}
 
 export function setTitleParts(next: Partial<TitleParts>): void {
 	if ("project" in next) parts.project = next.project ?? null;
 	if ("view" in next) parts.view = next.view ?? null;
-	document.title = composeTabTitle(parts);
+	apply();
+}
+
+/** A project/agent page's title (names only), or null when none is shown. */
+export function setTitlePage(next: string | null): void {
+	page = next;
+	apply();
 }
 
 /** Logout: back to the plain app title. */
 export function resetTabTitle(): void {
 	parts.project = null;
 	parts.view = null;
+	page = null;
 	document.title = APP_TITLE;
 }
