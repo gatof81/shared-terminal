@@ -257,8 +257,9 @@ at every container stop, so a bound pane is the current start), the one with the
 `at` is always evidence that **supports** the value:
 - `statusAt` moves only when a hook or a probe asserts the state, and a probe that confirms nothing
   does not move it;
-- `lastEventAt` moves only with activity (hook events and composer sends, CONVERSATION.md v1.9.1,
-  #568): never with a `probe` or `gap` record.
+- `lastEventAt` moves only with activity (hook events and a composer send's `prepared`, CONVERSATION.md
+  v1.9.1, #568): never with a `probe` or `gap` record, nor with the backend's other `composer_send`
+  records.
 
 So a live claim whose last activity is ≥ 10 min old is `unknown · stale`, however recently the
 backend probed it. A long turn stays `working` while its tool hooks keep arriving.

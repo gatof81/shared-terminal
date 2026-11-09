@@ -76,15 +76,39 @@ describe("ConversationStore — lastEventAt is activity (#568, v1.9.1)", () => {
 		store.enqueue(
 			"s1",
 			"c1",
-			ev(4, { ev: "composer_send", prompt_id: null, data: { phase: "prepared" } }),
+			ev(4, { ev: "composer_send", prompt_id: null, data: { state: "prepared" } }),
 		);
 		await store.flush("s1", "c1");
-		expect(store.getResidentIndex("s1", "c1")?.lastEventAt).toBe(iso(32));
+		expect(store.getResidentIndex("s1", "c1")?.lastEventAt).toBe(iso(32)); // a person started a send
+		now = at(32.5);
+		store.enqueue(
+			"s1",
+			"c1",
+			ev(6, { ev: "composer_send", prompt_id: null, data: { state: "released" } }),
+		);
+		await store.flush("s1", "c1");
+		expect(store.getResidentIndex("s1", "c1")?.lastEventAt).toBe(iso(32)); // the backend's own record
 
 		now = at(33);
 		store.enqueue("s1", "c1", ev(5, { ev: "tool_start", prompt_id: null, data: { tool: "Bash" } }));
 		await store.flush("s1", "c1");
 		expect(store.getResidentIndex("s1", "c1")?.lastEventAt).toBe(iso(33));
+	});
+
+	it("no snapshot and a file of only non-activity lines: the newest line's ts, never 'now'", async () => {
+		let now = at(0);
+		const store = new ConversationStore({ workspaceRoot: root, now: () => now });
+		await store.open("s1", "c1");
+		now = at(5);
+		store.enqueue("s1", "c1", ev(1, { ev: "gap", prompt_id: null, data: { reason: "rotated" } }));
+		await store.flush("s1", "c1");
+		now = at(6);
+		store.enqueue("s1", "c1", ev(2, { ev: "probe", prompt_id: null, data: { found: true } }));
+		await store.flush("s1", "c1");
+		await fs.rm(store.indexPath("s1", "c1")); // the snapshot is gone
+		const store2 = new ConversationStore({ workspaceRoot: root, now: () => at(60) });
+		const index = await store2.open("s1", "c1");
+		expect(index.lastEventAt).toBe(iso(6));
 	});
 
 	it("the rebuild from the FILE applies the same rule (a restart cannot re-freshen an old claim)", async () => {

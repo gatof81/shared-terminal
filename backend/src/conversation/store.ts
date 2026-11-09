@@ -246,17 +246,23 @@ function lastPromptIdIn(content: string): string | null {
 
 /**
  * `lastEventAt` is the time of the conversation's last ACTIVITY (CONVERSATION.md
- * v1.9.1, #568): what the CLI reported (hook events) or a person did (a composer
- * send). The backend's own records — a `probe` (it may confirm nothing: an
- * unverified identity, no status) and a `gap` (a loss report) — are persisted
- * but do not move it. Otherwise one confirmation-free probe made an old
- * `running` claim look fresh to every reader of this time: presence (§5 of
- * PROJECTS.md), the frontend attention rule, the silence seed after a restart.
- * `composer_send` stays activity on purpose: the composer's duplicate watch
- * (`rearmDupWatches`) scans by this time for exactly those events.
+ * v1.9.1, #568): what the CLI reported (hook events) or a person started (a
+ * composer send's `prepared`). The backend's own records — a `probe` (it may
+ * confirm nothing: an unverified identity, no status), a `gap` (a loss report)
+ * and every other `composer_send` state (settlement, release, recovery, an
+ * admin resolution, duplicate markers) — are persisted but do not move it.
+ * Otherwise one confirmation-free record made an old `running` claim look
+ * fresh to every reader of this time: presence (§5 of PROJECTS.md), the
+ * frontend attention rule, the silence seed after a restart. `prepared` is
+ * enough for the composer's duplicate watch (`rearmDupWatches`), which scans
+ * by this time with a 24 h horizon.
  */
-export function movesLastEventAt(ev: unknown): boolean {
-	return ev !== "probe" && ev !== "gap";
+export function movesLastEventAt(event: { ev: unknown; data?: unknown }): boolean {
+	if (event.ev === "probe" || event.ev === "gap") return false;
+	if (event.ev === "composer_send") {
+		return (event.data as { state?: unknown } | undefined)?.state === "prepared";
+	}
+	return true;
 }
 
 export class ConversationStore {
@@ -372,8 +378,14 @@ export class ConversationStore {
 		cid: string,
 		key: string,
 	): Promise<ConversationIndex> {
-		const { index, legacyPromptCorrelation } = await this.loadIndex(stSessionId, cid);
-		const fileBytes = await this.recoverFromFile(stSessionId, cid, index, legacyPromptCorrelation);
+		const { index, legacyPromptCorrelation, fromSnapshot } = await this.loadIndex(stSessionId, cid);
+		const fileBytes = await this.recoverFromFile(
+			stSessionId,
+			cid,
+			index,
+			legacyPromptCorrelation,
+			fromSnapshot,
+		);
 		// A purge or a concurrent registration may have raced the awaits.
 		if (this.purging.has(stSessionId)) throw new Error(`session ${stSessionId} is being purged`);
 		const raced = this.resident.get(key);
@@ -458,7 +470,11 @@ export class ConversationStore {
 	private async loadIndex(
 		stSessionId: string,
 		cid: string,
-	): Promise<{ index: ConversationIndex; legacyPromptCorrelation: boolean }> {
+	): Promise<{
+		index: ConversationIndex;
+		legacyPromptCorrelation: boolean;
+		fromSnapshot: boolean;
+	}> {
 		const fresh: ConversationIndex = {
 			v: 1,
 			cid,
@@ -503,12 +519,13 @@ export class ConversationStore {
 						composerSends: parsed.composerSends ?? {},
 					},
 					legacyPromptCorrelation: !("persistedPromptId" in parsed),
+					fromSnapshot: true,
 				};
 			}
 		} catch {
 			/* no index or unreadable: the file scan below rebuilds */
 		}
-		return { index: fresh, legacyPromptCorrelation: false };
+		return { index: fresh, legacyPromptCorrelation: false, fromSnapshot: false };
 	}
 
 	/**
@@ -529,6 +546,7 @@ export class ConversationStore {
 		cid: string,
 		index: ConversationIndex,
 		legacyPromptCorrelation: boolean,
+		fromSnapshot = true,
 	): Promise<number> {
 		if (legacyPromptCorrelation) index.persistedPromptId = null;
 		const file = this.eventsPath(stSessionId, cid);
@@ -576,6 +594,8 @@ export class ConversationStore {
 		}
 		index.lastPromptId = index.persistedPromptId;
 		let scannedSeq = index.offset === 0 ? 0 : index.lastSeq;
+		let sawActivity = false;
+		let newestAny: string | null = null;
 		for (const line of tail.split("\n")) {
 			if (!line) continue;
 			let ev: PersistedEvent;
@@ -590,7 +610,13 @@ export class ConversationStore {
 			index.eventsCount++;
 			index.eventsBytes += Buffer.byteLength(line, "utf8") + 1;
 			if (ev.ev === "gap") index.gapsCount++;
-			if (ev.ts && movesLastEventAt(ev.ev)) index.lastEventAt = ev.ts;
+			if (ev.ts) {
+				newestAny = ev.ts;
+				if (movesLastEventAt(ev)) {
+					index.lastEventAt = ev.ts;
+					sawActivity = true;
+				}
+			}
 			if (typeof ev.prompt_id === "string" && ev.prompt_id) {
 				index.persistedPromptId = ev.prompt_id;
 				index.lastPromptId = ev.prompt_id;
@@ -618,6 +644,11 @@ export class ConversationStore {
 		}
 		if (index.firstRetainedSeq === 0) index.firstRetainedSeq = index.lastSeq + 1;
 		index.lastSeq = Math.max(index.lastSeq, scannedSeq);
+		// No snapshot and no activity line (a rotated file holding only `gap
+		// rotated` and probes): the fresh index says "now", which would date
+		// the conversation as the newest. The newest line's own `ts` is closer
+		// to the truth; a snapshot's value, when there is one, is kept as is.
+		if (!fromSnapshot && !sawActivity && newestAny !== null) index.lastEventAt = newestAny;
 		index.offset = size;
 		return size;
 	}
@@ -750,7 +781,7 @@ export class ConversationStore {
 		r.index.offset += lineBytes;
 		r.index.eventsCount++;
 		r.index.eventsBytes += lineBytes;
-		if (movesLastEventAt(event.ev)) r.index.lastEventAt = event.ts;
+		if (movesLastEventAt(event)) r.index.lastEventAt = event.ts;
 		if (event.ev === "gap") r.index.gapsCount++;
 		// Persistence records what reached the disk and never touches the
 		// live correlation: `lastPromptId` belongs to ingest (see its doc).

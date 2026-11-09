@@ -105,7 +105,9 @@ describe("derivePresence", () => {
 		expect(garbage).toMatchObject({ value: "unknown", detail: "stale", at: null });
 	});
 
-	it("#568: what keeps a claim fresh is activity or a re-asserting probe, never a probe that confirms nothing", () => {
+	// Documentation of how a row reads under CONVERSATION.md v1.9.1. derivePresence itself is
+	// unchanged by #568; the regression guard is in conversation/store.test.ts.
+	it("#568 (how rows read): activity or a re-asserting probe keeps a claim fresh; an old claim with old activity is stale", () => {
 		const MIN = 60_000;
 		// A probe that CONFIRMS busy re-asserts the claim: statusAt moves ⇒ working.
 		expect(
