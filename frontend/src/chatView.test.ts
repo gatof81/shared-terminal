@@ -56,7 +56,7 @@ const api = vi.hoisted(() => ({
 		},
 	),
 	// P3a project directory: absent, as on a backend without the feature.
-	projectChatEnabled: () => false,
+	projectChatEnabled: vi.fn(() => false),
 }));
 vi.mock("./api.js", () => api);
 const core = vi.hoisted(() => ({
@@ -413,6 +413,24 @@ describe("Chat overlay", () => {
 		expect($("chat-back-btn").hidden).toBe(false);
 		$("chat-back-btn").click();
 		expect($("chat-body").classList.contains("show-thread")).toBe(false);
+	});
+
+	it("mobile switcher entry: 'projects' with the Projects feature off, 'sessions' with it on", async () => {
+		mainState.mobile = true;
+		await openChat();
+		expect(document.querySelector(".chat-switcher-entry")?.textContent).toBe(
+			"Other projects' conversations…",
+		);
+		vs.setView("terminal");
+		api.projectChatEnabled.mockReturnValue(true);
+		try {
+			await openChat("s2");
+			expect(document.querySelector(".chat-switcher-entry")?.textContent).toBe(
+				"Other sessions' conversations…",
+			);
+		} finally {
+			api.projectChatEnabled.mockReturnValue(false);
+		}
 	});
 
 	it("leaving the Chat view closes the live socket", async () => {

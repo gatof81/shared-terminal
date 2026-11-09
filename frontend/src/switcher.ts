@@ -17,6 +17,7 @@ import {
 	type ConversationSummary,
 	fetchConversationAgents,
 	fetchConversationSummaries,
+	projectChatEnabled,
 } from "./api.js";
 import { focusAgentWhenOpen } from "./chatView.js";
 import { createDialog, isAnyDialogOpen } from "./components/dialog.js";
@@ -25,6 +26,7 @@ import { isMobile, sessions } from "./main.js";
 import { routeHash } from "./router.js";
 import {
 	BUCKET_LABEL,
+	boundHandle,
 	explainProjectError,
 	matches,
 	type Project,
@@ -36,6 +38,9 @@ import {
 	SWITCHER_TIMEOUT_MS,
 	type SwitcherItem,
 	sectionize,
+	sessionLabel,
+	sessionNoun,
+	switcherWords,
 	toItem,
 	visibleInSwitcher,
 } from "./switcherModel.js";
@@ -72,6 +77,16 @@ export function openSwitcher(opener?: Element | null): void {
 	openNow = true;
 	let closed = false;
 	const now = Date.now();
+	// Read once per open: the feature only changes on a fresh /auth/status.
+	const noun = sessionNoun(projectChatEnabled());
+	const words = switcherWords(noun);
+	// "@handle" of the agent each running session is bound to (only present
+	// with the Projects feature on; rows without a live binding show nothing).
+	const handles = new Map<string, string>();
+	for (const s of sessions) {
+		const h = boundHandle(s);
+		if (h !== null) handles.set(s.sessionId, h);
+	}
 	const projects = new Map<string, Project>();
 	for (const p of runningProjects())
 		projects.set(p.sessionId, { ...p, state: { kind: "loading" } });
@@ -99,14 +114,14 @@ export function openSwitcher(opener?: Element | null): void {
 	const input = el("input", "switcher-input");
 	input.id = "switcher-input";
 	input.type = "search";
-	input.placeholder = "Search conversations or projects";
+	input.placeholder = words.search;
 	input.autocomplete = "off";
 	input.spellcheck = false;
 	input.setAttribute("role", "combobox");
 	input.setAttribute("aria-controls", "switcher-list");
 	input.setAttribute("aria-expanded", "true");
 	input.setAttribute("aria-autocomplete", "list");
-	input.setAttribute("aria-label", "Search conversations or projects");
+	input.setAttribute("aria-label", words.search);
 	card.appendChild(input);
 
 	// Parallel work across the loaded projects, above the list it summarises.
@@ -196,7 +211,10 @@ export function openSwitcher(opener?: Element | null): void {
 		listEl.replaceChildren();
 		const agentNames = (i: SwitcherItem) => {
 			const a = agents.get(conversationKey(i));
-			return a?.kind === "ok" ? a.g.working.map(agentName) : [];
+			const names = a?.kind === "ok" ? a.g.working.map(agentName) : [];
+			// The bound agent's "@handle" shown on the row is searchable too.
+			const h = handles.get(i.sessionId);
+			return h === undefined ? names : [...names, h];
 		};
 		const sections = sectionize(allItems().filter((i) => matches(i, q, agentNames(i))));
 		let n = 0;
@@ -216,7 +234,13 @@ export function openSwitcher(opener?: Element | null): void {
 				o.dataset.sessionId = item.sessionId;
 				const main = el("div", "switcher-option-main");
 				main.appendChild(el("span", "switcher-option-title", item.title));
-				main.appendChild(el("span", "switcher-option-project", item.projectName));
+				main.appendChild(
+					el(
+						"span",
+						"switcher-option-project",
+						sessionLabel(item.projectName, handles.get(item.sessionId)),
+					),
+				);
 				const ag = agents.get(conversationKey(item));
 				if (ag?.kind === "ok" && ag.g.total > 0) {
 					let line = agentsLine(ag.g);
@@ -295,13 +319,7 @@ export function openSwitcher(opener?: Element | null): void {
 		const loading = all.filter((p) => p.state.kind === "loading").length;
 		const failed = all.filter((p) => p.state.kind === "error");
 		if (all.length === 0) {
-			statusEl.appendChild(
-				el(
-					"p",
-					"switcher-empty",
-					"No running projects. Conversations are listed for projects that are running.",
-				),
-			);
+			statusEl.appendChild(el("p", "switcher-empty", words.noneRunning));
 			return;
 		}
 		if (shown.length === 0 && loading === 0) {
@@ -309,24 +327,19 @@ export function openSwitcher(opener?: Element | null): void {
 				q.trim() !== ""
 					? `No conversation matches “${q.trim()}”.`
 					: failed.length === all.length
-						? "No project could be loaded."
+						? words.noneLoaded
 						: failed.length > 0
-							? "No conversations in the projects that loaded."
-							: "No conversations yet in your running projects.";
+							? words.noneInLoaded
+							: words.noneYet;
 			statusEl.appendChild(el("p", "switcher-empty", msg));
 		}
 		// Parallel work at a glance (fresh evidence only; never the query's subset).
-		const summary = all.length > 0 ? parallelSummaryText(parallelSummary(allItems(), all)) : null;
+		const summary =
+			all.length > 0 ? parallelSummaryText(parallelSummary(allItems(), all), noun) : null;
 		summaryEl.textContent = summary ?? "";
 		summaryEl.hidden = summary === null;
 		if (loading > 0)
-			statusEl.appendChild(
-				el(
-					"p",
-					"switcher-loading",
-					`Loading ${loading} of ${all.length} project${all.length === 1 ? "" : "s"}…`,
-				),
-			);
+			statusEl.appendChild(el("p", "switcher-loading", words.loading(loading, all.length)));
 		// §6.2: with the names/archive state unreadable, the titles are the
 		// automatic ones and archived conversations are listed too — say so.
 		for (const p of all) {
