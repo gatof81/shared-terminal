@@ -30,12 +30,11 @@ describe("presentPresence (rule 2: honest presence)", () => {
 		const v = pp({ value: "working", source: "hook", at: at(5) });
 		expect(v).toMatchObject({ label: "Working", tone: "working" });
 		expect(v.evidence).toBe("via hook · just now");
-		for (const source of ["probe", "capture"])
-			expect(pp({ value: "working", source, at: at(5) }).tone).toBe("working");
+		expect(pp({ value: "working", source: "probe", at: at(5) }).tone).toBe("working");
 	});
 
-	it("working from a running session or the directory is not working", () => {
-		for (const source of ["session", "directory", "", "constructor"]) {
+	it("working from a running session, the directory or 'capture' (no usable evidence) is not working", () => {
+		for (const source of ["session", "directory", "capture", "", "constructor"]) {
 			const v = pp({ value: "working", source, at: at(5) });
 			expect(v.tone, source).toBe("unknown");
 			expect(v.label).toBe("State unknown");
@@ -451,5 +450,14 @@ describe("pageTitle: names only", () => {
 		expect(pageTitle("Educación HZ", null)).toBe("Educación HZ");
 		expect(pageTitle("Educación HZ", "developer-hz")).toBe("@developer-hz · Educación HZ");
 		expect(pageTitle(null, null)).toBe("Project");
+	});
+});
+
+describe("presentPresence: needs you only from the CLI's own hook", () => {
+	it("a waiting_permission read by a probe or with no usable evidence ('capture') is not Needs you", () => {
+		for (const source of ["probe", "capture"]) {
+			const v = pp({ value: "needs_attention", detail: "waiting_permission", source, at: at(5) });
+			expect(v.tone, source).not.toBe("attention");
+		}
 	});
 });

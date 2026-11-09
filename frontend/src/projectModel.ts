@@ -83,17 +83,19 @@ const SOURCE_LABEL: ReadonlyMap<string, string> = new Map([
 ]);
 
 /**
- * The sources that are evidence FROM the agent (the capture: a hook, a
- * probe of its CLI, the capture's own rows). `session` and `directory`
- * only say a container runs or a binding exists — never that Claude does
- * anything.
+ * The sources that are evidence FROM the agent: a hook of its CLI, or a
+ * probe of it (a probe only moves the state when it asserts it, e.g.
+ * `probe:busy`). `capture` is NOT one: backend presence.ts uses it for "no
+ * usable conversation evidence" (an empty status_evidence). `session` and
+ * `directory` only say a container runs or a binding exists — never that
+ * Claude does anything.
  */
-const AGENT_EVIDENCE: ReadonlySet<string> = new Set(["hook", "probe", "capture"]);
+const AGENT_EVIDENCE: ReadonlySet<string> = new Set(["hook", "probe"]);
 /**
  * A request addressed to the person must come from the CLI itself (its
  * hook), not from a probe's reading of a status line (owner, 2026-11-09).
  */
-const ATTENTION_EVIDENCE: ReadonlySet<string> = new Set(["hook", "capture"]);
+const ATTENTION_EVIDENCE: ReadonlySet<string> = new Set(["hook"]);
 
 /** "via hook · 2 min ago"; "no evidence" when there is none. `now` on the server's clock. */
 export function evidenceText(p: Pick<Presence, "source" | "at">, now: number): string {
