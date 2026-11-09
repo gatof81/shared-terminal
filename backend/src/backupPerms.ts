@@ -138,7 +138,7 @@ export async function hardenBackups(
 		if (kind === "dir" && !trusted(st)) {
 			report.skipped.push({
 				path: p,
-				reason: "directory not owned by us, writable by others, or on another filesystem",
+				reason: "directory not owned by us, writable by group or others, or on another filesystem",
 			});
 			return;
 		}

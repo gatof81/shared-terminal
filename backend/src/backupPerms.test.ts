@@ -159,7 +159,7 @@ describe("hardenBackups (existing backups)", () => {
 		await fs.chmod(open, 0o777);
 		const r = await hardenBackups(root, backupPerms({}), { write: true });
 		expect(r.skipped.map((k) => [path.relative(root, k.path), k.reason])).toEqual([
-			["2026-11-01/workspaces", expect.stringMatching(/writable by others/)],
+			["2026-11-01/workspaces", expect.stringMatching(/writable by group or others/)],
 		]);
 		expect(await mode(open)).toBe(0o777);
 		expect(await mode(path.join(open, "s1.tar.gz"))).toBe(0o644);
