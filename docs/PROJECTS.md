@@ -282,6 +282,17 @@ recreate them empty and the binding history would be lost.
 | **A.** v19 applied, flag never on, no project created | nothing: the tables are empty and unread | yes, no precondition. A later re-upgrade finds v19 recorded and applies nothing |
 | **B.** flag was on, agents with live bindings exist | ignores them. (1) Its hard delete is **not** guarded: a bound session can be purged and its row dropped. (2) Its `failSession` rewrites `terminated` to `failed` again. (3) Its `npm run backup` does not export the four tables, so a backup taken under it has no directory. | only under the conditions below |
 
+**Backups taken while the previous backend runs (both cases).** Its `npm run backup` writes
+`schemaVersion` = the ledger's maximum, **19**, but exports only the tables it knows: none of the four.
+Consequences:
+
+- the previous backend's own `npm run restore` **refuses** that backup on a fresh D1 ("backup schema v19
+  is NEWER than this code's v18"). Restore it with this backend or a later one, or onto a target that is
+  already at v19;
+- this backend restores it with the four tables **empty** and logs one `WARN` per table
+  (`no <table>.jsonl although the backup is schema v19`). In case A that loses nothing. In case B the
+  directory is lost, so take the recovery-point backup with **this** backend (condition 2 below).
+
 Conditions for a rollback in case B, in order of preference:
 
 1. **Do not roll back the code; turn the flag off.** This backend with the flag off keeps every row,

@@ -73,7 +73,8 @@ const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 // from a D1 older than that (the pre-deploy backup of an upgrade) skips
 // it instead of failing on "no such table"; at or past that version a
 // missing table still fails loudly. Restore reads a missing .jsonl as
-// zero rows, and its migrateDb() creates the table on the target.
+// zero rows, and its migrateDb() creates the table on the target; it warns
+// when the manifest's schema says the table should have been exported.
 const TABLES: ReadonlyArray<{ name: string; orderBy: string; sinceSchema?: number }> = [
 	{ name: "users", orderBy: "id" },
 	{ name: "user_groups", orderBy: "id" },
@@ -449,6 +450,22 @@ export async function runRestore(inDir: string, opts: { force?: boolean } = {}):
 	// this schema is \w+; anything else in a dump is malformed, full stop.
 	const SAFE_COL = /^\w+$/;
 	for (const t of TABLES) {
+		// A table the backup's schema already had but whose .jsonl is absent was
+		// not exported: a backend older than the table took the backup after a
+		// rollback (manifest = the D1 ledger, e.g. v19, while its TABLES list
+		// stops at v18). It restores as zero rows; say so instead of hiding it.
+		if (
+			(t.sinceSchema ?? 0) <= manifest.schemaVersion &&
+			!(await fs.stat(path.join(inDir, `${t.name}.jsonl`)).then(
+				() => true,
+				() => false,
+			))
+		) {
+			logger.warn(
+				`[restore] ${t.name}: no ${t.name}.jsonl although the backup is schema v${manifest.schemaVersion} — ` +
+					"taken by a backend that does not export this table; restored as 0 rows",
+			);
+		}
 		const rows = await readJsonl(inDir, t.name);
 		for (const row of rows) {
 			const cols = Object.keys(row);

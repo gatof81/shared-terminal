@@ -100,6 +100,7 @@ import {
 	writeGlobalRevocation,
 	writeSessionRevocation,
 } from "./conversation/revocation.js";
+import { logger } from "./logger.js";
 import { deriveSubkey, encryptSecret } from "./secrets.js";
 
 let outDir: string;
@@ -223,6 +224,45 @@ describe("runRestore", () => {
 		// Workspace files extracted back under WORKSPACE_ROOT.
 		const restored = await fs.readFile(path.join(WORKSPACE_ROOT, "s1", "hello.txt"), "utf-8");
 		expect(restored).toBe("hola");
+	});
+
+	it("warns for a table the backup's schema has but its files lack (backup by an older backend)", async () => {
+		await makeBackup();
+		// A rollback backend writes the D1 ledger's version (v19) but exports
+		// only the tables it knows. This fixture's source is v12, so the v16
+		// and v18 tables are absent too: every one of them must be named.
+		const manifestPath = path.join(outDir, "manifest.json");
+		const manifest = JSON.parse(await fs.readFile(manifestPath, "utf-8"));
+		await fs.writeFile(manifestPath, JSON.stringify({ ...manifest, schemaVersion: 19 }));
+		dbState.schemaVersion = 19;
+		const warn = vi.spyOn(logger, "warn");
+		try {
+			await runRestore(outDir);
+			const missing = warn.mock.calls
+				.map((c) => String(c[0]))
+				.filter((m) => /no \w+\.jsonl although/.test(m));
+			expect(missing.map((m) => /\[restore\] (\w+):/.exec(m)?.[1])).toEqual([
+				"claude_conversations",
+				"conversation_user_meta",
+				"projects",
+				"project_agents",
+				"agent_bindings",
+				"project_agent_creations",
+			]);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it("does not warn for tables newer than the backup's schema", async () => {
+		await makeBackup(); // schema v12: every table since v16+ is legitimately absent
+		const warn = vi.spyOn(logger, "warn");
+		try {
+			await runRestore(outDir);
+			expect(warn.mock.calls.some((c) => /although/.test(String(c[0])))).toBe(false);
+		} finally {
+			warn.mockRestore();
+		}
 	});
 
 	it("refuses a dir without manifest.json (interrupted backup)", async () => {

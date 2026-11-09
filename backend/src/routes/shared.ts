@@ -64,8 +64,9 @@ export interface RouteContext {
 	// are not mounted and `canSendInput` is false everywhere.
 	composer?: ComposerService;
 	// P3a — the project directory (docs/PROJECTS.md). Present only when
-	// PROJECT_CHAT_ENABLED is on; absent ⇒ its routes are not mounted, the
-	// session list carries no `binding` and the hard delete has no guard.
+	// PROJECT_CHAT_ENABLED is on; absent ⇒ its routes are not mounted and the
+	// session list carries no `binding`. The hard-delete guard does NOT depend on
+	// it: the routes call `assertNoLiveBinding` either way (bindings outlive the flag).
 	projects?: ProjectDirectory;
 }
 
@@ -206,7 +207,10 @@ export function handleSessionError(err: unknown, res: Response): void {
 		res.status(409).json({ error: "retained-present" });
 	} else if (err instanceof AgentActiveError) {
 		// P3a (03 §2.1): the session is bound to a project agent; the owner
-		// removes the agent first. Checked before any effect: nothing was done.
+		// removes the agent first. The hard delete checks twice: refused at the
+		// first check, nothing was done; refused at the second (after kill and
+		// terminate, before the purge), the session is soft-deleted and its
+		// workspace and row are kept — the same verb again finishes once unbound.
 		res.status(409).json({ error: "agent-active" });
 	} else if (err instanceof SessionBusyError) {
 		// Another lifecycle operation holds the session's lock and the wait
