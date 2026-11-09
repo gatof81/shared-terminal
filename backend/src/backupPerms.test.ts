@@ -73,6 +73,22 @@ describe("secure", () => {
 		expect(await mode(target)).toBe(0o644);
 	});
 
+	it("refuses when the entry is not the one the caller examined (dev/ino), and changes nothing", async () => {
+		const f = path.join(root, "f");
+		await fs.writeFile(f, "x");
+		await fs.chmod(f, 0o644);
+		const st = await fs.lstat(f);
+		await expect(
+			secure(f, "file", backupPerms({}), { dev: st.dev, ino: st.ino + 1 }),
+		).rejects.toThrow(/changed since/);
+		expect(await mode(f)).toBe(0o644);
+		await secure(f, "file", backupPerms({}), { dev: st.dev, ino: st.ino });
+		expect(await mode(f)).toBe(0o600);
+	});
+
+	// Not covered: the other-filesystem skip in hardenBackups (st.dev !== root's)
+	// needs a second mount, which the test runner does not have.
+
 	it("refuses an entry of the wrong kind (a FIFO does not hang it)", async () => {
 		const fifo = path.join(root, "fifo");
 		execFileSync("mkfifo", [fifo]);

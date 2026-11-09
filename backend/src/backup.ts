@@ -885,6 +885,14 @@ if (typeof require !== "undefined" && require.main === module) {
 			console.log(
 				`${r.changes.length} entr${r.changes.length === 1 ? "y" : "ies"} ${write ? "changed" : "to change (dry run; --write applies)"}, ${r.skipped.length} skipped`,
 			);
+			// Skipped entries keep their old (possibly world-readable) modes: say so
+			// on the last line and in the exit code, not only in the listing.
+			if (r.skipped.length > 0) {
+				console.log(
+					`${r.skipped.length} entr${r.skipped.length === 1 ? "y" : "ies"} NOT hardened — handle them by hand`,
+				);
+				process.exitCode = 2;
+			}
 		} else {
 			throw new Error(usage);
 		}
