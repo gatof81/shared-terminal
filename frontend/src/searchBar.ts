@@ -110,6 +110,9 @@ export function initTerminalSearch(): void {
 		// copy-mode in a pane the user can't see (and leave the chord to
 		// the browser).
 		if (isOverlayActive()) return;
+		// Same for a project page (P3a): it covers the terminal without
+		// being a view, so isOverlayActive() does not see it.
+		if (document.body.classList.contains("project-page-on")) return;
 		e.preventDefault();
 		openSearchBox();
 	});

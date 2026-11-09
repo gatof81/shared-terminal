@@ -25,6 +25,18 @@
  *
  * `#session=<id>` (the service worker's one-shot notification jump) is a
  * different shape and is not this module's: it parses to null here.
+ *
+ * Project pages (P3a, docs/PROJECTS.md; D-UX2) are a SECOND route shape,
+ * parsed apart so the session route above keeps its exact meaning:
+ *
+ *   #/projects/<pid>                      the project's agent directory
+ *   #/projects/<pid>/agents/<aid>         an agent's page
+ *
+ * (`…/agents/<aid>/chat[/<chatId>]` is D-UX2's future conversation route;
+ * it is not P3a's and parses to null.) A project page is shown OVER the
+ * session underneath, which stays open, attached and un-resized — so while
+ * one is in the address, `current` keeps naming that session and the
+ * session listeners are not told anything (projectsView.ts owns the page).
  */
 
 export type RouteView = "terminal" | "files" | "git" | "chat";
@@ -96,6 +108,34 @@ export function readRoute(): Route | null {
 	return parseRoute(window.location.hash);
 }
 
+// ── Project routes (P3a) ────────────────────────────────────────────────────
+
+export interface ProjectRoute {
+	projectId: string;
+	/** Null on the project page itself. */
+	agentId: string | null;
+}
+
+export function parseProjectRoute(hash: string): ProjectRoute | null {
+	const m = /^#\/projects\/([^/?#]+)(?:\/agents\/([^/?#]+))?$/.exec(hash);
+	if (!m) return null;
+	const projectId = decode(m[1]!);
+	if (projectId === null || projectId === "") return null;
+	if (m[2] === undefined) return { projectId, agentId: null };
+	const agentId = decode(m[2]);
+	if (agentId === null || agentId === "") return null;
+	return { projectId, agentId };
+}
+
+export function projectRouteHash(route: ProjectRoute): string {
+	const h = `#/projects/${encodeURIComponent(route.projectId)}`;
+	return route.agentId === null ? h : `${h}/agents/${encodeURIComponent(route.agentId)}`;
+}
+
+export function readProjectRoute(): ProjectRoute | null {
+	return parseProjectRoute(window.location.hash);
+}
+
 // ── History ─────────────────────────────────────────────────────────────────
 
 interface OurState {
@@ -137,12 +177,66 @@ export function navigate(route: Route | null, opts: { replace?: boolean } = {}):
 	const already = window.location.hash === hash || (route === null && !readRoute());
 	current = route;
 	if (already) return;
+	// A project page is shown over the session: a REPLACE only keeps the
+	// address up with the session underneath (a poll re-opening it, a
+	// landing, a tab switch), and must not swap the page the person is
+	// reading for that session. `current` still follows, so leaving the
+	// page lands on the session as it is now. A push is a choice the
+	// person made (a view) and leaves the page.
+	if (opts.replace && projectPageShown()) return;
 	const url = bare() + hash;
 	if (opts.replace) {
 		history.replaceState({ st: { n: depth() } }, "", url);
 	} else {
 		history.pushState({ st: { n: depth() + 1 } }, "", url);
 	}
+	for (const l of writeListeners) l();
+}
+
+// ── Project pages over the session ──────────────────────────────────────────
+
+// Set only while the project feature is on (projectsView.ts): with it off
+// nothing here changes how a session route is written or read.
+let projectPageShown: () => boolean = () => false;
+let projectRoutesOn = false;
+const writeListeners: Array<() => void> = [];
+
+/** projectsView.ts: project routes are live; `shown` says whether a page is up. */
+export function enableProjectRoutes(shown: () => boolean): void {
+	projectRoutesOn = true;
+	projectPageShown = shown;
+}
+
+/** Back to the plain session router (logout). */
+export function disableProjectRoutes(): void {
+	projectRoutesOn = false;
+	projectPageShown = () => false;
+}
+
+/** Called after every address write by this module (a project page may open or close). */
+export function onAddressWrite(listener: () => void): void {
+	writeListeners.push(listener);
+}
+
+/** Show a project page: a new history entry (Back returns), unless `replace`. */
+export function navigateProject(route: ProjectRoute, opts: { replace?: boolean } = {}): void {
+	const hash = projectRouteHash(route);
+	if (window.location.hash === hash) return;
+	const url = bare() + hash;
+	if (opts.replace) history.replaceState({ st: { n: depth() } }, "", url);
+	else history.pushState({ st: { n: depth() + 1 } }, "", url);
+	for (const l of writeListeners) l();
+}
+
+/**
+ * Leave a project page for the session shown underneath (a click on a
+ * session row or on the session bar): a new entry with that session's
+ * route — or none when no session is open — so Back returns to the page.
+ */
+export function pushSessionAddress(): void {
+	const url = bare() + (current === null ? "" : routeHash(current));
+	history.pushState({ st: { n: depth() + 1 } }, "", url);
+	for (const l of writeListeners) l();
 }
 
 /**
@@ -166,6 +260,9 @@ export function onRoute(listener: Listener): void {
 }
 
 function emit(source: RouteSource): void {
+	// A project page went up over the session: nothing for the session's
+	// listeners, and `current` keeps naming the session underneath.
+	if (projectRoutesOn && readProjectRoute() !== null) return;
 	const route = readRoute();
 	// Our own writes (navigate) set `current` first; a Back/Forward lands
 	// on an entry we wrote earlier and must be applied even though its
@@ -188,4 +285,6 @@ export function start(): void {
 export function resetForTests(): void {
 	current = null;
 	listeners.length = 0;
+	writeListeners.length = 0;
+	disableProjectRoutes();
 }

@@ -64,6 +64,17 @@ export function isLoggedIn(): boolean {
 	return _loggedIn;
 }
 
+// P3a (docs/PROJECTS.md §1): `features.projectChat` on /auth/status. The
+// key is ABSENT with the flag off, and then the project surface does not
+// exist — no section, no route, no request. A deployment property, not an
+// account's: a logout keeps it (the login screen's own status answered it).
+let _projectChat = false;
+
+/** True only when the last /auth/status said `features.projectChat === true`. */
+export function projectChatEnabled(): boolean {
+	return _projectChat;
+}
+
 /** True iff `users.is_admin = 1` for the current session (#50). Gates
  *  invite-mint UI in main.ts. Refreshes on every /auth/status call so a
  *  promotion / demotion takes effect on the next reload. */
@@ -118,6 +129,8 @@ export interface AuthStatus {
 	resourceCaps?: { cpuMaxCores: number; memMaxMiB: number };
 	/** Which frontend shell to mount (UI unification §8.4); older backends omit it. */
 	uiShell?: "v1" | "v2";
+	/** P3a: present only with PROJECT_CHAT_ENABLED on. Absent ⇒ no project surface. */
+	features?: { projectChat?: boolean };
 }
 
 export async function checkAuthStatus(): Promise<AuthStatus> {
@@ -143,6 +156,10 @@ async function fetchAuthStatus(): Promise<AuthStatus> {
 	// isLead() can answer instantly thereafter.
 	setAuthMirror(data.authenticated, data.isAdmin, data.isLead === true);
 	if (data.uiShell === "v1" || data.uiShell === "v2") _uiShell = data.uiShell;
+	_projectChat =
+		typeof data.features === "object" &&
+		data.features !== null &&
+		data.features.projectChat === true;
 	// #200: mirror caps if present. A pre-#200 backend omits the field
 	// and leaves the v1 defaults in place — same hardcoded ceilings the
 	// form would have used before this PR.
@@ -306,6 +323,208 @@ export interface SessionInfo {
 		memLimitBytes: number;
 		memPercent: number;
 	} | null;
+	/**
+	 * P3a (PROJECTS.md §4.6), only with the project feature on: an object =
+	 * bound to that agent; null = unassigned; the key ABSENT = unknown (the
+	 * directory read failed) — never read absence as null (`"binding" in s`).
+	 */
+	binding?: SessionBinding | null;
+}
+
+// ── Project directory types (P3a, docs/PROJECTS.md §4) ─────────────────────
+
+export type Allowed = { allowed: true } | { allowed: false; reason: string };
+
+export interface Presence {
+	value: "working" | "waiting_input" | "needs_attention" | "disconnected" | "unknown";
+	detail?: string;
+	source: string;
+	/** ISO; null = no evidence. */
+	at: string | null;
+	/** Only on waiting_input: true ⇔ a probe said it. */
+	verified?: boolean;
+}
+
+export interface Binding {
+	bindingId: string;
+	epoch: number;
+	sessionId: string;
+	state: "active" | "draining" | "retired";
+	createdAt?: string;
+}
+
+export interface AgentListEntry {
+	agentId: string;
+	handle: string;
+	role: string | null;
+	provider: string;
+	template: null;
+	binding: Binding | null;
+	presence: Presence;
+}
+
+export interface AgentHistoryBinding extends Binding {
+	retiredAt: string | null;
+	retireReason: string | null;
+}
+
+export interface AgentDetail extends AgentListEntry {
+	projectId: string;
+	createdAt: string;
+	removedAt: string | null;
+	capabilities: { capture: boolean; channels: boolean; directControl: boolean };
+	bindings: AgentHistoryBinding[];
+	can: { remove: Allowed };
+}
+
+export interface AgentsResponse {
+	projectId: string;
+	generatedAt: string;
+	agents: AgentListEntry[];
+	can: { createAgent: Allowed };
+}
+
+export interface ProjectSummary {
+	projectId: string;
+	name: string;
+	createdAt: string;
+	agentCount: number;
+}
+
+export interface ProjectsResponse {
+	projects: ProjectSummary[];
+	can: { createProject: Allowed };
+}
+
+export interface SessionBinding {
+	projectId: string;
+	agentId: string;
+	handle: string;
+	bindingId: string;
+	epoch: number;
+}
+
+export interface CreatedProject extends ProjectSummary {
+	replayed: boolean;
+}
+
+export interface CreatedAgent {
+	agentId: string;
+	projectId: string;
+	handle: string;
+	role: string | null;
+	binding: Binding | null;
+	replayed: boolean;
+}
+
+/**
+ * What a project-directory request came back with. `code` is the server's
+ * `error` (PROJECTS.md §4.7) — the UI decides on it, never on `message` —
+ * or one of the client's own: "network" (no answer: the outcome of a write
+ * is NOT known), "bad-answer" (a 2xx without the expected body: proves
+ * nothing either), "stale" (answered for an account that is no longer the
+ * signed-in one: drop it).
+ */
+export type ProjectAnswer<T> =
+	| { ok: true; status: number; body: T }
+	| { ok: false; status: number; code: string };
+
+async function projectRequest<T>(
+	path: string,
+	init: RequestInit | undefined,
+	valid: (body: unknown) => body is T,
+): Promise<ProjectAnswer<T>> {
+	const epoch = authEpoch;
+	let res: Response;
+	try {
+		res = await apiFetch(path, init);
+	} catch {
+		if (epoch !== authEpoch) return { ok: false, status: 0, code: "stale" };
+		return { ok: false, status: 0, code: "network" };
+	}
+	const body: unknown = res.status === 204 ? null : await res.json().catch(() => null);
+	if (epoch !== authEpoch) return { ok: false, status: res.status, code: "stale" };
+	if (res.ok) {
+		if (res.status === 204 || valid(body)) return { ok: true, status: res.status, body: body as T };
+		return { ok: false, status: res.status, code: "bad-answer" };
+	}
+	const code =
+		typeof body === "object" &&
+		body !== null &&
+		typeof (body as { error?: unknown }).error === "string"
+			? (body as { error: string }).error
+			: "";
+	return { ok: false, status: res.status, code };
+}
+
+const isObj = (b: unknown): b is Record<string, unknown> => typeof b === "object" && b !== null;
+
+export function fetchProjects(): Promise<ProjectAnswer<ProjectsResponse>> {
+	return projectRequest(
+		"/projects",
+		undefined,
+		(b): b is ProjectsResponse => isObj(b) && Array.isArray(b.projects),
+	);
+}
+
+export function fetchProjectAgents(projectId: string): Promise<ProjectAnswer<AgentsResponse>> {
+	return projectRequest(
+		`/projects/${encodeURIComponent(projectId)}/agents`,
+		undefined,
+		(b): b is AgentsResponse => isObj(b) && Array.isArray(b.agents),
+	);
+}
+
+export function fetchAgent(
+	projectId: string,
+	agentId: string,
+): Promise<ProjectAnswer<AgentDetail>> {
+	return projectRequest(
+		`/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agentId)}`,
+		undefined,
+		(b): b is AgentDetail => isObj(b) && typeof b.agentId === "string" && Array.isArray(b.bindings),
+	);
+}
+
+/** One user action = one `clientRequestId`; a retry of THAT action reuses it (PROJECTS.md §3). */
+export function createProject(
+	name: string,
+	clientRequestId: string,
+): Promise<ProjectAnswer<CreatedProject>> {
+	return projectRequest(
+		"/projects",
+		{ method: "POST", body: JSON.stringify({ name, clientRequestId }) },
+		(b): b is CreatedProject => isObj(b) && typeof b.projectId === "string",
+	);
+}
+
+export function createAgent(
+	projectId: string,
+	input: { handle: string; role: string | null; sessionId: string },
+	clientRequestId: string,
+): Promise<ProjectAnswer<CreatedAgent>> {
+	return projectRequest(
+		`/projects/${encodeURIComponent(projectId)}/agents`,
+		{
+			method: "POST",
+			body: JSON.stringify({
+				handle: input.handle,
+				...(input.role ? { role: input.role } : {}),
+				sessionId: input.sessionId,
+				clientRequestId,
+			}),
+		},
+		(b): b is CreatedAgent => isObj(b) && typeof b.agentId === "string",
+	);
+}
+
+/** Idempotent server-side: a retry after a lost answer is always safe. */
+export function removeAgent(projectId: string, agentId: string): Promise<ProjectAnswer<null>> {
+	return projectRequest(
+		`/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agentId)}`,
+		{ method: "DELETE" },
+		(b): b is null => b === null,
+	);
 }
 
 // ── Session API ─────────────────────────────────────────────────────────────

@@ -93,6 +93,8 @@ const api = vi.hoisted(() => ({
 	isAdmin: () => false,
 	isLead: () => false,
 	isLoggedIn: () => true,
+	// P3a project directory: absent, as on a backend without the feature.
+	projectChatEnabled: () => false,
 	TabNotFoundError: class extends Error {},
 }));
 vi.mock("./api.js", () => api);

@@ -85,6 +85,9 @@
   --z-hint: 10;
   --z-overlay: 20;
   --z-nav: 30;
+  /* A project / agent page (P3a): over the session views and their nav,
+     under the mobile drawer that opens from the header above it. */
+  --z-page: 32;
   --z-drawer-backdrop: 34;
   --z-drawer: 35;
   --z-modal: 100;

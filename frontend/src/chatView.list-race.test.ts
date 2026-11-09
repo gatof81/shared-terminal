@@ -40,6 +40,8 @@ const api = vi.hoisted(() => ({
 	fetchConversationEvents: vi.fn(),
 	sendConversationMessage: vi.fn(),
 	openConversationSocket: vi.fn(() => ({ follow: vi.fn(), close: vi.fn() })),
+	// P3a project directory: absent, as on a backend without the feature.
+	projectChatEnabled: () => false,
 }));
 vi.mock("./api.js", () => api);
 vi.mock("./sessionCore.js", () => ({

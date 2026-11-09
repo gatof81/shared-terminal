@@ -22,6 +22,8 @@ import {
 	isLoggedIn,
 	listSessions,
 	listTabs,
+	projectChatEnabled,
+	type SessionBinding,
 	type SessionInfo,
 	startSession,
 	stopSession,
@@ -55,7 +57,16 @@ import { renderSidebarObservables } from "./myGroups.js";
 import { openBootstrapLogModal } from "./newSession.js";
 import { openObserveModalFor } from "./observeModal.js";
 import { openPortsModalFor } from "./ports.js";
-import { clear as clearRoute, type Route, readRoute, routeHash } from "./router.js";
+import { projectName } from "./projectDirectory.js";
+import { groupSessionsByBinding } from "./projectModel.js";
+import {
+	clear as clearRoute,
+	navigateProject,
+	projectRouteHash,
+	type Route,
+	readRoute,
+	routeHash,
+} from "./router.js";
 import {
 	type SessionActionContext,
 	type SessionActionId,
@@ -408,135 +419,8 @@ export function renderSessionList() {
 			: undefined;
 	const focusedRole = active instanceof HTMLElement ? (active.dataset.role ?? "select") : "select";
 	sessionList.replaceChildren();
-	for (const s of sessions) {
-		const item = document.createElement("div");
-		// Status class on the wrapper mirrors the session-dot rules so CSS
-		// can target failed/terminated items uniformly.
-		const statusCls = s.status === "terminated" || s.status === "failed" ? ` ${s.status}` : "";
-		item.className = `session-item${s.sessionId === activeSessionId ? " active" : ""}${statusCls}`;
-		item.dataset.sessionId = s.sessionId;
-
-		// The row itself is a button (keyboard, screen readers): it selects
-		// the session. The quick action and the ⋯ menu are siblings, never
-		// nested inside it.
-		const select = document.createElement("button");
-		select.type = "button";
-		select.className = "session-select";
-		select.dataset.role = "select";
-		select.setAttribute("aria-current", String(s.sessionId === activeSessionId));
-		select.setAttribute(
-			"aria-label",
-			`${s.name}, ${s.status}${s.status === "failed" ? " — view the bootstrap log" : ""}`,
-		);
-
-		const dot = document.createElement("span");
-		dot.className = `session-dot ${s.status}`;
-		dot.setAttribute("aria-hidden", "true");
-		select.appendChild(dot);
-
-		const nameCol = document.createElement("span");
-		nameCol.className = "session-name-col";
-		const name = document.createElement("span");
-		name.className = "session-name";
-		name.textContent = s.name;
-		nameCol.appendChild(name);
-		// Live usage lines (#272). Only running sessions with a stats sample.
-		if (s.status === "running" && s.usage) {
-			const cpuCores = s.usage.cpuPercent / 100;
-			const cpuLine = document.createElement("span");
-			cpuLine.className = "session-usage";
-			cpuLine.textContent = `CPU ${formatCpuCores(cpuCores)} cores (${formatCpuPercent(s.usage.cpuPercent)})`;
-			nameCol.appendChild(cpuLine);
-			const memLine = document.createElement("span");
-			memLine.className = "session-usage";
-			memLine.textContent = `Mem ${formatBytes(s.usage.memBytes)} (${s.usage.memPercent.toFixed(0)}%)`;
-			nameCol.appendChild(memLine);
-		} else if (s.status !== "running") {
-			// The dot's colour alone told stopped / terminated / failed apart.
-			// The row's aria-label already says it: this line is for the eye.
-			const state = document.createElement("span");
-			state.className = `session-usage session-state ${s.status}`;
-			state.setAttribute("aria-hidden", "true");
-			state.textContent =
-				s.status === "stopped"
-					? "Stopped"
-					: s.status === "terminated"
-						? "Terminated · files kept"
-						: s.status === "failed"
-							? "Failed · open the log"
-							: s.status;
-			nameCol.appendChild(state);
-		}
-		select.appendChild(nameCol);
-		select.addEventListener("click", () => {
-			// A failed session has no workspace: the row opens its log.
-			void runSessionAction(s, s.status === "failed" ? "viewLog" : "open");
-		});
-		item.appendChild(select);
-		// With the "↳ last conversation" line the row has room between its
-		// controls; a tap there is a tap on the row (select), not a dead zone.
-		item.addEventListener("click", (e) => {
-			if (e.target === item) select.click();
-		});
-
-		const actions = document.createElement("span");
-		actions.className = "session-actions";
-		// The one obvious next step as a quick button; everything else
-		// (incl. terminate / delete, each with its own dialog) in the menu.
-		const quick = sessionActions(actionContext(s)).find(
-			(a) => a.kind === "primary" || a.id === "stop",
-		);
-		if (quick?.enabled) {
-			const b = document.createElement("button");
-			b.type = "button";
-			b.className = `session-action-btn ${quick.id === "stop" ? "stop" : "start"}`;
-			b.dataset.role = quick.id;
-			b.dataset.action = quick.id;
-			b.textContent = quick.id === "stop" ? "⏸" : quick.id === "restore" ? "↻" : "▶";
-			b.title = quick.label;
-			b.setAttribute("aria-label", `${quick.label}: ${s.name}`);
-			b.addEventListener("click", () => void runSessionAction(s, quick.id));
-			actions.appendChild(b);
-		}
-		const more = document.createElement("button");
-		more.type = "button";
-		more.className = "session-menu-btn";
-		more.dataset.role = "menu";
-		more.textContent = "⋯";
-		more.title = "More actions";
-		more.setAttribute("aria-label", `More actions: ${s.name}`);
-		more.setAttribute("aria-haspopup", "menu");
-		more.addEventListener("click", () => openSessionMenu(s, more));
-		actions.appendChild(more);
-		item.appendChild(actions);
-
-		// One click back to this project's last conversation, from anywhere.
-		// Named from what Chat remembered (no request); no status shown —
-		// knowing it would mean asking every project.
-		const lastCid = s.status === "failed" ? null : readLastConversation(s.sessionId);
-		const lastTitle = lastCid ? readLastConversationTitle(s.sessionId, lastCid) : null;
-		if (lastCid && lastTitle) {
-			const last = document.createElement("button");
-			last.type = "button";
-			last.className = "session-last-conv";
-			// Focus restore after each 5 s re-render finds controls by role.
-			last.dataset.role = "last-conv";
-			last.dataset.cid = lastCid;
-			const route = readRoute();
-			if (route?.sessionId === s.sessionId && route.view === "chat" && route.detail === lastCid)
-				last.setAttribute("aria-current", "page");
-			last.textContent = `↳ ${lastTitle}`;
-			last.title = `Open the last conversation: ${lastTitle}`;
-			last.setAttribute("aria-label", `Open the last conversation in ${s.name}: ${lastTitle}`);
-			last.addEventListener("click", () => {
-				const hash = routeHash({ sessionId: s.sessionId, view: "chat", detail: lastCid });
-				if (window.location.hash !== hash) window.location.hash = hash;
-			});
-			item.appendChild(last);
-		}
-
-		sessionList.appendChild(item);
-	}
+	if (projectChatEnabled()) renderGroupedSessions();
+	else for (const s of sessions) sessionList.appendChild(buildSessionItem(s, null));
 	if (focusedId !== undefined) {
 		sessionList
 			.querySelector<HTMLElement>(
@@ -547,6 +431,195 @@ export function renderSessionList() {
 	// Sidebar observables (#394) dedupe against THIS list, so re-render
 	// them whenever it changes.
 	renderSidebarObservables();
+}
+
+/**
+ * P3a (PROJECTS.md §4.6, rule 1): with the project feature on, the rows are
+ * grouped by their binding — bound ones first, each naming its agent; then
+ * «Unassigned sessions» (`binding: null`); then the rows whose binding is
+ * UNKNOWN (the key is absent: the directory read failed), which are never
+ * listed as unassigned. The rows themselves are the same as without the
+ * feature: binding a session changes nothing about it (rule 8).
+ */
+function renderGroupedSessions(): void {
+	const groups = groupSessionsByBinding(sessions);
+	const heading = (text: string, cls: string, title?: string) => {
+		const h = document.createElement("h3");
+		h.className = `session-group-title ${cls}`;
+		h.textContent = text;
+		if (title) h.title = title;
+		sessionList.appendChild(h);
+	};
+	if (groups.bound.length > 0) {
+		heading("Agent sessions", "session-group-bound");
+		for (const { session, binding } of groups.bound)
+			sessionList.appendChild(buildSessionItem(session, binding));
+	}
+	if (groups.unassigned.length > 0) {
+		heading("Unassigned sessions", "session-group-unassigned");
+		for (const s of groups.unassigned) sessionList.appendChild(buildSessionItem(s, null));
+	}
+	if (groups.unknown.length > 0) {
+		heading(
+			"Assignment unknown",
+			"session-group-unknown",
+			"The project directory could not be read: these sessions may or may not belong to an agent.",
+		);
+		const note = document.createElement("p");
+		note.className = "session-group-note";
+		note.textContent = "Couldn't read which agent these belong to.";
+		sessionList.appendChild(note);
+		for (const s of groups.unknown) sessionList.appendChild(buildSessionItem(s, null));
+	}
+}
+
+function buildSessionItem(s: SessionInfo, binding: SessionBinding | null): HTMLElement {
+	const item = document.createElement("div");
+	// Status class on the wrapper mirrors the session-dot rules so CSS
+	// can target failed/terminated items uniformly.
+	const statusCls = s.status === "terminated" || s.status === "failed" ? ` ${s.status}` : "";
+	item.className = `session-item${s.sessionId === activeSessionId ? " active" : ""}${statusCls}`;
+	item.dataset.sessionId = s.sessionId;
+
+	// The row itself is a button (keyboard, screen readers): it selects
+	// the session. The quick action and the ⋯ menu are siblings, never
+	// nested inside it.
+	const select = document.createElement("button");
+	select.type = "button";
+	select.className = "session-select";
+	select.dataset.role = "select";
+	select.setAttribute("aria-current", String(s.sessionId === activeSessionId));
+	select.setAttribute(
+		"aria-label",
+		`${s.name}, ${s.status}${s.status === "failed" ? " — view the bootstrap log" : ""}`,
+	);
+
+	const dot = document.createElement("span");
+	dot.className = `session-dot ${s.status}`;
+	dot.setAttribute("aria-hidden", "true");
+	select.appendChild(dot);
+
+	const nameCol = document.createElement("span");
+	nameCol.className = "session-name-col";
+	const name = document.createElement("span");
+	name.className = "session-name";
+	name.textContent = s.name;
+	nameCol.appendChild(name);
+	// Live usage lines (#272). Only running sessions with a stats sample.
+	if (s.status === "running" && s.usage) {
+		const cpuCores = s.usage.cpuPercent / 100;
+		const cpuLine = document.createElement("span");
+		cpuLine.className = "session-usage";
+		cpuLine.textContent = `CPU ${formatCpuCores(cpuCores)} cores (${formatCpuPercent(s.usage.cpuPercent)})`;
+		nameCol.appendChild(cpuLine);
+		const memLine = document.createElement("span");
+		memLine.className = "session-usage";
+		memLine.textContent = `Mem ${formatBytes(s.usage.memBytes)} (${s.usage.memPercent.toFixed(0)}%)`;
+		nameCol.appendChild(memLine);
+	} else if (s.status !== "running") {
+		// The dot's colour alone told stopped / terminated / failed apart.
+		// The row's aria-label already says it: this line is for the eye.
+		const state = document.createElement("span");
+		state.className = `session-usage session-state ${s.status}`;
+		state.setAttribute("aria-hidden", "true");
+		state.textContent =
+			s.status === "stopped"
+				? "Stopped"
+				: s.status === "terminated"
+					? "Terminated · files kept"
+					: s.status === "failed"
+						? "Failed · open the log"
+						: s.status;
+		nameCol.appendChild(state);
+	}
+	select.appendChild(nameCol);
+	select.addEventListener("click", () => {
+		// A failed session has no workspace: the row opens its log.
+		void runSessionAction(s, s.status === "failed" ? "viewLog" : "open");
+	});
+	item.appendChild(select);
+	// With the "↳ last conversation" line the row has room between its
+	// controls; a tap there is a tap on the row (select), not a dead zone.
+	item.addEventListener("click", (e) => {
+		if (e.target === item) select.click();
+	});
+
+	const actions = document.createElement("span");
+	actions.className = "session-actions";
+	// The one obvious next step as a quick button; everything else
+	// (incl. terminate / delete, each with its own dialog) in the menu.
+	const quick = sessionActions(actionContext(s)).find(
+		(a) => a.kind === "primary" || a.id === "stop",
+	);
+	if (quick?.enabled) {
+		const b = document.createElement("button");
+		b.type = "button";
+		b.className = `session-action-btn ${quick.id === "stop" ? "stop" : "start"}`;
+		b.dataset.role = quick.id;
+		b.dataset.action = quick.id;
+		b.textContent = quick.id === "stop" ? "⏸" : quick.id === "restore" ? "↻" : "▶";
+		b.title = quick.label;
+		b.setAttribute("aria-label", `${quick.label}: ${s.name}`);
+		b.addEventListener("click", () => void runSessionAction(s, quick.id));
+		actions.appendChild(b);
+	}
+	const more = document.createElement("button");
+	more.type = "button";
+	more.className = "session-menu-btn";
+	more.dataset.role = "menu";
+	more.textContent = "⋯";
+	more.title = "More actions";
+	more.setAttribute("aria-label", `More actions: ${s.name}`);
+	more.setAttribute("aria-haspopup", "menu");
+	more.addEventListener("click", () => openSessionMenu(s, more));
+	actions.appendChild(more);
+	item.appendChild(actions);
+
+	// One click back to this project's last conversation, from anywhere.
+	// Named from what Chat remembered (no request); no status shown —
+	// knowing it would mean asking every project.
+	const lastCid = s.status === "failed" ? null : readLastConversation(s.sessionId);
+	const lastTitle = lastCid ? readLastConversationTitle(s.sessionId, lastCid) : null;
+	if (lastCid && lastTitle) {
+		const last = document.createElement("button");
+		last.type = "button";
+		last.className = "session-last-conv";
+		// Focus restore after each 5 s re-render finds controls by role.
+		last.dataset.role = "last-conv";
+		last.dataset.cid = lastCid;
+		const route = readRoute();
+		if (route?.sessionId === s.sessionId && route.view === "chat" && route.detail === lastCid)
+			last.setAttribute("aria-current", "page");
+		last.textContent = `↳ ${lastTitle}`;
+		last.title = `Open the last conversation: ${lastTitle}`;
+		last.setAttribute("aria-label", `Open the last conversation in ${s.name}: ${lastTitle}`);
+		last.addEventListener("click", () => {
+			const hash = routeHash({ sessionId: s.sessionId, view: "chat", detail: lastCid });
+			if (window.location.hash !== hash) window.location.hash = hash;
+		});
+		item.appendChild(last);
+	}
+
+	// P3a: the agent this session is bound to — a way to its page. A
+	// name, not identity: the link carries the ids (rule 3).
+	if (binding !== null) {
+		const agent = document.createElement("a");
+		agent.className = "session-agent-link";
+		agent.dataset.role = "agent";
+		const route = { projectId: binding.projectId, agentId: binding.agentId };
+		agent.href = projectRouteHash(route);
+		const project = projectName(binding.projectId);
+		agent.textContent = project ? `@${binding.handle} · ${project}` : `@${binding.handle}`;
+		agent.title = `Open the agent @${binding.handle}`;
+		agent.addEventListener("click", (e) => {
+			if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+			e.preventDefault();
+			navigateProject(route);
+		});
+		item.appendChild(agent);
+	}
+
+	return item;
 }
 
 // ↑ / ↓ / Home / End move between rows; Enter / Space are the buttons' own.
