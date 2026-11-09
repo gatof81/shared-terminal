@@ -14,7 +14,12 @@ const api = vi.hoisted(() => ({
 	removeAgent: vi.fn(),
 }));
 const mainMock = vi.hoisted(() => ({ sessions: [] as Array<Record<string, unknown>> }));
-const core = vi.hoisted(() => ({ refreshSessions: vi.fn(async () => {}) }));
+const core = vi.hoisted(() => ({
+	refreshSessions: vi.fn(async () => {}),
+	renderSessionList: vi.fn(),
+	sessionListLoaded: vi.fn(() => true),
+	runSessionAction: vi.fn(async (_s: unknown, _id: string) => {}),
+}));
 const toast = vi.hoisted(() => ({ showToast: vi.fn() }));
 
 vi.mock("./api.js", () => api);
@@ -121,7 +126,13 @@ beforeEach(() => {
 		epoch: 1,
 	};
 	core.refreshSessions.mockClear();
+	core.renderSessionList.mockClear();
+	core.sessionListLoaded.mockReset();
+	core.sessionListLoaded.mockReturnValue(true);
+	core.runSessionAction.mockReset();
+	core.runSessionAction.mockImplementation(async () => {});
 	toast.showToast.mockClear();
+	localStorage.clear();
 });
 
 afterEach(() => {
@@ -143,6 +154,7 @@ describe("feature absent", () => {
 		expect(api.fetchProjects).not.toHaveBeenCalled();
 		expect(api.fetchProjectAgents).not.toHaveBeenCalled();
 		expect(document.body.classList.contains("project-page-on")).toBe(false);
+		expect(core.renderSessionList).not.toHaveBeenCalled();
 	});
 });
 
@@ -228,6 +240,259 @@ describe("sidebar and pages", () => {
 		router.navigateProject({ projectId: PID, agentId: "zzz" });
 		await flush();
 		expect(pageEl().textContent).toContain("Agent not found");
+	});
+});
+
+describe("one tap to the agent's session", () => {
+	const detailBody = (over: Record<string, unknown> = {}) =>
+		ok({
+			...agentsBody().body.agents[0],
+			projectId: PID,
+			createdAt: NOW,
+			removedAt: null,
+			capabilities: { capture: true, channels: false, directControl: true },
+			bindings: [{ ...agentsBody().body.agents[0]!.binding, retiredAt: null, retireReason: null }],
+			can: { remove: { allowed: true } },
+			...over,
+		});
+	const stopped = {
+		value: "disconnected",
+		detail: "session-stopped",
+		source: "session",
+		at: NOW,
+	};
+	const card = () => pageEl().querySelector<HTMLElement>(`.pv-agent[data-agent-id="${AID}"]`)!;
+	const startBtn = (root: HTMLElement) =>
+		[...root.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+			/^Start/.test(b.textContent ?? ""),
+		);
+
+	it("a card links to the session's Chat and Terminal, and to the last conversation this browser opened", async () => {
+		const policy = await import("./viewPolicy.js");
+		policy.writeLastConversation(SID, "c-42");
+		policy.writeLastConversationTitle(SID, "c-42", "Fix the login");
+		await load();
+		history.replaceState(null, "", `/#/projects/${PID}`);
+		view.startProjects();
+		await flush();
+		const c = card();
+		expect(c.querySelector<HTMLAnchorElement>(".pv-open-chat")!.getAttribute("href")).toBe(
+			`#/sessions/${SID}/chat`,
+		);
+		expect(c.querySelector<HTMLAnchorElement>(".pv-open-terminal")!.getAttribute("href")).toBe(
+			`#/sessions/${SID}/terminal`,
+		);
+		const last = c.querySelector<HTMLAnchorElement>(".pv-last-conv")!;
+		expect(last.textContent).toBe("↳ Fix the login");
+		expect(last.getAttribute("href")).toBe(`#/sessions/${SID}/chat/c-42`);
+		// A running session: nothing to start.
+		expect(startBtn(c)).toBeUndefined();
+	});
+
+	it("no last-conversation link without a remembered title; none for an unbound agent", async () => {
+		api.fetchProjectAgents.mockImplementation(async () => {
+			const b = agentsBody();
+			b.body.agents.push({
+				...b.body.agents[0]!,
+				agentId: "a-free",
+				handle: "loose",
+				binding: null as never,
+			});
+			return b;
+		});
+		await load();
+		history.replaceState(null, "", `/#/projects/${PID}`);
+		view.startProjects();
+		await flush();
+		expect(card().querySelector(".pv-last-conv")).toBeNull();
+		const loose = pageEl().querySelector<HTMLElement>('.pv-agent[data-agent-id="a-free"]')!;
+		expect(loose.querySelector(".pv-session-actions")).toBeNull();
+	});
+
+	it("agent page: Chat and Terminal replace the duplicate workbench link", async () => {
+		api.fetchAgent.mockImplementation(async () => detailBody());
+		await load();
+		history.replaceState(null, "", `/#/projects/${PID}/agents/${AID}`);
+		view.startProjects();
+		await flush();
+		const row = pageEl().querySelector<HTMLElement>(".pv-session-row")!;
+		expect(row.querySelectorAll(".pv-session-link")).toHaveLength(1);
+		expect([...row.querySelectorAll("a")].map((a) => a.textContent)).toEqual([
+			expect.stringContaining("my-project"),
+			"Chat",
+			"Terminal",
+		]);
+		expect(pageEl().textContent).not.toContain("Open the workbench");
+	});
+
+	it("session-stopped: one Start button, disabled while in flight, the sidebar's verb; never automatic", async () => {
+		mainMock.sessions[0]!.status = "stopped";
+		api.fetchAgent.mockImplementation(async () => detailBody({ presence: stopped }));
+		await load();
+		history.replaceState(null, "", `/#/projects/${PID}/agents/${AID}`);
+		view.startProjects();
+		await flush();
+		expect(core.runSessionAction).not.toHaveBeenCalled();
+		let release: () => void = () => {};
+		core.runSessionAction.mockImplementation(() => new Promise<void>((r) => (release = () => r())));
+		const fetches = api.fetchAgent.mock.calls.length;
+		startBtn(pageEl())!.click();
+		await flush();
+		const busy = startBtn(pageEl())!;
+		expect(busy.disabled).toBe(true);
+		expect(busy.textContent).toBe("Starting…");
+		busy.click();
+		expect(core.runSessionAction).toHaveBeenCalledTimes(1);
+		expect(core.runSessionAction.mock.calls[0]![0]).toBe(mainMock.sessions[0]);
+		expect(core.runSessionAction.mock.calls[0]![1]).toBe("start");
+		// The session is running now; the presence follows on the re-read.
+		mainMock.sessions[0]!.status = "running";
+		api.fetchAgent.mockImplementation(async () => detailBody());
+		release();
+		await flush();
+		expect(api.fetchAgent.mock.calls.length).toBeGreaterThan(fetches);
+		expect(startBtn(pageEl())).toBeUndefined();
+	});
+
+	it("no Start for any other disconnected detail, nor when the row says it isn't stopped", async () => {
+		mainMock.sessions[0]!.status = "stopped";
+		api.fetchProjectAgents.mockImplementation(async () => {
+			const b = agentsBody();
+			b.body.agents[0]!.presence = {
+				value: "disconnected",
+				detail: "session-terminated",
+				source: "session",
+				at: NOW,
+			} as never;
+			return b;
+		});
+		await load();
+		history.replaceState(null, "", `/#/projects/${PID}`);
+		view.startProjects();
+		await flush();
+		expect(startBtn(card())).toBeUndefined();
+		api.fetchProjectAgents.mockImplementation(async () => {
+			const b = agentsBody();
+			b.body.agents[0]!.presence = stopped as never;
+			return b;
+		});
+		mainMock.sessions[0]!.status = "running";
+		view.resetProjects();
+		view.startProjects();
+		await flush();
+		expect(startBtn(card())).toBeUndefined();
+		mainMock.sessions[0]!.status = "stopped";
+		view.resetProjects();
+		view.startProjects();
+		await flush();
+		expect(startBtn(card())!.textContent).toBe("Start session");
+	});
+});
+
+describe("dead ends", () => {
+	const emptyAgents = (allowed: boolean) =>
+		ok({
+			projectId: PID,
+			generatedAt: NOW,
+			agents: [],
+			can: { createAgent: allowed ? { allowed: true } : { allowed: false, reason: "agent-limit" } },
+		});
+
+	it("empty project: + New agent in the empty state and the unassigned count", async () => {
+		api.fetchProjectAgents.mockImplementation(async () => emptyAgents(true));
+		await load();
+		history.replaceState(null, "", `/#/projects/${PID}`);
+		view.startProjects();
+		await flush();
+		const box = pageEl().querySelector<HTMLElement>(".files-state-empty")!;
+		expect(box.textContent).toContain("You have 1 unassigned session.");
+		const add = [...box.querySelectorAll("button")].find((b) => b.textContent === "+ New agent")!;
+		add.click();
+		expect(dialogEl()).not.toBeNull();
+	});
+
+	it("empty project: no button when creation is refused; no count when bindings are unknown", async () => {
+		api.fetchProjectAgents.mockImplementation(async () => emptyAgents(false));
+		for (const s of mainMock.sessions) delete s.binding;
+		await load();
+		history.replaceState(null, "", `/#/projects/${PID}`);
+		view.startProjects();
+		await flush();
+		const box = pageEl().querySelector<HTMLElement>(".files-state-empty")!;
+		expect(box.querySelector("button")).toBeNull();
+		expect(box.textContent).not.toMatch(/unassigned session\b/);
+		expect(box.querySelector(".pv-free-count")).toBeNull();
+	});
+
+	it("agent not found: a sentence and Back to the project", async () => {
+		api.fetchAgent.mockImplementation(async () => fail(404, "agent-not-found"));
+		await load();
+		history.replaceState(null, "", `/#/projects/${PID}/agents/zzz`);
+		view.startProjects();
+		await flush();
+		expect(pageEl().querySelector(".pv-title")!.textContent).toBe("Agent not found");
+		expect(pageEl().textContent).toContain("There is no such agent in Educación HZ");
+		expect(pageEl().textContent).not.toContain("Not found.");
+		const back = [...pageEl().querySelectorAll("button")].find(
+			(b) => b.textContent === "Back to Educación HZ",
+		)!;
+		back.click();
+		await flush();
+		expect(window.location.hash).toBe(`#/projects/${PID}`);
+		expect(pageEl().querySelector(".pv-title")!.textContent).toBe("Educación HZ");
+	});
+
+	it("project not found: a sentence and Back to Projects (the sidebar list)", async () => {
+		api.fetchProjectAgents.mockImplementation(async () => fail(404, "project-not-found"));
+		await load();
+		history.replaceState(null, "", "/#/projects/nope");
+		view.startProjects();
+		await flush();
+		expect(pageEl().querySelector(".pv-title")!.textContent).toBe("Project not found");
+		expect(pageEl().textContent).toContain("doesn't exist or isn't yours");
+		[...pageEl().querySelectorAll("button")]
+			.find((b) => b.textContent === "Back to Projects")!
+			.click();
+		await flush();
+		expect(pageEl().hidden).toBe(true);
+		expect(document.activeElement).toBe(document.querySelector("#project-list .project-item"));
+		history.back();
+		await new Promise((r) => setTimeout(r, 30));
+		expect(pageEl().hidden).toBe(false);
+	});
+});
+
+describe("sidebar rows name their project as soon as the list arrives", () => {
+	it("the first list re-renders the loaded session rows; before they load, nothing", async () => {
+		await load();
+		view.startProjects();
+		await flush();
+		expect(core.renderSessionList).toHaveBeenCalledTimes(1);
+		view.resetProjects();
+		core.renderSessionList.mockClear();
+		core.sessionListLoaded.mockReturnValue(false);
+		view.startProjects();
+		await flush();
+		expect(api.fetchProjects).toHaveBeenCalledTimes(2);
+		expect(core.renderSessionList).not.toHaveBeenCalled();
+	});
+
+	it("setProjects reports a change only when a name the rows show changed", async () => {
+		const dir = await import("./projectDirectory.js");
+		dir.clearProjects();
+		const p = (name: string, agentCount = 1) => ({
+			projectId: PID,
+			name,
+			createdAt: NOW,
+			agentCount,
+		});
+		expect(dir.setProjects([p("A")])).toBe(true);
+		expect(dir.setProjects([p("A", 2)])).toBe(false);
+		expect(dir.setProjects([p("B", 2)])).toBe(true);
+		expect(dir.setProjects([])).toBe(true);
+		expect(dir.setProjects([])).toBe(false);
+		dir.clearProjects();
+		expect(dir.setProjects([])).toBe(true);
 	});
 });
 
