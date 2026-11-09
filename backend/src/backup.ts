@@ -99,8 +99,8 @@ export const TABLES: ReadonlyArray<{ name: string; orderBy: string; sinceSchema?
 	// environment and never in a backup. INSIDE the deployment, though, the
 	// endpoint is the subscription's identity: `POST /api/push/subscribe`
 	// re-owns an existing endpoint and the DELETE route is keyed on it alone,
-	// so a backup reader who also has an account could redirect or silence
-	// another user's notifications. That is why the backup's permissions
+	// so a backup reader who also has an account could send their own
+	// notifications to another user's browser, or silence that user's. That is why the backup's permissions
 	// matter (#562). Before #560 the table was missing here, so every restore
 	// emptied it.
 	{ name: "push_subscriptions", orderBy: "id", sinceSchema: 14 },
@@ -594,6 +594,7 @@ async function restoreAll(
 			);
 		}
 		const rows = await readJsonl(inDir, t.name);
+		let keptFromTarget = 0;
 		for (const row of rows) {
 			const cols = Object.keys(row);
 			for (const col of cols) {
@@ -604,18 +605,32 @@ async function restoreAll(
 				}
 			}
 			const placeholders = cols.map(() => "?").join(", ");
-			// push_subscriptions: the target's row wins. Its UNIQUE `endpoint` is
-			// re-owned by the app when a browser switches accounts; OR REPLACE
-			// would hand that browser back to the backup's owner under --force.
-			// Identical rows (the --force re-run over a partial restore) converge
-			// either way.
-			const verb = t.name === "push_subscriptions" ? "INSERT OR IGNORE" : "INSERT OR REPLACE";
+			const values = cols.map((c) => row[c] as string | number | null);
+			if (t.name === "push_subscriptions") {
+				// The target's row wins: the app re-owns a UNIQUE `endpoint` when a
+				// browser switches accounts, and OR REPLACE would hand that browser
+				// back to the backup's owner under --force. ON CONFLICT DO NOTHING,
+				// not OR IGNORE: only a uniqueness conflict is skipped — a NULL or
+				// malformed row still fails the restore. Identical rows (the --force
+				// re-run over a partial restore) converge either way.
+				const r = await d1Query(
+					`INSERT INTO ${t.name} (${cols.join(", ")}) VALUES (${placeholders}) ON CONFLICT DO NOTHING`,
+					values,
+				);
+				if (r.meta.changes === 0) keptFromTarget++;
+				continue;
+			}
 			await d1Query(
-				`${verb} INTO ${t.name} (${cols.join(", ")}) VALUES (${placeholders})`,
-				cols.map((c) => row[c] as string | number | null),
+				`INSERT OR REPLACE INTO ${t.name} (${cols.join(", ")}) VALUES (${placeholders})`,
+				values,
 			);
 		}
-		logger.info(`[restore] ${t.name}: ${rows.length} row(s)`);
+		logger.info(
+			`[restore] ${t.name}: ${rows.length} row(s)` +
+				(keptFromTarget > 0
+					? `, ${keptFromTarget} kept from the target (same endpoint or id already there)`
+					: ""),
+		);
 		// Restored either way (the operator may still install the source's keys),
 		// but a subscription only accepts pushes signed by the keypair it was
 		// created under: another key gets 403 from the push service, which is not

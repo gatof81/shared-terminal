@@ -36,6 +36,8 @@ const dbState = vi.hoisted(() => ({
 	missingTables: new Set<string>(),
 	/** Runs before the first query of a backup (the schema read): lets a test look at the disk then. */
 	onSchemaRead: null as null | (() => Promise<void>),
+	/** push_subscriptions endpoints the target already holds: their INSERT changes nothing. */
+	pushConflicts: new Set<string>(),
 }));
 
 vi.mock("./db.js", () => ({
@@ -68,8 +70,14 @@ vi.mock("./db.js", () => ({
 				],
 			};
 		}
-		if (sql.startsWith("INSERT OR REPLACE") || sql.startsWith("INSERT OR IGNORE")) {
+		if (sql.startsWith("INSERT OR REPLACE") || sql.startsWith("INSERT INTO")) {
 			dbState.inserts.push({ sql, params: params ?? [] });
+			if (
+				/^INSERT INTO push_subscriptions /.test(sql) &&
+				dbState.pushConflicts.has(String(params?.[2]))
+			) {
+				return { ...ok, meta: { ...ok.meta, changes: 0 }, results: [] };
+			}
 			return { ...ok, results: [] };
 		}
 		if (sql.startsWith("UPDATE sessions SET status = 'stopped'")) {
@@ -120,6 +128,7 @@ beforeEach(async () => {
 	dbState.selected.length = 0;
 	dbState.missingTables.clear();
 	dbState.onSchemaRead = null;
+	dbState.pushConflicts.clear();
 	outDir = mkdtempSync(path.join(os.tmpdir(), "st-backup-out-"));
 	// runBackup requires an EMPTY dir; mkdtemp gives us one, but it must
 	// not pre-create workspaces/ — runBackup does that itself.
@@ -414,9 +423,9 @@ describe("push_subscriptions (#560)", () => {
 		await runRestore(outDir);
 		const ins = dbState.inserts.find((i) => /INTO push_subscriptions /.test(i.sql));
 		expect(ins?.sql).toMatch(
-			// OR IGNORE: on --force, a target row the app has re-owned since the
-			// backup (same endpoint, another user) is not handed back.
-			/^INSERT OR IGNORE INTO push_subscriptions \(id, user_id, endpoint, p256dh, auth, created_at\)/,
+			// ON CONFLICT DO NOTHING: on --force, a target row the app has re-owned
+			// since the backup (same endpoint, another user) is not handed back.
+			/^INSERT INTO push_subscriptions \(id, user_id, endpoint, p256dh, auth, created_at\) VALUES \(\?, \?, \?, \?, \?, \?\) ON CONFLICT DO NOTHING$/,
 		);
 		expect(ins?.params).toEqual([
 			SUB.id,
@@ -429,6 +438,23 @@ describe("push_subscriptions (#560)", () => {
 		// After users: no FK today, but the rows belong to them.
 		const order = dbState.inserts.map((i) => /INTO (\w+)/.exec(i.sql)?.[1]);
 		expect(order.indexOf("users")).toBeLessThan(order.indexOf("push_subscriptions"));
+	});
+
+	it("--force onto a target that already holds the endpoint keeps the target's row and says so", async () => {
+		await backupWithSub("BKeyA");
+		vi.stubEnv("VAPID_PUBLIC_KEY", "BKeyA");
+		dbState.pushConflicts.add(SUB.endpoint);
+		const info = vi.spyOn(logger, "info");
+		try {
+			await runRestore(outDir, { force: true });
+			expect(
+				info.mock.calls.some((c) =>
+					/\[restore\] push_subscriptions: 1 row\(s\), 1 kept from the target/.test(String(c[0])),
+				),
+			).toBe(true);
+		} finally {
+			info.mockRestore();
+		}
 	});
 
 	it("warns when the subscriptions were created for another VAPID key, and still restores them", async () => {

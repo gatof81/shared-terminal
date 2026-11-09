@@ -1310,8 +1310,9 @@ What a row is worth to someone who reads the backup:
 - **Inside the deployment, the endpoint is the subscription's identity.**
   `POST /api/push/subscribe` re-owns an existing endpoint, and the DELETE
   route is keyed on the endpoint alone. Someone who can read a backup **and**
-  has an account can therefore redirect another user's notifications to
-  their own sessions, or silence them.
+  has an account can therefore send their own notifications to another
+  user's browser, or silence that user's. They never receive the other
+  user's notifications.
 - This is the reason to protect backups (#562), on top of what they already
   carry: password hashes, ciphertext, workspaces and `.env` files written by
   `writeEnvFile`.
@@ -1330,9 +1331,11 @@ the rows) or is unset (nothing is sent). Two ways out:
 A backup taken while push was not configured records no key; its rows are
 restored without the warning.
 
-On `--force`, `push_subscriptions` is replayed with `INSERT OR IGNORE`,
-unlike the other tables: when the target has a newer row for the same
-endpoint (a browser that switched accounts), the target's row wins.
+On `--force`, `push_subscriptions` is replayed with `ON CONFLICT DO
+NOTHING`, unlike the other tables: when the target has a newer row for the
+same endpoint (a browser that switched accounts), the target's row wins,
+and the log line counts it (`N kept from the target`). A malformed row
+still fails the restore.
 
 **File permissions.** The backup directory and its files are created with
 the process umask (typically 0755/0644), so anyone on the host who can
@@ -1343,8 +1346,8 @@ a non-root user.
 Restore guards:
 
 - **Non-empty target** (any `users`/`sessions` rows) refuses without
-  `--force`. Replays use `INSERT OR REPLACE` (`OR IGNORE` for
-  `push_subscriptions`, see above), so a `--force` re-run over a
+  `--force`. Replays use `INSERT OR REPLACE` (`ON CONFLICT DO
+  NOTHING` for `push_subscriptions`, see above), so a `--force` re-run over a
   partial restore converges.
 - **`SECRETS_ENCRYPTION_KEY` mismatch aborts before any write** and has
   NO `--force` override — a wrong key silently corrupts every secret with
