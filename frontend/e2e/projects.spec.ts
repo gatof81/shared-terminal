@@ -189,7 +189,7 @@ test.describe("projects — feature on", () => {
 		await expect(architect.locator(".pv-presence")).toHaveText("Ready (unverified)");
 	});
 
-	test("agent page: identity, presence, capabilities, history; the workbench link opens the session", async ({
+	test("agent page: identity, presence, capabilities, history; Terminal opens the session", async ({
 		app,
 		page,
 	}) => {
@@ -204,15 +204,147 @@ test.describe("projects — feature on", () => {
 		await expect(view.locator(".pv-history tbody tr")).toHaveCount(1);
 		await expect(view.locator(".pv-history tbody tr").first()).toContainText("active");
 		await expect(view.locator("button", { hasText: "Remove agent" })).toBeVisible();
+		// One named link to the session, then its views — no duplicate.
+		const row = view.locator(".pv-session-row");
+		await expect(row.locator(".pv-session-link")).toHaveCount(1);
+		await expect(row.locator(".pv-session-actions a")).toHaveText(["Chat", "Terminal"]);
+		await expect(view.getByText("Open the workbench")).toHaveCount(0);
+		await expect(view.locator("button", { hasText: "Start session" })).toHaveCount(0);
 
-		await view.locator("a", { hasText: "Open the workbench" }).click();
+		await row.locator("a", { hasText: "Terminal" }).click();
 		await expect(view).toBeHidden();
 		await expect(page.locator("#terminal-session-name")).toHaveText("my-project");
-		expect(new URL(page.url()).hash).toMatch(new RegExp(`^#/sessions/${SESSION_IDS.running}`));
+		await app.expectTerminalReady();
+		expect(new URL(page.url()).hash).toMatch(
+			new RegExp(`^#/sessions/${SESSION_IDS.running}/terminal`),
+		);
 		// Back returns to the agent's page; the session stays open underneath.
 		await page.goBack();
 		await expect(pageTitle(page)).toHaveText("@developer-hz");
 		await expect(page.locator("#terminal-session-name")).toHaveText("my-project");
+	});
+
+	test("agent → Chat in one click, from the card and from the agent page; Back returns to each", async ({
+		app,
+		page,
+	}) => {
+		await app.login("alice", projectHash);
+		await expect(pageTitle(page)).toHaveText("Educación HZ");
+		await card(page, "developer-hz")
+			.locator("a", { hasText: /^Chat$/ })
+			.click();
+		await expect(page.locator("#project-view")).toBeHidden();
+		expect(new URL(page.url()).hash).toBe(`#/sessions/${SESSION_IDS.running}/chat`);
+		await expect(page.locator("#chat-view")).toBeVisible();
+		await expect(page.locator("#terminal-session-name")).toHaveText("my-project");
+		await page.goBack();
+		await expect(pageTitle(page)).toHaveText("Educación HZ");
+		expect(new URL(page.url()).hash).toBe(projectHash);
+
+		await card(page, "developer-hz").locator(".pv-agent-handle").click();
+		await expect(pageTitle(page)).toHaveText("@developer-hz");
+		await page.locator("#project-view .pv-session-row a", { hasText: /^Chat$/ }).click();
+		await expect(page.locator("#chat-view")).toBeVisible();
+		expect(new URL(page.url()).hash).toBe(`#/sessions/${SESSION_IDS.running}/chat`);
+		await page.goBack();
+		await expect(pageTitle(page)).toHaveText("@developer-hz");
+		expect(new URL(page.url()).hash).toBe(agentHash(AGENT_IDS.developer));
+	});
+
+	test("the last conversation this browser opened is one tap away from the agent", async ({
+		app,
+		page,
+	}) => {
+		const sid = SESSION_IDS.running;
+		await page.addInitScript((sid) => {
+			localStorage.setItem(`st.chat.last.${sid}`, "c-remembered");
+			localStorage.setItem(`st.chat.lastTitle.${sid}`, "c-remembered\nFix the login flow");
+		}, sid);
+		await app.login("alice", projectHash);
+		const last = card(page, "developer-hz").locator(".pv-last-conv");
+		await expect(last).toHaveText("↳ Fix the login flow");
+		await expect(last).toHaveAttribute("href", `#/sessions/${sid}/chat/c-remembered`);
+		await expect(card(page, "architect-hz").locator(".pv-last-conv")).toHaveCount(0);
+	});
+
+	test("session stopped: only that agent offers Start session, which starts it once on a click", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		await app.login("alice", projectHash);
+		await expect(page.locator("#project-view .pv-agent")).toHaveCount(5);
+		const startButtons = page.locator("#project-view button", { hasText: "Start session" });
+		await expect(startButtons).toHaveCount(1);
+		const qa = card(page, "qa-hz");
+		await expect(qa.locator("button", { hasText: "Start session" })).toBeVisible();
+		// Never on its own.
+		await page.waitForTimeout(500);
+		const starts = () =>
+			backend.requests.filter(
+				(r) => r.method === "POST" && r.path === `/sessions/${SESSION_IDS.stopped}/start`,
+			);
+		expect(starts()).toHaveLength(0);
+		await qa.locator("button", { hasText: "Start session" }).click();
+		await expect(app.toast(/Starting "docs"/)).toBeVisible();
+		// The row now says running: no Start offered any more.
+		await expect(startButtons).toHaveCount(0);
+		expect(starts()).toHaveLength(1);
+		// Its views stay one tap away.
+		await expect(qa.locator(".pv-session-actions a")).toHaveText(["Chat", "Terminal"]);
+	});
+
+	test("sidebar agent links name their project as soon as the project list arrives", async ({
+		app,
+		backend,
+	}) => {
+		backend.delays.projects = 1_000;
+		await app.login("alice");
+		await app.openSidebar();
+		const link = app.sessionRow("my-project").locator(".session-agent-link");
+		await expect(link).toHaveText("@developer-hz");
+		// Not on the session list's next poll (5 s): when the list lands.
+		await expect(link).toHaveText("@developer-hz · Educación HZ", { timeout: 3_000 });
+	});
+
+	test("empty project: + New agent in the empty state and how many sessions are unassigned", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.projects.push({
+			projectId: "6b1f2c3d-0000-4000-8000-0000000000ee",
+			ownerUserId: "u-alice",
+			name: "Tienda",
+			createdAt: new Date().toISOString(),
+		});
+		await app.login("alice", "#/projects/6b1f2c3d-0000-4000-8000-0000000000ee");
+		await expect(pageTitle(page)).toHaveText("Tienda");
+		const empty = page.locator("#project-view .files-state-empty");
+		await expect(empty).toContainText("No agents yet");
+		await expect(empty).toContainText("You have 1 unassigned session.");
+		await empty.locator("button", { hasText: "+ New agent" }).click();
+		await expect(dialog(page).locator("select option")).toHaveText(["scratch · running"]);
+	});
+
+	test("not found: a sentence and a way back, never a bare error", async ({ app, page }) => {
+		await app.login("alice", agentHash("a0000000-0000-4000-8000-0000000000ff"));
+		const view = page.locator("#project-view");
+		await expect(pageTitle(page)).toHaveText("Agent not found");
+		await expect(view).toContainText("There is no such agent in Educación HZ");
+		await expect(view).not.toContainText("Not found.");
+		await view.locator("button", { hasText: "Back to Educación HZ" }).click();
+		await expect(pageTitle(page)).toHaveText("Educación HZ");
+		expect(new URL(page.url()).hash).toBe(projectHash);
+
+		await page.evaluate(() => {
+			window.location.hash = "#/projects/6b1f2c3d-0000-4000-8000-0000000000ff";
+		});
+		await expect(pageTitle(page)).toHaveText("Project not found");
+		await expect(view).toContainText("doesn't exist or isn't yours");
+		await view.locator("button", { hasText: "Back to Projects" }).click();
+		await expect(view).toBeHidden();
+		await expect(page.locator("#project-list .project-item").first()).toBeFocused();
 	});
 
 	test("a removed agent keeps its page and its history", async ({ app, page }) => {

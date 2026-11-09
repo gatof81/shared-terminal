@@ -15,10 +15,26 @@ let byId = new Map<string, ProjectSummary>();
 let order: ProjectSummary[] = [];
 let loaded = false;
 
-export function setProjects(list: ProjectSummary[]): void {
+/**
+ * Replace the list. True when a project NAME the session rows show changed
+ * (or the first list arrived): the caller re-renders those rows then,
+ * instead of leaving "@handle" without its project until the next poll.
+ */
+export function setProjects(list: ProjectSummary[]): boolean {
+	const next = new Map(list.map((p) => [p.projectId, p]));
+	let changed = !loaded || next.size !== byId.size;
+	if (!changed) {
+		for (const [id, p] of next) {
+			if (byId.get(id)?.name !== p.name) {
+				changed = true;
+				break;
+			}
+		}
+	}
 	order = list.slice();
-	byId = new Map(list.map((p) => [p.projectId, p]));
+	byId = next;
 	loaded = true;
+	return changed;
 }
 
 export function projects(): readonly ProjectSummary[] {

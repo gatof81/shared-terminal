@@ -373,7 +373,8 @@ export type DelayKey =
 	| "gitLog"
 	| "gitDiff"
 	| "conversations"
-	| "events";
+	| "events"
+	| "projects";
 
 function delayKeyOf(path: string): DelayKey | null {
 	if (/\/tabs$/.test(path)) return "tabs";
@@ -384,6 +385,7 @@ function delayKeyOf(path: string): DelayKey | null {
 	if (/\/git\/diff$/.test(path)) return "gitDiff";
 	if (/\/conversations$/.test(path)) return "conversations";
 	if (/\/events$/.test(path)) return "events";
+	if (path === "/projects") return "projects";
 	return null;
 }
 

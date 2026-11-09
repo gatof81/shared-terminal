@@ -324,6 +324,36 @@ body.project-page-on #actions-btn {
   text-decoration: underline;
 }
 
+/* One tap from an agent to its session's views */
+.pv-session-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  min-width: 0;
+}
+.pv-last-conv {
+  flex-basis: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.75rem;
+  color: var(--c-text-2);
+  text-decoration: none;
+}
+.pv-last-conv:hover {
+  color: var(--c-accent);
+  text-decoration: underline;
+}
+.pv-session-row .pv-last-conv {
+  flex-basis: auto;
+  max-width: 100%;
+}
+.pv-free-count {
+  color: var(--c-muted);
+}
+
 /* Presence: words first (the dot only repeats the tone) */
 .pv-presence-block {
   display: flex;
@@ -394,6 +424,8 @@ body.project-page-on #actions-btn {
   flex-wrap: wrap;
   align-items: center;
   gap: var(--s-3);
+  margin-bottom: var(--s-2);
+  font-size: 0.8rem;
 }
 .pv-caps {
   list-style: none;

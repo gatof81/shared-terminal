@@ -74,9 +74,15 @@ import {
 	readProjectRoute,
 	routeHash,
 } from "./router.js";
-import { refreshSessions } from "./sessionCore.js";
+import {
+	refreshSessions,
+	renderSessionList,
+	runSessionAction,
+	sessionListLoaded,
+} from "./sessionCore.js";
 import { setTitlePage } from "./tabTitle.js";
 import { button, el, stateBox } from "./ui.js";
+import { readLastConversation, readLastConversationTitle } from "./viewPolicy.js";
 
 // ── DOM ─────────────────────────────────────────────────────────────────────
 
@@ -109,6 +115,9 @@ let agentDetails = new Map<string, Loadable<AgentDetail>>();
 // Open creation/removal dialogs: closed on logout so nothing of this
 // account survives behind the login view.
 const openDialogs = new Set<{ close(): void }>();
+// Sessions whose start this page asked for and whose answer hasn't landed:
+// their Start button stays disabled (one click, one POST).
+const starting = new Set<string>();
 
 const detailKey = (pid: string, aid: string) => `${pid}\n${aid}`;
 
@@ -161,7 +170,12 @@ async function loadProjects(fresh = false): Promise<void> {
 		state,
 		async () => {
 			const a = await fetchProjects();
-			if (a.ok) setProjects(a.body.projects);
+			// The sidebar's session rows name their agent's project
+			// ("@handle · <project>"): re-render them now rather than on
+			// their own next poll, up to 5 s later. Before the session list
+			// has loaded there is nothing to re-render (and rendering then
+			// would replace its loading state with an empty list).
+			if (a.ok && setProjects(a.body.projects) && sessionListLoaded()) renderSessionList();
 			return a.ok ? { ...a, body: { can: a.body.can.createProject } } : a;
 		},
 		fresh,
@@ -356,9 +370,31 @@ function page(...children: HTMLElement[]): HTMLElement {
 	return root;
 }
 
-function notFoundPage(title: string, message: string): HTMLElement {
-	const back = button("Back to sessions", "pv-btn", leavePage);
-	return page(pageHeader(title, null), stateBox("error", message, back));
+/**
+ * "Back to Projects": there is no projects index page — the list lives in
+ * the sidebar — so leave the page for the session underneath and put the
+ * keyboard on that list (opening the mobile drawer when it is closed).
+ */
+function backToProjects(): void {
+	leavePage();
+	const list = document.getElementById("project-list");
+	const target = list?.querySelector<HTMLElement>(".project-item") ?? newProjectBtn;
+	if (!target) return;
+	if (target.getClientRects().length === 0) document.getElementById("sidebar-toggle")?.click();
+	target.focus();
+}
+
+function projectNotFoundPage(): HTMLElement {
+	const back = button("Back to Projects", "pv-btn", backToProjects);
+	back.dataset.key = "back-projects";
+	return page(
+		pageHeader("Project not found", null),
+		stateBox(
+			"info",
+			"This project doesn't exist or isn't yours — the link may be wrong, or it belongs to another account.",
+			back,
+		),
+	);
 }
 
 function sessionOf(sessionId: string): SessionInfo | undefined {
@@ -385,6 +421,97 @@ function sessionLink(sessionId: string, key: string): HTMLElement {
 		a.title = "Open this session";
 	}
 	return a;
+}
+
+/**
+ * One tap from an agent to its session's Chat or Terminal (and, when this
+ * browser remembers one, straight to the last conversation it opened
+ * there). Plain links to the session's own routes: the browser pushes the
+ * entry, so Back returns to this page (router.ts: a view the person chose
+ * is a push), and the session opens exactly as from its sidebar row.
+ */
+function sessionActions(sessionId: string, keyPrefix: string): HTMLElement {
+	const s = sessionOf(sessionId);
+	const name = s?.name ?? `Session ${sessionId.slice(0, 8)}`;
+	const row = el("div", "pv-session-actions");
+	const link = (label: string, cls: string, hash: string, key: string, title: string) => {
+		const a = el("a", cls, label);
+		a.href = hash;
+		a.dataset.key = `${keyPrefix}:${key}`;
+		a.title = title;
+		row.appendChild(a);
+		return a;
+	};
+	link(
+		"Chat",
+		"pv-btn pv-open-chat",
+		routeHash({ sessionId, view: "chat", detail: null }),
+		"chat",
+		`Open the Chat of ${name}`,
+	);
+	link(
+		"Terminal",
+		"pv-btn pv-open-terminal",
+		routeHash({ sessionId, view: "terminal", detail: null }),
+		"terminal",
+		`Open the Terminal of ${name}`,
+	);
+	// Same memory and same rule as the sidebar's "↳ last conversation":
+	// what Chat remembered in this browser, no request; never for a failed
+	// session.
+	const cid = s?.status === "failed" ? null : readLastConversation(sessionId);
+	const title = cid ? readLastConversationTitle(sessionId, cid) : null;
+	if (cid && title) {
+		const last = link(
+			`↳ ${title}`,
+			"pv-last-conv",
+			routeHash({ sessionId, view: "chat", detail: cid }),
+			"last-conv",
+			`Open the last conversation: ${title}`,
+		);
+		last.setAttribute("aria-label", `Open the last conversation in ${name}: ${title}`);
+	}
+	return row;
+}
+
+/**
+ * PROJECTS.md §5: `disconnected · session-stopped` is the one state a
+ * click can fix. Offered only while the sidebar's row agrees the session
+ * is stopped (after a start the row reads `running` before the presence
+ * does), and never pressed for the person.
+ */
+function startSessionButton(
+	presence: AgentListEntry["presence"],
+	sessionId: string,
+	key: string,
+): HTMLElement | null {
+	if (presence.value !== "disconnected" || presence.detail !== "session-stopped") return null;
+	const s = sessionOf(sessionId);
+	if (!s || s.status !== "stopped") return null;
+	const inFlight = starting.has(sessionId);
+	const b = button(inFlight ? "Starting…" : "Start session", "pv-btn pv-primary pv-start", () => {
+		void startFromPage(s);
+	});
+	b.dataset.key = key;
+	b.disabled = inFlight;
+	if (inFlight) b.setAttribute("aria-busy", "true");
+	return b;
+}
+
+async function startFromPage(s: SessionInfo): Promise<void> {
+	if (starting.has(s.sessionId)) return;
+	const myGen = gen;
+	starting.add(s.sessionId);
+	renderPage();
+	try {
+		// The sidebar's own verb: same request, same toasts (errors
+		// included), same list refresh.
+		await runSessionAction(s, "start");
+		if (myGen === gen) await loadShown(true);
+	} finally {
+		starting.delete(s.sessionId);
+		if (myGen === gen) renderPage();
+	}
 }
 
 function presenceBlock(p: AgentListEntry["presence"], compact: boolean): HTMLElement {
@@ -429,7 +556,7 @@ function renderProjectPage(pid: string): HTMLElement {
 	const state = agentLists.get(pid);
 	const data = state?.data ?? null;
 	if (!data && state?.error && state.error.status === 404) {
-		return notFoundPage("Project not found", projectErrorText(state.error.code, 404));
+		return projectNotFoundPage();
 	}
 	const createBtn = allowedButton(
 		"+ New agent",
@@ -458,19 +585,33 @@ function renderProjectPage(pid: string): HTMLElement {
 		return page(header, stateBox("loading", "Loading agents…"));
 	}
 	if (data.agents.length === 0) {
-		return page(
-			header,
-			sub,
-			stateBox(
-				"empty",
-				"No agents yet. An agent is a stable identity bound to one of your unassigned sessions.",
-			),
+		const actions: HTMLElement[] = [];
+		if (data.can.createAgent.allowed) {
+			const add = button("+ New agent", "pv-btn pv-primary", () => openCreateAgentDialog(pid));
+			add.dataset.key = "new-agent-empty";
+			actions.push(add);
+		}
+		const box = stateBox(
+			"empty",
+			"No agents yet. An agent is a stable identity bound to one of your unassigned sessions.",
+			...actions,
 		);
+		const free = unassignedText();
+		if (free) box.insertBefore(el("p", "pv-free-count", free), box.children[1] ?? null);
+		return page(header, sub, box);
 	}
 	const list = el("ul", "pv-agents");
 	list.setAttribute("aria-label", "Agents");
 	for (const a of data.agents) list.appendChild(agentCard(pid, a));
 	return page(header, sub, list);
+}
+
+/** How many sessions a new agent could take; nothing when that is unknown (rule 1). */
+function unassignedText(): string | null {
+	if (!sessions.some((s) => "binding" in s)) return null;
+	const n = bindableSessions(sessions).length;
+	if (n === 0) return "You have no unassigned session right now.";
+	return n === 1 ? "You have 1 unassigned session." : `You have ${n} unassigned sessions.`;
 }
 
 function agentCard(pid: string, a: AgentListEntry): HTMLElement {
@@ -500,6 +641,12 @@ function agentCard(pid: string, a: AgentListEntry): HTMLElement {
 		bind.appendChild(el("span", "pv-muted", "No session bound"));
 	}
 	li.appendChild(bind);
+	if (a.binding && a.binding.state !== "retired") {
+		const actions = sessionActions(a.binding.sessionId, `agent:${a.agentId}`);
+		const start = startSessionButton(a.presence, a.binding.sessionId, `start:${a.agentId}`);
+		if (start) actions.prepend(start);
+		li.appendChild(actions);
+	}
 	return li;
 }
 
@@ -519,10 +666,19 @@ function renderAgentPage(pid: string, aid: string): HTMLElement {
 		e.preventDefault();
 		navigateProject(backRoute);
 	});
+	if (!data && state?.error?.code === "project-not-found") return projectNotFoundPage();
 	if (!data && state?.error && state.error.status === 404) {
+		const toProject = button(`Back to ${name ?? "the project"}`, "pv-btn", () =>
+			navigateProject(backRoute),
+		);
+		toProject.dataset.key = "back-project";
 		return page(
 			pageHeader("Agent not found", back),
-			stateBox("error", projectErrorText(state.error.code, 404)),
+			stateBox(
+				"info",
+				`There is no such agent in ${name ?? "this project"} — the link may be wrong, or the agent belongs to another project.`,
+				toProject,
+			),
 		);
 	}
 	if (!data) {
@@ -566,12 +722,12 @@ function renderAgentPage(pid: string, aid: string): HTMLElement {
 	const sessionSec = el("section", "pv-section");
 	sessionSec.appendChild(el("h3", undefined, "Session"));
 	if (data.binding && data.binding.state !== "retired") {
-		const row = el("p", "pv-session-row");
+		const row = el("div", "pv-session-row");
 		row.appendChild(sessionLink(data.binding.sessionId, "bound-session"));
-		const open = el("a", "pv-btn", "Open the workbench");
-		open.href = routeHash({ sessionId: data.binding.sessionId, view: null, detail: null });
-		open.dataset.key = "workbench";
-		row.appendChild(open);
+		const actions = sessionActions(data.binding.sessionId, "bound");
+		const start = startSessionButton(data.presence, data.binding.sessionId, "start");
+		if (start) actions.prepend(start);
+		row.appendChild(actions);
 		sessionSec.appendChild(row);
 		sessionSec.appendChild(
 			el(
@@ -1043,6 +1199,7 @@ export function resetProjects(): void {
 	projectsState = blank();
 	agentLists = new Map();
 	agentDetails = new Map();
+	starting.clear();
 	hidePage();
 	renderSection();
 }
