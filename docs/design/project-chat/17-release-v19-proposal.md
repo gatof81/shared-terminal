@@ -127,15 +127,19 @@ NAS bajo `./manual/`. Las dos copias quedan fuera de la rotación `20*` y del `-
 5. **Gate final**, inmediatamente antes del paso 6:
    - P8 y P8′;
    - **ninguna ventana `observe` abierta.** La actual termina el **2026-11-10 a las 15:54Z**, y su
-     lectura de cierre `st-observe-end2` corre a las 15:55Z (C5). El reinicio pondría a cero sus
+     lectura de cierre `st-observe-end2` corre a las 15:55Z (C5). El script 04 de A exige
+     `observe2-end.txt` presente y ningún timer de observe pendiente. El reinicio pondría a cero sus
      contadores;
-   - **ningún backup corriendo** (P15). Un `--force-recreate` durante `exec … npm run backup` lo mata;
+   - **ningún backup corriendo y fuera de 08:00–09:00Z** (P15). Un `--force-recreate` durante
+     `exec … npm run backup` lo mata;
    - **B inactiva y con su tarea terminada** (`b_idle`, regla permanente del owner);
    - ninguna sesión con `createdAt` en los últimos 15 minutos;
    - la lista `sessionId → status` (base de V10);
-   - la bandera como la va a ver el backend nuevo: desde el checkout de `M`,
-     `docker compose config --format json | jq -r '.services.app.environment.PROJECT_CHAT_ENABLED'`
-     ⇒ vacío, y `printenv PROJECT_CHAT_ENABLED` en el shell ⇒ vacío.
+   - las banderas como las va a ver el backend nuevo: desde el checkout de `M`,
+     `docker compose config --format json | jq -r '.services.app.environment.PROJECT_CHAT_ENABLED, .services.app.environment.CONVERSATION_COMPOSER_BG_ENABLED'`
+     ⇒ vacío las dos veces, y `printenv` de las dos en el shell ⇒ vacío;
+   - `origin/main` puede haber avanzado más allá de `M`: alcanza con que `M` sea ancestro, porque el
+     checkout es de `M` y no de la punta.
    - Cualquier otro resultado ⇒ NO-GO.
 6. `docker compose up -d --no-deps --no-build --force-recreate -t 30 app`.
 
@@ -148,7 +152,7 @@ usa como rollback de v19:
 
 | # | Cambio respecto de doc 11 |
 | --- | --- |
-| V1 | Además: en el log, `[db] applying migration 19: projects, project_agents, agent_bindings (P3a directory)` y luego `[db] migrations complete (1 applied)` (N = 1 por P14). Ningún error D1 en esas líneas |
+| V1 | Además:<ul><li>en el log, exactamente un `[db] applying migration 19: projects, project_agents, agent_bindings (P3a directory)` y luego `[db] migrations complete (1 applied)` (N = 1 por P14), sin errores D1 en esas líneas;</li><li>en D1, el ledger 19/19;</li><li>los 9 objetos de v19, con los triggers sólo sobre las tablas nuevas;</li><li>las cuatro tablas vacías.</li></ul> |
 | V2 | Manifiesto de todo el `dist` del contenedor en ejecución = build limpia de `M` (§3.5); su imagen = la del paso 4; `grep -c 'version: 19' dist/db.js` > 0 |
 | V3 | **Bandera apagada:** `printenv PROJECT_CHAT_ENABLED` dentro del contenedor, vacía |
 | V3a | `GET /api/projects` ⇒ 404. A lo prueba por loopback con el token admin del proceso: sin rutas montadas, cualquier identidad recibe 404 |
@@ -156,7 +160,7 @@ usa como rollback de v19:
 | V4–V6 | Igual que doc 11: inventario P7, captura P5 y pérdidas del relay |
 | V7 | Igual (panes y recreaciones), más P8′: ningún `job-*.json` |
 | V8 | Igual, con `HEAD = 2a676db` y la etiqueta `shared-terminal-app:rollback-166ff78` |
-| V9 | Igual a la base, **incluida** `INGEST_REQUIRE_SESSION_ORIGIN` (sigue en `observe`). La única diferencia esperada es `PROJECT_CHAT_ENABLED` **vacía** |
+| V9 | Igual a la base, **incluida** `INGEST_REQUIRE_SESSION_ORIGIN` (sigue en `observe`, con su bloque de stats igual que antes). La única diferencia esperada es `PROJECT_CHAT_ENABLED` **vacía** |
 | V10 | Igual |
 | V11 | El bundle de producción en Pages no muestra la sección Projects: sin la clave `features`, la UI de #559 queda oculta |
 
@@ -195,7 +199,18 @@ por los tests.
 - Encender `CONVERSATION_COMPOSER_BG_ENABLED`: experimental, no aprobado.
 - G3-2, Channels, tareas y despacho: sin autorización.
 
-## 8. Respuestas de A (2026-11-09)
+## 8. Scripts de A y respuestas (2026-11-09)
+
+`/root/st-deploy-scripts-2a676db/` en VM100 implementa este documento: pasos 01–05 más `ROLLBACK.md`
+(#512, comentario 6747863704). En el ensayo de las 18:16Z, sólo lecturas salvo la etiqueta:
+- **01 OK:** `P` coincide por manifiesto completo, las banderas están apagadas y observe quedó
+  registrado;
+- **03 OK:** la etiqueta coincide con la imagen en ejecución, y el deploy y el rollback simulados
+  devuelven el ID exacto, sin tocar producción.
+
+Los pasos 02, 02b, 04 y 05 corren sólo en la ventana.
+
+Respuestas de A:
 
 1. `P = 166ff78`, con los digests de C1. G3-1 está terminado: `R` se desplegó el 2026-11-06.
 2. La secuencia de la versión anterior ya no aplica (§2).
