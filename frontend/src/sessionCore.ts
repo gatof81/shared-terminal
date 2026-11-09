@@ -431,6 +431,59 @@ export function renderSessionList() {
 	// Sidebar observables (#394) dedupe against THIS list, so re-render
 	// them whenever it changes.
 	renderSidebarObservables();
+	// A binding made or removed, or a project's name loaded: the session
+	// bar names the agent too.
+	renderToolbarAgent();
+}
+
+/**
+ * P3a: the session bar says which agent the open session is —
+ * "@handle · <project>" (just "@handle" until the project's name is
+ * loaded), a link to the agent's page. Only for a binding OBJECT (§4.6):
+ * `null` (unassigned) and an absent key (unknown) show nothing. With the
+ * feature off the element is never created.
+ *
+ * One line with an ellipsis inside the room the bar already has
+ * (terminal.css `#terminal-session-agent`): it must never make the bar
+ * taller — the bar's height is part of the terminal's box, and a change
+ * there refits xterm and resizes tmux for every viewer. Where there is no
+ * room (phones, both shells) the CSS leaves it out rather than wrap.
+ */
+let toolbarAgentLink: HTMLAnchorElement | null = null;
+
+function renderToolbarAgent(): void {
+	const s = projectChatEnabled()
+		? sessions.find((x) => x.sessionId === activeSessionId)
+		: undefined;
+	const binding = s?.binding;
+	if (!binding || typeof binding !== "object") {
+		toolbarAgentLink?.remove();
+		toolbarAgentLink = null;
+		return;
+	}
+	if (!toolbarAgentLink) {
+		const a = document.createElement("a");
+		a.id = "terminal-session-agent";
+		a.addEventListener("click", (e) => {
+			if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+			const pid = a.dataset.projectId;
+			const aid = a.dataset.agentId;
+			if (pid === undefined || aid === undefined) return;
+			e.preventDefault();
+			navigateProject({ projectId: pid, agentId: aid });
+		});
+		toolbarAgentLink = a;
+	}
+	const a = toolbarAgentLink;
+	const route = { projectId: binding.projectId, agentId: binding.agentId };
+	a.dataset.projectId = route.projectId;
+	a.dataset.agentId = route.agentId;
+	a.href = projectRouteHash(route);
+	const project = projectName(binding.projectId);
+	const text = project ? `@${binding.handle} · ${project}` : `@${binding.handle}`;
+	if (a.textContent !== text) a.textContent = text;
+	a.title = `Open the agent ${text}`;
+	if (a.previousElementSibling !== terminalStatusBadge) terminalStatusBadge.after(a);
 }
 
 /**
@@ -949,6 +1002,7 @@ registerRouteDetail("terminal", {
 });
 
 export function updateToolbar() {
+	renderToolbarAgent();
 	const s = sessions.find((x) => x.sessionId === activeSessionId);
 	if (!s) {
 		terminalToolbar.style.display = "none";

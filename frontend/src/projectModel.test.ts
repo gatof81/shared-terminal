@@ -7,8 +7,11 @@ import {
 	evidenceText,
 	groupSessionsByBinding,
 	pageTitle,
+	presenceSummary,
 	presentPresence,
 	projectErrorText,
+	type ServerClock,
+	serverNow,
 	validateHandle,
 	validateProjectName,
 	validateRole,
@@ -16,67 +19,173 @@ import {
 
 const NOW = Date.parse("2026-11-10T14:02:45Z");
 const at = (secAgo: number) => new Date(NOW - secAgo * 1000).toISOString();
+// The answer was generated at NOW (server clock) and received at NOW (a
+// browser clock in step with it); `skewed` moves only the browser's clock.
+const CLOCK: ServerClock = { generatedAt: new Date(NOW).toISOString(), receivedAt: NOW };
+const pp = (p: Presence, clock: ServerClock | null = CLOCK, now = NOW) =>
+	presentPresence(p, clock, now);
 
 describe("presentPresence (rule 2: honest presence)", () => {
 	it("working, with its evidence", () => {
-		const v = presentPresence({ value: "working", source: "hook", at: at(5) }, NOW);
+		const v = pp({ value: "working", source: "hook", at: at(5) });
 		expect(v).toMatchObject({ label: "Working", tone: "working" });
 		expect(v.evidence).toBe("via hook · just now");
+		for (const source of ["probe", "capture"])
+			expect(pp({ value: "working", source, at: at(5) }).tone).toBe("working");
+	});
+
+	it("working from a running session or the directory is not working", () => {
+		for (const source of ["session", "directory", "", "constructor"]) {
+			const v = pp({ value: "working", source, at: at(5) });
+			expect(v.tone, source).toBe("unknown");
+			expect(v.label).toBe("State unknown");
+		}
+	});
+
+	it("working without a valid time is not working", () => {
+		for (const t of [null, "nope", ""]) {
+			const v = pp({ value: "working", source: "hook", at: t });
+			expect(v).toMatchObject({ label: "No evidence", tone: "unknown" });
+		}
+	});
+
+	it("working 11 min old is No recent activity; just under 10 min is still working", () => {
+		const old = pp({ value: "working", source: "hook", at: at(11 * 60) });
+		expect(old).toMatchObject({ label: "No recent activity", tone: "unknown" });
+		expect(old.reason).toMatch(/10 min/);
+		expect(pp({ value: "working", source: "hook", at: at(10 * 60) }).tone).toBe("unknown");
+		expect(pp({ value: "working", source: "hook", at: at(10 * 60 - 1) }).tone).toBe("working");
+	});
+
+	it("the evidence ages with the time since the answer was received", () => {
+		const p: Presence = { value: "working", source: "hook", at: at(9 * 60) };
+		expect(pp(p, CLOCK, NOW).tone).toBe("working");
+		// Same answer, shown 2 min later on the browser's clock: 11 min old.
+		const later = pp(p, CLOCK, NOW + 2 * 60_000);
+		expect(later.label).toBe("No recent activity");
+		expect(later.evidence).toBe("via hook · 11 min ago");
+	});
+
+	it("without a server clock a live claim is never shown as live", () => {
+		for (const p of [
+			{ value: "working", source: "hook", at: at(5) },
+			{ value: "waiting_input", source: "probe", at: at(5), verified: true },
+			{ value: "needs_attention", detail: "waiting_permission", source: "hook", at: at(5) },
+		] as Presence[]) {
+			expect(pp(p, null).tone).toBe("unknown");
+			expect(pp(p, { generatedAt: "nope", receivedAt: NOW }).tone).toBe("unknown");
+		}
+	});
+
+	it("a client clock 1 h ahead or behind changes nothing", () => {
+		const cases: Presence[] = [
+			{ value: "working", source: "hook", at: at(5) },
+			{ value: "working", source: "hook", at: at(11 * 60) },
+			{ value: "waiting_input", source: "probe", at: at(34), verified: true },
+			{ value: "waiting_input", source: "hook", at: at(12 * 60) },
+			{ value: "needs_attention", detail: "waiting_permission", source: "hook", at: at(47) },
+			{ value: "needs_attention", detail: "waiting_permission", source: "hook", at: at(15 * 60) },
+			{ value: "unknown", detail: "stale", source: "hook", at: at(31 * 60) },
+			{ value: "disconnected", detail: "session-stopped", source: "session", at: at(80) },
+		];
+		for (const skew of [3_600_000, -3_600_000]) {
+			// The browser's clock is off by `skew`: it received the answer at
+			// NOW+skew and reads now as NOW+skew (+ the same elapsed time).
+			for (const elapsed of [0, 90_000]) {
+				for (const p of cases) {
+					const straight = pp(p, CLOCK, NOW + elapsed);
+					const skewed = pp(p, { ...CLOCK, receivedAt: NOW + skew }, NOW + skew + elapsed);
+					expect(skewed, `${skew} ${elapsed} ${JSON.stringify(p)}`).toEqual(straight);
+				}
+			}
+		}
 	});
 
 	it("waiting_input is Ready only when a probe verified it; otherwise Ready (unverified)", () => {
-		const verified = presentPresence(
-			{ value: "waiting_input", source: "probe", at: at(34), verified: true },
-			NOW,
-		);
+		const verified = pp({ value: "waiting_input", source: "probe", at: at(34), verified: true });
 		expect(verified).toMatchObject({ label: "Ready", tone: "ready", reason: null });
 		for (const verifiedFlag of [false, undefined]) {
-			const v = presentPresence(
-				{ value: "waiting_input", source: "hook", at: at(34), verified: verifiedFlag },
-				NOW,
-			);
+			const v = pp({ value: "waiting_input", source: "hook", at: at(34), verified: verifiedFlag });
 			expect(v.label).toBe("Ready (unverified)");
 			expect(v.tone).toBe("ready");
 		}
 	});
 
-	it("waiting_input is never 'needs you'", () => {
-		const v = presentPresence({ value: "waiting_input", source: "hook", at: at(1) }, NOW);
-		expect(v.tone).not.toBe("attention");
-		expect(v.label).not.toMatch(/need/i);
+	it("waiting_input stale is No recent activity, not Ready", () => {
+		const v = pp({ value: "waiting_input", source: "probe", at: at(12 * 60), verified: true });
+		expect(v).toMatchObject({ label: "No recent activity", tone: "unknown" });
+	});
+
+	it("waiting_input is never 'needs you', fresh or not", () => {
+		for (const t of [at(1), at(12 * 60), null]) {
+			for (const verified of [true, false]) {
+				const v = pp({ value: "waiting_input", source: "hook", at: t, verified });
+				expect(v.tone).not.toBe("attention");
+				expect(v.label).not.toMatch(/need/i);
+			}
+		}
 	});
 
 	it("needs_attention only with detail waiting_permission (attention rule, option A)", () => {
 		expect(
-			presentPresence(
-				{ value: "needs_attention", detail: "waiting_permission", source: "hook", at: at(47) },
-				NOW,
-			),
+			pp({ value: "needs_attention", detail: "waiting_permission", source: "hook", at: at(47) }),
 		).toMatchObject({ label: "Needs you", tone: "attention" });
-		const other = presentPresence(
-			{ value: "needs_attention", detail: "needs-terminal", source: "hook", at: at(47) },
-			NOW,
-		);
+		const other = pp({
+			value: "needs_attention",
+			detail: "needs-terminal",
+			source: "hook",
+			at: at(47),
+		});
 		expect(other.tone).toBe("unknown");
-		const bare = presentPresence({ value: "needs_attention", source: "hook", at: at(47) }, NOW);
+		const bare = pp({ value: "needs_attention", source: "hook", at: at(47) });
 		expect(bare.tone).toBe("unknown");
 	});
 
+	it("needs_attention stale or without a time is not Needs you", () => {
+		const stale = pp({
+			value: "needs_attention",
+			detail: "waiting_permission",
+			source: "hook",
+			at: at(10 * 60),
+		});
+		expect(stale).toMatchObject({ label: "No recent activity", tone: "unknown" });
+		const none = pp({
+			value: "needs_attention",
+			detail: "waiting_permission",
+			source: "hook",
+			at: null,
+		});
+		expect(none.tone).toBe("unknown");
+	});
+
+	it("needs_attention from a probe alone, the session or the directory is not Needs you", () => {
+		for (const source of ["probe", "session", "directory"]) {
+			const v = pp({
+				value: "needs_attention",
+				detail: "waiting_permission",
+				source,
+				at: at(5),
+			});
+			expect(v.tone, source).toBe("unknown");
+			expect(v.label).not.toMatch(/need/i);
+		}
+	});
+
 	it("unknown is never zero or idle: no evidence vs stale vs unreadable", () => {
-		const none = presentPresence({ value: "unknown", source: "capture", at: null }, NOW);
+		const none = pp({ value: "unknown", source: "capture", at: null });
 		expect(none).toMatchObject({ label: "No evidence", tone: "unknown" });
 		expect(none.evidence).toBe("no evidence");
-		const stale = presentPresence(
-			{ value: "unknown", detail: "stale", source: "hook", at: at(31 * 60) },
-			NOW,
-		);
-		expect(stale.label).toBe("State unknown");
+		const stale = pp({ value: "unknown", detail: "stale", source: "hook", at: at(31 * 60) });
+		expect(stale.label).toBe("No recent activity");
 		expect(stale.reason).toMatch(/10 min/);
 		expect(stale.evidence).toBe("via hook · 31 min ago");
-		const unreadable = presentPresence(
-			{ value: "unknown", detail: "capture-unreadable", source: "capture", at: null },
-			NOW,
-		);
+		const unreadable = pp({
+			value: "unknown",
+			detail: "capture-unreadable",
+			source: "capture",
+			at: null,
+		});
+		expect(unreadable.label).toBe("State unknown");
 		expect(unreadable.reason).toMatch(/could not be read/);
 		for (const v of [none, stale, unreadable]) {
 			expect(v.label).not.toMatch(/idle|0|zero|inactive/i);
@@ -84,38 +193,65 @@ describe("presentPresence (rule 2: honest presence)", () => {
 	});
 
 	it("disconnected says why, from a Map (an odd detail is shown verbatim, never looked up on an object)", () => {
-		const stopped = presentPresence(
-			{ value: "disconnected", detail: "session-stopped", source: "session", at: at(80) },
-			NOW,
-		);
+		const stopped = pp({
+			value: "disconnected",
+			detail: "session-stopped",
+			source: "session",
+			at: at(80),
+		});
 		expect(stopped).toMatchObject({
 			label: "Disconnected",
 			tone: "off",
 			reason: "session stopped",
 		});
-		const removed = presentPresence(
-			{ value: "disconnected", detail: "agent-removed", source: "directory", at: at(60) },
-			NOW,
-		);
+		const removed = pp({
+			value: "disconnected",
+			detail: "agent-removed",
+			source: "directory",
+			at: at(60),
+		});
 		expect(removed.reason).toBe("agent removed");
 		expect(removed.evidence).toBe("via directory · 1 min ago");
-		const odd = presentPresence(
-			{ value: "disconnected", detail: "constructor", source: "session", at: at(60) },
-			NOW,
-		);
+		const odd = pp({ value: "disconnected", detail: "constructor", source: "session", at: at(60) });
 		expect(odd.reason).toBe("constructor");
 	});
 
 	it("a value of a later phase (no_channel, degraded) is shown as unknown, not invented", () => {
-		const v = presentPresence(
-			{ value: "degraded", source: "x", at: at(1) } as unknown as Presence,
-			NOW,
-		);
+		const v = pp({ value: "degraded", source: "hook", at: at(1) } as unknown as Presence);
 		expect(v).toMatchObject({ label: "State unknown", tone: "unknown" });
 	});
 
 	it("evidenceText: an unparsable time is no evidence", () => {
 		expect(evidenceText({ source: "hook", at: "nope" }, NOW)).toBe("no evidence");
+	});
+
+	it("serverNow: generatedAt plus the browser's elapsed time; NaN without a clock", () => {
+		expect(serverNow(CLOCK, NOW + 5000)).toBe(NOW + 5000);
+		expect(serverNow({ ...CLOCK, receivedAt: 0 }, 5000)).toBe(NOW + 5000);
+		expect(serverNow(null, NOW)).toBeNaN();
+		expect(serverNow({ generatedAt: "x", receivedAt: NOW }, NOW)).toBeNaN();
+	});
+});
+
+describe("presenceSummary: one count per displayed tone", () => {
+	it("counts the views' tones, in a fixed order, without empty buckets", () => {
+		const views = [
+			pp({ value: "working", source: "hook", at: at(5) }),
+			pp({ value: "working", source: "session", at: at(5) }),
+			pp({ value: "working", source: "hook", at: at(11 * 60) }),
+			pp({ value: "needs_attention", detail: "waiting_permission", source: "hook", at: at(5) }),
+			pp({ value: "waiting_input", source: "probe", at: at(5), verified: true }),
+			pp({ value: "disconnected", detail: "session-stopped", source: "session", at: at(5) }),
+		];
+		expect(presenceSummary(views)).toEqual([
+			"1 needs you",
+			"1 working",
+			"1 ready",
+			"1 disconnected",
+			"2 no recent activity or unknown",
+		]);
+		expect(presenceSummary([])).toEqual([]);
+		expect(presenceSummary([views[0]!, views[0]!])).toEqual(["2 working"]);
 	});
 });
 

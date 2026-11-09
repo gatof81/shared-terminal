@@ -20,6 +20,29 @@
   color: var(--c-text);
   font-weight: 500;
 }
+/* P3a: "@handle · project" of a session bound to an agent (sessionCore.ts
+   renderToolbarAgent). One line, ellipsis, never taller than the name
+   beside it: the bar's height is part of the terminal's box. */
+#terminal-session-agent {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 24rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--c-accent);
+  text-decoration: none;
+}
+#terminal-session-agent:hover {
+  text-decoration: underline;
+}
+@media (max-width: 768px) {
+  /* No room on a phone's bar (v1 scrolls sideways, v2 shares the header's
+     line): left out rather than wrapped or squeezing the session name. */
+  #terminal-session-agent {
+    display: none;
+  }
+}
 #terminal-status-badge {
   padding: 1px 8px;
   border-radius: 10px;
