@@ -250,6 +250,11 @@ body.project-page-on #actions-btn {
   font-size: 0.78rem;
   color: var(--c-muted);
 }
+.pv-summary {
+  margin: calc(-1 * var(--s-3)) 0 var(--s-4);
+  font-size: 0.78rem;
+  color: var(--c-text-2);
+}
 .pv-muted {
   color: var(--c-muted);
 }
@@ -284,6 +289,12 @@ body.project-page-on #actions-btn {
   border-radius: var(--radius-m);
   background: var(--c-surface);
   min-width: 0;
+}
+/* A card that needs the person: an accent edge (tokens only), same box —
+   the inset shadow takes no space, so the grid never shifts on a poll. */
+.pv-agent.pv-agent-attention {
+  border-color: rgba(var(--c-warn-rgb), 0.6);
+  box-shadow: inset 3px 0 0 var(--c-warn);
 }
 .pv-agent-top {
   display: flex;

@@ -1,5 +1,5 @@
 import type { Page } from "@playwright/test";
-import { expect, test } from "./fixtures.js";
+import { expect, FIXED_NOW, test } from "./fixtures.js";
 import {
 	AGENT_IDS,
 	type MockBackend,
@@ -85,6 +85,8 @@ test.describe("projects — feature off", () => {
 		expect(new URL(page.url()).hash).toMatch(new RegExp(`^#/sessions/${SESSION_IDS.running}`));
 		await page.waitForTimeout(600);
 		expect(projectRequests(backend)).toEqual([]);
+		// No agent identity in the session bar: the element is never created.
+		await expect(page.locator("#terminal-session-agent")).toHaveCount(0);
 		// The status answer had no `features`, the rows no `binding`.
 		const rows = await page.evaluate(async () => (await fetch("/api/sessions")).json());
 		expect(rows.every((r: object) => !("binding" in r))).toBe(true);
@@ -170,7 +172,7 @@ test.describe("projects — feature on", () => {
 			"my-project",
 		);
 		const stale = card(page, "developer-hz-2");
-		await expect(stale.locator(".pv-presence")).toHaveText("State unknown");
+		await expect(stale.locator(".pv-presence")).toHaveText("No recent activity");
 		await expect(stale.locator(".pv-evidence")).toContainText("more than 10 min old");
 		await expect(stale.locator(".pv-evidence")).toContainText("via hook · 31 min ago");
 		const qa = card(page, "qa-hz");
@@ -653,6 +655,172 @@ test.describe("projects — feature on", () => {
 		await expect(page.locator("#session-menu-btn")).toBeVisible();
 		await page.waitForTimeout(400);
 		expect(await boxOf("#terminal-container")).toEqual(terminalBefore);
+		expect(
+			sock.sent.slice(frames).filter((f) => f.type === "resize"),
+			"no resize",
+		).toEqual([]);
+		expect(sock.sent.length - frames, "no frame of any kind").toBe(0);
+	});
+	test("presence summary: one count per displayed state; nothing live without fresh agent evidence", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		await app.login("alice", projectHash);
+		const summary = page.locator("#project-view .pv-summary");
+		await expect(summary).toHaveText(
+			"1 needs you · 1 working · 1 ready · 1 disconnected · 1 no recent activity or unknown",
+		);
+		await expect(page.locator("#project-view .pv-sub")).toHaveText("5 agents · as of just now");
+		// Only the card that needs the person carries the accent.
+		await expect(page.locator("#project-view .pv-agent.pv-agent-attention")).toHaveCount(1);
+		await expect(card(page, "designer-hz")).toHaveClass(/pv-agent-attention/);
+		const order = () => page.locator("#project-view .pv-agent-handle").allTextContents();
+		const before = await order();
+
+		const ago = (sec: number) => new Date(Date.parse(FIXED_NOW) - sec * 1000).toISOString();
+		// A running session alone is not a working Claude.
+		backend.agent(AGENT_IDS.architect).presence = {
+			value: "working",
+			source: "session",
+			at: ago(5),
+		};
+		// Working, but the last evidence is 11 min old.
+		backend.agent(AGENT_IDS.developer).presence = {
+			value: "working",
+			source: "hook",
+			at: ago(660),
+		};
+		// A permission prompt seen only by a probe is not "needs you".
+		backend.agent(AGENT_IDS.designer).presence = {
+			value: "needs_attention",
+			detail: "waiting_permission",
+			source: "probe",
+			at: ago(5),
+		};
+		await page.locator("#project-view .pv-tools button[aria-label='Refresh']").click();
+		await expect(summary).toHaveText("1 disconnected · 4 no recent activity or unknown");
+		await expect(card(page, "architect-hz").locator(".pv-presence")).toHaveText("State unknown");
+		await expect(card(page, "developer-hz").locator(".pv-presence")).toHaveText(
+			"No recent activity",
+		);
+		await expect(card(page, "designer-hz").locator(".pv-presence")).toHaveText("State unknown");
+		await expect(page.locator("#project-view .pv-agent.pv-agent-attention")).toHaveCount(0);
+		// A stale ready and a stale "needs you" are no recent activity, too.
+		backend.agent(AGENT_IDS.architect).presence = {
+			value: "waiting_input",
+			source: "probe",
+			at: ago(700),
+			verified: true,
+		};
+		backend.agent(AGENT_IDS.designer).presence = {
+			value: "needs_attention",
+			detail: "waiting_permission",
+			source: "hook",
+			at: ago(600),
+		};
+		await page.locator("#project-view .pv-tools button[aria-label='Refresh']").click();
+		await expect(card(page, "architect-hz").locator(".pv-presence")).toHaveText(
+			"No recent activity",
+		);
+		await expect(card(page, "designer-hz").locator(".pv-presence")).toHaveText(
+			"No recent activity",
+		);
+		await expect(summary).toHaveText("1 disconnected · 4 no recent activity or unknown");
+		// The cards never moved: creation order, whatever their state.
+		expect(await order()).toEqual(before);
+	});
+
+	test("presence is judged on the server's clock: a browser 1 h ahead or behind sees the same", async ({
+		app,
+		page,
+	}) => {
+		const expected =
+			"1 needs you · 1 working · 1 ready · 1 disconnected · 1 no recent activity or unknown";
+		for (const skewMs of [3_600_000, -3_600_000]) {
+			await page.clock.setFixedTime(Date.parse(FIXED_NOW) + skewMs);
+			await app.login("alice", projectHash);
+			await expect(page.locator("#project-view .pv-summary")).toHaveText(expected);
+			await expect(card(page, "developer-hz").locator(".pv-evidence")).toHaveText(
+				"via hook · just now",
+			);
+			await expect(page.locator("#project-view .pv-sub")).toHaveText("5 agents · as of just now");
+		}
+		// The agent page has no generatedAt of its own (§4.5): it ages its
+		// evidence on the server clock of the project's list.
+		await app.login("alice", agentHash(AGENT_IDS.designer));
+		await expect(page.locator("#project-view .pv-presence")).toHaveText("Needs you");
+	});
+
+	test("session bar: @handle · project for a bound session, nothing for unassigned or unknown", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		await app.login("alice");
+		await app.openSession("my-project");
+		const identity = page.locator("#terminal-session-agent");
+		await expect(identity).toHaveText("@developer-hz · Educación HZ");
+		await expect(identity).toHaveAttribute("href", agentHash(AGENT_IDS.developer));
+		if (app.mobile) {
+			// No room on a phone's bar: left out rather than wrapped.
+			await expect(identity).toBeHidden();
+		} else {
+			await expect(identity).toBeVisible();
+			await identity.click();
+			await expect(pageTitle(page)).toHaveText("@developer-hz");
+			expect(new URL(page.url()).hash).toBe(agentHash(AGENT_IDS.developer));
+			await page.locator("#project-view .pv-close").click();
+			await expect(page.locator("#project-view")).toBeHidden();
+		}
+		await app.openSession("scratch");
+		await expect(identity).toHaveCount(0);
+
+		// The binding key absent (directory read failed): unknown, nothing shown.
+		backend.bindingReadFails = true;
+		await app.login("alice");
+		await app.openSession("my-project");
+		await app.expectTerminalReady();
+		await expect(identity).toHaveCount(0);
+	});
+
+	test("session bar identity appearing changes neither the bar's height nor the terminal's box, and sends no resize", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		await app.login("alice");
+		await app.openSession("scratch");
+		await app.expectTerminalReady();
+		// v1 phone: the bar lives in the chrome drawer — measure it shown.
+		await app.openChrome();
+		await page.waitForTimeout(400);
+		const sock = backend.terminalSockets.find((s) => !s.closed)!;
+		const frames = sock.sent.length;
+		const box = (sel: string) =>
+			page.locator(sel).evaluate((el) => {
+				const r = el.getBoundingClientRect();
+				return { x: r.x, y: r.y, width: r.width, height: r.height };
+			});
+		const toolbarBefore = await box("#terminal-toolbar");
+		const terminalBefore = await box("#terminal-container");
+		const xtermBefore = await box("#terminal-container .tab-pane.active .xterm-screen");
+		await expect(page.locator("#terminal-session-agent")).toHaveCount(0);
+
+		// Another tab binds this session to an agent; the next session poll shows it.
+		backend.takeSession(PROJECT_SESSION_IDS.scratch, "scratch-agent-with-a-rather-long-handle");
+		await expect(page.locator("#terminal-session-agent")).toHaveText(
+			"@scratch-agent-with-a-rather-long-handle · Educación HZ",
+			{ timeout: 12_000 },
+		);
+		if (!app.mobile) {
+			const id = await box("#terminal-session-agent");
+			expect(id.height, "one line").toBeLessThanOrEqual(toolbarBefore.height);
+		}
+		await page.waitForTimeout(400);
+		expect(await box("#terminal-toolbar"), "the bar's box").toEqual(toolbarBefore);
+		expect(await box("#terminal-container"), "the terminal's box").toEqual(terminalBefore);
+		expect(await box("#terminal-container .tab-pane.active .xterm-screen")).toEqual(xtermBefore);
 		expect(
 			sock.sent.slice(frames).filter((f) => f.type === "resize"),
 			"no resize",

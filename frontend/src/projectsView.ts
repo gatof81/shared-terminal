@@ -53,12 +53,16 @@ import {
 	bindableSessions,
 	CreationAttempt,
 	classifyCreation,
+	type PresenceView,
 	pageTitle,
+	presenceSummary,
 	presentPresence,
 	projectErrorText,
 	providerText,
 	refusalText,
 	retireReasonText,
+	type ServerClock,
+	serverNow,
 	validateHandle,
 	validateProjectName,
 	validateRole,
@@ -99,9 +103,11 @@ interface Loadable<T> {
 	/** The last failure; cleared by the next success. Data already shown stays. */
 	error: { status: number; code: string } | null;
 	inFlight: Promise<void> | null;
+	/** The browser's clock when `data` arrived (presence ages from it, projectModel ServerClock). */
+	receivedAt: number | null;
 }
 
-const blank = <T>(): Loadable<T> => ({ data: null, error: null, inFlight: null });
+const blank = <T>(): Loadable<T> => ({ data: null, error: null, inFlight: null, receivedAt: null });
 
 let active = false; // feature on + signed in + app shown
 let shown: ProjectRoute | null = null;
@@ -112,6 +118,10 @@ let projectsState: Loadable<{ can: Allowed }> = blank();
 // Keyed by ids in Maps (server strings: never `obj[id]`).
 let agentLists = new Map<string, Loadable<AgentsResponse>>();
 let agentDetails = new Map<string, Loadable<AgentDetail>>();
+// The server clock of the last agents list received, from any project: an
+// agent's own answer (§4.5) carries no `generatedAt`, and a clock offset
+// does not age, so this is what places "now" for it.
+let lastClock: ServerClock | null = null;
 // Open creation/removal dialogs: closed on logout so nothing of this
 // account survives behind the login view.
 const openDialogs = new Set<{ close(): void }>();
@@ -151,6 +161,7 @@ async function load<T>(
 		if (myGen !== gen || !active) return;
 		if (answer.ok) {
 			state.data = answer.body;
+			state.receivedAt = Date.now();
 			state.error = null;
 		} else if (answer.code !== "stale") {
 			state.error = { status: answer.status, code: answer.code };
@@ -188,7 +199,15 @@ async function loadProjects(fresh = false): Promise<void> {
 async function loadAgents(pid: string, fresh = false): Promise<void> {
 	const state = entry(agentLists, pid);
 	await load(state, () => fetchProjectAgents(pid), fresh).catch(() => {});
-	if (shown?.projectId === pid && shown.agentId === null) renderPage();
+	const clock = listClock(state);
+	if (clock && (lastClock === null || clock.receivedAt >= lastClock.receivedAt)) lastClock = clock;
+	// The agent page reads its server clock from this list too.
+	if (shown?.projectId === pid) renderPage();
+}
+
+function listClock(state: Loadable<AgentsResponse> | undefined): ServerClock | null {
+	if (!state?.data || state.receivedAt === null) return null;
+	return { generatedAt: state.data.generatedAt, receivedAt: state.receivedAt };
 }
 
 async function loadAgent(pid: string, aid: string, fresh = false): Promise<void> {
@@ -202,6 +221,10 @@ function loadShown(fresh = false): Promise<unknown> {
 	const r = shown;
 	if (!r) return Promise.resolve();
 	if (r.agentId === null) return loadAgents(r.projectId, fresh);
+	// Without any list answer yet there is no server time to age the
+	// agent's evidence against: its project's list, once per project (not
+	// polled — until it lands, a live claim reads "State unknown").
+	if (lastClock === null && !agentLists.has(r.projectId)) void loadAgents(r.projectId);
 	return loadAgent(r.projectId, r.agentId, fresh);
 }
 
@@ -514,8 +537,7 @@ async function startFromPage(s: SessionInfo): Promise<void> {
 	}
 }
 
-function presenceBlock(p: AgentListEntry["presence"], compact: boolean): HTMLElement {
-	const v = presentPresence(p, Date.now());
+function presenceBlock(v: PresenceView, compact: boolean): HTMLElement {
 	const box = el("div", `pv-presence-block${compact ? " compact" : ""}`);
 	const chip = el("span", `pv-presence tone-${v.tone}`);
 	const dot = el("span", "pv-presence-dot");
@@ -567,9 +589,14 @@ function renderProjectPage(pid: string): HTMLElement {
 	const refresh = button("↻", "pv-btn pv-icon", () => void loadAgents(pid, true), "Refresh");
 	refresh.dataset.key = "refresh";
 	const header = pageHeader(name ?? "Project", null, refresh, createBtn);
+	const now = Date.now();
+	const clock = listClock(state);
 	const sub = el("p", "pv-sub");
 	if (data) {
-		sub.textContent = `${agentCountText(data.agents.length)} · updated ${relativeDate(data.generatedAt)}`;
+		// "as of" on the server's clock: the answer's age is the browser's
+		// own time since it arrived, whatever the two clocks say.
+		const asOf = relativeDate(data.generatedAt, serverNow(clock, now));
+		sub.textContent = `${agentCountText(data.agents.length)} · as of ${asOf}`;
 	}
 	if (state?.error && data) {
 		sub.appendChild(el("span", "pv-warn", " · couldn't refresh, showing the last answer"));
@@ -600,10 +627,17 @@ function renderProjectPage(pid: string): HTMLElement {
 		if (free) box.insertBefore(el("p", "pv-free-count", free), box.children[1] ?? null);
 		return page(header, sub, box);
 	}
+	// One view per agent, shared by its card and the summary (one source of
+	// truth). Cards stay in the server's order (creation, §4.4): a poll
+	// that changes a state never moves a card under the reader's pointer.
+	const views = data.agents.map((a) => presentPresence(a.presence, clock, now));
+	const summary = el("p", "pv-summary", presenceSummary(views).join(" · "));
 	const list = el("ul", "pv-agents");
 	list.setAttribute("aria-label", "Agents");
-	for (const a of data.agents) list.appendChild(agentCard(pid, a));
-	return page(header, sub, list);
+	data.agents.forEach((a, i) => {
+		list.appendChild(agentCard(pid, a, views[i]!));
+	});
+	return page(header, sub, summary, list);
 }
 
 /** How many sessions a new agent could take; nothing when that is unknown (rule 1). */
@@ -614,8 +648,8 @@ function unassignedText(): string | null {
 	return n === 1 ? "You have 1 unassigned session." : `You have ${n} unassigned sessions.`;
 }
 
-function agentCard(pid: string, a: AgentListEntry): HTMLElement {
-	const li = el("li", "pv-agent");
+function agentCard(pid: string, a: AgentListEntry, presence: PresenceView): HTMLElement {
+	const li = el("li", presence.tone === "attention" ? "pv-agent pv-agent-attention" : "pv-agent");
 	li.dataset.agentId = a.agentId;
 	const top = el("div", "pv-agent-top");
 	const link = el("a", "pv-agent-handle", `@${a.handle}`);
@@ -630,7 +664,7 @@ function agentCard(pid: string, a: AgentListEntry): HTMLElement {
 	top.appendChild(link);
 	top.appendChild(el("span", "pv-role", a.role ?? "No role"));
 	li.appendChild(top);
-	li.appendChild(presenceBlock(a.presence, true));
+	li.appendChild(presenceBlock(presence, true));
 	const bind = el("div", "pv-agent-session");
 	if (a.binding) {
 		bind.appendChild(el("span", "pv-muted", "Session: "));
@@ -716,7 +750,8 @@ function renderAgentPage(pid: string, aid: string): HTMLElement {
 
 	const presence = el("section", "pv-section");
 	presence.appendChild(el("h3", undefined, "Presence"));
-	presence.appendChild(presenceBlock(data.presence, false));
+	const clock = listClock(agentLists.get(pid)) ?? lastClock;
+	presence.appendChild(presenceBlock(presentPresence(data.presence, clock, Date.now()), false));
 	parts.push(presence);
 
 	const sessionSec = el("section", "pv-section");
@@ -1163,7 +1198,12 @@ function wire(): void {
 				if (shown === null) return;
 				const t = e.target;
 				if (!(t instanceof Element)) return;
-				if (t.closest(".session-agent-link, .session-actions, .session-last-conv")) return;
+				if (
+					t.closest(
+						".session-agent-link, #terminal-session-agent, .session-actions, .session-last-conv",
+					)
+				)
+					return;
 				leavePage();
 			},
 			true,
@@ -1199,6 +1239,7 @@ export function resetProjects(): void {
 	projectsState = blank();
 	agentLists = new Map();
 	agentDetails = new Map();
+	lastClock = null;
 	starting.clear();
 	hidePage();
 	renderSection();
