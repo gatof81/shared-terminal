@@ -1167,16 +1167,35 @@ anything is written into it, and every directory and file is then given:
 A malformed value refuses the backup before anything is written.
 `<WORKSPACE_ROOT>/.backups` itself is set only when the backup creates it.
 
-- **Before deploying this change,** make sure the nightly copy can still read
-  the backups. If it runs as a non-root user, create the group, add that user
-  to it, and set `BACKUP_GROUP_GID` in `.env` *before* the first backup under
-  the new code. Otherwise the mirror fails to read the new files.
+- **Gate before deploying this change (#562).** Don't deploy it until these
+  hold, or the nightly off-host copy fails on the first new backup:
+  1. Decide who the copy runs as. If it runs as **root**, the default
+     (`BACKUP_GROUP_GID` unset) is enough; go to step 4.
+  2. On the host, create a dedicated group and add the copy's user to it
+     (`groupadd st-backup`; `usermod -aG st-backup <user>`). Note the
+     numeric GID (`getent group st-backup`).
+  3. Set `BACKUP_GROUP_GID=<gid>` in `.env` and **recreate** the app container
+     (`docker compose up -d --no-deps --force-recreate app`). The variable is
+     a compose `environment:` entry, so `docker compose exec app npm run
+     backup` only sees it after the recreate. Check it with
+     `docker compose exec app printenv BACKUP_GROUP_GID`.
+  4. Run one backup by hand, then the copy's own `rsync` **as its user**, and
+     check that it reads every file. Do this before the next nightly run.
+
+  A backup that finds `.backups` readable by others while
+  `BACKUP_GROUP_GID` is unset logs a `WARN`: that combination means a copy
+  probably relied on the old world-readable modes.
 - **Existing backups** keep their old modes until
   `docker compose exec app npm run backup:harden` brings them in line.
   - Without `-- --write` it is a **dry run** that only lists what would change.
   - With `-- --write` it applies the same modes and group to everything under
     `.backups`, the directory itself included.
-  - It never follows a symlink and refuses a root that is one.
+  - It never follows a symlink, and it refuses a root that is one, that is not
+    owned by the user running it, or that others can write to.
+  - It does not enter a directory that someone else owns, that others can
+    write to, or that is on another filesystem: such a directory could be
+    swapped for a link while the walk is inside it. Those directories are
+    listed and left untouched, contents included.
 - **The off-host copy** keeps its own permissions:
   - `rsync -a` carries the modes;
   - on a CIFS mount, the mount's `file_mode`/`dir_mode`/`uid`/`gid` options

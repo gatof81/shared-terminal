@@ -1,7 +1,7 @@
 {
   "name": "shared-terminal-backend",
   "version": "2.0.0",
-  "description": "Shared terminal service \u2014 Docker-based sessions with persistent storage",
+  "description": "Shared terminal service — Docker-based sessions with persistent storage",
   "license": "MIT",
   "main": "dist/index.js",
   "scripts": {

@@ -40,7 +40,7 @@ import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
-import { backupPerms, hardenBackups, secure } from "./backupPerms.js";
+import { backupPerms, hardenBackups, parseHardenArgs, secure } from "./backupPerms.js";
 import {
 	ATTESTATION_FILE_PREFIX,
 	ATTESTATION_KEY_INFO,
@@ -145,7 +145,25 @@ export async function runBackup(outDir: string): Promise<BackupManifest> {
 	if ((await fs.readdir(outDir)).length > 0) {
 		throw new Error(`backup dir ${outDir} is not empty — refusing to mix with an existing backup`);
 	}
+	// An outDir (or a parent this run created) owned by someone else could be
+	// opened back up by that owner once the backup is in it.
+	const me = process.getuid?.() ?? 0;
+	for (const d of parentExisted ? [outDir] : [outDir, parent]) {
+		if ((await fs.lstat(d)).uid !== me) {
+			throw new Error(`backup dir ${d} is not owned by uid ${me} — refusing`);
+		}
+	}
 	if (!parentExisted) await secure(parent, "dir", perms);
+	// The signature of a copy that relied on world-readable backups: the
+	// parent is open to others while this run writes root-only output. Loud,
+	// because that copy now fails on every new backup (#562).
+	if (perms.gid === null && parentExisted && ((await fs.lstat(parent)).mode & 0o005) !== 0) {
+		logger.warn(
+			`[backup] ${parent} is readable by others but BACKUP_GROUP_GID is unset: this backup is ` +
+				"root-only (0700/0600). A non-root off-host copy can no longer read it — set " +
+				"BACKUP_GROUP_GID (docs/DEPLOYMENT.md, Backup & restore) or run the copy as root",
+		);
+	}
 	// The backup dir is closed BEFORE anything is written into it: a file
 	// created with the umask (tar, copyFile) is never reachable through it.
 	await secure(outDir, "dir", perms);
@@ -851,10 +869,10 @@ if (typeof require !== "undefined" && require.main === module) {
 			if (!dir) throw new Error(usage);
 			await runRestore(dir, { force });
 		} else if (mode === "harden") {
-			// #562 — existing backups. Dry run unless --write; `dir` may be the
-			// flag itself when no directory is given.
-			const root = dir && dir !== "--write" ? dir : path.join(WORKSPACE_ROOT, ".backups");
-			const write = process.argv.includes("--write");
+			// #562 — existing backups. Dry run unless --write; at most one dir.
+			const parsed = parseHardenArgs(process.argv.slice(3), path.join(WORKSPACE_ROOT, ".backups"));
+			if (!parsed) throw new Error(usage);
+			const { root, write } = parsed;
 			const perms = backupPerms();
 			const r = await hardenBackups(root, perms, { write });
 			for (const c of r.changes) {

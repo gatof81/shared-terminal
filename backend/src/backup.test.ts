@@ -34,6 +34,8 @@ const dbState = vi.hoisted(() => ({
 	schemaVersion: 12,
 	selected: [] as string[],
 	missingTables: new Set<string>(),
+	/** Runs before the first query of a backup (the schema read): lets a test look at the disk then. */
+	onSchemaRead: null as null | (() => Promise<void>),
 }));
 
 vi.mock("./db.js", () => ({
@@ -41,6 +43,7 @@ vi.mock("./db.js", () => ({
 	d1Query: vi.fn(async (sql: string, params?: unknown[]) => {
 		const ok = { success: true as const, meta: { changes: 1, duration: 0, last_row_id: 0 } };
 		if (sql.startsWith("SELECT MAX(version)")) {
+			if (dbState.onSchemaRead) await dbState.onSchemaRead();
 			return { ...ok, results: [{ v: dbState.schemaVersion }] };
 		}
 		const selectMatch = /^SELECT \* FROM (\w+) ORDER BY/.exec(sql);
@@ -116,6 +119,7 @@ beforeEach(async () => {
 	dbState.schemaVersion = 12;
 	dbState.selected.length = 0;
 	dbState.missingTables.clear();
+	dbState.onSchemaRead = null;
 	outDir = mkdtempSync(path.join(os.tmpdir(), "st-backup-out-"));
 	// runBackup requires an EMPTY dir; mkdtemp gives us one, but it must
 	// not pre-create workspaces/ — runBackup does that itself.
@@ -268,6 +272,56 @@ describe("backup permissions (#562)", () => {
 		await runBackup(path.join(parent, "b"));
 		expect((await fs.lstat(parent)).mode & 0o7777).toBe(0o755);
 		expect((await fs.lstat(path.join(parent, "b"))).mode & 0o7777).toBe(0o700);
+	});
+
+	it("the backup dir is closed before anything is written into it", async () => {
+		vi.stubEnv("BACKUP_GROUP_GID", "");
+		let seen: { mode: number; entries: string[] } | null = null;
+		dbState.onSchemaRead = async () => {
+			seen ??= {
+				mode: (await fs.lstat(outDir)).mode & 0o7777,
+				entries: (await fs.readdir(outDir)).sort(),
+			};
+		};
+		await fullBackup();
+		expect(seen).toEqual({ mode: 0o700, entries: ["workspaces"] });
+	});
+
+	it("refuses an outDir owned by someone else", async () => {
+		vi.stubEnv("BACKUP_GROUP_GID", "");
+		await fs.mkdir(outDir);
+		const me = process.getuid?.() ?? 0;
+		const spy = vi.spyOn(process, "getuid").mockReturnValue(me + 1);
+		try {
+			await expect(runBackup(outDir)).rejects.toThrow(/not owned by uid/);
+		} finally {
+			spy.mockRestore();
+		}
+		expect(await fs.readdir(outDir)).toEqual([]);
+	});
+
+	it("warns when the parent is open to others but the output is root-only", async () => {
+		const parent = path.join(outDir, ".backups");
+		await fs.mkdir(parent, { recursive: true });
+		await fs.chmod(parent, 0o755);
+		const warn = vi.spyOn(logger, "warn");
+		try {
+			vi.stubEnv("BACKUP_GROUP_GID", "");
+			await runBackup(path.join(parent, "a"));
+			expect(
+				warn.mock.calls.some((c) =>
+					/readable by others but BACKUP_GROUP_GID is unset/.test(String(c[0])),
+				),
+			).toBe(true);
+			warn.mockClear();
+			vi.stubEnv("BACKUP_GROUP_GID", String(process.getgid?.() ?? 0));
+			await runBackup(path.join(parent, "b"));
+			expect(warn.mock.calls.some((c) => /BACKUP_GROUP_GID is unset/.test(String(c[0])))).toBe(
+				false,
+			);
+		} finally {
+			warn.mockRestore();
+		}
 	});
 
 	it("a secured backup restores as before", async () => {

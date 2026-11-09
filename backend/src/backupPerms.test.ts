@@ -2,8 +2,8 @@ import { execFileSync } from "node:child_process";
 import { promises as fs, mkdtempSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { backupPerms, hardenBackups, secure } from "./backupPerms.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { backupPerms, hardenBackups, parseHardenArgs, secure } from "./backupPerms.js";
 
 const gid = process.getgid?.() ?? 0;
 let root: string;
@@ -137,6 +137,37 @@ describe("hardenBackups (existing backups)", () => {
 		}
 	});
 
+	it("never enters a directory others can write to (a swap there could redirect the walk)", async () => {
+		await legacyTree();
+		const open = path.join(root, "2026-11-01", "workspaces");
+		await fs.chmod(open, 0o777);
+		const r = await hardenBackups(root, backupPerms({}), { write: true });
+		expect(r.skipped.map((k) => [path.relative(root, k.path), k.reason])).toEqual([
+			["2026-11-01/workspaces", expect.stringMatching(/writable by others/)],
+		]);
+		expect(await mode(open)).toBe(0o777);
+		expect(await mode(path.join(open, "s1.tar.gz"))).toBe(0o644);
+		expect(await mode(path.join(root, "2026-11-01/users.jsonl"))).toBe(0o600);
+	});
+
+	it("refuses a root writable by others or owned by someone else", async () => {
+		await legacyTree();
+		await fs.chmod(root, 0o757);
+		await expect(hardenBackups(root, backupPerms({}), { write: true })).rejects.toThrow(
+			/writable by nobody else/,
+		);
+		await fs.chmod(root, 0o755);
+		const me = process.getuid?.() ?? 0;
+		const spy = vi.spyOn(process, "getuid").mockReturnValue(me + 1);
+		try {
+			await expect(hardenBackups(root, backupPerms({}), { write: false })).rejects.toThrow(
+				/owned by uid/,
+			);
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
 	it("refuses a root that is a symlink", async () => {
 		const link = `${root}-link`;
 		await fs.symlink(root, link);
@@ -147,5 +178,20 @@ describe("hardenBackups (existing backups)", () => {
 		} finally {
 			await fs.rm(link);
 		}
+	});
+});
+
+describe("parseHardenArgs", () => {
+	it.each([
+		[[], { root: "/d", write: false }],
+		[["--write"], { root: "/d", write: true }],
+		[["/x"], { root: "/x", write: false }],
+		[["/x", "--write"], { root: "/x", write: true }],
+		[["--write", "/x"], { root: "/x", write: true }],
+	])("%j", (args, want) => {
+		expect(parseHardenArgs(args, "/d")).toEqual(want);
+	});
+	it.each([[["--force"]], [["/x", "/y"]], [["--write", "--dry"]]])("refuses %j", (args) => {
+		expect(parseHardenArgs(args, "/d")).toBeNull();
 	});
 });
