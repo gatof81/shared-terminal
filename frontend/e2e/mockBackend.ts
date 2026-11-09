@@ -115,6 +115,68 @@ export const SESSION_IDS = {
 	bob: "dddddddd-4444-4444-8444-444444444444",
 };
 
+// ── Projects & Agents (P3a, docs/PROJECTS.md) ──────────────────────────────
+// Off by default: with `projectChat` false the mock answers exactly as before
+// (no `features`, no `binding`, the project routes 404) — the visual
+// baselines and every other spec run against that. `enableProjects()` seeds
+// the Educación HZ directory of design 16's fixture, re-stamped around this
+// harness's clock and bound to alice's own sessions.
+
+export const PROJECT_IDS = { hz: "6b1f2c3d-0000-4000-8000-000000000001" };
+
+export const AGENT_IDS = {
+	architect: "a0000000-0000-4000-8000-0000000000a1",
+	developer: "a0000000-0000-4000-8000-0000000000a2",
+	developer2: "a0000000-0000-4000-8000-0000000000a3",
+	qa: "a0000000-0000-4000-8000-0000000000a4",
+	designer: "a0000000-0000-4000-8000-0000000000a5",
+	removed: "a0000000-0000-4000-8000-0000000000a9",
+};
+
+/** Sessions `enableProjects()` adds to alice's list. */
+export const PROJECT_SESSION_IDS = {
+	architect: "3f2a0000-0000-4000-8000-000000000001",
+	developer2: "7e110000-0000-4000-8000-000000000003",
+	designer: "d5e60000-0000-4000-8000-000000000005",
+	scratch: "01d00000-0000-4000-8000-000000000099",
+};
+
+export interface MockPresence {
+	value: string;
+	detail?: string;
+	source: string;
+	at: string | null;
+	verified?: boolean;
+}
+
+export interface MockBinding {
+	bindingId: string;
+	epoch: number;
+	sessionId: string;
+	state: "active" | "draining" | "retired";
+	createdAt: string;
+	retiredAt: string | null;
+	retireReason: string | null;
+}
+
+export interface MockAgent {
+	agentId: string;
+	projectId: string;
+	handle: string;
+	role: string | null;
+	createdAt: string;
+	removedAt: string | null;
+	bindings: MockBinding[];
+	presence: MockPresence;
+}
+
+export interface MockProject {
+	projectId: string;
+	ownerUserId: string;
+	name: string;
+	createdAt: string;
+}
+
 function seedSessions(): MockSession[] {
 	return [
 		{
@@ -378,6 +440,24 @@ export class MockBackend {
 	 */
 	delays: Partial<Record<DelayKey, number>> = {};
 
+	// ── Projects & Agents (P3a) ──
+	/** PROJECT_CHAT_ENABLED: `features.projectChat` + `binding` on rows + the routes. */
+	projectChat = false;
+	/** The directory read failed: `/sessions` rows carry NO `binding` key (unknown). */
+	bindingReadFails = false;
+	projects: MockProject[] = [];
+	agents: MockAgent[] = [];
+	/** Idempotency records, by `${owner}\n${clientRequestId}`. */
+	private creations = new Map<string, { hash: string; kind: "project" | "agent"; id: string }>();
+	/**
+	 * The next project write (POST /projects, POST …/agents, DELETE …/agents/:aid)
+	 * answers this instead. `apply`: the write lands first (a lost answer).
+	 */
+	failNextProjectWrite: { status: number; error: string; apply: boolean } | null = null;
+	/** Every project-directory write, with its JSON body, in arrival order. */
+	projectWrites: Array<{ method: string; path: string; body: Record<string, unknown> | null }> = [];
+	private seq = 100;
+
 	/** Start every test logged in as `username` (skips the login form). */
 	loginAs(username: keyof typeof USERS): void {
 		this.current = USERS[username]!;
@@ -385,6 +465,462 @@ export class MockBackend {
 
 	session(id: string): MockSession | undefined {
 		return this.sessions.find((s) => s.sessionId === id);
+	}
+
+	/** Turn the P3a directory on, seeded (design 16 fixture, bound to alice's sessions). */
+	enableProjects(): void {
+		this.projectChat = true;
+		const at = (sec: number) => iso(30 * 60 - sec); // `sec` before the page's clock
+		const extra = (sessionId: string, name: string, status: MockSession["status"]) =>
+			this.sessions.push({
+				sessionId,
+				ownerUserId: "u-alice",
+				name,
+				status,
+				tabs: status === "running" ? [{ tabId: "tab-1", label: "Tab 1", createdAt: T0 }] : [],
+				createdAt: iso(-1200),
+			});
+		extra(PROJECT_SESSION_IDS.architect, "hz-architect", "running");
+		extra(PROJECT_SESSION_IDS.developer2, "hz-dev-2", "running");
+		extra(PROJECT_SESSION_IDS.designer, "hz-design", "running");
+		extra(PROJECT_SESSION_IDS.scratch, "scratch", "running");
+		const pid = PROJECT_IDS.hz;
+		this.projects = [
+			{ projectId: pid, ownerUserId: "u-alice", name: "Educación HZ", createdAt: iso(-7200) },
+		];
+		const bind = (id: string, sessionId: string, createdAt: string): MockBinding => ({
+			bindingId: `b0000000-0000-4000-8000-0000000000${id}`,
+			epoch: 1,
+			sessionId,
+			state: "active",
+			createdAt,
+			retiredAt: null,
+			retireReason: null,
+		});
+		const agent = (
+			agentId: string,
+			handle: string,
+			role: string,
+			binding: MockBinding,
+			presence: MockPresence,
+		): MockAgent => ({
+			agentId,
+			projectId: pid,
+			handle,
+			role,
+			createdAt: binding.createdAt,
+			removedAt: null,
+			bindings: [binding],
+			presence,
+		});
+		this.agents = [
+			agent(
+				AGENT_IDS.architect,
+				"architect-hz",
+				"Architect",
+				bind("b1", PROJECT_SESSION_IDS.architect, iso(-3600)),
+				{ value: "waiting_input", source: "probe", at: at(34), verified: true },
+			),
+			agent(
+				AGENT_IDS.developer,
+				"developer-hz",
+				"Developer",
+				bind("b2", SESSION_IDS.running, iso(-3300)),
+				{ value: "working", source: "hook", at: at(5) },
+			),
+			agent(
+				AGENT_IDS.developer2,
+				"developer-hz-2",
+				"Developer",
+				bind("b5", PROJECT_SESSION_IDS.developer2, iso(-2400)),
+				{ value: "unknown", detail: "stale", source: "hook", at: at(31 * 60) },
+			),
+			agent(AGENT_IDS.qa, "qa-hz", "QA & Release", bind("b3", SESSION_IDS.stopped, iso(-3000)), {
+				value: "disconnected",
+				detail: "session-stopped",
+				source: "session",
+				at: at(80 * 60),
+			}),
+			agent(
+				AGENT_IDS.designer,
+				"designer-hz",
+				"Designer",
+				bind("b4", PROJECT_SESSION_IDS.designer, iso(-2700)),
+				{ value: "needs_attention", detail: "waiting_permission", source: "hook", at: at(47) },
+			),
+			{
+				agentId: AGENT_IDS.removed,
+				projectId: pid,
+				handle: "designer-old",
+				role: "Designer",
+				createdAt: iso(-90000),
+				removedAt: iso(-5000),
+				bindings: [
+					{
+						...bind("b9", "d5e60000-0000-4000-8000-000000000004", iso(-90000)),
+						state: "retired",
+						retiredAt: iso(-5000),
+						retireReason: "agent-removed",
+					},
+				],
+				presence: {
+					value: "disconnected",
+					detail: "agent-removed",
+					source: "directory",
+					at: iso(-5000),
+				},
+			},
+		];
+	}
+
+	agent(agentId: string): MockAgent {
+		const a = this.agents.find((x) => x.agentId === agentId);
+		if (!a) throw new Error(`no agent ${agentId}`);
+		return a;
+	}
+
+	private liveBinding(a: MockAgent): MockBinding | null {
+		return a.bindings.find((b) => b.state === "active" || b.state === "draining") ?? null;
+	}
+
+	/** The live binding holding a session, in any project. */
+	private bindingOf(sessionId: string): { agent: MockAgent; binding: MockBinding } | null {
+		for (const agent of this.agents) {
+			const b = this.liveBinding(agent);
+			if (b?.sessionId === sessionId) return { agent, binding: b };
+		}
+		return null;
+	}
+
+	/** Bind a session to a fresh agent behind the app's back (another tab took it). */
+	takeSession(sessionId: string, handle = "someone-else"): void {
+		const id = String(++this.seq).padStart(3, "0");
+		this.agents.push({
+			agentId: `a0000000-0000-4000-8000-000000000${id}`,
+			projectId: PROJECT_IDS.hz,
+			handle,
+			role: null,
+			createdAt: iso(1700),
+			removedAt: null,
+			bindings: [
+				{
+					bindingId: `b0000000-0000-4000-8000-000000000${id}`,
+					epoch: 1,
+					sessionId,
+					state: "active",
+					createdAt: iso(1700),
+					retiredAt: null,
+					retireReason: null,
+				},
+			],
+			presence: { value: "unknown", source: "capture", at: null },
+		});
+	}
+
+	private sessionBinding(sessionId: string) {
+		const hit = this.bindingOf(sessionId);
+		if (!hit) return null;
+		return {
+			projectId: hit.agent.projectId,
+			agentId: hit.agent.agentId,
+			handle: hit.agent.handle,
+			bindingId: hit.binding.bindingId,
+			epoch: hit.binding.epoch,
+		};
+	}
+
+	private presenceOf(a: MockAgent): MockPresence {
+		if (a.removedAt)
+			return {
+				value: "disconnected",
+				detail: "agent-removed",
+				source: "directory",
+				at: a.removedAt,
+			};
+		return a.presence;
+	}
+
+	private agentEntry(a: MockAgent) {
+		const b = this.liveBinding(a);
+		return {
+			agentId: a.agentId,
+			handle: a.handle,
+			role: a.role,
+			provider: "claude-code",
+			template: null,
+			binding: b
+				? {
+						bindingId: b.bindingId,
+						epoch: b.epoch,
+						sessionId: b.sessionId,
+						state: b.state,
+						createdAt: b.createdAt,
+					}
+				: null,
+			presence: this.presenceOf(a),
+		};
+	}
+
+	private agentDetail(a: MockAgent) {
+		return {
+			...this.agentEntry(a),
+			projectId: a.projectId,
+			createdAt: a.createdAt,
+			removedAt: a.removedAt,
+			capabilities: { capture: true, channels: false, directControl: true },
+			bindings: a.bindings.map((b) => ({ ...b })),
+			can: {
+				remove: a.removedAt ? { allowed: false, reason: "agent-removed" } : { allowed: true },
+			},
+		};
+	}
+
+	private liveAgents(pid: string): MockAgent[] {
+		return this.agents
+			.filter((a) => a.projectId === pid && a.removedAt === null)
+			.sort((x, y) => x.createdAt.localeCompare(y.createdAt) || x.handle.localeCompare(y.handle));
+	}
+
+	private projectSummary(p: MockProject) {
+		return {
+			projectId: p.projectId,
+			name: p.name,
+			createdAt: p.createdAt,
+			agentCount: this.liveAgents(p.projectId).length,
+		};
+	}
+
+	/** The project routes (P3a). Null: not a project path. */
+	private async handleProjects(
+		method: string,
+		path: string,
+		req: ReturnType<Route["request"]>,
+		me: MockUser,
+		json: (status: number, body: unknown) => Promise<void>,
+		route: Route,
+	): Promise<boolean> {
+		if (!/^\/projects(\/|$)/.test(path)) return false;
+		// Flag off: the paths do not exist (the same 404 as any unknown route).
+		if (!this.projectChat) {
+			await json(404, { error: `No mock for ${method} ${path}` });
+			return true;
+		}
+		const body =
+			method === "POST" ? ((req.postDataJSON() ?? null) as Record<string, unknown> | null) : null;
+		if (method !== "GET") this.projectWrites.push({ method, path, body });
+		const fail = method !== "GET" ? this.failNextProjectWrite : null;
+		if (fail) this.failNextProjectWrite = null;
+		// The write's own answer, or the injected one (after applying it when `apply`).
+		// A lost answer (`apply`): the write lands, the client hears only the failure.
+		const answer = async (status: number, payload: unknown) => {
+			if (fail) return json(fail.status, { error: fail.error, message: fail.error });
+			if (status === 204) return route.fulfill({ status: 204 });
+			return json(status, payload);
+		};
+		// Refused before any write (`apply: false`).
+		if (fail && !fail.apply) {
+			await json(fail.status, { error: fail.error, message: fail.error });
+			return true;
+		}
+		const own = (pid: string) =>
+			this.projects.find((p) => p.projectId === pid && p.ownerUserId === me.userId);
+		type Idem =
+			| { kind: "new"; key: string }
+			| { kind: "bad" }
+			| { kind: "conflict" }
+			| { kind: "replay"; id: string };
+		const idem = (crid: unknown, kind: "project" | "agent", hash: string): Idem => {
+			if (typeof crid !== "string" || !/^[0-9a-f-]{36}$/i.test(crid)) return { kind: "bad" };
+			const key = `${me.userId}\n${crid}`;
+			const rec = this.creations.get(key);
+			if (!rec) return { kind: "new", key };
+			if (rec.kind !== kind || rec.hash !== hash) return { kind: "conflict" };
+			return { kind: "replay", id: rec.id };
+		};
+
+		if (path === "/projects" && method === "GET") {
+			const mine = this.projects.filter((p) => p.ownerUserId === me.userId);
+			await json(200, {
+				projects: mine.map((p) => this.projectSummary(p)),
+				can: {
+					createProject:
+						mine.length < 50 ? { allowed: true } : { allowed: false, reason: "project-limit" },
+				},
+			});
+			return true;
+		}
+		if (path === "/projects" && method === "POST") {
+			const name = typeof body?.name === "string" ? body.name.trim() : "";
+			if (name === "" || name.length > 80) {
+				await answer(400, { error: "invalid-name", message: "invalid-name" });
+				return true;
+			}
+			const r = idem(body?.clientRequestId, "project", JSON.stringify({ name }));
+			if (r.kind === "bad") {
+				await answer(400, { error: "invalid-client-request-id" });
+				return true;
+			}
+			if (r.kind === "conflict") {
+				await answer(409, { error: "idempotency-conflict" });
+				return true;
+			}
+			if (r.kind === "replay") {
+				const p = this.projects.find((x) => x.projectId === r.id)!;
+				await answer(201, { ...this.projectSummary(p), replayed: true });
+				return true;
+			}
+			const id = String(++this.seq).padStart(3, "0");
+			const p: MockProject = {
+				projectId: `6b1f2c3d-0000-4000-8000-000000000${id}`,
+				ownerUserId: me.userId,
+				name,
+				createdAt: iso(1700),
+			};
+			this.projects.push(p);
+			this.creations.set(r.key, {
+				kind: "project",
+				hash: JSON.stringify({ name }),
+				id: p.projectId,
+			});
+			await answer(201, { ...this.projectSummary(p), replayed: false });
+			return true;
+		}
+		const m = /^\/projects\/([^/]+)\/agents(?:\/([^/]+))?$/.exec(path);
+		if (!m) {
+			await json(404, { error: `No mock for ${method} ${path}` });
+			return true;
+		}
+		const pid = decodeURIComponent(m[1]!);
+		const aid = m[2] === undefined ? null : decodeURIComponent(m[2]);
+		const project = own(pid);
+		if (aid === null && method === "GET") {
+			if (!project) {
+				await json(404, { error: "project-not-found", message: "project-not-found" });
+				return true;
+			}
+			const live = this.liveAgents(pid);
+			await json(200, {
+				projectId: pid,
+				generatedAt: new Date(T0 + 30 * 60 * 1000).toISOString(),
+				agents: live.map((a) => this.agentEntry(a)),
+				can: {
+					createAgent:
+						live.length < 32 ? { allowed: true } : { allowed: false, reason: "agent-limit" },
+				},
+			});
+			return true;
+		}
+		if (aid === null && method === "POST") {
+			if (!project) {
+				await answer(404, { error: "project-not-found" });
+				return true;
+			}
+			const handle = typeof body?.handle === "string" ? body.handle : "";
+			const role = typeof body?.role === "string" ? body.role : null;
+			const sessionId = typeof body?.sessionId === "string" ? body.sessionId : "";
+			if (!/^[a-z][a-z0-9-]{1,31}$/.test(handle)) {
+				await answer(400, { error: "invalid-handle" });
+				return true;
+			}
+			const hash = JSON.stringify({ pid, handle, role, sessionId });
+			const r = idem(body?.clientRequestId, "agent", hash);
+			if (r.kind === "bad") {
+				await answer(400, { error: "invalid-client-request-id" });
+				return true;
+			}
+			if (r.kind === "conflict") {
+				await answer(409, { error: "idempotency-conflict" });
+				return true;
+			}
+			if (r.kind === "replay") {
+				const a = this.agent(r.id);
+				await answer(201, {
+					...this.agentEntry(a),
+					projectId: pid,
+					createdAt: a.createdAt,
+					removedAt: a.removedAt,
+					replayed: true,
+				});
+				return true;
+			}
+			const s = this.session(sessionId);
+			if (!s || s.ownerUserId !== me.userId || s.status === "terminated") {
+				await answer(404, { error: "session-not-found" });
+				return true;
+			}
+			if (this.agents.some((a) => a.projectId === pid && a.handle === handle)) {
+				await answer(409, { error: "handle-taken" });
+				return true;
+			}
+			if (this.bindingOf(sessionId)) {
+				await answer(409, { error: "session-taken" });
+				return true;
+			}
+			if (this.liveAgents(pid).length >= 32) {
+				await answer(409, { error: "agent-limit" });
+				return true;
+			}
+			const id = String(++this.seq).padStart(3, "0");
+			const a: MockAgent = {
+				agentId: `a0000000-0000-4000-8000-000000000${id}`,
+				projectId: pid,
+				handle,
+				role,
+				createdAt: iso(1700),
+				removedAt: null,
+				bindings: [
+					{
+						bindingId: `b0000000-0000-4000-8000-000000000${id}`,
+						epoch: 1,
+						sessionId,
+						state: "active",
+						createdAt: iso(1700),
+						retiredAt: null,
+						retireReason: null,
+					},
+				],
+				presence:
+					s.status === "running"
+						? { value: "unknown", source: "capture", at: null }
+						: { value: "disconnected", detail: `session-${s.status}`, source: "session", at: null },
+			};
+			this.agents.push(a);
+			this.creations.set(r.key, { kind: "agent", hash, id: a.agentId });
+			await answer(201, {
+				...this.agentEntry(a),
+				projectId: pid,
+				createdAt: a.createdAt,
+				removedAt: null,
+				replayed: false,
+			});
+			return true;
+		}
+		const a =
+			aid === null ? undefined : this.agents.find((x) => x.agentId === aid && x.projectId === pid);
+		if (!project || !a) {
+			if (method === "DELETE") await answer(404, { error: "agent-not-found" });
+			else await json(404, { error: "agent-not-found", message: "agent-not-found" });
+			return true;
+		}
+		if (method === "GET") {
+			await json(200, this.agentDetail(a));
+			return true;
+		}
+		if (method === "DELETE") {
+			if (a.removedAt === null) {
+				a.removedAt = iso(1700);
+				const live = this.liveBinding(a);
+				if (live) {
+					live.state = "retired";
+					live.retiredAt = a.removedAt;
+					live.retireReason = "agent-removed";
+				}
+			}
+			await answer(204, null);
+			return true;
+		}
+		await json(404, { error: `No mock for ${method} ${path}` });
+		return true;
 	}
 
 	async install(page: Page): Promise<void> {
@@ -556,6 +1092,8 @@ export class MockBackend {
 				isLead: this.current?.isLead ?? false,
 				resourceCaps: { cpuMaxCores: 8, memMaxMiB: 16384 },
 				uiShell: this.uiShell,
+				// P3a: present only with the flag on (byte-identical answer otherwise).
+				...(this.projectChat ? { features: { projectChat: true } } : {}),
 			});
 		}
 		if (path === "/auth/login" && method === "POST") {
@@ -639,6 +1177,9 @@ export class MockBackend {
 			return json(404, { error: "Not found" });
 		}
 
+		// ── projects & agents (P3a) ──
+		if (await this.handleProjects(method, path, req, me, json, route)) return;
+
 		// ── sessions ──
 		if (path === "/sessions" && method === "GET") {
 			const all = url.searchParams.get("all") === "true";
@@ -646,7 +1187,13 @@ export class MockBackend {
 				200,
 				this.sessions
 					.filter((s) => s.ownerUserId === me.userId && (all || s.status !== "terminated"))
-					.map((s) => this.serialize(s)),
+					.map((s) =>
+						// P3a: `binding` only with the flag on, and the key ABSENT when the directory
+						// read failed — the frontend must tell that apart from null.
+						this.projectChat && !this.bindingReadFails
+							? { ...this.serialize(s), binding: this.sessionBinding(s.sessionId) }
+							: this.serialize(s),
+					),
 			);
 		}
 		const m = /^\/sessions\/([^/]+)(\/.*)?$/.exec(path);
