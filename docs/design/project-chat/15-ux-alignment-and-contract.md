@@ -386,7 +386,7 @@ precisan:
 | N-2 | Tabla `project_agent_creations` y columnas `client_request_id`/`request_hash` en `projects` | registros durables de idempotencia (E-1, E-9) |
 | N-3 | Alta de agente + vínculo en **una** sentencia (trigger), baja con trigger que retira el vínculo | D1 por HTTP no tiene transacciones entre llamadas (condición A del GO) |
 | N-4 | 503 `outcome-unknown` cuando la respuesta se pierde y la relectura no encuentra el registro | una escritura tardía todavía puede aplicarse; el cliente reintenta con el mismo id |
-| N-5 | La guardia 409 `agent-active` del hard delete actúa sólo con la bandera encendida | con la bandera apagada la API existente no cambia (condición B); un vínculo a una sesión borrada se lee `session-gone` |
+| N-5 | La guardia 409 `agent-active` del hard delete actúa **siempre**, con la bandera encendida o apagada (corregido el 2026-11-09; la versión anterior decía «sólo con la bandera encendida», que contradecía PROJECTS.md §1/§6 y el código desde #557 `962dd3f`) | los vínculos sobreviven a la bandera: sin la guardia, apagar la bandera dejaría borrar una sesión vinculada. Sin vínculos, la guardia nunca rechaza, así que con la bandera apagada y sin agentes la API existente no cambia (condición B). Un vínculo a una sesión que se borró por otro camino se lee `session-gone` |
 | N-6 | Los handles de agentes quitados quedan reservados | 03 `UNIQUE (project_id, handle)` sin cambios |
 | N-7 | `binding` ausente en `/api/sessions` = lectura fallida; `features` ausente = bandera apagada | respuestas byte-idénticas con la bandera apagada |
 | N-8 | `project_agent_edges`, `chats` y `chat_participants` no se crean | son P3 |
