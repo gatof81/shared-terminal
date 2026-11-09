@@ -16,7 +16,8 @@ lives on the host, not in the container.
 
 ## What you can use today
 
-Everything below is on `main` and running in the reference deployment.
+Everything below is implemented on `main` and included in the deployed backend. Some features are
+opt-in through configuration; those are marked.
 
 **Sessions**
 
@@ -34,7 +35,7 @@ Everything below is on `main` and running in the reference deployment.
   no duplicates. Many browsers can watch and type into the same tab.
 - Search in the scrollback, adjustable font size, and a key bar (Esc, Tab, Ctrl, arrows…) on touch devices.
 
-**Chat view** — the Claude Code conversation, live
+**Chat view** — the Claude Code conversation, live (opt-in: `CONVERSATION_ENABLED` plus per-session capture)
 
 - Hook-based conversation capture renders each Claude Code conversation as a thread: your prompts,
   grouped tool calls, the final report, and subagents in their own panel.
@@ -43,7 +44,7 @@ Everything below is on `main` and running in the reference deployment.
 - Privacy by design: tool calls are summarised structurally (program, file path, URL host), never the
   full command or tool output.
 
-**Composer** — type to Claude Code from the Chat view
+**Composer** — type to Claude Code from the Chat view (opt-in: `CONVERSATION_COMPOSER_ENABLED`)
 
 - Send a message to the interactive Claude Code CLI running in the session's terminal, with
   explicit delivery states (delivered / unconfirmed / failed) and no automatic retries.
@@ -74,7 +75,7 @@ on the terminal.
 
 **More**
 
-- **Port exposure** — declare container ports and reach them at `p<port>-<session>.<your-domain>`,
+- **Port exposure** (opt-in: `PORT_PROXY_BASE_DOMAIN` + `COOKIE_DOMAIN`) — declare container ports and reach them at `p<port>-<session>.<your-domain>`,
   private (your login) or public (webhooks, OAuth callbacks); editable while the session runs.
 - **HTTP exec API** — run commands in a session and stream NDJSON output, for automation
   ([docs/EXEC_API.md](./docs/EXEC_API.md)).
