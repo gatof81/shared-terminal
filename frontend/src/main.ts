@@ -47,6 +47,7 @@ import {
 import { applyResourceCapsToForm } from "./newSession.js";
 import "./paste.js";
 import "./ports.js";
+import { resetProjects, startProjects } from "./projectsView.js";
 import {
 	disablePush,
 	enablePush,
@@ -373,6 +374,10 @@ function showApp() {
 		// shareable, survives the login screen (the hash rides along
 		// untouched until here) and restores the view on reload.
 		void applyRoute(readRoute());
+		// Projects & Agents (P3a): a no-op unless /auth/status reported
+		// features.projectChat. After the list, so a #/projects/… deep
+		// link names the sessions it links to.
+		if (isLoggedIn()) startProjects();
 	});
 }
 
@@ -639,6 +644,9 @@ function handleLogout(toastMessage?: string): void {
 	// Unsent drafts are the person's words: none survives for the next account.
 	forgetComposerState();
 	void logout();
+	// The project directory (P3a) is this account's: caches, dialogs and an
+	// open project page go with it.
+	resetProjects();
 	// A list request still in flight was sent with this account's cookie:
 	// its answer must not be applied after the next person signs in.
 	invalidateSessionList();
@@ -926,6 +934,13 @@ sessionList.addEventListener("click", (e) => {
 	const target = e.target as HTMLElement;
 	if (target.closest(".session-actions")) return;
 	if (target.closest(".session-item")) setSidebarOpen(false);
+});
+
+// Same for a project (P3a) picked from the drawer: the page is what they want to see.
+document.getElementById("project-section")?.addEventListener("click", (e) => {
+	if (!isMobile()) return;
+	const target = e.target as HTMLElement;
+	if (target.closest(".project-item, #new-project-btn")) setSidebarOpen(false);
 });
 
 // Crossing the breakpoint resets to the default state for that mode —

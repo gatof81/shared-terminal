@@ -1,0 +1,445 @@
+/* ── Projects & Agents (P3a, projectsView.ts) ────────────────────
+   Nothing here applies unless the feature is on: the sidebar section
+   and the page are `hidden` in the markup, and the session-group rules
+   only match elements sessionCore.ts renders with the feature on. */
+
+/* ── Sidebar: Projects section (above the sessions) ── */
+#project-section {
+  flex-shrink: 0;
+  max-height: 35%;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--c-border);
+  padding: 0 0.5rem 0.5rem;
+}
+#project-section[hidden] {
+  display: none;
+}
+#project-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 0.5rem 0.4rem;
+}
+#project-section-header h2 {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--c-muted);
+}
+#new-project-btn {
+  background: transparent;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-s);
+  color: var(--c-muted);
+  font-size: 0.9rem;
+  line-height: 1;
+  min-width: 1.8rem;
+  min-height: 1.8rem;
+  cursor: pointer;
+}
+#new-project-btn:hover:not(:disabled) {
+  border-color: var(--c-accent);
+  color: var(--c-accent);
+}
+#new-project-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.project-item {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.45rem 0.6rem;
+  border-radius: var(--radius-s);
+  color: var(--c-text);
+  text-decoration: none;
+  font-size: 0.82rem;
+}
+.project-item:hover {
+  background: var(--c-border-soft);
+}
+.project-item[aria-current="page"] {
+  background: #1f3348;
+}
+.project-item:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: -2px;
+}
+.project-item-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-item-count {
+  font-size: 0.68rem;
+  color: var(--c-faint);
+  white-space: nowrap;
+}
+.project-list-note {
+  font-size: 0.72rem;
+  color: var(--c-muted);
+  padding: 0.25rem 0.6rem;
+}
+
+/* ── Session rows grouped by binding (feature on) ── */
+.session-group-title {
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--c-muted);
+  padding: 0.6rem 0.6rem 0.25rem;
+}
+.session-group-title:first-child {
+  padding-top: 0.2rem;
+}
+.session-group-note {
+  font-size: 0.7rem;
+  color: var(--c-warn);
+  padding: 0 0.6rem 0.3rem;
+}
+.session-agent-link {
+  flex-basis: 100%;
+  padding-left: 1.1rem;
+  font-size: 0.72rem;
+  color: var(--c-accent);
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-agent-link:hover,
+.session-agent-link:focus-visible {
+  text-decoration: underline;
+}
+
+/* ── The page, over the session ──
+   Its siblings in #terminal-area turn visibility:hidden — never
+   display:none: the terminal keeps its box (no fit, no resize sent) and
+   nothing hidden can take focus. Same for the header controls that act
+   on the terminal. */
+body.project-page-on #terminal-area > :not(#project-view),
+body.project-page-on #chrome-toggle,
+body.project-page-on #actions-btn {
+  visibility: hidden;
+}
+#project-view {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-page);
+  overflow-y: auto;
+  background: var(--c-bg);
+  color: var(--c-text);
+}
+#project-view[hidden] {
+  display: none;
+}
+.pv-page {
+  max-width: 60rem;
+  margin: 0 auto;
+  padding: var(--s-4) var(--s-5) var(--s-6);
+}
+.pv-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s-2) var(--s-3);
+}
+.pv-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 1.15rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.pv-title:focus {
+  outline: none;
+}
+.pv-title:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+.pv-back {
+  flex-basis: 100%;
+  font-size: 0.8rem;
+  color: var(--c-accent);
+  text-decoration: none;
+}
+.pv-back:hover {
+  text-decoration: underline;
+}
+.pv-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+.pv-allowed {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+.pv-btn {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2rem;
+  padding: 0.3rem 0.75rem;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-s);
+  background: var(--c-surface);
+  color: var(--c-text-2);
+  font-size: 0.8rem;
+  text-decoration: none;
+  cursor: pointer;
+}
+.pv-btn:hover:not(:disabled) {
+  border-color: var(--c-accent);
+  color: var(--c-accent);
+}
+.pv-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.pv-primary {
+  background: var(--c-accent-strong);
+  border-color: var(--c-accent-strong);
+  color: var(--c-white);
+}
+.pv-primary:hover:not(:disabled) {
+  color: var(--c-white);
+  filter: brightness(1.1);
+}
+.pv-danger:hover:not(:disabled) {
+  border-color: var(--c-err);
+  color: var(--c-err);
+}
+.pv-icon,
+.pv-close {
+  min-width: 2rem;
+  justify-content: center;
+  padding: 0.3rem 0.5rem;
+}
+.pv-close {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--c-muted);
+  font-size: 1.1rem;
+  border-radius: var(--radius-s);
+  cursor: pointer;
+}
+.pv-close:hover {
+  color: var(--c-text);
+  border-color: var(--c-border);
+}
+.pv-sub {
+  margin: var(--s-1) 0 var(--s-4);
+  font-size: 0.78rem;
+  color: var(--c-muted);
+}
+.pv-muted {
+  color: var(--c-muted);
+}
+.pv-why {
+  font-size: 0.72rem;
+}
+.pv-warn {
+  color: var(--c-warn);
+}
+.pv-banner {
+  margin-bottom: var(--s-4);
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid rgba(var(--c-warn-rgb), 0.5);
+  border-radius: var(--radius-s);
+  background: rgba(var(--c-warn-rgb), 0.08);
+  font-size: 0.82rem;
+}
+
+/* Agent directory */
+.pv-agents {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
+  gap: var(--s-3);
+}
+.pv-agent {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-m);
+  background: var(--c-surface);
+  min-width: 0;
+}
+.pv-agent-top {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+  min-width: 0;
+}
+.pv-agent-handle {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--c-accent);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+.pv-agent-handle:hover {
+  text-decoration: underline;
+}
+.pv-role {
+  font-size: 0.75rem;
+  color: var(--c-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pv-agent-session {
+  font-size: 0.78rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.pv-session-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--c-text-2);
+  text-decoration: none;
+}
+.pv-session-link:hover span:not(.session-dot) {
+  text-decoration: underline;
+}
+
+/* Presence: words first (the dot only repeats the tone) */
+.pv-presence-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.pv-presence {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  align-self: flex-start;
+  padding: 0.12rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid var(--c-border);
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+.pv-presence-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--c-muted);
+}
+.pv-presence.tone-working .pv-presence-dot {
+  background: var(--c-ok);
+}
+.pv-presence.tone-ready .pv-presence-dot {
+  background: transparent;
+  border: 1.5px solid var(--c-ok);
+}
+.pv-presence.tone-attention {
+  border-color: rgba(var(--c-warn-rgb), 0.6);
+  color: var(--c-warn);
+}
+.pv-presence.tone-attention .pv-presence-dot {
+  background: var(--c-warn);
+}
+.pv-presence.tone-off .pv-presence-dot {
+  background: transparent;
+  border: 1.5px dashed var(--c-muted);
+}
+.pv-presence.tone-unknown {
+  color: var(--c-muted);
+}
+.pv-evidence {
+  font-size: 0.7rem;
+  color: var(--c-faint);
+}
+
+/* Agent page sections */
+.pv-section {
+  margin-top: var(--s-5);
+}
+.pv-section h3 {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--c-muted);
+  margin-bottom: var(--s-2);
+}
+.pv-section > p {
+  font-size: 0.8rem;
+  margin-bottom: var(--s-2);
+}
+.pv-session-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-3);
+}
+.pv-caps {
+  list-style: none;
+  font-size: 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.pv-cap-mark {
+  display: inline-block;
+  width: 1.2rem;
+}
+.pv-caps .on .pv-cap-mark {
+  color: var(--c-ok);
+}
+.pv-history {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+}
+.pv-history th,
+.pv-history td {
+  text-align: left;
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid var(--c-border-soft);
+  vertical-align: top;
+}
+.pv-history th {
+  color: var(--c-muted);
+  font-weight: 500;
+}
+.pv-state.retired {
+  color: var(--c-muted);
+}
+
+/* Dialogs */
+.pv-field-hint {
+  font-size: 0.72rem;
+  color: var(--c-faint);
+}
+.pv-dialog-status {
+  margin-top: var(--s-2);
+  font-size: 0.8rem;
+  color: var(--c-warn);
+}
+.pv-dialog .modal-field select {
+  min-height: 2.2rem;
+}
+
+@media (max-width: 768px) {
+  .pv-page {
+    padding: var(--s-3) var(--s-4) var(--s-6);
+  }
+  .pv-agents {
+    grid-template-columns: 1fr;
+  }
+  .pv-history th:nth-child(4),
+  .pv-history td:nth-child(4) {
+    display: none;
+  }
+}

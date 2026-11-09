@@ -55,6 +55,8 @@ const api = vi.hoisted(() => ({
 			return { follow: sock.follow, close: sock.close };
 		},
 	),
+	// P3a project directory: absent, as on a backend without the feature.
+	projectChatEnabled: () => false,
 }));
 vi.mock("./api.js", () => api);
 const core = vi.hoisted(() => ({

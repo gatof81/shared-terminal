@@ -172,6 +172,15 @@
       <main>
         <div id="sidebar-backdrop" aria-hidden="true"></div>
         <aside id="sidebar">
+          <!-- Projects & Agents (P3a, projectsView.ts): shown only when
+               /auth/status reports features.projectChat. -->
+          <section id="project-section" aria-labelledby="project-section-title" hidden>
+            <div id="project-section-header">
+              <h2 id="project-section-title">Projects</h2>
+              <button id="new-project-btn" type="button" aria-label="New project" title="Create a project for your agents">+</button>
+            </div>
+            <div id="project-list"></div>
+          </section>
           <div id="sidebar-header">
             <h2>Sessions</h2>
             <button
@@ -436,6 +445,10 @@
             <!-- Screen-reader announcements for final assistant messages (design §6.4). -->
             <div id="chat-announcer" class="visually-hidden" aria-live="polite"></div>
           </div>
+          <!-- Project / agent page (P3a, projectsView.ts): shown OVER the
+               session — its siblings only turn visibility:hidden, so the
+               terminal keeps its box and its socket. -->
+          <div id="project-view" hidden></div>
           <!-- Mobile bottom navigation between the session views. Shown only
                on narrow screens and only while an overlay covers the
                terminal (viewSwitch.ts): the terminal keeps its own key bar

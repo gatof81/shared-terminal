@@ -39,6 +39,7 @@ import {
 	fetchConversations,
 	openConversationSocket,
 	patchConversationMeta,
+	projectChatEnabled,
 	sendConversationMessage,
 } from "./api.js";
 import {
@@ -1375,7 +1376,7 @@ function threadHeadChildren(c: ConversationSummary): HTMLElement[] {
 	if (agents.length > 0) {
 		const running = agents.filter((a) => a.status === "running").length;
 		const b = button(
-			`Agents ${agents.length}${running > 0 ? ` · ${running} running` : ""}`,
+			`${subagentsWord()} ${agents.length}${running > 0 ? ` · ${running} running` : ""}`,
 			"files-btn chat-agents-btn",
 			() => {
 				agentsOpen = !agentsOpen;
@@ -1830,6 +1831,15 @@ function meta(who: string, ts: string): HTMLElement {
 
 // ── Agents panel ────────────────────────────────────────────────────────────
 
+/**
+ * What the CLI's own helpers inside a conversation are called. With the
+ * project directory on (P3a), "agents" are the project's team agents, so
+ * these become "Subagents" (design 15, D-UX7); with it off, nothing changes.
+ */
+function subagentsWord(): string {
+	return projectChatEnabled() ? "Subagents" : "Agents";
+}
+
 function renderAgents(): void {
 	const open = agentsOpen && selectedCid !== null && cur !== null;
 	agentsEl.hidden = !open;
@@ -1837,7 +1847,8 @@ function renderAgents(): void {
 	const agents = buildThread(cur.window.events).agents;
 	agentsEl.replaceChildren();
 	const head = el("div", "chat-agents-head");
-	head.appendChild(el("h3", undefined, `Agents · ${agents.length}`));
+	agentsEl.setAttribute("aria-label", subagentsWord());
+	head.appendChild(el("h3", undefined, `${subagentsWord()} · ${agents.length}`));
 	head.appendChild(
 		button(
 			"×",
