@@ -244,6 +244,21 @@ function lastPromptIdIn(content: string): string | null {
 	return last;
 }
 
+/**
+ * `lastEventAt` is the time of the conversation's last ACTIVITY (CONVERSATION.md
+ * v1.9.1, #568): what the CLI reported (hook events) or a person did (a composer
+ * send). The backend's own records — a `probe` (it may confirm nothing: an
+ * unverified identity, no status) and a `gap` (a loss report) — are persisted
+ * but do not move it. Otherwise one confirmation-free probe made an old
+ * `running` claim look fresh to every reader of this time: presence (§5 of
+ * PROJECTS.md), the frontend attention rule, the silence seed after a restart.
+ * `composer_send` stays activity on purpose: the composer's duplicate watch
+ * (`rearmDupWatches`) scans by this time for exactly those events.
+ */
+export function movesLastEventAt(ev: unknown): boolean {
+	return ev !== "probe" && ev !== "gap";
+}
+
 export class ConversationStore {
 	private readonly fs: StoreFs;
 	private readonly now: () => number;
@@ -575,7 +590,7 @@ export class ConversationStore {
 			index.eventsCount++;
 			index.eventsBytes += Buffer.byteLength(line, "utf8") + 1;
 			if (ev.ev === "gap") index.gapsCount++;
-			if (ev.ts) index.lastEventAt = ev.ts;
+			if (ev.ts && movesLastEventAt(ev.ev)) index.lastEventAt = ev.ts;
 			if (typeof ev.prompt_id === "string" && ev.prompt_id) {
 				index.persistedPromptId = ev.prompt_id;
 				index.lastPromptId = ev.prompt_id;
@@ -735,7 +750,7 @@ export class ConversationStore {
 		r.index.offset += lineBytes;
 		r.index.eventsCount++;
 		r.index.eventsBytes += lineBytes;
-		r.index.lastEventAt = event.ts;
+		if (movesLastEventAt(event.ev)) r.index.lastEventAt = event.ts;
 		if (event.ev === "gap") r.index.gapsCount++;
 		// Persistence records what reached the disk and never touches the
 		// live correlation: `lastPromptId` belongs to ingest (see its doc).

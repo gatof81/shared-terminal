@@ -105,6 +105,35 @@ describe("derivePresence", () => {
 		expect(garbage).toMatchObject({ value: "unknown", detail: "stale", at: null });
 	});
 
+	it("#568: what keeps a claim fresh is activity or a re-asserting probe, never a probe that confirms nothing", () => {
+		const MIN = 60_000;
+		// A probe that CONFIRMS busy re-asserts the claim: statusAt moves ⇒ working.
+		expect(
+			derivePresence({
+				...base,
+				sessionStatus: "running",
+				conversation: conv("running", "probe:busy", 0.5 * MIN, 0.5 * MIN),
+			}),
+		).toMatchObject({ value: "working", source: "probe" });
+		// A long turn: the claim dates from the prompt, its tool hooks are recent activity ⇒ working.
+		expect(
+			derivePresence({
+				...base,
+				sessionStatus: "running",
+				conversation: conv("running", "hook:UserPromptSubmit", 30 * MIN, 0.5 * MIN),
+			}),
+		).toMatchObject({ value: "working", source: "hook" });
+		// An old claim whose last ACTIVITY is old: a later probe or gap record no longer moves
+		// lastEventAt (store, CONVERSATION.md v1.9.1), so the row reads like this ⇒ stale.
+		expect(
+			derivePresence({
+				...base,
+				sessionStatus: "running",
+				conversation: conv("running", "hook:UserPromptSubmit", 30 * MIN, 30 * MIN),
+			}),
+		).toMatchObject({ value: "unknown", detail: "stale" });
+	});
+
 	it("no conversation, or an unreadable capture, is unknown — never zero, never a guess", () => {
 		expect(derivePresence({ ...base, sessionStatus: "running", conversation: null })).toEqual({
 			value: "unknown",

@@ -43,6 +43,74 @@ async function readLines(file: string) {
 	return out;
 }
 
+describe("ConversationStore — lastEventAt is activity (#568, v1.9.1)", () => {
+	const at = (m: number) => Date.parse("2026-11-10T12:00:00.000Z") + m * 60_000;
+	const iso = (m: number) => new Date(at(m)).toISOString();
+
+	it("a probe or a gap is persisted but does not move lastEventAt; a hook or a composer send does", async () => {
+		let now = at(0);
+		const store = new ConversationStore({ workspaceRoot: root, now: () => now });
+		await store.open("s1", "c1");
+		store.enqueue("s1", "c1", ev(1)); // user_prompt at t0
+		await store.flush("s1", "c1");
+		expect(store.getResidentIndex("s1", "c1")?.lastEventAt).toBe(iso(0));
+
+		now = at(30);
+		store.enqueue(
+			"s1",
+			"c1",
+			ev(2, { ev: "probe", prompt_id: null, data: { found: true, applied: false } }),
+		);
+		now = at(31);
+		store.enqueue(
+			"s1",
+			"c1",
+			ev(3, { ev: "gap", prompt_id: null, data: { reason: "relay_dropped" } }),
+		);
+		await store.flush("s1", "c1");
+		const idx = store.getResidentIndex("s1", "c1");
+		expect(idx?.lastSeq).toBe(3); // both persisted
+		expect(idx?.lastEventAt).toBe(iso(0)); // neither is activity
+
+		now = at(32);
+		store.enqueue(
+			"s1",
+			"c1",
+			ev(4, { ev: "composer_send", prompt_id: null, data: { phase: "prepared" } }),
+		);
+		await store.flush("s1", "c1");
+		expect(store.getResidentIndex("s1", "c1")?.lastEventAt).toBe(iso(32));
+
+		now = at(33);
+		store.enqueue("s1", "c1", ev(5, { ev: "tool_start", prompt_id: null, data: { tool: "Bash" } }));
+		await store.flush("s1", "c1");
+		expect(store.getResidentIndex("s1", "c1")?.lastEventAt).toBe(iso(33));
+	});
+
+	it("the rebuild from the FILE applies the same rule (a restart cannot re-freshen an old claim)", async () => {
+		let now = at(0);
+		const store = new ConversationStore({
+			workspaceRoot: root,
+			now: () => now,
+			limits: { flushEveryEvents: 1000 },
+		});
+		await store.open("s1", "c1");
+		store.enqueue("s1", "c1", ev(1));
+		await store.flush("s1", "c1"); // `ts` is stamped when the worker writes
+		now = at(30);
+		store.enqueue("s1", "c1", ev(2, { ev: "probe", prompt_id: null, data: { found: true } }));
+		await store.flush("s1", "c1");
+		// A stale snapshot forces the scan of the events file.
+		const idx = JSON.parse(await fs.readFile(store.indexPath("s1", "c1"), "utf8"));
+		Object.assign(idx, { lastSeq: 0, offset: 0, eventsCount: 0, lastEventAt: iso(-60) });
+		await fs.writeFile(store.indexPath("s1", "c1"), JSON.stringify(idx));
+		const store2 = new ConversationStore({ workspaceRoot: root, now: () => at(40) });
+		const index = await store2.open("s1", "c1");
+		expect(index.lastSeq).toBe(2);
+		expect(index.lastEventAt).toBe(iso(0));
+	});
+});
+
 describe("ConversationStore — seq and persistence", () => {
 	it("assigns strictly increasing seq to 1000 concurrently enqueued events", async () => {
 		const store = new ConversationStore({

@@ -254,6 +254,14 @@ of 2026-11-09 (#569): only the CLI's own `hook` evidence means "needs you". A `p
 **Deciding conversation:** among the session's conversations whose pane is bound (bindings are released
 at every container stop, so a bound pane is the current start), the one with the newest evidence
 (max of `statusAt`, `lastEventAt`). `at` is that evidence's time, `null` when there is none.
+`at` is always evidence that **supports** the value:
+- `statusAt` moves only when a hook or a probe asserts the state, and a probe that confirms nothing
+  does not move it;
+- `lastEventAt` moves only with activity (hook events and composer sends, CONVERSATION.md v1.9.1,
+  #568): never with a `probe` or `gap` record.
+
+So a live claim whose last activity is ≥ 10 min old is `unknown · stale`, however recently the
+backend probed it. A long turn stays `working` while its tool hooks keep arriving.
 `no_channel`, `degraded`, `ambiguous` are P6 and never appear in P3a.
 
 ## 6. Hard delete of a bound session
