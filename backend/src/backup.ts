@@ -92,12 +92,17 @@ export const TABLES: ReadonlyArray<{ name: string; orderBy: string; sinceSchema?
 	{ name: "users", orderBy: "id" },
 	// #355 — no FK (user_id is a plain column). Each row is a browser's
 	// PushSubscription: `endpoint` (an unguessable URL) and `p256dh`/`auth`
-	// (the keys that encrypt a payload for that browser). They are NOT enough
-	// to push: every subscription is bound to this deployment's VAPID key, and
-	// a push service only accepts a message signed with VAPID_PRIVATE_KEY,
-	// which lives in the environment and never in a backup. A backup holds
-	// them at the same level as the password hashes it already holds. Before
-	// #560 the table was missing here, so every restore emptied it.
+	// (the keys that encrypt a payload for that browser). Outside this
+	// deployment they are not enough to push: the frontend always subscribes
+	// with this deployment's applicationServerKey, and a push service only
+	// accepts a message signed with VAPID_PRIVATE_KEY, which lives in the
+	// environment and never in a backup. INSIDE the deployment, though, the
+	// endpoint is the subscription's identity: `POST /api/push/subscribe`
+	// re-owns an existing endpoint and the DELETE route is keyed on it alone,
+	// so a backup reader who also has an account could redirect or silence
+	// another user's notifications. That is why the backup's permissions
+	// matter (#562). Before #560 the table was missing here, so every restore
+	// emptied it.
 	{ name: "push_subscriptions", orderBy: "id", sinceSchema: 14 },
 	{ name: "user_groups", orderBy: "id" },
 	{ name: "user_group_members", orderBy: "group_id, user_id" },
@@ -599,8 +604,14 @@ async function restoreAll(
 				}
 			}
 			const placeholders = cols.map(() => "?").join(", ");
+			// push_subscriptions: the target's row wins. Its UNIQUE `endpoint` is
+			// re-owned by the app when a browser switches accounts; OR REPLACE
+			// would hand that browser back to the backup's owner under --force.
+			// Identical rows (the --force re-run over a partial restore) converge
+			// either way.
+			const verb = t.name === "push_subscriptions" ? "INSERT OR IGNORE" : "INSERT OR REPLACE";
 			await d1Query(
-				`INSERT OR REPLACE INTO ${t.name} (${cols.join(", ")}) VALUES (${placeholders})`,
+				`${verb} INTO ${t.name} (${cols.join(", ")}) VALUES (${placeholders})`,
 				cols.map((c) => row[c] as string | number | null),
 			);
 		}
@@ -617,10 +628,12 @@ async function restoreAll(
 			manifest.vapidPublicKey !== here
 		) {
 			logger.warn(
-				`[restore] push_subscriptions: ${rows.length} subscription(s) were created for another VAPID key ` +
-					`(${here ? "this deployment's VAPID_PUBLIC_KEY differs" : "VAPID is not configured here"}) — ` +
-					"pushes to them will be refused until the source's VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY are " +
-					"installed, or until each browser subscribes again",
+				`[restore] push_subscriptions: ${rows.length} subscription(s) were created for another VAPID key — ` +
+					(here
+						? "this deployment's VAPID_PUBLIC_KEY differs, so push services will refuse them (403, never pruned)"
+						: "VAPID is not configured here, so nothing will be sent to them") +
+					". Install the source's VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY, or clear the rows and have each user " +
+					"turn notifications off and on (docs/DEPLOYMENT.md, Backup & restore)",
 			);
 		}
 	}

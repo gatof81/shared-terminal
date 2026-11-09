@@ -68,7 +68,7 @@ vi.mock("./db.js", () => ({
 				],
 			};
 		}
-		if (sql.startsWith("INSERT OR REPLACE")) {
+		if (sql.startsWith("INSERT OR REPLACE") || sql.startsWith("INSERT OR IGNORE")) {
 			dbState.inserts.push({ sql, params: params ?? [] });
 			return { ...ok, results: [] };
 		}
@@ -414,7 +414,9 @@ describe("push_subscriptions (#560)", () => {
 		await runRestore(outDir);
 		const ins = dbState.inserts.find((i) => /INTO push_subscriptions /.test(i.sql));
 		expect(ins?.sql).toMatch(
-			/^INSERT OR REPLACE INTO push_subscriptions \(id, user_id, endpoint, p256dh, auth, created_at\)/,
+			// OR IGNORE: on --force, a target row the app has re-owned since the
+			// backup (same endpoint, another user) is not handed back.
+			/^INSERT OR IGNORE INTO push_subscriptions \(id, user_id, endpoint, p256dh, auth, created_at\)/,
 		);
 		expect(ins?.params).toEqual([
 			SUB.id,
@@ -442,7 +444,9 @@ describe("push_subscriptions (#560)", () => {
 			warn.mockClear();
 			vi.stubEnv("VAPID_PUBLIC_KEY", "");
 			await runRestore(outDir, { force: true });
-			expect(pushWarnings(warn)[0]).toMatch(/VAPID is not configured here/);
+			expect(pushWarnings(warn)[0]).toMatch(
+				/VAPID is not configured here, so nothing will be sent/,
+			);
 
 			warn.mockClear();
 			vi.stubEnv("VAPID_PUBLIC_KEY", "BKeyA");

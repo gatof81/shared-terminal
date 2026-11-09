@@ -93,8 +93,9 @@ describe("backup coverage", () => {
 		const backedUp = new Map(TABLES.map((t) => [t.name, t.sinceSchema ?? 1]));
 		const migrated = [...tables()].filter((t) => !EXCLUDED.has(t)).sort();
 		expect([...backedUp.keys()].sort()).toEqual(migrated);
-		// Some tables are rebuilt by a later migration (v11: invite_codes): the
-		// last creation counts, and a table without sinceSchema must date from v1–v11.
+		// A table without sinceSchema must come from the pre-ledger set (v1–v11),
+		// which every deployment has replayed. An in-place rebuild inside one
+		// migration (v11's DROP + CREATE of invite_codes) is not a new table here.
 		for (const [name, since] of backedUp) {
 			const v = createdBy.get(name) ?? 1;
 			if (since === 1) expect(v, name).toBeLessThanOrEqual(11);
