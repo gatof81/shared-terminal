@@ -1316,7 +1316,7 @@ the process umask (typically 0755/0644), so anyone on the host who can
 reach `<WORKSPACE_ROOT>/.backups` can read them. The dump already holds
 password hashes, invite-code hashes and ciphertext; the push rows add
 nothing that sends a notification. Tightening the permissions is tracked
-separately, because the nightly off-host copy reads these files as a
+in #562, because the nightly off-host copy reads these files as a
 non-root user.
 
 Restore guards:
