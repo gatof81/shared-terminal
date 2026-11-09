@@ -1141,6 +1141,18 @@ describe("agents: reads, boundary and removal", () => {
 		expect(d.json.bindings[0].sessionId).toBe(S.dev);
 	});
 
+	it("the agent page carries generatedAt like the list (§4.5, #569): the clock its presence was read at", async () => {
+		const before = Date.now();
+		const d = await api("GET", `/projects/${pid}/agents/${dev.agentId}`, OWNER);
+		const l = await api("GET", `/projects/${pid}/agents`, OWNER);
+		expect(d.status).toBe(200);
+		expect(typeof d.json.generatedAt).toBe("string");
+		const t = Date.parse(d.json.generatedAt);
+		expect(t).toBeGreaterThanOrEqual(before - 1000);
+		expect(t).toBeLessThanOrEqual(Date.parse(l.json.generatedAt));
+		expect(Object.keys(l.json)).toContain("generatedAt");
+	});
+
 	it("an agent bound WHILE the hard delete runs (after the first check) is caught before the purge", async () => {
 		onKill = () => {
 			db.prepare(
