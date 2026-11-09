@@ -239,9 +239,13 @@ A value not in this list means a later contract; a client shows it as "state unk
 
 **`needs_attention` can come from a probe alone.** A probe that sees the CLI waiting on a permission
 prompt (`probe:waiting`) yields `needs_attention` with `source: "probe"`. Presence passes it on as it
-is. Attention rule option A (#553) says only the CLI's own hook evidence means "needs you", so a client
-following that rule shows a `probe`-sourced `needs_attention` as unknown. The backend does not hide it,
-because the value is still true evidence that the prompt is on screen.
+is, because the value is true evidence that the prompt is on screen. How clients read it today:
+- **The project page** follows the owner's rule of 2026-11-09 (#569): only the CLI's own `hook`
+  evidence means "needs you", so it shows a `probe`-sourced `needs_attention` as "State unknown".
+- **The Chat switcher's** attention rule (`attentionRule.ts`, #553 option A) does not look at the
+  source, so the same conversation shows "Needs you" there.
+
+The two surfaces disagree. Aligning them is a separate decision.
 
 **Deciding conversation:** among the session's conversations whose pane is bound (bindings are released
 at every container stop, so a bound pane is the current start), the one with the newest evidence
