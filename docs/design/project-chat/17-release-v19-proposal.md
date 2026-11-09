@@ -16,7 +16,10 @@ pasar de `R` a `M` y qué se agrega por v19.
 ## 1. Qué cambia en producción entre `R` y `M`
 
 `R..M` son dos PRs de runtime: **#547** (`166ff78`) y **#557** (`M`). Ninguno toca `session-image/`,
-`Dockerfile`, `.dockerignore` ni `package*.json`, ni archivos del frontend.
+`Dockerfile`, `.dockerignore` ni `package*.json`.
+- #557 no toca el frontend.
+- El frontend de #547 ya está en producción, porque Pages lo publicó al mergear. Sólo agrega campos
+  opcionales, así que no depende de `P`.
 
 | Cambio | PR | Con todas las banderas apagadas (lo que se propone) |
 | --- | --- | --- |
@@ -65,7 +68,19 @@ Lo ejecuta A con el GO del owner. Todo lo que doc 11 no cambia aquí vale igual:
 ventana, la etapa de backup, las reglas del checkout y la prohibición de `down`, `--remove-orphans` y
 operaciones sobre `st-*`.
 
-**§1, gate previo (sólo lecturas).** Se toman P1 y P3–P13 con `P` en lugar de `1befd89`, y se agregan:
+**§1, gate previo (sólo lecturas).** Se toman P1 y P3–P13 de doc 11. Cambiar el SHA **no alcanza**:
+doc 11 lleva valores literales de `1befd89` que hay que sustituir así.
+
+| Lectura de doc 11 | Valor literal allí | Con `P` |
+| --- | --- | --- |
+| P1 | `1b116d5a…`, contenedor `da75082e`, imagen `221e6851` | digest de `P` (si `P = R`, `d1f310d8…`); el **contenedor `app` actual** y su imagen, leídos en la ventana |
+| P11 | `docker image inspect 221e6851`, `docker inspect da75082e` | `docker inspect <contenedor app actual> --format '{{.Image}}'`. **Ese ID completo** es la imagen que etiqueta el paso 1 y la que verifica §6. Nunca `221e6851`, que sigue existiendo como `st-backend-rollback:1befd89` |
+| P12 | **sin** `.dockerignore` | con `P ≥ e198b07`, `.dockerignore` **presente y versionado** |
+| P13 | `docker logs da75082e` | `docker logs <contenedor app actual>` |
+| P5 / V5 | `enabledSessions = effectiveSessions = 3` | **el valor leído en la ventana**, sea cual sea (O1 puede haberlo cambiado), y V5 igual a ese |
+| V9 (base) | — | registrar además el valor actual de `INGEST_REQUIRE_SESSION_ORIGIN` (`printenv` en el contenedor), que tiene que quedar igual |
+
+Además se agregan:
 
 | # | Lectura | Esperado |
 | --- | --- | --- |
@@ -73,7 +88,7 @@ operaciones sobre `st-*`.
 | P2′ | `docker compose exec app grep -c 'version: 19' dist/db.js` | `0`: v19 no está |
 | P4′ | `PROJECT_CHAT_ENABLED` y `CONVERSATION_COMPOSER_BG_ENABLED`: `grep -c '^<VAR>=' .env` y `printenv <VAR>` en el shell del operador | `0` y vacío, para las dos |
 | P8′ | además de P8: `ls <WORKSPACE_ROOT>/.st-control/*/composer/job-*.json 2>/dev/null` | ninguno |
-| P14 | ledger de D1: el log de arranque de `P` (`migrations complete …`) o `SELECT MAX(version) FROM schema_migrations` si A lo puede leer | 18. Si es otro valor, se registra y V1 lo ajusta |
+| P14 | ledger de D1: en el arranque de `P`, `[db] migrations complete (schema up to date)`, que implica todas las versiones de `P` registradas (1–18 para `R`); o `SELECT MAX(version) FROM schema_migrations` si A lo puede leer | `schema up to date` o `MAX = 18` ⇒ N = 1 en V1. Si el log rotó y no hay lectura de D1, se registra «N desconocido» y V1 acepta cualquier N siempre que la última línea sea `applying migration 19` y no haya errores |
 
 **§2, backup:** igual que doc 11 §2, con el backend `P`. Todavía no existen tablas de v19, así que nada
 queda afuera.
@@ -90,6 +105,9 @@ queda afuera.
    otro valor ⇒ NO-GO, sin reinicio.
 5. **Gate final** de doc 11 §3 paso 5:
    - P8 y P8′;
+   - **ninguna ventana `observe` abierta** (O1 o doc 11 §5). El reinicio pone a cero sus contadores y
+     la deja INCONCLUSIVE. Si hay una, el owner la cierra antes, con sus lecturas de fin de ventana
+     tomadas, o se espera a que termine;
    - ninguna sesión con `createdAt` en los últimos 15 minutos;
    - la lista `sessionId → status` (base de V10);
    - las dos banderas como las va a ver el backend nuevo: desde el checkout de `M`,
@@ -115,7 +133,7 @@ usa como rollback de v19:
 | V4–V6 | Igual que doc 11: inventario P7, captura P5 y pérdidas del relay |
 | V7 | Igual (panes y recreaciones), más P8′: ningún `job-*.json` |
 | V8 | Igual, con `HEAD = M` y la etiqueta `st-backend-rollback:<P corto>` |
-| V9 | Igual; las diferencias esperadas son las variables nuevas, **vacías**: `PROJECT_CHAT_ENABLED`, `CONVERSATION_COMPOSER_BG_ENABLED`, `COMPOSER_BG_CLI_VERSIONS` y `COMPOSER_BG_SESSIONS` |
+| V9 | Igual, e `INGEST_REQUIRE_SESSION_ORIGIN` igual a la base; las diferencias esperadas son las variables nuevas, **vacías**: `PROJECT_CHAT_ENABLED`, `CONVERSATION_COMPOSER_BG_ENABLED`, `COMPOSER_BG_CLI_VERSIONS` y `COMPOSER_BG_SESSIONS` |
 | V10 | Igual |
 
 En producción **no** se prueba un hard delete. El guard y `markFailed` quedan cubiertos por la D1 real y
