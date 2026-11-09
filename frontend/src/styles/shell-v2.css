@@ -199,6 +199,19 @@ html[data-shell="v2"] .chat-float {
   }
 }
 
+/* A project page (projects.css, body.project-page-on) covers the session;
+   the merged bar puts the view tabs and the ⋯ menu in the header, where
+   projects.css's #terminal-area rule does not reach, and they would act
+   on that unrelated session. visibility, NEVER display:none: the header's
+   height is part of the terminal's box, and a height change refits xterm
+   and resizes tmux for every viewer. A hidden element takes neither
+   clicks nor focus; pointer-events is the belt for any descendant. */
+html[data-shell="v2"] body.project-page-on #view-switch,
+html[data-shell="v2"] body.project-page-on #session-menu-btn {
+  visibility: hidden;
+  pointer-events: none;
+}
+
 /* The sidebar drawer's footer menu (v1 mobile) is the user menu now. */
 html[data-shell="v2"] #sidebar-footer {
   display: none !important;

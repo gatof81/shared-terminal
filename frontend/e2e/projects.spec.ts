@@ -51,6 +51,20 @@ function dialog(page: Page) {
 	return page.locator(".modal.open .pv-dialog");
 }
 
+/** Every visible match of each selector is a ≥ 44 × 44 px box (the phone touch-target rule). */
+async function expectTouchTargets(page: Page, selectors: string[]): Promise<void> {
+	for (const sel of selectors) {
+		const found = page.locator(sel).filter({ visible: true });
+		await expect(found.first(), sel).toBeVisible();
+		for (const loc of await found.all()) {
+			const box = await loc.boundingBox();
+			expect(box, sel).not.toBeNull();
+			expect(box!.height, `${sel} height`).toBeGreaterThanOrEqual(44);
+			expect(box!.width, `${sel} width`).toBeGreaterThanOrEqual(44);
+		}
+	}
+}
+
 test.describe("projects — feature off", () => {
 	test("no Projects UI, no project request, and a project link changes nothing", async ({
 		app,
@@ -402,5 +416,115 @@ test.describe("projects — feature on", () => {
 		).toEqual([]);
 		expect(sock.sent.length - frames, "no frame of any kind").toBe(0);
 		await expect(page.locator("#terminal-session-name")).toHaveText("my-project");
+	});
+
+	test("phones: every Projects control is a 44-px touch target", async ({ app, page }) => {
+		test.skip(!app.mobile, "the narrow-screen rule");
+		await app.login("alice");
+		await app.openSidebar();
+		await expectTouchTargets(page, [
+			"#new-project-btn",
+			"#project-list .project-item",
+			"#session-list .session-agent-link",
+		]);
+		await page.locator("#project-list .project-item", { hasText: "Educación HZ" }).click();
+		await expect(pageTitle(page)).toHaveText("Educación HZ");
+		await expect(page.locator("#project-view .pv-agent")).toHaveCount(5);
+		await expectTouchTargets(page, [
+			"#project-view .pv-agent-handle",
+			"#project-view .pv-session-link",
+			"#project-view .pv-btn",
+			"#project-view .pv-close",
+		]);
+		await page.locator("#project-view button", { hasText: "+ New agent" }).click();
+		await expect(dialog(page)).toBeVisible();
+		await expectTouchTargets(page, [".modal.open .pv-dialog .modal-close"]);
+		await dialog(page).locator(".modal-close").click();
+		await expect(dialog(page)).toHaveCount(0);
+		await card(page, "developer-hz").locator(".pv-agent-handle").click();
+		await expect(pageTitle(page)).toHaveText("@developer-hz");
+		await expectTouchTargets(page, [
+			"#project-view .pv-back",
+			"#project-view .pv-btn",
+			"#project-view .pv-close",
+		]);
+	});
+
+	test("the focused page title draws no ring; a control reached by keyboard does", async ({
+		app,
+		page,
+	}) => {
+		test.skip(app.mobile, "keyboard focus");
+		await app.login("alice");
+		await page.locator("#project-list .project-item", { hasText: "Educación HZ" }).focus();
+		await page.keyboard.press("Enter");
+		await expect(pageTitle(page)).toBeFocused();
+		await expect(pageTitle(page)).toHaveCSS("outline-style", "none");
+		await page.keyboard.press("Tab");
+		const focused = page.locator("#project-view :focus");
+		await expect(focused).toHaveCount(1);
+		await expect(focused).toHaveCSS("outline-style", "solid");
+	});
+
+	test("v2 phone: the bar's view tabs and ⋯ menu are out of reach under a project page, the terminal box unchanged", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		test.skip(!(app.mobile && app.shell === "v2"), "the merged v2 bar");
+		await app.login("alice");
+		await app.openSession("my-project");
+		await app.expectTerminalReady();
+		await page.waitForTimeout(400);
+		const sock = backend.terminalSockets[0]!;
+		const frames = sock.sent.length;
+		const boxOf = (sel: string) =>
+			page.locator(sel).evaluate((el) => {
+				const r = el.getBoundingClientRect();
+				return { top: r.top, height: r.height, width: r.width };
+			});
+		const terminalBefore = await boxOf("#terminal-container");
+		const headerBefore = await boxOf("header");
+		const filesTab = (await page.locator("#view-files-btn").boundingBox())!;
+		const menuBtn = (await page.locator("#session-menu-btn").boundingBox())!;
+
+		await app.openSidebar();
+		await page.locator("#project-list .project-item", { hasText: "Educación HZ" }).click();
+		await expect(pageTitle(page)).toHaveText("Educación HZ");
+		await expect(page.locator("#view-switch")).toBeHidden();
+		await expect(page.locator("#session-menu-btn")).toBeHidden();
+		expect(await boxOf("#terminal-container"), "the terminal's box").toEqual(terminalBefore);
+		expect(await boxOf("header"), "the header's box").toEqual(headerBefore);
+		// Nothing of the bar answers a tap where its buttons were.
+		for (const b of [filesTab, menuBtn]) {
+			const hit = await page.evaluate(
+				([px, py]) =>
+					document.elementFromPoint(px!, py!)?.closest("#view-switch, #session-menu-btn")?.id ??
+					null,
+				[b.x + b.width / 2, b.y + b.height / 2],
+			);
+			expect(hit, "a bar control under the tap").toBeNull();
+		}
+		// A tap on the bar gives the page way to the session (projectsView.ts),
+		// but the hidden Files tab under it switched nothing and no menu opened.
+		await page.mouse.click(filesTab.x + filesTab.width / 2, filesTab.y + filesTab.height / 2);
+		await expect(page.locator("[role='menu'].action-menu")).toHaveCount(0);
+		await expect(page.locator("#files-view")).toBeHidden();
+		await expect(page.locator("#view-terminal-btn")).toHaveAttribute("aria-pressed", "true");
+
+		await app.openSidebar();
+		await page.locator("#project-list .project-item", { hasText: "Educación HZ" }).click();
+		await expect(pageTitle(page)).toHaveText("Educación HZ");
+		await page.locator("#project-view .pv-close").click();
+		await expect(page.locator("#project-view")).toBeHidden();
+		await expect(page.locator("#view-switch")).toBeVisible();
+		await expect(page.locator("#session-menu-btn")).toBeVisible();
+		await page.waitForTimeout(400);
+		expect(await boxOf("#terminal-container")).toEqual(terminalBefore);
+		expect(
+			sock.sent.slice(frames).filter((f) => f.type === "resize"),
+			"no resize",
+		).toEqual([]);
+		expect(sock.sent.length - frames, "no frame of any kind").toBe(0);
 	});
 });
