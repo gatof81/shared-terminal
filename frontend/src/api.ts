@@ -64,15 +64,6 @@ export function isLoggedIn(): boolean {
 	return _loggedIn;
 }
 
-/**
- * The auth generation right now. A caller that keeps an answer around
- * (the project directory's caches) compares the generation it sent under
- * with this one and drops an answer that belongs to an earlier account.
- */
-export function authGeneration(): number {
-	return authEpoch;
-}
-
 // P3a (docs/PROJECTS.md §1): `features.projectChat` on /auth/status. The
 // key is ABSENT with the flag off, and then the project surface does not
 // exist — no section, no route, no request. A deployment property, not an

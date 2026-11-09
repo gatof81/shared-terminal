@@ -639,14 +639,16 @@ function renderAgentPage(pid: string, aid: string): HTMLElement {
 // ── Remove (idempotent DELETE) ──────────────────────────────────────────────
 
 async function removeFlow(pid: string, a: AgentDetail): Promise<void> {
+	// Captured BEFORE the confirm: a confirm answered after a logout (the
+	// dialog is not in openDialogs) must not act for the next account.
+	const myGen = gen;
 	const ok = await confirmDialog({
 		title: "Remove agent",
 		message: `Remove @${a.handle}?\n\nIts session is released and nothing in the session changes. The agent's page and its history are kept, and the handle @${a.handle} stays reserved in this project.`,
 		confirmLabel: "Remove agent",
 		danger: true,
 	});
-	if (!ok) return;
-	const myGen = gen;
+	if (!ok || myGen !== gen) return;
 	// A DELETE is idempotent: retrying after a lost answer is always safe —
 	// but only when the person asks (never on our own, rule 4).
 	for (;;) {
@@ -1005,7 +1007,7 @@ function wire(): void {
 				if (shown === null) return;
 				const t = e.target;
 				if (!(t instanceof Element)) return;
-				if (t.closest(".session-agent-link, .session-actions")) return;
+				if (t.closest(".session-agent-link, .session-actions, .session-last-conv")) return;
 				leavePage();
 			},
 			true,

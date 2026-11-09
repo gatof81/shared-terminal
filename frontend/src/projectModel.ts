@@ -334,6 +334,19 @@ export class CreationAttempt {
 					reloadFirst: false,
 				};
 			case "refused": {
+				// A 429 after an unknown outcome is the rate limiter refusing the
+				// RETRY before any write: it says nothing about the lost attempt,
+				// which can still land. Keep the id (and the frozen inputs) so the
+				// next Retry stays idempotent — a fresh id could create a second
+				// project, since names are not unique (PROJECTS.md §3).
+				if (outcome.status === 429 && this.sawUnknown) {
+					this.phase = "unknown";
+					return {
+						phase: "unknown",
+						message: projectErrorText(outcome.code, 429),
+						reloadFirst: false,
+					};
+				}
 				// A refusal is final for THIS id; the next action mints a new
 				// one (an `idempotency-conflict` is a client error: same rule).
 				const reloadFirst = this.sawUnknown;

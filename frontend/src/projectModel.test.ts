@@ -252,6 +252,27 @@ describe("CreationAttempt (rule 4: one id per user action)", () => {
 		expect(a.send()).not.toBe(first);
 	});
 
+	it("a 429 after a 503 keeps the id: the rate limiter proves nothing about the lost write", () => {
+		const a = new CreationAttempt(minter());
+		const first = a.send();
+		a.receive({ kind: "unknown", code: "outcome-unknown" });
+		expect(a.send()).toBe(first);
+		const step = a.receive({ kind: "refused", code: "rate-limited", status: 429 });
+		expect(step).toMatchObject({ phase: "unknown", reloadFirst: false });
+		expect(step.message).toMatch(/Too many requests/);
+		expect(a.inputsLocked).toBe(true);
+		expect(a.send()).toBe(first);
+		expect(a.receive({ kind: "created", replayed: true }).phase).toBe("done");
+	});
+
+	it("a 429 with no unknown outcome before it is an ordinary refusal", () => {
+		const a = new CreationAttempt(minter());
+		const first = a.send();
+		const step = a.receive({ kind: "refused", code: "rate-limited", status: 429 });
+		expect(step).toMatchObject({ phase: "editing", reloadFirst: false });
+		expect(a.send()).not.toBe(first);
+	});
+
 	it("a refusal without a 503 before it needs no reload", () => {
 		const a = new CreationAttempt(minter());
 		a.send();
