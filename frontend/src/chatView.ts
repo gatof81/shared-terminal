@@ -91,6 +91,7 @@ import {
 } from "./main.js";
 import { renderMarkdown } from "./markdown.js";
 import { renderSessionList, showTerminalTab, syncLastConversationCurrent } from "./sessionCore.js";
+import { sessionNoun, switcherWords } from "./switcherModel.js";
 import { button, el, stateBox } from "./ui.js";
 import {
 	clearLastConversationTitle,
@@ -975,12 +976,15 @@ function renderListInner(): void {
 	// taps away: from the list, one tap reaches every running project's
 	// conversations. (The event name mirrors switcher.ts OPEN_SWITCHER_EVENT.)
 	if (isMobile()) {
-		const go = button("Other projects' conversations…", "chat-switcher-entry", () =>
-			document.dispatchEvent(
-				new CustomEvent("st:open-switcher", {
-					detail: { opener: listEl.querySelector(".chat-switcher-entry") },
-				}),
-			),
+		const go = button(
+			switcherWords(sessionNoun(projectChatEnabled())).otherConversations,
+			"chat-switcher-entry",
+			() =>
+				document.dispatchEvent(
+					new CustomEvent("st:open-switcher", {
+						detail: { opener: listEl.querySelector(".chat-switcher-entry") },
+					}),
+				),
 		);
 		listEl.appendChild(go);
 	}

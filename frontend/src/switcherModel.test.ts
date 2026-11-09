@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ConversationSummary } from "./api.js";
 import { STALE_EVIDENCE_MS } from "./conversationModel.js";
 import {
+	boundHandle,
 	bucketOf,
 	type FetchList,
 	loadProjects,
@@ -11,6 +12,9 @@ import {
 	parallelSummary,
 	parallelSummaryText,
 	sectionize,
+	sessionLabel,
+	sessionNoun,
+	switcherWords,
 	toItem,
 	visibleInSwitcher,
 } from "./switcherModel.js";
@@ -296,5 +300,69 @@ describe("parallel work at a glance", () => {
 		);
 		expect(r).toMatchObject({ attention: 0, ready: 1 });
 		expect(parallelSummaryText(r)).toBe("Now: 1 ready.");
+	});
+});
+
+describe("words: with Projects on, the switcher says 'session' (a project is only a P3a Project)", () => {
+	it("Projects off: every string is the previous one, byte for byte", () => {
+		const w = switcherWords(sessionNoun(false));
+		expect(w.search).toBe("Search conversations or projects");
+		expect(w.noneRunning).toBe(
+			"No running projects. Conversations are listed for projects that are running.",
+		);
+		expect(w.noneLoaded).toBe("No project could be loaded.");
+		expect(w.noneInLoaded).toBe("No conversations in the projects that loaded.");
+		expect(w.noneYet).toBe("No conversations yet in your running projects.");
+		expect(w.loading(1, 1)).toBe("Loading 1 of 1 project…");
+		expect(w.loading(2, 3)).toBe("Loading 2 of 3 projects…");
+		expect(w.otherConversations).toBe("Other projects' conversations…");
+	});
+	it("Projects on: sessions", () => {
+		const w = switcherWords(sessionNoun(true));
+		expect(w.search).toBe("Search conversations or sessions");
+		expect(w.noneRunning).toBe(
+			"No running sessions. Conversations are listed for sessions that are running.",
+		);
+		expect(w.noneLoaded).toBe("No session could be loaded.");
+		expect(w.noneInLoaded).toBe("No conversations in the sessions that loaded.");
+		expect(w.noneYet).toBe("No conversations yet in your running sessions.");
+		expect(w.loading(1, 1)).toBe("Loading 1 of 1 session…");
+		expect(w.loading(2, 3)).toBe("Loading 2 of 3 sessions…");
+		expect(w.otherConversations).toBe("Other sessions' conversations…");
+		const text = Object.values(w)
+			.map((v) => (typeof v === "function" ? v(2, 3) : v))
+			.join(" ");
+		expect(text).not.toMatch(/project/i);
+	});
+	it("the summary line follows the noun; the default is the previous wording", () => {
+		const s = {
+			attention: 0,
+			attentionProjects: [],
+			working: 2,
+			workingProjects: 1,
+			ready: 0,
+			incomplete: 2,
+		};
+		expect(parallelSummaryText(s)).toBe(
+			"Now: 2 working in 1 project — 2 projects not loaded, so this may be incomplete.",
+		);
+		expect(parallelSummaryText(s, "session")).toBe(
+			"Now: 2 working in 1 session — 2 sessions not loaded, so this may be incomplete.",
+		);
+	});
+});
+
+describe("bound agent handle (PROJECTS.md §4.6: object = bound, null = unassigned, absent = unknown)", () => {
+	const binding = { projectId: "p1", agentId: "a1", handle: "reviewer", bindingId: "b1", epoch: 1 };
+	it("only a binding object yields @handle", () => {
+		expect(boundHandle({ binding })).toBe("@reviewer");
+		expect(boundHandle({ binding: null })).toBeNull();
+		expect(boundHandle({})).toBeNull();
+		expect(boundHandle({ binding: { ...binding, handle: "" } })).toBeNull();
+	});
+	it("the row label is the name alone unless bound", () => {
+		expect(sessionLabel("alpha", null)).toBe("alpha");
+		expect(sessionLabel("alpha", undefined)).toBe("alpha");
+		expect(sessionLabel("alpha", "@reviewer")).toBe("alpha · @reviewer");
 	});
 });

@@ -12,7 +12,7 @@
  * and a failed project is shown as failed — never as an empty list.
  */
 
-import type { ConversationSummary } from "./api.js";
+import type { ConversationSummary, SessionBinding } from "./api.js";
 import { attentionKind } from "./attentionRule.js";
 import { displayTitle, isArchived } from "./chatMeta.js";
 import { lastEvidenceAt, presentStatus, type StatusPresentation } from "./conversationModel.js";
@@ -353,23 +353,81 @@ export function parallelSummary(
 	};
 }
 
+// ── Words ────────────────────────────────────────────────────────────────
+
+/**
+ * What a session is called in the switcher and the Chat list. With the
+ * Projects feature on (features.projectChat), "project" means ONLY a P3a
+ * Project, so these surfaces — which list sessions — say "session"; with it
+ * off, every string stays exactly as it was (screenshot baselines).
+ */
+export type SessionNoun = "project" | "session";
+
+export function sessionNoun(projectsOn: boolean): SessionNoun {
+	return projectsOn ? "session" : "project";
+}
+
+function plural(n: number, noun: SessionNoun): string {
+	return `${noun}${n === 1 ? "" : "s"}`;
+}
+
+export interface SwitcherWords {
+	search: string;
+	noneRunning: string;
+	noneLoaded: string;
+	noneInLoaded: string;
+	noneYet: string;
+	loading: (loading: number, total: number) => string;
+	/** The Chat list's mobile entry to the switcher. */
+	otherConversations: string;
+}
+
+export function switcherWords(noun: SessionNoun): SwitcherWords {
+	return {
+		search: `Search conversations or ${noun}s`,
+		noneRunning: `No running ${noun}s. Conversations are listed for ${noun}s that are running.`,
+		noneLoaded: `No ${noun} could be loaded.`,
+		noneInLoaded: `No conversations in the ${noun}s that loaded.`,
+		noneYet: `No conversations yet in your running ${noun}s.`,
+		loading: (loading, total) => `Loading ${loading} of ${total} ${plural(total, noun)}…`,
+		otherConversations: `Other ${noun === "project" ? "projects'" : "sessions'"} conversations…`,
+	};
+}
+
+/**
+ * The agent a session is bound to, as "@handle" (PROJECTS.md §4.6): an
+ * object = bound; null = unassigned and an absent key = unknown, both shown
+ * as nothing.
+ */
+export function boundHandle(s: { binding?: SessionBinding | null }): string | null {
+	const b = s.binding;
+	if (b === null || b === undefined || typeof b !== "object") return null;
+	return typeof b.handle === "string" && b.handle !== "" ? `@${b.handle}` : null;
+}
+
+/** A row's session line: its name, then "· @handle" when bound. */
+export function sessionLabel(name: string, handle: string | null | undefined): string {
+	return handle ? `${name} · ${handle}` : name;
+}
+
 /** The summary line, or null when there is nothing worth saying. */
-export function parallelSummaryText(s: ParallelSummary): string | null {
+export function parallelSummaryText(
+	s: ParallelSummary,
+	noun: SessionNoun = "project",
+): string | null {
 	const parts: string[] = [];
 	if (s.attention > 0)
 		parts.push(
 			`${s.attention} need${s.attention === 1 ? "s" : ""} you (${s.attentionProjects.join(", ")})`,
 		);
 	if (s.working > 0)
-		parts.push(
-			`${s.working} working in ${s.workingProjects} project${s.workingProjects === 1 ? "" : "s"}`,
-		);
+		parts.push(`${s.working} working in ${s.workingProjects} ${plural(s.workingProjects, noun)}`);
 	// Secondary and discreet: a count, no project names.
 	if (s.ready > 0) parts.push(`${s.ready} ready`);
 	if (parts.length === 0) return null;
 	const tail =
 		s.incomplete > 0
-			? ` — ${s.incomplete} project${s.incomplete === 1 ? "" : "s"} not loaded, so this may be incomplete`
+			? ` — ${s.incomplete} ${plural(s.incomplete, noun)} not loaded, so this may be incomplete`
 			: "";
 	return `Now: ${parts.join(" · ")}${tail}.`;
 }
