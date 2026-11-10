@@ -1544,8 +1544,16 @@ que es **actividad**:
 - los demás estados de `composer_send`: liquidación, liberación, recuperación tras un reinicio,
   resolución del admin, marcas de duplicado.
 
-**Reconstrucción desde el archivo:** vale la misma regla. Sin snapshot y sin ninguna línea de
-actividad, se toma el `ts` de la línea más nueva, nunca la hora de la carga.
+**Reconstrucción desde el archivo:** vale la misma regla, y sin snapshot debe dar lo mismo que el
+índice vivo. Si el archivo actual no tiene ninguna línea de actividad (tras una rotación L7 solo
+quedan el `gap rotated` y probes), se toma:
+1. la última actividad del archivo rotado `.1`, que es lo que el índice vivo guardaba;
+2. si `.1` tampoco tiene actividad, o no existe, el `ts` de la línea **más vieja** en disco, el
+   registro más cercano a la apertura del índice vivo.
+
+Nunca la hora de la carga ni la línea más nueva, que sería un probe o un gap y haría parecer fresca
+una afirmación vieja. Único caso más tardío que la verdad: un `.1` sin ninguna actividad (dos
+rotaciones desde la última), porque esa hora ya no está en disco.
 
 **El frontend** aplica la misma regla y el `ts` del evento al actualizar una fila desde el WS.
 

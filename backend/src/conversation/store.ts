@@ -265,6 +265,25 @@ export function movesLastEventAt(event: { ev: unknown; data?: unknown }): boolea
 	return true;
 }
 
+/** The last activity line's `ts` and the first line's `ts` of an events file's content. */
+function activityTimesIn(content: string): { lastActivity: string | null; oldest: string | null } {
+	let lastActivity: string | null = null;
+	let oldest: string | null = null;
+	for (const line of content.split("\n")) {
+		if (!line) continue;
+		let ev: PersistedEvent;
+		try {
+			ev = JSON.parse(line) as PersistedEvent;
+		} catch {
+			continue; // torn line
+		}
+		if (!ev.ts) continue;
+		oldest ??= ev.ts;
+		if (movesLastEventAt(ev)) lastActivity = ev.ts;
+	}
+	return { lastActivity, oldest };
+}
+
 export class ConversationStore {
 	private readonly fs: StoreFs;
 	private readonly now: () => number;
@@ -595,7 +614,7 @@ export class ConversationStore {
 		index.lastPromptId = index.persistedPromptId;
 		let scannedSeq = index.offset === 0 ? 0 : index.lastSeq;
 		let sawActivity = false;
-		let newestAny: string | null = null;
+		let oldestAny: string | null = null;
 		for (const line of tail.split("\n")) {
 			if (!line) continue;
 			let ev: PersistedEvent;
@@ -611,7 +630,7 @@ export class ConversationStore {
 			index.eventsBytes += Buffer.byteLength(line, "utf8") + 1;
 			if (ev.ev === "gap") index.gapsCount++;
 			if (ev.ts) {
-				newestAny = ev.ts;
+				oldestAny ??= ev.ts;
 				if (movesLastEventAt(ev)) {
 					index.lastEventAt = ev.ts;
 					sawActivity = true;
@@ -644,11 +663,25 @@ export class ConversationStore {
 		}
 		if (index.firstRetainedSeq === 0) index.firstRetainedSeq = index.lastSeq + 1;
 		index.lastSeq = Math.max(index.lastSeq, scannedSeq);
-		// No snapshot and no activity line (a rotated file holding only `gap
-		// rotated` and probes): the fresh index says "now", which would date
-		// the conversation as the newest. The newest line's own `ts` is closer
-		// to the truth; a snapshot's value, when there is one, is kept as is.
-		if (!fromSnapshot && !sawActivity && newestAny !== null) index.lastEventAt = newestAny;
+		// No snapshot and no activity line in the current file (one that L7
+		// rotated, holding only `gap rotated` and probes): the fresh index says
+		// "now", which would date the conversation as the newest, and the
+		// newest line is a probe or a gap — taking it would let a restart
+		// re-freshen an old claim, which the live path never does. What the
+		// live index held is the last activity before the rotation, so read it
+		// from the `.1` archive; with none there either, the live index still
+		// held the time it was opened, and the oldest line on disk is the
+		// closest record of that. An older time only reads as stale, a newer
+		// one invents activity. The one case that can land later than the
+		// truth: an archive holding no activity at all (a whole generation of
+		// probes and gaps, two rotations after the last activity) — that time
+		// is gone from disk, and its first line, itself a rotation, is the
+		// earliest left. A snapshot's value, when there is one, is kept as is.
+		if (!fromSnapshot && !sawActivity && oldestAny !== null) {
+			const archived = await this.fs.readFile(`${file}.1`, "utf8").catch(() => "");
+			const a = activityTimesIn(archived);
+			index.lastEventAt = a.lastActivity ?? a.oldest ?? oldestAny;
+		}
 		index.offset = size;
 		return size;
 	}

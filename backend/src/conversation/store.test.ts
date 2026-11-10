@@ -95,7 +95,7 @@ describe("ConversationStore — lastEventAt is activity (#568, v1.9.1)", () => {
 		expect(store.getResidentIndex("s1", "c1")?.lastEventAt).toBe(iso(33));
 	});
 
-	it("no snapshot and a file of only non-activity lines: the newest line's ts, never 'now'", async () => {
+	it("no snapshot and a file of only non-activity lines: the oldest line's ts, never 'now' nor a probe's", async () => {
 		let now = at(0);
 		const store = new ConversationStore({ workspaceRoot: root, now: () => now });
 		await store.open("s1", "c1");
@@ -108,7 +108,7 @@ describe("ConversationStore — lastEventAt is activity (#568, v1.9.1)", () => {
 		await fs.rm(store.indexPath("s1", "c1")); // the snapshot is gone
 		const store2 = new ConversationStore({ workspaceRoot: root, now: () => at(60) });
 		const index = await store2.open("s1", "c1");
-		expect(index.lastEventAt).toBe(iso(6));
+		expect(index.lastEventAt).toBe(iso(5));
 	});
 
 	it("the rebuild from the FILE applies the same rule (a restart cannot re-freshen an old claim)", async () => {
@@ -132,6 +132,114 @@ describe("ConversationStore — lastEventAt is activity (#568, v1.9.1)", () => {
 		const index = await store2.open("s1", "c1");
 		expect(index.lastSeq).toBe(2);
 		expect(index.lastEventAt).toBe(iso(0));
+	});
+});
+
+describe("ConversationStore — recovery without a snapshot agrees with the live index (#568)", () => {
+	const at = (m: number) => Date.parse("2026-11-10T12:00:00.000Z") + m * 60_000;
+	const iso = (m: number) => new Date(at(m)).toISOString();
+	const probe = (i: number) => ev(i, { ev: "probe", prompt_id: null, data: { found: true } });
+
+	/** The live index's lastEventAt, then the one a restart rebuilds from the files alone. */
+	async function liveAndRebuilt(store: ConversationStore): Promise<[string, string]> {
+		await store.flush("s1", "c1");
+		const live = store.getResidentIndex("s1", "c1")?.lastEventAt as string;
+		await fs.rm(store.indexPath("s1", "c1"));
+		const store2 = new ConversationStore({ workspaceRoot: root, now: () => at(10_000) });
+		return [live, (await store2.open("s1", "c1")).lastEventAt];
+	}
+
+	it("activity then probes, no rotation: the same time", async () => {
+		let now = at(0);
+		const store = new ConversationStore({ workspaceRoot: root, now: () => now });
+		await store.open("s1", "c1");
+		store.enqueue("s1", "c1", ev(1));
+		await store.flush("s1", "c1");
+		for (let i = 2; i <= 4; i++) {
+			now = at(i * 8);
+			store.enqueue("s1", "c1", probe(i));
+			await store.flush("s1", "c1");
+		}
+		const [live, rebuilt] = await liveAndRebuilt(store);
+		expect(live).toBe(iso(0));
+		expect(rebuilt).toBe(live);
+	});
+
+	it("activity, an L7 rotation, then only probes: the last activity is read from the archive", async () => {
+		let now = at(0);
+		const store = new ConversationStore({
+			workspaceRoot: root,
+			now: () => now,
+			limits: { fileBytes: 600 },
+		});
+		await store.open("s1", "c1");
+		store.enqueue("s1", "c1", ev(1));
+		await store.flush("s1", "c1");
+		now = at(1);
+		store.enqueue("s1", "c1", ev(2, { ev: "tool_start", prompt_id: null, data: { tool: "Bash" } }));
+		await store.flush("s1", "c1");
+		let i = 3;
+		while (store.stats.rotations === 0) {
+			now = at(i * 8);
+			store.enqueue("s1", "c1", probe(i++));
+			await store.flush("s1", "c1");
+		}
+		now = at(i * 8);
+		store.enqueue("s1", "c1", probe(i));
+		await store.flush("s1", "c1");
+		expect(store.stats.rotations).toBe(1);
+		// The current file holds no activity: only the rotation's gap and probes.
+		const lines = await readLines(store.eventsPath("s1", "c1"));
+		expect(lines.map((l) => l.ev).every((e) => e === "gap" || e === "probe")).toBe(true);
+		const [live, rebuilt] = await liveAndRebuilt(store);
+		expect(live).toBe(iso(1));
+		expect(rebuilt).toBe(live);
+	});
+
+	it("only probes ever: the oldest line, which is when the live index was opened", async () => {
+		let now = at(0);
+		const store = new ConversationStore({ workspaceRoot: root, now: () => now });
+		await store.open("s1", "c1");
+		store.enqueue("s1", "c1", probe(1));
+		await store.flush("s1", "c1");
+		now = at(20);
+		store.enqueue("s1", "c1", probe(2));
+		await store.flush("s1", "c1");
+		const [live, rebuilt] = await liveAndRebuilt(store);
+		expect(live).toBe(iso(0));
+		expect(rebuilt).toBe(live);
+	});
+
+	it("activity in the current file: the archive is not needed and the file's last activity wins", async () => {
+		let now = at(0);
+		const store = new ConversationStore({ workspaceRoot: root, now: () => now });
+		await store.open("s1", "c1");
+		store.enqueue("s1", "c1", ev(1));
+		await store.flush("s1", "c1");
+		now = at(3);
+		store.enqueue(
+			"s1",
+			"c1",
+			ev(2, { ev: "composer_send", prompt_id: null, data: { state: "prepared" } }),
+		);
+		await store.flush("s1", "c1");
+		now = at(4);
+		store.enqueue(
+			"s1",
+			"c1",
+			ev(3, { ev: "composer_send", prompt_id: null, data: { state: "released" } }),
+		);
+		await store.flush("s1", "c1");
+		now = at(30);
+		store.enqueue(
+			"s1",
+			"c1",
+			ev(4, { ev: "gap", prompt_id: null, data: { reason: "relay_dropped" } }),
+		);
+		await store.flush("s1", "c1");
+		const [live, rebuilt] = await liveAndRebuilt(store);
+		expect(live).toBe(iso(3));
+		expect(rebuilt).toBe(live);
 	});
 });
 
