@@ -447,6 +447,12 @@ export class MockBackend {
 	projectChat = false;
 	/** The directory read failed: `/sessions` rows carry NO `binding` key (unknown). */
 	bindingReadFails = false;
+	/**
+	 * A hard delete of a bound session is refused at the server's SECOND
+	 * check (PROJECTS.md §6): the soft delete has already happened (the row
+	 * is `terminated`, kept) when the 409 `agent-active` answers.
+	 */
+	hardDeleteRefusedAfterSoftDelete = false;
 	projects: MockProject[] = [];
 	agents: MockAgent[] = [];
 	/** Idempotency records, by `${owner}\n${clientRequestId}`. */
@@ -1219,6 +1225,11 @@ export class MockBackend {
 			}
 			if (rest === "" && method === "DELETE") {
 				if (url.searchParams.get("hard") === "true") {
+					// PROJECTS.md §6: a live binding refuses the hard delete.
+					if (this.projectChat && this.bindingOf(id)) {
+						if (this.hardDeleteRefusedAfterSoftDelete) s.status = "terminated";
+						return json(409, { error: "agent-active" });
+					}
 					this.sessions = this.sessions.filter((x) => x.sessionId !== id);
 				} else {
 					s.status = "terminated";

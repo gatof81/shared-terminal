@@ -345,6 +345,31 @@ export function projectErrorText(code: string, status: number): string {
 	return ERROR_TEXT.get(code) ?? `Something went wrong (${code || status}).`;
 }
 
+/**
+ * Why a hard delete of a bound session is refused (PROJECTS.md §6, 409
+ * `agent-active`), in words: whose session it is and what to do instead.
+ * `agent` null = the binding is not known to this page (key absent, or a
+ * stale row) — the generic sentence. `terminated`: the server's second
+ * check refused after the soft delete had already happened.
+ */
+export function agentActiveDeleteText(
+	sessionName: string,
+	agent: { handle: string; projectName: string | null } | null,
+	terminated: boolean,
+): { title: string; message: string } {
+	const title = "Can't delete permanently";
+	let message =
+		agent === null
+			? "This session belongs to a project agent. Remove the agent first (Projects), then delete it."
+			: `"${sessionName}" belongs to the agent @${agent.handle}${
+					agent.projectName ? ` in ${agent.projectName}` : ""
+				}. Remove the agent first; the session itself stays and can then be deleted.`;
+	if (terminated)
+		message +=
+			"\n\nIt was terminated; its files are kept. Delete it permanently after removing the agent.";
+	return { title, message };
+}
+
 /** A `can` refusal's reason, in words (the server's codes; unknown ones verbatim). */
 export function refusalText(reason: string): string {
 	if (reason === "agent-limit") return "This project has the maximum of 32 agents.";
