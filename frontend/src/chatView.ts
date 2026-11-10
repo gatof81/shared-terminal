@@ -773,7 +773,8 @@ function statusChip(
 	chip.appendChild(el("span", "chat-dot"));
 	chip.appendChild(el("span", "chat-status-label", shown.label));
 	const t = new Date(st.at).getTime();
-	const ageMs = Number.isNaN(t) ? 0 : Date.now() - t;
+	// The epoch is the backend's "no time" (CONVERSATION.md §4.1): no age.
+	const ageMs = Number.isNaN(t) || t <= 0 ? 0 : Date.now() - t;
 	if (opts.age && ageMs >= 60_000) {
 		chip.appendChild(el("span", "chat-status-age", relativeDate(st.at)));
 	}

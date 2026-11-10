@@ -85,6 +85,16 @@ export function bucketOf(
 	}
 }
 
+/**
+ * ms since epoch, NaN when unknown. The epoch itself is the backend's "no
+ * time" (a state without one, a last activity it could not recover —
+ * CONVERSATION.md §4.1), so it is unknown too, never a 1970 date.
+ */
+function knownTime(iso: string): number {
+	const t = Date.parse(iso);
+	return t > 0 ? t : Number.NaN;
+}
+
 /** `c.sessionId` is the CONVERSATION id (the API's name for it); the project is passed in. */
 export function toItem(
 	c: ConversationSummary,
@@ -99,7 +109,7 @@ export function toItem(
 		title: displayTitle(c),
 		status,
 		bucket,
-		evidenceAt: Date.parse(lastEvidenceAt(c)),
+		evidenceAt: knownTime(lastEvidenceAt(c)),
 		archived: isArchived(c),
 	};
 }
