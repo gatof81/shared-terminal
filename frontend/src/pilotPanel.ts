@@ -158,6 +158,8 @@ export function suspendPilot(): void {
 export function resetPilot(): void {
 	gen++;
 	if (!state) return;
+	// A send still in flight on this state must open nothing after this.
+	state.visible = false;
 	for (const f of state.feeds.values()) f.socket?.close();
 	state.root.remove();
 	state = null;
@@ -360,6 +362,7 @@ async function send(s: PilotState): Promise<void> {
 		s.errorEl.textContent = explainCode(v.code);
 		return;
 	}
+	const sentRaw = s.text.value;
 	const chosen = s.agents.filter((a) => s.selected.has(a.agentId));
 	// Re-checked here, not only in the button's state: a click that raced a
 	// re-render never sends twice to an agent still waiting for an answer.
@@ -401,9 +404,11 @@ async function send(s: PilotState): Promise<void> {
 	if (g !== gen || state !== s) return;
 	// The draft goes only when at least one agent took it; otherwise it stays
 	// for the person to fix or resend (never resent by the panel).
-	if (accepted) {
+	// …and only if the box still holds what this exchange sent: the person
+	// may already be writing the next message or a forward (sends overlap).
+	if (accepted && s.text.value === sentRaw) {
 		s.text.value = "";
-		s.forwardFrom = null;
+		if (s.forwardFrom === ex.forwardedFrom) s.forwardFrom = null;
 	}
 	renderControls(s);
 	loadTargets(s);
@@ -420,6 +425,8 @@ async function sendLane(s: PilotState, lane: Lane, text: string, g: number): Pro
 	// and it may have changed since the list was shown.
 	const a = s.agents.find((x) => x.agentId === lane.agentId);
 	const t = a ? await targetOf(a) : ({ kind: "none", reason: "no longer in the project" } as const);
+	// Logout or another project while the target was read: send nothing.
+	if (g !== gen || state !== s) return false;
 	if (t.kind !== "ok") {
 		update({ kind: "refused", status: 0, text: `Not sent: ${targetText(t)}.` });
 		return false;
@@ -436,7 +443,11 @@ async function sendLane(s: PilotState, lane: Lane, text: string, g: number): Pro
 		if (st.kind === "pending") {
 			for (const e of feed.events) {
 				const settled = settleFromEvent(e, lane.clientMessageId);
-				if (settled && settled.kind !== "pending") st = settled;
+				// The first event that records a decision is the decision.
+				if (settled && settled.kind !== "pending") {
+					st = settled;
+					break;
+				}
 			}
 		}
 		update(st);
@@ -569,18 +580,15 @@ function stateLine(lane: Lane): { text: string; tone: string } {
 			return { text: "Sending…", tone: "muted" };
 		case "delivered":
 			return { text: "Delivered", tone: "ok" };
+		case "unconfirmed":
+			return {
+				text: "Not confirmed: Claude Code did not show this message as received. Check the Terminal before sending again.",
+				tone: "warn",
+			};
 		case "pending":
-			return st.result === "unconfirmed"
-				? {
-						text: "Not confirmed: Claude Code did not show this message as received. Check the Terminal before sending again.",
-						tone: "warn",
-					}
-				: st.result === "accepted"
-					? { text: "Accepted, waiting for delivery…", tone: "muted" }
-					: {
-							text: "Outcome not known yet (the server is still settling it).",
-							tone: "warn",
-						};
+			return st.result === "accepted"
+				? { text: "Accepted, waiting for delivery…", tone: "muted" }
+				: { text: "Outcome not known yet (the server is still settling it).", tone: "warn" };
 		case "delivered-unattributed":
 			return {
 				text: "Delivered, but Claude Code gave no prompt id, so no reply can be attributed here — read it in Chat.",

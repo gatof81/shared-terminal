@@ -118,7 +118,9 @@ export type SendState =
 	| { kind: "sending" }
 	| { kind: "delivered"; corr: Correlation }
 	/** Accepted by the server, delivery not proven yet: waiting for the send's own event. */
-	| { kind: "pending"; result: "uncertain" | "accepted" | "unconfirmed" }
+	| { kind: "pending"; result: "uncertain" | "accepted" }
+	/** Final (§8.1.6): the CLI did not show the message as received; nothing is attributed. */
+	| { kind: "unconfirmed" }
 	| { kind: "misdelivered" }
 	/** The server says delivered but names no prompt id: final, and nothing can be attributed. */
 	| { kind: "delivered-unattributed" }
@@ -131,6 +133,7 @@ export type SendState =
 export function isFinal(st: SendState): boolean {
 	return (
 		st.kind === "misdelivered" ||
+		st.kind === "unconfirmed" ||
 		st.kind === "delivered-unattributed" ||
 		st.kind === "resolved" ||
 		st.kind === "refused" ||
@@ -152,7 +155,8 @@ export function sendStateOf(r: ComposerSendResult): SendState {
 		// The server's `delivered` without a prompt id (its candidate had none):
 		// final, but there is no evidence to attribute a reply on.
 		if (b.result === "delivered") return { kind: "delivered-unattributed" };
-		if (b.result === "unconfirmed" || b.result === "uncertain" || b.result === "accepted") {
+		if (b.result === "unconfirmed") return { kind: "unconfirmed" };
+		if (b.result === "uncertain" || b.result === "accepted") {
 			return { kind: "pending", result: b.result };
 		}
 		return { kind: "pending", result: "uncertain" };
@@ -173,7 +177,10 @@ export function sendStateOf(r: ComposerSendResult): SendState {
 export function settleFromEvent(e: ConversationEvent, clientMessageId: string): SendState | null {
 	if (e.ev !== "composer_send" || e.data.client_message_id !== clientMessageId) return null;
 	const d = e.data;
-	const is = (v: string) => d.result === v || d.state === v;
+	// Only the event that RECORDS a decision counts: its `state` is the
+	// decision. Later events of the same send (`released`, duplicate markers)
+	// repeat `result` and may carry another prompt id; they decide nothing.
+	const is = (v: string) => d.state === v;
 	if (is("delivered")) {
 		if (typeof d.prompt_id === "string" && d.prompt_id) {
 			return {
@@ -181,9 +188,9 @@ export function settleFromEvent(e: ConversationEvent, clientMessageId: string): 
 				corr: { promptId: d.prompt_id, seq: typeof d.seq === "number" ? d.seq : null },
 			};
 		}
-		// Only the final `result` is a decision; a `state: delivered` without an
-		// id may still be followed by one (background transport).
-		return d.result === "delivered" ? { kind: "delivered-unattributed" } : null;
+		// A recorded `delivered` without a prompt id: final, unattributable.
+		// (The background transport's `delivered` always carries one.)
+		return { kind: "delivered-unattributed" };
 	}
 	if (is("misdelivered")) return { kind: "misdelivered" };
 	if (is("failed")) {
@@ -196,7 +203,7 @@ export function settleFromEvent(e: ConversationEvent, clientMessageId: string): 
 	if (is("resolved")) {
 		return { kind: "resolved", outcome: typeof d.outcome === "string" ? d.outcome : "resolved" };
 	}
-	if (is("unconfirmed")) return { kind: "pending", result: "unconfirmed" };
+	if (is("unconfirmed")) return { kind: "unconfirmed" };
 	return null;
 }
 

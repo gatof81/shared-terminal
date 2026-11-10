@@ -113,10 +113,11 @@ describe("sendStateOf — the HTTP answer, as is", () => {
 			kind: "delivered-unattributed",
 		});
 	});
-	it("unconfirmed / uncertain / accepted are pending; misdelivered is never correlated", () => {
-		for (const r of ["unconfirmed", "uncertain", "accepted"] as const) {
+	it("uncertain / accepted are pending; unconfirmed is final; misdelivered is never correlated", () => {
+		for (const r of ["uncertain", "accepted"] as const) {
 			expect(sendStateOf(res(202, { result: r }))).toEqual({ kind: "pending", result: r });
 		}
+		expect(sendStateOf(res(202, { result: "unconfirmed" }))).toEqual({ kind: "unconfirmed" });
 		expect(sendStateOf(res(202, { result: "misdelivered", conversation: "c9" }))).toEqual({
 			kind: "misdelivered",
 		});
@@ -131,12 +132,18 @@ describe("sendStateOf — the HTTP answer, as is", () => {
 	});
 });
 
-describe("settleFromEvent — only this send's own event settles it", () => {
+describe("settleFromEvent — only the event that records this send's decision settles it", () => {
 	const cs = (data: Record<string, unknown>) => ev("composer_send", null, data);
-	it("delivered with a prompt id (interactive `result` or background `state`)", () => {
+	it("delivered with a prompt id (the decision event's `state`)", () => {
 		expect(
 			settleFromEvent(
-				cs({ client_message_id: "m1", result: "delivered", prompt_id: "p1", seq: 9 }),
+				cs({
+					client_message_id: "m1",
+					state: "delivered",
+					result: "delivered",
+					prompt_id: "p1",
+					seq: 9,
+				}),
 				"m1",
 			),
 		).toEqual({ kind: "delivered", corr: { promptId: "p1", seq: 9 } });
@@ -144,12 +151,24 @@ describe("settleFromEvent — only this send's own event settles it", () => {
 			settleFromEvent(cs({ client_message_id: "m1", state: "delivered", prompt_id: "p1" }), "m1"),
 		).toEqual({ kind: "delivered", corr: { promptId: "p1", seq: null } });
 	});
-	it("another send's event, or a delivered without a prompt id, settles nothing", () => {
+	it("a recorded delivered without a prompt id is final and unattributable", () => {
+		expect(settleFromEvent(cs({ client_message_id: "m1", state: "delivered" }), "m1")).toEqual({
+			kind: "delivered-unattributed",
+		});
+	});
+	it("another send's event, and later events that only repeat `result`, settle nothing", () => {
 		expect(
-			settleFromEvent(cs({ client_message_id: "m2", result: "delivered", prompt_id: "p2" }), "m1"),
+			settleFromEvent(cs({ client_message_id: "m2", state: "delivered", prompt_id: "p2" }), "m1"),
 		).toBeNull();
-		expect(settleFromEvent(cs({ client_message_id: "m1", state: "delivered" }), "m1")).toBeNull();
-		expect(settleFromEvent(cs({ client_message_id: "m1", state: "prepared" }), "m1")).toBeNull();
+		for (const state of ["released", "duplicated", "possible-duplicate", "prepared", "entered"]) {
+			expect(
+				settleFromEvent(
+					cs({ client_message_id: "m1", state, result: "delivered", prompt_id: "pX" }),
+					"m1",
+				),
+				state,
+			).toBeNull();
+		}
 		expect(settleFromEvent(ev("user_prompt", "p1", { prompt: "x" }), "m1")).toBeNull();
 	});
 	it("final answers recorded later: failed (with the server's reason) and an operator's resolution", () => {
@@ -175,19 +194,13 @@ describe("settleFromEvent — only this send's own event settles it", () => {
 				"m1",
 			),
 		).toEqual({ kind: "resolved", outcome: "discarded" });
-		// The final result `delivered` without a prompt id: final, unattributable.
-		expect(settleFromEvent(cs({ client_message_id: "m1", result: "delivered" }), "m1")).toEqual({
-			kind: "delivered-unattributed",
-		});
 	});
-
-	it("misdelivered and unconfirmed are reported as such", () => {
-		expect(settleFromEvent(cs({ client_message_id: "m1", result: "misdelivered" }), "m1")).toEqual({
+	it("misdelivered and unconfirmed are final", () => {
+		expect(settleFromEvent(cs({ client_message_id: "m1", state: "misdelivered" }), "m1")).toEqual({
 			kind: "misdelivered",
 		});
 		expect(settleFromEvent(cs({ client_message_id: "m1", state: "unconfirmed" }), "m1")).toEqual({
-			kind: "pending",
-			result: "unconfirmed",
+			kind: "unconfirmed",
 		});
 	});
 });
