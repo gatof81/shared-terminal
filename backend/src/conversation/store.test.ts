@@ -210,6 +210,59 @@ describe("ConversationStore — recovery without a snapshot agrees with the live
 		expect(rebuilt).toBe(live);
 	});
 
+	it("a rotation whose gap append failed (only `.1` left, or an empty current file): the archive still decides", async () => {
+		let now = at(0);
+		const store = new ConversationStore({ workspaceRoot: root, now: () => now });
+		await store.open("s1", "c1");
+		store.enqueue("s1", "c1", ev(1));
+		await store.flush("s1", "c1");
+		now = at(20);
+		store.enqueue("s1", "c1", probe(2));
+		await store.flush("s1", "c1");
+		const file = store.eventsPath("s1", "c1");
+		await fs.rename(file, `${file}.1`);
+		await fs.rm(store.indexPath("s1", "c1"));
+		const reopen = async () =>
+			(await new ConversationStore({ workspaceRoot: root, now: () => at(10_000) }).open("s1", "c1"))
+				.lastEventAt;
+		expect(await reopen()).toBe(iso(0)); // no current file
+		await fs.rm(store.indexPath("s1", "c1"), { force: true });
+		await fs.writeFile(file, "");
+		expect(await reopen()).toBe(iso(0)); // an empty one
+	});
+
+	it("an archive with no activity at all: its oldest line", async () => {
+		let now = at(0);
+		const store = new ConversationStore({ workspaceRoot: root, now: () => now });
+		await store.open("s1", "c1");
+		now = at(2);
+		store.enqueue("s1", "c1", probe(1));
+		await store.flush("s1", "c1");
+		now = at(9);
+		store.enqueue("s1", "c1", probe(2));
+		await store.flush("s1", "c1");
+		const file = store.eventsPath("s1", "c1");
+		await fs.rename(file, `${file}.1`);
+		await fs.writeFile(
+			file,
+			`${JSON.stringify({ seq: 3, ts: iso(30), ev: "gap", data: { reason: "rotated" } })}\n`,
+		);
+		await fs.rm(store.indexPath("s1", "c1"));
+		const index = await new ConversationStore({ workspaceRoot: root, now: () => at(10_000) }).open(
+			"s1",
+			"c1",
+		);
+		expect(index.lastEventAt).toBe(iso(2));
+	});
+
+	it("nothing on disk at all: a new conversation, dated when it is opened", async () => {
+		const index = await new ConversationStore({ workspaceRoot: root, now: () => at(7) }).open(
+			"s1",
+			"c9",
+		);
+		expect(index.lastEventAt).toBe(iso(7));
+	});
+
 	it("activity in the current file: the archive is not needed and the file's last activity wins", async () => {
 		let now = at(0);
 		const store = new ConversationStore({ workspaceRoot: root, now: () => now });

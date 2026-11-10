@@ -577,6 +577,8 @@ export class ConversationStore {
 			// Keep lastSeq (a rotated-away file can be gone) but reset offset.
 			index.offset = 0;
 			index.lastPromptId = index.persistedPromptId;
+			// A rotation whose `gap rotated` append failed leaves only `.1`.
+			if (!fromSnapshot) await this.lastEventAtFromArchive(file, index, null);
 			return 0;
 		}
 		let size = Buffer.byteLength(content, "utf8");
@@ -677,11 +679,7 @@ export class ConversationStore {
 		// probes and gaps, two rotations after the last activity) — that time
 		// is gone from disk, and its first line, itself a rotation, is the
 		// earliest left. A snapshot's value, when there is one, is kept as is.
-		if (!fromSnapshot && !sawActivity && oldestAny !== null) {
-			const archived = await this.fs.readFile(`${file}.1`, "utf8").catch(() => "");
-			const a = activityTimesIn(archived);
-			index.lastEventAt = a.lastActivity ?? a.oldest ?? oldestAny;
-		}
+		if (!fromSnapshot && !sawActivity) await this.lastEventAtFromArchive(file, index, oldestAny);
 		index.offset = size;
 		return size;
 	}
@@ -974,6 +972,22 @@ export class ConversationStore {
 			data: { reason: "rotated", archived_up_to_seq: r.index.lastSeq },
 		};
 		await this.appendOne(stSessionId, cid, r, gap);
+	}
+
+	/**
+	 * The snapshotless fallback of recoverFromFile: the `.1` archive's last
+	 * activity, else its oldest line, else `oldestCurrent` (the current file's
+	 * oldest line); with none of them the fresh index's load time stays — a
+	 * conversation with nothing on disk is new.
+	 */
+	private async lastEventAtFromArchive(
+		file: string,
+		index: ConversationIndex,
+		oldestCurrent: string | null,
+	): Promise<void> {
+		const archived = await this.fs.readFile(`${file}.1`, "utf8").catch(() => "");
+		const a = activityTimesIn(archived);
+		index.lastEventAt = a.lastActivity ?? a.oldest ?? oldestCurrent ?? index.lastEventAt;
 	}
 
 	// ── Mutation of index metadata (service-driven) ────────────────────────
