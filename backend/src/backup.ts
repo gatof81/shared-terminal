@@ -41,6 +41,13 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import {
+	backupPerms,
+	hardenBackups,
+	parseHardenArgs,
+	permsForBackup,
+	secure,
+} from "./backupPerms.js";
+import {
 	ATTESTATION_FILE_PREFIX,
 	ATTESTATION_KEY_INFO,
 	classifyAttestation,
@@ -131,11 +138,50 @@ export type ConcurrentChangeKind = "changed" | "removed" | "shrank";
 // ── Backup ──────────────────────────────────────────────────────────────────
 
 export async function runBackup(outDir: string): Promise<BackupManifest> {
+	// Before anything is created: a malformed BACKUP_GROUP_GID refuses here.
+	// Only a daily (`20*`, what the cron mirrors) gets the group mode; a backup
+	// made for one operation (`pre-*`, …) stays root-only (owner, 2026-11-10).
+	const configured = backupPerms();
+	const perms = permsForBackup(outDir, configured);
+	// The parent (normally `.backups`) is secured only when this run creates
+	// it; an existing one is the operator's (hardenBackups brings it in line).
+	const parent = path.dirname(path.resolve(outDir));
+	const parentExisted = await fs.lstat(parent).then(
+		() => true,
+		() => false,
+	);
 	await fs.mkdir(outDir, { recursive: true });
 	if ((await fs.readdir(outDir)).length > 0) {
 		throw new Error(`backup dir ${outDir} is not empty — refusing to mix with an existing backup`);
 	}
+	// An outDir (or a parent this run created) owned by someone else could be
+	// opened back up by that owner once the backup is in it.
+	const me = process.getuid?.() ?? 0;
+	for (const d of parentExisted ? [outDir] : [outDir, parent]) {
+		if ((await fs.lstat(d)).uid !== me) {
+			throw new Error(`backup dir ${d} is not owned by uid ${me} — refusing`);
+		}
+	}
+	// The parent is `.backups`, the dailies' container, so it gets the
+	// configured mode whatever this backup's own name: a first `pre-*` backup
+	// on a fresh host must not leave it 0700 and lock the mirror out of every
+	// later daily (hardenBackups puts it in the daily class too).
+	if (!parentExisted) await secure(parent, "dir", configured);
+	// The signature of a copy that relied on world-readable backups: the
+	// parent is open to others while this run writes root-only output. Loud,
+	// because that copy now fails on every new backup (#562).
+	if (configured.gid === null && parentExisted && ((await fs.lstat(parent)).mode & 0o005) !== 0) {
+		logger.warn(
+			`[backup] ${parent} is readable by others but BACKUP_GROUP_GID is unset: this backup is ` +
+				"root-only (0700/0600). A non-root off-host copy can no longer read it — set " +
+				"BACKUP_GROUP_GID (docs/DEPLOYMENT.md, Backup & restore) or run the copy as root",
+		);
+	}
+	// The backup dir is closed BEFORE anything is written into it: a file
+	// created with the umask (tar, copyFile) is never reachable through it.
+	await secure(outDir, "dir", perms);
 	await fs.mkdir(path.join(outDir, "workspaces"));
+	await secure(path.join(outDir, "workspaces"), "dir", perms);
 
 	const versionRow = await d1Query<{ v: number | null }>(
 		"SELECT MAX(version) AS v FROM schema_migrations",
@@ -161,7 +207,9 @@ export async function runBackup(outDir: string): Promise<BackupManifest> {
 			`SELECT * FROM ${t.name} ORDER BY ${t.orderBy}`,
 		);
 		const lines = rows.results.map((r) => JSON.stringify(r)).join("\n");
-		await fs.writeFile(path.join(outDir, `${t.name}.jsonl`), lines === "" ? "" : `${lines}\n`);
+		const jsonl = path.join(outDir, `${t.name}.jsonl`);
+		await fs.writeFile(jsonl, lines === "" ? "" : `${lines}\n`, { mode: perms.fileMode });
+		await secure(jsonl, "file", perms);
 		manifest.tables[t.name] = rows.results.length;
 		logger.info(`[backup] ${t.name}: ${rows.results.length} row(s)`);
 	}
@@ -196,6 +244,7 @@ export async function runBackup(outDir: string): Promise<BackupManifest> {
 		if (members.length === 0) continue;
 		const tarPath = path.join(outDir, "workspaces", `${session_id}.tar.gz`);
 		const changes = await createTarball(tarPath, members);
+		await secure(tarPath, "file", perms);
 		// Structural check of what was just written: gzip CRC + every tar
 		// header, end to end. The listing is also the manifest's count.
 		const fileCount = (await verifyTarball(tarPath)).length;
@@ -219,6 +268,7 @@ export async function runBackup(outDir: string): Promise<BackupManifest> {
 	// The global emergency cut is not inside any session's tarball.
 	try {
 		await fs.copyFile(revokedAllPath(WORKSPACE_ROOT), path.join(outDir, REVOKED_ALL_FILE));
+		await secure(path.join(outDir, REVOKED_ALL_FILE), "file", perms);
 		manifest.globalRevocation = true;
 		logger.warn("[backup] global conversation revocation (REVOKED_ALL) is in effect — carried");
 	} catch (err) {
@@ -230,7 +280,9 @@ export async function runBackup(outDir: string): Promise<BackupManifest> {
 	await fs.writeFile(
 		path.join(outDir, "manifest.json"),
 		`${JSON.stringify(manifest, null, "\t")}\n`,
+		{ mode: perms.fileMode },
 	);
+	await secure(path.join(outDir, "manifest.json"), "file", perms);
 	logger.info(`[backup] complete → ${outDir}`);
 	return manifest;
 }
@@ -818,7 +870,8 @@ async function publishNoClobber(file: string, bytes: string): Promise<boolean> {
 if (typeof require !== "undefined" && require.main === module) {
 	const [mode, dir, ...rest] = process.argv.slice(2);
 	const force = rest.includes("--force");
-	const usage = "usage: node dist/backup.js backup [outDir] | restore <inDir> [--force]";
+	const usage =
+		"usage: node dist/backup.js backup [outDir] | restore <inDir> [--force] | harden [backupsDir] [--write]";
 	const run = async (): Promise<void> => {
 		if (mode === "backup") {
 			const out =
@@ -828,6 +881,45 @@ if (typeof require !== "undefined" && require.main === module) {
 		} else if (mode === "restore") {
 			if (!dir) throw new Error(usage);
 			await runRestore(dir, { force });
+		} else if (mode === "harden") {
+			// #562 — existing backups. Dry run unless --write; at most one dir.
+			const parsed = parseHardenArgs(process.argv.slice(3), path.join(WORKSPACE_ROOT, ".backups"));
+			if (!parsed) throw new Error(usage);
+			const { root, write } = parsed;
+			const perms = backupPerms();
+			const r = await hardenBackups(root, perms, { write });
+			for (const cls of ["daily", "private"] as const) {
+				const list = r.changes.filter((c) => c.class === cls);
+				console.log(
+					cls === "daily"
+						? `── daily (.backups and 20*): ${list.length} — mode ∩ ${perms.gid === null ? "0700/0600" : `0750/0640, group ${perms.gid}`}`
+						: `── private (pre-*, st-control-*, …): ${list.length} — mode ∩ 0700/0600, group unchanged`,
+				);
+				for (const c of list) {
+					console.log(
+						`${write ? "changed" : "would change"} ${c.kind} ${c.path}: ` +
+							`${c.from.mode.toString(8)}:${c.from.gid} → ${c.to.mode.toString(8)}:${c.to.gid}`,
+					);
+				}
+			}
+			for (const k of r.skipped) console.log(`skipped ${k.path} (${k.reason})`);
+			for (const g of r.groupUnreadable) {
+				console.log(
+					`group can't read ${g} (harden never widens — open it by hand if the mirror needs it)`,
+				);
+			}
+			console.log(
+				`${r.changes.length} entr${r.changes.length === 1 ? "y" : "ies"} ${write ? "changed" : "to change (dry run; --write applies)"}, ${r.skipped.length} skipped, ${r.groupUnreadable.length} unreadable by the group`,
+			);
+			if (r.groupUnreadable.length > 0) process.exitCode = 2;
+			// Skipped entries keep their old (possibly world-readable) modes: say so
+			// on the last line and in the exit code, not only in the listing.
+			if (r.skipped.length > 0) {
+				console.log(
+					`${r.skipped.length} entr${r.skipped.length === 1 ? "y" : "ies"} NOT hardened — handle them by hand`,
+				);
+				process.exitCode = 2;
+			}
 		} else {
 			throw new Error(usage);
 		}

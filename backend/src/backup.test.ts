@@ -34,6 +34,8 @@ const dbState = vi.hoisted(() => ({
 	schemaVersion: 12,
 	selected: [] as string[],
 	missingTables: new Set<string>(),
+	/** Runs before the first query of a backup (the schema read): lets a test look at the disk then. */
+	onSchemaRead: null as null | (() => Promise<void>),
 }));
 
 vi.mock("./db.js", () => ({
@@ -41,6 +43,7 @@ vi.mock("./db.js", () => ({
 	d1Query: vi.fn(async (sql: string, params?: unknown[]) => {
 		const ok = { success: true as const, meta: { changes: 1, duration: 0, last_row_id: 0 } };
 		if (sql.startsWith("SELECT MAX(version)")) {
+			if (dbState.onSchemaRead) await dbState.onSchemaRead();
 			return { ...ok, results: [{ v: dbState.schemaVersion }] };
 		}
 		const selectMatch = /^SELECT \* FROM (\w+) ORDER BY/.exec(sql);
@@ -116,6 +119,7 @@ beforeEach(async () => {
 	dbState.schemaVersion = 12;
 	dbState.selected.length = 0;
 	dbState.missingTables.clear();
+	dbState.onSchemaRead = null;
 	outDir = mkdtempSync(path.join(os.tmpdir(), "st-backup-out-"));
 	// runBackup requires an EMPTY dir; mkdtemp gives us one, but it must
 	// not pre-create workspaces/ — runBackup does that itself.
@@ -194,6 +198,172 @@ describe("runBackup", () => {
 		await fs.mkdir(outDir, { recursive: true });
 		await fs.writeFile(path.join(outDir, "junk"), "x");
 		await expect(runBackup(outDir)).rejects.toThrow(/not empty/);
+	});
+});
+
+describe("backup permissions (#562)", () => {
+	afterEach(() => {
+		vi.unstubAllEnvs();
+	});
+	async function entries(
+		dir: string,
+	): Promise<Array<{ p: string; dir: boolean; mode: number; gid: number }>> {
+		const out: Array<{ p: string; dir: boolean; mode: number; gid: number }> = [];
+		const walk = async (p: string) => {
+			const st = await fs.lstat(p);
+			out.push({
+				p: path.relative(dir, p) || ".",
+				dir: st.isDirectory(),
+				mode: st.mode & 0o7777,
+				gid: st.gid,
+			});
+			if (st.isDirectory()) for (const n of await fs.readdir(p)) await walk(path.join(p, n));
+		};
+		await walk(dir);
+		return out;
+	}
+	async function fullBackup(dir = outDir): Promise<void> {
+		dbState.tables.set("users", [{ id: "u1", username: "diego" }]);
+		dbState.tables.set("sessions", [{ session_id: "s1", user_id: "u1", status: "stopped" }]);
+		await seedWorkspace("s1", { "s1/hello.txt": "hola" });
+		await runBackup(dir);
+	}
+	// The group mode is for dailies only: the name the cron rotates and mirrors.
+	const daily = () => path.join(outDir, "2026-11-10T08-17-01-903Z");
+	const supplementaryGid = () => {
+		const primary = process.getgid?.() ?? 0;
+		return (process.getgroups?.() ?? []).find((g) => g !== primary) ?? primary;
+	};
+
+	it("without BACKUP_GROUP_GID every entry is 0700/0600: nothing for group or others", async () => {
+		vi.stubEnv("BACKUP_GROUP_GID", "");
+		await fullBackup();
+		const all = await entries(outDir);
+		expect(all.some((e) => e.p.endsWith(".tar.gz"))).toBe(true);
+		expect(all.some((e) => e.p === "manifest.json")).toBe(true);
+		for (const e of all) expect([e.p, e.mode]).toEqual([e.p, e.dir ? 0o700 : 0o600]);
+	});
+
+	it("with BACKUP_GROUP_GID every entry of a daily is 0750/0640 in that group", async () => {
+		// A supplementary group when the runner has one (CI does), so a missing
+		// chown shows; and a 077 umask, under which every create lands at
+		// 0700/0600, so a missing chmod shows on every single entry.
+		const gid = supplementaryGid();
+		vi.stubEnv("BACKUP_GROUP_GID", String(gid));
+		const prev = process.umask(0o077);
+		try {
+			await fullBackup(daily());
+		} finally {
+			process.umask(prev);
+		}
+		for (const e of await entries(daily())) {
+			expect([e.p, e.mode, e.gid]).toEqual([e.p, e.dir ? 0o750 : 0o640, gid]);
+		}
+	});
+
+	it("with BACKUP_GROUP_GID a backup that is not a daily (pre-*) stays 0700/0600, group untouched", async () => {
+		const gid = supplementaryGid();
+		vi.stubEnv("BACKUP_GROUP_GID", String(gid));
+		const pre = path.join(outDir, "pre-2a676db-20261110T150000Z");
+		const prev = process.umask(0o022);
+		try {
+			await fullBackup(pre);
+		} finally {
+			process.umask(prev);
+		}
+		const primary = process.getgid?.() ?? 0;
+		for (const e of await entries(pre)) {
+			expect([e.p, e.mode]).toEqual([e.p, e.dir ? 0o700 : 0o600]);
+			if (gid !== primary) expect([e.p, e.gid]).not.toEqual([e.p, gid]);
+		}
+	});
+
+	it("a first pre-* backup that creates .backups gives it the group mode, not root-only", async () => {
+		const gid = supplementaryGid();
+		vi.stubEnv("BACKUP_GROUP_GID", String(gid));
+		const parent = path.join(outDir, ".backups");
+		await fullBackup(path.join(parent, "pre-abc"));
+		const st = await fs.lstat(parent);
+		expect([st.mode & 0o7777, st.gid]).toEqual([0o750, gid]);
+		expect((await fs.lstat(path.join(parent, "pre-abc"))).mode & 0o7777).toBe(0o700);
+	});
+
+	it("a malformed BACKUP_GROUP_GID refuses before anything is created", async () => {
+		vi.stubEnv("BACKUP_GROUP_GID", "backup");
+		await expect(runBackup(outDir)).rejects.toThrow(/numeric group id/);
+		await expect(fs.access(outDir)).rejects.toThrow();
+		expect(dbState.selected).toHaveLength(0);
+	});
+
+	it("secures the parent it creates, and leaves an existing parent alone", async () => {
+		vi.stubEnv("BACKUP_GROUP_GID", "");
+		const parent = path.join(outDir, ".backups");
+		await runBackup(path.join(parent, "a"));
+		expect((await fs.lstat(parent)).mode & 0o7777).toBe(0o700);
+		await fs.chmod(parent, 0o755);
+		await runBackup(path.join(parent, "b"));
+		expect((await fs.lstat(parent)).mode & 0o7777).toBe(0o755);
+		expect((await fs.lstat(path.join(parent, "b"))).mode & 0o7777).toBe(0o700);
+	});
+
+	it("the backup dir is closed before anything is written into it", async () => {
+		vi.stubEnv("BACKUP_GROUP_GID", "");
+		let seen: { mode: number; entries: string[] } | null = null;
+		dbState.onSchemaRead = async () => {
+			seen ??= {
+				mode: (await fs.lstat(outDir)).mode & 0o7777,
+				entries: (await fs.readdir(outDir)).sort(),
+			};
+		};
+		await fullBackup();
+		expect(seen).toEqual({ mode: 0o700, entries: ["workspaces"] });
+	});
+
+	it("refuses an outDir owned by someone else", async () => {
+		vi.stubEnv("BACKUP_GROUP_GID", "");
+		await fs.mkdir(outDir);
+		const me = process.getuid?.() ?? 0;
+		const spy = vi.spyOn(process, "getuid").mockReturnValue(me + 1);
+		try {
+			await expect(runBackup(outDir)).rejects.toThrow(/not owned by uid/);
+		} finally {
+			spy.mockRestore();
+		}
+		expect(await fs.readdir(outDir)).toEqual([]);
+	});
+
+	it("warns when the parent is open to others but the output is root-only", async () => {
+		const parent = path.join(outDir, ".backups");
+		await fs.mkdir(parent, { recursive: true });
+		await fs.chmod(parent, 0o755);
+		const warn = vi.spyOn(logger, "warn");
+		try {
+			vi.stubEnv("BACKUP_GROUP_GID", "");
+			await runBackup(path.join(parent, "a"));
+			expect(
+				warn.mock.calls.some((c) =>
+					/readable by others but BACKUP_GROUP_GID is unset/.test(String(c[0])),
+				),
+			).toBe(true);
+			warn.mockClear();
+			vi.stubEnv("BACKUP_GROUP_GID", String(process.getgid?.() ?? 0));
+			await runBackup(path.join(parent, "b"));
+			expect(warn.mock.calls.some((c) => /BACKUP_GROUP_GID is unset/.test(String(c[0])))).toBe(
+				false,
+			);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it("a secured backup restores as before", async () => {
+		vi.stubEnv("BACKUP_GROUP_GID", "");
+		await fullBackup();
+		dbState.tables.clear();
+		await fs.rm(path.join(WORKSPACE_ROOT, "s1"), { recursive: true });
+		await runRestore(outDir);
+		expect(dbState.inserts.some((i) => /INTO users /.test(i.sql))).toBe(true);
+		expect(await fs.readFile(path.join(WORKSPACE_ROOT, "s1", "hello.txt"), "utf-8")).toBe("hola");
 	});
 });
 

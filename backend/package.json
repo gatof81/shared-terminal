@@ -23,6 +23,7 @@
     "composer:resolve": "node dist/conversation/composerCli.js",
     "recreate:admin": "node dist/recreate/adminCli.js",
     "restore": "node dist/backup.js restore",
+    "backup:harden": "node dist/backup.js harden",
     "docker:build-session": "../scripts/build-session-image.sh"
   },
   "dependencies": {
