@@ -1,6 +1,6 @@
 # Projects & Agents: first pilot plan (proposal)
 
-Status: **proposal, 2026-11-10. Nothing here is authorized.** Each window below needs its own owner GO.
+Status: **approved by the owner (2026-11-10): D1–D5 as proposed; B's review LGTM with two adjustments, both applied below.** The activation window runs under the owner's conditional GO, after R1.
 Owner of the plan: Claude A (frontend, QA, deploy). Backend contract: [docs/PROJECTS.md](../PROJECTS.md) (Claude B).
 
 ## Goal
@@ -17,7 +17,7 @@ Use Projects & Agents for real, on **new pilot sessions only**, to learn whether
 | D1 directory (migration v19) | deployed with `2a676db` (2026-11-10); the four tables are empty |
 | API `/api/projects/*`, `binding` on `/api/sessions`, `features.projectChat` | in the deployed backend, **not mounted**: `PROJECT_CHAT_ENABLED` is off |
 | Frontend (#559, #563–#565, #569, #573) | on Pages; hidden until `features.projectChat` |
-| Presence freshness fix (#568 → #572, contract v1.9.1) | merged as `c36078e`; **not deployed yet** (release R1) |
+| Presence freshness fix (#568 → #572, contract v1.9.1) | `c36078e` **deployed 2026-11-10 (R1, PASS)** |
 
 ## Preconditions (all required before the activation window)
 1. **R1 deployed and verified** (`c36078e`): without it, a silence probe can make an old "Working" look fresh. This was reproduced on production on 2026-11-10.
@@ -39,7 +39,11 @@ Same mechanics as the previous releases: a script set with gates, a rollback tag
 
 1. **Preflight** (read only): the image is R1's; the four P3a tables are empty; `PROJECT_CHAT_ENABLED` and `CONVERSATION_ALLOW_USERS` are absent from `.env`; no session is bound.
 2. **Backup** `pre-pilot-*` (private) and its NAS copy, verified.
-3. **`.env`:** add exactly `PROJECT_CHAT_ENABLED=true` and `CONVERSATION_ALLOW_USERS=<owner id>`. Check the diff (two lines) and `docker compose config`.
+3. **`.env`:** the owner's three variables:
+   - `PROJECT_CHAT_ENABLED=true` and `CONVERSATION_ALLOW_USERS=<owner id>` are **added**; the diff must be exactly those two lines, and `docker compose config` shows both.
+   - `COMPOSER_CLI_MIN_VERSION=2.1.314` is **already present** (verified 2026-11-10: exact line in `.env`, active in the container and in the composer policy: *min 2.1.314, open: any later stable release*). It stays as it is; it is not added twice.
+   - Every other flag is unchanged.
+   - `CONVERSATION_ALLOW_USERS` stays after the pilot (owner's decision).
 4. **Restart:** `up -d --no-deps --no-build --force-recreate -t 30 app` (only `app`).
 5. **Verify:**
    - `/api/auth/status` has `features.projectChat: true`;
@@ -65,7 +69,7 @@ Same mechanics as the previous releases: a script set with gates, a rollback tag
 | # | Scenario | Pass when |
 |---|---|---|
 | S1 | Navigation, desktop and phone (v1 and v2) | project → agent → Chat/Terminal in one tap; Back returns to the agent; `@handle · Pilot` in the session bar (desktop); no terminal resize on a view change |
-| S2 | Presence honesty | "Working" only while a prompt runs (fresh hook evidence); "Ready" after the turn; after > 10 min idle, "No recent activity" (probes don't refresh it); a permission prompt shows "Needs you"; a probe never produces "Needs you" |
+| S2 | Presence honesty | "Working" only while a prompt runs (fresh hook evidence); **a probe without real activity never keeps "Working"** (an old running claim ages out: "No recent activity"/unknown). A Claude at its prompt confirmed by valid probes (`probe:idle`, verified identity) **stays "Ready" even past 10 min**: `lastEventAt` ages, while the verifying probe keeps the state's evidence fresh. A permission prompt shows "Needs you"; a probe alone never produces "Needs you" (B's review, owner, 2026-11-10) |
 | S3 | Stopped session | stopping `pilot-qa` shows "Disconnected · session stopped" and a **Start session** button; it never starts by itself |
 | S4 | Composer from the agent's Chat | a message reaches the CLI; delivery states shown; Chat and Projects agree on "Needs you" |
 | S5 | Directory operations | a double-clicked create makes one agent (idempotency); removing an agent retires its binding, keeps the session and the history, and reserves the handle |
