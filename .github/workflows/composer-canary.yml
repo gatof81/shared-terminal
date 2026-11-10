@@ -3,8 +3,8 @@ name: Composer CLI canary
 # Early warning for a new Claude Code release (CONVERSATION.md §8.1.9, v1.8.3).
 #
 # Sessions update their CLI on their own (the native installer moved
-# Educación HZ to 2.1.317 on 2026-11-04). With COMPOSER_CLI_MIN_VERSION set,
-# such a release — patch, minor or major — is ADMITTED without anyone having
+# Educación HZ to 2.1.317 on 2026-11-04). By default (COMPOSER_CLI_MIN_VERSION
+# open, v1.9.2) such a release — patch, minor or major — is ADMITTED without anyone having
 # run §8.2.6 against it. This job runs that revalidation (the composer smoke
 # in both install layouts, plus the conversation smoke) against the newest
 # published releases (the three newest plain X.Y.Z, so a release that was
@@ -121,7 +121,7 @@ jobs:
           if [ "$OUTCOME" = "success" ]; then
             echo "PASS for $CLI — nothing to do (new stable releases are admitted by default)." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "FAIL for $CLI — see the issue opened by this run; exclude it with COMPOSER_CLI_DENY." >> "$GITHUB_STEP_SUMMARY"
+            echo "FAIL for $CLI — see the issue opened by this run; exclude it with COMPOSER_CLI_DENY (and RECREATE_CLI_DENY if the conversation smoke failed)." >> "$GITHUB_STEP_SUMMARY"
             mkdir -p failed && echo "$CLI" > "failed/$CLI"
           fi
 
@@ -168,7 +168,7 @@ jobs:
 
           **Exclusion procedure (operator):**
           1. Read the failing step of the run above; decide whether the failure is the CLI's or the environment's.
-          2. If the CLI's: on the backend host add \`$CLI\` to \`COMPOSER_CLI_DENY\` in \`.env\` (comma-separated, plain X.Y.Z).
+          2. If the CLI's: on the backend host add \`$CLI\` to \`COMPOSER_CLI_DENY\` in \`.env\` (comma-separated, plain X.Y.Z). If the failing step is the **conversation smoke** (its phase 11d validates \`/etc/st-control\`), add it to \`RECREATE_CLI_DENY\` too, so no recreation creates a container on it.
           3. \`docker compose up -d --no-build app\` (restart only; the backend refuses to start on a malformed list).
           4. Check the log line \`[server] composer CLI policy: …\` lists \`deny $CLI\`, and that a send on such a session answers 409 \`cli-unvalidated\` / \`denied\`.
           5. Keep this issue open while the version is denied; close it only after a green run (\`workflow_dispatch\`, cli=$CLI) and the DENY entry removed.

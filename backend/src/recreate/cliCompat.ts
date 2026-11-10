@@ -110,14 +110,15 @@ export function decideRecreateCli(
 	const v = parseVersion(version);
 	if (!v) return { ok: false, detail: `not-a-stable-release:${version.slice(0, 64)}` };
 	if (policy.deny.has(version)) return { ok: false, detail: `denied:${version}` };
-	if (CONTROL_MARKER_VALIDATED_CLI.has(version)) return { ok: true, by: "validated" };
-	if (policy.min !== null && compare(v, parseVersion(policy.min) as Semver) >= 0) {
-		return { ok: true, by: "min" };
+	// A floor is a floor: raising it retires the validated versions below it too.
+	if (policy.min !== null) {
+		return compare(v, parseVersion(policy.min) as Semver) >= 0
+			? { ok: true, by: CONTROL_MARKER_VALIDATED_CLI.has(version) ? "validated" : "min" }
+			: { ok: false, detail: `below-min:${version}` };
 	}
-	return {
-		ok: false,
-		detail: policy.min === null ? `not-validated:${version}` : `below-min:${version}`,
-	};
+	return CONTROL_MARKER_VALIDATED_CLI.has(version)
+		? { ok: true, by: "validated" }
+		: { ok: false, detail: `not-validated:${version}` };
 }
 
 /** NPM_CONFIG_PREFIX=/home/developer/.npm-global, seen from the host. */

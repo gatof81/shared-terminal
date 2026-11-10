@@ -448,6 +448,8 @@ sessions whose capture is effective — a send is confirmed by the CLI's own
 | `CONVERSATION_COMPOSER_ENABLED` | unset (`false`) | Mounts `POST /api/sessions/:id/conversations/:cid/messages` and the admin routes `POST /api/admin/sessions/:id/composer/resolve`, `GET /api/admin/sessions/:id/composer/panes`; `canSendInput` becomes true for interactive conversations with a pane, effective capture and no blocking operation. |
 | `COMPOSER_CLI_VERSIONS` | `2.1.314` | Comma-separated Claude Code versions the §8.2.6 revalidation was run with. A conversation whose CLI (the process in the pane) is another version gets 409 `cli-unvalidated`. Adding a version means running `backend/src/conversation/composer.smoke.ts` against it: the Session Image workflow's `cli-variants` job does so for 2.1.314 and 2.1.316 on every change, so `COMPOSER_CLI_VERSIONS=2.1.314,2.1.316` is the value for the existing sessions (their workspace CLI is 2.1.316). Since v1.8.2 the version is asked of the pane's Claude process itself (`/proc/<pid>/exe --version`, as its uid, empty env, auto-updater off, starttime checked before and after), never of PATH's `claude` nor of the SessionStart hook's text; when it cannot be established the send is refused (`detail: unverifiable:<reason>`). |
 | `COMPOSER_CLI_MIN_VERSION` | unset = the lowest of `COMPOSER_CLI_VERSIONS` | **Open policy, on by default** (owner, 2026-11-10; CONVERSATION.md v1.9.2): also admit ANY later stable Claude Code release — patch, minor or major, no ceiling. When set, it must be a version listed in `COMPOSER_CLI_VERSIONS`; `off` = the exact list only (the previous behaviour); anything else refuses to start. A broken release goes in `COMPOSER_CLI_DENY` (the daily canary reports it). Judged on the pane's live process (never PATH's `claude` or the hook's text). **Risk:** those releases were never revalidated (§8.2.6); a change in the CLI's terminal behaviour can misdeliver a send in ways the dynamic checks cannot see (CONVERSATION.md §8.1.9). Startup logs a warning while it is set. |
+| `RECREATE_CLI_MIN_VERSION` | unset = 2.1.308 | The floor for the workspace CLI a recreated container runs (CONVERSATION.md §2.7.7, v1.9.2): any plain stable release at or above it passes, validated or not; below it (validated or not), unreadable or pre-release ⇒ `control-marker-incompatible` with a `detail`. When set it must be a validated version (2.1.308, 2.1.314, 2.1.316); `off` = the validated set only (the previous rule). Malformed ⇒ refuses to start. |
+| `RECREATE_CLI_DENY` | unset | Exact versions that block a recreation whatever the floor says (`detail: denied:X`) — e.g. a release whose `/etc/st-control` handling the canary's conversation smoke found broken. |
 | `COMPOSER_CLI_DENY` | unset | Exact versions refused whatever the list or the minimum say (`detail: denied`). Deny always wins. The daily **Composer CLI canary** workflow runs §8.2.6 against the three newest plain releases (older intermediates are not tested: dispatch it with `cli=<version>` for any version a session log shows) and opens, reopens or comments on one issue per failed version (from a separate job; the job running the CLI has a read-only token) with the procedure: add the version here, `docker compose up -d --no-build app`, check the `[server] composer CLI policy:` line. It never changes production itself, and it is not a prior guarantee. |
 
 Operator surface (`CONVERSATION.md` §8.1.11). A pane whose last send has a
@@ -543,14 +545,14 @@ requested for it; the Claude Code version running in its pane is in
    `kind: interactive`, a `paneId` and a `claudeVersion` whose `X.Y.Z` is in
    the allowlist (the field is the hook's raw `claude --version` text, e.g.
    `2.1.314 (Claude Code)`); `claude --version` in the pane matches.
-   (`canSendInput` is still `false` here: the flag is off.) **Pin the CLI
-   before starting it**: the session image's `claude` auto-updates itself on
-   launch into the session's own npm prefix (the 2026-10-31 pilot went from
-   2.1.314 to 2.1.316 on its first start), so in the pilot pane install the
-   validated version and disable the updater for that process:
-   `npm install -g @anthropic-ai/claude-code@2.1.314 && DISABLE_AUTOUPDATER=1 claude`.
-   A pane on another version is refused with 409 `cli-unvalidated` until that
-   version passes the §8.2.6 smoke and is added to `COMPOSER_CLI_VERSIONS`.
+   (`canSendInput` is still `false` here: the flag is off.) **No pinning
+   needed** (owner, 2026-11-10; CONVERSATION.md v1.9.2): the session's CLI
+   may auto-update, and any stable release at or above
+   `COMPOSER_CLI_MIN_VERSION` (by default the lowest of
+   `COMPOSER_CLI_VERSIONS`) is accepted unless it is in `COMPOSER_CLI_DENY`.
+   Never downgrade a session's CLI to make the composer accept it. Only with
+   `COMPOSER_CLI_MIN_VERSION=off` is a pane on an unlisted version refused
+   with 409 `cli-unvalidated`.
 3. **Turn the flag on** for the backend only (`CONVERSATION_COMPOSER_ENABLED=true`
    in `.env`, `docker compose up -d app`); the boot log prints
    `composer ENABLED (CLI versions: …)`. Only now do the composer routes
@@ -861,12 +863,10 @@ unreadable version or a pre-release does, with `control-marker-incompatible`
 and its `detail`. `RECREATE_CLI_MIN_VERSION=off` restores the old rule (only
 2.1.308, 2.1.314 and 2.1.316, which the Session Image workflow's
 `cli-variants` job keeps re-validating). For every session you recreate:
-- never run `claude update` beforehand;
-- prefer `DISABLE_AUTOUPDATER=1` among its env vars (the session-image smoke
-  checks that the pinned CLI knows the variable; that no update then happens
-  is only observable over time, so compare `claude --version` before and
-  after);
-- check `claude --version` again right before the `POST`.
+- no pinning and no downgrade: a CLI that updated itself is fine;
+- check `claude --version` right before the `POST` and compare it with the
+  preflight (the version is read again under the lock), so the log records
+  which CLI N runs.
 
 **The endpoint (3.0d, [CONVERSATION.md §2.7](./CONVERSATION.md#27-recreación-administrativa-y-activación-30d))**, admin only:
 

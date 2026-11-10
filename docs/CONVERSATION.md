@@ -1055,13 +1055,16 @@ ubicación. No hay respaldo silencioso. La validación pasó con 2.1.308; hoy la
 se comprueba en la recreación (allowlist, abajo). Aplicarla también a `PATCH {enabled:true}` es una
 decisión pendiente del responsable (#466) y no forma parte de este contrato.
 
-No se supone compatibilidad universal: `N` ejecuta el CLI del `.npm-global` del workspace, que
-puede no ser el de la imagen. La recreación lee su versión en el host, sin seguir symlinks, y
-solo acepta una versión con la que esta validación se haya hecho (hoy, 2.1.308). Cualquier otra,
-o una ilegible, responde `control-marker-incompatible` en el preflight y en el POST, sin efectos.
+`N` ejecuta el CLI del `.npm-global` del workspace, que puede no ser el de la imagen. La recreación
+lee su versión en el host, sin seguir symlinks. **Desde v1.9.2** (decisión del responsable,
+2026-11-10) la acepta si es una release estable plana ≥ `RECREATE_CLI_MIN_VERSION` y no está en
+`RECREATE_CLI_DENY` (regla completa en §2.7.7, viñeta «CLI»); una ilegible o una prerelease responden
+`control-marker-incompatible` en el preflight y en el POST, sin efectos. El texto que sigue era la
+regla anterior, **reemplazada por v1.9.2** (se conserva como historial; `RECREATE_CLI_MIN_VERSION=off`
+la restaura): solo una versión con la que esta validación se hubiera hecho.
 
-- **Decisión del responsable (2026-10-27): allowlist exacta {2.1.308} aprobada, solo para el
-  piloto descartable.** Límites:
+- **Decisión del responsable (2026-10-27), reemplazada por v1.9.2: allowlist exacta {2.1.308}
+  aprobada, solo para el piloto descartable.** Límites (de entonces):
   - cualquier versión de Claude Code no validada bloquea la recreación, también una posterior y
     compatible; ampliar la lista exige repetir la validación de arriba con esa versión y una
     revisión del cambio;
