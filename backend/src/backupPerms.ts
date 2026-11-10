@@ -169,16 +169,18 @@ export async function hardenBackups(
 	const trusted = (st: { uid: number; mode: number; dev: number }) =>
 		st.uid === me && (st.mode & 0o022) === 0 && st.dev === rootSt.dev;
 	// The classes are decided by the names directly under `.backups`: pointed at
-	// one backup, the walk would take its contents for top-level entries and
-	// narrow a daily's files as private (breaking the mirror without a report).
+	// one backup, the walk would take its contents for top-level entries —
+	// narrowing a daily's files as private (breaking the mirror without a
+	// report) or putting a private dump's own dir in the group. So the root
+	// must be a `.backups` directory, and not a backup itself.
 	if (
-		isDailyName(path.basename(path.resolve(root))) ||
+		path.basename(path.resolve(root)) !== ".backups" ||
 		(await fs.lstat(path.join(root, "manifest.json")).then(
 			() => true,
 			() => false,
 		))
 	) {
-		throw new Error(`${root} is one backup, not the backups directory — point harden at .backups`);
+		throw new Error(`harden runs on a .backups directory, not on ${root} — refusing`);
 	}
 	if (!trusted(rootSt)) {
 		throw new Error(

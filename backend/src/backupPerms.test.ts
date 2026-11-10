@@ -9,11 +9,13 @@ const gid = process.getgid?.() ?? 0;
 let root: string;
 const mode = async (p: string) => (await fs.lstat(p)).mode & 0o7777;
 
-beforeEach(() => {
-	root = mkdtempSync(path.join(os.tmpdir(), "st-backup-perms-"));
+// harden only runs on a dir named `.backups`, so the fixture is one.
+beforeEach(async () => {
+	root = path.join(mkdtempSync(path.join(os.tmpdir(), "st-backup-perms-")), ".backups");
+	await fs.mkdir(root, { mode: 0o700 });
 });
 afterEach(async () => {
-	await fs.rm(root, { recursive: true, force: true });
+	await fs.rm(path.dirname(root), { recursive: true, force: true });
 });
 
 describe("backupPerms", () => {
@@ -244,14 +246,20 @@ describe("hardenBackups (existing backups)", () => {
 		}
 	});
 
-	it("refuses a root that is one backup (a 20* name or a manifest.json in it)", async () => {
+	it("refuses any root but a .backups directory, and a .backups that is itself a backup", async () => {
 		await legacyTree();
-		await expect(
-			hardenBackups(path.join(root, "2026-11-01"), backupPerms({}), { write: false }),
-		).rejects.toThrow(/one backup/);
-		await expect(
-			hardenBackups(path.join(root, "pre-abc"), backupPerms({}), { write: false }),
-		).rejects.toThrow(/one backup/);
+		await fs.mkdir(path.join(root, "st-control-x")); // no manifest: refused by name
+		for (const rel of ["2026-11-01", "pre-abc", "st-control-x"]) {
+			await expect(
+				hardenBackups(path.join(root, rel), backupPerms({}), { write: false }),
+			).rejects.toThrow(/runs on a \.backups directory/);
+		}
+		const nested = path.join(root, "pre-abc", ".backups");
+		await fs.mkdir(nested);
+		await fs.writeFile(path.join(nested, "manifest.json"), "{}");
+		await expect(hardenBackups(nested, backupPerms({}), { write: false })).rejects.toThrow(
+			/runs on a \.backups directory/,
+		);
 	});
 
 	it("refuses a root that is a symlink", async () => {

@@ -1218,9 +1218,10 @@ mirror has to go through it.
     someone made it stricter by hand) is listed as `group can't read …` and
     the command exits 2. Opening it is the operator's decision, by hand.
   - With `-- --write` it applies what the dry run listed.
-  - Point it at `.backups`, never at one backup: a root named `20*` or holding
-    a `manifest.json` is refused, because the classes come from the names
-    directly under `.backups`.
+  - It only runs on a directory named `.backups` that is not itself a backup
+    (no `manifest.json` in it): the classes come from the names directly under
+    `.backups`, so pointed at one backup it would classify that backup's own
+    files.
   - It never follows a symlink, and it refuses a root that is one, that is not
     owned by the user running it, or that others can write to.
   - It does not enter a directory that someone else owns, that others can
