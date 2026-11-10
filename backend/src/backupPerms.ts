@@ -13,9 +13,17 @@
  *     runs as a non-root user in that group (the nightly NAS mirror).
  * A numeric id, never a name: the container does not know the host's groups.
  *
- * `hardenBackups` brings EXISTING backups to the same modes. Dry run unless
- * asked to write; it never follows a symlink, and it only enters directories
- * nobody else can modify, so no path on the way can be swapped for a link.
+ * The group mode is for the DAILY backups only — the top-level `20*` dirs,
+ * the same glob the nightly cron rotates (KEEP) and mirrors. Every other
+ * backup (`pre-*`, `st-control-*`, `quarantine-*`, …) is made by hand for one
+ * operation, is not mirrored, and stays root-only whatever the variable says
+ * (owner, 2026-11-10).
+ *
+ * `hardenBackups` brings EXISTING backups in line, and only ever NARROWS: an
+ * entry ends at its current mode ∩ its class's mode, so nothing private is
+ * opened to the group (owner, 2026-11-10). Dry run unless asked to write; it
+ * never follows a symlink, and it only enters directories nobody else can
+ * modify, so no path on the way can be swapped for a link.
  */
 
 import { promises as fs, constants as fsc } from "node:fs";
@@ -30,9 +38,25 @@ export interface BackupPerms {
 
 const MAX_GID = 2_147_483_647;
 
+/** Root-only: what every non-daily backup gets. */
+export const PRIVATE_PERMS: Readonly<BackupPerms> = { dirMode: 0o700, fileMode: 0o600, gid: null };
+
+/**
+ * A daily backup's dir name: the cron's `20*` (its retention and its rsync
+ * filter use that glob), which `npm run backup`'s default ISO name matches.
+ */
+export function isDailyName(name: string): boolean {
+	return name.startsWith("20");
+}
+
+/** The perms a backup written to `outDir` gets: the group mode only for a daily. */
+export function permsForBackup(outDir: string, perms: BackupPerms): BackupPerms {
+	return isDailyName(path.basename(path.resolve(outDir))) ? perms : { ...PRIVATE_PERMS };
+}
+
 export function backupPerms(env: NodeJS.ProcessEnv = process.env): BackupPerms {
 	const raw = env.BACKUP_GROUP_GID?.trim();
-	if (!raw) return { dirMode: 0o700, fileMode: 0o600, gid: null };
+	if (!raw) return { ...PRIVATE_PERMS };
 	// Refuse rather than guess: a typo here would either lock the mirror out
 	// (backups silently stop leaving the host) or hand them to the wrong group.
 	if (!/^\d+$/.test(raw) || Number(raw) > MAX_GID) {
@@ -53,6 +77,8 @@ export async function secure(
 	perms: BackupPerms,
 	/** dev/ino seen by the caller's lstat: the opened entry must be that one. */
 	expected?: { dev: number; ino: number },
+	/** Never add a bit: the mode becomes current ∩ the perms' (hardenBackups). */
+	opts: { narrowOnly?: boolean } = {},
 ): Promise<void> {
 	let fh: fs.FileHandle;
 	try {
@@ -74,15 +100,22 @@ export async function secure(
 			);
 		}
 		if (perms.gid !== null && st.gid !== perms.gid) await fh.chown(st.uid, perms.gid);
-		await fh.chmod(kind === "dir" ? perms.dirMode : perms.fileMode);
+		const want = kind === "dir" ? perms.dirMode : perms.fileMode;
+		// The intersection is taken on the OPENED entry's mode, not the caller's
+		// earlier lstat: a mode changed in between is still only narrowed.
+		await fh.chmod(opts.narrowOnly ? st.mode & 0o7777 & want : want);
 	} finally {
 		await fh.close();
 	}
 }
 
+/** `daily`: the `.backups` root and the `20*` trees; `private`: everything else. */
+export type HardenClass = "daily" | "private";
+
 export interface HardenChange {
 	path: string;
 	kind: "dir" | "file";
+	class: HardenClass;
 	from: { mode: number; gid: number };
 	to: { mode: number; gid: number };
 }
@@ -91,19 +124,33 @@ export interface HardenReport {
 	changes: HardenChange[];
 	/** Symlinks and special files: reported, never followed or touched. */
 	skipped: Array<{ path: string; reason: string }>;
+	/**
+	 * With BACKUP_GROUP_GID: daily entries the group still cannot read after
+	 * the pass, because reaching it would ADD bits and harden never does. The
+	 * mirror running as that group fails on them; widening is a decision for
+	 * the operator, by hand.
+	 */
+	groupUnreadable: string[];
 	written: boolean;
 }
 
 /**
- * Walk `root` (the `.backups` dir) and bring every directory and regular file
- * under it — root included — to `perms`. `write: false` only reports.
+ * Walk `root` (the `.backups` dir) and narrow every directory and regular file
+ * under it — root included — to its class's mode: the root and the `20*`
+ * trees to `perms` (group mode when BACKUP_GROUP_GID is set), everything else
+ * to PRIVATE_PERMS with its group left as it is. `write: false` only reports.
  */
 export async function hardenBackups(
 	root: string,
 	perms: BackupPerms,
 	opts: { write: boolean },
 ): Promise<HardenReport> {
-	const report: HardenReport = { changes: [], skipped: [], written: opts.write };
+	const report: HardenReport = {
+		changes: [],
+		skipped: [],
+		groupUnreadable: [],
+		written: opts.write,
+	};
 	const rootSt = await fs.lstat(root);
 	if (rootSt.isSymbolicLink() || !rootSt.isDirectory()) {
 		throw new Error(`${root} is not a real directory — refusing`);
@@ -123,7 +170,7 @@ export async function hardenBackups(
 			`${root} must be owned by uid ${me} and writable by nobody else to be hardened — refusing`,
 		);
 	}
-	const visit = async (p: string): Promise<void> => {
+	const visit = async (p: string, cls: HardenClass): Promise<void> => {
 		const st = await fs.lstat(p);
 		let kind: "dir" | "file";
 		if (st.isDirectory()) kind = "dir";
@@ -142,19 +189,42 @@ export async function hardenBackups(
 			});
 			return;
 		}
-		const want = kind === "dir" ? perms.dirMode : perms.fileMode;
-		const gid = perms.gid ?? st.gid;
+		const target = cls === "daily" ? perms : PRIVATE_PERMS;
 		const mode = st.mode & 0o7777;
-		if (mode !== want || st.gid !== gid) {
-			report.changes.push({ path: p, kind, from: { mode, gid: st.gid }, to: { mode: want, gid } });
-			if (opts.write) await secure(p, kind, perms, { dev: st.dev, ino: st.ino });
+		const to = {
+			mode: mode & (kind === "dir" ? target.dirMode : target.fileMode),
+			gid: target.gid ?? st.gid,
+		};
+		if (mode !== to.mode || st.gid !== to.gid) {
+			report.changes.push({ path: p, kind, class: cls, from: { mode, gid: st.gid }, to });
+			if (opts.write) {
+				await secure(p, kind, target, { dev: st.dev, ino: st.ino }, { narrowOnly: true });
+			}
+		}
+		const groupNeeds = kind === "dir" ? 0o050 : 0o040;
+		if (cls === "daily" && perms.gid !== null && (to.mode & groupNeeds) !== groupNeeds) {
+			report.groupUnreadable.push(p);
 		}
 		if (kind === "dir") {
-			for (const name of (await fs.readdir(p)).sort()) await visit(path.join(p, name));
+			for (const name of (await fs.readdir(p)).sort()) {
+				const child = path.join(p, name);
+				// Below the root a tree keeps its class; at the top only a `20*`
+				// directory is a daily — a loose file there is private.
+				const childCls: HardenClass =
+					p !== root ? cls : isDailyName(name) && (await isDir(child)) ? "daily" : "private";
+				await visit(child, childCls);
+			}
 		}
 	};
-	await visit(root);
+	await visit(root, "daily");
 	return report;
+}
+
+async function isDir(p: string): Promise<boolean> {
+	return fs.lstat(p).then(
+		(st) => st.isDirectory(),
+		() => false,
+	);
 }
 
 /** `harden [dir] [--write]`: at most one directory, `--write` the only flag. */

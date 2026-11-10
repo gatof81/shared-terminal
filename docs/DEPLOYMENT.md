@@ -1164,6 +1164,13 @@ anything is written into it, and every directory and file is then given:
 | unset (default) | 0700 | 0600 | root only. The off-host copy must run as root |
 | a numeric GID | 0750 | 0640, group = that GID | root and that group, e.g. a dedicated `st-backup` group that the mirror's user belongs to |
 
+The group mode applies to **daily** backups only: a directory whose name
+starts with `20`, the glob the nightly cron rotates and mirrors (`npm run
+backup`'s default name is an ISO time, so it matches). A backup written
+anywhere else (`npm run backup -- /path/pre-<sha>`, `st-control-*`, …) is made
+for one operation, is not mirrored, and is always 0700/0600, whatever
+`BACKUP_GROUP_GID` says.
+
 A malformed value refuses the backup before anything is written.
 `<WORKSPACE_ROOT>/.backups` itself is set only when the backup creates it.
 
@@ -1173,23 +1180,41 @@ A malformed value refuses the backup before anything is written.
      (`BACKUP_GROUP_GID` unset) is enough; go to step 4.
   2. On the host, create a dedicated group and add the copy's user to it
      (`groupadd st-backup`; `usermod -aG st-backup <user>`). Note the
-     numeric GID (`getent group st-backup`).
+     numeric GID (`getent group st-backup`). This comes **before** the first
+     backup with the GID: a 0640 daily the copy can't read makes `rsync`
+     exit 23, and rsync then skips `--delete` too.
   3. Set `BACKUP_GROUP_GID=<gid>` in `.env` and **recreate** the app container
      (`docker compose up -d --no-deps --force-recreate app`). The variable is
      a compose `environment:` entry, so `docker compose exec app npm run
      backup` only sees it after the recreate. Check it with
      `docker compose exec app printenv BACKUP_GROUP_GID`.
-  4. Run one backup by hand, then the copy's own `rsync` **as its user**, and
-     check that it reads every file. Do this before the next nightly run.
+  4. Run one backup by hand, then the copy **as its user**, and check that it
+     reads every file. Do this before the next nightly run. Test the copy
+     **without** the cron's retention and **without** `--delete`: run its
+     `rsync` line yourself, limited to the new backup and with `--delete`
+     removed, rather than the whole cron script. A first run of the full
+     script would rotate (`KEEP`) and delete on the destination before you
+     know the copy works.
 
   A backup that finds `.backups` readable by others while
   `BACKUP_GROUP_GID` is unset logs a `WARN`: that combination means a copy
   probably relied on the old world-readable modes.
 - **Existing backups** keep their old modes until
   `docker compose exec app npm run backup:harden` brings them in line.
-  - Without `-- --write` it is a **dry run** that only lists what would change.
-  - With `-- --write` it applies the same modes and group to everything under
-    `.backups`, the directory itself included.
+  - Without `-- --write` it is a **dry run** that only lists what would change,
+    in two groups:
+    - **daily**: `.backups` itself and every `20*` tree. They get the mode
+      above, and the group when `BACKUP_GROUP_GID` is set;
+    - **private**: everything else at the top of `.backups` (`pre-*`,
+      `st-control-*`, `quarantine-*`, loose files). They get 0700/0600, and
+      their group is left alone.
+  - It **only narrows**: each entry ends at its current mode intersected with
+    its group's mode, so it never adds a bit. A 0700/0600 backup stays
+    0700/0600, and a 0644 file inside a private backup becomes 0600, not 0640.
+  - A daily entry that the group still can't read after the pass (because
+    someone made it stricter by hand) is listed as `group can't read …` and
+    the command exits 2. Opening it is the operator's decision, by hand.
+  - With `-- --write` it applies what the dry run listed.
   - It never follows a symlink, and it refuses a root that is one, that is not
     owned by the user running it, or that others can write to.
   - It does not enter a directory that someone else owns, that others can
@@ -1197,7 +1222,10 @@ A malformed value refuses the backup before anything is written.
     swapped for a link while the walk is inside it. Those directories are
     listed and left untouched, contents included.
 - **The off-host copy** keeps its own permissions:
-  - `rsync -a` carries the modes;
+  - `rsync -a` (or `-p`) carries the modes;
+  - to set the destination's modes yourself, use `--perms --chmod=D0700,F0600`.
+    `--chmod` **without** `--perms` only applies to files rsync creates: it
+    leaves the files already on the destination as they are;
   - on a CIFS mount, the mount's `file_mode`/`dir_mode`/`uid`/`gid` options
     decide instead;
   - check the NAS side separately: its share's ACLs decide who can read it there.

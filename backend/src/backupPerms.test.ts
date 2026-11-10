@@ -124,15 +124,75 @@ describe("hardenBackups (existing backups)", () => {
 		expect(await mode(root)).toBe(0o755);
 	});
 
-	it("--write brings the tree to the modes, and a second pass finds nothing", async () => {
+	it("--write: the dailies to the group mode, a pre-* to root-only; a second pass finds nothing", async () => {
 		await legacyTree();
 		const perms = { dirMode: 0o750, fileMode: 0o640, gid };
-		await hardenBackups(root, perms, { write: true });
+		const r = await hardenBackups(root, perms, { write: true });
+		expect(r.groupUnreadable).toEqual([]);
 		expect(await mode(root)).toBe(0o750);
 		expect(await mode(path.join(root, "2026-11-01/workspaces"))).toBe(0o750);
 		expect(await mode(path.join(root, "2026-11-01/workspaces/s1.tar.gz"))).toBe(0o640);
-		expect(await mode(path.join(root, "pre-abc/manifest.json"))).toBe(0o640);
+		expect(await mode(path.join(root, "pre-abc"))).toBe(0o700);
+		expect(await mode(path.join(root, "pre-abc/manifest.json"))).toBe(0o600);
+		expect(
+			r.changes.filter((c) => c.class === "private").map((c) => path.relative(root, c.path)),
+		).toEqual(["pre-abc", "pre-abc/manifest.json"]);
 		expect((await hardenBackups(root, perms, { write: false })).changes).toHaveLength(0);
+	});
+
+	it("never widens: private backups stay private, a stricter daily stays stricter and is reported", async () => {
+		const mk = async (rel: string, m: number, file = false) => {
+			const p = path.join(root, rel);
+			if (file) await fs.writeFile(p, "x");
+			else await fs.mkdir(p);
+			await fs.chmod(p, m);
+		};
+		await fs.chmod(root, 0o755);
+		await mk("pre-x", 0o700);
+		await mk("pre-x/users.jsonl", 0o600, true);
+		await mk("st-control-y", 0o700);
+		await mk("st-control-y/REVOKED", 0o600, true);
+		await mk("quarantine-z", 0o700);
+		await mk("quarantine-z/old.jsonl", 0o644, true); // inside a private dir: narrowed, not opened
+		await mk("2026-11-02", 0o700); // a daily someone closed by hand
+		await mk("2026-11-02/manifest.json", 0o604, true);
+		await mk("notes.txt", 0o644, true); // a loose file at the top is private
+		const perms = { dirMode: 0o750, fileMode: 0o640, gid };
+		const r = await hardenBackups(root, perms, { write: true });
+		for (const [rel, m] of [
+			["pre-x", 0o700],
+			["pre-x/users.jsonl", 0o600],
+			["st-control-y", 0o700],
+			["st-control-y/REVOKED", 0o600],
+			["quarantine-z/old.jsonl", 0o600],
+			["2026-11-02", 0o700],
+			["2026-11-02/manifest.json", 0o600],
+			["notes.txt", 0o600],
+		] as const) {
+			expect([rel, await mode(path.join(root, rel))]).toEqual([rel, m]);
+		}
+		// Nothing already private is even touched (no chmod, no chgrp).
+		const touched = r.changes.map((c) => path.relative(root, c.path)).sort();
+		expect(touched).not.toContain("pre-x");
+		expect(touched).not.toContain("pre-x/users.jsonl");
+		expect(touched).not.toContain("st-control-y/REVOKED");
+		expect(r.groupUnreadable.map((p) => path.relative(root, p)).sort()).toEqual([
+			"2026-11-02",
+			"2026-11-02/manifest.json",
+		]);
+		for (const c of r.changes) {
+			expect(c.to.mode & ~c.from.mode, path.relative(root, c.path)).toBe(0); // no bit added
+		}
+	});
+
+	it("narrowing is taken on the opened entry: a mode tightened after the walk's lstat stays tight", async () => {
+		const f = path.join(root, "f");
+		await fs.writeFile(f, "x");
+		await fs.chmod(f, 0o600);
+		await secure(f, "file", { dirMode: 0o750, fileMode: 0o640, gid }, undefined, {
+			narrowOnly: true,
+		});
+		expect(await mode(f)).toBe(0o600);
 	});
 
 	it("never follows a symlink: reported, target untouched", async () => {

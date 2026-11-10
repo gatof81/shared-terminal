@@ -222,12 +222,18 @@ describe("backup permissions (#562)", () => {
 		await walk(dir);
 		return out;
 	}
-	async function fullBackup(): Promise<void> {
+	async function fullBackup(dir = outDir): Promise<void> {
 		dbState.tables.set("users", [{ id: "u1", username: "diego" }]);
 		dbState.tables.set("sessions", [{ session_id: "s1", user_id: "u1", status: "stopped" }]);
 		await seedWorkspace("s1", { "s1/hello.txt": "hola" });
-		await runBackup(outDir);
+		await runBackup(dir);
 	}
+	// The group mode is for dailies only: the name the cron rotates and mirrors.
+	const daily = () => path.join(outDir, "2026-11-10T08-17-01-903Z");
+	const supplementaryGid = () => {
+		const primary = process.getgid?.() ?? 0;
+		return (process.getgroups?.() ?? []).find((g) => g !== primary) ?? primary;
+	};
 
 	it("without BACKUP_GROUP_GID every entry is 0700/0600: nothing for group or others", async () => {
 		vi.stubEnv("BACKUP_GROUP_GID", "");
@@ -238,21 +244,37 @@ describe("backup permissions (#562)", () => {
 		for (const e of all) expect([e.p, e.mode]).toEqual([e.p, e.dir ? 0o700 : 0o600]);
 	});
 
-	it("with BACKUP_GROUP_GID every entry is 0750/0640 in that group", async () => {
+	it("with BACKUP_GROUP_GID every entry of a daily is 0750/0640 in that group", async () => {
 		// A supplementary group when the runner has one (CI does), so a missing
 		// chown shows; and a 077 umask, under which every create lands at
 		// 0700/0600, so a missing chmod shows on every single entry.
-		const primary = process.getgid?.() ?? 0;
-		const gid = (process.getgroups?.() ?? []).find((g) => g !== primary) ?? primary;
+		const gid = supplementaryGid();
 		vi.stubEnv("BACKUP_GROUP_GID", String(gid));
 		const prev = process.umask(0o077);
 		try {
-			await fullBackup();
+			await fullBackup(daily());
 		} finally {
 			process.umask(prev);
 		}
-		for (const e of await entries(outDir)) {
+		for (const e of await entries(daily())) {
 			expect([e.p, e.mode, e.gid]).toEqual([e.p, e.dir ? 0o750 : 0o640, gid]);
+		}
+	});
+
+	it("with BACKUP_GROUP_GID a backup that is not a daily (pre-*) stays 0700/0600, group untouched", async () => {
+		const gid = supplementaryGid();
+		vi.stubEnv("BACKUP_GROUP_GID", String(gid));
+		const pre = path.join(outDir, "pre-2a676db-20261110T150000Z");
+		const prev = process.umask(0o022);
+		try {
+			await fullBackup(pre);
+		} finally {
+			process.umask(prev);
+		}
+		const primary = process.getgid?.() ?? 0;
+		for (const e of await entries(pre)) {
+			expect([e.p, e.mode]).toEqual([e.p, e.dir ? 0o700 : 0o600]);
+			if (gid !== primary) expect([e.p, e.gid]).not.toEqual([e.p, gid]);
 		}
 	});
 
