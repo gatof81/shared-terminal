@@ -42,7 +42,7 @@ import { showToast } from "./components/toast.js";
 import { relativeDate } from "./format.js";
 import { sessions } from "./main.js";
 import { initPilotOptIn } from "./pilotModel.js";
-import { pilotPanel, resetPilot } from "./pilotPanel.js";
+import { pilotPanel, resetPilot, suspendPilot } from "./pilotPanel.js";
 import {
 	clearProjects,
 	projectName,
@@ -330,6 +330,7 @@ function sync(): void {
 function hidePage(): void {
 	if (shown === null && pageEl?.hidden !== false) return;
 	shown = null;
+	suspendPilot();
 	document.body.classList.remove("project-page-on");
 	if (pageEl) {
 		pageEl.hidden = true;
@@ -369,6 +370,8 @@ function renderPage(): void {
 		pilotOn && shown.agentId === null
 			? pilotPanel(shown.projectId, agentLists.get(shown.projectId)?.data?.agents ?? null)
 			: null;
+	// Off screen (the agent page): its sockets close, its lanes stay.
+	if (!pilot) suspendPilot();
 	const shape = pilot ? [contentHost, pilot] : [contentHost];
 	if (
 		pageEl.childNodes.length !== shape.length ||

@@ -120,8 +120,23 @@ export type SendState =
 	/** Accepted by the server, delivery not proven yet: waiting for the send's own event. */
 	| { kind: "pending"; result: "uncertain" | "accepted" | "unconfirmed" }
 	| { kind: "misdelivered" }
+	/** The server says delivered but names no prompt id: final, and nothing can be attributed. */
+	| { kind: "delivered-unattributed" }
+	/** Settled by an operator (§8.1.10: `discarded` / `sent-manually`). */
+	| { kind: "resolved"; outcome: string }
 	| { kind: "refused"; status: number; text: string }
 	| { kind: "error"; text: string };
+
+/** States no later event changes: the panel stops following for them. */
+export function isFinal(st: SendState): boolean {
+	return (
+		st.kind === "misdelivered" ||
+		st.kind === "delivered-unattributed" ||
+		st.kind === "resolved" ||
+		st.kind === "refused" ||
+		st.kind === "error"
+	);
+}
 
 /** The HTTP answer of one Composer send (§8.1), as a lane state. Never retried. */
 export function sendStateOf(r: ComposerSendResult): SendState {
@@ -134,10 +149,12 @@ export function sendStateOf(r: ComposerSendResult): SendState {
 			};
 		}
 		if (b.result === "misdelivered") return { kind: "misdelivered" };
+		// The server's `delivered` without a prompt id (its candidate had none):
+		// final, but there is no evidence to attribute a reply on.
+		if (b.result === "delivered") return { kind: "delivered-unattributed" };
 		if (b.result === "unconfirmed" || b.result === "uncertain" || b.result === "accepted") {
 			return { kind: "pending", result: b.result };
 		}
-		// `delivered` without its prompt id: no evidence to correlate on.
 		return { kind: "pending", result: "uncertain" };
 	}
 	const code = typeof b.error === "string" ? b.error : "";
@@ -155,22 +172,31 @@ export function sendStateOf(r: ComposerSendResult): SendState {
  */
 export function settleFromEvent(e: ConversationEvent, clientMessageId: string): SendState | null {
 	if (e.ev !== "composer_send" || e.data.client_message_id !== clientMessageId) return null;
-	const delivered = e.data.result === "delivered" || e.data.state === "delivered";
-	if (delivered && typeof e.data.prompt_id === "string" && e.data.prompt_id) {
-		return {
-			kind: "delivered",
-			corr: {
-				promptId: e.data.prompt_id,
-				seq: typeof e.data.seq === "number" ? e.data.seq : null,
-			},
-		};
+	const d = e.data;
+	const is = (v: string) => d.result === v || d.state === v;
+	if (is("delivered")) {
+		if (typeof d.prompt_id === "string" && d.prompt_id) {
+			return {
+				kind: "delivered",
+				corr: { promptId: d.prompt_id, seq: typeof d.seq === "number" ? d.seq : null },
+			};
+		}
+		// Only the final `result` is a decision; a `state: delivered` without an
+		// id may still be followed by one (background transport).
+		return d.result === "delivered" ? { kind: "delivered-unattributed" } : null;
 	}
-	if (e.data.result === "misdelivered" || e.data.state === "misdelivered") {
-		return { kind: "misdelivered" };
+	if (is("misdelivered")) return { kind: "misdelivered" };
+	if (is("failed")) {
+		// The answer the server recorded for it (a late failure, a cancellation).
+		const body = (d.http as { body?: { error?: unknown; detail?: unknown } } | undefined)?.body;
+		const code = typeof body?.error === "string" ? body.error : "delivery-failed";
+		const detail = typeof body?.detail === "string" ? body.detail : undefined;
+		return { kind: "refused", status: 0, text: explainCode(code, detail) };
 	}
-	if (e.data.result === "unconfirmed" || e.data.state === "unconfirmed") {
-		return { kind: "pending", result: "unconfirmed" };
+	if (is("resolved")) {
+		return { kind: "resolved", outcome: typeof d.outcome === "string" ? d.outcome : "resolved" };
 	}
+	if (is("unconfirmed")) return { kind: "pending", result: "unconfirmed" };
 	return null;
 }
 
@@ -179,9 +205,20 @@ export function settleFromEvent(e: ConversationEvent, clientMessageId: string): 
 export interface Reply {
 	/** The thread of exactly the correlated events (user prompt, tools, answer). */
 	items: ThreadItem[];
-	/** A `turn_end`/`turn_failed` for this prompt arrived. */
+	/**
+	 * A `turn_end`/`turn_failed` for this prompt arrived. Not necessarily the
+	 * last: `Stop` can fire again for the same prompt id when a hook blocks
+	 * and the turn goes on, so the answer can still change.
+	 */
 	finished: boolean;
 	failed: boolean;
+	/**
+	 * Another prompt joined the turn: text typed while the CLI was busy is
+	 * submitted with the prompt id of the turn in progress (CONVERSATION.md
+	 * §8.1.7), so the answer may be to both. Shown, never hidden; not
+	 * forwardable as this agent's answer to this message.
+	 */
+	ambiguous: boolean;
 	/** The answer to forward: the turn's report, else the last assistant text. */
 	answer: string | null;
 }
@@ -204,6 +241,9 @@ export function replyOf(events: readonly ConversationEvent[], corr: Correlation)
 	const thread = buildThread(mine);
 	const finished = mine.some((e) => e.ev === "turn_end" || e.ev === "turn_failed");
 	const failed = mine.some((e) => e.ev === "turn_failed");
+	const prompts = mine.filter((e) => e.ev === "user_prompt" || e.ev === "internal_prompt");
+	const ambiguous =
+		corr.seq !== null ? prompts.some((e) => e.seq !== corr.seq) : prompts.length > 1;
 	let answer: string | null = null;
 	for (const it of thread.items) {
 		if (it.kind === "report" && it.text) answer = it.text;
@@ -213,7 +253,7 @@ export function replyOf(events: readonly ConversationEvent[], corr: Correlation)
 		const last = [...thread.items].reverse().find((it) => it.kind === "assistant");
 		if (last && last.kind === "assistant" && last.text) answer = last.text;
 	}
-	return { items: thread.items, finished, failed, answer };
+	return { items: thread.items, finished, failed, ambiguous, answer };
 }
 
 /**

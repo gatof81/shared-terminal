@@ -108,10 +108,9 @@ describe("sendStateOf — the HTTP answer, as is", () => {
 			kind: "delivered",
 			corr: { promptId: "p1", seq: 41 },
 		});
-		// No prompt id = no evidence: pending, never "delivered".
+		// No prompt id = no evidence: final, but never a correlated "delivered".
 		expect(sendStateOf(res(202, { result: "delivered" }))).toEqual({
-			kind: "pending",
-			result: "uncertain",
+			kind: "delivered-unattributed",
 		});
 	});
 	it("unconfirmed / uncertain / accepted are pending; misdelivered is never correlated", () => {
@@ -149,10 +148,39 @@ describe("settleFromEvent — only this send's own event settles it", () => {
 		expect(
 			settleFromEvent(cs({ client_message_id: "m2", result: "delivered", prompt_id: "p2" }), "m1"),
 		).toBeNull();
-		expect(settleFromEvent(cs({ client_message_id: "m1", result: "delivered" }), "m1")).toBeNull();
+		expect(settleFromEvent(cs({ client_message_id: "m1", state: "delivered" }), "m1")).toBeNull();
 		expect(settleFromEvent(cs({ client_message_id: "m1", state: "prepared" }), "m1")).toBeNull();
 		expect(settleFromEvent(ev("user_prompt", "p1", { prompt: "x" }), "m1")).toBeNull();
 	});
+	it("final answers recorded later: failed (with the server's reason) and an operator's resolution", () => {
+		expect(
+			settleFromEvent(
+				cs({
+					client_message_id: "m1",
+					state: "failed",
+					result: "failed",
+					http: { status: 502, body: { error: "delivery-failed", detail: "cancelled" } },
+				}),
+				"m1",
+			),
+		).toMatchObject({ kind: "refused", text: expect.stringContaining("Delivery failed part-way") });
+		expect(
+			settleFromEvent(
+				cs({
+					client_message_id: "m1",
+					state: "resolved",
+					result: "resolved",
+					outcome: "discarded",
+				}),
+				"m1",
+			),
+		).toEqual({ kind: "resolved", outcome: "discarded" });
+		// The final result `delivered` without a prompt id: final, unattributable.
+		expect(settleFromEvent(cs({ client_message_id: "m1", result: "delivered" }), "m1")).toEqual({
+			kind: "delivered-unattributed",
+		});
+	});
+
 	it("misdelivered and unconfirmed are reported as such", () => {
 		expect(settleFromEvent(cs({ client_message_id: "m1", result: "misdelivered" }), "m1")).toEqual({
 			kind: "misdelivered",
@@ -214,6 +242,22 @@ describe("replies are attributed by prompt id only — never by time", () => {
 		];
 		expect(unattributedCount(events, 40, null)).toBe(2);
 		expect(unattributedCount(events, 40, { promptId: "p9", seq: 43 })).toBe(0);
+	});
+
+	it("another prompt that joined the turn (same prompt id) makes the reply ambiguous", () => {
+		seq = 40;
+		const events = [
+			ev("user_prompt", "pA", { prompt: "pilot message" }),
+			ev("user_prompt", "pA", { prompt: "typed in the Terminal meanwhile" }),
+			answer("pA", "answer to both?"),
+			ev("turn_end", "pA", { last_assistant_message: "answer to both?" }),
+		];
+		expect(replyOf(events, { promptId: "pA", seq: 41 }).ambiguous).toBe(true);
+		expect(
+			replyOf(events.slice(0, 1).concat(events.slice(2)), { promptId: "pA", seq: 41 }).ambiguous,
+		).toBe(false);
+		// Without the acknowledged seq, two prompts are ambiguous too.
+		expect(replyOf(events, { promptId: "pA", seq: null }).ambiguous).toBe(true);
 	});
 
 	it("a failed turn is finished and failed", () => {

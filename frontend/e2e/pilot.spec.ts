@@ -99,7 +99,9 @@ test.describe("pilot — ask the agents", () => {
 		await agentBox(page, "architect-hz").check();
 		await panel(page).locator(".pilot-text").fill("What is the plan?");
 		await panel(page).locator(".pilot-send").click();
-		await expect(lane(page, "architect-hz").locator(".pilot-lane-foot")).toContainText("Finished.");
+		await expect(lane(page, "architect-hz").locator(".pilot-lane-foot")).toContainText(
+			"Turn ended",
+		);
 		expect(sends).toHaveLength(1);
 
 		await lane(page, "architect-hz").locator(".pilot-forward").click();

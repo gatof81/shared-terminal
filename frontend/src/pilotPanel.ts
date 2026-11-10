@@ -28,8 +28,8 @@ import { explainCode, validateText } from "./composerText.js";
 import { type ConversationEvent, clock, type ThreadItem, toolLine } from "./conversationModel.js";
 import {
 	type Correlation,
-	correlated,
 	forwardDraft,
+	isFinal,
 	newClientMessageId,
 	pickTarget,
 	replyOf,
@@ -37,12 +37,11 @@ import {
 	sendStateOf,
 	settleFromEvent,
 	type Target,
-	unattributedCount,
 } from "./pilotModel.js";
 import { routeHash } from "./router.js";
 import { button, el } from "./ui.js";
 
-/** A conversation's events held for the lanes (newest kept). */
+/** Events a feed keeps for lanes still waiting for their evidence (newest kept). */
 const FEED_MAX_EVENTS = 4000;
 /** How long the list read behind a target may take. */
 const TARGET_TIMEOUT_MS = 8000;
@@ -56,6 +55,14 @@ interface Lane {
 	/** The conversation's last seq read just before the send. */
 	after: number;
 	state: SendState;
+	/**
+	 * The lane's own copy of its correlated events (by prompt id), so a reply
+	 * survives the feed being evicted, closed or switched to another
+	 * conversation of the same session.
+	 */
+	events: ConversationEvent[];
+	/** Events after the send not attributed to it (no evidence yet, or another prompt). */
+	unattributed: number;
 }
 
 interface Exchange {
@@ -66,11 +73,19 @@ interface Exchange {
 	lanes: Lane[];
 }
 
+/** One followed conversation (the WS follows one conversation per socket). */
 interface Feed {
-	socket: ConversationSocket;
+	sessionId: string;
 	cid: string;
+	socket: ConversationSocket | null;
+	/** Recent events, for a lane whose evidence arrives after its events. */
 	events: ConversationEvent[];
+	lastSeq: number;
+	/** The server refused the socket (1008: e.g. too many open Chat views). */
+	refused: boolean;
 }
+
+const feedKey = (sessionId: string, cid: string) => `${sessionId}/${cid}`;
 
 type TargetState = Target | { kind: "loading" } | { kind: "error"; text: string };
 
@@ -88,10 +103,13 @@ interface PilotState {
 	selected: Set<string>;
 	targets: Map<string, TargetState>;
 	forwardFrom: string | null;
-	inFlight: number;
+	/** Agents with a send whose HTTP answer has not arrived: only they wait. */
+	sendingAgents: Set<string>;
 	exchanges: Exchange[];
-	/** One socket per agent session, following that agent's conversation. */
+	/** By `sessionId/cid`. A socket stays open only while a lane on it can still change. */
 	feeds: Map<string, Feed>;
+	/** The panel is on screen (sockets open only then). */
+	visible: boolean;
 }
 
 let state: PilotState | null = null;
@@ -109,14 +127,38 @@ export function pilotPanel(pid: string, agents: AgentListEntry[] | null): HTMLEl
 		state = create(pid);
 	}
 	if (agents) updateAgents(state, agents);
+	if (!state.visible) {
+		state.visible = true;
+		// Shown again by the person: a socket the server refused before is
+		// worth one more try now.
+		for (const f of state.feeds.values()) {
+			f.refused = false;
+			syncFeed(state, f);
+		}
+	}
 	return state.root;
 }
 
-/** Logout, expiry, or leaving the project: sockets closed, nothing kept. */
+/**
+ * The panel left the screen (another page, the agent page, the session):
+ * close every socket — the server allows few per user, and the Chat view
+ * needs them. Lanes keep their events; following resumes from each feed's
+ * last seq when the panel is shown again.
+ */
+export function suspendPilot(): void {
+	if (!state || !state.visible) return;
+	state.visible = false;
+	for (const f of state.feeds.values()) {
+		f.socket?.close();
+		f.socket = null;
+	}
+}
+
+/** Logout, expiry, or another project: sockets closed, nothing kept. */
 export function resetPilot(): void {
 	gen++;
 	if (!state) return;
-	for (const f of state.feeds.values()) f.socket.close();
+	for (const f of state.feeds.values()) f.socket?.close();
 	state.root.remove();
 	state = null;
 }
@@ -164,9 +206,10 @@ function create(pid: string): PilotState {
 		selected: new Set(),
 		targets: new Map(),
 		forwardFrom: null,
-		inFlight: 0,
+		sendingAgents: new Set(),
 		exchanges: [],
 		feeds: new Map(),
+		visible: true,
 	};
 	s.sendBtn = button("Send", "pv-btn pv-primary pilot-send", () => void send(s));
 	s.sendBtn.dataset.key = "pilot-send";
@@ -275,7 +318,14 @@ function renderAgents(s: PilotState): void {
 
 function renderControls(s: PilotState): void {
 	const n = s.selected.size;
-	s.sendBtn.disabled = s.inFlight > 0 || n === 0 || s.text.value.trim() === "";
+	const waiting = s.agents.filter(
+		(a) => s.selected.has(a.agentId) && s.sendingAgents.has(a.agentId),
+	);
+	s.sendBtn.disabled = waiting.length > 0 || n === 0 || s.text.value.trim() === "";
+	s.sendBtn.title =
+		waiting.length > 0
+			? `Waiting for the answer to the previous send to ${waiting.map((a) => `@${a.handle}`).join(", ")}`
+			: "";
 	s.sendBtn.textContent =
 		s.forwardFrom !== null
 			? `Send forwarded text to ${n} agent${n === 1 ? "" : "s"}`
@@ -311,7 +361,9 @@ async function send(s: PilotState): Promise<void> {
 		return;
 	}
 	const chosen = s.agents.filter((a) => s.selected.has(a.agentId));
-	if (chosen.length === 0) return;
+	// Re-checked here, not only in the button's state: a click that raced a
+	// re-render never sends twice to an agent still waiting for an answer.
+	if (chosen.length === 0 || chosen.some((a) => s.sendingAgents.has(a.agentId))) return;
 	const g = gen;
 	const ex: Exchange = {
 		id: newClientMessageId(),
@@ -326,18 +378,27 @@ async function send(s: PilotState): Promise<void> {
 			clientMessageId: newClientMessageId(),
 			after: 0,
 			state: { kind: "sending" },
+			events: [],
+			unattributed: 0,
 		})),
 	};
 	s.exchanges.unshift(ex);
-	s.inFlight++;
+	for (const a of chosen) s.sendingAgents.add(a.agentId);
 	renderControls(s);
 	renderExchanges(s);
 	// Independent: each lane runs on its own; none waits for, or is cancelled
-	// by, another's answer (D-PIL, 2026-11-10).
-	const runs = ex.lanes.map((lane) => sendLane(s, lane, ex.text, g));
+	// by, another's answer, and an agent whose answer is back can take the
+	// next message while another is still slow (D-PIL, 2026-11-10).
+	const runs = ex.lanes.map(async (lane) => {
+		const took = await sendLane(s, lane, ex.text, g);
+		if (g === gen && state === s) {
+			s.sendingAgents.delete(lane.agentId);
+			renderControls(s);
+		}
+		return took;
+	});
 	const accepted = (await Promise.all(runs)).some(Boolean);
 	if (g !== gen || state !== s) return;
-	s.inFlight--;
 	// The draft goes only when at least one agent took it; otherwise it stays
 	// for the person to fix or resend (never resent by the panel).
 	if (accepted) {
@@ -352,7 +413,7 @@ async function send(s: PilotState): Promise<void> {
 async function sendLane(s: PilotState, lane: Lane, text: string, g: number): Promise<boolean> {
 	const update = (st: SendState) => {
 		if (g !== gen || state !== s) return;
-		lane.state = st;
+		setState(s, lane, st);
 		renderExchanges(s);
 	};
 	// The target is read again now: its lastSeq is where the replies start,
@@ -367,17 +428,18 @@ async function sendLane(s: PilotState, lane: Lane, text: string, g: number): Pro
 	lane.after = t.lastSeq;
 	// Follow BEFORE the send, from the seq read above: nothing the send causes
 	// can arrive before the subscription.
-	follow(s, lane.sessionId, t.cid, t.lastSeq);
+	const feed = follow(s, lane.sessionId, t.cid, t.lastSeq);
 	try {
 		const r = await sendConversationMessage(lane.sessionId, t.cid, text, lane.clientMessageId);
-		const st = sendStateOf(r);
+		let st = sendStateOf(r);
 		// The send's own event may have landed before its HTTP answer.
-		const feed = s.feeds.get(lane.sessionId);
-		let settled: SendState | null = null;
-		if (st.kind === "pending" && feed) {
-			for (const e of feed.events) settled = settleFromEvent(e, lane.clientMessageId) ?? settled;
+		if (st.kind === "pending") {
+			for (const e of feed.events) {
+				const settled = settleFromEvent(e, lane.clientMessageId);
+				if (settled && settled.kind !== "pending") st = settled;
+			}
 		}
-		update(settled && settled.kind !== "pending" ? settled : st);
+		update(st);
 		return r.status === 202 || r.status === 200;
 	} catch {
 		update({
@@ -387,36 +449,114 @@ async function sendLane(s: PilotState, lane: Lane, text: string, g: number): Pro
 				`${lane.handle}'s Chat before sending again.`,
 		});
 		return false;
+	} finally {
+		if (g === gen && state === s) syncFeed(s, feed);
 	}
 }
 
-function follow(s: PilotState, sessionId: string, cid: string, after: number): void {
-	const cur = s.feeds.get(sessionId);
-	if (cur && cur.cid === cid) return;
-	cur?.socket.close();
-	const feed: Feed = { cid, events: [], socket: null as unknown as ConversationSocket };
-	feed.socket = openConversationSocket(sessionId, (f) => {
-		if (state !== s || f.type !== "event" || f.conv !== feed.cid) return;
-		onEvent(s, sessionId, feed, f.event);
-	});
-	feed.socket.follow(cid, after);
-	s.feeds.set(sessionId, feed);
+/**
+ * A lane's new state. On reaching `delivered` the lane takes, from the feed,
+ * the events of its prompt that arrived before the evidence did.
+ */
+function setState(s: PilotState, lane: Lane, st: SendState): void {
+	lane.state = st;
+	if (st.kind !== "delivered" || lane.cid === null) return;
+	const feed = s.feeds.get(feedKey(lane.sessionId, lane.cid));
+	const have = new Set(lane.events.map((e) => e.seq));
+	for (const e of feed?.events ?? []) {
+		if (!have.has(e.seq) && ownsEvent(lane, e)) lane.events.push(e);
+	}
+	lane.events.sort((x, y) => x.seq - y.seq);
 }
 
-function onEvent(s: PilotState, sessionId: string, feed: Feed, e: ConversationEvent): void {
-	if (feed.events.length > 0 && e.seq <= feed.events[feed.events.length - 1]!.seq) return;
+function ownsEvent(lane: Lane, e: ConversationEvent): boolean {
+	if (lane.state.kind !== "delivered") return false;
+	const { promptId, seq } = lane.state.corr;
+	return e.prompt_id === promptId && e.ev !== "composer_send" && (seq === null || e.seq >= seq);
+}
+
+function lanesOf(s: PilotState, feed: Feed): Lane[] {
+	const out: Lane[] = [];
+	for (const ex of s.exchanges) {
+		for (const l of ex.lanes) if (l.sessionId === feed.sessionId && l.cid === feed.cid) out.push(l);
+	}
+	return out;
+}
+
+/** A lane no later event can change: final, or delivered with its turn ended. */
+function laneSettled(lane: Lane): boolean {
+	if (isFinal(lane.state)) return true;
+	if (lane.state.kind !== "delivered") return false;
+	return lane.events.some((e) => e.ev === "turn_end" || e.ev === "turn_failed");
+}
+
+function follow(s: PilotState, sessionId: string, cid: string, after: number): Feed {
+	const key = feedKey(sessionId, cid);
+	let feed = s.feeds.get(key);
+	if (!feed) {
+		feed = { sessionId, cid, socket: null, events: [], lastSeq: after, refused: false };
+		s.feeds.set(key, feed);
+	}
+	if (!feed.socket && s.visible) openFeed(s, feed);
+	return feed;
+}
+
+function openFeed(s: PilotState, feed: Feed): void {
+	feed.refused = false;
+	const socket = openConversationSocket(
+		feed.sessionId,
+		(f) => {
+			if (state !== s || feed.socket !== socket || f.type !== "event" || f.conv !== feed.cid)
+				return;
+			onEvent(s, feed, f.event);
+		},
+		(_connected, refused) => {
+			if (!refused || state !== s || feed.socket !== socket) return;
+			feed.refused = true;
+			feed.socket = null;
+			renderExchanges(s);
+		},
+	);
+	feed.socket = socket;
+	socket.follow(feed.cid, feed.lastSeq);
+}
+
+/**
+ * Keep a feed's socket open only while the panel is shown and a lane on it
+ * can still change; reopen it (from its last seq) when that is true again.
+ */
+function syncFeed(s: PilotState, feed: Feed): void {
+	const needed = s.visible && lanesOf(s, feed).some((l) => !laneSettled(l));
+	if (needed && !feed.socket && !feed.refused) openFeed(s, feed);
+	if (!needed && feed.socket) {
+		feed.socket.close();
+		feed.socket = null;
+	}
+}
+
+function onEvent(s: PilotState, feed: Feed, e: ConversationEvent): void {
+	if (e.seq <= feed.lastSeq) return;
+	feed.lastSeq = Math.max(feed.lastSeq, e.seq);
 	feed.events.push(e);
 	if (feed.events.length > FEED_MAX_EVENTS)
 		feed.events.splice(0, feed.events.length - FEED_MAX_EVENTS);
-	for (const ex of s.exchanges) {
-		for (const lane of ex.lanes) {
-			if (lane.sessionId !== sessionId || lane.cid !== feed.cid) continue;
-			if (lane.state.kind === "pending" || lane.state.kind === "sending") {
-				const settled = settleFromEvent(e, lane.clientMessageId);
-				if (settled) lane.state = settled;
-			}
+	for (const lane of lanesOf(s, feed)) {
+		if (lane.state.kind === "pending" || lane.state.kind === "sending") {
+			const settled = settleFromEvent(e, lane.clientMessageId);
+			if (settled) setState(s, lane, settled);
+		}
+		if (ownsEvent(lane, e)) {
+			if (!lane.events.some((x) => x.seq === e.seq)) lane.events.push(e);
+		} else if (
+			e.seq > lane.after &&
+			e.ev !== "composer_send" &&
+			e.ev !== "probe" &&
+			lane.state.kind !== "sending"
+		) {
+			lane.unattributed++;
 		}
 	}
+	syncFeed(s, feed);
 	renderExchanges(s);
 }
 
@@ -441,6 +581,13 @@ function stateLine(lane: Lane): { text: string; tone: string } {
 							text: "Outcome not known yet (the server is still settling it).",
 							tone: "warn",
 						};
+		case "delivered-unattributed":
+			return {
+				text: "Delivered, but Claude Code gave no prompt id, so no reply can be attributed here — read it in Chat.",
+				tone: "warn",
+			};
+		case "resolved":
+			return { text: `Settled by an operator (${st.outcome}).`, tone: "warn" };
 		case "misdelivered":
 			return {
 				text: "Delivered to a different conversation in that terminal — nothing is attributed here.",
@@ -479,11 +626,20 @@ function laneEl(s: PilotState, lane: Lane): HTMLElement {
 	const line = stateLine(lane);
 	top.appendChild(el("span", `pilot-state pilot-state-${line.tone}`, line.text));
 	box.appendChild(top);
-	const feed = s.feeds.get(lane.sessionId);
-	const events = feed && feed.cid === lane.cid ? feed.events : [];
+	const feed = lane.cid !== null ? s.feeds.get(feedKey(lane.sessionId, lane.cid)) : undefined;
 	const corr: Correlation | null = lane.state.kind === "delivered" ? lane.state.corr : null;
+	const settled = laneSettled(lane);
 	if (corr) {
-		const reply = replyOf(events, corr);
+		const reply = replyOf(lane.events, corr);
+		if (reply.ambiguous) {
+			box.appendChild(
+				el(
+					"div",
+					"pilot-state pilot-state-warn pilot-ambiguous",
+					"Another message joined this turn (typed in the Terminal while Claude was busy), so this answer may be to both. It is not forwarded from here.",
+				),
+			);
+		}
 		const body = el("div", "pilot-reply");
 		for (const it of reply.items) {
 			if (it.kind === "user") continue;
@@ -502,12 +658,12 @@ function laneEl(s: PilotState, lane: Lane): HTMLElement {
 				reply.failed
 					? "The turn failed."
 					: reply.finished
-						? "Finished."
-						: `${correlated(events, corr).length} events so far`,
+						? "Turn ended (later activity of this prompt shows in Chat)."
+						: `${lane.events.length} events so far`,
 			),
 		);
 		const others = s.agents.filter((a) => a.agentId !== lane.agentId);
-		if (reply.finished && reply.answer && others.length > 0) {
+		if (reply.finished && !reply.failed && !reply.ambiguous && reply.answer && others.length > 0) {
 			const fwd = button("Forward…", "pv-btn pilot-forward", () =>
 				startForward(s, lane, reply.answer ?? ""),
 			);
@@ -516,18 +672,29 @@ function laneEl(s: PilotState, lane: Lane): HTMLElement {
 			foot.appendChild(fwd);
 		}
 		box.appendChild(foot);
-	} else if (lane.state.kind !== "sending" && lane.cid !== null) {
+	} else if (lane.state.kind !== "sending" && lane.cid !== null && lane.unattributed > 0) {
 		// No evidence ties anything to this send: count, never show as an answer.
-		const n = unattributedCount(events, lane.after, null);
-		if (n > 0) {
-			box.appendChild(
-				el(
-					"div",
-					"pilot-muted pilot-unattributed",
-					`${n} new event${n === 1 ? "" : "s"} in @${lane.handle}'s conversation, not attributed to this message.`,
-				),
-			);
-		}
+		const n = lane.unattributed;
+		box.appendChild(
+			el(
+				"div",
+				"pilot-muted pilot-unattributed",
+				`${n} new event${n === 1 ? "" : "s"} in @${lane.handle}'s conversation, not attributed to this message.`,
+			),
+		);
+	}
+	if (!settled && feed?.refused) {
+		box.appendChild(
+			el(
+				"div",
+				"pilot-state pilot-state-warn pilot-not-followed",
+				"Replies can't be followed here: the server refused another live Chat connection (too many open Chat views). Open Chat to read them.",
+			),
+		);
+	} else if (!settled && lane.cid !== null && !feed?.socket && lane.state.kind !== "sending") {
+		box.appendChild(
+			el("div", "pilot-muted pilot-not-followed", "Not following replies right now — open Chat."),
+		);
 	}
 	if (lane.cid !== null) {
 		const open = el("a", "pilot-open-chat", "Open Chat");
