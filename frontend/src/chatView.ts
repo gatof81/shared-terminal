@@ -64,9 +64,11 @@ import {
 	type AgentView,
 	BG_TEXT,
 	buildThread,
+	type ConversationEvent,
 	clock,
 	EventWindow,
 	groupBlocks,
+	isActivityEvent,
 	lastEvidenceAt,
 	presentClaim,
 	presentStatus,
@@ -653,7 +655,7 @@ function onFrame(f: ConversationServerFrame): void {
 	if (!("conv" in f) || f.conv !== selectedCid || !cur) return;
 	if (f.type === "event") {
 		const changed = cur.window.append(f.event);
-		bumpRow(f.conv, f.event.seq);
+		bumpRow(f.conv, f.event);
 		if (changed || !cur.window.atLatest) scheduleRender();
 	} else if (f.type === "status") {
 		cur.liveStatus = { status: f.status, evidence: f.evidence, at: f.at };
@@ -680,13 +682,15 @@ function onFrame(f: ConversationServerFrame): void {
 function rowOf(cid: string): ConversationSummary | undefined {
 	return list.status === "loaded" ? list.conversations.find((c) => c.sessionId === cid) : undefined;
 }
-function bumpRow(cid: string, seq: number): void {
+function bumpRow(cid: string, event: ConversationEvent): void {
 	const row = rowOf(cid);
 	if (!row) return;
-	if (seq > row.lastSeq) {
-		row.lastSeq = seq;
+	if (event.seq > row.lastSeq) {
+		row.lastSeq = event.seq;
 		row.eventsCount++;
-		row.lastEventAt = new Date().toISOString();
+		// The server's rule and the event's own time (never this browser's
+		// clock): what the next list poll will say (#568).
+		if (isActivityEvent(event)) row.lastEventAt = event.ts;
 	}
 }
 
@@ -769,7 +773,8 @@ function statusChip(
 	chip.appendChild(el("span", "chat-dot"));
 	chip.appendChild(el("span", "chat-status-label", shown.label));
 	const t = new Date(st.at).getTime();
-	const ageMs = Number.isNaN(t) ? 0 : Date.now() - t;
+	// The epoch is the backend's "no time" (CONVERSATION.md §4.1): no age.
+	const ageMs = Number.isNaN(t) || t <= 0 ? 0 : Date.now() - t;
 	if (opts.age && ageMs >= 60_000) {
 		chip.appendChild(el("span", "chat-status-age", relativeDate(st.at)));
 	}
@@ -1088,7 +1093,10 @@ function convList(items: ConversationSummary[]): HTMLElement {
 		const main = el("span", "chat-conv-main");
 		const top = el("span", "chat-conv-top");
 		top.appendChild(el("span", "chat-conv-title", titleOf(c)));
-		top.appendChild(el("span", "chat-conv-time", relativeDate(c.lastEventAt)));
+		// The epoch is the backend's "no time" (a last activity it could not
+		// recover, CONVERSATION.md §4.1): no date rather than 1970.
+		const lastAt = Date.parse(c.lastEventAt);
+		top.appendChild(el("span", "chat-conv-time", lastAt > 0 ? relativeDate(c.lastEventAt) : "—"));
 		main.appendChild(top);
 		const bottom = el("span", "chat-conv-bottom");
 		bottom.appendChild(el("span", `chat-conv-status tone-${tone}`, shown.label));

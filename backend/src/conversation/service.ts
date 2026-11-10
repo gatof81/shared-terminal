@@ -267,9 +267,10 @@ interface ConvRuntime {
 	rateDropped: number;
 	rateDroppedBytes: number;
 	/**
-	 * ms of the last accepted HOOK event (v1.7.2 §5.3 silence). Not the
-	 * index's `lastEventAt`: persisted `probe` events move that one, and an
-	 * unverified probe is not evidence of anything.
+	 * ms of the last accepted HOOK event (v1.7.2 §5.3 silence). Seeded on
+	 * reopen from the index's `lastEventAt`, which since v1.9.1 (#568) only
+	 * activity moves — a persisted `probe` or `gap` no longer does — so a
+	 * restart cannot extend an old live claim's silence window.
 	 */
 	lastHookAt: number;
 }

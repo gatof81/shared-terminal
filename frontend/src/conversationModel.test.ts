@@ -5,6 +5,7 @@ import {
 	EventWindow,
 	gapText,
 	groupBlocks,
+	isActivityEvent,
 	lastEvidenceAt,
 	presentStatus,
 	statusIsLiveClaim,
@@ -623,5 +624,29 @@ describe("runMode (the server's probe, as evidence for wording)", () => {
 			buildThread([ev("probe", { kind: "background" }, { agent_id: "a1" })]).runMode,
 		).toBeNull();
 		expect(buildThread([ev("user_prompt", { prompt: "x" })]).runMode).toBeNull();
+	});
+});
+
+describe("isActivityEvent (#568, mirrors the backend store rule)", () => {
+	const e = (ev: string, data: Record<string, unknown> = {}) => ({ ev, data });
+	it("hook events and a person's composer send are activity", () => {
+		for (const ev of [
+			"user_prompt",
+			"tool_start",
+			"tool_end",
+			"turn_end",
+			"notification",
+			"session_start",
+		]) {
+			expect(isActivityEvent(e(ev))).toBe(true);
+		}
+		expect(isActivityEvent(e("composer_send", { state: "prepared" }))).toBe(true);
+	});
+	it("the backend's own records are not: probe, gap, and every other composer_send state", () => {
+		expect(isActivityEvent(e("probe", { found: true }))).toBe(false);
+		expect(isActivityEvent(e("gap", { reason: "relay_dropped" }))).toBe(false);
+		for (const state of ["released", "acknowledged", "uncertain", "duplicated"]) {
+			expect(isActivityEvent(e("composer_send", { state }))).toBe(false);
+		}
 	});
 });

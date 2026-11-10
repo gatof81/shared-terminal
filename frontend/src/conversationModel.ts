@@ -811,6 +811,20 @@ export interface StatusPresentation {
 }
 
 /**
+ * Whether a persisted event is ACTIVITY, the only thing that moves a
+ * conversation's `lastEventAt` (CONVERSATION.md v1.9.1, #568). It mirrors the
+ * backend's store rule, so a row updated from the live stream reads exactly
+ * like the next list poll: hook events and a composer send's `prepared` count,
+ * while the backend's own `probe`, `gap` and other `composer_send` records
+ * don't. A probe would otherwise make an old claim look fresh.
+ */
+export function isActivityEvent(e: Pick<ConversationEvent, "ev" | "data">): boolean {
+	if (e.ev === "probe" || e.ev === "gap") return false;
+	if (e.ev === "composer_send") return e.data?.state === "prepared";
+	return true;
+}
+
+/**
  * When a conversation last showed a sign of life: the later of its status
  * time and its last event. The backend renews `statusAt` only on a state
  * transition (or a confirming probe), so a long turn that keeps emitting

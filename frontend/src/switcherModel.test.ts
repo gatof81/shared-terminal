@@ -47,6 +47,19 @@ function conv(over: Partial<ConversationSummary> = {}): ConversationSummary {
 	} as ConversationSummary;
 }
 
+describe("toItem — the epoch is no time", () => {
+	it("a rebuilt conversation (statusAt and lastEventAt the epoch) has no evidence time, never 1970", () => {
+		const epoch = new Date(0).toISOString();
+		const item = toItem(
+			conv({ status: "unknown", statusAt: epoch, lastEventAt: epoch }),
+			{ sessionId: "s1", name: "p" },
+			NOW,
+		);
+		expect(Number.isNaN(item.evidenceAt)).toBe(true);
+		expect(item.bucket).toBe("quiet");
+	});
+});
+
 describe("bucketOf — states come from the presentation, never from age or canSendInput alone", () => {
 	it("only a fresh permission prompt needs the person; Claude fresh at its prompt is 'ready' (option A)", () => {
 		expect(bucketOf(conv({ status: "waiting_permission" }), NOW).bucket).toBe("attention");

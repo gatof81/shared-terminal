@@ -105,6 +105,37 @@ describe("derivePresence", () => {
 		expect(garbage).toMatchObject({ value: "unknown", detail: "stale", at: null });
 	});
 
+	// Documentation of how a row reads under CONVERSATION.md v1.9.1. derivePresence itself is
+	// unchanged by #568; the regression guard is in conversation/store.test.ts.
+	it("#568 (how rows read): activity or a re-asserting probe keeps a claim fresh; an old claim with old activity is stale", () => {
+		const MIN = 60_000;
+		// A probe that CONFIRMS busy re-asserts the claim: statusAt moves ⇒ working.
+		expect(
+			derivePresence({
+				...base,
+				sessionStatus: "running",
+				conversation: conv("running", "probe:busy", 0.5 * MIN, 0.5 * MIN),
+			}),
+		).toMatchObject({ value: "working", source: "probe" });
+		// A long turn: the claim dates from the prompt, its tool hooks are recent activity ⇒ working.
+		expect(
+			derivePresence({
+				...base,
+				sessionStatus: "running",
+				conversation: conv("running", "hook:UserPromptSubmit", 30 * MIN, 0.5 * MIN),
+			}),
+		).toMatchObject({ value: "working", source: "hook" });
+		// An old claim whose last ACTIVITY is old: a later probe or gap record no longer moves
+		// lastEventAt (store, CONVERSATION.md v1.9.1), so the row reads like this ⇒ stale.
+		expect(
+			derivePresence({
+				...base,
+				sessionStatus: "running",
+				conversation: conv("running", "hook:UserPromptSubmit", 30 * MIN, 30 * MIN),
+			}),
+		).toMatchObject({ value: "unknown", detail: "stale" });
+	});
+
 	it("no conversation, or an unreadable capture, is unknown — never zero, never a guess", () => {
 		expect(derivePresence({ ...base, sessionStatus: "running", conversation: null })).toEqual({
 			value: "unknown",
@@ -122,6 +153,49 @@ describe("derivePresence", () => {
 			value: "unknown",
 			detail: "capture-unreadable",
 		});
+	});
+});
+
+describe("an unrecoverable last activity (the epoch, CONVERSATION.md §4.1) is no evidence", () => {
+	const EPOCH = new Date(0).toISOString();
+	it("a rebuilt conversation (state unknown at 0, lastEventAt the epoch): unknown, at null", () => {
+		const c = { status: "unknown", statusEvidence: "created", statusAt: EPOCH, lastEventAt: EPOCH };
+		expect(derivePresence({ ...base, sessionStatus: "running", conversation: c })).toEqual({
+			value: "unknown",
+			detail: "unknown",
+			source: "created",
+			at: null,
+		});
+	});
+	it("a live claim with only the epoch behind it is stale, never activity", () => {
+		const c = { status: "running", statusEvidence: "hook:x", statusAt: EPOCH, lastEventAt: EPOCH };
+		expect(derivePresence({ ...base, sessionStatus: "running", conversation: c })).toEqual({
+			value: "unknown",
+			detail: "stale",
+			source: "hook",
+			at: null,
+		});
+	});
+	it("fresh evidence after it still decides (a probe that applied a state)", () => {
+		const c = { ...conv("running", "probe:busy", 1000), lastEventAt: EPOCH };
+		expect(derivePresence({ ...base, sessionStatus: "running", conversation: c })).toMatchObject({
+			value: "working",
+			at: ago(1000),
+		});
+	});
+	it("never chosen over a conversation that has a time", () => {
+		const rows = [
+			{
+				status: "unknown",
+				statusEvidence: "created",
+				statusAt: EPOCH,
+				lastEventAt: EPOCH,
+				paneId: "%1",
+			},
+			{ ...conv("ended", "hook:SessionEnd", 3_600_000), paneId: "%2" },
+		];
+		expect(decidingConversation(rows)?.paneId).toBe("%2");
+		expect(decidingConversation([...rows].reverse())?.paneId).toBe("%2");
 	});
 });
 
