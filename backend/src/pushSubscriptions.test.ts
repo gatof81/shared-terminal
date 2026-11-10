@@ -10,6 +10,7 @@ const dbStubs = vi.hoisted(() => ({
 vi.mock("./db.js", () => dbStubs);
 
 import {
+	deleteOwnSubscription,
 	deleteSubscriptionByEndpoint,
 	listSubscriptionsForUser,
 	MAX_PUSH_SUBSCRIPTIONS_PER_USER,
@@ -145,5 +146,19 @@ describe("userHasSubscription", () => {
 			meta: { changes: 0, duration: 0, last_row_id: 0 },
 		});
 		expect(await userHasSubscription("u1")).toBe(false);
+	});
+});
+
+describe("deleteOwnSubscription (#566)", () => {
+	it("deletes only the caller's row: the user is part of the WHERE", async () => {
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [],
+			success: true,
+			meta: { changes: 1, duration: 0, last_row_id: 0 },
+		});
+		expect(await deleteOwnSubscription("u1", "https://a")).toBe(true);
+		const [sql, params] = dbStubs.d1Query.mock.calls.at(-1) as unknown as [string, unknown[]];
+		expect(sql).toMatch(/WHERE endpoint = \? AND user_id = \?/);
+		expect(params).toEqual(["https://a", "u1"]);
 	});
 });

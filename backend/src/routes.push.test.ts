@@ -49,12 +49,13 @@ vi.mock("./db.js", () => dbStubs);
 const pushStubs = vi.hoisted(() => ({
 	isPushEnabled: vi.fn(() => true),
 	getVapidPublicKey: vi.fn(() => "pubkey"),
+	isAllowedPushEndpoint: vi.fn((_e: string) => true),
 }));
 vi.mock("./webPush.js", () => pushStubs);
 
 const subStubs = vi.hoisted(() => ({
 	upsertSubscription: vi.fn(async () => undefined),
-	deleteSubscriptionByEndpoint: vi.fn(async () => true),
+	deleteOwnSubscription: vi.fn(async () => true),
 	userHasSubscription: vi.fn(async () => false),
 	// Real error class so the route's `instanceof` check matches.
 	PushQuotaExceededError: class extends Error {
@@ -79,8 +80,10 @@ beforeEach(() => {
 	pushStubs.getVapidPublicKey.mockReturnValue("pubkey");
 	subStubs.upsertSubscription.mockReset();
 	subStubs.upsertSubscription.mockResolvedValue(undefined);
-	subStubs.deleteSubscriptionByEndpoint.mockReset();
-	subStubs.deleteSubscriptionByEndpoint.mockResolvedValue(true);
+	subStubs.deleteOwnSubscription.mockReset();
+	subStubs.deleteOwnSubscription.mockResolvedValue(true);
+	pushStubs.isAllowedPushEndpoint.mockReset();
+	pushStubs.isAllowedPushEndpoint.mockReturnValue(true);
 	subStubs.userHasSubscription.mockReset();
 	subStubs.userHasSubscription.mockResolvedValue(false);
 });
@@ -119,7 +122,7 @@ async function spinUp() {
 }
 
 const validSub = {
-	endpoint: "https://push.example.com/abc",
+	endpoint: "https://fcm.googleapis.com/fcm/send/abc",
 	keys: { p256dh: "Bd2...", auth: "aXk..." },
 };
 
@@ -157,6 +160,20 @@ describe("GET /push/status", () => {
 });
 
 describe("POST /push/subscribe", () => {
+	it("400s an endpoint that is not a push service, and stores nothing (#566)", async () => {
+		await spinUp();
+		pushStubs.isAllowedPushEndpoint.mockReturnValue(false);
+		const res = await fetch(`${baseUrl}/api/push/subscribe`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ ...validSub, endpoint: "https://10.0.0.5:8443/x" }),
+		});
+		expect(res.status).toBe(400);
+		expect(await res.json()).toMatchObject({ code: "endpoint-not-allowed" });
+		expect(pushStubs.isAllowedPushEndpoint).toHaveBeenCalledWith("https://10.0.0.5:8443/x");
+		expect(subStubs.upsertSubscription).not.toHaveBeenCalled();
+	});
+
 	it("204s and upserts a valid subscription scoped to the caller", async () => {
 		await spinUp();
 		const res = await fetch(`${baseUrl}/api/push/subscribe`, {
@@ -215,17 +232,29 @@ describe("POST /push/subscribe", () => {
 });
 
 describe("DELETE /push/subscribe", () => {
-	it("204s and deletes by endpoint", async () => {
+	it("204s and deletes only the caller's own row by endpoint (#566)", async () => {
 		await spinUp();
 		const res = await fetch(`${baseUrl}/api/push/subscribe`, {
 			method: "DELETE",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ endpoint: "https://push.example.com/abc" }),
+			body: JSON.stringify({ endpoint: "https://fcm.googleapis.com/fcm/send/abc" }),
 		});
 		expect(res.status).toBe(204);
-		expect(subStubs.deleteSubscriptionByEndpoint).toHaveBeenCalledWith(
-			"https://push.example.com/abc",
+		expect(subStubs.deleteOwnSubscription).toHaveBeenCalledWith(
+			"u1",
+			"https://fcm.googleapis.com/fcm/send/abc",
 		);
+	});
+
+	it("answers the same 204 when the row is someone else's (nothing deleted, nothing told)", async () => {
+		await spinUp();
+		subStubs.deleteOwnSubscription.mockResolvedValueOnce(false);
+		const res = await fetch(`${baseUrl}/api/push/subscribe`, {
+			method: "DELETE",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ endpoint: "https://fcm.googleapis.com/fcm/send/other" }),
+		});
+		expect(res.status).toBe(204);
 	});
 
 	it("400s a missing endpoint", async () => {

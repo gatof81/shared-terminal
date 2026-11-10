@@ -4,7 +4,7 @@
  *   GET    /api/push/vapid-key   → { key } | 404 when push disabled
  *   GET    /api/push/status      → { enabled, subscribed }
  *   POST   /api/push/subscribe   → 204 (upsert the browser's subscription)
- *   DELETE /api/push/subscribe   → 204 (remove by endpoint; "turn off")
+ *   DELETE /api/push/subscribe   → 204 (remove the caller's own row by endpoint; "turn off")
  *
  * All under `requireAuth` (mounted in routes.ts). Subscriptions are
  * user-scoped: `upsertSubscription` re-owns the endpoint to the caller,
@@ -17,12 +17,12 @@ import type { Request, Response, Router } from "express";
 import type { AuthedRequest } from "../auth.js";
 import { logger } from "../logger.js";
 import {
-	deleteSubscriptionByEndpoint,
+	deleteOwnSubscription,
 	PushQuotaExceededError,
 	upsertSubscription,
 	userHasSubscription,
 } from "../pushSubscriptions.js";
-import { getVapidPublicKey, isPushEnabled } from "../webPush.js";
+import { getVapidPublicKey, isAllowedPushEndpoint, isPushEnabled } from "../webPush.js";
 import type { RouteContext } from "./shared.js";
 
 // Bound the subscription fields at the boundary. A browser `endpoint`
@@ -89,6 +89,12 @@ export function registerPushRoutes(router: Router, _ctx: RouteContext): void {
 				.json({ error: "invalid subscription (endpoint + keys.p256dh + keys.auth required)" });
 			return;
 		}
+		// Only a real push service (#566): any other https URL made the
+		// backend POST wherever the client said, from inside its network.
+		if (!isAllowedPushEndpoint(endpoint)) {
+			res.status(400).json({ error: "push endpoint not allowed", code: "endpoint-not-allowed" });
+			return;
+		}
 		try {
 			await upsertSubscription(userId, { endpoint, p256dh, auth });
 			res.status(204).send();
@@ -111,11 +117,10 @@ export function registerPushRoutes(router: Router, _ctx: RouteContext): void {
 			return;
 		}
 		try {
-			// Not user-scoped by design: the endpoint is globally unique and
-			// the caller is unsubscribing their own browser. A cross-user
-			// delete would require guessing another browser's endpoint URL
-			// (unguessable), so scoping adds nothing. Log the user for audit.
-			await deleteSubscriptionByEndpoint(endpoint);
+			// Only the caller's own row (#566): the endpoint is not a secret
+			// to anyone who reads a D1 export or a backup. Always 204 — the
+			// answer must not tell whether someone else holds the endpoint.
+			await deleteOwnSubscription(userId, endpoint);
 			logger.info(`[push] user ${userId} unsubscribed an endpoint`);
 			res.status(204).send();
 		} catch (err) {

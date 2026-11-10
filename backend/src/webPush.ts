@@ -18,10 +18,20 @@
 
 import webpush from "web-push";
 import { logger } from "./logger.js";
+import { checkPushEndpoint, DEFAULT_PUSH_HOSTS, pushEndpointHosts } from "./pushEndpoint.js";
 import { deleteSubscriptionByEndpoint, listSubscriptionsForUser } from "./pushSubscriptions.js";
 
 let configured = false;
 let publicKey: string | null = null;
+let endpointHosts: readonly string[] = DEFAULT_PUSH_HOSTS;
+
+/**
+ * How long one push request may take (#566). web-push sets no timeout of its
+ * own, so an endpoint that accepts the connection and never answers held a
+ * socket for good, one per bell episode. Push services answer in well under a
+ * second.
+ */
+export const PUSH_SEND_TIMEOUT_MS = 10_000;
 
 /**
  * Read VAPID config from the environment and configure `web-push`.
@@ -36,6 +46,15 @@ export function configureWebPush(): boolean {
 	const pub = process.env.VAPID_PUBLIC_KEY?.trim();
 	const priv = process.env.VAPID_PRIVATE_KEY?.trim();
 	const subject = process.env.VAPID_SUBJECT?.trim();
+	let hosts: readonly string[];
+	try {
+		hosts = pushEndpointHosts();
+	} catch (err) {
+		configured = false;
+		publicKey = null;
+		logger.warn(`[push] ${(err as Error).message}; Web Push disabled.`);
+		return false;
+	}
 	if (!pub || !priv || !subject) {
 		configured = false;
 		publicKey = null;
@@ -58,6 +77,7 @@ export function configureWebPush(): boolean {
 	}
 	configured = true;
 	publicKey = pub;
+	endpointHosts = hosts;
 	logger.info("[push] Web Push enabled (VAPID configured).");
 	return true;
 }
@@ -72,6 +92,11 @@ export function isPushEnabled(): boolean {
  *  Null when push is disabled. */
 export function getVapidPublicKey(): string | null {
 	return publicKey;
+}
+
+/** Whether `endpoint` names an allowed push service (pushEndpoint.ts, #566). */
+export function isAllowedPushEndpoint(endpoint: string): boolean {
+	return checkPushEndpoint(endpoint, endpointHosts).ok;
 }
 
 /** Payload shape delivered to the service worker. Kept small — push
@@ -106,10 +131,22 @@ export async function sendToUser(userId: string, payload: PushPayload): Promise<
 	const body = JSON.stringify(payload);
 	await Promise.all(
 		subs.map(async (sub) => {
+			// Rows stored before #566 (or before the list was narrowed) are
+			// checked again here: never sent to, but kept — the row is the
+			// user's, and dropping it is not this sweep's call. The reason is
+			// logged, never the endpoint (it is a capability).
+			const check = checkPushEndpoint(sub.endpoint, endpointHosts);
+			if (!check.ok) {
+				logger.warn(
+					`[push] not sending to a stored endpoint of user ${userId}: ${check.reason} (#566)`,
+				);
+				return;
+			}
 			try {
 				await webpush.sendNotification(
 					{ endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
 					body,
+					{ timeout: PUSH_SEND_TIMEOUT_MS },
 				);
 			} catch (err) {
 				const status = (err as { statusCode?: number }).statusCode;
