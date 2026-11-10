@@ -101,6 +101,8 @@ export interface AgentListEntry {
 
 export interface AgentDetail extends AgentListEntry {
 	projectId: string;
+	/** Server clock at the read that decided `presence` (§4.5, #569), as in the list. */
+	generatedAt: string;
 	createdAt: string;
 	removedAt: string | null;
 	capabilities: typeof CLAUDE_CODE_CAPABILITIES;
@@ -677,6 +679,7 @@ export class ProjectDirectory {
 		return {
 			agentId: first.agent_id as string,
 			projectId,
+			generatedAt: readAt,
 			handle: first.handle as string,
 			role: first.role,
 			provider: first.provider as string,

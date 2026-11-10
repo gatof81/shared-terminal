@@ -88,6 +88,23 @@ test.describe("conversation switcher", () => {
 		await expect(page.locator(".switcher-summary")).toHaveText("Now: 1 needs you (my-project).");
 	});
 
+	test("a permission prompt only a probe saw is not 'Needs you', as on the project page (#569)", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		const c1 = backend.conversations.find((c) => c.cid === "conv-1")!;
+		c1.status = "waiting_permission";
+		c1.statusEvidence = "probe:waiting";
+		await app.login("alice");
+		await openSwitcher(app, page);
+		await expect(page.locator(".switcher-group-title")).toHaveText([
+			"Recent",
+			"Unknown or no recent activity",
+		]);
+		await expect(page.locator(".switcher-summary")).not.toContainText("needs you");
+	});
+
 	test("a stale wait is not 'Needs you': it is listed as no recent activity", async ({
 		app,
 		backend,

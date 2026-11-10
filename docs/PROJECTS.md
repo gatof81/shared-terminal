@@ -171,10 +171,13 @@ resolves, §4.5).
 
 ### 4.5 `GET /api/projects/:pid/agents/:aid` (E-3)
 
-Also for a removed agent. `bindings` is the whole history, by epoch.
+Also for a removed agent. `bindings` is the whole history, by epoch. `generatedAt` is the server clock
+at the read that decided `presence`, the same as in §4.4. It lets a client age `presence.at` without
+loading the list first (#569).
 
 ```jsonc
-{ "agentId": "a0…a2", "projectId": "6b1f…", "handle": "developer-hz", "role": "Developer",
+{ "agentId": "a0…a2", "projectId": "6b1f…", "generatedAt": "2026-11-10T14:02:45.000Z",
+  "handle": "developer-hz", "role": "Developer",
   "provider": "claude-code", "template": null, "createdAt": "…", "removedAt": null,
   "capabilities": { "capture": true, "channels": false, "directControl": true },  // declared by the provider
   "binding": { "bindingId": "b0…b2", "epoch": 1, "sessionId": "a724…", "state": "active", "createdAt": "…" },
@@ -222,6 +225,31 @@ the Chat view may be up to that much ahead.
 | `waiting_input` | `waiting_input`; `verified: true` only when the evidence is a probe | |
 | `needs_attention` | `waiting_permission` | `detail: "waiting_permission"` |
 | `unknown` | no conversation · capture unreadable · live claim with evidence ≥ 10 min old · `error`/`ending`/`unknown` | `detail`: `capture-unreadable`, `stale`, or the capture status |
+
+**`source` is a closed list (#569).** It is the prefix of the deciding conversation's
+`statusEvidence`, or presence's own source:
+
+| `value` | possible `source` |
+| --- | --- |
+| `working`, `waiting_input`, `needs_attention` | only `hook` or `probe`: the state machine only produces live states from hook or probe evidence (CONVERSATION.md §5.3) |
+| `disconnected` | `session` (the session row), `directory` (`unbound`/`agent-removed`), `hook` or `probe` (`ended`), `reconcile` (container down) |
+| `unknown` | `capture` (no conversation / capture unreadable), `timeout` (silence), `reconcile`, `reopened`, `created`, `binding_lost`, `hook` (`SessionStart`, `error`, `ending`), or the live claim's own `hook`/`probe` when `stale` |
+
+A value not in this list means a later contract; a client shows it as "state unknown".
+
+**`needs_attention` can come from a probe alone.** A probe that sees the CLI waiting on a permission
+prompt (`probe:waiting`) yields `needs_attention` with `source: "probe"`. Presence passes it on as it
+is, because the value is true evidence that the prompt is on screen. Clients apply the owner's rule
+of 2026-11-09 (#569): only the CLI's own `hook` evidence means "needs you". A `probe`-sourced
+`needs_attention` shows as "State unknown" everywhere:
+- **the project page** (`projectModel.ts`, `presentPresence`);
+- **the Chat switcher** (`attentionRule.ts`, which reads the conversation's `statusEvidence` with the
+  same prefix rule as `source`): the conversation goes to "Unknown or no recent activity";
+- **the Chat list row and the conversation's status chip** (`presentClaim` in
+  `conversationModel.ts`, which the switcher's chip also uses): "State unknown", not "Needs
+  permission".
+
+`attentionRule.test.ts` feeds the same evidence to all three and requires the same verdict.
 
 **Deciding conversation:** among the session's conversations whose pane is bound (bindings are released
 at every container stop, so a bound pane is the current start), the one with the newest evidence

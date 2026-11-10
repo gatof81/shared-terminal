@@ -170,6 +170,7 @@ Cost per computation is therefore one readdir and one stat per non-resident conv
   - Subagents only in the sidebar tooltip.
   - Backoff on 429 and network errors, and no duplicate concurrent requests.
 - **(2026-11-06)** What "needs you" means: **option A**. "Needs you" is `waiting_permission` with fresh evidence only; "ready" is `waiting_input`, a secondary, discreet indicator; "working" is `running` and `waiting_background` with fresh evidence. The rule is shared between backend and frontend as one pure module: `frontend/src/attentionRule.ts`, which the switcher already uses and the backend endpoint must copy byte-identically.
+- **(2026-11-10)** "Needs you" also needs the evidence to come from the CLI's own hook (the owner's rule of 2026-11-09 for the project page, #569, applied to the switcher so the two agree). A `waiting_permission` that only a probe saw is `unknown`: "State unknown", never counted as "needs you". `attentionKind` reads `statusEvidence` for it.
 
 ## Assumptions
 

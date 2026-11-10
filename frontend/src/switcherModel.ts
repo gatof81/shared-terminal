@@ -15,7 +15,12 @@
 import type { ConversationSummary, SessionBinding } from "./api.js";
 import { attentionKind } from "./attentionRule.js";
 import { displayTitle, isArchived } from "./chatMeta.js";
-import { lastEvidenceAt, presentStatus, type StatusPresentation } from "./conversationModel.js";
+import {
+	lastEvidenceAt,
+	presentClaim,
+	presentStatus,
+	type StatusPresentation,
+} from "./conversationModel.js";
 
 // ── Ranking ─────────────────────────────────────────────────────────────────
 
@@ -47,10 +52,11 @@ export interface SwitcherItem {
 /**
  * The bucket is attentionRule.ts's verdict (owner option A, 2026-11-06) — the
  * same rule the per-project attention signal uses:
- * - attention ("Needs you"): a FRESH permission prompt;
+ * - attention ("Needs you"): a FRESH permission prompt from the CLI's hook;
  * - working: a fresh claim of activity (running, background tasks);
  * - ready: Claude fresh at its prompt — secondary, after the work in progress;
- * - quiet: `unknown`, or a live claim gone stale (nothing proves Claude is there);
+ * - quiet: `unknown`, a live claim gone stale (nothing proves Claude is there),
+ *   or a permission prompt only a probe saw (shown as "State unknown");
  * - recent: everything else (ended, error, disconnected…), by last evidence.
  */
 export function bucketOf(
@@ -60,7 +66,10 @@ export function bucketOf(
 	bucket: Bucket;
 	status: StatusPresentation;
 } {
-	const status = presentStatus(c.status, lastEvidenceAt(c), now);
+	const status = presentClaim(
+		{ status: c.status, at: lastEvidenceAt(c), evidence: c.statusEvidence },
+		now,
+	);
 	switch (attentionKind(c, now)) {
 		case "attention":
 			return { bucket: "attention", status };

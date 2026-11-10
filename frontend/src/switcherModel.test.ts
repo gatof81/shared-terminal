@@ -52,6 +52,22 @@ describe("bucketOf — states come from the presentation, never from age or canS
 		expect(bucketOf(conv({ status: "waiting_permission" }), NOW).bucket).toBe("attention");
 		expect(bucketOf(conv({ status: "waiting_input" }), NOW).bucket).toBe("ready");
 	});
+	it("a permission prompt only a probe saw is quiet and 'State unknown', as on the project page (#569)", () => {
+		const r = bucketOf(
+			conv({ status: "waiting_permission", statusEvidence: "probe:waiting" }),
+			NOW,
+		);
+		expect(r.bucket).toBe("quiet");
+		expect(r.status.label).toBe("State unknown");
+		expect(r.status.tone).toBe("muted");
+		// Still live: an archived one stays visible, like any live claim.
+		expect(
+			visibleInSwitcher(
+				conv({ status: "waiting_permission", statusEvidence: "probe:waiting", archivedAt: ago(1) }),
+				NOW,
+			),
+		).toBe(true);
+	});
 	it("a fresh run or background wait is working", () => {
 		expect(bucketOf(conv({ status: "running" }), NOW).bucket).toBe("working");
 		expect(bucketOf(conv({ status: "waiting_background" }), NOW).bucket).toBe("working");

@@ -27,6 +27,7 @@
  *     "You", and both start a new turn for the report matching.
  */
 
+import { evidenceSource } from "./attentionRule";
 import { classifyPrompt } from "./internalPrompt";
 
 export interface ConversationEvent {
@@ -837,6 +838,25 @@ export function presentStatus(status: string, at: string, now: number): StatusPr
 		active: statusIsLiveClaim(status),
 		stale: false,
 	};
+}
+
+/**
+ * presentStatus plus the owner's rule of 2026-11-09 (#569): a fresh
+ * permission prompt is shown as such only on the CLI's own hook evidence. One
+ * only a probe saw is "State unknown" — the project page's wording — on every
+ * surface that shows a conversation's state (the Chat list row, its status
+ * chip, the switcher), so none of them says "Needs permission" while another
+ * says it is unknown. `evidence` is the conversation's `statusEvidence`.
+ */
+export function presentClaim(
+	c: { status: string; at: string; evidence: string | null | undefined },
+	now: number,
+): StatusPresentation {
+	const p = presentStatus(c.status, c.at, now);
+	if (c.status === "waiting_permission" && !p.stale && evidenceSource(c.evidence) !== "hook") {
+		return { ...p, label: "State unknown", tone: "muted" };
+	}
+	return p;
 }
 
 // ── Event window (L8) ───────────────────────────────────────────────────────
