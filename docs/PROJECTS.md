@@ -347,3 +347,24 @@ Conditions for a rollback in case B, in order of preference:
 3. After re-upgrading, a binding whose session was purged in between reads
    `disconnected · session-gone` (§5) and its agent can be removed; nothing else acts on it in P3a.
 
+
+## 9. Pilot: "Ask the agents" (temporary, frontend only)
+
+Owner decisions D-PIL1–D-PIL5 (2026-11-10; design 18 of #512). A panel on the project page, **opt-in
+per browser** (`?pilot=1`, `?pilot=0` to turn it off; kept in localStorage) and only where
+`features.projectChat` is on. It adds **no backend, no route, no table and no rule**:
+
+- **Sends:** one click makes one ordinary Composer send (`POST …/messages`, CONVERSATION.md §8) per
+  selected agent, each with its own `clientMessageId`, issued independently. A `busy`, any 409 or an
+  `unconfirmed` for one agent never holds back or cancels another's; nothing is retried.
+- **Target:** the agent's live interactive conversation bound to a pane with `canSendInput` (light list,
+  re-read just before the send). None ⇒ the reason; more than one ⇒ "ambiguous", nothing sent.
+- **Replies are attributed on evidence only:** the CLI's `prompt_id` that the Composer acknowledged
+  (a 202 `delivered` with `promptId`, or the send's own `composer_send` event with `result: delivered`
+  and `prompt_id`). A reply is exactly the events with that `prompt_id`. Without that evidence
+  (`unconfirmed`, `uncertain`, `misdelivered`, a refusal) nothing is shown as the answer, whatever
+  arrives close in time; new events are only counted as "not attributed".
+- **Forward:** pre-fills the panel with "From @handle:" and the answer, selects the other agents, and
+  says that nothing leaves until the person clicks Send. The text is editable; it is an ordinary send.
+- **Temporary:** P7 (the host conversation with guests) replaces it. Its retirement is evaluated then,
+  keeping a way to ask several agents at once.

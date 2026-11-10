@@ -534,3 +534,208 @@ body.project-page-on #actions-btn {
     display: none;
   }
 }
+
+/* ── "Ask the agents" (Pilot 1, docs/design/project-chat/18) ─────────────── */
+/* Beside the re-rendered page content (projectsView keeps the element across
+   polls), so it carries the page's own padding. Tokens only. */
+.pv-content {
+  min-width: 0;
+}
+.pilot {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  margin: var(--s-4);
+  padding: var(--s-4);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-m);
+  background: var(--c-surface);
+  min-width: 0;
+}
+.pilot-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+.pilot-title {
+  margin: 0;
+  font-size: 1rem;
+  color: var(--c-text);
+}
+.pilot-badge {
+  padding: 0 var(--s-2);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-s);
+  color: var(--c-muted);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+}
+.pilot-note,
+.pilot-muted {
+  margin: 0;
+  color: var(--c-muted);
+  font-size: 0.85rem;
+}
+.pilot-agents {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+.pilot-agent {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  min-height: 44px;
+}
+.pilot-agent label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-height: 44px;
+  cursor: pointer;
+}
+.pilot-agent input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+}
+.pilot-handle {
+  font-weight: 600;
+  color: var(--c-text);
+}
+.pilot-target {
+  color: var(--c-muted);
+  font-size: 0.85rem;
+}
+.pilot-target-ok {
+  color: var(--c-ok);
+}
+.pilot-target-none,
+.pilot-target-ambiguous,
+.pilot-target-error {
+  color: var(--c-warn);
+}
+.pilot-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border-left: 3px solid var(--c-warn);
+  background: rgba(var(--c-warn-rgb), 0.08);
+  color: var(--c-text);
+}
+.pilot-text {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 4.5em;
+  padding: var(--s-2);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-s);
+  background: var(--c-bg);
+  color: var(--c-text);
+  font: inherit;
+  resize: vertical;
+}
+.pilot-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+}
+.pilot-error {
+  color: var(--c-err);
+}
+.pilot-exchanges {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+.pilot-exchange {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding-top: var(--s-3);
+  border-top: 1px solid var(--c-border-soft);
+}
+.pilot-exchange-head {
+  display: flex;
+  gap: var(--s-2);
+  color: var(--c-muted);
+  font-size: 0.8rem;
+}
+.pilot-sent {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--c-text-2);
+}
+.pilot-lanes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: var(--s-3);
+}
+.pilot-lane {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-s);
+  min-width: 0;
+}
+.pilot-lane-top,
+.pilot-lane-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+}
+.pilot-state {
+  font-size: 0.85rem;
+}
+.pilot-state-ok {
+  color: var(--c-ok);
+}
+.pilot-state-warn {
+  color: var(--c-warn);
+}
+.pilot-state-muted {
+  color: var(--c-muted);
+}
+.pilot-reply {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+.pilot-answer {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--c-text);
+}
+.pilot-tool,
+.pilot-marker {
+  color: var(--c-muted);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+.pilot-tool-failed,
+.pilot-marker-warn {
+  color: var(--c-warn);
+}
+.pilot-open-chat {
+  align-self: flex-start;
+  color: var(--c-accent);
+  font-size: 0.85rem;
+}
+@media (max-width: 768px) {
+  .pilot {
+    margin: var(--s-2);
+    padding: var(--s-3);
+  }
+  .pilot-lanes {
+    grid-template-columns: 1fr;
+  }
+}
