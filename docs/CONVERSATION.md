@@ -2568,7 +2568,7 @@ operación o de ninguna.
 
 #### 8.1.9 Compatibilidad con la versión del CLI
 
-Todo §8 describe el comportamiento observado del CLI **2.1.314** (§8.2). La allowlist de
+Todo §8 describe el comportamiento observado del CLI **2.1.314** (§8.2). La regla de
 recreación (§2.7.5, `cliCompat.ts`; mínima + denegación desde v1.9.2) es otra: son **contratos
 distintos** y ninguno se amplía por el otro. `COMPOSER_CLI_VERSIONS` (env, por defecto `2.1.314`) es
 la lista de versiones con las que §8.2 se repitió. Lo que la política de abajo no admite (fuera de la
