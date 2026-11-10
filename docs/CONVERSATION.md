@@ -546,8 +546,9 @@ Las pestañas tmux ya se pierden con el stop.
   `layer-tmp`**: en particular un archivo regular en `tasks/` (la salida de una tarea en segundo
   plano es contenido del usuario y nada muestra que sea descartable), otro destino o un destino
   relativo, una sonda de otro tamaño o tipo, otros nombres, niveles o uid, y cualquier entrada
-  borrada o solo modificada. Una versión del CLI distinta de 2.1.308 queda fuera por la allowlist
-  de versiones (§2.7.5): sus artefactos no están validados.
+  borrada o solo modificada. Desde v1.9.2 una versión del CLI distinta de 2.1.308 ya no queda fuera
+  por versión (§2.7.5): llega a esta comprobación, y artefactos de runtime con una forma no validada
+  bloquean como `layer-tmp`.
 - **Se permite el registro del manejador de enlaces `claude-cli://` del CLI 2.1.308 en HOME**
   (decisión del responsable, 2026-10-28; levanta "no ampliar HOME" solo para estas cuatro rutas, D2
   y D3 siguen vigentes para todo lo demás). La sesión interactiva lo escribe en su primer turno, no al
@@ -1052,7 +1053,7 @@ inválido dentro:
 Si esa validación fallara, la activación quedaría bloqueada (`control-marker-incompatible` en
 `PATCH {enabled:true}` y en `POST …/recreate`) y 3.0d no se publicaría hasta revisar otra
 ubicación. No hay respaldo silencioso. La validación pasó con 2.1.308; hoy la versión del CLI solo
-se comprueba en la recreación (allowlist, abajo). Aplicarla también a `PATCH {enabled:true}` es una
+se comprueba en la recreación (mínima + denegación desde v1.9.2, abajo). Aplicarla también a `PATCH {enabled:true}` es una
 decisión pendiente del responsable (#466) y no forma parte de este contrato.
 
 `N` ejecuta el CLI del `.npm-global` del workspace, que puede no ser el de la imagen. La recreación
