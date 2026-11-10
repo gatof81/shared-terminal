@@ -266,9 +266,12 @@ export function movesLastEventAt(event: { ev: unknown; data?: unknown }): boolea
 }
 
 /** The last activity line's `ts` and the first line's `ts` of an events file's content. */
-function activityTimesIn(content: string): { lastActivity: string | null; oldest: string | null } {
+function activityTimesIn(content: string): {
+	lastActivity: string | null;
+	oldest: { ts: string; seq: number } | null;
+} {
 	let lastActivity: string | null = null;
-	let oldest: string | null = null;
+	let oldest: { ts: string; seq: number } | null = null;
 	for (const line of content.split("\n")) {
 		if (!line) continue;
 		let ev: PersistedEvent;
@@ -278,11 +281,19 @@ function activityTimesIn(content: string): { lastActivity: string | null; oldest
 			continue; // torn line
 		}
 		if (!ev.ts) continue;
-		oldest ??= ev.ts;
+		oldest ??= { ts: ev.ts, seq: ev.seq };
 		if (movesLastEventAt(ev)) lastActivity = ev.ts;
 	}
 	return { lastActivity, oldest };
 }
+
+/**
+ * `lastEventAt` when the last activity's time can no longer be recovered
+ * (CONVERSATION.md §4.1, v1.9.1): the epoch, the same "no time" a state that
+ * has none carries (`state.at = 0`). It sorts last and never reads as recent;
+ * presence takes it as no evidence at all.
+ */
+export const NO_ACTIVITY_TIME = new Date(0).toISOString();
 
 export class ConversationStore {
 	private readonly fs: StoreFs;
@@ -616,7 +627,7 @@ export class ConversationStore {
 		index.lastPromptId = index.persistedPromptId;
 		let scannedSeq = index.offset === 0 ? 0 : index.lastSeq;
 		let sawActivity = false;
-		let oldestAny: string | null = null;
+		let oldestAny: { ts: string; seq: number } | null = null;
 		for (const line of tail.split("\n")) {
 			if (!line) continue;
 			let ev: PersistedEvent;
@@ -632,7 +643,7 @@ export class ConversationStore {
 			index.eventsBytes += Buffer.byteLength(line, "utf8") + 1;
 			if (ev.ev === "gap") index.gapsCount++;
 			if (ev.ts) {
-				oldestAny ??= ev.ts;
+				oldestAny ??= { ts: ev.ts, seq: ev.seq };
 				if (movesLastEventAt(ev)) {
 					index.lastEventAt = ev.ts;
 					sawActivity = true;
@@ -673,12 +684,12 @@ export class ConversationStore {
 		// live index held is the last activity before the rotation, so read it
 		// from the `.1` archive; with none there either, the live index still
 		// held the time it was opened, and the oldest line on disk is the
-		// closest record of that. An older time only reads as stale, a newer
-		// one invents activity. The one case that can land later than the
-		// truth: an archive holding no activity at all (a whole generation of
-		// probes and gaps, two rotations after the last activity) — that time
-		// is gone from disk, and its first line, itself a rotation, is the
-		// earliest left. A snapshot's value, when there is one, is kept as is.
+		// closest record of that — but only while the whole history is on disk
+		// (the oldest line is seq 1). When it is not (two rotations since the
+		// last activity, an archive lost), the time is gone: NO_ACTIVITY_TIME,
+		// never a later line that would read as activity (owner, 2026-11-10:
+		// unknown presence rather than a false sign of activity). A snapshot's
+		// value, when there is one, is kept as is.
 		if (!fromSnapshot && !sawActivity) await this.lastEventAtFromArchive(file, index, oldestAny);
 		index.offset = size;
 		return size;
@@ -975,19 +986,31 @@ export class ConversationStore {
 	}
 
 	/**
-	 * The snapshotless fallback of recoverFromFile: the `.1` archive's last
-	 * activity, else its oldest line, else `oldestCurrent` (the current file's
-	 * oldest line); with none of them the fresh index's load time stays — a
-	 * conversation with nothing on disk is new.
+	 * The snapshotless fallback of recoverFromFile:
+	 *  - the `.1` archive's last activity;
+	 *  - else, with the whole history on disk and no activity in it (the
+	 *    oldest line left is seq 1), that line: the live index still held the
+	 *    time it was opened;
+	 *  - else, with the start of the history gone (an archive without activity
+	 *    is a second rotation; a missing archive under a rotated file),
+	 *    NO_ACTIVITY_TIME — the true time is not on disk;
+	 *  - nothing on disk at all: the fresh index's load time stays — a new
+	 *    conversation.
 	 */
 	private async lastEventAtFromArchive(
 		file: string,
 		index: ConversationIndex,
-		oldestCurrent: string | null,
+		oldestCurrent: { ts: string; seq: number } | null,
 	): Promise<void> {
 		const archived = await this.fs.readFile(`${file}.1`, "utf8").catch(() => "");
 		const a = activityTimesIn(archived);
-		index.lastEventAt = a.lastActivity ?? a.oldest ?? oldestCurrent ?? index.lastEventAt;
+		if (a.lastActivity !== null) {
+			index.lastEventAt = a.lastActivity;
+			return;
+		}
+		const oldest = a.oldest ?? oldestCurrent;
+		if (oldest === null) return;
+		index.lastEventAt = oldest.seq === 1 ? oldest.ts : NO_ACTIVITY_TIME;
 	}
 
 	// ── Mutation of index metadata (service-driven) ────────────────────────

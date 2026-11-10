@@ -1548,12 +1548,18 @@ que es **actividad**:
 índice vivo. Si el archivo actual no tiene ninguna línea de actividad (tras una rotación L7 solo
 quedan el `gap rotated` y probes), se toma:
 1. la última actividad del archivo rotado `.1`, que es lo que el índice vivo guardaba;
-2. si `.1` tampoco tiene actividad, o no existe, el `ts` de la línea **más vieja** en disco, el
-   registro más cercano a la apertura del índice vivo.
+2. si no hay actividad en disco pero la historia está completa (la línea más vieja que queda es
+   `seq` 1), el `ts` de esa línea: es la apertura del índice vivo, que nunca vio actividad;
+3. si falta el comienzo de la historia (un `.1` sin actividad es una segunda rotación; o el `.1` se
+   perdió bajo un archivo rotado), **la época** (`1970-01-01T00:00:00.000Z`): la hora verdadera ya
+   no está en disco. Es el mismo "sin hora" que lleva un estado que no la tiene (`state.at = 0`).
+   Ordena último, nunca se lee como reciente, y la presencia (PROJECTS.md §5) lo toma como sin
+   evidencia (`at: null`). La decisión del responsable (2026-11-10): presencia desconocida antes que
+   una falsa señal de actividad.
 
 Nunca la hora de la carga ni la línea más nueva, que sería un probe o un gap y haría parecer fresca
-una afirmación vieja. Único caso más tardío que la verdad: un `.1` sin ninguna actividad (dos
-rotaciones desde la última), porque esa hora ya no está en disco.
+una afirmación vieja. Sin snapshot, el estado mismo se reconstruye como `unknown` (`created`, en 0),
+así que esta reconstrucción nunca produce una afirmación viva.
 
 **El frontend** aplica la misma regla y el `ts` del evento al actualizar una fila desde el WS.
 

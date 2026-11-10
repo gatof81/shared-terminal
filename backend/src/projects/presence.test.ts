@@ -156,6 +156,49 @@ describe("derivePresence", () => {
 	});
 });
 
+describe("an unrecoverable last activity (the epoch, CONVERSATION.md §4.1) is no evidence", () => {
+	const EPOCH = new Date(0).toISOString();
+	it("a rebuilt conversation (state unknown at 0, lastEventAt the epoch): unknown, at null", () => {
+		const c = { status: "unknown", statusEvidence: "created", statusAt: EPOCH, lastEventAt: EPOCH };
+		expect(derivePresence({ ...base, sessionStatus: "running", conversation: c })).toEqual({
+			value: "unknown",
+			detail: "unknown",
+			source: "created",
+			at: null,
+		});
+	});
+	it("a live claim with only the epoch behind it is stale, never activity", () => {
+		const c = { status: "running", statusEvidence: "hook:x", statusAt: EPOCH, lastEventAt: EPOCH };
+		expect(derivePresence({ ...base, sessionStatus: "running", conversation: c })).toEqual({
+			value: "unknown",
+			detail: "stale",
+			source: "hook",
+			at: null,
+		});
+	});
+	it("fresh evidence after it still decides (a probe that applied a state)", () => {
+		const c = { ...conv("running", "probe:busy", 1000), lastEventAt: EPOCH };
+		expect(derivePresence({ ...base, sessionStatus: "running", conversation: c })).toMatchObject({
+			value: "working",
+			at: ago(1000),
+		});
+	});
+	it("never chosen over a conversation that has a time", () => {
+		const rows = [
+			{
+				status: "unknown",
+				statusEvidence: "created",
+				statusAt: EPOCH,
+				lastEventAt: EPOCH,
+				paneId: "%1",
+			},
+			{ ...conv("ended", "hook:SessionEnd", 3_600_000), paneId: "%2" },
+		];
+		expect(decidingConversation(rows)?.paneId).toBe("%2");
+		expect(decidingConversation([...rows].reverse())?.paneId).toBe("%2");
+	});
+});
+
 describe("decidingConversation", () => {
 	it("only bound panes; the newest evidence wins", () => {
 		const rows = [

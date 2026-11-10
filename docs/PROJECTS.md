@@ -253,7 +253,10 @@ of 2026-11-09 (#569): only the CLI's own `hook` evidence means "needs you". A `p
 
 **Deciding conversation:** among the session's conversations whose pane is bound (bindings are released
 at every container stop, so a bound pane is the current start), the one with the newest evidence
-(max of `statusAt`, `lastEventAt`). `at` is that evidence's time, `null` when there is none.
+(max of `statusAt`, `lastEventAt`). `at` is that evidence's time, `null` when there is none. The
+epoch counts as no time: it is what a state without a time carries, and the `lastEventAt` the store
+writes when the last activity can no longer be recovered (CONVERSATION.md §4.1), so it never decides
+over a conversation with a real time and never reads as evidence.
 `at` is always evidence that **supports** the value:
 - `statusAt` moves only when a hook or a probe asserts the state, and a probe that confirms nothing
   does not move it;

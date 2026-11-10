@@ -61,9 +61,19 @@ const LIVE_CLAIMS = new Set([
 	"waiting_permission",
 ]);
 
-function newestEvidence(c: PresenceConversation): { at: string; t: number } {
-	const s = Date.parse(c.statusAt);
-	const e = c.lastEventAt === null ? Number.NaN : Date.parse(c.lastEventAt);
+/**
+ * The newer of the state's time and the last activity. The epoch is "no time"
+ * (a state that has none, or a `lastEventAt` the store could not recover —
+ * CONVERSATION.md §4.1), so it counts as no evidence: `at` null, `t` NaN.
+ */
+function newestEvidence(c: PresenceConversation): { at: string | null; t: number } {
+	const time = (v: string | null) => {
+		const t = v === null ? Number.NaN : Date.parse(v);
+		return t > 0 ? t : Number.NaN;
+	};
+	const s = time(c.statusAt);
+	const e = time(c.lastEventAt);
+	if (Number.isNaN(s) && Number.isNaN(e)) return { at: null, t: Number.NaN };
 	if (Number.isNaN(e) || (!Number.isNaN(s) && s >= e)) return { at: c.statusAt, t: s };
 	return { at: c.lastEventAt as string, t: e };
 }
@@ -94,7 +104,7 @@ export function derivePresence(input: PresenceInput): Presence {
 	const { at, t } = newestEvidence(c);
 	const source = evidenceSource(c.statusEvidence);
 	if (LIVE_CLAIMS.has(c.status) && (Number.isNaN(t) || input.now - t >= PRESENCE_STALE_MS)) {
-		return { value: "unknown", detail: "stale", source, at: Number.isNaN(t) ? null : at };
+		return { value: "unknown", detail: "stale", source, at };
 	}
 	switch (c.status) {
 		case "running":

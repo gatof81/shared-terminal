@@ -10,7 +10,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ConversationStore, type PendingEvent, type StoreFs } from "./store.js";
+import { ConversationStore, NO_ACTIVITY_TIME, type PendingEvent, type StoreFs } from "./store.js";
 
 let root: string;
 beforeEach(async () => {
@@ -231,7 +231,7 @@ describe("ConversationStore — recovery without a snapshot agrees with the live
 		expect(await reopen()).toBe(iso(0)); // an empty one
 	});
 
-	it("an archive with no activity at all: its oldest line", async () => {
+	it("an archive with no activity, holding the whole history (seq 1): its oldest line", async () => {
 		let now = at(0);
 		const store = new ConversationStore({ workspaceRoot: root, now: () => now });
 		await store.open("s1", "c1");
@@ -253,6 +253,43 @@ describe("ConversationStore — recovery without a snapshot agrees with the live
 			"c1",
 		);
 		expect(index.lastEventAt).toBe(iso(2));
+	});
+
+	it("two rotations since the last activity, snapshot lost: NO_ACTIVITY_TIME, never a later line", async () => {
+		let now = at(0);
+		const store = new ConversationStore({
+			workspaceRoot: root,
+			now: () => now,
+			limits: { fileBytes: 600 },
+		});
+		await store.open("s1", "c1");
+		store.enqueue("s1", "c1", ev(1));
+		await store.flush("s1", "c1");
+		let i = 2;
+		while (store.stats.rotations < 2) {
+			now = at(i * 8);
+			store.enqueue("s1", "c1", probe(i++));
+			await store.flush("s1", "c1");
+		}
+		// The activity (seq 1) is gone: `.1` starts with the first rotation's gap.
+		const archive = await readLines(`${store.eventsPath("s1", "c1")}.1`);
+		expect(archive[0]?.seq).toBeGreaterThan(1);
+		expect(archive.every((l) => l.ev === "gap" || l.ev === "probe")).toBe(true);
+		const [live, rebuilt] = await liveAndRebuilt(store);
+		expect(live).toBe(iso(0)); // the live index still knew it
+		expect(rebuilt).toBe(NO_ACTIVITY_TIME); // the disk does not: unknown, not a probe's time
+		expect(Date.parse(rebuilt)).toBeLessThan(Date.parse(live));
+	});
+
+	it("a rotated file whose archive is gone, no activity left: NO_ACTIVITY_TIME", async () => {
+		const store = new ConversationStore({ workspaceRoot: root, now: () => at(40) });
+		const file = store.eventsPath("s1", "c3");
+		await fs.mkdir(path.dirname(file), { recursive: true });
+		const line = (seq: number, m: number, ev: string) =>
+			`${JSON.stringify({ seq, ts: iso(m), ev, data: {} })}\n`;
+		// Starts after seq 1 (a rotation's gap) and there is no `.1`.
+		await fs.writeFile(file, line(40, 30, "gap") + line(41, 38, "probe"));
+		expect((await store.open("s1", "c3")).lastEventAt).toBe(NO_ACTIVITY_TIME);
 	});
 
 	it("nothing on disk at all: a new conversation, dated when it is opened", async () => {

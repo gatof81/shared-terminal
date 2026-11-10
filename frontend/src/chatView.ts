@@ -1092,7 +1092,10 @@ function convList(items: ConversationSummary[]): HTMLElement {
 		const main = el("span", "chat-conv-main");
 		const top = el("span", "chat-conv-top");
 		top.appendChild(el("span", "chat-conv-title", titleOf(c)));
-		top.appendChild(el("span", "chat-conv-time", relativeDate(c.lastEventAt)));
+		// The epoch is the backend's "no time" (a last activity it could not
+		// recover, CONVERSATION.md §4.1): no date rather than 1970.
+		const lastAt = Date.parse(c.lastEventAt);
+		top.appendChild(el("span", "chat-conv-time", lastAt > 0 ? relativeDate(c.lastEventAt) : "—"));
 		main.appendChild(top);
 		const bottom = el("span", "chat-conv-bottom");
 		bottom.appendChild(el("span", `chat-conv-status tone-${tone}`, shown.label));
