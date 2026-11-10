@@ -1172,7 +1172,10 @@ for one operation, is not mirrored, and is always 0700/0600, whatever
 `BACKUP_GROUP_GID` says.
 
 A malformed value refuses the backup before anything is written.
-`<WORKSPACE_ROOT>/.backups` itself is set only when the backup creates it.
+`<WORKSPACE_ROOT>/.backups` itself is set only when the backup creates it, and
+then to the daily mode (0750 in the group when `BACKUP_GROUP_GID` is set),
+whatever the first backup's name: it is the dailies' container, and the
+mirror has to go through it.
 
 - **Gate before deploying this change (#562).** Don't deploy it until these
   hold, or the nightly off-host copy fails on the first new backup:
@@ -1215,6 +1218,9 @@ A malformed value refuses the backup before anything is written.
     someone made it stricter by hand) is listed as `group can't read …` and
     the command exits 2. Opening it is the operator's decision, by hand.
   - With `-- --write` it applies what the dry run listed.
+  - Point it at `.backups`, never at one backup: a root named `20*` or holding
+    a `manifest.json` is refused, because the classes come from the names
+    directly under `.backups`.
   - It never follows a symlink, and it refuses a root that is one, that is not
     owned by the user running it, or that others can write to.
   - It does not enter a directory that someone else owns, that others can

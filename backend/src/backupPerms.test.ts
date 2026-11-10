@@ -244,6 +244,16 @@ describe("hardenBackups (existing backups)", () => {
 		}
 	});
 
+	it("refuses a root that is one backup (a 20* name or a manifest.json in it)", async () => {
+		await legacyTree();
+		await expect(
+			hardenBackups(path.join(root, "2026-11-01"), backupPerms({}), { write: false }),
+		).rejects.toThrow(/one backup/);
+		await expect(
+			hardenBackups(path.join(root, "pre-abc"), backupPerms({}), { write: false }),
+		).rejects.toThrow(/one backup/);
+	});
+
 	it("refuses a root that is a symlink", async () => {
 		const link = `${root}-link`;
 		await fs.symlink(root, link);

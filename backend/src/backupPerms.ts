@@ -99,11 +99,14 @@ export async function secure(
 				`refusing to secure ${p}: not a ${kind === "dir" ? "directory" : "regular file"}`,
 			);
 		}
-		if (perms.gid !== null && st.gid !== perms.gid) await fh.chown(st.uid, perms.gid);
 		const want = kind === "dir" ? perms.dirMode : perms.fileMode;
 		// The intersection is taken on the OPENED entry's mode, not the caller's
 		// earlier lstat: a mode changed in between is still only narrowed.
+		// Mode BEFORE group: the other way round, a group-writable file would be
+		// writable by the new group between the two calls, and a descriptor
+		// opened then keeps that access after the chmod.
 		await fh.chmod(opts.narrowOnly ? st.mode & 0o7777 & want : want);
+		if (perms.gid !== null && st.gid !== perms.gid) await fh.chown(st.uid, perms.gid);
 	} finally {
 		await fh.close();
 	}
@@ -165,6 +168,18 @@ export async function hardenBackups(
 	// reported and left alone, contents included.
 	const trusted = (st: { uid: number; mode: number; dev: number }) =>
 		st.uid === me && (st.mode & 0o022) === 0 && st.dev === rootSt.dev;
+	// The classes are decided by the names directly under `.backups`: pointed at
+	// one backup, the walk would take its contents for top-level entries and
+	// narrow a daily's files as private (breaking the mirror without a report).
+	if (
+		isDailyName(path.basename(path.resolve(root))) ||
+		(await fs.lstat(path.join(root, "manifest.json")).then(
+			() => true,
+			() => false,
+		))
+	) {
+		throw new Error(`${root} is one backup, not the backups directory — point harden at .backups`);
+	}
 	if (!trusted(rootSt)) {
 		throw new Error(
 			`${root} must be owned by uid ${me} and writable by nobody else to be hardened — refusing`,

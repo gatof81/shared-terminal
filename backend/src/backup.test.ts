@@ -278,6 +278,16 @@ describe("backup permissions (#562)", () => {
 		}
 	});
 
+	it("a first pre-* backup that creates .backups gives it the group mode, not root-only", async () => {
+		const gid = supplementaryGid();
+		vi.stubEnv("BACKUP_GROUP_GID", String(gid));
+		const parent = path.join(outDir, ".backups");
+		await fullBackup(path.join(parent, "pre-abc"));
+		const st = await fs.lstat(parent);
+		expect([st.mode & 0o7777, st.gid]).toEqual([0o750, gid]);
+		expect((await fs.lstat(path.join(parent, "pre-abc"))).mode & 0o7777).toBe(0o700);
+	});
+
 	it("a malformed BACKUP_GROUP_GID refuses before anything is created", async () => {
 		vi.stubEnv("BACKUP_GROUP_GID", "backup");
 		await expect(runBackup(outDir)).rejects.toThrow(/numeric group id/);

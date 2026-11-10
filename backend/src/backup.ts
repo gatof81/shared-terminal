@@ -162,7 +162,11 @@ export async function runBackup(outDir: string): Promise<BackupManifest> {
 			throw new Error(`backup dir ${d} is not owned by uid ${me} — refusing`);
 		}
 	}
-	if (!parentExisted) await secure(parent, "dir", perms);
+	// The parent is `.backups`, the dailies' container, so it gets the
+	// configured mode whatever this backup's own name: a first `pre-*` backup
+	// on a fresh host must not leave it 0700 and lock the mirror out of every
+	// later daily (hardenBackups puts it in the daily class too).
+	if (!parentExisted) await secure(parent, "dir", configured);
 	// The signature of a copy that relied on world-readable backups: the
 	// parent is open to others while this run writes root-only output. Loud,
 	// because that copy now fails on every new backup (#562).
