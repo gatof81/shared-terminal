@@ -125,10 +125,12 @@ describe("preflight: terminal blockers end it before the expensive checks", () =
 			blockers: [{ code: "layer-home", count: 1 }],
 		});
 		h.docker.changesOf.delete(O_ID);
-		h.cli.version = "2.1.309";
+		// The CLI check still runs: an unreadable workspace CLI blocks (a newer
+		// stable release no longer does, owner 2026-11-10).
+		h.cli.version = null;
 		expect(await h.engine.preflight(SID)).toMatchObject({
 			recreatable: false,
-			blockers: [{ code: "control-marker-incompatible" }],
+			blockers: [{ code: "control-marker-incompatible", detail: "unreadable" }],
 		});
 	});
 

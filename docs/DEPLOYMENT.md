@@ -393,8 +393,11 @@ session emits anything.
 > until a coordinated deploy is authorized. The first and only pilot is a
 > **new, disposable** session with no real data (D8). **No real working
 > session is recreated** until a manual administrative recovery procedure
-> exists and has been validated. Recreation accepts only a workspace CLI of
-> exactly **2.1.308** (the validated allowlist, for the pilot only).
+> exists and has been validated. The workspace CLI a recreation accepts is a
+> plain stable release at or above `RECREATE_CLI_MIN_VERSION` (default
+> 2.1.308) and not in `RECREATE_CLI_DENY` (CONVERSATION.md v1.9.2, owner
+> 2026-11-10; it replaced the exact 2.1.308 allowlist — see "The workspace's
+> Claude Code" below).
 
 | Variable | Default | Effect |
 | --- | --- | --- |
@@ -446,8 +449,10 @@ sessions whose capture is effective — a send is confirmed by the CLI's own
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `CONVERSATION_COMPOSER_ENABLED` | unset (`false`) | Mounts `POST /api/sessions/:id/conversations/:cid/messages` and the admin routes `POST /api/admin/sessions/:id/composer/resolve`, `GET /api/admin/sessions/:id/composer/panes`; `canSendInput` becomes true for interactive conversations with a pane, effective capture and no blocking operation. |
-| `COMPOSER_CLI_VERSIONS` | `2.1.314` | Comma-separated Claude Code versions the §8.2.6 revalidation was run with. A conversation whose CLI (the process in the pane) is another version gets 409 `cli-unvalidated`. Adding a version means running `backend/src/conversation/composer.smoke.ts` against it: the Session Image workflow's `cli-variants` job does so for 2.1.314 and 2.1.316 on every change, so `COMPOSER_CLI_VERSIONS=2.1.314,2.1.316` is the value for the existing sessions (their workspace CLI is 2.1.316). Since v1.8.2 the version is asked of the pane's Claude process itself (`/proc/<pid>/exe --version`, as its uid, empty env, auto-updater off, starttime checked before and after), never of PATH's `claude` nor of the SessionStart hook's text; when it cannot be established the send is refused (`detail: unverifiable:<reason>`). |
-| `COMPOSER_CLI_MIN_VERSION` | unset | **Opt-in open policy**: also admit ANY later stable Claude Code release — patch, minor or major, no ceiling. Must be a version listed in `COMPOSER_CLI_VERSIONS`; anything else refuses to start. Judged on the pane's live process (never PATH's `claude` or the hook's text). **Risk:** those releases were never revalidated (§8.2.6); a change in the CLI's terminal behaviour can misdeliver a send in ways the dynamic checks cannot see (CONVERSATION.md §8.1.9). Startup logs a warning while it is set. |
+| `COMPOSER_CLI_VERSIONS` | `2.1.314` | Comma-separated Claude Code versions the §8.2.6 revalidation was run with. A conversation whose CLI (the process in the pane) the policy does not admit — not listed and below `COMPOSER_CLI_MIN_VERSION`, or denied — gets 409 `cli-unvalidated`. With the open minimum (the default), a later stable release needs no entry here. Adding a version means running `backend/src/conversation/composer.smoke.ts` against it: the Session Image workflow's `cli-variants` job does so for 2.1.314 and 2.1.316 on every change, so `COMPOSER_CLI_VERSIONS=2.1.314,2.1.316` is the value for the existing sessions (their workspace CLI is 2.1.316). Since v1.8.2 the version is asked of the pane's Claude process itself (`/proc/<pid>/exe --version`, as its uid, empty env, auto-updater off, starttime checked before and after), never of PATH's `claude` nor of the SessionStart hook's text; when it cannot be established the send is refused (`detail: unverifiable:<reason>`). |
+| `COMPOSER_CLI_MIN_VERSION` | unset = the lowest of `COMPOSER_CLI_VERSIONS` | **Open policy, on by default** (owner, 2026-11-10; CONVERSATION.md v1.9.2): also admit ANY later stable Claude Code release — patch, minor or major, no ceiling. When set, it must be a version listed in `COMPOSER_CLI_VERSIONS`; `off` = the exact list only (the previous behaviour); anything else refuses to start. A broken release goes in `COMPOSER_CLI_DENY` (the daily canary reports it). Judged on the pane's live process (never PATH's `claude` or the hook's text). **Risk:** those releases were never revalidated (§8.2.6); a change in the CLI's terminal behaviour can misdeliver a send in ways the dynamic checks cannot see (CONVERSATION.md §8.1.9). Startup logs a warning while it is set. |
+| `RECREATE_CLI_MIN_VERSION` | unset = 2.1.308 | The floor for the workspace CLI a recreated container runs (CONVERSATION.md §2.7.7, v1.9.2): any plain stable release at or above it passes, validated or not; below it (validated or not), unreadable or pre-release ⇒ `control-marker-incompatible` with a `detail`. When set it must be a validated version (2.1.308, 2.1.314, 2.1.316); `off` = the validated set only (the previous rule). Malformed ⇒ refuses to start. |
+| `RECREATE_CLI_DENY` | unset | Exact versions that block a recreation whatever the floor says (`detail: denied:X`) — e.g. a release whose `/etc/st-control` handling the canary's conversation smoke found broken. |
 | `COMPOSER_CLI_DENY` | unset | Exact versions refused whatever the list or the minimum say (`detail: denied`). Deny always wins. The daily **Composer CLI canary** workflow runs §8.2.6 against the three newest plain releases (older intermediates are not tested: dispatch it with `cli=<version>` for any version a session log shows) and opens, reopens or comments on one issue per failed version (from a separate job; the job running the CLI has a read-only token) with the procedure: add the version here, `docker compose up -d --no-build app`, check the `[server] composer CLI policy:` line. It never changes production itself, and it is not a prior guarantee. |
 
 Operator surface (`CONVERSATION.md` §8.1.11). A pane whose last send has a
@@ -529,8 +534,9 @@ Each step needs its own authorization; none of this touches a real session.
 Prerequisites: backend at a main that includes `b3cbdbd` with
 `CONVERSATION_ENABLED=true`; the pilot session created from an image with
 the relay (`io.shared-terminal.conversation-relay="2"`) and capture
-requested for it; the Claude Code version running in its pane is in
-`COMPOSER_CLI_VERSIONS` (default 2.1.314).
+requested for it; the Claude Code version running in its pane is admitted
+by the policy (≥ `COMPOSER_CLI_MIN_VERSION`, by default the lowest of
+`COMPOSER_CLI_VERSIONS`, and not denied).
 
 1. **Capture effective.** `GET /api/sessions/<pilot>/conversations` →
    `capture.effective: true` (`effectiveAfterRestart` is `false` for a
@@ -540,17 +546,17 @@ requested for it; the Claude Code version running in its pane is in
    conversation appears in Chat with its `user_prompt`. Without this the
    composer can never confirm a send (`capture-inactive`).
 2. **CLI compatible, pane interactive.** The conversation row shows
-   `kind: interactive`, a `paneId` and a `claudeVersion` whose `X.Y.Z` is in
-   the allowlist (the field is the hook's raw `claude --version` text, e.g.
+   `kind: interactive`, a `paneId` and a `claudeVersion` whose `X.Y.Z` the
+   policy admits (the field is the hook's raw `claude --version` text, e.g.
    `2.1.314 (Claude Code)`); `claude --version` in the pane matches.
-   (`canSendInput` is still `false` here: the flag is off.) **Pin the CLI
-   before starting it**: the session image's `claude` auto-updates itself on
-   launch into the session's own npm prefix (the 2026-10-31 pilot went from
-   2.1.314 to 2.1.316 on its first start), so in the pilot pane install the
-   validated version and disable the updater for that process:
-   `npm install -g @anthropic-ai/claude-code@2.1.314 && DISABLE_AUTOUPDATER=1 claude`.
-   A pane on another version is refused with 409 `cli-unvalidated` until that
-   version passes the §8.2.6 smoke and is added to `COMPOSER_CLI_VERSIONS`.
+   (`canSendInput` is still `false` here: the flag is off.) **No pinning
+   needed** (owner, 2026-11-10; CONVERSATION.md v1.9.2): the session's CLI
+   may auto-update, and any stable release at or above
+   `COMPOSER_CLI_MIN_VERSION` (by default the lowest of
+   `COMPOSER_CLI_VERSIONS`) is accepted unless it is in `COMPOSER_CLI_DENY`.
+   Never downgrade a session's CLI to make the composer accept it. Only with
+   `COMPOSER_CLI_MIN_VERSION=off` is a pane on an unlisted version refused
+   with 409 `cli-unvalidated`.
 3. **Turn the flag on** for the backend only (`CONVERSATION_COMPOSER_ENABLED=true`
    in `.env`, `docker compose up -d app`); the boot log prints
    `composer ENABLED (CLI versions: …)`. Only now do the composer routes
@@ -854,17 +860,17 @@ the session row.
 the **disposable pilot session**; an existing working session is recreated
 only through the carry-over mode of the next section, one session at a time
 and each with the owner's explicit GO. The workspace's Claude Code must be a
-version the control directory was validated with — **2.1.308, 2.1.314 or
-2.1.316** (`backend/src/recreate/cliCompat.ts`; 2.1.314 and 2.1.316 are
-re-validated by the Session Image workflow's `cli-variants` job on every
-change). Any other version, including a newer one the CLI updated itself to,
-blocks with `control-marker-incompatible`. For every session you recreate:
-- never run `claude update` beforehand;
-- prefer `DISABLE_AUTOUPDATER=1` among its env vars (the session-image smoke
-  checks that the pinned CLI knows the variable; that no update then happens
-  is only observable over time, so compare `claude --version` before and
-  after);
-- check `claude --version` again right before the `POST`.
+plain stable release at or above `RECREATE_CLI_MIN_VERSION` (default 2.1.308)
+and not in `RECREATE_CLI_DENY` (`backend/src/recreate/cliCompat.ts`; owner,
+2026-11-10). A newer release the CLI updated itself to no longer blocks; an
+unreadable version or a pre-release does, with `control-marker-incompatible`
+and its `detail`. `RECREATE_CLI_MIN_VERSION=off` restores the old rule (only
+2.1.308, 2.1.314 and 2.1.316, which the Session Image workflow's
+`cli-variants` job keeps re-validating). For every session you recreate:
+- no pinning and no downgrade: a CLI that updated itself is fine;
+- check `claude --version` right before the `POST` and compare it with the
+  preflight (the version is read again under the lock), so the log records
+  which CLI N runs.
 
 **The endpoint (3.0d, [CONVERSATION.md §2.7](./CONVERSATION.md#27-recreación-administrativa-y-activación-30d))**, admin only:
 
@@ -983,10 +989,11 @@ Automation: 11.8 GB twice).
    `claude --resume` continues the conversations afterwards (the CLI's state
    lives in the workspace, which is untouched).
 2. **Composer versions.** If the owner will use the composer, make sure the
-   pane's CLI version is in `COMPOSER_CLI_VERSIONS` (e.g.
-   `COMPOSER_CLI_VERSIONS=2.1.314,2.1.316`, both validated by the
-   `cli-variants` job) — a backend restart applies it; this is independent of
-   the recreation.
+   pane's CLI version is admitted by the policy: with the open default any
+   stable release ≥ the lowest of `COMPOSER_CLI_VERSIONS` passes unless it is
+   in `COMPOSER_CLI_DENY` — no list edit and no pinning; only with
+   `COMPOSER_CLI_MIN_VERSION=off` must the version be listed. A backend
+   restart applies a change; this is independent of the recreation.
 3. **Request capture** if not already requested:
    `PATCH /api/admin/sessions/<sid>/conversation {"enabled": true}` answers
    `requiresRecreate: true` on a pre-3.0d container (no control mount) and

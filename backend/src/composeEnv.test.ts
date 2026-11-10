@@ -44,7 +44,7 @@ describe("docker-compose.yml → composer env (3.2)", () => {
 		expect(env.get("CONVERSATION_ENABLED")).toBe(shape("CONVERSATION_ENABLED"));
 	});
 
-	it("COMPOSER_CLI_MIN_VERSION / COMPOSER_CLI_DENY are forwarded with the empty default ⇒ no minimum, no deny (behaviour-neutral)", () => {
+	it("COMPOSER_CLI_MIN_VERSION / COMPOSER_CLI_DENY are forwarded with the empty default ⇒ open from the lowest validated version, no deny", () => {
 		const env = appEnvironment();
 		const shape = (name: string) => `$\{${name}:-}`;
 		expect(env.get("COMPOSER_CLI_MIN_VERSION")).toBe(shape("COMPOSER_CLI_MIN_VERSION"));
@@ -54,7 +54,7 @@ describe("docker-compose.yml → composer env (3.2)", () => {
 			COMPOSER_CLI_MIN_VERSION: interpolate(env.get("COMPOSER_CLI_MIN_VERSION")!, {}),
 			COMPOSER_CLI_DENY: interpolate(env.get("COMPOSER_CLI_DENY")!, {}),
 		});
-		expect(unset.min).toBeNull();
+		expect(unset.min).toBe("2.1.314");
 		expect(unset.deny.size).toBe(0);
 		const vars = {
 			COMPOSER_CLI_VERSIONS: "2.1.314,2.1.316",

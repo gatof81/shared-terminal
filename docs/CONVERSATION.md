@@ -25,7 +25,7 @@ vinculante para los PRs
 y, para 3.0d, en [docs/design/phase3-3.0d-activation.md](./design/phase3-3.0d-activation.md) (v5,
 `ac1024d`); si los dos documentos difieren, manda este;
 este archivo define lo que el código debe cumplir y lo que cada PR debe demostrar. Cambiar un
-contrato exige un PR de docs antes o junto con el código. **v1.7.1**: §8.1.5 paso 2b, consumo del paste antes del siguiente byte, y `too-many-segments` en 48 pastes por el presupuesto T_http (hallazgos del smoke con CLI 2.1.314 y de la revisión durante la implementación 3.2, 2026-10-30). **v1.7.2** (aprobado por el responsable como P1 de backend de Chat, 2026-11-02, tras la reanudación real de Educación HZ): §5.2 el binding vale para UN arranque del contenedor —toda parada lo retira de todas las conversaciones de la sesión, residentes o no—; §5.3 el probe solo lleva a `waiting_input` con identidad verificada (entrada `interactive`, `pid` descendiente del `pane_pid` del pane ligado), nunca revive `ended`, un estado ilegible no es `idle`, y el silencio de 10 min y un probe dirigido tras `SessionStart` se despachan de verdad; §8.1.3 `binding-stale` también para una entrada del probe con `kind ≠ interactive` aunque descienda del pane **v1.7.3**: §8.1.3 identidad de foreground por proceso (identidad, sesión, tty, grupo de primer plano, `starttime` repetido en el precheck) en lugar del nombre `pane_current_command`, que el instalador nativo hace igual a la versión (falso negativo en Educación HZ, 2026-11-02). **v1.7.4** (#510, aprobado por el responsable 2026-11-02): §8.1.3 el envío exige que el probe confirme el prompt (`idle`, o `waiting` + `input needed`); `status` ausente/ilegible y `waiting` sin `waitingFor` responden `needs-terminal` antes de cualquier efecto. **v1.8** (aprobado por el responsable 2026-11-03): §6.2 metadata del dueño —renombrar y archivar— en la tabla propia `conversation_user_meta` (migración v18), fuera de la captura; §6 la lista añade `customTitle`, `archivedAt` y `meta`; §9 backup y borrado de esa tabla. **v1.8.1** (propuesta, pendiente de aprobación; incidente 2026-11-03): §2.7.5 condición 5 «capaz de relay» — la imagen propia con `="2"` mientras exista, y si Docker ya no la tiene, una **acreditación de capacidad** firmada al crear el contenedor y ligada a su id inmutable (§2.7.5.1); una acreditación contradictoria deniega siempre. **v1.8.1 aprobado por el responsable el 2026-11-04.** **v1.8.2** (propuesta, pendiente de aprobación; hallazgo de Educación HZ, 2026-11-04): §8.1.9 la versión que decide es la del **proceso** que recibirá el texto, preguntada a su propio ejecutable (`/proc/<pid>/exe --version`, sin shell, como su uid, entorno vacío, autoactualizador apagado, `starttime` y ejecutable iguales antes y después); la `claude_version` del `session_start` —que el hook toma del `PATH`— queda como metadato y nunca autoriza. **v1.8.3** (propuesta, pendiente de aprobación): §8.1.9 política de versiones del composer, siempre sobre la versión del proceso de v1.8.2 — `COMPOSER_CLI_DENY` gana siempre, `COMPOSER_CLI_VERSIONS` exacta, y `COMPOSER_CLI_MIN_VERSION` **opcional y abierta** (toda release estable ≥ una versión validada, incluidos cambios minor y major, sin techo); prereleases y versiones no verificables siempre rechazadas; el riesgo de admitir versiones futuras sin validación queda declarado. **v1.8.4** (propuesta, pendiente de aprobación; protección de imágenes, #521): §2.7.2 paso 1, los requests `pin image` (antes de `create N`, obligatorio: sin tag verificado no hay `N`) y `pin N` (después, verificación); el `spawn` de `DockerManager` crea siempre desde el ID inmutable ya protegido, nunca desde el tag **v1.8.5** (propuesta, pendiente de aprobación; hallazgo en B, 2026-11-05): §5.2 solo una conversación `interactive` toma un pane (retirando a la anterior); `headless` nunca se liga; `teammate` y `unknown` solo a un pane que ninguna conversación viva tenga, sin retirar a nadie; una sesión sin pane en sus hooks (sesión en segundo plano del CLI) nunca se liga y el pane no se infiere por ascendencia. **v1.8.5 aprobado por el responsable el 2026-11-05.** **v1.8.6** (propuesta, pendiente de aprobación; G3, PR-G3-1): §3.1.1 la ingesta puede exigir que el **origen de red** de la conexión sea el contenedor vigente de la sesión en `sessions-net` (bandera `INGEST_REQUIRE_SESSION_ORIGIN`: `false` por defecto, `observe` para la puerta de activación, `true` para exigirlo). Así un token filtrado no sirve desde el túnel, desde loopback ni desde otro contenedor. Con la bandera apagada nada cambia. **v1.9** (propuesta, revisión 2, pendiente de aprobación; B, 2026-11-05): §8.1.12 composer para sesiones en segundo plano del CLI por el op `reply` con `nextTurn` fijo, sin el pane (el cliente `attach`/`agents` sigue rechazado); v1 sin encolado intencional (doble lectura idle); identidad de job, proceso y daemon (peer pid) antes del efecto; ack con `prompt_id` nuevo más confirmación en el transcript y exclusión de hashes recientes (falso positivo residual declarado); estados `accepted`/`unconfirmed`/`duplicated`, sin reintentos; la seguridad corregida por la auditoría (la frontera es el uid, no la clave); migración por validación. **v1.9 revisión 3** (decisiones del responsable tras la auditoría de la implementación, #547): ack emparejado con NUESTRO enqueue; exclusión de textos idénticos solo por operaciones pendientes o cola ambigua (la regla de 10 min se elimina; repetir un texto está permitido) con reconocimiento durable de un `unconfirmed`; transcript inaccesible ⇒ 409 antes del efecto, `unconfirmed` después; `CLAUDE_CONFIG_DIR` propio fuera del MVP; marcas `duplicated`/`possible-duplicate` persistentes e idempotentes; respuesta desconocida del daemon ⇒ `uncertain`; alcance por sesión (`COMPOSER_BG_SESSIONS`); con la bandera apagada, sin cambios salvo dos diferencias declaradas (§8.1.12.11). **v1.9.1** (propuesta, pendiente de aprobación; #568, hallazgo de A en el resumen de presencia, 2026-11-09): §4.1 `lastEventAt` es el momento de la última **actividad** de la conversación, es decir, un evento de hook o el `prepared` de un `composer_send`. Los registros propios del backend (`probe`, `gap` y los demás estados de `composer_send`) se persisten igual pero no lo mueven. Así, un probe que no confirma nada ya no hace parecer fresca una afirmación viva vieja. Esto vale para la presencia de PROJECTS.md §5, para la regla de atención del frontend y para la semilla del silencio tras un reinicio. Sin migración: la columna `last_event_at` es la misma.
+contrato exige un PR de docs antes o junto con el código. **v1.7.1**: §8.1.5 paso 2b, consumo del paste antes del siguiente byte, y `too-many-segments` en 48 pastes por el presupuesto T_http (hallazgos del smoke con CLI 2.1.314 y de la revisión durante la implementación 3.2, 2026-10-30). **v1.7.2** (aprobado por el responsable como P1 de backend de Chat, 2026-11-02, tras la reanudación real de Educación HZ): §5.2 el binding vale para UN arranque del contenedor —toda parada lo retira de todas las conversaciones de la sesión, residentes o no—; §5.3 el probe solo lleva a `waiting_input` con identidad verificada (entrada `interactive`, `pid` descendiente del `pane_pid` del pane ligado), nunca revive `ended`, un estado ilegible no es `idle`, y el silencio de 10 min y un probe dirigido tras `SessionStart` se despachan de verdad; §8.1.3 `binding-stale` también para una entrada del probe con `kind ≠ interactive` aunque descienda del pane **v1.7.3**: §8.1.3 identidad de foreground por proceso (identidad, sesión, tty, grupo de primer plano, `starttime` repetido en el precheck) en lugar del nombre `pane_current_command`, que el instalador nativo hace igual a la versión (falso negativo en Educación HZ, 2026-11-02). **v1.7.4** (#510, aprobado por el responsable 2026-11-02): §8.1.3 el envío exige que el probe confirme el prompt (`idle`, o `waiting` + `input needed`); `status` ausente/ilegible y `waiting` sin `waitingFor` responden `needs-terminal` antes de cualquier efecto. **v1.8** (aprobado por el responsable 2026-11-03): §6.2 metadata del dueño —renombrar y archivar— en la tabla propia `conversation_user_meta` (migración v18), fuera de la captura; §6 la lista añade `customTitle`, `archivedAt` y `meta`; §9 backup y borrado de esa tabla. **v1.8.1** (propuesta, pendiente de aprobación; incidente 2026-11-03): §2.7.5 condición 5 «capaz de relay» — la imagen propia con `="2"` mientras exista, y si Docker ya no la tiene, una **acreditación de capacidad** firmada al crear el contenedor y ligada a su id inmutable (§2.7.5.1); una acreditación contradictoria deniega siempre. **v1.8.1 aprobado por el responsable el 2026-11-04.** **v1.8.2** (propuesta, pendiente de aprobación; hallazgo de Educación HZ, 2026-11-04): §8.1.9 la versión que decide es la del **proceso** que recibirá el texto, preguntada a su propio ejecutable (`/proc/<pid>/exe --version`, sin shell, como su uid, entorno vacío, autoactualizador apagado, `starttime` y ejecutable iguales antes y después); la `claude_version` del `session_start` —que el hook toma del `PATH`— queda como metadato y nunca autoriza. **v1.8.3** (propuesta, pendiente de aprobación): §8.1.9 política de versiones del composer, siempre sobre la versión del proceso de v1.8.2 — `COMPOSER_CLI_DENY` gana siempre, `COMPOSER_CLI_VERSIONS` exacta, y `COMPOSER_CLI_MIN_VERSION` **opcional y abierta** (toda release estable ≥ una versión validada, incluidos cambios minor y major, sin techo); prereleases y versiones no verificables siempre rechazadas; el riesgo de admitir versiones futuras sin validación queda declarado. **v1.8.4** (propuesta, pendiente de aprobación; protección de imágenes, #521): §2.7.2 paso 1, los requests `pin image` (antes de `create N`, obligatorio: sin tag verificado no hay `N`) y `pin N` (después, verificación); el `spawn` de `DockerManager` crea siempre desde el ID inmutable ya protegido, nunca desde el tag **v1.8.5** (propuesta, pendiente de aprobación; hallazgo en B, 2026-11-05): §5.2 solo una conversación `interactive` toma un pane (retirando a la anterior); `headless` nunca se liga; `teammate` y `unknown` solo a un pane que ninguna conversación viva tenga, sin retirar a nadie; una sesión sin pane en sus hooks (sesión en segundo plano del CLI) nunca se liga y el pane no se infiere por ascendencia. **v1.8.5 aprobado por el responsable el 2026-11-05.** **v1.8.6** (propuesta, pendiente de aprobación; G3, PR-G3-1): §3.1.1 la ingesta puede exigir que el **origen de red** de la conexión sea el contenedor vigente de la sesión en `sessions-net` (bandera `INGEST_REQUIRE_SESSION_ORIGIN`: `false` por defecto, `observe` para la puerta de activación, `true` para exigirlo). Así un token filtrado no sirve desde el túnel, desde loopback ni desde otro contenedor. Con la bandera apagada nada cambia. **v1.9** (propuesta, revisión 2, pendiente de aprobación; B, 2026-11-05): §8.1.12 composer para sesiones en segundo plano del CLI por el op `reply` con `nextTurn` fijo, sin el pane (el cliente `attach`/`agents` sigue rechazado); v1 sin encolado intencional (doble lectura idle); identidad de job, proceso y daemon (peer pid) antes del efecto; ack con `prompt_id` nuevo más confirmación en el transcript y exclusión de hashes recientes (falso positivo residual declarado); estados `accepted`/`unconfirmed`/`duplicated`, sin reintentos; la seguridad corregida por la auditoría (la frontera es el uid, no la clave); migración por validación. **v1.9 revisión 3** (decisiones del responsable tras la auditoría de la implementación, #547): ack emparejado con NUESTRO enqueue; exclusión de textos idénticos solo por operaciones pendientes o cola ambigua (la regla de 10 min se elimina; repetir un texto está permitido) con reconocimiento durable de un `unconfirmed`; transcript inaccesible ⇒ 409 antes del efecto, `unconfirmed` después; `CLAUDE_CONFIG_DIR` propio fuera del MVP; marcas `duplicated`/`possible-duplicate` persistentes e idempotentes; respuesta desconocida del daemon ⇒ `uncertain`; alcance por sesión (`COMPOSER_BG_SESSIONS`); con la bandera apagada, sin cambios salvo dos diferencias declaradas (§8.1.12.11). **v1.9.1** (propuesta, pendiente de aprobación; #568, hallazgo de A en el resumen de presencia, 2026-11-09): §4.1 `lastEventAt` es el momento de la última **actividad** de la conversación, es decir, un evento de hook o el `prepared` de un `composer_send`. Los registros propios del backend (`probe`, `gap` y los demás estados de `composer_send`) se persisten igual pero no lo mueven. Así, un probe que no confirma nada ya no hace parecer fresca una afirmación viva vieja. Esto vale para la presencia de PROJECTS.md §5, para la regla de atención del frontend y para la semilla del silencio tras un reinicio. Sin migración: la columna `last_event_at` es la misma. **v1.9.1 aprobado conceptualmente por el responsable el 2026-11-10.** **v1.9.2** (decisión del responsable, 2026-11-10: aceptar por defecto las versiones estables nuevas del CLI, sin validar cada release ni degradar sesiones; el riesgo de compatibilidad queda asumido): §8.1.9 la mínima abierta del composer pasa a ser **la regla por defecto** (sin definir ⇒ la versión más baja de `COMPOSER_CLI_VERSIONS`; `off` ⇒ solo la lista exacta, el comportamiento anterior); §2.7.5 la compatibilidad del CLI del workspace en la recreación pasa de una allowlist exacta a **mínima estable + denegación** (`RECREATE_CLI_MIN_VERSION`, por defecto 2.1.308; `RECREATE_CLI_DENY`); una versión ilegible o una prerelease siguen bloqueando. Todas las demás precondiciones, las comprobaciones dinámicas del composer y la regla de no reintentar no cambian; los canarios de versiones pasan a ser informativos.
 
 Convenciones: *MUST*/*MUST NOT* son requisitos verificados por test; *SHOULD* son requisitos
 verificados en revisión. "Bytes" significa siempre bytes UTF-8 del contenido, salvo donde se dice
@@ -546,8 +546,9 @@ Las pestañas tmux ya se pierden con el stop.
   `layer-tmp`**: en particular un archivo regular en `tasks/` (la salida de una tarea en segundo
   plano es contenido del usuario y nada muestra que sea descartable), otro destino o un destino
   relativo, una sonda de otro tamaño o tipo, otros nombres, niveles o uid, y cualquier entrada
-  borrada o solo modificada. Una versión del CLI distinta de 2.1.308 queda fuera por la allowlist
-  de versiones (§2.7.5): sus artefactos no están validados.
+  borrada o solo modificada. Desde v1.9.2 una versión del CLI distinta de 2.1.308 ya no queda fuera
+  por versión (§2.7.5): llega a esta comprobación, y artefactos de runtime con una forma no validada
+  bloquean como `layer-tmp`.
 - **Se permite el registro del manejador de enlaces `claude-cli://` del CLI 2.1.308 en HOME**
   (decisión del responsable, 2026-10-28; levanta "no ampliar HOME" solo para estas cuatro rutas, D2
   y D3 siguen vigentes para todo lo demás). La sesión interactiva lo escribe en su primer turno, no al
@@ -574,8 +575,8 @@ Las pestañas tmux ya se pierden con el stop.
   perderlo no cambia nada de la sesión. No se copia a `N` ni se toca el entrypoint, los montajes o la
   persistencia de HOME. **Cualquier otro byte, tamaño o tipo, un symlink en cualquiera de esas rutas,
   otro archivo, directorio o symlink bajo `~/.local`, o una entrada borrada o solo modificada bloquea
-  con `layer-home`**; también un contenido distinto escrito por otra versión del CLI, que además
-  queda fuera por la allowlist de versiones (§2.7.5).
+  con `layer-home`**; también un contenido distinto escrito por otra versión del CLI (desde v1.9.2
+  esa versión ya no queda fuera por versión, §2.7.5: es esta comprobación la que la bloquea).
 - **`~/.gitconfig`:** se permite solo si contiene exactamente `user.name` y `user.email`, iguales a
   `session_configs`. Se lee con `getArchive`, ≤ 4 KiB. Tras la recreación se reaplica
   gitIdentity.
@@ -1052,16 +1053,19 @@ inválido dentro:
 Si esa validación fallara, la activación quedaría bloqueada (`control-marker-incompatible` en
 `PATCH {enabled:true}` y en `POST …/recreate`) y 3.0d no se publicaría hasta revisar otra
 ubicación. No hay respaldo silencioso. La validación pasó con 2.1.308; hoy la versión del CLI solo
-se comprueba en la recreación (allowlist, abajo). Aplicarla también a `PATCH {enabled:true}` es una
+se comprueba en la recreación (mínima + denegación desde v1.9.2, abajo). Aplicarla también a `PATCH {enabled:true}` es una
 decisión pendiente del responsable (#466) y no forma parte de este contrato.
 
-No se supone compatibilidad universal: `N` ejecuta el CLI del `.npm-global` del workspace, que
-puede no ser el de la imagen. La recreación lee su versión en el host, sin seguir symlinks, y
-solo acepta una versión con la que esta validación se haya hecho (hoy, 2.1.308). Cualquier otra,
-o una ilegible, responde `control-marker-incompatible` en el preflight y en el POST, sin efectos.
+`N` ejecuta el CLI del `.npm-global` del workspace, que puede no ser el de la imagen. La recreación
+lee su versión en el host, sin seguir symlinks. **Desde v1.9.2** (decisión del responsable,
+2026-11-10) la acepta si es una release estable plana ≥ `RECREATE_CLI_MIN_VERSION` y no está en
+`RECREATE_CLI_DENY` (regla completa en §2.7.7, viñeta «CLI»); una ilegible o una prerelease responden
+`control-marker-incompatible` en el preflight y en el POST, sin efectos. El texto que sigue era la
+regla anterior, **reemplazada por v1.9.2** (se conserva como historial; `RECREATE_CLI_MIN_VERSION=off`
+la restaura): solo una versión con la que esta validación se hubiera hecho.
 
-- **Decisión del responsable (2026-10-27): allowlist exacta {2.1.308} aprobada, solo para el
-  piloto descartable.** Límites:
+- **Decisión del responsable (2026-10-27), reemplazada por v1.9.2: allowlist exacta {2.1.308}
+  aprobada, solo para el piloto descartable.** Límites (de entonces):
   - cualquier versión de Claude Code no validada bloquea la recreación, también una posterior y
     compatible; ampliar la lista exige repetir la validación de arriba con esa versión y una
     revisión del cambio;
@@ -1379,12 +1383,18 @@ y `/tmp` se transmite a `N` antes de su primer arranque.
   `recreate-unresolved` ⇒ aún en curso, o muerta con el backend ⇒ `recover`); un 500 con
   `unresolved: true` también es UNCERTAIN. El operador decide con esa evidencia; un segundo
   `recreate` concurrente recibe `busy`.
-- **CLI**: la allowlist de `control-marker-incompatible` es {2.1.308, 2.1.314, 2.1.316}. 2.1.314 y
-  2.1.316 se validan en el job `cli-variants` del workflow Session Image, que construye el mismo
-  Dockerfile con cada versión y ejecuta contra ella el smoke de conversación completo (su fase 11d
-  es la validación de §2.7.5), el smoke de recreación (con un traslado cuya `N` ejecuta ese CLI
-  desde el workspace) y el smoke del composer. Una versión sale de la lista cuando ese job deja de
-  pasar con ella.
+- **CLI** (**v1.9.2**): `control-marker-incompatible` bloquea solo un CLI del workspace **ilegible**,
+  que **no es una release estable plana** (`X.Y.Z`, sin prerelease), que está **por debajo de la
+  mínima** (`RECREATE_CLI_MIN_VERSION`, por defecto 2.1.308, la más baja validada; debe ser una versión
+  validada) o que está **denegado** (`RECREATE_CLI_DENY`); el bloqueo lleva `detail` (`unreadable`,
+  `below-min:X`, `denied:X`, `not-a-stable-release:X`). Una versión futura desconocida **no** bloquea.
+  `off` vuelve a la regla anterior: solo las validadas, {2.1.308, 2.1.314, 2.1.316}, que el job
+  `cli-variants` del workflow Session Image sigue verificando (el mismo Dockerfile con cada versión: el
+  smoke de conversación completo —su fase 11d es la validación de §2.7.5—, el de recreación con un
+  traslado cuya `N` ejecuta ese CLI desde el workspace, y el del composer). Lo que la regla abierta no
+  prueba: que un CLI futuro lea `/etc/st-control` igual; el job y el canario diario lo informan, y una
+  versión rota se deniega. Las demás precondiciones (imagen, relay, capa, skills, disco, backup), el
+  traslado de `preserveLayer` y la vuelta atrás no cambian.
 
 **Qué se conserva y qué no.** Se conserva, byte a byte (verificado por `sha256` en el smoke), todo
 lo de primer nivel bajo HOME y `/tmp` que no sea producto del entrypoint ni runtime del CLI, con
@@ -2558,11 +2568,13 @@ operación o de ninguna.
 
 #### 8.1.9 Compatibilidad con la versión del CLI
 
-Todo §8 describe el comportamiento observado del CLI **2.1.314** (§8.2). La allowlist de
-recreación (§2.7.1, `cliCompat.ts`) está validada con 2.1.308: son **contratos distintos** y ninguno
-se amplía por el otro. `COMPOSER_CLI_VERSIONS` (env, por defecto `2.1.314`) es la lista de versiones
-con las que §8.2 se repitió. Fuera de la lista ⇒ 409 `cli-unvalidated`. Añadir una versión exige
-repetir la lista de revalidación de §8.2.6 y adjuntar los resultados al PR que la añada.
+Todo §8 describe el comportamiento observado del CLI **2.1.314** (§8.2). La regla de
+recreación (§2.7.5, `cliCompat.ts`; mínima + denegación desde v1.9.2) es otra: son **contratos
+distintos** y ninguno se amplía por el otro. `COMPOSER_CLI_VERSIONS` (env, por defecto `2.1.314`) es
+la lista de versiones con las que §8.2 se repitió. Lo que la política de abajo no admite (fuera de la
+lista y por debajo de la mínima, o denegado) ⇒ 409 `cli-unvalidated`. Con la mínima abierta (por
+defecto desde v1.9.2) una release estable posterior no necesita entrar en la lista; añadirla sigue
+pidiendo repetir §8.2.6 y adjuntar los resultados al PR.
 
 **Qué versión se comprueba (v1.8.2).** La del **proceso que recibirá el texto**, preguntada a su
 propio ejecutable. Hasta v1.8.1 era la `claude_version` del `session_start`, pero el hook la obtiene
@@ -2617,9 +2629,10 @@ sobre el texto del hook, en este orden:
 1. `COMPOSER_CLI_DENY` — versiones exactas rechazadas siempre (`detail: denied`), aunque la lista o
    la mínima las admitan. **Prioridad absoluta.** Es la vía rápida para excluir una release rota.
 2. `COMPOSER_CLI_VERSIONS` — la lista exacta validada (por defecto `2.1.314`).
-3. `COMPOSER_CLI_MIN_VERSION` — **opcional y abierta**: toda release estable mayor o igual, incluidos
-   cambios **minor y major**, sin techo. Debe ser una versión de `COMPOSER_CLI_VERSIONS` (la política
-   parte de evidencia). Sin definir ⇒ solo la lista exacta, el comportamiento anterior.
+3. `COMPOSER_CLI_MIN_VERSION` — **abierta y activa por defecto (v1.9.2)**: toda release estable mayor
+   o igual, incluidos cambios **minor y major**, sin techo. Debe ser una versión de
+   `COMPOSER_CLI_VERSIONS` (la política parte de evidencia). Sin definir ⇒ la versión más baja de esa
+   lista; `off` ⇒ solo la lista exacta (el comportamiento anterior a v1.9.2).
 
 Fuera de todo ⇒ `detail: not-allowed`. Las prereleases y las versiones no planas o no verificables
 nunca llegan a la política (§8.1.9 arriba: `unverifiable:*`) y el módulo las vuelve a rechazar

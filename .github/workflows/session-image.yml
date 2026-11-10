@@ -138,7 +138,7 @@ jobs:
 
   # §2.7.7 legacy activation: the CLI versions the three pre-3.0d sessions
   # run (2.1.316, auto-updated) and the composer pilot runs (2.1.314) must be
-  # validated the way 2.1.308 was before they enter the recreation allowlist
+  # validated the way 2.1.308 was before they enter the validated set
   # (backend/src/recreate/cliCompat.ts) and COMPOSER_CLI_VERSIONS: the same
   # Dockerfile built with that CLI, then the whole conversation smoke (its
   # phase 11d is the /etc/st-control compatibility validation of

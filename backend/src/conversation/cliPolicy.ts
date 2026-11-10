@@ -11,11 +11,14 @@
  *                               release found broken). Deny always wins.
  *   2. COMPOSER_CLI_VERSIONS    exact versions the §8.2.6 revalidation was run
  *                               with (unchanged; default 2.1.314).
- *   3. COMPOSER_CLI_MIN_VERSION optional, OPEN: every stable release ≥ it —
- *                               later patches, minors AND majors — with no
- *                               ceiling. It must itself be a validated version
- *                               (listed in COMPOSER_CLI_VERSIONS).
- * Unset (3) ⇒ exactly the previous behaviour (the exact list alone).
+ *   3. COMPOSER_CLI_MIN_VERSION OPEN: every stable release ≥ it — later
+ *                               patches, minors AND majors — with no ceiling.
+ *                               It must itself be a validated version (listed
+ *                               in COMPOSER_CLI_VERSIONS).
+ * Unset (3) ⇒ the lowest version of the exact list (owner, 2026-11-10: new
+ * stable CLI releases are accepted by default, without validating each one
+ * or downgrading a session; known-broken ones go in the deny list).
+ * `COMPOSER_CLI_MIN_VERSION=off` ⇒ the exact list alone (the old behaviour).
  * Pre-releases and build suffixes never count (the version parser accepts
  * plain X.Y.Z only). A malformed setting refuses to start.
  *
@@ -81,12 +84,23 @@ export function parseDeny(raw: string | undefined): Set<string> {
 	return new Set(versionList("COMPOSER_CLI_DENY", raw));
 }
 
+/** The default minimum: the lowest validated version (the exact list is never empty). */
+export function lowestVersion(versions: Iterable<string>): string {
+	let low: string | null = null;
+	for (const v of versions) {
+		if (low === null || compare(parseVersion(v) as Semver, parseVersion(low) as Semver) < 0)
+			low = v;
+	}
+	return low as string;
+}
+
 export function parseMin(raw: string | undefined, exact: ReadonlySet<string>): string | null {
 	const text = (raw ?? "").trim();
-	if (text === "") return null;
+	if (text === "off") return null;
+	if (text === "") return lowestVersion(exact);
 	if (!parseVersion(text))
 		throw new Error(
-			`COMPOSER_CLI_MIN_VERSION ${JSON.stringify(text)}: not a version (expected plain X.Y.Z, no range, no pre-release)`,
+			`COMPOSER_CLI_MIN_VERSION ${JSON.stringify(text)}: not a version (expected plain X.Y.Z, no range, no pre-release, or "off")`,
 		);
 	if (!exact.has(text))
 		throw new Error(
