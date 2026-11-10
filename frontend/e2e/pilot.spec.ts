@@ -110,12 +110,15 @@ test.describe("pilot — ask the agents", () => {
 		await expect(panel(page).locator(".pilot-notice")).toContainText(
 			"nothing is sent until you click",
 		);
-		await expect(agentBox(page, "architect-hz")).not.toBeChecked();
-		await expect(agentBox(page, "developer-hz-2")).toBeChecked();
+		// Nobody is pre-selected: the person chooses the recipients.
+		for (const h of ["architect-hz", "developer-hz-2", "designer-hz"]) {
+			await expect(agentBox(page, h)).not.toBeChecked();
+		}
+		await expect(panel(page).locator(".pilot-send")).toBeDisabled();
 		await page.waitForTimeout(500);
 		expect(sends).toHaveLength(1); // nothing left on its own
 
-		await agentBox(page, "designer-hz").uncheck();
+		await agentBox(page, "developer-hz-2").check();
 		await text.fill(
 			"From @architect-hz:\n\nPlan: split the import into two steps.\n\nPlease review.",
 		);

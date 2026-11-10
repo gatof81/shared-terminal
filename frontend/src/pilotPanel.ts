@@ -340,7 +340,7 @@ function renderControls(s: PilotState): void {
 			el(
 				"span",
 				undefined,
-				`Forwarding @${s.forwardFrom}'s answer. Read and edit it below — nothing is sent until you click the button.`,
+				`Forwarding @${s.forwardFrom}'s answer. Choose who receives it, read and edit it below — nothing is sent until you click the button.`,
 			),
 			button("Cancel forward", "pv-btn pilot-cancel-forward", () => {
 				s.forwardFrom = null;
@@ -739,11 +739,10 @@ function renderExchanges(s: PilotState): void {
 function startForward(s: PilotState, from: Lane, answer: string): void {
 	s.forwardFrom = from.handle;
 	s.text.value = forwardDraft(from.handle, answer);
-	s.selected = new Set(
-		s.agents
-			.filter((a) => a.agentId !== from.agentId && s.targets.get(a.agentId)?.kind === "ok")
-			.map((a) => a.agentId),
-	);
+	// Nobody is pre-selected: the person picks who receives the forward, so a
+	// click can never reach an agent they did not choose (D-PIL3: preview,
+	// editable text, human confirmation — of the text AND the recipients).
+	s.selected = new Set();
 	s.errorEl.textContent = "";
 	renderAgents(s);
 	renderControls(s);
