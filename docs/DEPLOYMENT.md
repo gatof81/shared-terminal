@@ -1337,11 +1337,9 @@ same endpoint (a browser that switched accounts), the target's row wins,
 and the log line counts it (`N kept from the target`). A malformed row
 still fails the restore.
 
-**File permissions.** The backup directory and its files are created with
-the process umask (typically 0755/0644), so anyone on the host who can
-reach `<WORKSPACE_ROOT>/.backups` can read them. Tightening the permissions
-is tracked in #562, because the nightly off-host copy reads these files as
-a non-root user.
+**File permissions.** `push_subscriptions.jsonl` gets the same modes as every
+other file in the backup: 0640 in the `BACKUP_GROUP_GID` group in a daily
+`20*` backup, 0600 everywhere else (see "Who can read a backup (#562)" above).
 
 Restore guards:
 
