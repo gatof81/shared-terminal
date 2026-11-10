@@ -21,17 +21,44 @@ const policy = (min?: string, deny?: string, exact = "2.1.314,2.1.316") =>
 		COMPOSER_CLI_DENY: deny,
 	});
 
-describe("no minimum ⇒ exactly today's behaviour", () => {
-	it("only the exact list passes; 2.1.317 (HZ's auto-update, 2026-11-04) is refused", () => {
+describe("default: open from the lowest validated version (owner, 2026-11-10)", () => {
+	it("unset ⇒ any stable release ≥ the lowest listed passes: 2.1.322 (session A), a future 3.0.0", () => {
 		const p = policy();
+		expect(p.min).toBe("2.1.314");
+		expect(decide(p, "2.1.314")).toEqual({ ok: true, version: "2.1.314", by: "exact" });
+		expect(decide(p, "2.1.322")).toEqual({ ok: true, version: "2.1.322", by: "min" });
+		expect(decide(p, "3.0.0")).toEqual({ ok: true, version: "3.0.0", by: "min" });
+		expect(decide(p, "2.1.313")).toMatchObject({ ok: false, why: "not-allowed" });
+		expect(decide(p, "2.1.322-rc.1")).toMatchObject({ ok: false, why: "invalid-version" });
+	});
+	it("empty settings ⇒ the default list, open from 2.1.314", () => {
+		const p = parsePolicy({});
+		expect([...p.exact]).toEqual(["2.1.314"]);
+		expect(p.min).toBe("2.1.314");
+		expect(decide(p, "2.1.322")).toMatchObject({ ok: true, by: "min" });
+	});
+	it("the default minimum is the LOWEST listed, whatever the order", () => {
+		expect(policy(undefined, undefined, "2.1.316,2.1.314").min).toBe("2.1.314");
+		expect(policy(undefined, undefined, "2.1.316").min).toBe("2.1.316");
+	});
+	it("the deny list still wins over the open default", () => {
+		const p = policy(undefined, "2.1.322");
+		expect(decide(p, "2.1.322")).toEqual({ ok: false, version: "2.1.322", why: "denied" });
+		expect(decide(p, "2.1.323")).toMatchObject({ ok: true, by: "min" });
+	});
+});
+
+describe("COMPOSER_CLI_MIN_VERSION=off ⇒ exactly the previous behaviour", () => {
+	it("only the exact list passes; 2.1.317 (HZ's auto-update, 2026-11-04) is refused", () => {
+		const p = policy("off");
 		expect(p.min).toBeNull();
 		expect(decide(p, "2.1.314")).toEqual({ ok: true, version: "2.1.314", by: "exact" });
 		expect(decide(p, "2.1.316")).toEqual({ ok: true, version: "2.1.316", by: "exact" });
 		expect(decide(p, "2.1.317")).toEqual({ ok: false, version: "2.1.317", why: "not-allowed" });
 		expect(decide(p, "3.0.0")).toMatchObject({ ok: false, why: "not-allowed" });
 	});
-	it("empty settings ⇒ the validated default 2.1.314 only", () => {
-		const p = parsePolicy({});
+	it("off with empty settings ⇒ the validated default 2.1.314 only", () => {
+		const p = parsePolicy({ COMPOSER_CLI_MIN_VERSION: "off" });
 		expect([...p.exact]).toEqual(["2.1.314"]);
 		expect(decide(p, "2.1.316")).toMatchObject({ ok: false });
 	});
@@ -89,12 +116,18 @@ describe("deny list: an explicit block always wins", () => {
 		expect(decide(p, "3.0.1")).toMatchObject({ ok: true, by: "min" });
 	});
 	it("a denied version also in the exact list is refused, with a startup warning", () => {
-		const p = policy(undefined, "2.1.316");
+		const p = policy("off", "2.1.316");
 		expect(decide(p, "2.1.316")).toMatchObject({ ok: false, why: "denied" });
 		expect(policyWarnings(p)).toEqual([
 			"COMPOSER_CLI_DENY also lists validated 2.1.316: denied (deny wins)",
 		]);
-		expect(policyWarnings(policy())).toEqual([]);
+		expect(policyWarnings(policy("off"))).toEqual([]);
+		// The open default states its risk at boot.
+		expect(policyWarnings(policy())).toEqual([
+			expect.stringContaining(
+				"COMPOSER_CLI_MIN_VERSION=2.1.314: the composer will type into ANY later stable",
+			),
+		]);
 	});
 });
 

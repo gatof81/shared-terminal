@@ -50,7 +50,12 @@ import {
 	planCarry,
 	requiredFreeBytes,
 } from "./carry.js";
-import { CONTROL_MARKER_VALIDATED_CLI, readWorkspaceCliVersion } from "./cliCompat.js";
+import {
+	decideRecreateCli,
+	parseRecreateCliPolicy,
+	type RecreateCliPolicy,
+	readWorkspaceCliVersion,
+} from "./cliCompat.js";
 import type { RecreateD1Port, RecreateSessionConfig, RecreateSessionRow } from "./d1.js";
 import {
 	CLI_URL_HANDLER,
@@ -142,6 +147,8 @@ export type RecreateStep = "prepare" | "rename" | "start" | "commit";
 export interface Blocker {
 	code: string;
 	count?: number;
+	/** Why, when the code alone does not say it (e.g. `denied:2.1.330`, `unreadable`). */
+	detail?: string;
 }
 
 export interface CarryPreview {
@@ -264,6 +271,8 @@ export interface RecreationDeps {
 	readWorkspaceSkill?: (sessionId: string, rel: string) => Promise<WorkspaceSkill>;
 	/** The workspace CLI's version (cliCompat.ts); null when unreadable. */
 	readCliVersion?: (sessionId: string) => Promise<string | null>;
+	/** The workspace-CLI rule (cliCompat.ts); default: RECREATE_CLI_* from the environment. */
+	cliPolicy?: RecreateCliPolicy;
 	/** Free bytes of the filesystem holding Docker's layers (default: statfs of the workspace root — same disk on the deployment). */
 	/**
 	 * Free bytes on the filesystem that holds Docker's data root (where N's
@@ -476,6 +485,7 @@ export class RecreationEngine {
 	private readonly sleep: (ms: number) => Promise<void>;
 	private readonly readW: (sessionId: string, rel: string) => Promise<WorkspaceSkill>;
 	private readonly readCli: (sessionId: string) => Promise<string | null>;
+	private readonly cliPolicy: RecreateCliPolicy;
 	private readonly diskFree: () => Promise<number | null>;
 	private readonly dockerFsPath: string | null;
 	private readonly backupFresh: (
@@ -494,6 +504,7 @@ export class RecreationEngine {
 		this.sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
 		this.readW = deps.readWorkspaceSkill ?? readWorkspaceSkill;
 		this.readCli = deps.readCliVersion ?? readWorkspaceCliVersion;
+		this.cliPolicy = deps.cliPolicy ?? parseRecreateCliPolicy(process.env);
 		this.dockerFsPath = deps.dockerFsPath ?? null;
 		this.diskFree =
 			deps.diskFree ??
@@ -995,12 +1006,11 @@ export class RecreationEngine {
 			)),
 		);
 		if (done()) return result();
-		// §2.7.5: N mounts /etc/st-control and runs the workspace's CLI. Only
-		// a version that directory was validated with may run it (cliCompat.ts).
-		const cli = await this.readCli(sessionId);
-		if (cli === null || !CONTROL_MARKER_VALIDATED_CLI.has(cli)) {
-			blockers.push({ code: "control-marker-incompatible" });
-		}
+		// §2.7.5: N mounts /etc/st-control and runs the workspace's CLI: a
+		// stable release at or above the floor and not denied (cliCompat.ts,
+		// owner 2026-11-10); an unreadable version still blocks.
+		const cli = decideRecreateCli(this.cliPolicy, await this.readCli(sessionId));
+		if (!cli.ok) blockers.push({ code: "control-marker-incompatible", detail: cli.detail });
 		if (blockers.length > 0 || !image) return result();
 		return result({ row, o, image, config, layer, imageOSkills, carry, sizeRw });
 	}

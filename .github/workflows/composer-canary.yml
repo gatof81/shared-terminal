@@ -15,10 +15,12 @@ name: Composer CLI canary
 # older ones untested (dispatch with cli=<version> for any version a session
 # log shows), and the smokes cover the §8.2.6 list, not every CLI behaviour. It is the fastest signal we have to exclude a broken release.
 #
-# A red run opens (or comments on) an issue with the exclusion procedure. It
-# never changes production: putting the version in COMPOSER_CLI_DENY and
-# restarting the backend is the operator's decision. A green run is evidence
-# to add the version to COMPOSER_CLI_VERSIONS and the cli-variants matrix.
+# INFORMATIVE (owner, 2026-11-10): new stable releases are admitted by default
+# (COMPOSER_CLI_MIN_VERSION / RECREATE_CLI_MIN_VERSION are open), so a green
+# run needs no action. A red run opens (or comments on) an issue with the
+# exclusion procedure. It never changes production: putting the version in
+# COMPOSER_CLI_DENY (and RECREATE_CLI_DENY if the control dir is affected)
+# and restarting the backend is the operator's decision.
 #
 # Not path-filtered and not a PR check: its input is the npm registry.
 
@@ -117,7 +119,7 @@ jobs:
           OUTCOME: ${{ job.status }}
         run: |
           if [ "$OUTCOME" = "success" ]; then
-            echo "PASS for $CLI — evidence to add it to COMPOSER_CLI_VERSIONS and the cli-variants matrix." >> "$GITHUB_STEP_SUMMARY"
+            echo "PASS for $CLI — nothing to do (new stable releases are admitted by default)." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "FAIL for $CLI — see the issue opened by this run; exclude it with COMPOSER_CLI_DENY." >> "$GITHUB_STEP_SUMMARY"
             mkdir -p failed && echo "$CLI" > "failed/$CLI"
@@ -162,7 +164,7 @@ jobs:
             body=$(cat <<MD
           The §8.2.6 revalidation failed against Claude Code **$CLI**: $RUN_URL
 
-          With \`COMPOSER_CLI_MIN_VERSION\` set, the composer may be typing into sessions that run this release. Nothing was changed automatically.
+          The open policy is the default (\`COMPOSER_CLI_MIN_VERSION\`), so the composer may be typing into sessions that run this release. Nothing was changed automatically; the Terminal is unaffected.
 
           **Exclusion procedure (operator):**
           1. Read the failing step of the run above; decide whether the failure is the CLI's or the environment's.

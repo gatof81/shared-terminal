@@ -395,11 +395,15 @@ describe("E3 — the resolution converges and checks before `resolved`, under th
 	});
 });
 
-// ── Point 8: no universal CLI compatibility ────────────────────────────────
+// ── Point 8: the workspace CLI (minimum + deny list, owner 2026-11-10) ──────
 
-describe("control-marker-incompatible — only a CLI /etc/st-control was validated with", () => {
-	for (const version of ["2.1.309", "3.0.0", "2.1.307", null]) {
-		it(`workspace CLI ${version ?? "unreadable"} ⇒ 409 control-marker-incompatible, no record, no effects; listed by the preflight`, async () => {
+describe("control-marker-incompatible — a stable CLI at or above the floor, not denied", () => {
+	for (const [version, detail] of [
+		[null, "unreadable"],
+		["2.1.307", "below-min:2.1.307"],
+		["2.1.322-rc.1", "not-a-stable-release:2.1.322-rc.1"],
+	] as const) {
+		it(`workspace CLI ${version ?? "unreadable"} ⇒ 409 control-marker-incompatible (${detail}), no record, no effects; listed by the preflight`, async () => {
 			const h = await setup();
 			h.cli.version = version;
 			const r = await h.engine.recreate(SID, IMG_N);
@@ -408,8 +412,16 @@ describe("control-marker-incompatible — only a CLI /etc/st-control was validat
 			expect(await h.attempts.read(SID)).toMatchObject({ kind: "none" });
 			expect(await h.engine.preflight(SID)).toMatchObject({
 				recreatable: false,
-				blockers: [{ code: "control-marker-incompatible" }],
+				blockers: [{ code: "control-marker-incompatible", detail }],
 			});
+		});
+	}
+
+	for (const version of ["2.1.322", "2.1.309", "3.0.0"]) {
+		it(`a newer stable CLI never validated (${version}) does not block the recreation`, async () => {
+			const h = await setup();
+			h.cli.version = version;
+			expect(await h.engine.recreate(SID, IMG_N)).toMatchObject({ ok: true, outcome: "committed" });
 		});
 	}
 
