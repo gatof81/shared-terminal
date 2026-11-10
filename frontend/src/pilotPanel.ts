@@ -146,7 +146,7 @@ export function pilotPanel(pid: string, agents: AgentListEntry[] | null): HTMLEl
  * last seq when the panel is shown again.
  */
 export function suspendPilot(): void {
-	if (!state || !state.visible) return;
+	if (!state?.visible) return;
 	state.visible = false;
 	for (const f of state.feeds.values()) {
 		f.socket?.close();
