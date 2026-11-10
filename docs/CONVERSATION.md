@@ -575,8 +575,8 @@ Las pestañas tmux ya se pierden con el stop.
   perderlo no cambia nada de la sesión. No se copia a `N` ni se toca el entrypoint, los montajes o la
   persistencia de HOME. **Cualquier otro byte, tamaño o tipo, un symlink en cualquiera de esas rutas,
   otro archivo, directorio o symlink bajo `~/.local`, o una entrada borrada o solo modificada bloquea
-  con `layer-home`**; también un contenido distinto escrito por otra versión del CLI, que además
-  queda fuera por la allowlist de versiones (§2.7.5).
+  con `layer-home`**; también un contenido distinto escrito por otra versión del CLI (desde v1.9.2
+  esa versión ya no queda fuera por versión, §2.7.5: es esta comprobación la que la bloquea).
 - **`~/.gitconfig`:** se permite solo si contiene exactamente `user.name` y `user.email`, iguales a
   `session_configs`. Se lee con `getArchive`, ≤ 4 KiB. Tras la recreación se reaplica
   gitIdentity.
@@ -2569,10 +2569,12 @@ operación o de ninguna.
 #### 8.1.9 Compatibilidad con la versión del CLI
 
 Todo §8 describe el comportamiento observado del CLI **2.1.314** (§8.2). La allowlist de
-recreación (§2.7.1, `cliCompat.ts`) está validada con 2.1.308: son **contratos distintos** y ninguno
-se amplía por el otro. `COMPOSER_CLI_VERSIONS` (env, por defecto `2.1.314`) es la lista de versiones
-con las que §8.2 se repitió. Fuera de la lista ⇒ 409 `cli-unvalidated`. Añadir una versión exige
-repetir la lista de revalidación de §8.2.6 y adjuntar los resultados al PR que la añada.
+recreación (§2.7.5, `cliCompat.ts`; mínima + denegación desde v1.9.2) es otra: son **contratos
+distintos** y ninguno se amplía por el otro. `COMPOSER_CLI_VERSIONS` (env, por defecto `2.1.314`) es
+la lista de versiones con las que §8.2 se repitió. Lo que la política de abajo no admite (fuera de la
+lista y por debajo de la mínima, o denegado) ⇒ 409 `cli-unvalidated`. Con la mínima abierta (por
+defecto desde v1.9.2) una release estable posterior no necesita entrar en la lista; añadirla sigue
+pidiendo repetir §8.2.6 y adjuntar los resultados al PR.
 
 **Qué versión se comprueba (v1.8.2).** La del **proceso que recibirá el texto**, preguntada a su
 propio ejecutable. Hasta v1.8.1 era la `claude_version` del `session_start`, pero el hook la obtiene
