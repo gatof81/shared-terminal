@@ -77,6 +77,7 @@ services:
       - VAPID_PUBLIC_KEY=${VAPID_PUBLIC_KEY:-}
       - VAPID_PRIVATE_KEY=${VAPID_PRIVATE_KEY:-}
       - VAPID_SUBJECT=${VAPID_SUBJECT:-}
+      - PUSH_ENDPOINT_HOSTS=${PUSH_ENDPOINT_HOSTS:-}
       # Conversation capture (docs/CONVERSATION.md §7). Documented in
       # .env.example and DEPLOYMENT.md but previously not forwarded, so
       # `CONVERSATION_ENABLED=true` in .env silently did nothing — the same

@@ -319,6 +319,38 @@ mount of the workspace would close that gap and is the documented
 follow-up; it was left out of v1 to keep the trusted computing base of
 the first version small.
 
+## Web Push endpoints (#566)
+
+A browser's push subscription carries an `endpoint` URL, and the backend
+POSTs every notification to it from inside its own network (the bell
+sweeper, `webPush.sendToUser`). The endpoint comes from the client, so it is
+checked (`backend/src/pushEndpoint.ts`):
+- **On subscribe**, `POST /api/push/subscribe` refuses with 400
+  `endpoint-not-allowed` anything that is not https on port 443, that carries
+  `user:password`, whose host is an IP literal (any form the URL parser
+  normalises: `2130706433`, `0x7f.1`, `[::ffff:…]`), or whose host is not on
+  the push-service list (`PUSH_ENDPOINT_HOSTS`, default: FCM, Mozilla autopush,
+  Apple, WNS).
+- **On every send**, a stored endpoint is checked again. One that fails (stored
+  before #566, or the list was narrowed) is never sent to; the row is kept
+  and the reason logged, never the endpoint.
+- **Every send** has a 10 s timeout, so an endpoint that accepts a connection
+  and never answers no longer holds a socket.
+
+Without this, any account could register `https://<internal host>:<port>/…`
+and make the backend send blind requests there, learning from whether the row
+survived (a 404/410 deletes it) what answered.
+
+**What an endpoint is worth.** Inside the app the endpoint is a subscription's
+identity. `DELETE /api/push/subscribe` deletes only the caller's own row and
+always answers 204, so it neither silences another user's browser nor says
+whether someone else holds the endpoint. `POST /api/push/subscribe` still
+re-assigns an existing endpoint to the caller: that is how a shared browser
+follows whoever is logged in (#355). Someone who has an account and read a D1
+export or a backup can therefore point another user's browser at their own
+notifications; backups are protected for that reason (#562). Changing the
+re-assignment rule is a separate decision (#566).
+
 ## Optional: docker-socket-proxy
 
 For deployments that want to shrink the backend's daemon surface

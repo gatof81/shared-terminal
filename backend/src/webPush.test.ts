@@ -12,7 +12,14 @@ const subStubs = vi.hoisted(() => ({
 }));
 vi.mock("./pushSubscriptions.js", () => subStubs);
 
-import { configureWebPush, getVapidPublicKey, isPushEnabled, sendToUser } from "./webPush.js";
+import {
+	configureWebPush,
+	getVapidPublicKey,
+	isAllowedPushEndpoint,
+	isPushEnabled,
+	PUSH_SEND_TIMEOUT_MS,
+	sendToUser,
+} from "./webPush.js";
 
 function setOrDelete(name: string, value?: string): void {
 	if (value === undefined) {
@@ -35,7 +42,10 @@ beforeEach(() => {
 	subStubs.deleteSubscriptionByEndpoint.mockReset();
 	subStubs.deleteSubscriptionByEndpoint.mockResolvedValue(true);
 });
-afterEach(() => setEnv(undefined, undefined, undefined));
+afterEach(() => {
+	setEnv(undefined, undefined, undefined);
+	delete process.env.PUSH_ENDPOINT_HOSTS;
+});
 
 describe("configureWebPush", () => {
 	it("enables push when all three VAPID vars are set", () => {
@@ -79,13 +89,16 @@ describe("sendToUser", () => {
 
 	it("sends the JSON payload to every subscription", async () => {
 		subStubs.listSubscriptionsForUser.mockResolvedValueOnce([
-			{ endpoint: "https://a", p256dh: "k1", auth: "a1" },
-			{ endpoint: "https://b", p256dh: "k2", auth: "a2" },
+			{ endpoint: "https://fcm.googleapis.com/fcm/send/a", p256dh: "k1", auth: "a1" },
+			{ endpoint: "https://fcm.googleapis.com/fcm/send/b", p256dh: "k2", auth: "a2" },
 		]);
 		await sendToUser("u1", { title: "Done", body: "Claude finished", sessionId: "s1" });
 		expect(webpushStubs.sendNotification).toHaveBeenCalledTimes(2);
 		const [sub, body] = webpushStubs.sendNotification.mock.calls[0]!;
-		expect(sub).toEqual({ endpoint: "https://a", keys: { p256dh: "k1", auth: "a1" } });
+		expect(sub).toEqual({
+			endpoint: "https://fcm.googleapis.com/fcm/send/a",
+			keys: { p256dh: "k1", auth: "a1" },
+		});
 		expect(JSON.parse(body as string)).toEqual({
 			title: "Done",
 			body: "Claude finished",
@@ -95,18 +108,20 @@ describe("sendToUser", () => {
 
 	it("prunes a subscription the push service reports as gone (410)", async () => {
 		subStubs.listSubscriptionsForUser.mockResolvedValueOnce([
-			{ endpoint: "https://dead", p256dh: "k", auth: "a" },
+			{ endpoint: "https://fcm.googleapis.com/fcm/send/dead", p256dh: "k", auth: "a" },
 		]);
 		webpushStubs.sendNotification.mockRejectedValueOnce(
 			Object.assign(new Error("gone"), { statusCode: 410 }),
 		);
 		await sendToUser("u1", { title: "t", body: "b", sessionId: "s1" });
-		expect(subStubs.deleteSubscriptionByEndpoint).toHaveBeenCalledWith("https://dead");
+		expect(subStubs.deleteSubscriptionByEndpoint).toHaveBeenCalledWith(
+			"https://fcm.googleapis.com/fcm/send/dead",
+		);
 	});
 
 	it("does NOT prune on a transient (5xx) failure", async () => {
 		subStubs.listSubscriptionsForUser.mockResolvedValueOnce([
-			{ endpoint: "https://x", p256dh: "k", auth: "a" },
+			{ endpoint: "https://fcm.googleapis.com/fcm/send/x", p256dh: "k", auth: "a" },
 		]);
 		webpushStubs.sendNotification.mockRejectedValueOnce(
 			Object.assign(new Error("service down"), { statusCode: 503 }),
@@ -117,8 +132,8 @@ describe("sendToUser", () => {
 
 	it("isolates a per-subscription failure — the others still send", async () => {
 		subStubs.listSubscriptionsForUser.mockResolvedValueOnce([
-			{ endpoint: "https://dead", p256dh: "k", auth: "a" },
-			{ endpoint: "https://ok", p256dh: "k", auth: "a" },
+			{ endpoint: "https://fcm.googleapis.com/fcm/send/dead", p256dh: "k", auth: "a" },
+			{ endpoint: "https://fcm.googleapis.com/fcm/send/ok", p256dh: "k", auth: "a" },
 		]);
 		webpushStubs.sendNotification
 			.mockRejectedValueOnce(Object.assign(new Error("gone"), { statusCode: 410 }))
@@ -134,5 +149,46 @@ describe("sendToUser", () => {
 		await expect(
 			sendToUser("u1", { title: "t", body: "b", sessionId: "s1" }),
 		).resolves.toBeUndefined();
+	});
+});
+
+describe("endpoints (#566)", () => {
+	beforeEach(() => {
+		setEnv("pubkey", "privkey", "mailto:x@y.z");
+		configureWebPush();
+	});
+
+	it("never sends to a stored endpoint outside the allowlist, and keeps the row", async () => {
+		subStubs.listSubscriptionsForUser.mockResolvedValue([
+			{ endpoint: "https://10.0.0.5:8443/hook", p256dh: "k", auth: "a" },
+			{ endpoint: "https://st-backend/api", p256dh: "k", auth: "a" },
+			{ endpoint: "https://web.push.apple.com/QX", p256dh: "k", auth: "a" },
+		]);
+		await sendToUser("u1", { title: "t", body: "b", sessionId: "s1" });
+		expect(webpushStubs.sendNotification).toHaveBeenCalledTimes(1);
+		expect(webpushStubs.sendNotification.mock.calls[0]![0]).toMatchObject({
+			endpoint: "https://web.push.apple.com/QX",
+		});
+		expect(subStubs.deleteSubscriptionByEndpoint).not.toHaveBeenCalled();
+	});
+
+	it("every send carries a timeout", async () => {
+		subStubs.listSubscriptionsForUser.mockResolvedValue([
+			{ endpoint: "https://fcm.googleapis.com/fcm/send/a", p256dh: "k", auth: "a" },
+		]);
+		await sendToUser("u1", { title: "t", body: "b", sessionId: "s1" });
+		expect(webpushStubs.sendNotification.mock.calls[0]![2]).toEqual({
+			timeout: PUSH_SEND_TIMEOUT_MS,
+		});
+	});
+
+	it("PUSH_ENDPOINT_HOSTS replaces the list; a malformed value disables push", () => {
+		process.env.PUSH_ENDPOINT_HOSTS = "push.example.org";
+		expect(configureWebPush()).toBe(true);
+		expect(isAllowedPushEndpoint("https://push.example.org/x")).toBe(true);
+		expect(isAllowedPushEndpoint("https://fcm.googleapis.com/fcm/send/x")).toBe(false);
+		process.env.PUSH_ENDPOINT_HOSTS = "push.example.org, 10.0.0.5";
+		expect(configureWebPush()).toBe(false);
+		expect(isPushEnabled()).toBe(false);
 	});
 });

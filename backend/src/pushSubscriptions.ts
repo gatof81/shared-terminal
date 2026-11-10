@@ -83,14 +83,27 @@ export async function listSubscriptionsForUser(userId: string): Promise<PushSubs
 }
 
 /**
- * Delete a subscription by endpoint. Two callers:
- *   - the frontend on explicit "turn off notifications" (DELETE route),
- *   - `webPush.sendToUser` when the push service reports 404/410 (gone).
- * Not user-scoped: the endpoint is globally unique and both callers act
- * on the current holder. Returns whether a row was removed.
+ * Delete a subscription by endpoint, whoever holds it: only for
+ * `webPush.sendToUser` when the push service itself reports it gone
+ * (404/410). Returns whether a row was removed.
  */
 export async function deleteSubscriptionByEndpoint(endpoint: string): Promise<boolean> {
 	const result = await d1Query("DELETE FROM push_subscriptions WHERE endpoint = ?", [endpoint]);
+	return result.meta.changes > 0;
+}
+
+/**
+ * The DELETE route ("turn off notifications" in this browser): only the
+ * caller's own row (#566). The endpoint was treated as unguessable, but a
+ * D1 export or a backup holds every one of them, and an endpoint alone
+ * then let any account silence another user's browser. Returns whether a
+ * row was removed.
+ */
+export async function deleteOwnSubscription(userId: string, endpoint: string): Promise<boolean> {
+	const result = await d1Query(
+		"DELETE FROM push_subscriptions WHERE endpoint = ? AND user_id = ?",
+		[endpoint, userId],
+	);
 	return result.meta.changes > 0;
 }
 
