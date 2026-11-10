@@ -18,9 +18,18 @@
  *
  * Redirects are not a way around it: web-push's `https.request` never follows
  * one. DNS is: an allowlisted name is assumed to resolve to the vendor.
+ *
+ * The check must hold for the URL web-push CONNECTS to, and web-push (3.6.x)
+ * parses the endpoint with the legacy `url.parse`, not WHATWG `new URL`. The
+ * two disagree: WHATWG keeps `'`, `;`, `{`… inside a host, legacy cuts the host
+ * there — `https://127.0.0.1'.push.services.mozilla.com/` matched the
+ * `*.push.services.mozilla.com` suffix here and connected to 127.0.0.1 there
+ * (#574 review). So the host must be a plain DNS name, AND the legacy parse
+ * must name the same host with no port, no userinfo, over https.
  */
 
 import net from "node:net";
+import { parse as legacyParse } from "node:url";
 
 /** Chrome/Android (FCM), Firefox (autopush), Safari (APNs web), Edge (WNS). */
 export const DEFAULT_PUSH_HOSTS: readonly string[] = [
@@ -65,6 +74,17 @@ export function checkPushEndpoint(endpoint: string, hosts: readonly string[]): E
 	const host = u.hostname;
 	if (net.isIP(host.replace(/^\[|\]$/g, "")) !== 0) return { ok: false, reason: "IP literal" };
 	if (host.endsWith(".")) return { ok: false, reason: "trailing dot" };
+	if (!HOST_RE.test(host)) return { ok: false, reason: "host not a DNS name" };
+	// What web-push will actually use (see the header): any disagreement is refused.
+	const legacy = legacyParse(endpoint);
+	if (
+		legacy.protocol !== "https:" ||
+		legacy.hostname !== host ||
+		(legacy.port !== null && legacy.port !== "443") ||
+		legacy.auth !== null
+	) {
+		return { ok: false, reason: "ambiguous URL" };
+	}
 	const allowed = hosts.some((h) =>
 		h.startsWith("*.") ? host.endsWith(h.slice(1)) && host.length > h.length - 1 : host === h,
 	);

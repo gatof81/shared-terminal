@@ -328,9 +328,14 @@ checked (`backend/src/pushEndpoint.ts`):
 - **On subscribe**, `POST /api/push/subscribe` refuses with 400
   `endpoint-not-allowed` anything that is not https on port 443, that carries
   `user:password`, whose host is an IP literal (any form the URL parser
-  normalises: `2130706433`, `0x7f.1`, `[::ffff:…]`), or whose host is not on
-  the push-service list (`PUSH_ENDPOINT_HOSTS`, default: FCM, Mozilla autopush,
-  Apple, WNS).
+  normalises: `2130706433`, `0x7f.1`, `[::ffff:…]`), whose host is not a
+  plain DNS name, or whose host is not on the push-service list
+  (`PUSH_ENDPOINT_HOSTS`, default: FCM, Mozilla autopush, Apple, WNS).
+  web-push connects using the legacy `url.parse`, which cuts a host at
+  characters WHATWG keeps (`https://127.0.0.1'.push.services.mozilla.com/`
+  reached 127.0.0.1), so the endpoint must also parse to the same host, port
+  and scheme under `url.parse`. A test sends every case through the real
+  web-push and checks where it would connect.
 - **On every send**, a stored endpoint is checked again. One that fails (stored
   before #566, or the list was narrowed) is never sent to; the row is kept
   and the reason logged, never the endpoint.
