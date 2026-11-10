@@ -241,13 +241,15 @@ A value not in this list means a later contract; a client shows it as "state unk
 prompt (`probe:waiting`) yields `needs_attention` with `source: "probe"`. Presence passes it on as it
 is, because the value is true evidence that the prompt is on screen. Clients apply the owner's rule
 of 2026-11-09 (#569): only the CLI's own `hook` evidence means "needs you". A `probe`-sourced
-`needs_attention` shows as "State unknown" on **both** surfaces:
+`needs_attention` shows as "State unknown" everywhere:
 - **the project page** (`projectModel.ts`, `presentPresence`);
 - **the Chat switcher** (`attentionRule.ts`, which reads the conversation's `statusEvidence` with the
-  same prefix rule as `source`). The conversation goes to "Unknown or no recent activity" and its
-  chip says "State unknown", not "Needs permission".
+  same prefix rule as `source`): the conversation goes to "Unknown or no recent activity";
+- **the Chat list row and the conversation's status chip** (`presentClaim` in
+  `conversationModel.ts`, which the switcher's chip also uses): "State unknown", not "Needs
+  permission".
 
-`attentionRule.test.ts` feeds the same evidence to both and requires the same verdict.
+`attentionRule.test.ts` feeds the same evidence to all three and requires the same verdict.
 
 **Deciding conversation:** among the session's conversations whose pane is bound (bindings are released
 at every container stop, so a bound pane is the current start), the one with the newest evidence

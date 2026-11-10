@@ -68,6 +68,7 @@ import {
 	EventWindow,
 	groupBlocks,
 	lastEvidenceAt,
+	presentClaim,
 	presentStatus,
 	STALE_EVIDENCE_MS,
 	STATUS_LABEL,
@@ -763,7 +764,7 @@ function statusChip(
 					active: false,
 					stale: false,
 				}
-			: presentStatus(st.status, st.at, Date.now());
+			: presentClaim(st, Date.now());
 	const chip = el("span", `chat-status tone-${shown.tone}`);
 	chip.appendChild(el("span", "chat-dot"));
 	chip.appendChild(el("span", "chat-status-label", shown.label));
@@ -1074,7 +1075,10 @@ function convList(items: ConversationSummary[]): HTMLElement {
 		const current = c.sessionId === selectedCid;
 		if (current) row.classList.add("selected");
 		row.setAttribute("aria-current", String(current));
-		const shown = presentStatus(c.status, lastEvidenceAt(c), Date.now());
+		const shown = presentClaim(
+			{ status: c.status, at: lastEvidenceAt(c), evidence: c.statusEvidence },
+			Date.now(),
+		);
 		const tone = shown.tone;
 		if (isArchived(c)) row.classList.add("archived");
 		row.classList.add(`tone-${tone}`);

@@ -6,7 +6,12 @@ import {
 	evidenceSource,
 	lastEvidenceMs,
 } from "./attentionRule.js";
-import { lastEvidenceAt, presentStatus, STALE_EVIDENCE_MS } from "./conversationModel.js";
+import {
+	lastEvidenceAt,
+	presentClaim,
+	presentStatus,
+	STALE_EVIDENCE_MS,
+} from "./conversationModel.js";
 import { presentPresence } from "./projectModel.js";
 
 const NOW = Date.parse("2026-11-06T12:00:00Z");
@@ -123,6 +128,10 @@ describe("'needs you' is the CLI's own hook only (owner rule 2026-11-09, #569)",
 				const chat = attentionKind(x, NOW) === "attention";
 				const projects = presentPresence(p, clock, NOW).label === "Needs you";
 				expect(chat, `${ev} @ ${age}`).toBe(projects);
+				// The Chat list row and chip: "Needs permission" exactly when it is "Needs you".
+				const row = presentClaim({ status: x.status, at: lastEvidenceAt(x), evidence: ev }, NOW);
+				expect(row.label === "Needs permission", `row ${ev} @ ${age}`).toBe(projects);
+				if (!projects && !row.stale) expect(row.label).toBe("State unknown");
 			}
 		}
 	});

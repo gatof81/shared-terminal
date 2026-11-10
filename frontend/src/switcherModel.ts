@@ -15,7 +15,12 @@
 import type { ConversationSummary, SessionBinding } from "./api.js";
 import { attentionKind } from "./attentionRule.js";
 import { displayTitle, isArchived } from "./chatMeta.js";
-import { lastEvidenceAt, presentStatus, type StatusPresentation } from "./conversationModel.js";
+import {
+	lastEvidenceAt,
+	presentClaim,
+	presentStatus,
+	type StatusPresentation,
+} from "./conversationModel.js";
 
 // ── Ranking ─────────────────────────────────────────────────────────────────
 
@@ -61,7 +66,10 @@ export function bucketOf(
 	bucket: Bucket;
 	status: StatusPresentation;
 } {
-	const status = presentStatus(c.status, lastEvidenceAt(c), now);
+	const status = presentClaim(
+		{ status: c.status, at: lastEvidenceAt(c), evidence: c.statusEvidence },
+		now,
+	);
 	switch (attentionKind(c, now)) {
 		case "attention":
 			return { bucket: "attention", status };
@@ -70,13 +78,7 @@ export function bucketOf(
 		case "ready":
 			return { bucket: "ready", status };
 		case "stale":
-			return { bucket: "quiet", status };
 		case "unknown":
-			// A fresh permission prompt that only a probe saw: the project page
-			// shows it as "State unknown" (#569), so the chip must not say
-			// "Needs permission" here either.
-			if (status.active)
-				return { bucket: "quiet", status: { ...status, label: "State unknown", tone: "muted" } };
 			return { bucket: "quiet", status };
 		default:
 			return { bucket: "recent", status };
