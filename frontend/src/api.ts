@@ -934,7 +934,24 @@ export async function deleteSession(id: string, hard = false): Promise<void> {
 	// the previous form had was dead code (mirrors the cleanup in
 	// `deleteTemplate` above).
 	if (!res.ok) {
-		throw new Error("Failed to delete session");
+		// The message stays generic (today's toast); the server's `error`
+		// code rides along so a caller can explain a refusal it knows —
+		// `agent-active` (PROJECTS.md §6: a bound session can't be hard-deleted).
+		const body = (await res.json().catch(() => ({}))) as { error?: unknown };
+		const code = typeof body?.error === "string" ? body.error : null;
+		throw new ApiCodeError("Failed to delete session", code, res.status);
+	}
+}
+
+/** A failed request that keeps the server's `error` code (null when it sent none). */
+export class ApiCodeError extends Error {
+	constructor(
+		message: string,
+		readonly code: string | null,
+		readonly status: number,
+	) {
+		super(message);
+		this.name = "ApiCodeError";
 	}
 }
 

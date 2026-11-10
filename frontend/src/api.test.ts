@@ -17,6 +17,8 @@ interface Api {
 	createSession: typeof import("./api.js").createSession;
 	listSessions: typeof import("./api.js").listSessions;
 	deleteTab: typeof import("./api.js").deleteTab;
+	deleteSession: typeof import("./api.js").deleteSession;
+	ApiCodeError: typeof import("./api.js").ApiCodeError;
 	createInvite: typeof import("./api.js").createInvite;
 	listInvites: typeof import("./api.js").listInvites;
 	revokeInvite: typeof import("./api.js").revokeInvite;
@@ -531,5 +533,46 @@ describe("downloadSessionFile", () => {
 		await expect(api.downloadSessionFile("session-1", "nope.txt")).rejects.toThrow(
 			"File not found",
 		);
+	});
+});
+
+// ── deleteSession: the server's refusal code travels with the error ────────
+
+describe("deleteSession", () => {
+	it("a 409 agent-active keeps the code; the message stays generic", async () => {
+		const api = await loadApi();
+		fetchSpy.mockResolvedValueOnce(
+			mockFetchResponse({ status: 409, json: { error: "agent-active" } }),
+		);
+		const err = await api.deleteSession("s1", true).catch((e: unknown) => e);
+		expect(err).toBeInstanceOf(api.ApiCodeError);
+		expect((err as InstanceType<typeof api.ApiCodeError>).code).toBe("agent-active");
+		expect((err as InstanceType<typeof api.ApiCodeError>).status).toBe(409);
+		expect((err as Error).message).toBe("Failed to delete session");
+		expect(fetchSpy.mock.calls[0][0]).toContain("/sessions/s1?hard=true");
+	});
+
+	it("an unreadable or code-less body gives code null", async () => {
+		const api = await loadApi();
+		fetchSpy.mockResolvedValueOnce({
+			status: 500,
+			ok: false,
+			json: vi.fn(async () => {
+				throw new SyntaxError("not json");
+			}),
+		} as unknown as Response);
+		const err = await api.deleteSession("s1").catch((e: unknown) => e);
+		expect((err as InstanceType<typeof api.ApiCodeError>).code).toBeNull();
+		expect((err as Error).message).toBe("Failed to delete session");
+
+		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ status: 500, json: { error: 42 } }));
+		const err2 = await api.deleteSession("s1").catch((e: unknown) => e);
+		expect((err2 as InstanceType<typeof api.ApiCodeError>).code).toBeNull();
+	});
+
+	it("a 204 resolves", async () => {
+		const api = await loadApi();
+		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ status: 204 }));
+		await expect(api.deleteSession("s1", true)).resolves.toBeUndefined();
 	});
 });

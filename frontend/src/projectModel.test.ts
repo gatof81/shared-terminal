@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Presence, SessionBinding } from "./api.js";
 import {
+	agentActiveDeleteText,
 	bindableSessions,
 	CreationAttempt,
 	classifyCreation,
@@ -459,5 +460,37 @@ describe("presentPresence: needs you only from the CLI's own hook", () => {
 			const v = pp({ value: "needs_attention", detail: "waiting_permission", source, at: at(5) });
 			expect(v.tone, source).not.toBe("attention");
 		}
+	});
+});
+
+describe("agentActiveDeleteText (409 agent-active on a hard delete)", () => {
+	it("names the agent and its project, and what to do", () => {
+		expect(
+			agentActiveDeleteText("my-project", { handle: "dev", projectName: "Educación HZ" }, false),
+		).toEqual({
+			title: "Can't delete permanently",
+			message:
+				'"my-project" belongs to the agent @dev in Educación HZ. Remove the agent first; the session itself stays and can then be deleted.',
+		});
+	});
+
+	it("without a known project name, the agent alone", () => {
+		expect(agentActiveDeleteText("s", { handle: "dev", projectName: null }, false).message).toBe(
+			'"s" belongs to the agent @dev. Remove the agent first; the session itself stays and can then be deleted.',
+		);
+	});
+
+	it("no binding known: the generic sentence", () => {
+		expect(agentActiveDeleteText("s", null, false).message).toBe(
+			"This session belongs to a project agent. Remove the agent first (Projects), then delete it.",
+		);
+	});
+
+	it("terminated by the refused attempt: one more paragraph", () => {
+		const { message } = agentActiveDeleteText("s", null, true);
+		expect(message.split("\n\n")).toEqual([
+			"This session belongs to a project agent. Remove the agent first (Projects), then delete it.",
+			"It was terminated; its files are kept. Delete it permanently after removing the agent.",
+		]);
 	});
 });

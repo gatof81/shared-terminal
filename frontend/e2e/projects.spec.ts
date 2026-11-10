@@ -514,6 +514,77 @@ test.describe("projects — feature on", () => {
 			.toEqual(["docs", "scratch"]);
 	});
 
+	test("delete permanently on a bound session: explained before any request, with a way to its agent", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		await app.login("alice");
+		await app.openSidebar();
+		await app.sessionRow("my-project").locator(".session-menu-btn").click();
+		await page.locator('[role="menuitem"][data-action="delete"]').click();
+		const d = page.locator(".modal.open .dialog-card");
+		await expect(d.locator("h2")).toHaveText("Can't delete permanently");
+		await expect(d).toContainText(
+			'"my-project" belongs to the agent @developer-hz in Educación HZ. Remove the agent first; the session itself stays and can then be deleted.',
+		);
+		// No name to type: nothing here deletes.
+		await expect(d.locator("input")).toHaveCount(0);
+		await d.locator("button", { hasText: "Open @developer-hz" }).click();
+		await expect(pageTitle(page)).toHaveText("@developer-hz");
+		expect(new URL(page.url()).hash).toBe(agentHash(AGENT_IDS.developer));
+		expect(backend.requests.filter((r) => r.method === "DELETE")).toEqual([]);
+	});
+
+	test("delete permanently refused by the server (binding unknown here): the explanation after the request", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.bindingReadFails = true;
+		await app.login("alice");
+		await app.openSidebar();
+		await app.sessionRow("my-project").locator(".session-menu-btn").click();
+		await page.locator('[role="menuitem"][data-action="delete"]').click();
+		const confirm = page.locator('[role="alertdialog"]');
+		await confirm.locator("input").fill("my-project");
+		await confirm.locator(".modal-danger-action").click();
+		const d = page.locator(".modal.open .dialog-card");
+		await expect(d.locator("h2")).toHaveText("Can't delete permanently");
+		await expect(d).toContainText(
+			"This session belongs to a project agent. Remove the agent first (Projects), then delete it.",
+		);
+		await expect(d).not.toContainText("It was terminated");
+		expect(backend.requests.filter((r) => r.method === "DELETE").map((r) => r.path)).toEqual([
+			`/sessions/${SESSION_IDS.running}?hard=true`,
+		]);
+		await expect(app.toast("Failed to delete session")).toHaveCount(0);
+		await d.locator("button", { hasText: "Close" }).click();
+		await expect(d).toHaveCount(0);
+		await expect(app.sessionRow("my-project")).toBeVisible();
+	});
+
+	test("refused at the server's second check: the session was terminated, its files kept — said so", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.bindingReadFails = true;
+		backend.hardDeleteRefusedAfterSoftDelete = true;
+		await app.login("alice");
+		await app.openSidebar();
+		await app.sessionRow("my-project").locator(".session-menu-btn").click();
+		await page.locator('[role="menuitem"][data-action="delete"]').click();
+		const confirm = page.locator('[role="alertdialog"]');
+		await confirm.locator("input").fill("my-project");
+		await confirm.locator(".modal-danger-action").click();
+		const d = page.locator(".modal.open .dialog-card");
+		await expect(d).toContainText(
+			"It was terminated; its files are kept. Delete it permanently after removing the agent.",
+		);
+		expect(backend.session(SESSION_IDS.running)?.status).toBe("terminated");
+	});
+
 	test("terminal invariant: a trip to a project page and back opens no socket and sends no resize", async ({
 		app,
 		backend,

@@ -11,6 +11,7 @@
 
 import { openObserversModalFor } from "./admin.js";
 import {
+	ApiCodeError,
 	createTab,
 	deleteSession,
 	deleteTab,
@@ -30,7 +31,7 @@ import {
 	TabNotFoundError,
 } from "./api.js";
 import { openActionMenu } from "./components/actionMenu.js";
-import { confirmDialog } from "./components/dialog.js";
+import { alertDialog, confirmDialog } from "./components/dialog.js";
 import { formatBytes, formatCpuCores, formatCpuPercent } from "./format.js";
 import { transformKeyInput } from "./keyBar.js";
 import {
@@ -58,7 +59,7 @@ import { openBootstrapLogModal } from "./newSession.js";
 import { openObserveModalFor } from "./observeModal.js";
 import { openPortsModalFor } from "./ports.js";
 import { projectName } from "./projectDirectory.js";
-import { groupSessionsByBinding } from "./projectModel.js";
+import { agentActiveDeleteText, groupSessionsByBinding } from "./projectModel.js";
 import {
 	clear as clearRoute,
 	navigateProject,
@@ -215,6 +216,14 @@ export async function runSessionAction(s: SessionInfo, id: SessionActionId): Pro
 		case "terminate":
 		case "delete": {
 			const hard = id === "delete";
+			// A session bound to a project agent can't be hard-deleted (the
+			// server answers 409 agent-active, PROJECTS.md §6): say so and
+			// where to go BEFORE asking for its name, and send nothing.
+			const guard = hard && projectChatEnabled();
+			if (guard && isBinding(s.binding)) {
+				await explainAgentActive(s.name, s.binding, false);
+				return;
+			}
 			// An irreversible delete asks for the session's name (§9.5 of
 			// docs/design/ui-unificada.md); a terminate is reversible
 			// (Restore) and only needs a plain confirmation.
@@ -245,11 +254,62 @@ export async function runSessionAction(s: SessionInfo, id: SessionActionId): Pro
 				}
 				await refreshSessions();
 			} catch (err) {
+				if (guard && err instanceof ApiCodeError && err.code === "agent-active") {
+					await explainAgentActiveAfterRefusal(s);
+					return;
+				}
 				showToast((err as Error).message, true);
 			}
 			return;
 		}
 	}
+}
+
+function isBinding(b: SessionInfo["binding"]): b is SessionBinding {
+	return typeof b === "object" && b !== null;
+}
+
+/**
+ * The server refused a hard delete with `agent-active` although this page
+ * did not know the session as bound (binding key absent, or a stale row).
+ * Re-read the list for the binding — and for the status: the server's
+ * second check refuses AFTER the soft delete happened (PROJECTS.md §6), so
+ * a row that was live may now be `terminated`, files kept.
+ */
+async function explainAgentActiveAfterRefusal(s: SessionInfo): Promise<void> {
+	await refreshSessions();
+	let fresh: SessionInfo | null = sessions.find((x) => x.sessionId === s.sessionId) ?? null;
+	// Hidden from the list (terminated rows are shown only with the toggle on).
+	if (fresh === null) fresh = await getSession(s.sessionId).catch(() => null);
+	// The fresh row decides when it carries the key; an absent key (unknown)
+	// keeps what the page knew before, a null (now unbound) means stale.
+	const binding = fresh && "binding" in fresh ? fresh.binding : s.binding;
+	const terminated = s.status !== "terminated" && fresh?.status === "terminated";
+	await explainAgentActive(s.name, isBinding(binding) ? binding : null, terminated);
+}
+
+/** "Can't delete permanently": whose session it is, and a way to that agent. */
+async function explainAgentActive(
+	name: string,
+	binding: SessionBinding | null,
+	terminated: boolean,
+): Promise<void> {
+	const agent = binding && {
+		handle: binding.handle,
+		projectName: projectName(binding.projectId),
+	};
+	const { title, message } = agentActiveDeleteText(name, agent, terminated);
+	if (binding === null) {
+		await alertDialog({ title, message, okLabel: "Close" });
+		return;
+	}
+	const open = await confirmDialog({
+		title,
+		message,
+		confirmLabel: `Open @${binding.handle}`,
+		cancelLabel: "Close",
+	});
+	if (open) navigateProject({ projectId: binding.projectId, agentId: binding.agentId });
 }
 
 /** The ⋯ menu of the ACTIVE session (shell v2's session bar). */
