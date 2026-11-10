@@ -47,10 +47,11 @@ export interface SwitcherItem {
 /**
  * The bucket is attentionRule.ts's verdict (owner option A, 2026-11-06) — the
  * same rule the per-project attention signal uses:
- * - attention ("Needs you"): a FRESH permission prompt;
+ * - attention ("Needs you"): a FRESH permission prompt from the CLI's hook;
  * - working: a fresh claim of activity (running, background tasks);
  * - ready: Claude fresh at its prompt — secondary, after the work in progress;
- * - quiet: `unknown`, or a live claim gone stale (nothing proves Claude is there);
+ * - quiet: `unknown`, a live claim gone stale (nothing proves Claude is there),
+ *   or a permission prompt only a probe saw (shown as "State unknown");
  * - recent: everything else (ended, error, disconnected…), by last evidence.
  */
 export function bucketOf(
@@ -69,7 +70,13 @@ export function bucketOf(
 		case "ready":
 			return { bucket: "ready", status };
 		case "stale":
+			return { bucket: "quiet", status };
 		case "unknown":
+			// A fresh permission prompt that only a probe saw: the project page
+			// shows it as "State unknown" (#569), so the chip must not say
+			// "Needs permission" here either.
+			if (status.active)
+				return { bucket: "quiet", status: { ...status, label: "State unknown", tone: "muted" } };
 			return { bucket: "quiet", status };
 		default:
 			return { bucket: "recent", status };

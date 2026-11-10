@@ -8,8 +8,12 @@
  *
  * Pure and dependency-free on purpose: no imports, no DOM, no clock.
  *
- * Owner decision (2026-11-06, option A):
- * - attention ("needs you"): `waiting_permission` with FRESH evidence only;
+ * Owner decision (2026-11-06, option A), narrowed by the owner's rule of
+ * 2026-11-09 (#569) so the Chat switcher and the project page agree:
+ * - attention ("needs you"): `waiting_permission` with FRESH evidence from
+ *   the CLI's own hook. A probe that saw the prompt on screen is real
+ *   evidence, but only the hook says the CLI is asking — a probe-only (or
+ *   unlabelled) permission state is "unknown", never "needs you";
  * - ready: `waiting_input` with fresh evidence — Claude at its prompt; a
  *   secondary, discreet indicator (every idle CLI is "ready", so counting it
  *   as "needs you" would bury the real permission prompts);
@@ -27,6 +31,17 @@ export const ATTENTION_STALE_MS = 10 * 60 * 1000;
 const LIVE = new Set(["running", "waiting_input", "waiting_background", "waiting_permission"]);
 
 /**
+ * The source of a `statusEvidence` ("hook:PermissionRequest" ⇒ "hook"): the
+ * text before the first colon, "capture" when empty — the same derivation as
+ * the backend's presence `source` (backend/src/projects/presence.ts).
+ */
+export function evidenceSource(statusEvidence: string | null | undefined): string {
+	const e = statusEvidence ?? "";
+	const i = e.indexOf(":");
+	return (i === -1 ? e : e.slice(0, i)) || "capture";
+}
+
+/**
  * Last evidence (ms since epoch): the newer of the state's time and the last
  * event, falling back to whichever parses; NaN when neither does.
  */
@@ -39,7 +54,12 @@ export function lastEvidenceMs(statusAt: string, lastEventAt?: string | null): n
 }
 
 export function attentionKind(
-	c: { status: string; statusAt: string; lastEventAt?: string | null },
+	c: {
+		status: string;
+		statusAt: string;
+		lastEventAt?: string | null;
+		statusEvidence?: string | null;
+	},
 	now: number,
 	staleMs: number = ATTENTION_STALE_MS,
 ): AttentionKind {
@@ -47,7 +67,9 @@ export function attentionKind(
 	if (!LIVE.has(c.status)) return "other";
 	const at = lastEvidenceMs(c.statusAt, c.lastEventAt);
 	if (Number.isNaN(at) || now - at >= staleMs) return "stale";
-	if (c.status === "waiting_permission") return "attention";
+	if (c.status === "waiting_permission") {
+		return evidenceSource(c.statusEvidence) === "hook" ? "attention" : "unknown";
+	}
 	if (c.status === "waiting_input") return "ready";
 	return "working";
 }
