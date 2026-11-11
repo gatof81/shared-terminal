@@ -1,6 +1,6 @@
 # Conversación de proyecto por el Composer (D1–D3)
 
-Estado: **contrato propuesto, v0.2, para aprobación del responsable** (B, 2026-11-11). Nada de lo
+Estado: **contrato propuesto, v0.3, para aprobación del responsable** (B, 2026-11-11). Nada de lo
 que sigue está implementado.
 
 - **v0.1** pasó una revisión adversarial independiente: 2 BLOCKER, 9 SHOULD-FIX y 1 NIT, todos
@@ -9,6 +9,13 @@ que sigue está implementado.
   - asentamiento antes de que una respuesta sea elegible para D3 (§4.1, §7.3);
   - idempotencia sobre todo el cuerpo, adjuntos incluidos (§3.4);
   - un solo proceso escritor (§2.1).
+- **v0.3** cierra los puntos de la revisión del responsable:
+  - toda escritura del registro bajo el lock, incluido `artifact-failed` (§3.3 S2b);
+  - creación del permiso atómica respecto del registro (§7.2 S_G);
+  - publicación del restore desde staging, con diario (§8);
+  - el punto de verificación garantizado del binding, sin prometer atomicidad entre D1 y el registro
+    (§3.3 c0);
+  - idempotencia por el cuerpo canónico normalizado (§3.4).
 
 Decisión que lo origina (responsable, 2026-11-11, sobre la evaluación de B en #512 a las 16:57Z):
 
@@ -53,10 +60,10 @@ En los tres casos **el único que envía es el backend, a través del Composer e
 | --- | --- | --- |
 | Persistencia segura de entregas | §2 (fsync, nunca descarta, escritor envenenado, un solo proceso escritor §2.1), §3.3 (intención en disco antes del efecto) | §10 T1–T4b, T22b, T22c |
 | Cero reintentos, también tras reinicios | §2.1, §3.1, §3.4 | §10 T2–T5c, T8b, T8c, T22b |
-| Binding del destinatario fijado al envío | §3.2, §3.3 S2/S3, §7.2 | §10 T6, T7, T18b |
-| Backup/restore de `.projects` | §8 | §10 T15–T17 |
+| Binding del destinatario fijado al envío | §3.2, §3.3 (c0, S3), §7.2 | §10 T6–T7, T18b |
+| Backup/restore de `.projects` | §2.1, §8 | §10 T15–T17 |
 | Seguridad en la transferencia de artefactos | §6 | §10 T9–T14, T12b |
-| Colaboración revocable y auditable | §4.1, §7.2–§7.5 | §10 T18–T22, T20b–T20d |
+| Colaboración revocable y auditable | §4.1, §7.2–§7.5 | §10 T18–T22 |
 
 ## 1. Banderas y compatibilidad
 
@@ -261,17 +268,24 @@ POST /api/projects/:pid/conversation/messages
      ESCRIBIR en un solo append + fsync: message + un delivery{planned | not-sent} por destinatario
   ── fin de S1 ──
   3. por destinatario (independientes entre sí; uno ocupado o rechazado no frena a otro):
+       a. LEER el binding en D1 (sin lock, tope 5 s) ⇒ R_a
      ── sección crítica S2, lock project:<pid> ──
-       a. RE-LEER el binding en D1: mismo binding_id, mismo epoch, misma sid, vivo;
-          si no ⇒ delivery{not-sent, binding-changed}, siguiente
-          (en D3 además: el permiso sigue vivo y coincide con grant.bindings, §7.3)
+       R_a ≠ el binding fijado (binding_id, epoch, sid, vivo), o lectura fallida o vencida
+          ⇒ ESCRIBIR delivery{not-sent, binding-changed | binding-unverified} + fsync, fin de esta entrega
+          (en D3 además: el permiso sigue vivo y R_a coincide con grant.bindings, §7.3)
        b. con artefactos: ESCRIBIR delivery{placing, artifacts[]} + fsync
      ── fin de S2 (la colocación no se hace con el lock tomado) ──
-       b'. colocar (§6.4); un fallo ⇒ delivery{not-sent, artifact-failed,
-           files_possibly_placed}, siguiente
+       b'. colocar (§6.4), sin lock
+     ── sección crítica S2b, lock project:<pid> (solo si b' falló) ──
+          ESCRIBIR delivery{not-sent, artifact-failed, files_possibly_placed} + fsync, fin de esta entrega
+     ── fin de S2b ──
+       c0. LEER el binding en D1 otra vez (sin lock, tope 5 s) ⇒ R_c, recibido en t_c
+           ← PUNTO DE VERIFICACIÓN GARANTIZADO del binding (ver abajo)
      ── sección crítica S3, lock project:<pid> ──
-       c. re-comprobar lo de (a); escritor no poisoned
-          ESCRIBIR delivery{sending, artifacts_placed?} + fsync     ← la intención
+       c. R_c = el binding fijado y vivo (si no ⇒ not-sent{binding-changed | binding-unverified},
+          con placing previo además files_possibly_placed); en D3, permiso vivo y R_c = grant.bindings;
+          escritor no poisoned
+          ESCRIBIR delivery{sending, artifacts_placed?, binding_verified_at: t_c} + fsync  ← la intención
      ── fin de S3 ──
        d. ComposerService.send({sid, cid, body: {text, clientMessageId: composer_client_message_id}})
           (sin el lock del proyecto: puede tardar hasta T_http)
@@ -282,10 +296,26 @@ POST /api/projects/:pid/conversation/messages
 
 - **Un `message` con 2xx sobrevive a un reinicio.** Ninguna entrega llega al Composer sin un
   `sending` en disco.
-- **El lock nunca está tomado durante un efecto** (colocación o llamada al Composer). Las comprobaciones
-  que deciden si hay efecto y la escritura de la intención van juntas en una sección crítica (S3). Una
-  revocación o un cambio de binding que llega antes de S3 gana; uno que llega después ya no puede
-  impedir ese envío, y queda registrado como posterior.
+- **Toda escritura del registro ocurre dentro de una sección crítica** (S1, S2, S2b, S3, S4), con su
+  `fsync`. Un error de `write` o `fsync` en cualquiera de ellas envenena el escritor (§2). Ninguna
+  escritura, tampoco la de un fallo, se hace sin el lock.
+- **El lock nunca está tomado durante un efecto** (colocación o llamada al Composer) **ni durante una
+  llamada a D1.** Las lecturas de D1 se hacen antes de la sección crítica, que solo compara su
+  resultado.
+- **Una revocación del permiso** (una escritura del registro, §7.4) que entra antes de S3 gana. Una que
+  entra después ya no puede impedir ese envío, y queda registrada como posterior.
+- **Bindings: lo que se garantiza y lo que no.** Los cambios de binding (retirar un agente, religarlo,
+  PROJECTS.md §3–§4.6) se confirman en D1 y **no** toman el lock del proyecto. **No hay atomicidad entre
+  D1 y este registro**, y el contrato no la promete.
+  - **Se garantiza esto:** en `t_c` (paso c0) D1 respondió que el binding fijado en `planned` estaba
+    vivo, con el mismo `binding_id`, `epoch` y `sid`. El `sending` se escribe después, bajo el lock, y
+    guarda `binding_verified_at = t_c`.
+  - **Lo que no se puede impedir:** un cambio que D1 confirma después de `t_c` no detiene ese envío. El
+    texto llega a la sesión fijada, que es la que la persona eligió al enviar, nunca a otra.
+  - **Lo que muestra la UI:** si el binding cambió después, comparando `binding_verified_at` con el
+    momento del cambio en D1, muestra «entregado a la sesión que tenía el agente al enviar».
+  - **Por su lado,** el Composer sigue protegiendo la conversación y el pane (CONVERSATION.md §8.1.3),
+    con su comprobación de `binding-stale` en la propia request.
 - **Si falla la escritura de S1,** responde 503 y no hubo efecto.
 - **Si falla la del paso 3c** (`write` o `fsync`), esa entrega no se envía y el escritor queda
   `poisoned` (§2). Al reabrir, según lo que haya llegado al disco, la entrega aparece como `planned`
@@ -311,10 +341,17 @@ Estas reglas son **MUST** y cada una tiene su prueba en §10:
    mismo id producen un solo `message`.
    - Un POST repetido, sea cual sea su antigüedad, devuelve lo guardado y no hace nada más.
    - Si **cualquier parte del cuerpo** difiere de lo guardado, recibe 409 `idempotency-conflict`. La
-     comparación es por `request_sha256`: el sha256 del JSON canónico de
-     `{text normalizado, to[] ordenado, artifacts[] (los sha256, en el orden enviado), quote_ref, in_reply_to}`.
-     Dos requests con el mismo id y adjuntos distintos, o los mismos adjuntos en otro orden, son un
-     conflicto.
+     comparación es por `request_sha256`, el sha256 del **cuerpo canónico normalizado**, no de los
+     bytes recibidos. Ese cuerpo es un JSON con las claves ordenadas y sin espacios:
+     - `text` después de `normalizeText` (§8.1.2);
+     - `to[]` ordenado;
+     - `artifacts[]` como lista de sha256 en minúsculas, en el orden enviado;
+     - `quote_ref` e `in_reply_to`, con `null` si faltan;
+     - los ids en minúsculas.
+
+     Dos requests que solo difieren en espacios del JSON, orden de claves, CRLF/LF, espacios finales o
+     el orden de `to[]` son **el mismo** cuerpo. Dos requests con el mismo id y adjuntos distintos, o
+     los mismos adjuntos en otro orden, son un conflicto.
    - La ventana de 256 ids del Composer (§8.1.4 regla 10) es una segunda capa, no la garantía.
 3. **`composer_client_message_id` se genera una sola vez, en `planned`, y se persiste.** Nunca se
    deriva ni se regenera. Un relevo o una recuperación nunca crean otro id para la misma entrega.
@@ -546,6 +583,27 @@ crea la persona, con un clic, sobre un mensaje suyo ya enviado: la tarea.
 - **`expiresInMin`.** 30 por defecto, tope 120.
 - **`artifacts`.** `false` por defecto.
 - **Un solo permiso vivo por proyecto en v1.** Uno nuevo con otro vivo ⇒ 409 `grant-active`.
+- **Orden de la creación.** Es atómico respecto del registro; no hay atomicidad con D1:
+
+  ```
+  0. validar cuerpo, flags, dueño, tarea (delivered a start), pares
+  1. LEER de D1 los bindings de los agentes del permiso (sin lock, tope 5 s) ⇒ B, recibido en t_b
+     (lectura fallida o vencida ⇒ 503 binding-unverified, sin escribir nada)
+  ── sección crítica S_G, lock project:<pid> ──
+     escritor no poisoned, registro no unverifiable
+     bandera de origen = true (si no ⇒ 409 origin-binding-off)
+     ¿hay un permiso vivo en el índice? ⇒ 409 grant-active
+     ESCRIBIR grant{created, bindings: B, bindings_read_at: t_b} + fsync
+       (y, si la tarea ya tenía una respuesta elegible, su message{relay} + delivery{planned}
+        en el mismo append)
+  ── fin de S_G ──
+  ```
+
+  - La comprobación de `grant-active` y la escritura de `grant{created}` van en la **misma** sección
+    crítica, así que dos creaciones simultáneas producen un solo permiso vivo.
+  - Un binding que D1 cambia después de `t_b` no se refleja en el permiso, pero **todo relevo vuelve a
+    verificar** los bindings contra `grant.bindings[]` en su paso c0 (§3.3). Un desajuste termina el
+    permiso con `ended{binding-changed}` sin enviar.
 - **Qué se registra.** `grant{created}` guarda exactamente el alcance que se mostró, y la UI lo repite
   textualmente: quién, qué pares, cuántos relevos y hasta cuándo.
 
@@ -673,13 +731,47 @@ Todas las rutas de esta sección son relativas a `<WORKSPACE_ROOT>` y usan un ú
   - nada fuera de `.projects/<pid>/`.
 - **Sin `--force`, un destino con `.projects/<pid>` existente no se toca,** igual que con los
   workspaces.
-- **Cada artefacto restaurado se verifica por su sha256.** Uno que no coincide no se instala y queda en
-  `.restore-evidence/projects/<pid>/`.
-- **Marca durable.** Al terminar, el restore escribe `.projects/<pid>/RESTORED`, con
-  `{manifest_at, restored_at}`, y hace `fsync` del archivo y del directorio.
-  - El store comprueba esa marca **cada vez que abre** el registro, y la consume con las reglas
-    siguientes **antes** de la recuperación normal.
-  - Un arranque posterior nunca puede tratar como reinicio corriente un registro que vino de un backup.
+- **Nunca se extrae sobre el directorio vivo.** El restore arma el proyecto completo en un staging y
+  lo publica con un `rename(2)`. La marca `RESTORED` ya está **dentro** del staging antes de publicarlo,
+  así que un directorio publicado nunca existe sin ella. Un diario durable impide que una publicación a
+  medias se lea como un proyecto corriente. Cada paso hace `fsync` de lo que escribe y de su directorio:
+
+  1. **Staging.** Se extrae en `.projects/.restore-staging/<pid>.<restore_id>/` (0700) y se verifica
+     cada artefacto por su sha256. Uno que no coincide se mueve a `.restore-evidence/projects/<pid>/` y
+     no se publica. Después se escribe `RESTORED` = `{restore_id, manifest_at, restored_at}` en el
+     staging.
+  2. **Diario.** Se escribe `.projects/.restore-journal/<pid>.json` = `{restore_id, phase: publishing,
+     aside?}`. Recién **desde aquí** el proyecto está en restauración.
+  3. **Apartar** (solo con `--force` y un `.projects/<pid>` existente): `rename` a
+     `.projects/.restore-replaced/<pid>.<restore_id>`. **No se borra.**
+  4. **Publicar:** `rename` del staging a `.projects/<pid>`. Si el destino existe, el paso falla y el
+     restore se detiene con el diario abierto.
+  5. **Cerrar:** el diario se renombra a `<pid>.<restore_id>.done`.
+
+- **Regla del store** (al abrir un proyecto y antes de crear el directorio de uno nuevo):
+  - **con un diario abierto** para ese `pid` ⇒ el proyecto queda `unverifiable{restore-incomplete}`.
+    No se abre, no se recupera, no se crea un registro vacío en su lugar y no envía nada.
+  - **sin diario abierto y con `RESTORED` en el directorio** ⇒ se aplican las reglas de restore de
+    abajo, **antes** de la recuperación normal.
+  - **Los nombres que empiezan por `.`** dentro de `.projects/` (staging, apartados, diarios, el lock)
+    nunca se abren como proyectos.
+- **Qué pasa si el proceso muere en cada punto.** En ningún caso un registro restaurado se lee sin su
+  condición de restauración, ni se recupera como un reinicio corriente.
+
+  | Muere… | Estado | El store |
+  | --- | --- | --- |
+  | durante 1 | staging incompleto, oculto; el proyecto vivo intacto (o ausente) | abre el proyecto vivo como siempre; nada se restauró |
+  | entre 2 y 3, o entre 3 y 4 | diario abierto; proyecto intacto, o apartado y ausente | `restore-incomplete` |
+  | entre 4 y 5 | publicado con `RESTORED` y el diario abierto | `restore-incomplete` |
+  | después de 5 | publicado con `RESTORED` | reglas de restore |
+
+- **Completar un restore interrumpido.** Se vuelve a correr el restore con el mismo backup. Con el
+  diario abierto:
+  - si `.projects/<pid>` ya tiene `RESTORED` con ese `restore_id`, solo ejecuta el paso 5;
+  - si no, y el staging de ese `restore_id` tiene su `RESTORED`, retoma en el paso 3 o en el 4.
+
+  Cualquier otro estado lo informa y no toca nada. **Nada se borra:** los staging incompletos y los
+  directorios apartados quedan para el operador y para la retención de #567.
 - **Reglas al consumir `RESTORED`,** más estrictas que las de un reinicio:
   - `planned`, `placing` y `sending` sin resultado ⇒ **`uncertain{restored}`**, nunca `not-sent`,
     porque el backup puede ser anterior al efecto;
@@ -687,6 +779,8 @@ Todas las rutas de esta sección son relativas a `<WORKSPACE_ROOT>` y usan un ú
   - se escribe `recovery{source: restore, manifest_at}`, que la UI muestra como «restaurado desde el
     backup de <fecha>»;
   - la marca se renombra a `RESTORED.consumed-<boot_id>` después del `fsync` de ese append. No se borra.
+    Si el proceso muere antes de ese rename, el próximo arranque vuelve a aplicar las reglas: son
+    idempotentes, porque nada pasa de `uncertain{restored}` a otro estado.
 
   **Un restore nunca causa un envío.**
 - **Lo que un restore no puede saber (riesgo declarado).** Los eventos posteriores al backup se pierden,
@@ -715,7 +809,10 @@ el sistema de archivos real (carreras con `rename`/`symlink`).
 | T5 | mismo `client_message_id` repetido 1 000 mensajes después y tras un reinicio | lo guardado, 0 efectos |
 | T5b | dos POST simultáneos con el mismo `client_message_id` | un solo `message`, una llamada por destinatario |
 | T5c | mismo id con otro texto, otros `to[]`, otros `artifacts[]` (o en otro orden), otro `quote_ref` | 409 `idempotency-conflict`, 0 efectos |
-| T6 | binding cambia (epoch +1) entre el paso 2 y el 3a | `not-sent{binding-changed}`, 0 llamadas |
+| T5d | mismo id, mismo cuerpo canónico con otros bytes (CRLF, espacios finales, orden de claves y de `to[]`) | lo guardado, 0 efectos |
+| T6 | binding cambia (epoch +1) antes de c0 / D1 no responde en 5 s | `not-sent{binding-changed}` / `not-sent{binding-unverified}`, 0 llamadas |
+| T6b | binding cambia en D1 después de c0 y antes de la llamada al Composer | el envío va a la sesión fijada (nunca a la nueva); `binding_verified_at` < el cambio; la UI lo indica |
+| T6c | dos entregas del mismo mensaje fallan su colocación a la vez | dos `not-sent{artifact-failed}` en S2b, líneas íntegras, registro legible |
 | T7 | el Composer recibe sid/cid distintos de los fijados | imposible por construcción; test de que el argumento sale del `planned` |
 | T8 | un destinatario `busy` y dos libres | dos `delivered`, un `refused{busy}`, sin espera ni reintento |
 | T8b | el Composer responde 429 / 503 / 404 / lanza | `refused{rate-limited\|shutting-down\|not-found}` / `uncertain{composer-error}` |
@@ -729,11 +826,15 @@ el sistema de archivos real (carreras con `rename`/`symlink`).
 | T14 | nombre `../x`, `.bashrc`, unicode | saneado; nunca empieza por `.`; nunca sale de `.st-inbox` |
 | T15 | backup con un permiso vivo, un `planned` y un `sending`; restore; arranque | `ended{interrupted}`, ambos `uncertain{restored}`, 0 envíos; `RESTORED` consumida |
 | T15b | restore con `PROJECT_CONVERSATION_ENABLED` encendido / backup durante escrituras de índice y artefactos | negado sin tocar nada / el tarball se restaura (sin temporales) |
+| T15c | muerte del restore **antes de publicar**: durante la extracción / con el diario abierto, antes de apartar / después de apartar | proyecto vivo intacto / `restore-incomplete` / `restore-incomplete`, sin registro vacío nuevo; en todos los casos, 0 envíos y ninguna recuperación como reinicio |
+| T15d | muerte entre publicar y cerrar el diario; luego, el restore de nuevo | `restore-incomplete`; después del segundo restore, reglas de restore (`uncertain{restored}`), 0 envíos |
+| T15e | muerte después de escribir `recovery{restore}` y antes del rename de `RESTORED` | el siguiente arranque reaplica las reglas sin cambiar nada |
 | T16 | tarball con link o ruta fuera de `<pid>/` | restore lo rechaza antes de extraer |
 | T17 | artefacto restaurado con hash cambiado | no instalado, queda en evidencia |
 | T18 | revocación antes de S3 de un relevo / durante la llamada al Composer | `not-sent{grant-inactive}`, 0 llamadas / la revocación no espera; ningún relevo más |
 | T18b | @qa se vuelve a ligar a otra sesión con el permiso vivo | `ended{binding-changed}`, nada enviado a la sesión nueva |
 | T18c | la tarea entregada a `start` y a otro destinatario | solo la respuesta de `start` dispara |
+| T18d | dos `POST …/grants` simultáneos | un `grant{created}` y un 409 `grant-active` |
 | T19 | presupuesto 6 | el 6.º relevo escribe `ended{budget}`; no hay 7.º |
 | T20 | `reply_ref` ambiguo (cada una de las condiciones de §4.1) / `failed` / informe vacío / truncado / con `control-bytes` | `ended{reply-…}` o `ended{report-invalid}`, sin relevo |
 | T20b | segundo `turn_end` con `P` a los 9 s del primero | `ambiguous{second-close}`, ningún relevo; el Composer no se llama durante los 10 s |
@@ -750,8 +851,8 @@ el sistema de archivos real (carreras con `rename`/`symlink`).
 
 | # | PR | Contenido | Gate |
 | --- | --- | --- | --- |
-| 1 | D1-a | store del proyecto (§2), lock de escritor (§2.1, con `/usr/bin/flock` comprobado en el job de la imagen del backend), recuperación (§3.4), backup/restore (§8), T1–T5c, T15–T17, T22b, T22c, T23 | contrato aprobado |
-| 2 | D1-b | fan-out (§3), `reply_ref` (§4), API y WS (§5), T6–T8, T24 | D1-a |
+| 1 | D1-a | store del proyecto (§2), lock de escritor (§2.1, con `/usr/bin/flock` comprobado en el job de la imagen del backend), recuperación (§3.4), backup/restore (§8), T1–T5d, T15–T17, T22b, T22c, T23 | contrato aprobado |
+| 2 | D1-b | fan-out (§3), `reply_ref` (§4), API y WS (§5), T6–T8c, T24 | D1-a |
 | 3 | frontend | conversación del proyecto (A), sobre la API de §5 | D1-b |
 | 4 | D2 | artefactos (§6), T9–T14, revisión de seguridad independiente | D1-b |
 | 5 | D3 | permisos y relevo (§7), T18–T22 | D2, y la bandera de origen en `true` en producción (GO propio) |
