@@ -491,6 +491,17 @@ describe("resolved rollback: a definitive failure in steps 1–4 ⇒ the previou
 		expect(h.docker.execs.filter((e) => e[1] === "/opt/st/seed-skills.sh")).toEqual([]);
 	});
 
+	it("a skill only in N's image that W already holds byte for byte ⇒ committed (v1.9.3)", async () => {
+		const h = await setup();
+		h.docker.skillsByImage.set(IMG_N, {
+			"delegate-task/SKILL.md": "v2",
+			"new-skill/SKILL.md": "n",
+		});
+		h.workspaceSkills.set("new-skill/SKILL.md", { kind: "file", data: Buffer.from("n") });
+		const r = await h.engine.recreate(SID, IMG_N);
+		expect(r).toMatchObject({ ok: true, outcome: "committed" });
+	});
+
 	it("an O created by 3.0d gets its marker and hooks file back; a disable meanwhile wins", async () => {
 		for (const disable of [false, true]) {
 			const h = await setup();
