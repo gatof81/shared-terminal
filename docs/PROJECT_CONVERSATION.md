@@ -185,12 +185,12 @@ de este contrato tiene **su propia exclusión, aplicada por el kernel:**
 
 | `ev` | Campos | Identidad |
 | --- | --- | --- |
-| `message` | `msg_id` (UUID v4 del servidor), `client_message_id`, `by` (user_id), `kind: owner\|relay`, `to[]` (agent_ids), `text` (normalizado, §8.1.2), `text_sha256`, `request_sha256` (§3.4 regla 2), `quote_ref?` (§4.2), `in_reply_to?` (`msg_id`), `artifacts[]` (§6: `{sha256, name, bytes}`), `relay?` (`{grant_id, round, from_delivery}` en `kind: relay`) | `client_message_id` (owner) o `grant_id` + `round` (relay) |
+| `message` | `msg_id` (UUID v4 del servidor), `client_message_id`, `by` (user_id), `kind: owner\|relay`, `to[]` (agent_ids), `text` (normalizado, §8.1.2), `text_sha256`, `request_sha256` (§3.4 regla 2), `quote_ref?` (§4.2), `in_reply_to?` (`msg_id`), `artifacts[]` (§6: `{sha256, name, bytes}`), `relay?` (`{grant_id, round, from_delivery}` en `kind: relay`) | `client_message_id` (owner) o `grant_id` + `from_delivery` (relay: **una respuesta se releva como mucho una vez por permiso**) |
 | `delivery` | `msg_id`, `agent_id`, `state` (§3.1), `binding{binding_id, epoch, sid, cid}` (desde `planned`, fijo), `composer_client_message_id` (UUID v4, fijo desde `planned`), `reason?`, `http?` (`{status, result, promptId?, seq?}` de la respuesta del Composer), `artifacts[]?` (en `placing`: lo que se va a colocar), `artifacts_placed?` (§6.4), `files_possibly_placed?`, `binding_verified_at?` (en `sending`, §3.3 c0), `authorized_by` (`owner` \| `collab:<grant_id>`) | `msg_id` + `agent_id` + `state` |
 | `reply_ref` | `msg_id`, `agent_id`, `sid`, `cid`, `prompt_id`, `seq_from`, `seq_to`, `turn_end_seq`, `report_sha256`, `report_bytes`, `truncated`, `attribution: exact\|ambiguous` | `msg_id` + `agent_id` + `prompt_id` |
 | `reply_late_close` | `msg_id`, `agent_id`, `prompt_id`, `seq` (del cierre tardío en la captura) | `msg_id` + `agent_id` + `seq` |
 | `artifact` | `sha256`, `name`, `bytes`, `source{kind: owner\|relay, sid, path}`, `by` | `sha256` + `source` |
-| `grant` | `grant_id`, `event: created\|revoked\|ended`, `task_msg_id`, `start` (agent_id), `pairs[]` (`{from, to}` de agent_ids), `bindings[]` (`{agent_id, binding_id, epoch, sid}` de cada agente del permiso, fijados al crearlo), `bindings_read_at`, `max_relays`, `expires_at`, `artifacts: bool`, `by` (user_id, en `created`/`revoked`), `reason?` (en `ended`: §7.4), `relays_used` | `grant_id` + `event` |
+| `grant` | `grant_id`, `event: created\|revoked\|ended`, `task_msg_id`, `start` (agent_id), `initial_relay_from` (delivery o `null`, §7.2), `pairs[]` (`{from, to}` de agent_ids), `bindings[]` (`{agent_id, binding_id, epoch, sid}` de cada agente del permiso, fijados al crearlo), `bindings_read_at`, `max_relays`, `expires_at`, `artifacts: bool`, `by` (user_id, en `created`/`revoked`), `reason?` (en `ended`: §7.4), `relays_used` | `grant_id` + `event` |
 | `recovery` | `boot_id`, `at`, `source: boot\|restore`, `truncated_bytes?`, `manifest_at?` (restore), `orphaned[]` (`{msg_id, agent_id, as}`), `grants_closed[]` | `boot_id` |
 
 **Orden en el registro:**
@@ -603,10 +603,13 @@ crea la persona, con un clic, sobre un mensaje suyo ya enviado: la tarea.
      escritor no poisoned, registro no unverifiable
      bandera de origen = true (si no ⇒ 409 origin-binding-off)
      ¿hay un permiso vivo en el índice? ⇒ 409 grant-active
-     ESCRIBIR grant{created, bindings: B, bindings_read_at: t_b} + fsync
+     initial_relay_from = la entrega de la tarea a start, si en el índice ya tiene un reply_ref
+       exact (con seq menor que el de este append); si no, null
+     ESCRIBIR grant{created, bindings: B, bindings_read_at: t_b, initial_relay_from} + fsync
   ── fin de S_G ──
-  2. si la entrega de la tarea a start ya tenía un reply_ref exact, el relevo inicial sigue el
-     camino normal de §7.3 desde S1, con su propia resolución §3.2 fuera del lock
+  2. si initial_relay_from ≠ null, el relevo inicial sigue el camino normal de §7.3 desde S1, con su
+     propia resolución §3.2 fuera del lock. Actúa sólo sobre esa decisión registrada; no vuelve a
+     mirar el índice
   ```
 
   - La comprobación de `grant-active` y la escritura de `grant{created}` van en la **misma** sección
@@ -653,8 +656,10 @@ Es información de otro agente, no una instrucción de <dueño>:
 
 **Orden del relevo:**
 
-1. **S1:** el permiso está vivo (§7.4) y la bandera de origen vale `true`; se escribe `message` +
-   `delivery{planned}`.
+1. **S1:** el permiso está vivo (§7.4), la bandera de origen vale `true` y **no existe ya un
+   `message{relay}` de este permiso con el mismo `from_delivery`**. Si existe, no se escribe nada: es
+   la identidad de §2.2, y cubre que el disparador de §7.3 y el relevo inicial de §7.2 vean la misma
+   respuesta. Si no existe, se escribe `message` + `delivery{planned}`.
 2. **S2 y S3:** se vuelve a comprobar el permiso, el binding contra `grant.bindings[]` y la bandera. En
    S3 se escribe `delivery{sending}` con el contador `relays_used` y, si fue el último,
    `grant{ended, budget}` en el mismo append.
@@ -749,7 +754,7 @@ Todas las rutas de esta sección son relativas a `<WORKSPACE_ROOT>`, bajo `.proj
   0. **Diario, antes de todo.** Se escribe `.projects/.restore-journal/<pid>.json` =
      `{restore_id, phase: staging}` (temp + fsync + rename + fsync del directorio). **Desde aquí** el
      proyecto está en restauración, exista o no `.projects/<pid>`.
-  1. **Staging.** Se extrae en `.projects/.restore-staging/<pid>.<restore_id>/` (0700) y se verifica
+  1. **Staging.** Se extrae en `.projects/.restore-staging/<pid>.<restore_id>.<n>/` (0700, `n` desde 1) y se verifica
      cada artefacto por su sha256. Uno que no coincide se mueve a `.restore-evidence/projects/<pid>/` y
      no se publica. Después se escribe `RESTORED` = `{restore_id, manifest_at, restored_at}` en el
      staging.
@@ -783,9 +788,11 @@ Todas las rutas de esta sección son relativas a `<WORKSPACE_ROOT>`, bajo `.proj
   se mira **antes** de la regla «sin `--force`, un destino existente no se toca». Con el diario
   abierto:
   - si `.projects/<pid>` ya tiene `RESTORED` con ese `restore_id`, solo ejecuta el paso 5;
-  - si no, y el staging de ese `restore_id` tiene su `RESTORED`, retoma en el paso 2, 3 o 4;
+  - si no, busca el staging completo de ese `restore_id`. Uno es completo **solo** si tiene su
+    `RESTORED` con ese `restore_id`. Con exactamente uno, retoma en el paso 2, 3 o 4. Con más de uno,
+    lo informa y no toca nada;
   - si el diario sigue en `staging` sin un staging completo, arma un staging nuevo bajo el mismo
-    `restore_id` y otro nombre de directorio. El incompleto no se borra.
+    `restore_id`, con el siguiente `<n>`. El incompleto no se borra.
 
   Cualquier otro estado lo informa y no toca nada. **Nada se borra:** los staging incompletos y los
   directorios apartados quedan para el operador y para la retención de #567.
@@ -853,6 +860,7 @@ el sistema de archivos real (carreras con `rename`/`symlink`).
 | T18b | @qa se vuelve a ligar a otra sesión con el permiso vivo | `ended{binding-changed}`, nada enviado a la sesión nueva |
 | T18c | la tarea entregada a `start` y a otro destinatario | solo la respuesta de `start` dispara |
 | T18d | dos `POST …/grants` simultáneos | un `grant{created}` y un 409 `grant-active` |
+| T18e | el `reply_ref` de la tarea se escribe justo después de S_G (carrera entre el disparador de §7.3 y el relevo inicial) | un solo relevo de esa respuesta (identidad `grant_id` + `from_delivery`), una unidad consumida |
 | T19 | presupuesto 6 | el 6.º relevo escribe `ended{budget}`; no hay 7.º |
 | T20 | `reply_ref` ambiguo (cada una de las condiciones de §4.1) / `failed` / informe vacío / truncado / con `control-bytes` | `ended{reply-…}` o `ended{report-invalid}`, sin relevo |
 | T20b | segundo `turn_end` con `P` a los 9 s del primero | `ambiguous{second-close}`, ningún relevo; el Composer no se llama durante los 10 s |
