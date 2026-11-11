@@ -508,7 +508,8 @@ El workspace destino lo controla el agente y el backend es root en el host. Por 
    es exactamente esa ruta.
 2. **Abrir el inbox.** Se abre `.st-inbox` **relativo a ese descriptor**, mediante
    `/proc/self/fd/<dirfd>/.st-inbox`, con `O_DIRECTORY | O_NOFOLLOW`.
-   - Si no existe, se crea con `mkdir` en ese mismo directorio, se abre igual, y se hace `fchown` por su
+   - Si no existe, se crea con `mkdir('/proc/self/fd/<dirfd>/.st-inbox', 0755)`, nunca con la ruta
+     textual, se abre igual, y se hace `fchown` por su
      descriptor a `WORKSPACE_UID:WORKSPACE_GID`, modo 0755. Así el agente puede retirar lo que recibió.
    - Se verifica otra vez por `/proc/self/fd`.
    - Un link, o algo que no sea un directorio ⇒ `artifact-failed: inbox-not-dir`. **Nunca se sigue, se
@@ -591,7 +592,7 @@ crea la persona, con un clic, sobre un mensaje suyo ya enviado: la tarea.
   `exact` al crearse el permiso, dispara exactamente un relevo en el momento de crearlo, y la UI lo
   avisa al aprobar. Cualquier otro `reply_ref` anterior a `grant{created}` no dispara nada.
 - **`maxRelays`.** Entre 1 y 20, 6 por defecto. Fuera de ese rango ⇒ 400 `invalid-body`.
-- **`expiresInMin`.** 30 por defecto, tope 120.
+- **`expiresInMin`.** Entre 1 y 120, 30 por defecto. Fuera de ese rango ⇒ 400 `invalid-body`.
 - **`artifacts`.** `false` por defecto.
 - **Un solo permiso vivo por proyecto en v1.** Uno nuevo con otro vivo ⇒ 409 `grant-active`.
 - **Orden de la creación.** Es atómico respecto del registro; no hay atomicidad con D1:
@@ -876,7 +877,7 @@ el sistema de archivos real (carreras con `rename`/`symlink`).
 | T19 | presupuesto 6 | el 6.º relevo escribe `ended{budget}`; no hay 7.º |
 | T19b | `expiresInMin: 1`; respuesta elegible 2 min después | `not-sent{grant-inactive}` y `grant{ended, expired}` en la misma sección crítica; 0 llamadas |
 | T19c | vence el plazo sin relevo pendiente / reinicio después de vencido | `grant{ended, expired}` por el temporizador / `expired` en la recuperación (no `interrupted`) |
-| T19d | `maxRelays: 0` o `21` | 400 `invalid-body`, sin `grant{created}` |
+| T19d | `maxRelays: 0` o `21`; `expiresInMin: 0` o `121` | 400 `invalid-body`, sin `grant{created}` |
 | T20 | `reply_ref` ambiguo (cada una de las condiciones de §4.1) / `failed` / informe vacío / truncado / con `control-bytes` | `ended{reply-…}` o `ended{report-invalid}`, sin relevo |
 | T20b | segundo `turn_end` con `P` a los 9 s del primero | `ambiguous{second-close}`, ningún relevo; el Composer no se llama durante los 10 s |
 | T20c | segundo cierre con `P` a los 11 s, con el relevo ya enviado | `reply_late_close` y `ended{reply-late-close}`; ningún relevo más |
