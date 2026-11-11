@@ -1,7 +1,8 @@
 /**
  * pilotPanel.ts — the "Ask the agents" panel on a project page (Pilot 1,
  * docs/design/project-chat/18; owner decisions D-PIL1–D-PIL5, 2026-11-10).
- * Opt-in per browser (`?pilot=1`) and only where Projects is on.
+ * Opt-in per browser (`?pilot=1`), then shown on every project page of
+ * that browser, and only where Projects is on (docs/PROJECTS.md §9).
  *
  * Every send is the person's: one click, one ordinary Composer send per
  * selected agent (`POST …/messages`, CONVERSATION.md §8), each with its own
