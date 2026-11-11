@@ -266,7 +266,8 @@ Para cada destinatario, dentro de la request y antes de escribir nada:
 2. **La conversación destino**, con la misma regla que el Piloto 1 (PROJECTS.md §9): la única
    conversación interactiva de esa sesión con `canSendInput`, sacada de la lista ligera. Si no hay
    ninguna, `not-sent{no-target}`; si hay más de una, `not-sent{ambiguous-target}`.
-3. Se escribe `delivery{planned, binding{binding_id, epoch, sid, cid}, composer_client_message_id}`.
+3. Se escribe `delivery{planned, binding{binding_id, epoch, sid, cid}, composer_client_message_id}` **en S1
+   de §3.3**, bajo el lock y en el mismo append que el `message`. Los pasos 1 y 2 son lecturas sin lock.
    **Desde ese momento el destino de esa entrega es exactamente ese** `(binding_id, epoch, sid, cid)`.
    Nada lo reevalúa ni lo cambia, ni el reenvío, ni un relevo, ni la recuperación.
 
