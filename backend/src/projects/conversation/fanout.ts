@@ -24,8 +24,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { HttpResult } from "../../conversation/composer.js";
 import { normalizeText, validateText } from "../../conversation/composerText.js";
+import { logErrorToHttp } from "./api.js";
 import { type DeliveryState, deliveryKey } from "./fold.js";
-import { type LogLine, ProjectLogError } from "./log.js";
+import type { LogLine } from "./log.js";
 import type { ProjectConversationStore } from "./store.js";
 
 export const T_HTTP_MS = 30_000;
@@ -252,22 +253,6 @@ export function mapComposer(r: HttpResult | Error): {
 	return { state: "uncertain", reason: "composer-error", http: { status: r.status } };
 }
 
-function logErrorHttp(e: unknown): HttpResult | null {
-	if (!(e instanceof ProjectLogError)) return null;
-	switch (e.code) {
-		case "persist-failed":
-		case "project-writer-unavailable":
-			return err(503, e.code);
-		case "project-log-unverifiable":
-		case "project-log-full":
-			return err(
-				409,
-				e.code,
-				e.message === "restore-incomplete" ? "restore-incomplete" : undefined,
-			);
-	}
-}
-
 /** The answer for an existing message (replay): its deliveries as they stand now. */
 function answerFor(
 	state: { deliveries: Map<string, { state: DeliveryState; reason?: string }> },
@@ -408,7 +393,7 @@ export class ProjectFanout {
 				};
 			});
 		} catch (e) {
-			const h = logErrorHttp(e);
+			const h = logErrorToHttp(e);
 			if (h) return h;
 			throw e;
 		}
@@ -467,7 +452,7 @@ export class ProjectFanout {
 				};
 			});
 		} catch (e) {
-			const h = logErrorHttp(e);
+			const h = logErrorToHttp(e);
 			if (h) return h;
 			throw e;
 		}

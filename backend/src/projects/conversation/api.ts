@@ -57,7 +57,12 @@ export class ProjectConversationApi {
 		if (this.owned.has(key)) return true;
 		const ok = await this.deps.ownsProject(ownerId, projectId);
 		if (ok) {
-			if (this.owned.size >= OWNER_CACHE_MAX) this.owned.clear();
+			// One entry out, oldest first (insertion order) — never a mass
+			// invalidation that sends every request to D1 at once.
+			if (this.owned.size >= OWNER_CACHE_MAX) {
+				const oldest = this.owned.values().next().value;
+				if (oldest !== undefined) this.owned.delete(oldest);
+			}
 			this.owned.add(key);
 		}
 		return ok;
