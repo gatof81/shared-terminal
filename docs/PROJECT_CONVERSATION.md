@@ -1,12 +1,14 @@
 # Conversación de proyecto por el Composer (D1–D3)
 
-Estado: **contrato propuesto, v0.2, para aprobación del responsable** (B, 2026-11-11). La v0.2
-incorpora los tres ajustes del responsable sobre la v0.1: asentamiento antes de la elegibilidad para D3
-(§4.1, §7.3), idempotencia sobre todo el cuerpo, adjuntos incluidos (§3.4), y un solo proceso escritor
-(§2.1). Antes de
-presentarlo pasó una revisión adversarial independiente: 2 BLOCKER, 9 SHOULD-FIX y 1 NIT, todos
-incorporados. Nada de lo que
-sigue está implementado.
+Estado: **contrato propuesto, v0.2, para aprobación del responsable** (B, 2026-11-11). Nada de lo
+que sigue está implementado.
+
+- **v0.1** pasó una revisión adversarial independiente: 2 BLOCKER, 9 SHOULD-FIX y 1 NIT, todos
+  incorporados.
+- **v0.2** incorpora los tres ajustes del responsable:
+  - asentamiento antes de que una respuesta sea elegible para D3 (§4.1, §7.3);
+  - idempotencia sobre todo el cuerpo, adjuntos incluidos (§3.4);
+  - un solo proceso escritor (§2.1).
 
 Decisión que lo origina (responsable, 2026-11-11, sobre la evaluación de B en #512 a las 16:57Z):
 
