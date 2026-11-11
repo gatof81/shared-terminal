@@ -579,7 +579,8 @@ crea la persona, con un clic, sobre un mensaje suyo ya enviado: la tarea.
   relevos.** Las entregas de la tarea a otros destinatarios no disparan nada. Así, en el caso típico de
   «tarea a @dev, @qa revisa», @qa no recibe nada mientras trabaja en otra cosa.
 - **`pairs`.** Entre 1 y 2 pares entre agentes vivos del proyecto, sin un par de un agente consigo
-  mismo. Lo típico es `@dev→@qa` y `@qa→@dev`.
+  mismo y **con como mucho un par saliente por agente**. Así cada respuesta tiene un único
+  destinatario de relevo, que es lo que permite la identidad `grant_id` + `from_delivery` de §2.2. Lo típico es `@dev→@qa` y `@qa→@dev`.
 - **Bindings fijados.** Al crearlo se leen de D1 los bindings de cada agente del permiso y se guardan en
   `grant.bindings[]` (`binding_id`, `epoch`, `sid`): son las sesiones que la persona vio al aprobar.
   - Todo relevo tiene que resolver §3.2 **a esos mismos** bindings. Si no ⇒ `ended{binding-changed}`
