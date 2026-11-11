@@ -204,6 +204,10 @@ archivo), `ev`, `at` (ISO 8601 UTC del backend, con milisegundos), `w` (§2.1 pu
 que faltan en el mismo append; 0 en la última). Con `bn`, al abrir se descarta entero un append que un
 crash dejó incompleto: su `fsync` nunca terminó, así que nadie recibió confirmación de él.
 
+**Un `message` con `kind: relay`** (D3) lo escribe el backend, no una request. Su `by` es el `by` del
+`grant{created}` que lo autoriza, es decir, la persona que aprobó el permiso. `client_message_id` y
+`request_sha256` son `null`, y su idempotencia es `grant_id` + `from_delivery`.
+
 **Orden en el registro:**
 - un `message` antes de cualquiera de sus `delivery`;
 - un `grant{created}` antes de cualquier relevo que lo cite;
@@ -409,6 +413,11 @@ Un observador del backend sigue las conversaciones con entregas `delivered` que 
     asentamiento, y solo entonces se escribe el `reply_ref` con su atribución final.
   - El `reply_ref` lleva el rango `seq_from..seq_to`, el `turn_end_seq`, el sha256 y los bytes del
     `last_assistant_message`, y si vino truncado (L3, CONVERSATION.md §4.4).
+  - **El rango es el de la respuesta, no el de la ventana:** `seq_from` es el `user_prompt` acusado y
+    `seq_to` = `turn_end_seq`, el `turn_end` que abrió el asentamiento. Así es en `reply_settling` y en
+    el `reply_ref` que le sigue, también en el `ambiguous{settle-unobserved}` de la recuperación. Los
+    eventos que llegan durante la ventana deciden la atribución, pero no forman parte de la respuesta.
+    Para ver por qué quedó ambigua, la UI enlaza el Chat del agente.
 - **El asentamiento tiene que observarse entero.** Si el proceso que recibió el `turn_end` no siguió
   vivo durante los 10 s (un reinicio en medio, o un `turn_end` que se encuentra al recuperar), el
   `reply_ref` es `ambiguous{settle-unobserved}`. El texto se sigue mostrando, marcado «sin confirmar».
@@ -643,8 +652,9 @@ crea la persona, con un clic, sobre un mensaje suyo ya enviado: la tarea.
      ESCRIBIR grant{created, bindings: B, bindings_read_at: t_b, initial_relay_from} + fsync
   ── fin de S_G ──
   2. si initial_relay_from ≠ null, el relevo inicial sigue el camino normal de §7.3 desde S1, con su
-     propia resolución §3.2 fuera del lock. Actúa sólo sobre esa decisión registrada; no vuelve a
-     mirar el índice
+     propia resolución §3.2 fuera del lock. Actúa sólo sobre esa decisión registrada: no vuelve a
+     mirar el índice para decidir si hay respuesta, pero **sí** pasa por la guarda de duplicado de S1
+     (§7.3), como cualquier relevo
   ```
 
   - La comprobación de `grant-active` y la escritura de `grant{created}` van en la **misma** sección
@@ -733,6 +743,9 @@ El permiso termina, **sin reintentar nada**, en cualquiera de estos casos:
     fin a tiempo. Si otra escritura ya cerró el permiso, no escribe nada.
   - **En la recuperación tras un reinicio,** un permiso cuyo `expires_at` ya pasó se cierra como
     `expired`; los demás, como `interrupted`.
+  - **Con el escritor envenenado** (§2), el temporizador no puede escribir y omite la escritura. Igual
+    ningún relevo sale, porque toda comprobación de «vivo» mira `expires_at` y un escritor envenenado
+    no escribe intenciones. La recuperación del próximo arranque deja el permiso como `expired`.
 - **Un permiso terminado no se reabre.** Seguir significa crear un permiso nuevo, con un clic nuevo.
 - **Tras un reinicio no queda ningún permiso vivo.** Todos se cierran como `interrupted`, o como `expired` si su plazo ya pasó. Es fail-closed:
   el backend nunca retoma una colaboración que la persona no ve en vivo.
@@ -1006,7 +1019,8 @@ type ReplyLateCloseEv = Base & { ev: "reply_late_close"; msg_id: string; agent_i
 type OwnerAckEv = Base & { ev: "owner_ack"; ack_id: string; client_ack_id: string; by: string;
   target: { msg_id: string; agent_id?: string; report_sha256?: string } };
 type RecoveryEv = Base & { ev: "recovery"; boot_id: string; source: "boot" | "restore";
-  manifest_at?: string; orphaned: { msg_id: string; agent_id: string; as: string }[]; grants_closed: string[] };
+  manifest_at?: string; orphaned: { msg_id: string; agent_id: string; as: string }[];
+  grants_closed: string[] /* grant_ids; el motivo de cada uno está en su grant{ended} */ };
 // grant / artifact: D2–D3 (§2.2), no aparecen con D1 solo.
 type ProjectEvent = MessageEv | DeliveryEv | ReplySettlingEv | ReplyRefEv | ReplyLateCloseEv | OwnerAckEv | RecoveryEv;
 
