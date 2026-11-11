@@ -590,36 +590,165 @@ describe("create agent (rule 4)", () => {
 });
 
 describe("polling (rule 9)", () => {
-	it("≤ every 5 s while a page is shown and the tab visible; one request in flight", async () => {
-		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
-		await load();
+	// flush() waits on a real setTimeout, which the fake clock below stops;
+	// settle microtasks through the fake clock instead.
+	const settle = () => vi.advanceTimersByTimeAsync(0);
+	const agentsWith = (value: "working" | "waiting_input" | "needs_attention") => () => {
+		const r = agentsBody();
+		r.body.agents[0]!.presence.value = value;
+		return r;
+	};
+	const start = async (body: () => ReturnType<typeof agentsBody>) => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+		api.fetchProjectAgents.mockImplementation(async () => body());
 		history.replaceState(null, "", `/#/projects/${PID}`);
+		await load();
 		view.startProjects();
-		await flush();
-		const base = api.fetchProjectAgents.mock.calls.length;
+		await settle();
+		return api.fetchProjectAgents.mock.calls.length;
+	};
+
+	it("every 5 s while an agent is working; one request in flight; hidden tab and no page: nothing", async () => {
+		const base = await start(agentsWith("working"));
 		let release: () => void = () => {};
 		api.fetchProjectAgents.mockImplementation(
-			() => new Promise((r) => (release = () => r(agentsBody()))),
+			() => new Promise((r) => (release = () => r(agentsWith("working")()))),
 		);
-		vi.advanceTimersByTime(5_000);
-		vi.advanceTimersByTime(5_000);
+		await vi.advanceTimersByTimeAsync(5_000);
+		await vi.advanceTimersByTimeAsync(5_000);
 		expect(api.fetchProjectAgents.mock.calls.length).toBe(base + 1);
 		release();
-		await flush();
-		vi.advanceTimersByTime(5_000);
+		await settle();
+		api.fetchProjectAgents.mockImplementation(async () => agentsWith("working")());
+		await vi.advanceTimersByTimeAsync(5_000);
 		expect(api.fetchProjectAgents.mock.calls.length).toBe(base + 2);
-		release();
-		await flush();
 		// Hidden tab: nothing.
 		const hidden = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
-		vi.advanceTimersByTime(15_000);
+		await vi.advanceTimersByTimeAsync(15_000);
 		expect(api.fetchProjectAgents.mock.calls.length).toBe(base + 2);
 		hidden.mockRestore();
 		// No page shown: nothing for the page.
 		router.navigate({ sessionId: SID, view: null, detail: null });
-		await flush();
-		vi.advanceTimersByTime(5_000);
+		await settle();
+		await vi.advanceTimersByTimeAsync(5_000);
 		expect(api.fetchProjectAgents.mock.calls.length).toBe(base + 2);
+	});
+
+	it("every 5 s while an agent needs attention", async () => {
+		const base = await start(agentsWith("needs_attention"));
+		await vi.advanceTimersByTimeAsync(5_000);
+		await vi.advanceTimersByTimeAsync(5_000);
+		expect(api.fetchProjectAgents.mock.calls.length).toBe(base + 2);
+	});
+
+	it("every 15 s when all agents are at rest, and 5 s again once one starts working", async () => {
+		const base = await start(agentsWith("waiting_input"));
+		await vi.advanceTimersByTimeAsync(14_999);
+		expect(api.fetchProjectAgents.mock.calls.length).toBe(base);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(api.fetchProjectAgents.mock.calls.length).toBe(base + 1);
+		api.fetchProjectAgents.mockImplementation(async () => agentsWith("working")());
+		await vi.advanceTimersByTimeAsync(15_000);
+		expect(api.fetchProjectAgents.mock.calls.length).toBe(base + 2);
+		await vi.advanceTimersByTimeAsync(5_000);
+		expect(api.fetchProjectAgents.mock.calls.length).toBe(base + 3);
+	});
+
+	it("refreshes at once on returning to the tab", async () => {
+		const base = await start(agentsWith("waiting_input"));
+		document.dispatchEvent(new Event("visibilitychange"));
+		await settle();
+		expect(api.fetchProjectAgents.mock.calls.length).toBe(base + 1);
+	});
+
+	it("refreshes the project list by elapsed time (60 s), not by tick count", async () => {
+		await start(agentsWith("waiting_input"));
+		const base = api.fetchProjects.mock.calls.length;
+		await vi.advanceTimersByTimeAsync(45_000); // three idle ticks
+		expect(api.fetchProjects.mock.calls.length).toBe(base);
+		await vi.advanceTimersByTimeAsync(15_000);
+		expect(api.fetchProjects.mock.calls.length).toBe(base + 1);
+	});
+
+	it.each([
+		"working",
+		"waiting_input",
+	] as const)("leaves no timer running after a logout (%s)", async (value) => {
+		await start(agentsWith(value));
+		expect(vi.getTimerCount()).toBeGreaterThan(0);
+		view.resetProjects();
+		expect(vi.getTimerCount()).toBe(0);
+		const calls = api.fetchProjectAgents.mock.calls.length;
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(api.fetchProjectAgents.mock.calls.length).toBe(calls);
+	});
+
+	describe("a single agent's page paces itself on that agent's own presence", () => {
+		const detailWith = (value: "working" | "waiting_input") => () => {
+			const a = agentsBody().body.agents[0]!;
+			return ok({
+				...a,
+				presence: { ...a.presence, value },
+				projectId: PID,
+				createdAt: NOW,
+				removedAt: null,
+				capabilities: { capture: true, channels: false, directControl: true },
+				bindings: [{ ...a.binding, retiredAt: null, retireReason: null }],
+				can: { remove: { allowed: true } },
+			});
+		};
+		// The list and the detail deliberately disagree: only the detail is
+		// re-read on this page, so only it may set the pace.
+		const startAgentPage = async (
+			list: "working" | "waiting_input",
+			detail: () => ReturnType<ReturnType<typeof detailWith>>,
+		) => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+			api.fetchProjectAgents.mockImplementation(async () => agentsWith(list)());
+			api.fetchAgent.mockImplementation(async () => detail());
+			history.replaceState(null, "", `/#/projects/${PID}/agents/${AID}`);
+			await load();
+			view.startProjects();
+			await settle();
+			return api.fetchAgent.mock.calls.length;
+		};
+
+		it("every 5 s while that agent works, even if the list says rest", async () => {
+			const base = await startAgentPage("waiting_input", detailWith("working"));
+			await vi.advanceTimersByTimeAsync(5_000);
+			await vi.advanceTimersByTimeAsync(5_000);
+			expect(api.fetchAgent.mock.calls.length).toBe(base + 2);
+		});
+
+		it("every 15 s while that agent rests, even if the list says working", async () => {
+			const base = await startAgentPage("working", detailWith("waiting_input"));
+			await vi.advanceTimersByTimeAsync(14_999);
+			expect(api.fetchAgent.mock.calls.length).toBe(base);
+			await vi.advanceTimersByTimeAsync(1);
+			expect(api.fetchAgent.mock.calls.length).toBe(base + 1);
+		});
+
+		it("speeds up to 5 s once the re-read detail shows the agent working", async () => {
+			const base = await startAgentPage("waiting_input", detailWith("waiting_input"));
+			api.fetchAgent.mockImplementation(async () => detailWith("working")());
+			await vi.advanceTimersByTimeAsync(15_000);
+			expect(api.fetchAgent.mock.calls.length).toBe(base + 1);
+			await vi.advanceTimersByTimeAsync(5_000);
+			expect(api.fetchAgent.mock.calls.length).toBe(base + 2);
+		});
+	});
+
+	it("polls every 15 s, not 5, when no page is shown", async () => {
+		await start(agentsWith("working"));
+		router.navigate({ sessionId: SID, view: null, detail: null });
+		await settle();
+		const base = api.fetchProjects.mock.calls.length;
+		await vi.advanceTimersByTimeAsync(5_000);
+		await vi.advanceTimersByTimeAsync(5_000);
+		expect(vi.getTimerCount()).toBe(1);
+		await vi.advanceTimersByTimeAsync(5_000);
+		await vi.advanceTimersByTimeAsync(45_000);
+		expect(api.fetchProjects.mock.calls.length).toBe(base + 1);
 	});
 
 	it("an answer landing after a logout is not applied", async () => {

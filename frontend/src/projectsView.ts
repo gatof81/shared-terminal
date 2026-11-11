@@ -55,11 +55,14 @@ import {
 	bindableSessions,
 	CreationAttempt,
 	classifyCreation,
+	nextPollDelayMs,
+	POLL_ACTIVE_MS,
 	type PresenceView,
 	pageTitle,
 	presenceSummary,
 	presentPresence,
 	projectErrorText,
+	projectsRefreshDue,
 	providerText,
 	refusalText,
 	retireReasonText,
@@ -204,7 +207,10 @@ async function loadAgents(pid: string, fresh = false): Promise<void> {
 	const clock = listClock(state);
 	if (clock && (lastClock === null || clock.receivedAt >= lastClock.receivedAt)) lastClock = clock;
 	// The agent page reads its server clock from this list too.
-	if (shown?.projectId === pid) renderPage();
+	if (shown?.projectId === pid) {
+		renderPage();
+		rescheduleIfCadenceChanged();
+	}
 }
 
 function listClock(state: Loadable<AgentsResponse> | undefined): ServerClock | null {
@@ -215,7 +221,10 @@ function listClock(state: Loadable<AgentsResponse> | undefined): ServerClock | n
 async function loadAgent(pid: string, aid: string, fresh = false): Promise<void> {
 	const state = entry(agentDetails, detailKey(pid, aid));
 	await load(state, () => fetchAgent(pid, aid), fresh).catch(() => {});
-	if (shown?.projectId === pid && shown.agentId === aid) renderPage();
+	if (shown?.projectId === pid && shown.agentId === aid) {
+		renderPage();
+		rescheduleIfCadenceChanged();
+	}
 }
 
 /** Re-read what the current page shows (and its project's list, for counts). */
@@ -324,6 +333,7 @@ function sync(): void {
 		pageEl.scrollTop = 0;
 		void loadShown();
 		if (!projectsLoaded()) void loadProjects();
+		rescheduleIfCadenceChanged();
 	}
 }
 
@@ -338,6 +348,7 @@ function hidePage(): void {
 	}
 	setTitlePage(null);
 	renderSection();
+	rescheduleIfCadenceChanged();
 }
 
 /** Leave the page for the session underneath (Back returns to the page). */
@@ -1183,18 +1194,62 @@ function openCreateAgentDialog(pid: string): void {
 
 // ── Polling ─────────────────────────────────────────────────────────────────
 
-// ≤ every 5 s per visible page (design 16 rule 9; `projectIp` is 120/min);
-// the sidebar's list is slower — counts change only on create/remove,
-// which re-read it themselves.
-const POLL_MS = 5_000;
-const PROJECTS_EVERY_N_TICKS = 6;
-let tickCount = 0;
+// ≤ every 5 s per visible page while an agent is working or needs you,
+// every 15 s when all are at rest (design 16 rule 9; `projectIp` is
+// 120/min). The sidebar's list is slower — counts change only on
+// create/remove, which re-read it themselves — and is paced by elapsed
+// time, since the poll interval varies.
+let lastProjectsAt = Date.now();
+let pollTimer: ReturnType<typeof setTimeout> | null = null;
+let pollDelay = POLL_ACTIVE_MS;
 
 function tick(): void {
 	if (!active || !isLoggedIn() || document.visibilityState !== "visible") return;
-	tickCount++;
 	if (shown) void loadShown();
-	if (tickCount % PROJECTS_EVERY_N_TICKS === 0) void loadProjects();
+	const now = Date.now();
+	if (projectsRefreshDue(lastProjectsAt, now)) {
+		lastProjectsAt = now;
+		void loadProjects();
+	}
+}
+
+function currentPollDelay(): number {
+	if (shown === null) return nextPollDelayMs(null, false);
+	// An agent page re-reads only that agent (loadShown), never the list, so
+	// its own presence is the evidence; the list would go stale under it.
+	const agents =
+		shown.agentId === null
+			? (agentLists.get(shown.projectId)?.data?.agents ?? null)
+			: ((d) => (d ? [d] : null))(
+					agentDetails.get(detailKey(shown.projectId, shown.agentId))?.data,
+				);
+	return nextPollDelayMs(agents, true);
+}
+
+function stopPoll(): void {
+	if (pollTimer !== null) clearTimeout(pollTimer);
+	pollTimer = null;
+}
+
+// Armed by startProjects and cut by resetProjects: the chain re-arms itself,
+// so without the explicit stop a logout would leave it waking forever.
+function schedulePoll(): void {
+	stopPoll();
+	if (!active) return;
+	pollDelay = currentPollDelay();
+	pollTimer = setTimeout(() => {
+		// finally: a future synchronous throw in tick must not end the chain.
+		try {
+			tick();
+		} finally {
+			schedulePoll();
+		}
+	}, pollDelay);
+}
+
+/** A list answer or a page change can flip the cadence; restart the wait only when it does. */
+function rescheduleIfCadenceChanged(): void {
+	if (pollTimer !== null && currentPollDelay() !== pollDelay) schedulePoll();
 }
 
 // ── Lifecycle (main.ts) ─────────────────────────────────────────────────────
@@ -1207,9 +1262,11 @@ function wire(): void {
 	window.addEventListener("popstate", () => sync());
 	window.addEventListener("hashchange", () => sync());
 	onAddressWrite(() => sync());
-	setInterval(tick, POLL_MS);
 	document.addEventListener("visibilitychange", () => {
-		if (document.visibilityState === "visible") tick();
+		if (document.visibilityState === "visible") {
+			tick();
+			schedulePoll();
+		}
 	});
 	newProjectBtn?.addEventListener("click", () => openCreateProjectDialog());
 	// A session row or the session bar used while a page is up: the page
@@ -1249,14 +1306,17 @@ export function startProjects(): void {
 	// writes that follow must land.
 	enableProjectRoutes(() => shown !== null && readProjectRoute() !== null);
 	renderSection();
+	lastProjectsAt = Date.now();
 	void loadProjects();
 	sync();
+	schedulePoll();
 }
 
 /** Logout / expiry: nothing of this account stays on screen or in memory. */
 export function resetProjects(): void {
 	gen++;
 	active = false;
+	stopPoll();
 	disableProjectRoutes();
 	for (const d of [...openDialogs]) d.close();
 	openDialogs.clear();

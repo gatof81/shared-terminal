@@ -240,6 +240,43 @@ export function presenceSummary(views: ReadonlyArray<Pick<PresenceView, "tone">>
 	return parts;
 }
 
+// ── Polling cadence (design 16 rule 9) ──────────────────────────────────────
+
+export const POLL_ACTIVE_MS = 5_000;
+export const POLL_IDLE_MS = 15_000;
+export const PROJECTS_REFRESH_MS = 60_000;
+
+/**
+ * How long to wait before the project page's next agents poll: fast while
+ * any agent is `working` or `needs_attention` (the states that change under
+ * the user's eyes), slow when all are at rest. Reads the raw presence value,
+ * not the displayed tone — a stale claim still means something is live
+ * server-side. With a page shown but no list yet (null) it stays fast:
+ * nothing is known. With no page shown there are no agents to watch and
+ * only the sidebar's elapsed-time refresh is left, so it stays slow.
+ */
+export function nextPollDelayMs(
+	agents: ReadonlyArray<{ presence: Pick<Presence, "value"> }> | null,
+	pageShown = true,
+): number {
+	if (!pageShown) return POLL_IDLE_MS;
+	if (agents === null) return POLL_ACTIVE_MS;
+	const busy = agents.some(
+		(a) => a.presence.value === "working" || a.presence.value === "needs_attention",
+	);
+	return busy ? POLL_ACTIVE_MS : POLL_IDLE_MS;
+}
+
+/**
+ * Whether the sidebar's project list is due, by elapsed time (not tick
+ * count: the poll interval now varies). A clock that went backwards counts
+ * as due, so a bad `lastAt` can't freeze the refresh.
+ */
+export function projectsRefreshDue(lastAt: number, now: number): boolean {
+	const elapsed = now - lastAt;
+	return !(elapsed >= 0) || elapsed >= PROJECTS_REFRESH_MS;
+}
+
 // ── Sessions by binding (rule 1) ────────────────────────────────────────────
 
 export interface BindableSession {
