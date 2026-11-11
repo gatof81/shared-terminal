@@ -9,7 +9,13 @@
 /** L1 — `user_prompt.prompt` content bytes (CONVERSATION.md §4.4). */
 export const L1_PROMPT_BYTES = 64 * 1024;
 export const SEGMENT_MAX_CHARS = 800;
-export const SEGMENTS_MAX = 256;
+/**
+ * Pastes per message — the backend's value (§8.1.2, contract v1.7.1: the
+ * T_http budget). This copy said 256 from #488 on, so a 49–256 paste
+ * message passed here and was refused by the server; composerText.test.ts
+ * now reads the backend's constants and fails on any drift.
+ */
+export const SEGMENTS_MAX = 48;
 
 export function normalizeText(s: string): string {
 	return s
