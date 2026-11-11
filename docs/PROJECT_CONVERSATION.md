@@ -1,6 +1,9 @@
 # Conversación de proyecto por el Composer (D1–D3)
 
-Estado: **contrato propuesto, v0.1, para revisión del responsable** (B, 2026-11-11). Antes de
+Estado: **contrato propuesto, v0.2, para aprobación del responsable** (B, 2026-11-11). La v0.2
+incorpora los tres ajustes del responsable sobre la v0.1: asentamiento antes de la elegibilidad para D3
+(§4.1, §7.3), idempotencia sobre todo el cuerpo, adjuntos incluidos (§3.4), y un solo proceso escritor
+(§2.1). Antes de
 presentarlo pasó una revisión adversarial independiente: 2 BLOCKER, 9 SHOULD-FIX y 1 NIT, todos
 incorporados. Nada de lo que
 sigue está implementado.
@@ -46,12 +49,12 @@ En los tres casos **el único que envía es el backend, a través del Composer e
 
 | Condición | Regla | Prueba |
 | --- | --- | --- |
-| Persistencia segura de entregas | §2 (fsync, nunca descarta, escritor envenenado), §3.3 (intención en disco antes del efecto) | §10 T1–T4b |
-| Cero reintentos, también tras reinicios | §3.1, §3.4 | §10 T2–T5c, T8b, T8c |
+| Persistencia segura de entregas | §2 (fsync, nunca descarta, escritor envenenado, un solo proceso escritor §2.1), §3.3 (intención en disco antes del efecto) | §10 T1–T4b, T22b, T22c |
+| Cero reintentos, también tras reinicios | §2.1, §3.1, §3.4 | §10 T2–T5c, T8b, T8c, T22b |
 | Binding del destinatario fijado al envío | §3.2, §3.3 S2/S3, §7.2 | §10 T6, T7, T18b |
 | Backup/restore de `.projects` | §8 | §10 T15–T17 |
 | Seguridad en la transferencia de artefactos | §6 | §10 T9–T14, T12b |
-| Colaboración revocable y auditable | §7.2–§7.5 | §10 T18–T22 |
+| Colaboración revocable y auditable | §4.1, §7.2–§7.5 | §10 T18–T22, T20b–T20d |
 
 ## 1. Banderas y compatibilidad
 
@@ -82,7 +85,8 @@ Channels. Estos nombres no chocan con ellos, y un futuro P7 puede convivir con e
 reemplazarlo sin migrarlo.
 
 **Formato y garantías.** Son las de 03 §2.2 (rama de #512), escritas aquí completas para que el contrato no dependa de ese borrador:
-- Un **único escritor por proyecto** asigna `seq`, con un lock en proceso, clave `project:<pid>`.
+- Un **único escritor por proyecto** asigna `seq`. Dentro del proceso lo garantiza un lock con clave
+  `project:<pid>`; entre procesos, §2.1.
   Un evento está **persistido si y solo si su línea, con `seq`, está escrita**.
 - **Toda escritura resuelve solo tras `write` + `fsync` del archivo.** Al crear archivos o
   directorios se hace además `fsync` del directorio y de cada padre hasta `WORKSPACE_ROOT`, con el
@@ -118,13 +122,63 @@ reemplazarlo sin migrarlo.
   **referencia** con hash (§4), nunca una copia.
 - **En los archivos de §6:** el contenido de los artefactos, direccionado por sha256.
 
-### 2.1 Eventos
+### 2.1 Un solo proceso escritor (exclusión entre procesos)
+
+**Hoy nada garantiza una sola instancia del backend.** El servicio `app` no tiene `container_name`. El
+arranque hace `migrateDb`, `reconcile` y la recuperación **antes** de `listen`, así que un segundo
+proceso trabaja antes de fallar al abrir el puerto. Puede ser un recreate de compose que se solapa, un
+`npm run dev` o un `node dist/index.js` a mano contra el mismo `WORKSPACE_ROOT`. Por eso el subsistema
+de este contrato tiene **su propia exclusión, aplicada por el kernel:**
+
+1. **Lock de escritor.** Antes de abrir cualquier registro de proyecto, de recuperar o de aceptar una
+   request, el backend lanza un proceso auxiliar:
+
+   `/usr/bin/flock --exclusive --nonblock <WORKSPACE_ROOT>/.projects/.writer.lock sh -c 'echo held; exec cat'`
+
+   con `stdin` conectado a un pipe del backend.
+   - **El lock está tomado** solo cuando llega la línea `held`. Un fallo inmediato (exit 1) significa
+     que otro proceso lo tiene.
+   - **El kernel lo libera solo cuando el auxiliar termina.** El auxiliar termina cuando el backend
+     muere, incluso con SIGKILL, porque el pipe se cierra y `cat` sale por EOF. También termina si el
+     contenedor se detiene.
+   - **El lock funciona entre contenedores,** porque es el mismo inodo en el bind mount del host.
+   - **Por qué así.** Node no tiene `flock` ni `fcntl`, y un archivo de lock con `O_EXCL` no se libera
+     si el proceso muere. El patrón de proceso auxiliar con el lock tomado es el mismo del
+     preflight F1.
+2. **Sin el lock, el subsistema no arranca.** Si el lock no se obtiene, `/usr/bin/flock` no existe o
+   el auxiliar no responde en 5 s:
+   - el subsistema queda apagado en ese proceso: no abre registros, no recupera, no escribe, no envía y
+     no releva;
+   - las rutas de §5 responden 503 `project-writer-unavailable`, y el arranque lo registra en voz alta;
+   - el resto del backend sigue igual.
+
+   El subsistema **no** reintenta tomar el lock por su cuenta. Lo intenta de nuevo en el próximo
+   arranque.
+3. **Pérdida del lock en vivo.** Si el auxiliar termina mientras el backend vive (un `kill`, un OOM), el
+   subsistema se **envenena al instante** (§2): no escribe ni envía nada más hasta reiniciar. Las
+   secciones críticas comprueban además que el auxiliar sigue vivo antes de escribir.
+4. **Comprobación de tamaño antes de escribir.** Cierra la ventana residual entre la muerte del
+   auxiliar y la detección.
+   - Antes de cada append, el escritor compara el tamaño del archivo (`fstat`) con el que él mismo dejó.
+   - Si difieren, alguien más escribió: el escritor se envenena y no escribe esa línea ni hace el
+     efecto que venía detrás.
+   - Cada línea lleva además `w` (el `boot_id` del escritor). La recuperación informa las líneas de más
+     de un `w` intercaladas como `recovery{foreign_writer}`.
+5. **CLIs.** `npm run restore` toma el mismo lock con `--nonblock` antes de tocar `.projects/`. Si no
+   lo obtiene, se niega y no toca nada. El backup solo lee una copia (§8) y no lo toma.
+6. **Alcance (declarado).** Este lock protege **las escrituras y los envíos de este contrato**. Dos
+   backends simultáneos siguen siendo un error de operación para el resto del sistema: el Composer
+   directo desde Chat, las recreaciones y la ingesta. Este contrato no lo resuelve para ellos, y el
+   procedimiento de deploy de A sigue siendo detener antes de arrancar.
+
+### 2.2 Eventos
 
 | `ev` | Campos | Identidad |
 | --- | --- | --- |
-| `message` | `msg_id` (UUID v4 del servidor), `client_message_id`, `by` (user_id), `kind: owner\|relay`, `to[]` (agent_ids), `text` (normalizado, §8.1.2), `text_sha256`, `quote_ref?` (§4.2), `in_reply_to?` (`msg_id`), `artifacts[]` (§6: `{sha256, name, bytes}`), `relay?` (`{grant_id, round, from_delivery}` en `kind: relay`) | `client_message_id` (owner) o `grant_id` + `round` (relay) |
+| `message` | `msg_id` (UUID v4 del servidor), `client_message_id`, `by` (user_id), `kind: owner\|relay`, `to[]` (agent_ids), `text` (normalizado, §8.1.2), `text_sha256`, `request_sha256` (§3.4 regla 2), `quote_ref?` (§4.2), `in_reply_to?` (`msg_id`), `artifacts[]` (§6: `{sha256, name, bytes}`), `relay?` (`{grant_id, round, from_delivery}` en `kind: relay`) | `client_message_id` (owner) o `grant_id` + `round` (relay) |
 | `delivery` | `msg_id`, `agent_id`, `state` (§3.1), `binding{binding_id, epoch, sid, cid}` (desde `planned`, fijo), `composer_client_message_id` (UUID v4, fijo desde `planned`), `reason?`, `http?` (`{status, result, promptId?, seq?}` de la respuesta del Composer), `artifacts[]?` (en `placing`: lo que se va a colocar), `artifacts_placed?` (§6.4), `authorized_by` (`owner` \| `collab:<grant_id>`) | `msg_id` + `agent_id` + `state` |
 | `reply_ref` | `msg_id`, `agent_id`, `sid`, `cid`, `prompt_id`, `seq_from`, `seq_to`, `turn_end_seq`, `report_sha256`, `report_bytes`, `truncated`, `attribution: exact\|ambiguous` | `msg_id` + `agent_id` + `prompt_id` |
+| `reply_late_close` | `msg_id`, `agent_id`, `prompt_id`, `seq` (del cierre tardío en la captura) | `msg_id` + `agent_id` + `seq` |
 | `artifact` | `sha256`, `name`, `bytes`, `source{kind: owner\|relay, sid, path}`, `by` | `sha256` + `source` |
 | `grant` | `grant_id`, `event: created\|revoked\|ended`, `task_msg_id`, `start` (agent_id), `pairs[]` (`{from, to}` de agent_ids), `bindings[]` (`{agent_id, binding_id, epoch, sid}` de cada agente del permiso, fijados al crearlo), `max_relays`, `expires_at`, `artifacts: bool`, `by` (user_id, en `created`/`revoked`), `reason?` (en `ended`: §7.4), `relays_used` | `grant_id` + `event` |
 | `recovery` | `boot_id`, `at`, `source: boot\|restore`, `truncated_bytes?`, `manifest_at?` (restore), `orphaned[]` (`{msg_id, agent_id, as}`), `grants_closed[]` | `boot_id` |
@@ -199,8 +253,8 @@ POST /api/projects/:pid/conversation/messages
   1. (atajo sin lock) client_message_id ya en el índice ⇒ ir a 1'
   2. resolver §3.2 para cada destinatario (lecturas de D1 y de la lista ligera, sin lock)
   ── sección crítica S1, lock project:<pid> ──
-     1'. client_message_id ya en el índice ⇒ mismo text_sha256 y mismo to[] ⇒ responder lo
-         guardado; si difieren ⇒ 409 idempotency-conflict. Fin, en los dos casos
+     1'. client_message_id ya en el índice ⇒ mismo request_sha256 ⇒ responder lo guardado;
+         distinto ⇒ 409 idempotency-conflict. Fin, en los dos casos
      escritor poisoned o registro unverifiable ⇒ 503 / 409, fin
      ESCRIBIR en un solo append + fsync: message + un delivery{planned | not-sent} por destinatario
   ── fin de S1 ──
@@ -254,7 +308,11 @@ Estas reglas son **MUST** y cada una tiene su prueba en §10:
    proyecto, y la decisión se toma **dentro de S1**, bajo el lock. Por eso dos POST simultáneos con el
    mismo id producen un solo `message`.
    - Un POST repetido, sea cual sea su antigüedad, devuelve lo guardado y no hace nada más.
-   - Si el texto o los destinatarios difieren de lo guardado, recibe 409 `idempotency-conflict`.
+   - Si **cualquier parte del cuerpo** difiere de lo guardado, recibe 409 `idempotency-conflict`. La
+     comparación es por `request_sha256`: el sha256 del JSON canónico de
+     `{text normalizado, to[] ordenado, artifacts[] (los sha256, en el orden enviado), quote_ref, in_reply_to}`.
+     Dos requests con el mismo id y adjuntos distintos, o los mismos adjuntos en otro orden, son un
+     conflicto.
    - La ventana de 256 ids del Composer (§8.1.4 regla 10) es una segunda capa, no la garantía.
 3. **`composer_client_message_id` se genera una sola vez, en `planned`, y se persiste.** Nunca se
    deriva ni se regenera. Un relevo o una recuperación nunca crean otro id para la misma entrega.
@@ -280,10 +338,19 @@ Estas reglas son **MUST** y cada una tiene su prueba en §10:
 Un observador del backend sigue las conversaciones con entregas `delivered` que todavía no tienen
 `reply_ref`. Usa la suscripción en proceso del store de la captura, no un WS.
 
-- **Cuándo escribe un `reply_ref`.** Cuando llega a la captura de `(sid, cid)` el `turn_end` cuyo
-  `prompt_id` es el `promptId` que el Composer acusó. El `reply_ref` lleva el rango
-  `seq_from..seq_to`, el `turn_end_seq`, el sha256 y los bytes del `last_assistant_message`, y si
-  vino truncado (L3, CONVERSATION.md §4.4).
+- **Cuándo escribe un `reply_ref`.** **No** al recibir el `turn_end` cuyo `prompt_id` es el `promptId`
+  que el Composer acusó, sino cuando **termina su ventana de asentamiento**: `T_SETTLE` = 10 s desde que
+  el backend recibió ese `turn_end` (reloj monotónico del proceso). Es la misma ventana en la que
+  CONVERSATION.md §4.6 admite otro `Stop` en el mismo `prompt_id`.
+  - Mientras corre, la entrega muestra «respuesta recibida, confirmando…» con el texto de la captura, y
+    **no es elegible para nada**.
+  - Al terminar, se evalúan las condiciones de abajo sobre la ventana **extendida** hasta el final del
+    asentamiento, y solo entonces se escribe el `reply_ref` con su atribución final.
+  - El `reply_ref` lleva el rango `seq_from..seq_to`, el `turn_end_seq`, el sha256 y los bytes del
+    `last_assistant_message`, y si vino truncado (L3, CONVERSATION.md §4.4).
+- **El asentamiento tiene que observarse entero.** Si el proceso que recibió el `turn_end` no siguió
+  vivo durante los 10 s (un reinicio en medio, o un `turn_end` que se encuentra al recuperar), el
+  `reply_ref` es `ambiguous{settle-unobserved}`. El texto se sigue mostrando, marcado «sin confirmar».
 - **`attribution: exact` exige todas estas condiciones.** Se miran sobre los eventos persistidos de
   `(sid, cid)`, en orden de `seq`, dentro de la **ventana**: desde el `user_prompt` con `P` que el
   Composer acusó (`P` = `promptId`) hasta el primer cierre (`turn_end` o `turn_failed`) con `P`.
@@ -293,8 +360,12 @@ Un observador del backend sigue las conversaciones con entregas `delivered` que 
      sea cual sea su `prompt_id`.
   3. En la ventana no hay ningún cierre con otro `prompt_id` ni sin `prompt_id`.
   4. En la ventana no hay ningún `gap` (incluidos `relay_dropped` y `relay_restart`).
-  5. Hay **un solo** `turn_end` con `P`. Un segundo, en los 10 s siguientes, hace que la atribución
-     pase a `ambiguous`: el `Stop` puede repetirse en un mismo `prompt_id`, CONVERSATION.md §4.6.
+  5. Hay **un solo** cierre con `P` hasta el final del asentamiento. Un segundo `turn_end` o un
+     `turn_failed` con `P` dentro de esos 10 s ⇒ `ambiguous{second-close}`. Lo mismo ocurre con
+     cualquier prompt, cierre o `gap` de las condiciones 2–4 que llegue en esos 10 s.
+  6. **Cierre tardío.** Un cierre con `P` que llega **después** de escrito el `reply_ref` no lo cambia,
+     porque el registro es append-only. Se escribe `reply_late_close{msg_id, agent_id, prompt_id, seq}`,
+     que la UI muestra junto a la respuesta.
 
   Si falla una ⇒ `attribution: ambiguous{reason}`, y la UI no la muestra como «la respuesta». Un
   `turn_failed` con `P` ⇒ `reply_ref{attribution: failed}`, sin informe. Esta lista es la regla R8 de
@@ -306,7 +377,7 @@ Un observador del backend sigue las conversaciones con entregas `delivered` que 
   tiene por la rotación L7, la UI muestra «respuesta ya no retenida», con el hash. Es un costo
   aceptado de no copiar el texto.
 - **Tras un reinicio,** el observador vuelve a leer desde el `seq` guardado en el índice. Es
-  idempotente por la identidad de §2.1.
+  idempotente por la identidad de §2.2.
 
 ### 4.2 Reenviar y responder a
 
@@ -480,6 +551,11 @@ crea la persona, con un clic, sobre un mensaje suyo ya enviado: la tarea.
 
 **Disparador.** Una entrega a X bajo este permiso (la tarea, o un relevo anterior) recibe un `reply_ref`
 con `attribution: exact`. Si existe un par X→Y, el backend arma un `message{kind: relay}` para Y.
+- **Una respuesta es elegible para D3 solo cuando su `reply_ref` está escrito con `exact`,** es decir,
+  después de un asentamiento completo y observado (§4.1). Antes de eso nada se releva, aunque el
+  `turn_end` ya esté en la captura.
+- **Un `reply_late_close`** de una respuesta que ya se relevó termina el permiso con
+  `ended{reply-late-close}`. El relevo ya enviado no se deshace y queda marcado en la UI.
 
 **Texto del relevo:**
 
@@ -528,7 +604,7 @@ El permiso termina, **sin reintentar nada**, en cualquiera de estos casos:
 | se usaron todos los relevos | `budget` |
 | venció el plazo | `expired` |
 | una entrega del permiso no quedó `delivered` (ocupado, rechazo, `unconfirmed`, `misdelivered`, `failed`, `uncertain`, `not-sent`) | `delivery-<state>` |
-| `reply_ref` `ambiguous` o `failed`, informe vacío o truncado, texto del relevo no admitido | `reply-<causa>` / `report-invalid` |
+| `reply_ref` `ambiguous` o `failed`, informe vacío o truncado, texto del relevo no admitido, cierre tardío de una respuesta ya relevada | `reply-<causa>` / `report-invalid` / `reply-late-close` |
 | un agente del permiso fue retirado o cambió su binding | `binding-changed` |
 | la bandera de origen dejó de ser `true`, o `PROJECT_RELAY_ENABLED` se apagó | `origin-binding-off` / `relay-off` |
 | reinicio del backend o restore | `interrupted` (en `recovery.grants_closed[]`, §3.4) |
@@ -582,9 +658,10 @@ Todas las rutas de esta sección son relativas a `<WORKSPACE_ROOT>` y usan un ú
 - Las tablas de D1 de P3a ya van en el backup (`TABLES`, `sinceSchema: 19`).
 
 **Restore** (`npm run restore`, otro proceso dentro del contenedor `app`):
-- **Exige `PROJECT_CONVERSATION_ENABLED` apagado** en su propio entorno, que es el del backend. Así el
-  backend no tiene ningún registro de proyecto abierto mientras se reemplazan sus archivos. Con la
-  bandera encendida, el restore de `.projects` se niega y no toca nada. Las tablas y los workspaces
+- **Exige el lock de escritor de §2.1** (`--nonblock`) y además `PROJECT_CONVERSATION_ENABLED` apagado
+  en su propio entorno, que es el del backend. Así ningún backend tiene un registro de proyecto abierto
+  mientras se reemplazan sus archivos. Si falta cualquiera de las dos cosas, el restore de `.projects`
+  se niega y no toca nada. Las tablas y los workspaces
   siguen su procedimiento de siempre.
 - **Antes de extraer:**
   - el tarball se llama como un proyecto del manifiesto;
@@ -635,7 +712,7 @@ el sistema de archivos real (carreras con `rename`/`symlink`).
 | T4b | línea rota al final / línea ilegible en medio | truncada y recuperada / registro `unverifiable`, 409 a envíos |
 | T5 | mismo `client_message_id` repetido 1 000 mensajes después y tras un reinicio | lo guardado, 0 efectos |
 | T5b | dos POST simultáneos con el mismo `client_message_id` | un solo `message`, una llamada por destinatario |
-| T5c | mismo id con otro texto u otros `to[]` | 409 `idempotency-conflict` |
+| T5c | mismo id con otro texto, otros `to[]`, otros `artifacts[]` (o en otro orden), otro `quote_ref` | 409 `idempotency-conflict`, 0 efectos |
 | T6 | binding cambia (epoch +1) entre el paso 2 y el 3a | `not-sent{binding-changed}`, 0 llamadas |
 | T7 | el Composer recibe sid/cid distintos de los fijados | imposible por construcción; test de que el argumento sale del `planned` |
 | T8 | un destinatario `busy` y dos libres | dos `delivered`, un `refused{busy}`, sin espera ni reintento |
@@ -656,9 +733,14 @@ el sistema de archivos real (carreras con `rename`/`symlink`).
 | T18b | @qa se vuelve a ligar a otra sesión con el permiso vivo | `ended{binding-changed}`, nada enviado a la sesión nueva |
 | T18c | la tarea entregada a `start` y a otro destinatario | solo la respuesta de `start` dispara |
 | T19 | presupuesto 6 | el 6.º relevo escribe `ended{budget}`; no hay 7.º |
-| T20 | `reply_ref` ambiguo (cada una de las 5 condiciones de §4.1) / `failed` / informe vacío / truncado / con `control-bytes` | `ended{reply-…}` o `ended{report-invalid}`, sin relevo |
+| T20 | `reply_ref` ambiguo (cada una de las condiciones de §4.1) / `failed` / informe vacío / truncado / con `control-bytes` | `ended{reply-…}` o `ended{report-invalid}`, sin relevo |
+| T20b | segundo `turn_end` con `P` a los 9 s del primero | `ambiguous{second-close}`, ningún relevo; el Composer no se llama durante los 10 s |
+| T20c | segundo cierre con `P` a los 11 s, con el relevo ya enviado | `reply_late_close` y `ended{reply-late-close}`; ningún relevo más |
+| T20d | reinicio a los 5 s del `turn_end` | `ambiguous{settle-unobserved}`, ningún relevo |
 | T21 | reinicio con permiso vivo | `ended{interrupted}`; ningún relevo tras el arranque |
 | T22 | bandera de origen ≠ `true` al crear / durante | 409 `origin-binding-off` / `ended{origin-binding-off}` |
+| T22b | dos backends contra el mismo `WORKSPACE_ROOT` | el segundo responde 503 `project-writer-unavailable`, no escribe ni envía; al matar el primero con SIGKILL, el lock queda libre y el siguiente arranque lo toma |
+| T22c | el auxiliar de `flock` muere con el backend vivo / alguien agrega bytes al registro | subsistema envenenado; ni esa línea ni su efecto |
 | T23 | flags apagadas | rutas 404, `.projects/` sin escribir, API byte-idéntica |
 | T24 | `/ws/project/` por la entrada real | admitido y probado en `wsUpgrade.test.ts` |
 
@@ -666,7 +748,7 @@ el sistema de archivos real (carreras con `rename`/`symlink`).
 
 | # | PR | Contenido | Gate |
 | --- | --- | --- | --- |
-| 1 | D1-a | store del proyecto (§2), recuperación (§3.4), backup/restore (§8), T1–T5, T15–T17, T23 | contrato aprobado |
+| 1 | D1-a | store del proyecto (§2), lock de escritor (§2.1, con `/usr/bin/flock` comprobado en el job de la imagen del backend), recuperación (§3.4), backup/restore (§8), T1–T5c, T15–T17, T22b, T22c, T23 | contrato aprobado |
 | 2 | D1-b | fan-out (§3), `reply_ref` (§4), API y WS (§5), T6–T8, T24 | D1-a |
 | 3 | frontend | conversación del proyecto (A), sobre la API de §5 | D1-b |
 | 4 | D2 | artefactos (§6), T9–T14, revisión de seguridad independiente | D1-b |
