@@ -590,7 +590,7 @@ crea la persona, con un clic, sobre un mensaje suyo ya enviado: la tarea.
 - **Respuestas anteriores al permiso.** Si la entrega de la tarea a `start` ya tenía un `reply_ref`
   `exact` al crearse el permiso, dispara exactamente un relevo en el momento de crearlo, y la UI lo
   avisa al aprobar. Cualquier otro `reply_ref` anterior a `grant{created}` no dispara nada.
-- **`maxRelays`.** 6 por defecto, tope 20.
+- **`maxRelays`.** Entre 1 y 20, 6 por defecto. Fuera de ese rango ⇒ 400 `invalid-body`.
 - **`expiresInMin`.** 30 por defecto, tope 120.
 - **`artifacts`.** `false` por defecto.
 - **Un solo permiso vivo por proyecto en v1.** Uno nuevo con otro vivo ⇒ 409 `grant-active`.
@@ -688,8 +688,19 @@ El permiso termina, **sin reintentar nada**, en cualquiera de estos casos:
 - **La revocación surte efecto antes del siguiente efecto.** Es una escritura bajo el lock del
   proyecto, y nunca espera a una llamada al Composer, porque esas corren sin el lock (§3.3). No anula un
   `sending` ya escrito: ese envío ya ocurrió, y se muestra como último relevo.
+- **Vencimiento: definición y dónde se aplica.** Un permiso está **vivo** si y solo si no tiene
+  `grant{revoked}` ni `grant{ended}` y el reloj del backend es anterior a `expires_at`.
+  - **Toda comprobación de «permiso vivo»** usa esa definición: S1, S2 y S3 de §7.3, S_G de §7.2 y la
+    evaluación del disparador.
+  - **La primera comprobación que encuentra el plazo vencido** escribe `grant{ended, expired}` en su
+    misma sección crítica. La entrega en curso queda `not-sent{grant-inactive}`.
+  - **Además, un temporizador en proceso por permiso vivo**, programado a `expires_at`, escribe
+    `grant{ended, expired}` bajo el lock aunque no haya ningún relevo pendiente. Así la UI muestra el
+    fin a tiempo. Si otra escritura ya cerró el permiso, no escribe nada.
+  - **En la recuperación tras un reinicio,** un permiso cuyo `expires_at` ya pasó se cierra como
+    `expired`; los demás, como `interrupted`.
 - **Un permiso terminado no se reabre.** Seguir significa crear un permiso nuevo, con un clic nuevo.
-- **Tras un reinicio no queda ningún permiso vivo.** Todos se cierran como `interrupted`. Es fail-closed:
+- **Tras un reinicio no queda ningún permiso vivo.** Todos se cierran como `interrupted`, o como `expired` si su plazo ya pasó. Es fail-closed:
   el backend nunca retoma una colaboración que la persona no ve en vivo.
 
 ### 7.5 Auditoría
@@ -863,6 +874,9 @@ el sistema de archivos real (carreras con `rename`/`symlink`).
 | T18d | dos `POST …/grants` simultáneos | un `grant{created}` y un 409 `grant-active` |
 | T18e | el `reply_ref` de la tarea se escribe justo después de S_G (carrera entre el disparador de §7.3 y el relevo inicial) | un solo relevo de esa respuesta (identidad `grant_id` + `from_delivery`), una unidad consumida |
 | T19 | presupuesto 6 | el 6.º relevo escribe `ended{budget}`; no hay 7.º |
+| T19b | `expiresInMin: 1`; respuesta elegible 2 min después | `not-sent{grant-inactive}` y `grant{ended, expired}` en la misma sección crítica; 0 llamadas |
+| T19c | vence el plazo sin relevo pendiente / reinicio después de vencido | `grant{ended, expired}` por el temporizador / `expired` en la recuperación (no `interrupted`) |
+| T19d | `maxRelays: 0` o `21` | 400 `invalid-body`, sin `grant{created}` |
 | T20 | `reply_ref` ambiguo (cada una de las condiciones de §4.1) / `failed` / informe vacío / truncado / con `control-bytes` | `ended{reply-…}` o `ended{report-invalid}`, sin relevo |
 | T20b | segundo `turn_end` con `P` a los 9 s del primero | `ambiguous{second-close}`, ningún relevo; el Composer no se llama durante los 10 s |
 | T20c | segundo cierre con `P` a los 11 s, con el relevo ya enviado | `reply_late_close` y `ended{reply-late-close}`; ningún relevo más |
