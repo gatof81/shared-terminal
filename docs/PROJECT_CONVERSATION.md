@@ -413,7 +413,10 @@ Un observador del backend sigue las conversaciones con entregas `delivered` que 
   `(sid, cid)`, en orden de `seq`, dentro de la **ventana**: desde el `user_prompt` con `P` que el
   Composer acusó (`P` = `promptId`) hasta el primer cierre (`turn_end` o `turn_failed`) con `P`.
   1. `P` es nuevo: ningún prompt anterior al acusado llevaba `P`. Si lo llevaba, el mensaje se encoló
-     detrás de otro turno.
+     detrás de otro turno. La búsqueda mira los **2000 eventos** anteriores al acuse
+     (`PRE_ACK_SCAN`). Basta porque una entrada encolada se anuncia con el `prompt_id` del turno **en
+     curso**, que está pocos eventos atrás. Un `P` repetido más lejos que eso queda fuera, como riesgo
+     declarado, a cambio de no releer la captura entera en cada entrega.
   2. En la ventana no hay ningún otro prompt (`user_prompt` de cualquier origen o `internal_prompt`),
      sea cual sea su `prompt_id`.
   3. En la ventana no hay ningún cierre con otro `prompt_id` ni sin `prompt_id`.
