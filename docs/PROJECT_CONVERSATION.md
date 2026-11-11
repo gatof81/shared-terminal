@@ -115,8 +115,9 @@ reemplazarlo sin migrarlo.
   es una escritura que nunca se confirmó). Una línea ilegible **en medio** del archivo deja el registro
   `unverifiable`: se puede leer, pero no acepta envíos ni permisos (409 `project-log-unverifiable`) y
   no se repara solo.
-- El **snapshot** (`.index.json`, temp + fsync + rename) es una caché: al abrir se recupera desde el
-  archivo de eventos, y si discrepa gana el archivo. Guarda el último `seq`, el estado plegado de cada
+- El **snapshot** (`.index.json`, temp + fsync + rename) es una caché **opcional**: al abrir se
+  recupera desde el archivo de eventos, y si discrepa gana el archivo. D1 no lo escribe: recalcula el
+  estado desde el archivo al abrir (≤ 64 MiB). Guarda el último `seq`, el estado plegado de cada
   mensaje, entrega y permiso, y el **conjunto completo** de `clientMessageId` del proyecto (no una
   ventana; ver §3.4).
 - **Sin rotación en v1.** Pasado `PROJECT_LOG_MAX_BYTES` (64 MiB por defecto), un mensaje nuevo recibe
@@ -187,7 +188,7 @@ de este contrato tiene **su propia exclusión, aplicada por el kernel:**
 | --- | --- | --- |
 | `message` | `msg_id` (UUID v4 del servidor), `client_message_id`, `by` (user_id), `kind: owner\|relay`, `to[]` (agent_ids), `text` (normalizado, §8.1.2), `text_sha256`, `request_sha256` (§3.4 regla 2), `quote_ref?` (§4.2), `in_reply_to?` (`msg_id`), `artifacts[]` (§6: `{sha256, name, bytes}`), `relay?` (`{grant_id, round, from_delivery}` en `kind: relay`) | `client_message_id` (owner) o `grant_id` + `from_delivery` (relay: **una respuesta se releva como mucho una vez por permiso**) |
 | `delivery` | `msg_id`, `agent_id`, `state` (§3.1), `binding{binding_id, epoch, sid, cid}` (desde `planned`, fijo), `composer_client_message_id` (UUID v4, fijo desde `planned`), `reason?`, `http?` (`{status, result, promptId?, seq?}` de la respuesta del Composer), `artifacts[]?` (en `placing`: lo que se va a colocar), `artifacts_placed?` (§6.4), `files_possibly_placed?`, `binding_verified_at?` (en `sending`, §3.3 c0), `authorized_by` (`owner` \| `collab:<grant_id>`) | `msg_id` + `agent_id` + `state` |
-| `reply_settling` | `msg_id`, `agent_id`, `prompt_id`, `turn_end_seq`, `settle_until` (ISO) — informativo: empezó el asentamiento de §4.1; **no** es una respuesta ni da elegibilidad | `msg_id` + `agent_id` + `turn_end_seq` |
+| `reply_settling` | los mismos campos que `reply_ref` salvo `attribution`, más `settle_until` (ISO) — informativo: empezó el asentamiento de §4.1; **no** es una respuesta ni da elegibilidad. Si el asentamiento no se observa entero, la recuperación escribe con esos campos el `reply_ref{ambiguous{settle-unobserved}}` | `msg_id` + `agent_id` + `turn_end_seq` |
 | `reply_ref` | `msg_id`, `agent_id`, `sid`, `cid`, `prompt_id`, `seq_from`, `seq_to`, `turn_end_seq`, `report_sha256`, `report_bytes`, `truncated`, `attribution: exact\|ambiguous` | `msg_id` + `agent_id` + `prompt_id` |
 | `reply_late_close` | `msg_id`, `agent_id`, `prompt_id`, `seq` (del cierre tardío en la captura) | `msg_id` + `agent_id` + `seq` |
 | `artifact` | `sha256`, `name`, `bytes`, `source{kind: owner\|relay, sid, path}`, `by` | `sha256` + `source` |
@@ -195,8 +196,10 @@ de este contrato tiene **su propia exclusión, aplicada por el kernel:**
 | `owner_ack` | `ack_id`, `client_ack_id`, `by` (user_id), `target{msg_id, agent_id?, report_sha256?}` — la persona marcó un elemento como atendido (§4.3); sin entrega ni efecto | `client_ack_id` |
 | `recovery` | `boot_id`, `at`, `source: boot\|restore`, `truncated_bytes?`, `manifest_at?` (restore), `orphaned[]` (`{msg_id, agent_id, as}`), `grants_closed[]` | `boot_id` |
 
-**Campos comunes de toda línea:** `seq` (entero ≥ 1, estrictamente creciente en el archivo), `ev`, `at`
-(ISO 8601 UTC del backend, con milisegundos) y `w` (§2.1 punto 4).
+**Campos comunes de toda línea:** `seq` (entero ≥ 1, contiguo y estrictamente creciente en el
+archivo), `ev`, `at` (ISO 8601 UTC del backend, con milisegundos), `w` (§2.1 punto 4) y `bn` (líneas
+que faltan en el mismo append; 0 en la última). Con `bn`, al abrir se descarta entero un append que un
+crash dejó incompleto: su `fsync` nunca terminó, así que nadie recibió confirmación de él.
 
 **Orden en el registro:**
 - un `message` antes de cualquiera de sus `delivery`;
@@ -963,7 +966,7 @@ captura). Las fechas son ISO 8601 UTC.
 
 ```ts
 // ── Eventos (GET …/events, WS frame {type:"event", event}) ────────────────
-type Base = { seq: number; ev: string; at: string; w: string };
+type Base = { seq: number; ev: string; at: string; w: string; bn: number };
 type Binding = { binding_id: string; epoch: number; sid: string; cid: string };
 type DeliveryState =
   | "planned" | "placing" | "sending" | "settled"
@@ -986,8 +989,7 @@ type DeliveryEv = Base & {
   files_possibly_placed?: boolean; binding_verified_at?: string;
   authorized_by: "owner" | `collab:${string}`;
 };
-type ReplySettlingEv = Base & { ev: "reply_settling"; msg_id: string; agent_id: string;
-  prompt_id: string; turn_end_seq: number; settle_until: string };
+type ReplySettlingEv = Omit<ReplyRefEv, "ev" | "attribution"> & { ev: "reply_settling"; settle_until: string };
 type ReplyRefEv = Base & {
   ev: "reply_ref"; msg_id: string; agent_id: string; sid: string; cid: string; prompt_id: string;
   seq_from: number; seq_to: number; turn_end_seq: number;
@@ -1028,11 +1030,12 @@ Un replay devuelve el mismo cuerpo con `"replayed": true`.
 
 ```json
 { "events": [
-    { "seq": 897, "ev": "delivery", "at": "2026-11-12T10:00:01.120Z", "w": "b-7f…", "msg_id": "5b0e…", "agent_id": "a0…dev",
+    { "seq": 897, "ev": "delivery", "at": "2026-11-12T10:00:01.120Z", "w": "b-7f…", "bn": 0, "msg_id": "5b0e…", "agent_id": "a0…dev",
       "state": "delivered", "authorized_by": "owner", "http": { "status": 202, "result": "delivered", "promptId": "p-91…", "seq": 412 } },
-    { "seq": 898, "ev": "reply_settling", "at": "2026-11-12T10:03:40.002Z", "w": "b-7f…", "msg_id": "5b0e…", "agent_id": "a0…dev",
-      "prompt_id": "p-91…", "turn_end_seq": 455, "settle_until": "2026-11-12T10:03:50.002Z" },
-    { "seq": 899, "ev": "reply_ref", "at": "2026-11-12T10:03:50.010Z", "w": "b-7f…", "msg_id": "5b0e…", "agent_id": "a0…dev",
+    { "seq": 898, "ev": "reply_settling", "at": "2026-11-12T10:03:40.002Z", "w": "b-7f…", "bn": 0, "msg_id": "5b0e…", "agent_id": "a0…dev",
+      "sid": "a724…", "cid": "c-1…", "prompt_id": "p-91…", "seq_from": 412, "seq_to": 455, "turn_end_seq": 455,
+      "report_sha256": "9c1d…", "report_bytes": 1834, "truncated": false, "settle_until": "2026-11-12T10:03:50.002Z" },
+    { "seq": 899, "ev": "reply_ref", "at": "2026-11-12T10:03:50.010Z", "w": "b-7f…", "bn": 0, "msg_id": "5b0e…", "agent_id": "a0…dev",
       "sid": "a724…", "cid": "c-1…", "prompt_id": "p-91…", "seq_from": 412, "seq_to": 455, "turn_end_seq": 455,
       "report_sha256": "9c1d…", "report_bytes": 1834, "truncated": false, "attribution": "exact" } ],
   "oldestSeq": 897, "hasMore": true }
