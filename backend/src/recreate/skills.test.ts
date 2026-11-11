@@ -50,9 +50,23 @@ describe("compareSkills (§2.7.1 precondition 8)", () => {
 			{ code: "managed-skills-collision", count: 1 },
 		]);
 	});
-	it("O without skills ⇒ every existing managed W collides", async () => {
+	it("W at a path O's image lacks but byte-identical to I_N ⇒ allowed (v1.9.3)", async () => {
+		expect(await compareSkills(iN, iO, W({ "c/SKILL.md": file("new c") }))).toEqual([]);
 		expect(
-			await compareSkills(iN, null, W({ "a/SKILL.md": file("new a"), "b/SKILL.md": file("b") })),
+			await compareSkills(iN, iO, W({ "c/SKILL.md": file("new c"), "a/SKILL.md": file("mine") })),
+		).toEqual([{ code: "managed-skills-customized", count: 1 }]);
+		expect(await compareSkills(iN, iO, W({ "c/SKILL.md": { kind: "other" } }))).toEqual([
+			{ code: "managed-skills-collision", count: 1 },
+		]);
+	});
+	it("O without skills ⇒ a W equal to I_N is allowed, the rest collide", async () => {
+		expect(
+			await compareSkills(iN, null, W({ "a/SKILL.md": file("old a"), "b/SKILL.md": file("b") })),
+		).toEqual([{ code: "managed-skills-collision", count: 1 }]);
+	});
+	it("O without skills ⇒ every managed W that differs from I_N collides", async () => {
+		expect(
+			await compareSkills(iN, null, W({ "a/SKILL.md": file("old a"), "b/SKILL.md": file("b2") })),
 		).toEqual([{ code: "managed-skills-collision", count: 2 }]);
 	});
 	it("a non-file anywhere can't be compared ⇒ blocks", async () => {

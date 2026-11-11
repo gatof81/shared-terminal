@@ -9,7 +9,8 @@
  *
  *   - W absent, W = I_N or W = I_O          ⇒ allowed
  *   - W differs from both                   ⇒ managed-skills-customized
- *   - W exists at a path O's image lacks    ⇒ managed-skills-collision
+ *   - W exists at a path O's image lacks    ⇒ managed-skills-collision,
+ *     unless W is a plain file byte-identical to I_N (v1.9.3)
  *
  * The preflight creates nothing, so it compares against I_O alone (it
  * passes I_O as I_N); the POST repeats the check against the real I_N in
@@ -74,6 +75,12 @@ export async function compareSkills(
 		if (w.kind === "absent") continue;
 		const iO = imageO?.get(rel);
 		if (iO === undefined) {
+			// v1.9.3: a W byte-identical to I_N loses nothing when N seeds the
+			// same bytes over it — the case of a pre-3.0 O whose image lacked a
+			// skill that sync-skills.sh (or an earlier seed) already put in the
+			// workspace. Anything else at a path O's image lacks may be the
+			// user's own file and still blocks.
+			if (iN !== "other" && w.kind === "file" && w.data.equals(iN)) continue;
 			collision++;
 			continue;
 		}
