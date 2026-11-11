@@ -10,8 +10,12 @@
  * SIGKILL. Node has no flock/fcntl, and an `O_EXCL` lock file survives a
  * crash, so the lock is held by a helper process:
  *
- *   /usr/bin/flock --exclusive --nonblock <lock> /bin/sh -c 'echo held; exec cat'
+ *   /usr/bin/flock --exclusive --nonblock --close <lock> /bin/sh -c 'echo held; exec cat'
  *
+ * `--close` keeps the lock's descriptor out of the child, so the lock lives
+ * exactly as long as the flock process — the process whose exit we observe.
+ * Without it the `cat` child inherits the descriptor and could hold the lock
+ * after flock itself died and we already reported the loss.
  * with stdin a pipe from this process. The lock is ours once `held` arrives;
  * the kernel drops it when the helper exits, and the helper exits when our
  * end of the pipe closes — on any death of this process, or when the
@@ -53,6 +57,7 @@ export async function acquireWriterLock(
 		child = spawn(opts.flockPath ?? FLOCK_PATH, [
 			"--exclusive",
 			"--nonblock",
+			"--close",
 			lockPath,
 			"/bin/sh",
 			"-c",

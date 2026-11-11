@@ -53,7 +53,13 @@ describe.skipIf(!haveFlock)("acquireWriterLock (real flock)", () => {
 		child?.kill("SIGKILL");
 		await lost;
 		expect(r.lock.held()).toBe(false);
-		const again = await acquireWriterLock(p);
+		// With --close the lock dies with flock itself: free at once (a short
+		// retry only absorbs the exit being reported before the kernel unlock).
+		let again = await acquireWriterLock(p);
+		for (let i = 0; i < 10 && !again.ok; i++) {
+			await new Promise((res) => setTimeout(res, 20));
+			again = await acquireWriterLock(p);
+		}
 		expect(again.ok).toBe(true);
 		if (again.ok) again.lock.release();
 	});
