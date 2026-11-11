@@ -362,7 +362,9 @@ async function stage(
 		],
 		{ env: tarEnv() },
 	);
-	await fs.chmod(dir, 0o700);
+	// The archive's mode bits are not trusted: every published dir is 0700
+	// and every file 0600 (§2), whatever a hand-made tarball says.
+	await normalizeModes(dir);
 	const arts = path.join(dir, ARTIFACTS_DIR);
 	if (await exists(arts)) {
 		for (const name of (await fs.readdir(arts)).filter((n) => SHA_RE.test(n))) {
@@ -389,6 +391,15 @@ async function stage(
 	await fsyncDir(dir);
 	await fsyncDir(stagingRoot);
 	return dir;
+}
+
+async function normalizeModes(dir: string): Promise<void> {
+	await fs.chmod(dir, 0o700);
+	for (const e of await fs.readdir(dir, { withFileTypes: true })) {
+		const p = path.join(dir, e.name);
+		if (e.isDirectory()) await normalizeModes(p);
+		else if (e.isFile()) await fs.chmod(p, 0o600);
+	}
 }
 
 async function completeStagings(root: string, pid: string, rid: string): Promise<string[]> {

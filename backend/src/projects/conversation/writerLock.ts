@@ -78,6 +78,9 @@ export async function acquireWriterLock(
 		};
 		const release = () => {
 			released = true;
+			// Not ours any more from this instant: the helper's exit (which frees
+			// the kernel lock) arrives later, and nothing may write in between.
+			held = false;
 			try {
 				child.stdin?.end();
 			} catch {

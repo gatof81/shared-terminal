@@ -222,6 +222,40 @@ describe("restoreProjects — staged publication", () => {
 		});
 	}
 
+	it("restored files are 0600 and dirs 0700 whatever the tarball says", async () => {
+		await seedSource();
+		const m = await backup();
+		// re-pack the same members with loose modes, re-signed
+		const loose = await fs.mkdtemp(path.join(os.tmpdir(), "st-pbk-loose-"));
+		try {
+			await execFileP("tar", ["-xzf", path.join(out, "projects", `${PID}.tar.gz`), "-C", loose]);
+			for (const f of [
+				`.projects/${PID}/${LOG_FILE}`,
+				`.projects/${PID}/artifacts/${sha("diff")}`,
+			]) {
+				await fs.chmod(path.join(loose, f), 0o666);
+			}
+			const tarPath = path.join(out, "projects", `${PID}.tar.gz`);
+			const { stdout } = await execFileP("tar", ["-tzf", tarPath]);
+			await execFileP("tar", ["-czf", tarPath, "-C", loose, ...stdout.split("\n").filter(Boolean)]);
+			const projects = {
+				[PID]: { ...m.projects[PID], tarSha256: sha(await fs.readFile(tarPath)) },
+			} as typeof m.projects;
+			const plan = await preflightProjectsRestore(out, projects, dst, {
+				env: offEnv,
+				acquire: acquireOk,
+			});
+			if (!plan) throw new Error("no plan");
+			await restoreProjects(out, m.createdAt, plan, dst, {}, quiet);
+			const dir = projectDir(dst, PID);
+			expect((await fs.stat(dir)).mode & 0o777).toBe(0o700);
+			expect((await fs.stat(path.join(dir, LOG_FILE))).mode & 0o777).toBe(0o600);
+			expect((await fs.stat(path.join(dir, "artifacts", sha("diff")))).mode & 0o777).toBe(0o600);
+		} finally {
+			await fs.rm(loose, { recursive: true, force: true });
+		}
+	});
+
 	it("without --force an existing project is kept and nothing is journaled", async () => {
 		await seedSource();
 		const m = await backup();

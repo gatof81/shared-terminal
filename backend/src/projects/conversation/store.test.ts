@@ -244,6 +244,28 @@ describe("single writer (§2.1)", () => {
 		await store.close();
 	});
 
+	it("after close() nothing reopens or writes, even before the helper has exited", async () => {
+		const { store } = await start("b");
+		await store.critical(PID, (tx) =>
+			tx.append([{ ev: "message", msg_id: "m1", client_message_id: "c1" }]),
+		);
+		await store.close();
+		await expect(store.critical(PID, async () => {})).rejects.toMatchObject({
+			code: "project-writer-unavailable",
+		});
+		expect((await readLines()).length).toBe(1);
+	});
+
+	it("a filesystem error at start leaves the subsystem unavailable instead of failing the boot", async () => {
+		await fs.writeFile(path.join(root, ".projects"), "not a dir");
+		const store = await ProjectConversationStore.start({
+			workspaceRoot: root,
+			bootId: "b",
+			acquire: acquireOk(fakeLock().lock),
+		});
+		expect(store.unavailable).toBe("error");
+	});
+
 	it("a failed critical section does not wedge the next one", async () => {
 		const { store } = await start("b");
 		await expect(

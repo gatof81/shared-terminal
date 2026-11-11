@@ -396,6 +396,36 @@ describe("runRestore", () => {
 		expect(restored).toBe("hola");
 	});
 
+	it(".projects refused (flag on): tables and workspaces still restored, exit code non-zero (PROJECT_CONVERSATION.md §8)", async () => {
+		dbState.tables.set("users", [{ id: "u1", username: "diego" }]);
+		dbState.tables.set("sessions", [{ session_id: "s1", user_id: "u1", status: "stopped" }]);
+		await seedWorkspace("s1", { "s1/hello.txt": "hola" });
+		const pid = "6b1f0c4e-1d2a-4b3c-8d4e-5f6a7b8c9d0e";
+		const pdir = path.join(WORKSPACE_ROOT, ".projects", pid);
+		await fs.mkdir(pdir, { recursive: true });
+		await fs.writeFile(
+			path.join(pdir, "conversation.events.jsonl"),
+			`${JSON.stringify({ seq: 1, ev: "message", at: "t", w: "b", bn: 0, msg_id: "m1" })}\n`,
+		);
+		const manifest = await runBackup(outDir);
+		expect(Object.keys(manifest.projects ?? {})).toEqual([pid]);
+		await fs.rm(path.join(WORKSPACE_ROOT, "s1"), { recursive: true });
+		await fs.rm(path.join(WORKSPACE_ROOT, ".projects"), { recursive: true });
+		dbState.tables.clear();
+		vi.stubEnv("PROJECT_CONVERSATION_ENABLED", "true");
+		const before = process.exitCode;
+		try {
+			await runRestore(outDir);
+			expect(process.exitCode).toBe(1);
+		} finally {
+			process.exitCode = before;
+			vi.unstubAllEnvs();
+		}
+		expect(dbState.inserts.some((i) => /INTO users /.test(i.sql))).toBe(true);
+		expect(await fs.readFile(path.join(WORKSPACE_ROOT, "s1", "hello.txt"), "utf-8")).toBe("hola");
+		await expect(fs.lstat(pdir)).rejects.toMatchObject({ code: "ENOENT" });
+	});
+
 	it("warns for a table the backup's schema has but its files lack (backup by an older backend)", async () => {
 		await makeBackup();
 		// A rollback backend writes the D1 ledger's version (v19) but exports

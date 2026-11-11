@@ -67,6 +67,7 @@ export class ProjectConversationStore {
 	private readonly open = new Map<string, OpenProject>();
 	private readonly chains = new Map<string, Promise<unknown>>();
 	private lost = false;
+	private closed = false;
 
 	private constructor(
 		private readonly opts: StoreOptions,
@@ -84,8 +85,15 @@ export class ProjectConversationStore {
 
 	static async start(opts: StoreOptions): Promise<ProjectConversationStore> {
 		const root = projectsRoot(opts.workspaceRoot);
-		await ensureDir(root);
-		const r = await (opts.acquire ?? acquireWriterLock)(writerLockPath(opts.workspaceRoot));
+		let r: Awaited<ReturnType<typeof acquireWriterLock>>;
+		try {
+			await ensureDir(root);
+			r = await (opts.acquire ?? acquireWriterLock)(writerLockPath(opts.workspaceRoot));
+		} catch (err) {
+			// §2.1 point 2: without the lock this subsystem is off — the rest of
+			// the backend boots as usual.
+			r = { ok: false, reason: "error", detail: (err as Error).message };
+		}
 		if (!r.ok) {
 			opts.log?.error(
 				`[projects] writer lock not acquired (${r.reason}${r.detail ? `: ${r.detail}` : ""}) — ` +
@@ -116,7 +124,7 @@ export class ProjectConversationStore {
 	}
 
 	private async runCritical<T>(pid: string, fn: (tx: CriticalTx) => Promise<T>): Promise<T> {
-		if (this.unavailable || !this.lockHeld()) {
+		if (this.closed || this.unavailable || !this.lockHeld()) {
 			throw new ProjectLogError("project-writer-unavailable", "writer lock not held");
 		}
 		const p = this.open.get(pid) ?? (await this.openProject(pid));
@@ -184,6 +192,7 @@ export class ProjectConversationStore {
 
 	/** Lets the helper go; for graceful shutdown and tests. */
 	async close(): Promise<void> {
+		this.closed = true;
 		for (const p of this.open.values()) await p.log.close();
 		this.open.clear();
 		this.lock?.release();
