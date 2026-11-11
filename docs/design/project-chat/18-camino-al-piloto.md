@@ -131,6 +131,32 @@ Un panel **«Preguntar a los agentes»** en la página del proyecto, sólo front
 | D-PIL4 | ¿El piloto se retira o se conserva cuando llegue P7? | **se retira** (o pasa a «Control Directo» de P9 si el responsable lo decide entonces) |
 | D-PIL5 | Duración y criterio de éxito del piloto | p. ej. 1 semana de uso real; qué tiene que haber funcionado para pedir el GO de la POC de Channels |
 
+### 3.7 Resultado del Piloto 1 y registro de evidencias (2026-11-11)
+
+- **Resultado (A, #512 16:44Z).** El piloto corrió con el GO del responsable sobre una tarea real, Dev ↔ QA,
+  en 3 rondas de revisión. Hubo 10 intercambios, todos `delivered`:
+  - `noRetry`: 10/10, con un POST por `clientMessageId`;
+  - `attributionOk`: 10/10, con el `turn_end` en el `promptId` acusado.
+
+  Hicieron falta unas 8 intervenciones manuales, todas de transporte: el panel solo vivía en memoria, no
+  había «Reenviar» desde Chat, la copia del límite del Composer en el frontend estaba desactualizada (256
+  en vez de 48, corregido en #586) y un agente no puede copiar de forma fiable un blob base64 a un
+  archivo.
+- **Registro de evidencias para el próximo piloto:** un archivo JSONL append-only con una fila por carril.
+  Lo reconstruye A desde los eventos del servidor:
+
+  ```
+  exchange, at, textSha256, forwardOf, lane, sid, cid, clientMessageId,
+  http{status, result, promptId, seq}, composerSendStates, postsForThisClientMessageId,
+  replyPromptId, turnEndSeq, verdict{noRetry, attributionOk}
+  ```
+
+  - **Se quitan `panelShowed` y `matchesChatView`:** son comprobaciones de interfaz. Los reemplaza una
+    revisión manual de 2 intercambios por día.
+  - **`authorized`:** hasta que exista la conversación del proyecto, es una línea diaria del responsable
+    («E01–En: destinatarios según lo previsto: sí/no»). Con D1 pasa a ser mecánico: las entregas están
+    incluidas en `message.to[]` y su cantidad es igual a `|to[]|`.
+
 ## 4. Lo que realmente requiere Channels, PASS-B y el monitor
 
 | Capacidad | Por qué no la cubre el Composer | Fase | Bloqueo |
@@ -141,6 +167,26 @@ Un panel **«Preguntar a los agentes»** en la página del proyecto, sólo front
 | Modo Colaboración con presupuesto y vencimiento | requiere turnos entre agentes | P8 | Channels + G3-2 |
 | Tareas con despacho, puntos seguros, `CHANGE`/`STOP` | requieren el monitor | T2, T3 | P6 + TG1–TG5; T3 además G3-2 |
 | Envío a sesiones del CLI en segundo plano | existe en código (v1.9) | — | su propia activación (`CONVERSATION_COMPOSER_BG_ENABLED`) |
+
+### 4.1 Enmienda: el camino Composer (GO del responsable, 2026-11-11)
+
+El responsable aprobó un camino incremental **sin Channels** para parte de lo anterior. Su contrato vive en
+main: `docs/PROJECT_CONVERSATION.md`, versión v0.1, pendiente de revisión.
+
+**En todo este camino, el único que envía es el backend, a través del Composer existente.** Ningún agente
+emite peticiones, así que **G3-2 sigue en NO-GO y no se toca**.
+
+| Capacidad de la tabla de §4 | Camino Composer | Qué sigue requiriendo Channels |
+| --- | --- | --- |
+| Conversación con varios agentes y estados de entrega | **D1:** un registro por proyecto (`.projects/<pid>/conversation.events.jsonl`, garantías de 03 §2.2) y el envío a varios agentes hecho por el servidor con el Composer | invitados en la conversación del anfitrión, la cola y la entrega a un agente ocupado (P5–P7) |
+| Pasar resultados entre agentes | **D2:** artefactos de texto de hasta 1 MiB, de workspace a workspace, por sha256 | — |
+| Colaboración con presupuesto y vencimiento | **D3:** el backend pasa el informe final de un turno que él mismo entregó, bajo un permiso de la persona por tarea. Requiere `INGEST_REQUIRE_SESSION_ORIGIN=true`, con GO operativo propio | que un agente publique o escriba a otro por su cuenta (P8, G3-2) |
+
+AD7 («un tipo de conversación de proyecto solo con necesidad probada, en su propio log, sin copiar
+mensajes») se cumple así:
+- la necesidad la probó el Piloto 1 (§3.7);
+- el registro es propio, con rutas que no chocan con las que 03 §2.2 reserva;
+- el texto de los agentes queda solo en la captura, y el registro guarda referencias con hash.
 
 ## 5. Bloqueos: imprescindibles y diferibles
 
