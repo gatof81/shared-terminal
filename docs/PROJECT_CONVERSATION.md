@@ -9,7 +9,7 @@ que sigue está implementado.
   - asentamiento antes de que una respuesta sea elegible para D3 (§4.1, §7.3);
   - idempotencia sobre todo el cuerpo, adjuntos incluidos (§3.4);
   - un solo proceso escritor (§2.1).
-- **v0.3** cierra los puntos de la revisión del responsable:
+- **v0.3** cierra los puntos de la revisión del responsable y agrega lo que UX v3 (aprobado) necesita de D1, sin tocar garantías: `reply_settling`, `owner_ack`, paginación filtrable y el Apéndice A (tipos y ejemplos para el frontend):
   - toda escritura del registro bajo el lock, incluido `artifact-failed` (§3.3 S2b);
   - creación del permiso atómica respecto del registro (§7.2 S_G);
   - publicación del restore desde staging, con diario (§8);
@@ -187,11 +187,16 @@ de este contrato tiene **su propia exclusión, aplicada por el kernel:**
 | --- | --- | --- |
 | `message` | `msg_id` (UUID v4 del servidor), `client_message_id`, `by` (user_id), `kind: owner\|relay`, `to[]` (agent_ids), `text` (normalizado, §8.1.2), `text_sha256`, `request_sha256` (§3.4 regla 2), `quote_ref?` (§4.2), `in_reply_to?` (`msg_id`), `artifacts[]` (§6: `{sha256, name, bytes}`), `relay?` (`{grant_id, round, from_delivery}` en `kind: relay`) | `client_message_id` (owner) o `grant_id` + `from_delivery` (relay: **una respuesta se releva como mucho una vez por permiso**) |
 | `delivery` | `msg_id`, `agent_id`, `state` (§3.1), `binding{binding_id, epoch, sid, cid}` (desde `planned`, fijo), `composer_client_message_id` (UUID v4, fijo desde `planned`), `reason?`, `http?` (`{status, result, promptId?, seq?}` de la respuesta del Composer), `artifacts[]?` (en `placing`: lo que se va a colocar), `artifacts_placed?` (§6.4), `files_possibly_placed?`, `binding_verified_at?` (en `sending`, §3.3 c0), `authorized_by` (`owner` \| `collab:<grant_id>`) | `msg_id` + `agent_id` + `state` |
+| `reply_settling` | `msg_id`, `agent_id`, `prompt_id`, `turn_end_seq`, `settle_until` (ISO) — informativo: empezó el asentamiento de §4.1; **no** es una respuesta ni da elegibilidad | `msg_id` + `agent_id` + `turn_end_seq` |
 | `reply_ref` | `msg_id`, `agent_id`, `sid`, `cid`, `prompt_id`, `seq_from`, `seq_to`, `turn_end_seq`, `report_sha256`, `report_bytes`, `truncated`, `attribution: exact\|ambiguous` | `msg_id` + `agent_id` + `prompt_id` |
 | `reply_late_close` | `msg_id`, `agent_id`, `prompt_id`, `seq` (del cierre tardío en la captura) | `msg_id` + `agent_id` + `seq` |
 | `artifact` | `sha256`, `name`, `bytes`, `source{kind: owner\|relay, sid, path}`, `by` | `sha256` + `source` |
 | `grant` | `grant_id`, `event: created\|revoked\|ended`, `task_msg_id`, `start` (agent_id), `initial_relay_from` (delivery o `null`, §7.2), `pairs[]` (`{from, to}` de agent_ids), `bindings[]` (`{agent_id, binding_id, epoch, sid}` de cada agente del permiso, fijados al crearlo), `bindings_read_at`, `max_relays`, `expires_at`, `artifacts: bool`, `by` (user_id, en `created`/`revoked`), `reason?` (en `ended`: §7.4), `relays_used` | `grant_id` + `event` |
+| `owner_ack` | `ack_id`, `client_ack_id`, `by` (user_id), `target{msg_id, agent_id?, report_sha256?}` — la persona marcó un elemento como atendido (§4.3); sin entrega ni efecto | `client_ack_id` |
 | `recovery` | `boot_id`, `at`, `source: boot\|restore`, `truncated_bytes?`, `manifest_at?` (restore), `orphaned[]` (`{msg_id, agent_id, as}`), `grants_closed[]` | `boot_id` |
+
+**Campos comunes de toda línea:** `seq` (entero ≥ 1, estrictamente creciente en el archivo), `ev`, `at`
+(ISO 8601 UTC del backend, con milisegundos) y `w` (§2.1 punto 4).
 
 **Orden en el registro:**
 - un `message` antes de cualquiera de sus `delivery`;
@@ -390,8 +395,10 @@ Un observador del backend sigue las conversaciones con entregas `delivered` que 
   que el Composer acusó, sino cuando **termina su ventana de asentamiento**: `T_SETTLE` = 10 s desde que
   el backend recibió ese `turn_end` (reloj monotónico del proceso). Es la misma ventana en la que
   CONVERSATION.md §4.6 admite otro `Stop` en el mismo `prompt_id`.
-  - Mientras corre, la entrega muestra «respuesta recibida, confirmando…» con el texto de la captura, y
-    **no es elegible para nada**.
+  - Al empezar se escribe `reply_settling{settle_until}` (informativo). Mientras corre, la entrega
+    muestra «respuesta recibida, confirmando…» con el texto de la captura, y **no es elegible para
+    nada**. Un `reply_settling` sin `reply_ref` posterior (por un reinicio) termina en
+    `reply_ref{ambiguous{settle-unobserved}}` al recuperar.
   - Al terminar, se evalúan las condiciones de abajo sobre la ventana **extendida** hasta el final del
     asentamiento, y solo entonces se escribe el `reply_ref` con su atribución final.
   - El `reply_ref` lleva el rango `seq_from..seq_to`, el `turn_end_seq`, el sha256 y los bytes del
@@ -434,19 +441,36 @@ Un observador del backend sigue las conversaciones con entregas `delivered` que 
 - `quote_ref` es solo un metadato para la UI. No da permisos ni cambia el destino.
 - **«Respondiendo a…»** es `in_reply_to`, y la UI lo muestra con la hora.
 
+### 4.3 «Hecho» de la persona (`owner_ack`)
+
+`POST …/acks {clientAckId, target: {msgId, agentId?, reportSha256?}}` escribe un `owner_ack` (S1-like:
+idempotente por `client_ack_id` bajo el lock, cuerpo canónico; otro cuerpo con el mismo id ⇒ 409
+`idempotency-conflict`). No envía nada, no cambia ningún estado de entrega ni de permiso, y no se
+deshace (append-only; un «deshacer» sería un evento futuro, fuera de D1). Valida sólo que `msgId`
+exista en el registro; `agentId`/`reportSha256` se guardan tal cual. Lo que la UI deriva de él es
+asunto de la UI.
+
 ## 5. API (dueño solamente; un id ajeno es el mismo 404)
 
 | Método | Ruta | Respuesta |
 | --- | --- | --- |
 | `POST` | `/api/projects/:pid/conversation/messages` | §3.3 |
-| `GET` | `/api/projects/:pid/conversation/events?before=&limit=` | páginas hacia atrás (≤ 500, ≤ 8 MiB), como §6 de CONVERSATION.md |
-| `GET` | `/api/projects/:pid/conversation/messages/:msgId` | el mensaje con sus entregas plegadas y sus `reply_ref` |
+| `GET` | `/api/projects/:pid/conversation/events?before=&limit=&ev=` | páginas hacia atrás (≤ 500, ≤ 8 MiB), como §6 de CONVERSATION.md; `ev` filtra por tipo (lista separada por comas) |
+| `GET` | `/api/projects/:pid/conversation/messages/:msgId` | el mensaje (`kind` `owner` o `relay`) con sus entregas plegadas, sus `reply_settling`, `reply_ref`, `reply_late_close` y `owner_ack` |
+| `POST` | `/api/projects/:pid/conversation/acks` | §4.3 |
 | `POST` | `/api/projects/:pid/conversation/artifacts` | §6.1, origen elegido por la persona |
 | `GET` | `/api/projects/:pid/conversation/artifacts/:sha256` | contenido (`text/plain`, `nosniff`, `attachment`, CSP sandbox) |
 | `POST` | `/api/projects/:pid/conversation/grants` | §7.2 |
 | `POST` | `/api/projects/:pid/conversation/grants/:grantId/revoke` | §7.4 |
 | `WS` | `/ws/project/<pid>` | `subscribe{after}` con la misma mecánica que `/ws/conversation/` (armado antes de leer, cola en bytes, `resync`) |
 
+- **Paginación de eventos.** El registro es append-only y `seq` es estrictamente creciente, así que
+  los cursores son estables: `before` es exclusivo; sin `before`, la última página. Cada página viene
+  **en orden ascendente de `seq`** con `{events, oldestSeq, hasMore}`; la siguiente página hacia atrás
+  es `before = oldestSeq`. Con `ev`, el filtro se aplica antes del límite y `oldestSeq` es el del
+  último evento **examinado**, de modo que paginar con filtro nunca salta eventos que coincidan. Ni
+  huecos ni duplicados entre páginas; el WS `subscribe{after}` empalma por `seq` igual que en la
+  captura.
 - **WS.** `/ws/project/` entra en `WS_PATH_PREFIXES` con su caso en `wsUpgrade.test.ts`, con la misma
   lección de 3.1 (CLAUDE.md). Hace la misma comprobación de origen y cookie que los demás WS.
 - **Límites por usuario.** `projectSendIp` limita los POST de mensajes y permisos. Un `InFlightLimiter`
@@ -887,6 +911,9 @@ el sistema de archivos real (carreras con `rename`/`symlink`).
 | T22b | dos backends contra el mismo `WORKSPACE_ROOT` | el segundo responde 503 `project-writer-unavailable`, no escribe ni envía; al matar el primero con SIGKILL, el lock queda libre y el siguiente arranque lo toma |
 | T22c | el auxiliar de `flock` muere con el backend vivo / alguien agrega bytes al registro | subsistema envenenado; ni esa línea ni su efecto |
 | T23 | flags apagadas | rutas 404, `.projects/` sin escribir, API byte-idéntica |
+| T25 | `owner_ack` repetido con el mismo `clientAckId` / otro cuerpo / `msgId` inexistente | uno solo / 409 `idempotency-conflict` / 404, sin escribir |
+| T26 | paginar hacia atrás con y sin `ev`, mientras se escriben eventos nuevos | sin huecos ni duplicados, cada página ascendente |
+| T27 | `turn_end` atribuible | `reply_settling` inmediato y `reply_ref` a los 10 s; ningún efecto entre ambos |
 | T24 | `/ws/project/` por la entrada real | admitido y probado en `wsUpgrade.test.ts` |
 
 ## 11. Plan de PRs (después de aprobar este contrato)
@@ -894,7 +921,7 @@ el sistema de archivos real (carreras con `rename`/`symlink`).
 | # | PR | Contenido | Gate |
 | --- | --- | --- | --- |
 | 1 | D1-a | store del proyecto (§2), lock de escritor (§2.1, con `/usr/bin/flock` comprobado en el job de la imagen del backend), recuperación (§3.4), backup/restore (§8), T1–T5d, T15–T17, T22b, T22c, T23 | contrato aprobado |
-| 2 | D1-b | fan-out (§3), `reply_ref` (§4), API y WS (§5), T6–T8c, T24 | D1-a |
+| 2 | D1-b | fan-out (§3), `reply_settling`/`reply_ref` (§4.1), `owner_ack` (§4.3), API y WS (§5), T6–T8c, T24, T25–T27 | D1-a |
 | 3 | frontend | conversación del proyecto (A), sobre la API de §5 | D1-b |
 | 4 | D2 | artefactos (§6), S2b (§3.3), T9–T14 y T12b, T13b, revisión de seguridad independiente | D1-b |
 | 5 | D3 | permisos y relevo (§7), T18–T22 | D2, y la bandera de origen en `true` en producción (GO propio) |
@@ -927,3 +954,110 @@ Solo preparación y lecturas. **El cambio a `true` tiene una autorización opera
   la conversación del proyecto; su retiro se decide entonces.
 - **Doc 18 §4:** se enmienda para registrar este camino. Channels, PASS-B, el monitor y G3-2 conservan
   sus gates.
+
+## Apéndice A. Integración con el frontend (D1)
+
+Formato de cable: los **cuerpos de request** y las **respuestas resumen** usan camelCase (como el
+Composer); los **eventos** se entregan tal como están en el registro (snake_case, como los eventos de la
+captura). Las fechas son ISO 8601 UTC.
+
+```ts
+// ── Eventos (GET …/events, WS frame {type:"event", event}) ────────────────
+type Base = { seq: number; ev: string; at: string; w: string };
+type Binding = { binding_id: string; epoch: number; sid: string; cid: string };
+type DeliveryState =
+  | "planned" | "placing" | "sending" | "settled"
+  | "delivered" | "unconfirmed" | "misdelivered" | "failed" | "uncertain"
+  | "refused" | "not-sent";
+
+type MessageEv = Base & {
+  ev: "message"; msg_id: string; client_message_id: string | null; by: string;
+  kind: "owner" | "relay"; to: string[]; text: string; text_sha256: string; request_sha256: string | null;
+  quote_ref: { msg_id: string; agent_id: string; prompt_id: string; report_sha256: string } | null;
+  in_reply_to: string | null;
+  artifacts: { sha256: string; name: string; bytes: number }[];
+  relay: { grant_id: string; round: number; from_delivery: { msg_id: string; agent_id: string } } | null;
+};
+type DeliveryEv = Base & {
+  ev: "delivery"; msg_id: string; agent_id: string; state: DeliveryState;
+  reason?: string;                       // not-sent / refused / uncertain{…} / settled{result}
+  binding?: Binding; composer_client_message_id?: string;
+  http?: { status: number; result?: string; promptId?: string; seq?: number };
+  files_possibly_placed?: boolean; binding_verified_at?: string;
+  authorized_by: "owner" | `collab:${string}`;
+};
+type ReplySettlingEv = Base & { ev: "reply_settling"; msg_id: string; agent_id: string;
+  prompt_id: string; turn_end_seq: number; settle_until: string };
+type ReplyRefEv = Base & {
+  ev: "reply_ref"; msg_id: string; agent_id: string; sid: string; cid: string; prompt_id: string;
+  seq_from: number; seq_to: number; turn_end_seq: number;
+  report_sha256: string | null; report_bytes: number; truncated: boolean;
+  attribution: "exact" | "failed" | `ambiguous{${string}}`;
+};
+type ReplyLateCloseEv = Base & { ev: "reply_late_close"; msg_id: string; agent_id: string; prompt_id: string; seq: number };
+type OwnerAckEv = Base & { ev: "owner_ack"; ack_id: string; client_ack_id: string; by: string;
+  target: { msg_id: string; agent_id?: string; report_sha256?: string } };
+type RecoveryEv = Base & { ev: "recovery"; boot_id: string; source: "boot" | "restore";
+  manifest_at?: string; orphaned: { msg_id: string; agent_id: string; as: string }[]; grants_closed: string[] };
+// grant / artifact: D2–D3 (§2.2), no aparecen con D1 solo.
+type ProjectEvent = MessageEv | DeliveryEv | ReplySettlingEv | ReplyRefEv | ReplyLateCloseEv | OwnerAckEv | RecoveryEv;
+
+// ── Requests ─────────────────────────────────────────────────────────────
+type SendBody = { clientMessageId: string /* UUID v4 */; text: string; to: string[] /* agentIds, 1–8 */;
+  quoteRef?: { msgId: string; agentId: string; promptId: string; reportSha256: string };
+  inReplyTo?: string; artifacts?: [] /* D2 */ };
+type AckBody = { clientAckId: string; target: { msgId: string; agentId?: string; reportSha256?: string } };
+```
+
+**`POST …/messages`** → `202`
+
+```json
+{ "msgId": "5b0e…", "replayed": false,
+  "deliveries": [
+    { "agentId": "a0…dev", "state": "delivered", "http": { "status": 202, "result": "delivered", "promptId": "p-91…", "seq": 412 } },
+    { "agentId": "a0…qa",  "state": "refused",   "reason": "busy", "http": { "status": 409 } },
+    { "agentId": "a0…ops", "state": "not-sent",  "reason": "ambiguous-target" },
+    { "agentId": "a0…ux",  "state": "sending" }
+  ] }
+```
+
+Una entrega en `sending` al responder (T_http) termina sola: su resultado llega como evento `delivery`.
+Un replay devuelve el mismo cuerpo con `"replayed": true`.
+
+**`GET …/events?before=900&limit=3`** → `200`
+
+```json
+{ "events": [
+    { "seq": 897, "ev": "delivery", "at": "2026-11-12T10:00:01.120Z", "w": "b-7f…", "msg_id": "5b0e…", "agent_id": "a0…dev",
+      "state": "delivered", "authorized_by": "owner", "http": { "status": 202, "result": "delivered", "promptId": "p-91…", "seq": 412 } },
+    { "seq": 898, "ev": "reply_settling", "at": "2026-11-12T10:03:40.002Z", "w": "b-7f…", "msg_id": "5b0e…", "agent_id": "a0…dev",
+      "prompt_id": "p-91…", "turn_end_seq": 455, "settle_until": "2026-11-12T10:03:50.002Z" },
+    { "seq": 899, "ev": "reply_ref", "at": "2026-11-12T10:03:50.010Z", "w": "b-7f…", "msg_id": "5b0e…", "agent_id": "a0…dev",
+      "sid": "a724…", "cid": "c-1…", "prompt_id": "p-91…", "seq_from": 412, "seq_to": 455, "turn_end_seq": 455,
+      "report_sha256": "9c1d…", "report_bytes": 1834, "truncated": false, "attribution": "exact" } ],
+  "oldestSeq": 897, "hasMore": true }
+```
+
+El texto de la respuesta se lee de la captura de esa sesión
+(`GET /api/sessions/<sid>/conversations/<cid>/events/<turn_end_seq>`, el `last_assistant_message`) y se
+compara con `report_sha256` (sha256 de sus bytes UTF-8). Si la captura ya no lo tiene: «respuesta ya
+no retenida».
+
+**`GET …/messages/:msgId`** → `200`
+
+```json
+{ "message": { "seq": 880, "ev": "message", "msg_id": "5b0e…", "kind": "owner", "to": ["a0…dev"], "text": "…", "in_reply_to": null, "quote_ref": null, "artifacts": [], "relay": null, "…": "…" },
+  "deliveries": [ { "agentId": "a0…dev", "state": "delivered", "events": [ /* delivery events, ascendente */ ] } ],
+  "replies": [ { "agentId": "a0…dev", "settling": { /* reply_settling */ }, "ref": { /* reply_ref */ }, "lateCloses": [] } ],
+  "acks": [] }
+```
+
+**WS `/ws/project/<pid>`**: el cliente envía `{"type":"subscribe","after":<seq>}`; el servidor manda
+`{"type":"event","event":<ProjectEvent>}` en orden de `seq`, sin duplicados, y si se queda atrás
+`{"type":"resync","fromSeq":<n>}` (recargar por `GET …/events` desde ahí). Cierre 1008 = sin permiso.
+
+**Errores**: `{ "error": "<code>", "detail"?: string }` con los códigos de §5.
+
+**Flag**: `GET /api/auth/status` → `features.projectConversation: true` sólo con la bandera encendida
+(la clave falta si está apagada, igual que `projectChat`; ausente ⇒ `false`). Con la bandera apagada las
+rutas no existen (404) y la respuesta de `/auth/status` queda byte-idéntica.
