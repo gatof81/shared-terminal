@@ -37,6 +37,14 @@ import type { ProjectConversationStore } from "./store.js";
 
 export const T_SETTLE_MS = 10_000;
 export const LATE_WINDOW_MS = 30 * 60_000;
+/** How long an uncertain delivery is watched for the Composer's own evidence. */
+export const SETTLE_WATCH_MS = 24 * 60 * 60_000;
+/**
+ * Condition 1 (P is new) only needs the prompts just before the ack: a
+ * queued input is announced with the CURRENT turn's prompt id, i.e. a few
+ * events back. Reading from here instead of from 0 bounds the catch-up.
+ */
+export const PRE_ACK_SCAN = 2_000;
 
 const PROMPTS = new Set(["user_prompt", "internal_prompt"]);
 const CLOSES = new Set(["turn_end", "turn_failed"]);
@@ -65,6 +73,9 @@ interface Watch {
 	turnEnd?: PersistedEvent;
 	timer?: NodeJS.Timeout;
 	lateUntil?: number;
+	/** Every step of this watch runs on this chain: never two at once (an
+	 *  await inside one step must not let the next event see a stale phase). */
+	chain: Promise<void>;
 }
 
 interface Settle {
@@ -78,6 +89,8 @@ interface Settle {
 	phase: "catching-up" | "live" | "done";
 	queue: PersistedEvent[];
 	lastSeq: number;
+	chain: Promise<void>;
+	timer?: NodeJS.Timeout;
 }
 
 const COMPOSER_FINAL = new Set(["delivered", "unconfirmed", "misdelivered", "failed", "resolved"]);
@@ -86,6 +99,8 @@ export class ReplyWatcher {
 	private readonly byConv = new Map<string, Array<Watch | Settle>>();
 	private readonly unlisten: () => void;
 	private stopped = false;
+	/** Catch-up reads load a capture file each; one at a time bounds memory. */
+	private reads: Promise<unknown> = Promise.resolve();
 
 	constructor(private readonly deps: ReplyDeps) {
 		this.unlisten = deps.onCaptureEvent((sid, cid, ev) => this.onEvent(sid, cid, ev));
@@ -95,13 +110,25 @@ export class ReplyWatcher {
 		this.stopped = true;
 		this.unlisten();
 		for (const list of this.byConv.values()) {
-			for (const w of list) if (w.kind === "reply" && w.timer) clearTimeout(w.timer);
+			for (const w of list) if (w.timer) clearTimeout(w.timer);
 		}
 		this.byConv.clear();
 	}
 
 	private now(): number {
 		return (this.deps.now ?? Date.now)();
+	}
+
+	private step(w: Watch | Settle, fn: () => Promise<void>): void {
+		w.chain = w.chain.then(fn).catch((err) => {
+			this.deps.log?.warn(`[projects] reply watch step failed: ${(err as Error).message}`);
+		});
+	}
+
+	private read(sid: string, cid: string, after: number): Promise<PersistedEvent[]> {
+		const r = this.reads.then(() => this.deps.readCapture(sid, cid, after));
+		this.reads = r.catch(() => {});
+		return r;
 	}
 
 	private add(sid: string, cid: string, w: Watch | Settle): void {
@@ -128,29 +155,46 @@ export class ReplyWatcher {
 			violation: null,
 			lastSeq: 0,
 			queue: [],
+			chain: Promise.resolve(),
 		};
 		this.add(ref.sid, ref.cid, w);
-		void this.catchUp(w);
+		this.step(w, () => this.catchUp(w));
 	}
 
 	/** An `uncertain` delivery: settle it from the capture's `composer_send` evidence only (§3.1). */
-	watchUncertain(s: Omit<Settle, "kind" | "phase" | "queue" | "lastSeq">): void {
+	watchUncertain(
+		s: Omit<Settle, "kind" | "phase" | "queue" | "lastSeq" | "chain" | "timer">,
+	): void {
 		if (this.stopped) return;
-		const w: Settle = { ...s, kind: "settle", phase: "catching-up", queue: [], lastSeq: 0 };
+		const w: Settle = {
+			...s,
+			kind: "settle",
+			phase: "catching-up",
+			queue: [],
+			lastSeq: 0,
+			chain: Promise.resolve(),
+		};
 		this.add(s.sid, s.cid, w);
-		void (async () => {
+		// Bounded: a send whose Composer operation never resolves is not
+		// followed forever (the delivery simply stays uncertain).
+		w.timer = setTimeout(() => {
+			w.phase = "done";
+			this.remove(s.sid, s.cid, w);
+		}, SETTLE_WATCH_MS);
+		w.timer.unref?.();
+		this.step(w, async () => {
 			try {
-				const evs = await this.deps.readCapture(s.sid, s.cid, 0);
+				const evs = await this.read(s.sid, s.cid, 0);
 				for (const ev of evs) await this.applySettle(w, ev);
-				w.phase = w.phase === "done" ? "done" : "live";
-				for (const ev of w.queue.splice(0)) await this.applySettle(w, ev);
+				while (w.queue.length > 0) await this.applySettle(w, w.queue.shift() as PersistedEvent);
+				if (w.phase !== "done") w.phase = "live";
 			} catch (err) {
 				this.deps.log?.warn(
 					`[projects] settle watch ${s.msgId}/${s.agentId}: ${(err as Error).message}`,
 				);
 				this.remove(s.sid, s.cid, w);
 			}
-		})();
+		});
 	}
 
 	/** Boot: resume every delivery of a project whose outcome is still being decided. */
@@ -192,26 +236,27 @@ export class ReplyWatcher {
 				w.queue.push(ev);
 				continue;
 			}
-			if (w.kind === "reply") void this.apply(w, ev);
-			else void this.applySettle(w, ev);
+			if (w.kind === "reply") this.step(w, () => this.apply(w, ev));
+			else this.step(w, () => this.applySettle(w, ev));
 		}
 	}
 
 	private async catchUp(w: Watch): Promise<void> {
 		try {
-			// From the start of the file: condition 1 (P is new) looks before the ack.
-			const evs = await this.deps.readCapture(w.ref.sid, w.ref.cid, 0);
+			// Condition 1 (P is new) looks a bounded stretch before the ack.
+			const evs = await this.read(w.ref.sid, w.ref.cid, Math.max(0, w.ref.ackSeq - PRE_ACK_SCAN));
 			for (const ev of evs) {
 				if (ev.seq < w.ref.ackSeq) {
 					if (PROMPTS.has(ev.ev) && ev.prompt_id === w.ref.promptId) w.violation ??= "queued";
 					w.lastSeq = ev.seq;
 					continue;
 				}
-				if (w.phase === "catching-up") w.phase = "waiting";
 				await this.apply(w, ev);
 			}
+			// Live events stay queued until the file AND the queue are applied;
+			// the phase flips only when nothing is left (no await in between).
+			while (w.queue.length > 0) await this.apply(w, w.queue.shift() as PersistedEvent);
 			if (w.phase === "catching-up") w.phase = "waiting";
-			for (const ev of w.queue.splice(0)) await this.apply(w, ev);
 		} catch (err) {
 			this.deps.log?.warn(
 				`[projects] reply watch ${w.ref.msgId}/${w.ref.agentId}: ${(err as Error).message}`,
@@ -304,13 +349,12 @@ export class ReplyWatcher {
 		}
 		w.phase = "settling";
 		w.timer = setTimeout(
-			() => {
-				void (async () => {
+			() =>
+				this.step(w, async () => {
 					if (w.phase !== "settling" || this.stopped) return;
 					await this.writeRef(w, ev, w.violation ? `ambiguous{${w.violation}}` : "exact");
 					this.toAfter(w);
-				})();
-			},
+				}),
 			Math.max(0, until - this.now()),
 		);
 	}
@@ -318,6 +362,9 @@ export class ReplyWatcher {
 	private toAfter(w: Watch): void {
 		w.phase = "after";
 		w.lateUntil = this.now() + LATE_WINDOW_MS;
+		if (w.timer) clearTimeout(w.timer);
+		w.timer = setTimeout(() => this.step(w, async () => this.finish(w)), LATE_WINDOW_MS);
+		w.timer.unref?.();
 	}
 
 	private finish(w: Watch): void {
@@ -387,6 +434,7 @@ export class ReplyWatcher {
 			};
 		});
 		w.phase = "done";
+		if (w.timer) clearTimeout(w.timer);
 		this.remove(w.sid, w.cid, w);
 		if (written && result === "delivered" && promptId && seq !== undefined) {
 			this.watch({

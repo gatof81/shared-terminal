@@ -81,6 +81,7 @@ interface Harness {
 		diskStateAtCall: string;
 	}>;
 	delivered: unknown[];
+	uncertain: unknown[];
 	bindingsQueue: Array<ProjectBindings | Error>;
 	composer: (sid: string) => Promise<HttpResult>;
 }
@@ -97,6 +98,7 @@ function harness(): Harness {
 	const h: Harness = {
 		calls: [],
 		delivered: [],
+		uncertain: [],
 		bindingsQueue: [],
 		composer: async () => ({ status: 202, body: { result: "delivered", promptId: "p1", seq: 7 } }),
 		deps: undefined as unknown as FanoutDeps,
@@ -129,6 +131,8 @@ function harness(): Harness {
 			return h.composer(input.stSessionId);
 		},
 		onDelivered: (d) => h.delivered.push(d),
+		onUncertain: (d) => h.uncertain.push(d),
+		isForbidden: (e) => (e as Error).message === "forbidden",
 		tHttpMs: 2_000,
 	};
 	return h;
@@ -362,6 +366,43 @@ describe("send — §3.3 order", () => {
 			{ agentId: A, state: "uncertain", reason: "composer-error", http: { status: 0 } },
 		]);
 		expect(h.calls).toHaveLength(3);
+	});
+
+	it("review regression: an uncertain answer is handed to the settlement watch at once", async () => {
+		const h = harness();
+		h.composer = async () => ({ status: 202, body: { result: "uncertain" } });
+		await send(h, { clientMessageId: cmid(), text: "x", to: [A] });
+		expect(h.uncertain).toEqual([
+			expect.objectContaining({ msgId: expect.any(String), agentId: A, sid: SA, cid: "c-5a" }),
+		]);
+	});
+
+	it("review regression: session meta failing — forbidden ⇒ 409, a D1 hiccup ⇒ 503; at c0 ⇒ not-sent with no call", async () => {
+		const h = harness();
+		h.deps.sessionMeta = async () => {
+			throw new Error("forbidden");
+		};
+		expect(await send(h, { clientMessageId: cmid(), text: "x", to: [A] })).toMatchObject({
+			status: 409,
+		});
+		h.deps.sessionMeta = async () => {
+			throw new Error("D1 timeout");
+		};
+		expect(await send(h, { clientMessageId: cmid(), text: "x", to: [A] })).toMatchObject({
+			status: 503,
+			body: { error: "binding-unverified" },
+		});
+		let n = 0;
+		h.deps.sessionMeta = async () => {
+			n++;
+			if (n === 2) throw new Error("D1 timeout");
+			return { userId: OWNER };
+		};
+		const r = await send(h, { clientMessageId: cmid(), text: "x", to: [A] });
+		expect((r.body as { deliveries: unknown[] }).deliveries).toEqual([
+			{ agentId: A, state: "not-sent", reason: "binding-unverified" },
+		]);
+		expect(h.calls).toHaveLength(0);
 	});
 
 	it("unknown recipient is 400; not this owner's project is 404; a foreign session is 409", async () => {

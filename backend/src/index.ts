@@ -58,7 +58,7 @@ import { requestIdMiddleware } from "./requestContext.js";
 import { buildRouter } from "./routes.js";
 import { deriveSubkey, validateSecretsKey } from "./secrets.js";
 import { sessionLifecycleLock } from "./sessionLifecycleLock.js";
-import { SessionManager } from "./sessionManager.js";
+import { ForbiddenError, NotFoundError, SessionManager } from "./sessionManager.js";
 import { parseTrustProxy, TrustProxyError, warnIfProductionMisconfigured } from "./trustProxy.js";
 import { configureWebPush, isPushEnabled, sendToUser } from "./webPush.js";
 import { handleWsConnection, startWsHeartbeat } from "./wsHandler.js";
@@ -637,6 +637,8 @@ async function start() {
 						},
 					}),
 				onDelivered: (d) => replies.watch(d),
+				onUncertain: (d) => replies.watchUncertain(d),
+				isForbidden: (e) => e instanceof NotFoundError || e instanceof ForbiddenError,
 			});
 			const api = new ProjectConversationApi({
 				store,

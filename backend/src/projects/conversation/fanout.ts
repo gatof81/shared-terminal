@@ -29,6 +29,8 @@ import { type LogLine, ProjectLogError } from "./log.js";
 import type { ProjectConversationStore } from "./store.js";
 
 export const T_HTTP_MS = 30_000;
+/** §3.3: a binding read that has not answered in this long is `binding-unverified`. */
+export const BINDING_READ_MS = 5_000;
 export const MAX_RECIPIENTS = 8;
 const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -84,6 +86,17 @@ export interface FanoutDeps {
 	}): Promise<HttpResult>;
 	/** A delivery became `delivered` with a prompt id: follow its reply (replies.ts). */
 	onDelivered(d: DeliveredRef): void;
+	/** A delivery became `uncertain` after its call: follow the Composer's own evidence (§3.1). */
+	onUncertain(d: {
+		projectId: string;
+		msgId: string;
+		agentId: string;
+		sid: string;
+		cid: string;
+		ccmid: string;
+	}): void;
+	/** Is this error an authorization refusal (foreign or missing session)? */
+	isForbidden?(err: unknown): boolean;
 	now?: () => number;
 	tHttpMs?: number;
 }
@@ -304,8 +317,15 @@ export class ProjectFanout {
 				plans.push({ agentId, notSent: "no-target" });
 				continue;
 			}
-			const meta = await this.deps.sessionMeta(a.binding.sessionId, ownerId).catch(() => null);
-			if (!meta || meta.userId !== ownerId) return err(409, "foreign-session");
+			let meta: { userId: string };
+			try {
+				meta = await this.deps.sessionMeta(a.binding.sessionId, ownerId);
+			} catch (e) {
+				// Only an authorization refusal is "foreign"; a D1 hiccup is retryable.
+				if (this.deps.isForbidden?.(e)) return err(409, "foreign-session");
+				return err(503, "binding-unverified");
+			}
+			if (meta.userId !== ownerId) return err(409, "foreign-session");
 			const t = await this.deps
 				.target(a.binding.sessionId)
 				.catch(() => ({ kind: "none" }) as const);
@@ -471,7 +491,14 @@ export class ProjectFanout {
 		const ccmid = planned.composer_client_message_id as string;
 		const set = (a: Omit<DeliveryAnswer, "agentId">) => answers.set(agentId, { agentId, ...a });
 		const matches = async (): Promise<"ok" | "binding-changed" | "binding-unverified"> => {
-			const b = await this.deps.bindings(ownerId, projectId).catch(() => undefined);
+			let timer: NodeJS.Timeout | undefined;
+			const b = await Promise.race([
+				this.deps.bindings(ownerId, projectId).catch(() => undefined),
+				new Promise<undefined>((resolve) => {
+					timer = setTimeout(() => resolve(undefined), BINDING_READ_MS);
+				}),
+			]);
+			clearTimeout(timer);
 			if (!b) return "binding-unverified";
 			const a = b.get(agentId);
 			if (!a || a.removed || !a.binding) return "binding-changed";
@@ -512,9 +539,18 @@ export class ProjectFanout {
 		if (a !== "ok") return notSent(a);
 		// (S2 has nothing to write without artifacts: D2 adds `placing` here.)
 
-		// c0 → S3: the guaranteed checkpoint, then the intent.
-		const tC = new Date((this.deps.now ?? Date.now)()).toISOString();
+		// The session meta the Composer needs, read BEFORE the intent: a failure
+		// here must leave the delivery not-sent, never an `uncertain` that no
+		// call ever made.
+		let meta: { userId: string };
+		try {
+			meta = await this.deps.sessionMeta(fixed.sid, ownerId);
+		} catch {
+			return notSent("binding-unverified");
+		}
+		// c0 → S3: the guaranteed checkpoint (t_c = when D1's answer arrived), then the intent.
 		const c = await matches();
+		const tC = new Date((this.deps.now ?? Date.now)()).toISOString();
 		if (c !== "ok") return notSent(c);
 		try {
 			await this.deps.store.critical(projectId, (tx) =>
@@ -542,7 +578,6 @@ export class ProjectFanout {
 		// d — the effect, exactly once.
 		let r: HttpResult | Error;
 		try {
-			const meta = await this.deps.sessionMeta(fixed.sid, ownerId);
 			r = await this.deps.composerSend({
 				stSessionId: fixed.sid,
 				cid: fixed.cid,
@@ -578,6 +613,9 @@ export class ProjectFanout {
 			return;
 		}
 		set({ state: m.state, ...(m.reason ? { reason: m.reason } : {}), http: m.http });
+		if (m.state === "uncertain") {
+			this.deps.onUncertain({ projectId, msgId, agentId, sid: fixed.sid, cid: fixed.cid, ccmid });
+		}
 		if (
 			m.state === "delivered" &&
 			typeof m.http.promptId === "string" &&

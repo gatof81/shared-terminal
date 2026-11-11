@@ -213,14 +213,21 @@ describe("WS /ws/project/<pid> through server.on('upgrade')", () => {
 	it("flag on: admitted; the owner is served, anyone else gets 1008", async () => {
 		await new Promise<void>((r) => server.close(() => r()));
 		const served: string[] = [];
-		const owns = vi.fn(async (u: string, pid: string) => u === OWNER && pid === PID);
+		const earlyFrames: string[] = [];
+		// An uncached owner check takes a D1 round-trip; the client's subscribe
+		// (sent on open) must survive it (review regression).
+		const owns = vi.fn(async (u: string, pid: string) => {
+			await new Promise((r) => setTimeout(r, 80));
+			return u === OWNER && pid === PID;
+		});
 		await start(
 			{ extraPathPrefixes: [PROJECT_WS_PREFIX] },
 			{
 				api: { owns, store: { unavailable: null } } as unknown as ProjectConversationApi,
 				hub: {
-					serve: (ws: WebSocket, pid: string) => {
+					serve: (ws: WebSocket, pid: string, early: unknown[] = []) => {
 						served.push(pid);
+						for (const e of early) earlyFrames.push(String(e));
 						ws.send(JSON.stringify({ type: "served" }));
 					},
 				} as unknown as ProjectWsHub,
@@ -228,8 +235,10 @@ describe("WS /ws/project/<pid> through server.on('upgrade')", () => {
 		);
 		const c = await connect(`/ws/project/${PID}`, asOwner());
 		expect(c.opened).toBe(true);
+		c.ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
 		await waitFor(() => c.frames.some((f) => f.type === "served"));
 		expect(served).toEqual([PID]);
+		expect(earlyFrames).toEqual([JSON.stringify({ type: "subscribe", after: 0 })]);
 		c.ws.close();
 		await c.close;
 		const other = await connect(`/ws/project/aaaaaaaa-1d2a-4b3c-8d4e-5f6a7b8c9d0e`, asOwner());

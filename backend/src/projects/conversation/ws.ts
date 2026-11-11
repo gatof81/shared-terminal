@@ -11,7 +11,7 @@
  * nothing more until it subscribes again (everything is in the log).
  */
 
-import type { WebSocket } from "ws";
+import type { RawData, WebSocket } from "ws";
 import type { LogLine } from "./log.js";
 import type { ProjectConversationStore } from "./store.js";
 
@@ -32,7 +32,12 @@ export class ProjectWsHub {
 	) {}
 
 	/** Called after auth (owner of `pid`). */
-	serve(ws: WebSocket, pid: string): void {
+	/**
+	 * `early`: frames the client sent before authorization finished (its
+	 * `subscribe` goes out on `open`, while the owner check may still be on
+	 * its way to D1) — handled first, in order, so none is lost.
+	 */
+	serve(ws: WebSocket, pid: string, early: readonly RawData[] = []): void {
 		let sub: Sub | null = null;
 		const unlisten = this.store.onAppend((p, lines) => {
 			if (p !== pid || !sub || sub.cancelled || sub.paused) return;
@@ -47,7 +52,7 @@ export class ProjectWsHub {
 			unlisten();
 		};
 		ws.on("close", end);
-		ws.on("message", (raw) => {
+		const onMessage = (raw: RawData) => {
 			try {
 				let msg: unknown;
 				try {
@@ -88,7 +93,9 @@ export class ProjectWsHub {
 			} catch {
 				/* nothing thrown here may escape to the process */
 			}
-		});
+		};
+		ws.on("message", onMessage);
+		for (const raw of early) onMessage(raw);
 	}
 
 	private sendLine(ws: WebSocket, sub: Sub, l: LogLine): void {

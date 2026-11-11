@@ -184,6 +184,28 @@ describe("reply attribution (§4.1)", () => {
 		}
 	});
 
+	it("review regression: two turn_end with P back to back ⇒ second-close, never exact", async () => {
+		const ack = emit("user_prompt", { prompt_id: "P" });
+		watcher.watch(ref(ack.seq));
+		await sleep(10);
+		emit("turn_end", { prompt_id: "P", data: { last_assistant_message: "a" } });
+		emit("turn_end", { prompt_id: "P", data: { last_assistant_message: "b" } });
+		await sleep(SETTLE + 40);
+		const refs = (await events()).filter((l) => l.ev === "reply_ref");
+		expect(refs).toHaveLength(1);
+		expect(refs[0]?.attribution).toBe("ambiguous{second-close}");
+	});
+
+	it("review regression: a gap in the file after the turn_end, with live events during catch-up ⇒ ambiguous{gap}", async () => {
+		const ack = emit("user_prompt", { prompt_id: "P" });
+		emit("turn_end", { prompt_id: "P", data: { last_assistant_message: "a" } });
+		emit("gap", { data: { reason: "relay_dropped" } });
+		watcher.watch(ref(ack.seq));
+		emit("tool_end", { prompt_id: "P" });
+		await sleep(SETTLE + 40);
+		expect((await events()).find((l) => l.ev === "reply_ref")?.attribution).toBe("ambiguous{gap}");
+	});
+
 	it("P not new (queued behind another turn) ⇒ ambiguous{queued}", async () => {
 		emit("user_prompt", { prompt_id: "P" });
 		const ack = emit("user_prompt", { prompt_id: "P" });

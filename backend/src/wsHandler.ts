@@ -5,7 +5,7 @@
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { v4 as uuidv4 } from "uuid";
-import { WebSocket, type WebSocketServer } from "ws";
+import { type RawData, WebSocket, type WebSocketServer } from "ws";
 import { verifyWsToken } from "./auth.js";
 import type { BootstrapBroadcaster, BootstrapMessage } from "./bootstrap.js";
 import type { ConversationWsHub } from "./conversation/ws.js";
@@ -178,15 +178,23 @@ export function handleWsConnection(
 			ws.close(1011, "Project conversation unavailable");
 			return;
 		}
+		// The client subscribes on `open`; until the owner check answers, its
+		// frames are held here and handed to the hub in order.
+		const early: RawData[] = [];
+		const hold = (d: RawData) => {
+			if (early.length < 16) early.push(d);
+		};
+		ws.on("message", hold);
 		void api.owns(userId, pid).then(
 			(ok) => {
+				ws.off("message", hold);
 				if (ws.readyState !== WebSocket.OPEN) return;
 				if (!ok) {
 					sendError(ws, "Project not found");
 					ws.close(1008, "Not found");
 					return;
 				}
-				hub.serve(ws, pid);
+				hub.serve(ws, pid, early);
 			},
 			(err) => {
 				log.error(`[ws] project auth failed for ${pid}: ${(err as Error).message}`);
