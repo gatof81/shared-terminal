@@ -226,7 +226,7 @@ async function freshDb() {
 	sess.run(S.foreign, OTHER, "theirs", "st-f0f00c1e-666", "running");
 }
 
-async function startServer(withDirectory: boolean) {
+async function startServer(withDirectory: boolean, extras: Record<string, unknown> = {}) {
 	const { buildRouter, SessionManager, ProjectDirectory } = await load();
 	const docker = {
 		getUploadTmpDir: () => "/tmp",
@@ -251,7 +251,7 @@ async function startServer(withDirectory: boolean) {
 			undefined,
 			undefined,
 			undefined,
-			withDirectory ? { projects: new ProjectDirectory() } : {},
+			withDirectory ? { projects: new ProjectDirectory(), ...extras } : {},
 		),
 	);
 	await stopServer();
@@ -1124,6 +1124,34 @@ describe("agents: reads, boundary and removal", () => {
 	it("GET /api/auth/status says features.projectChat", async () => {
 		const r = await api("GET", "/auth/status", OWNER);
 		expect(r.json.features).toEqual({ projectChat: true });
+	});
+
+	it("D1 off (T23): the project conversation routes do not exist and status has no projectConversation", async () => {
+		const unknown = await api("GET", "/no-such-surface", OWNER);
+		for (const [m, p] of [
+			["POST", `/projects/${uuid()}/conversation/messages`],
+			["GET", `/projects/${uuid()}/conversation/events`],
+			["GET", `/projects/${uuid()}/conversation/messages/${uuid()}`],
+			["POST", `/projects/${uuid()}/conversation/acks`],
+		] as const) {
+			const r = await api(m, p, OWNER, m === "POST" ? {} : undefined);
+			expect({ m, p, status: r.status }).toEqual({ m, p, status: unknown.status });
+		}
+		expect((await api("GET", "/auth/status", OWNER)).json.features).toEqual({ projectChat: true });
+	});
+
+	it("D1 on: features.projectConversation, and 503 project-writer-unavailable until the store has its lock", async () => {
+		await startServer(true, { projectConversation: { api: null } });
+		expect((await api("GET", "/auth/status", OWNER)).json.features).toEqual({
+			projectChat: true,
+			projectConversation: true,
+		});
+		const r = await api("POST", `/projects/${uuid()}/conversation/messages`, OWNER, {});
+		expect(r.status).toBe(503);
+		expect(r.json).toEqual({ error: "project-writer-unavailable" });
+		expect((await api("POST", `/projects/${uuid()}/conversation/messages`, null, {})).status).toBe(
+			401,
+		);
 	});
 
 	it("hard delete of a bound session: 409 agent-active BEFORE any effect; after removing the agent it proceeds", async () => {

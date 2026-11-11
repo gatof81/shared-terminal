@@ -108,7 +108,16 @@ export function registerAuthRoutes(router: Router, ctx: RouteContext): void {
 			uiShell: UI_SHELL,
 			// P3a (E-6): present only with PROJECT_CHAT_ENABLED on, so with the
 			// flag off this answer stays byte-identical. Absent ⇒ false.
-			...(ctx.projects ? { features: { projectChat: true } } : {}),
+			// D1: `projectConversation` only with its flag effective; absent ⇒ false,
+			// and with it off this answer is byte-identical to before.
+			...(ctx.projects
+				? {
+						features: {
+							projectChat: true,
+							...(ctx.projectConversation ? { projectConversation: true } : {}),
+						},
+					}
+				: {}),
 		});
 	});
 

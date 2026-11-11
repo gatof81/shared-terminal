@@ -15,6 +15,7 @@ import { UploadQuotaExceededError } from "../dockerManager.js";
 import type { ExecRegistry } from "../execRegistry.js";
 import type { IdleSweeperStats } from "../idleSweeper.js";
 import { logger } from "../logger.js";
+import type { ProjectConversationApi } from "../projects/conversation/api.js";
 import type { ProjectDirectory } from "../projects/directory.js";
 import { AgentActiveError } from "../projects/directory.js";
 import type { createAuthRateLimiters, RateLimitConfig, UsernameRateLimiter } from "../rateLimit.js";
@@ -68,6 +69,11 @@ export interface RouteContext {
 	// session list carries no `binding`. The hard-delete guard does NOT depend on
 	// it: the routes call `assertNoLiveBinding` either way (bindings outlive the flag).
 	projects?: ProjectDirectory;
+	// D1 — the project conversation (docs/PROJECT_CONVERSATION.md). Present only
+	// when PROJECT_CONVERSATION_ENABLED is effective; `api` is null until the
+	// store has started (or for good if it could not take the writer lock),
+	// and the routes then answer 503 `project-writer-unavailable`.
+	projectConversation?: { api: ProjectConversationApi | null };
 }
 
 // Exported so wsHandler can apply the same upper bound when validating

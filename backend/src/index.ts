@@ -41,10 +41,14 @@ import { DockerManager } from "./dockerManager.js";
 import { IdleSweeper, listRunningSessionIds } from "./idleSweeper.js";
 import { logger } from "./logger.js";
 import { createPortDispatcher, validatePortProxyBaseDomain } from "./portDispatcher.js";
+import { ProjectConversationApi } from "./projects/conversation/api.js";
+import { ProjectFanout, pickTarget } from "./projects/conversation/fanout.js";
+import { ReplyWatcher } from "./projects/conversation/replies.js";
 import {
 	ProjectConversationStore,
 	projectConversationFlagEnabled,
 } from "./projects/conversation/store.js";
+import { ProjectWsHub } from "./projects/conversation/ws.js";
 import { ProjectDirectory, projectChatFlagEnabled } from "./projects/directory.js";
 import { conversationRecreatePort } from "./recreate/capturePort.js";
 import { d1RecreatePort } from "./recreate/d1.js";
@@ -58,7 +62,7 @@ import { SessionManager } from "./sessionManager.js";
 import { parseTrustProxy, TrustProxyError, warnIfProductionMisconfigured } from "./trustProxy.js";
 import { configureWebPush, isPushEnabled, sendToUser } from "./webPush.js";
 import { handleWsConnection, startWsHeartbeat } from "./wsHandler.js";
-import { createWsUpgradeHandler } from "./wsUpgrade.js";
+import { createWsUpgradeHandler, PROJECT_WS_PREFIX } from "./wsUpgrade.js";
 import { createWsUpgradeRateLimiter } from "./wsUpgradeRateLimit.js";
 
 // ── Configuration ─────────────────────────────────────────────────────────────
@@ -144,6 +148,9 @@ if (INGEST_ORIGIN_MODE === null && !["", "false"].includes(INGEST_ORIGIN_FLAG)) 
 }
 // 3.0d (§7): owners whose NEW sessions are born with capture requested.
 const CONVERSATION_ALLOW_USERS = parseAllowUsers(process.env.CONVERSATION_ALLOW_USERS);
+// D1 §4.1: a capture event stamped before this moment was received by a
+// previous process, so a settle window it opened was not observed here.
+const BOOTED_AT_MS = Date.now();
 const WORKSPACE_ROOT_FOR_CONVERSATION =
 	process.env.WORKSPACE_ROOT ?? "/var/shared-terminal/workspaces";
 const conversationStore = new ConversationStore({ workspaceRoot: WORKSPACE_ROOT_FOR_CONVERSATION });
@@ -291,6 +298,12 @@ if (PROJECT_CONVERSATION_FLAG && !PROJECT_CONVERSATION_ENABLED) {
 	);
 }
 let projectConversation: ProjectConversationStore | undefined;
+let projectReplies: ReplyWatcher | undefined;
+// Built before the store exists (the router is built at load, the store
+// takes its lock in start()); the routes answer 503 until `api` is set.
+const projectConversationHolder:
+	| { api: ProjectConversationApi | null; hub: ProjectWsHub | null }
+	| undefined = PROJECT_CONVERSATION_ENABLED ? { api: null, hub: null } : undefined;
 // Single shared bootstrap broadcaster (PR 185b2b). Owned at the server
 // scope so the route's runAsyncBootstrap and the WS handler's
 // /ws/bootstrap subscriber see the same per-session listener sets and
@@ -510,6 +523,7 @@ app.use(
 		conversationAllowUsers: CONVERSATION_ALLOW_USERS,
 		composer,
 		projects: projectDirectory,
+		...(projectConversationHolder ? { projectConversation: projectConversationHolder } : {}),
 	}),
 );
 app.get("/health", (_req, res) => res.json({ ok: true }));
@@ -535,6 +549,7 @@ server.on(
 		trustProxyValue,
 		corsOrigins: CORS_ORIGINS,
 		nodeEnv: process.env.NODE_ENV,
+		...(projectConversationHolder ? { extraPathPrefixes: [PROJECT_WS_PREFIX] } : {}),
 	}),
 );
 
@@ -548,7 +563,16 @@ const stopHeartbeat = startWsHeartbeat(wss, 30_000);
 const conversationWs = new ConversationWsHub(conversation);
 
 wss.on("connection", (ws, req) => {
-	handleWsConnection(ws, req, sessions, docker, bootstrapBroadcaster, idleSweeper, conversationWs);
+	handleWsConnection(
+		ws,
+		req,
+		sessions,
+		docker,
+		bootstrapBroadcaster,
+		idleSweeper,
+		conversationWs,
+		projectConversationHolder,
+	);
 });
 
 // ── Startup ───────────────────────────────────────────────────────────────────
@@ -564,6 +588,72 @@ async function start() {
 			bootId: randomUUID(),
 			log: logger,
 		});
+		if (projectConversationHolder && projectDirectory && !projectConversation.unavailable) {
+			const store = projectConversation;
+			const directory = projectDirectory;
+			const replies = new ReplyWatcher({
+				store,
+				onCaptureEvent: (l) => conversation.onPersistedEvent(l),
+				readCapture: (sid, cid, after) =>
+					conversationStore.readEvents(sid, cid, after, Number.MAX_SAFE_INTEGER, { archive: true }),
+				bootAt: BOOTED_AT_MS,
+				log: logger,
+			});
+			projectReplies = replies;
+			const fanout = new ProjectFanout({
+				store,
+				bindings: (ownerId, pid) => directory.projectBindings(ownerId, pid),
+				target: async (sid) => {
+					const { conversations } = await conversation.summariesWithMeta(sid);
+					const av = await composer.availability(
+						sid,
+						conversations.map((c) => ({
+							cid: c.sessionId,
+							kind: c.kind,
+							paneId: c.paneId,
+							endedAt: c.endedAt,
+						})),
+						{ captureEffective: true, callerMayOperate: true },
+					);
+					return pickTarget(
+						conversations.map((c) => ({
+							cid: c.sessionId,
+							kind: c.kind,
+							paneId: c.paneId,
+							endedAt: c.endedAt,
+							blocked: av.get(c.sessionId)?.composer.blocked === true,
+						})),
+					);
+				},
+				sessionMeta: (sid, ownerId) => sessions.assertCanOperate(sid, ownerId),
+				composerSend: (input) =>
+					composer.send({
+						...input,
+						meta: input.meta as Awaited<ReturnType<typeof sessions.assertCanOperate>>,
+						// The project's owner is the session's owner (§3.3), so the
+						// composer never asks for a cross-user row; fail closed if it did.
+						audit: async () => {
+							throw new Error("project conversation sends only to the owner's sessions");
+						},
+					}),
+				onDelivered: (d) => replies.watch(d),
+			});
+			const api = new ProjectConversationApi({
+				store,
+				fanout,
+				ownsProject: (ownerId, pid) => directory.ownsProject(ownerId, pid),
+			});
+			projectConversationHolder.api = api;
+			projectConversationHolder.hub = new ProjectWsHub(store);
+			// Recovery of every project now, then resume the replies being decided.
+			for (const pid of await store.openAll()) {
+				await replies
+					.resume(pid)
+					.catch((err) =>
+						logger.warn(`[projects] ${pid}: replies not resumed (${(err as Error).message})`),
+					);
+			}
+		}
 		logger.info("[server] project conversation ENABLED (D1)");
 	}
 	// #355 — configure Web Push from VAPID env (or warn + disable). Must run
@@ -715,6 +805,7 @@ function shutdown() {
 	// phase `cancelled`, reason `shutdown`): a late Docker answer may still
 	// settle an exec as evidence, but nothing further starts (§8.1.4).
 	// D1 — lets the writer-lock helper go (the kernel releases the lock when it exits).
+	projectReplies?.stop();
 	void projectConversation?.close();
 	const composerDrained = composer.shutdown().catch((err) => {
 		logger.warn(`[server] composer shutdown failed: ${(err as Error).message}`);

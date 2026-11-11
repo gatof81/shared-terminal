@@ -21,11 +21,14 @@ import { BootstrapBroadcaster } from "./bootstrap.js";
 import { ConversationWsHub } from "./conversation/ws.js";
 import type { DockerManager } from "./dockerManager.js";
 import { createPortDispatcher } from "./portDispatcher.js";
+import type { ProjectConversationApi } from "./projects/conversation/api.js";
+import type { ProjectWsHub } from "./projects/conversation/ws.js";
 import { ForbiddenError, NotFoundError, type SessionManager } from "./sessionManager.js";
 import { handleWsConnection } from "./wsHandler.js";
 import {
 	createWsUpgradeHandler,
 	isWsPath,
+	PROJECT_WS_PREFIX,
 	WS_PATH_PREFIXES,
 	type WsUpgradeDeps,
 } from "./wsUpgrade.js";
@@ -79,7 +82,10 @@ let broadcaster: BootstrapBroadcaster;
 let hub: ConversationWsHub;
 const summaries = vi.fn(async (_sid: string) => []);
 
-async function start(overrides: Partial<WsUpgradeDeps> = {}) {
+async function start(
+	overrides: Partial<WsUpgradeDeps> = {},
+	projectWs?: Parameters<typeof handleWsConnection>[7],
+) {
 	wss = new WebSocketServer({ noServer: true });
 	broadcaster = new BootstrapBroadcaster();
 	hub = new ConversationWsHub({
@@ -112,7 +118,7 @@ async function start(overrides: Partial<WsUpgradeDeps> = {}) {
 		}),
 	);
 	wss.on("connection", (ws, req) => {
-		handleWsConnection(ws, req, sessions, docker, broadcaster, undefined, hub);
+		handleWsConnection(ws, req, sessions, docker, broadcaster, undefined, hub, projectWs);
 	});
 	await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
 	port = (server.address() as AddressInfo).port;
@@ -192,6 +198,42 @@ describe("isWsPath", () => {
 		]) {
 			expect(isWsPath(p), p).toBe(false);
 		}
+	});
+});
+
+// ── /ws/project (D1, PROJECT_CONVERSATION.md §5; T23/T24) ────────────────────
+
+describe("WS /ws/project/<pid> through server.on('upgrade')", () => {
+	const PID = "6b1f0c4e-1d2a-4b3c-8d4e-5f6a7b8c9d0e";
+	it("flag off: the path is not admitted (404), exactly as before", async () => {
+		const c = await connect(`/ws/project/${PID}`, asOwner());
+		expect(c.status).toBe(404);
+	});
+
+	it("flag on: admitted; the owner is served, anyone else gets 1008", async () => {
+		await new Promise<void>((r) => server.close(() => r()));
+		const served: string[] = [];
+		const owns = vi.fn(async (u: string, pid: string) => u === OWNER && pid === PID);
+		await start(
+			{ extraPathPrefixes: [PROJECT_WS_PREFIX] },
+			{
+				api: { owns, store: { unavailable: null } } as unknown as ProjectConversationApi,
+				hub: {
+					serve: (ws: WebSocket, pid: string) => {
+						served.push(pid);
+						ws.send(JSON.stringify({ type: "served" }));
+					},
+				} as unknown as ProjectWsHub,
+			},
+		);
+		const c = await connect(`/ws/project/${PID}`, asOwner());
+		expect(c.opened).toBe(true);
+		await waitFor(() => c.frames.some((f) => f.type === "served"));
+		expect(served).toEqual([PID]);
+		c.ws.close();
+		await c.close;
+		const other = await connect(`/ws/project/aaaaaaaa-1d2a-4b3c-8d4e-5f6a7b8c9d0e`, asOwner());
+		expect(await other.close).toEqual({ code: 1008, reason: "Not found" });
 	});
 });
 

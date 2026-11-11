@@ -31,6 +31,7 @@ import { registerFileRoutes } from "./routes/files.js";
 import { registerGitRoutes } from "./routes/git.js";
 import { registerGroupRoutes } from "./routes/groups.js";
 import { registerInviteRoutes } from "./routes/invites.js";
+import { registerProjectConversationRoutes } from "./routes/projectConversation.js";
 import { registerProjectRoutes } from "./routes/projects.js";
 import { registerPushRoutes } from "./routes/push.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
@@ -57,7 +58,7 @@ export function buildRouter(
 	// P3a — `projects` too (PROJECT_CHAT_ENABLED); optional for the same reason.
 	conversationExtras: Pick<
 		RouteContext,
-		"recreation" | "conversationAllowUsers" | "composer" | "projects"
+		"recreation" | "conversationAllowUsers" | "composer" | "projects" | "projectConversation"
 	> = {},
 ): Router {
 	const router = Router();
@@ -149,6 +150,7 @@ export function buildRouter(
 	registerExecRoutes(router, ctx);
 	registerTemplateRoutes(router, ctx);
 	registerProjectRoutes(router, ctx);
+	registerProjectConversationRoutes(router, ctx);
 
 	return router;
 }
