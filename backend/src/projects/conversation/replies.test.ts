@@ -206,6 +206,19 @@ describe("reply attribution (§4.1)", () => {
 		expect((await events()).find((l) => l.ev === "reply_ref")?.attribution).toBe("ambiguous{gap}");
 	});
 
+	it("review regression: live events landing during the settling write still see a gap read from the file", async () => {
+		const ack = emit("user_prompt", { prompt_id: "P" });
+		emit("turn_end", { prompt_id: "P", data: { last_assistant_message: "a" } });
+		emit("gap", { data: { reason: "relay_dropped" } });
+		watcher.watch(ref(ack.seq));
+		for (let i = 0; i < 5; i++) {
+			await new Promise((r) => setImmediate(r));
+			emit("tool_end", { prompt_id: "P" });
+		}
+		await sleep(SETTLE + 40);
+		expect((await events()).find((l) => l.ev === "reply_ref")?.attribution).toBe("ambiguous{gap}");
+	});
+
 	it("P not new (queued behind another turn) ⇒ ambiguous{queued}", async () => {
 		emit("user_prompt", { prompt_id: "P" });
 		const ack = emit("user_prompt", { prompt_id: "P" });
