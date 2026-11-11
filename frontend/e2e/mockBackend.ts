@@ -96,6 +96,16 @@ interface Conversation {
 	/** v1.8 §6.2 owner metadata. */
 	customTitle?: string | null;
 	archivedAt?: string | null;
+	/**
+	 * The ST session the conversation belongs to. Untagged conversations are
+	 * listed for every session with history (the default); a session in
+	 * `scopedSessions` lists only the conversations tagged with it.
+	 */
+	sessionId?: string;
+	/** A delivered send is answered: an assistant message + `turn_end` under the send's prompt id. */
+	reply?: string;
+	/** Every send to this conversation is refused with this answer (e.g. 409 busy). */
+	sendError?: { status: number; error: string; detail?: string };
 }
 
 const T0 = Date.parse("2026-10-31T10:00:00Z");
@@ -414,6 +424,8 @@ export class MockBackend {
 	conversations: Conversation[] = seedConversations();
 	/** Which sessions have captured history (the list answers [] for the others). */
 	historySessions = new Set<string>([SESSION_IDS.running, SESSION_IDS.stopped]);
+	/** Sessions whose conversation list is only their own tagged conversations. */
+	scopedSessions = new Set<string>();
 	/** Capture state reported for the running session. */
 	capture = { requested: true, effective: true, effectiveAfterRestart: true };
 	/** Which push/notification shape the server reports. */
@@ -473,6 +485,61 @@ export class MockBackend {
 
 	session(id: string): MockSession | undefined {
 		return this.sessions.find((s) => s.sessionId === id);
+	}
+
+	/**
+	 * Pilot 1 (doc 18): after `enableProjects()`, give three agents' sessions
+	 * their own conversation — the architect's and developer-2's answer a
+	 * delivered send, the designer's refuses every send with 409 `busy`.
+	 */
+	seedPilot(): void {
+		const conv = (
+			cid: string,
+			sessionId: string,
+			title: string,
+			extra: Partial<Conversation>,
+		): Conversation => ({
+			cid,
+			title,
+			kind: "interactive",
+			status: "waiting_input",
+			statusEvidence: "probe:idle",
+			canSendInput: true,
+			startedAt: iso(-600),
+			sessionId,
+			events: [
+				{
+					seq: 1,
+					ts: iso(-600),
+					ev: "session_start",
+					prompt_id: null,
+					turn_id: null,
+					agent_id: null,
+					pane: "%1",
+					data: {},
+				},
+			],
+			...extra,
+		});
+		for (const sid of [
+			PROJECT_SESSION_IDS.architect,
+			PROJECT_SESSION_IDS.developer2,
+			PROJECT_SESSION_IDS.designer,
+		]) {
+			this.historySessions.add(sid);
+			this.scopedSessions.add(sid);
+		}
+		this.conversations.push(
+			conv("c-pilot-arch", PROJECT_SESSION_IDS.architect, "Architecture", {
+				reply: "Plan: split the import into two steps.",
+			}),
+			conv("c-pilot-dev2", PROJECT_SESSION_IDS.developer2, "Implementation", {
+				reply: "Review: step two needs a rollback.",
+			}),
+			conv("c-pilot-design", PROJECT_SESSION_IDS.designer, "Design", {
+				sendError: { status: 409, error: "busy" },
+			}),
+		);
 	}
 
 	/** Turn the P3a directory on, seeded (design 16 fixture, bound to alice's sessions). */
@@ -1379,7 +1446,13 @@ export class MockBackend {
 					conversations:
 						s.status === "failed" || !this.historySessions.has(s.sessionId)
 							? []
-							: this.conversations.map((c) => this.summary(c)),
+							: this.conversations
+									.filter((c) =>
+										this.scopedSessions.has(s.sessionId)
+											? c.sessionId === s.sessionId
+											: c.sessionId === undefined,
+									)
+									.map((c) => this.summary(c)),
 					meta: this.metaUnavailable ? "unavailable" : "ok",
 				});
 			}
@@ -1438,6 +1511,10 @@ export class MockBackend {
 				const conv = this.conversations.find((c) => c.cid === decodeURIComponent(msg[1]!));
 				const body = req.postDataJSON() as { text: string; clientMessageId: string };
 				if (!conv || !conv.canSendInput) return json(409, { error: "needs-terminal" });
+				if (conv.sendError) {
+					const { status, ...err } = conv.sendError;
+					return json(status, err);
+				}
 				if (conv.transport === "background") {
 					const id = body.clientMessageId;
 					const cs = (state: string, extra: Record<string, unknown> = {}) =>
@@ -1478,19 +1555,45 @@ export class MockBackend {
 					}, 1500);
 					return json(202, { result: "accepted", clientMessageId: id });
 				}
-				// Delivered: the CLI's own user_prompt follows over the socket.
+				// Delivered: the CLI's own user_prompt follows over the socket, and
+				// the answer carries its prompt id and seq as the real server's does
+				// (§8.1.5: the ack names the user_prompt it matched).
+				const promptId = `p-${body.clientMessageId}`;
+				const promptSeq = (conv.events[conv.events.length - 1]?.seq ?? 0) + 1;
+				const reply = conv.reply;
 				setTimeout(() => {
+					const base = { turn_id: null, agent_id: null, pane: "%1" };
 					this.pushConversationEvent(conv.cid, {
+						...base,
 						ts: new Date().toISOString(),
 						ev: "user_prompt",
-						prompt_id: `p-${body.clientMessageId}`,
-						turn_id: null,
-						agent_id: null,
-						pane: "%1",
+						prompt_id: promptId,
 						data: { prompt: body.text, source: "user" },
 					});
+					if (reply === undefined) return;
+					setTimeout(() => {
+						this.pushConversationEvent(conv.cid, {
+							...base,
+							ts: new Date().toISOString(),
+							ev: "assistant_delta",
+							prompt_id: promptId,
+							data: { message_id: `m-${promptId}`, index: 0, delta: reply, final: true },
+						});
+						this.pushConversationEvent(conv.cid, {
+							...base,
+							ts: new Date().toISOString(),
+							ev: "turn_end",
+							prompt_id: promptId,
+							data: { last_assistant_message: reply },
+						});
+					}, 150);
 				}, 50);
-				return json(202, { result: "delivered", clientMessageId: body.clientMessageId });
+				return json(202, {
+					result: "delivered",
+					clientMessageId: body.clientMessageId,
+					promptId,
+					seq: promptSeq,
+				});
 			}
 		}
 		return json(404, { error: `No mock for ${method} ${path}` });

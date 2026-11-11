@@ -41,6 +41,8 @@ import { confirmDialog, createDialog } from "./components/dialog.js";
 import { showToast } from "./components/toast.js";
 import { relativeDate } from "./format.js";
 import { sessions } from "./main.js";
+import { initPilotOptIn } from "./pilotModel.js";
+import { pilotPanel, resetPilot, suspendPilot } from "./pilotPanel.js";
 import {
 	clearProjects,
 	projectName,
@@ -328,6 +330,7 @@ function sync(): void {
 function hidePage(): void {
 	if (shown === null && pageEl?.hidden !== false) return;
 	shown = null;
+	suspendPilot();
 	document.body.classList.remove("project-page-on");
 	if (pageEl) {
 		pageEl.hidden = true;
@@ -344,6 +347,11 @@ function leavePage(): void {
 	sync();
 }
 
+/** Pilot 1 (doc 18): the "Ask the agents" panel, opt-in per browser (`?pilot=1`). */
+let pilotOn = false;
+/** The re-rendered part of the page; the pilot panel sits beside it, never inside. */
+const contentHost = el("div", "pv-content");
+
 // Re-rendered on every poll: keep the keyboard user's place (by data-key).
 function renderPage(): void {
 	if (!pageEl || !shown) return;
@@ -355,7 +363,23 @@ function renderPage(): void {
 		shown.agentId === null
 			? renderProjectPage(shown.projectId)
 			: renderAgentPage(shown.projectId, shown.agentId);
-	pageEl.replaceChildren(content);
+	// The panel is kept as one element across polls (its draft, selection and
+	// focus live in it), so it is re-attached only when the page's shape
+	// changes — re-inserting it on every poll would blur the textarea.
+	const pilot =
+		pilotOn && shown.agentId === null
+			? pilotPanel(shown.projectId, agentLists.get(shown.projectId)?.data?.agents ?? null)
+			: null;
+	// Off screen (the agent page): its sockets close, its lanes stay.
+	if (!pilot) suspendPilot();
+	const shape = pilot ? [contentHost, pilot] : [contentHost];
+	if (
+		pageEl.childNodes.length !== shape.length ||
+		shape.some((n, i) => pageEl?.childNodes[i] !== n)
+	) {
+		pageEl.replaceChildren(...shape);
+	}
+	contentHost.replaceChildren(content);
 	pageEl.scrollTop = scroll;
 	if (focusKey !== undefined) {
 		pageEl.querySelector<HTMLElement>(`[data-key="${CSS.escape(focusKey)}"]`)?.focus({
@@ -1217,6 +1241,7 @@ function wire(): void {
  */
 export function startProjects(): void {
 	if (!projectChatEnabled()) return;
+	pilotOn = initPilotOptIn();
 	wire();
 	active = true;
 	// Held only while the address still names the page: a session link
@@ -1236,6 +1261,7 @@ export function resetProjects(): void {
 	for (const d of [...openDialogs]) d.close();
 	openDialogs.clear();
 	clearProjects();
+	resetPilot();
 	projectsState = blank();
 	agentLists = new Map();
 	agentDetails = new Map();
