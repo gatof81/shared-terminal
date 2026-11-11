@@ -7,10 +7,15 @@ import {
 	classifyCreation,
 	evidenceText,
 	groupSessionsByBinding,
+	nextPollDelayMs,
+	POLL_ACTIVE_MS,
+	POLL_IDLE_MS,
+	PROJECTS_REFRESH_MS,
 	pageTitle,
 	presenceSummary,
 	presentPresence,
 	projectErrorText,
+	projectsRefreshDue,
 	type ServerClock,
 	serverNow,
 	validateHandle,
@@ -492,5 +497,46 @@ describe("agentActiveDeleteText (409 agent-active on a hard delete)", () => {
 			"This session belongs to a project agent. Remove the agent first (Projects), then delete it.",
 			"It was terminated; its files are kept. Delete it permanently after removing the agent.",
 		]);
+	});
+});
+
+describe("nextPollDelayMs (adaptive polling)", () => {
+	const agent = (value: Presence["value"]) => ({ presence: { value } });
+	it("is 5 s while any agent is working or needs attention", () => {
+		expect(nextPollDelayMs([agent("working")])).toBe(POLL_ACTIVE_MS);
+		expect(nextPollDelayMs([agent("waiting_input"), agent("needs_attention")])).toBe(
+			POLL_ACTIVE_MS,
+		);
+		expect(POLL_ACTIVE_MS).toBe(5_000);
+	});
+	it("is 15 s when every agent is at rest, or there are none", () => {
+		expect(nextPollDelayMs([agent("waiting_input"), agent("disconnected"), agent("unknown")])).toBe(
+			POLL_IDLE_MS,
+		);
+		expect(nextPollDelayMs([])).toBe(POLL_IDLE_MS);
+		expect(POLL_IDLE_MS).toBe(15_000);
+	});
+	it("stays fast while a page is shown and nothing is known yet", () => {
+		expect(nextPollDelayMs(null)).toBe(POLL_ACTIVE_MS);
+		expect(nextPollDelayMs(null, true)).toBe(POLL_ACTIVE_MS);
+	});
+	it("is slow with no page shown, whatever the agents say", () => {
+		expect(nextPollDelayMs(null, false)).toBe(POLL_IDLE_MS);
+		expect(nextPollDelayMs([agent("working")], false)).toBe(POLL_IDLE_MS);
+	});
+});
+
+describe("projectsRefreshDue (60 s of elapsed time)", () => {
+	it("is due only once 60 s have elapsed, whatever the tick cadence", () => {
+		expect(PROJECTS_REFRESH_MS).toBe(60_000);
+		expect(projectsRefreshDue(1_000, 1_000 + 59_999)).toBe(false);
+		expect(projectsRefreshDue(1_000, 1_000 + 60_000)).toBe(true);
+		// Three 15 s idle ticks are not enough; four are.
+		expect(projectsRefreshDue(0, 45_000)).toBe(false);
+		expect(projectsRefreshDue(0, 60_000)).toBe(true);
+	});
+	it("treats a clock that went backwards or a NaN as due", () => {
+		expect(projectsRefreshDue(10_000, 5_000)).toBe(true);
+		expect(projectsRefreshDue(Number.NaN, 5_000)).toBe(true);
 	});
 });
