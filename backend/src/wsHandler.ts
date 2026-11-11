@@ -197,6 +197,7 @@ export function handleWsConnection(
 				hub.serve(ws, pid, early);
 			},
 			(err) => {
+				ws.off("message", hold);
 				log.error(`[ws] project auth failed for ${pid}: ${(err as Error).message}`);
 				sendError(ws, "Internal error");
 				ws.close(1011, "Internal error");
