@@ -185,15 +185,18 @@ jobs:
       # job below, against the versions in COMPOSER_CLI_VERSIONS, not the
       # image's pin.
 
-  # §2.7.7 legacy activation: the CLI versions the three pre-3.0d sessions
-  # run (2.1.316, auto-updated) and the composer pilot runs (2.1.314) must be
-  # validated the way 2.1.308 was before they enter the validated set
-  # (backend/src/recreate/cliCompat.ts) and COMPOSER_CLI_VERSIONS: the same
-  # Dockerfile built with that CLI, then the whole conversation smoke (its
-  # phase 11d is the /etc/st-control compatibility validation of
-  # CONVERSATION.md §2.7.5), the recreation smoke (a carry-over whose N runs
-  # that CLI from the workspace) and the composer smoke. One job per version,
-  # in parallel with the pinned image's job.
+  # CLI coverage: the versions real sessions run — the three pre-3.0d
+  # sessions (2.1.316, auto-updated), the composer pilot (2.1.314) and
+  # session A (2.1.322, owner 2026-11-10/11, #577) — each built into the same
+  # Dockerfile, then the whole conversation smoke (its phase 11d is the
+  # /etc/st-control compatibility validation of CONVERSATION.md §2.7.5), the
+  # recreation smoke (a carry-over whose N runs that CLI from the workspace)
+  # and the composer smoke. Since v1.9.2 (#578) this is coverage, not a gate:
+  # recreation and the composer admit any later stable release by default,
+  # and a failing version here is a reason to deny it (RECREATE_CLI_DENY /
+  # COMPOSER_CLI_DENY), never an automatic block. The versions listed here
+  # are the record in cliCompat.ts's validated set. One job per version, in
+  # parallel with the pinned image's job.
   cli-variants:
     name: CLI ${{ matrix.cli }} — control dir, recreation and composer smokes
     needs: changes
@@ -205,7 +208,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        cli: ["2.1.314", "2.1.316"]
+        cli: ["2.1.314", "2.1.316", "2.1.322"]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

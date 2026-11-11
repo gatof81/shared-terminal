@@ -64,7 +64,7 @@ describe("recreation CLI policy: minimum + deny list (owner, 2026-11-10)", () =>
 		}
 	});
 	it("any later stable release passes without validation — patch, minor, major", () => {
-		for (const v of ["2.1.322", "2.1.999", "2.2.0", "3.0.0"]) {
+		for (const v of ["2.1.330", "2.1.999", "2.2.0", "3.0.0"]) {
 			expect(decideRecreateCli(def, v), v).toEqual({ ok: true, by: "min" });
 		}
 	});
@@ -88,14 +88,16 @@ describe("recreation CLI policy: minimum + deny list (owner, 2026-11-10)", () =>
 		const p = parseRecreateCliPolicy({ RECREATE_CLI_MIN_VERSION: "off" });
 		expect(p.min).toBeNull();
 		expect(decideRecreateCli(p, "2.1.316")).toEqual({ ok: true, by: "validated" });
-		expect(decideRecreateCli(p, "2.1.322")).toEqual({ ok: false, detail: "not-validated:2.1.322" });
+		expect(decideRecreateCli(p, "2.1.322")).toEqual({ ok: true, by: "validated" });
+		expect(decideRecreateCli(p, "2.1.330")).toEqual({ ok: false, detail: "not-validated:2.1.330" });
 	});
 	it("a raised floor retires the validated versions below it too", () => {
 		const p = parseRecreateCliPolicy({ RECREATE_CLI_MIN_VERSION: "2.1.316" });
 		expect(decideRecreateCli(p, "2.1.308")).toEqual({ ok: false, detail: "below-min:2.1.308" });
 		expect(decideRecreateCli(p, "2.1.314")).toEqual({ ok: false, detail: "below-min:2.1.314" });
 		expect(decideRecreateCli(p, "2.1.316")).toEqual({ ok: true, by: "validated" });
-		expect(decideRecreateCli(p, "2.1.322")).toEqual({ ok: true, by: "min" });
+		expect(decideRecreateCli(p, "2.1.322")).toEqual({ ok: true, by: "validated" });
+		expect(decideRecreateCli(p, "2.1.330")).toEqual({ ok: true, by: "min" });
 	});
 
 	it("a chosen floor must be validated; malformed settings refuse to start", () => {

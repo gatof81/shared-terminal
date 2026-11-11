@@ -417,7 +417,7 @@ describe("control-marker-incompatible — a stable CLI at or above the floor, no
 		});
 	}
 
-	for (const version of ["2.1.322", "2.1.309", "3.0.0"]) {
+	for (const version of ["2.1.330", "2.1.309", "3.0.0"]) {
 		it(`a newer stable CLI never validated (${version}) does not block the recreation`, async () => {
 			const h = await setup();
 			h.cli.version = version;
