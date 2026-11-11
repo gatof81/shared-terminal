@@ -120,6 +120,14 @@ jobs:
           grep '\.js$' "$RUNNER_TEMP/img.txt" > "$RUNNER_TEMP/img-js.txt"
           echo "dist *.js: $(wc -l < "$RUNNER_TEMP/img-js.txt") $(sha256sum < "$RUNNER_TEMP/img-js.txt" | cut -c1-64)"
 
+      # docs/PROJECT_CONVERSATION.md §2.1: the project conversation's writer
+      # lock is held by /usr/bin/flock; without it the subsystem stays off, so
+      # the image must carry it (util-linux in node:22-slim).
+      - name: Image carries the writer-lock helper (flock)
+        run: |
+          docker run --rm --network none --entrypoint sh st-backend-hygiene \
+            -c 'test -x /usr/bin/flock && /usr/bin/flock --exclusive --nonblock /tmp/st.lock /bin/sh -c "echo held" | grep -qx held'
+
       - name: Build stage carries nothing from the host
         run: |
           docker run --rm --network none --entrypoint sh st-backend-hygiene-build \

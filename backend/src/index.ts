@@ -5,6 +5,7 @@
  * Database is Cloudflare D1 (accessed via HTTP API).
  */
 
+import { randomUUID } from "node:crypto";
 import http from "node:http";
 import cookieParser from "cookie-parser";
 import express from "express";
@@ -40,6 +41,10 @@ import { DockerManager } from "./dockerManager.js";
 import { IdleSweeper, listRunningSessionIds } from "./idleSweeper.js";
 import { logger } from "./logger.js";
 import { createPortDispatcher, validatePortProxyBaseDomain } from "./portDispatcher.js";
+import {
+	ProjectConversationStore,
+	projectConversationFlagEnabled,
+} from "./projects/conversation/store.js";
 import { ProjectDirectory, projectChatFlagEnabled } from "./projects/directory.js";
 import { conversationRecreatePort } from "./recreate/capturePort.js";
 import { d1RecreatePort } from "./recreate/d1.js";
@@ -270,6 +275,22 @@ for (const w of COMPOSER_BG.warnings) logger.warn(`[server] ${w}`);
 const PROJECT_CHAT_ENABLED = projectChatFlagEnabled(process.env.PROJECT_CHAT_ENABLED);
 const projectDirectory = PROJECT_CHAT_ENABLED ? new ProjectDirectory() : undefined;
 if (PROJECT_CHAT_ENABLED) logger.info("[server] project directory ENABLED (P3a)");
+// D1 — the project conversation (docs/PROJECT_CONVERSATION.md §1). It sends
+// only through the composer and only to agents of the directory, so it is
+// effective only with both on; a flag set without them is logged and stays
+// off. Off ⇒ nothing is constructed and nothing under `.projects/` is created.
+const PROJECT_CONVERSATION_FLAG = projectConversationFlagEnabled(
+	process.env.PROJECT_CONVERSATION_ENABLED,
+);
+const PROJECT_CONVERSATION_ENABLED =
+	PROJECT_CONVERSATION_FLAG && PROJECT_CHAT_ENABLED && COMPOSER_ENABLED;
+if (PROJECT_CONVERSATION_FLAG && !PROJECT_CONVERSATION_ENABLED) {
+	logger.warn(
+		"[server] PROJECT_CONVERSATION_ENABLED is set but needs PROJECT_CHAT_ENABLED and " +
+			"CONVERSATION_COMPOSER_ENABLED — project conversation stays OFF",
+	);
+}
+let projectConversation: ProjectConversationStore | undefined;
 // Single shared bootstrap broadcaster (PR 185b2b). Owned at the server
 // scope so the route's runAsyncBootstrap and the WS handler's
 // /ws/bootstrap subscriber see the same per-session listener sets and
@@ -534,6 +555,17 @@ wss.on("connection", (ws, req) => {
 
 async function start() {
 	await migrateDb();
+	// Before the server accepts requests: the store takes the cross-process
+	// writer lock (§2.1) and, without it, stays unavailable (503) — never a
+	// second writer on the same logs.
+	if (PROJECT_CONVERSATION_ENABLED) {
+		projectConversation = await ProjectConversationStore.start({
+			workspaceRoot: WORKSPACE_ROOT_FOR_CONVERSATION,
+			bootId: randomUUID(),
+			log: logger,
+		});
+		logger.info("[server] project conversation ENABLED (D1)");
+	}
 	// #355 — configure Web Push from VAPID env (or warn + disable). Must run
 	// AFTER migrateDb so the push_subscriptions table exists before any
 	// subscribe/send, and before the server accepts requests.
@@ -682,6 +714,8 @@ function shutdown() {
 	// 3.2 — refuse new sends and cancel the active executors durably (record
 	// phase `cancelled`, reason `shutdown`): a late Docker answer may still
 	// settle an exec as evidence, but nothing further starts (§8.1.4).
+	// D1 — lets the writer-lock helper go (the kernel releases the lock when it exits).
+	void projectConversation?.close();
 	const composerDrained = composer.shutdown().catch((err) => {
 		logger.warn(`[server] composer shutdown failed: ${(err as Error).message}`);
 	});
