@@ -379,3 +379,9 @@ where `features.projectChat` is on. It adds **no backend, no route, no table and
   editable; it is an ordinary send.
 - **Temporary:** P7 (the host conversation with guests) replaces it. Its retirement is evaluated then,
   keeping a way to ask several agents at once.
+
+## 10. Project conversation (proposed)
+
+The project-level conversation, artifacts and per-task Dev ↔ QA relay (D1–D3, the Composer track the
+owner approved on 2026-11-11) have their own binding contract: [PROJECT_CONVERSATION.md](./PROJECT_CONVERSATION.md).
+Proposal v0.1, not implemented; nothing in §1–§9 changes.
