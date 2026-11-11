@@ -1,0 +1,255 @@
+import { createHash } from "node:crypto";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// teamView.ts against a fake api: the workspace renders the log and the
+// directory, and the composer sends exactly what the person chose.
+
+const api = vi.hoisted(() => ({
+	fetchProjectEvents: vi.fn(),
+	fetchProjectMessage: vi.fn(),
+	postProjectMessage: vi.fn(),
+	readConversationEvent: vi.fn(),
+}));
+vi.mock("./api.js", () => api);
+
+type View = typeof import("./teamView.js");
+
+const PID = "p1";
+const DEV = "a-dev";
+const QA = "a-qa";
+const ASK = "a-ask";
+const NOW = "2026-11-11T12:30:00.000Z";
+const sha = (t: string) => createHash("sha256").update(t, "utf8").digest("hex");
+
+const agent = (agentId: string, handle: string, presence: Record<string, unknown>) => ({
+	agentId,
+	handle,
+	role: "Developer",
+	provider: "claude",
+	template: null,
+	binding: { bindingId: `b-${agentId}`, epoch: 1, sessionId: `s-${agentId}`, state: "active" },
+	presence,
+});
+const agents = [
+	agent(DEV, "dev-pilot", { value: "working", source: "hook", at: "2026-11-11T12:29:40.000Z" }),
+	agent(QA, "qa-pilor", {
+		value: "waiting_input",
+		source: "probe",
+		at: "2026-11-11T12:29:00.000Z",
+		verified: true,
+	}),
+	agent(ASK, "infra-pilot", {
+		value: "needs_attention",
+		detail: "waiting_permission",
+		source: "hook",
+		at: "2026-11-11T12:28:00.000Z",
+	}),
+];
+
+const REPLY = "Done: adaptive cadence. 628 tests pass.";
+const log = [
+	{
+		seq: 1,
+		ts: NOW,
+		ev: "message",
+		msg_id: "t1",
+		kind: "owner",
+		to: [DEV],
+		text: "Adaptive polling\nbody",
+	},
+	{ seq: 2, ts: NOW, ev: "delivery", msg_id: "t1", agent_id: DEV, state: "delivered" },
+	{ seq: 3, ts: NOW, ev: "message", msg_id: "t2", kind: "owner", to: [QA], text: "Release notes" },
+	{ seq: 4, ts: NOW, ev: "delivery", msg_id: "t2", agent_id: QA, state: "refused", reason: "busy" },
+	{
+		seq: 5,
+		ts: NOW,
+		ev: "reply_ref",
+		msg_id: "t1",
+		agent_id: DEV,
+		sid: "s-dev",
+		cid: "c-dev",
+		prompt_id: "p1",
+		turn_end_seq: 77,
+		report_sha256: sha(REPLY),
+		report_bytes: 40,
+		truncated: false,
+		attribution: "exact",
+	},
+];
+
+let view: View;
+let header: HTMLElement;
+
+async function flush(): Promise<void> {
+	for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0));
+}
+
+function mount(panel: Parameters<View["teamWorkspace"]>[0]["panel"]) {
+	const root = view.teamWorkspace({
+		projectId: PID,
+		panel,
+		agents: agents as never,
+		clock: { generatedAt: NOW, receivedAt: Date.now() },
+		header,
+	});
+	if (!root.isConnected) document.body.append(root);
+	return root;
+}
+
+beforeEach(async () => {
+	vi.resetModules();
+	document.body.replaceChildren();
+	header = document.createElement("div");
+	api.fetchProjectEvents.mockResolvedValue({
+		ok: true,
+		status: 200,
+		body: { events: log, hasMore: false },
+	});
+	api.fetchProjectMessage.mockResolvedValue({ ok: false, status: 404, code: "not-found" });
+	api.readConversationEvent.mockResolvedValue({
+		ok: true,
+		event: { seq: 77, ts: NOW, ev: "turn_end", data: { last_assistant_message: REPLY } },
+	});
+	api.postProjectMessage.mockResolvedValue({
+		ok: true,
+		status: 202,
+		body: { msgId: "m-new", deliveries: [{ agentId: QA, state: "delivered" }] },
+	});
+	view = await import("./teamView.js");
+});
+
+afterEach(() => {
+	view.resetWorkspaces();
+	vi.clearAllMocks();
+});
+
+describe("Now", () => {
+	it("shows the agents, For you by kind (permission from presence first) and the threads", async () => {
+		const root = mount(null);
+		await flush();
+		const names = [...root.querySelectorAll(".tw-agent-name")].map((n) => n.textContent);
+		expect(names).toEqual(["dev-pilot", "qa-pilor", "infra-pilot"]);
+		const side = root.querySelector(".tw-foryou-inline")!;
+		const titles = [...side.querySelectorAll(".tw-card b")].map((n) => n.textContent);
+		expect(titles).toEqual([
+			"@infra-pilot is asking for permission",
+			"@dev-pilot replied to you",
+			"Not delivered to @qa-pilor",
+		]);
+		// The reply's first line, verified against the log's hash.
+		expect(side.querySelector(".tw-card-replied .tw-card-quote")?.textContent).toBe(REPLY);
+		const rows = [...root.querySelectorAll(".tw-thread-row b")].map((n) => n.textContent);
+		expect(rows).toEqual(["Adaptive polling", "Release notes"]);
+	});
+
+	it("never shows a reply whose text doesn't hash to the record", async () => {
+		api.readConversationEvent.mockResolvedValue({
+			ok: true,
+			event: { seq: 77, ts: NOW, ev: "turn_end", data: { last_assistant_message: "tampered" } },
+		});
+		const root = mount({ kind: "thread", msgId: "t1" });
+		await flush();
+		const tl = root.querySelector(".tw-timeline")!;
+		expect(tl.textContent).toContain("doesn't match what was recorded");
+		expect(tl.textContent).not.toContain("tampered");
+	});
+
+	it("says the reply is no longer retained when the capture answers 404", async () => {
+		api.readConversationEvent.mockResolvedValue({ ok: false, status: 404 });
+		const root = mount({ kind: "thread", msgId: "t1" });
+		await flush();
+		expect(root.querySelector(".tw-timeline")?.textContent).toContain("Reply no longer retained");
+	});
+});
+
+describe("composer", () => {
+	it("@ opens the picker; picking adds the chip; only chips are sent; the agent at a prompt can't be chosen", async () => {
+		const root = mount({ kind: "new" });
+		await flush();
+		const text = root.querySelector<HTMLTextAreaElement>(".tw-composer textarea")!;
+		text.value = "Review it @";
+		text.setSelectionRange(text.value.length, text.value.length);
+		text.dispatchEvent(new Event("input"));
+		const options = [...root.querySelectorAll<HTMLButtonElement>(".tw-option")];
+		expect(options.map((o) => o.querySelector("b")?.textContent)).toEqual([
+			"@dev-pilot",
+			"@qa-pilor",
+			"@infra-pilot",
+		]);
+		expect(options[2]!.disabled).toBe(true);
+		options[1]!.click();
+		expect(text.value).toBe("Review it @qa-pilor ");
+		// Typed but not picked: text only.
+		text.value += "and ask @dev-pilot later";
+		text.dispatchEvent(new Event("input"));
+		expect(root.querySelector(".tw-hint")?.textContent).toBe("Only @qa-pilor will receive this.");
+		root.querySelector<HTMLFormElement>(".tw-composer")!.requestSubmit();
+		await flush();
+		const body = api.postProjectMessage.mock.calls[0]![1];
+		expect(body.to).toEqual([QA]);
+		expect(body).not.toHaveProperty("inReplyTo");
+		expect(body.clientMessageId).toMatch(/^[0-9a-f-]{36}$/);
+	});
+
+	it("keeps focus and draft across a poll (the composer is never re-inserted)", async () => {
+		const root = mount({ kind: "thread", msgId: "t1" });
+		await flush();
+		const text = root.querySelector<HTMLTextAreaElement>(".tw-composer textarea")!;
+		text.focus();
+		text.value = "half-typed";
+		mount({ kind: "thread", msgId: "t1" }); // the project page's 5 s re-render
+		await flush();
+		expect(root.querySelector(".tw-composer textarea")).toBe(text);
+		expect(document.activeElement).toBe(text);
+		expect(text.value).toBe("half-typed");
+	});
+
+	it("Reply… quotes exactly that reply and answers its message", async () => {
+		const root = mount({ kind: "thread", msgId: "t1" });
+		await flush();
+		[...root.querySelectorAll<HTMLButtonElement>(".tw-timeline button")]
+			.find((b) => b.textContent === "Reply…")!
+			.click();
+		const text = root.querySelector<HTMLTextAreaElement>(".tw-composer textarea")!;
+		text.value = "thanks";
+		root.querySelector<HTMLFormElement>(".tw-composer")!.requestSubmit();
+		await flush();
+		expect(api.postProjectMessage.mock.calls[0]![1]).toMatchObject({
+			to: [DEV],
+			inReplyTo: "t1",
+			quoteRef: { msgId: "t1", agentId: DEV, promptId: "p1", reportSha256: sha(REPLY) },
+		});
+	});
+
+	it("a lost answer offers Check, which repeats the SAME id; a refusal keeps the draft", async () => {
+		api.postProjectMessage.mockResolvedValueOnce({ ok: false, status: 0, code: "network" });
+		const root = mount({ kind: "thread", msgId: "t1" });
+		await flush();
+		const text = root.querySelector<HTMLTextAreaElement>(".tw-composer textarea")!;
+		root.querySelector<HTMLButtonElement>(".tw-chip-add")!.click();
+		root.querySelectorAll<HTMLButtonElement>(".tw-option")[0]!.click();
+		text.value = "ship it";
+		root.querySelector<HTMLFormElement>(".tw-composer")!.requestSubmit();
+		await flush();
+		const status = root.querySelector(".tw-send-status")!;
+		expect(status.textContent).toContain("may or may not have been sent");
+		[...status.querySelectorAll("button")].find((b) => b.textContent === "Check")!.click();
+		await flush();
+		const [a, b] = api.postProjectMessage.mock.calls.map((c) => c[1]);
+		expect(b.clientMessageId).toBe(a.clientMessageId);
+		expect(text.value).toBe("");
+
+		api.postProjectMessage.mockResolvedValueOnce({
+			ok: false,
+			status: 409,
+			code: "project-log-full",
+		});
+		root.querySelector<HTMLButtonElement>(".tw-chip-add")!.click();
+		root.querySelectorAll<HTMLButtonElement>(".tw-option")[0]!.click();
+		text.value = "second";
+		root.querySelector<HTMLFormElement>(".tw-composer")!.requestSubmit();
+		await flush();
+		expect(root.querySelector(".tw-send-status")?.textContent).toContain("conversation is full");
+		expect(text.value).toBe("second");
+	});
+});

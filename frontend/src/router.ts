@@ -110,26 +110,64 @@ export function readRoute(): Route | null {
 
 // ── Project routes (P3a) ────────────────────────────────────────────────────
 
+/**
+ * A sub-page of the Projects v3 workspace (teamView.ts), on the project
+ * page only: a thread (by its root message id), the New task page, or the
+ * P3a agent directory. Absent = the workspace's "Now". With the v3 flag off
+ * a panel is ignored and the project page is the P3a directory.
+ */
+export type ProjectPanel = { kind: "thread"; msgId: string } | { kind: "new" } | { kind: "agents" };
+
 export interface ProjectRoute {
 	projectId: string;
 	/** Null on the project page itself. */
 	agentId: string | null;
+	/** Only on the project page (agentId null); absent = Now. */
+	panel?: ProjectPanel;
 }
 
 export function parseProjectRoute(hash: string): ProjectRoute | null {
-	const m = /^#\/projects\/([^/?#]+)(?:\/agents\/([^/?#]+))?$/.exec(hash);
+	const m =
+		/^#\/projects\/([^/?#]+)(?:\/agents\/([^/?#]+)|\/(agents|new)|\/threads\/([^/?#]+))?$/.exec(
+			hash,
+		);
 	if (!m) return null;
 	const projectId = decode(m[1]!);
 	if (projectId === null || projectId === "") return null;
-	if (m[2] === undefined) return { projectId, agentId: null };
-	const agentId = decode(m[2]);
-	if (agentId === null || agentId === "") return null;
-	return { projectId, agentId };
+	if (m[2] !== undefined) {
+		const agentId = decode(m[2]);
+		if (agentId === null || agentId === "") return null;
+		return { projectId, agentId };
+	}
+	if (m[3] === "agents") return { projectId, agentId: null, panel: { kind: "agents" } };
+	if (m[3] === "new") return { projectId, agentId: null, panel: { kind: "new" } };
+	if (m[4] !== undefined) {
+		const msgId = decode(m[4]);
+		if (msgId === null || msgId === "") return null;
+		return { projectId, agentId: null, panel: { kind: "thread", msgId } };
+	}
+	return { projectId, agentId: null };
 }
 
 export function projectRouteHash(route: ProjectRoute): string {
 	const h = `#/projects/${encodeURIComponent(route.projectId)}`;
-	return route.agentId === null ? h : `${h}/agents/${encodeURIComponent(route.agentId)}`;
+	if (route.agentId !== null) return `${h}/agents/${encodeURIComponent(route.agentId)}`;
+	switch (route.panel?.kind) {
+		case "thread":
+			return `${h}/threads/${encodeURIComponent(route.panel.msgId)}`;
+		case "new":
+			return `${h}/new`;
+		case "agents":
+			return `${h}/agents`;
+		default:
+			return h;
+	}
+}
+
+/** Same page and same panel. */
+export function sameProjectRoute(a: ProjectRoute | null, b: ProjectRoute | null): boolean {
+	if (a === null || b === null) return a === b;
+	return projectRouteHash(a) === projectRouteHash(b);
 }
 
 export function readProjectRoute(): ProjectRoute | null {

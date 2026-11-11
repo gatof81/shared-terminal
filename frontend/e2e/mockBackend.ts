@@ -14,6 +14,7 @@
  * Shapes mirror `src/api.ts`; keep them in step when the API changes.
  */
 
+import { createHash } from "node:crypto";
 import type { Page, Route, WebSocketRoute } from "@playwright/test";
 import { normalizeTitle } from "../src/conversationTitle.js";
 
@@ -133,6 +134,14 @@ export const SESSION_IDS = {
 // harness's clock and bound to alice's own sessions.
 
 export const PROJECT_IDS = { hz: "6b1f2c3d-0000-4000-8000-000000000001" };
+
+/** The seeded project-conversation threads (enableProjectConversation). */
+export const PROJECT_MSG_IDS = {
+	polling: "m1000000-0000-4000-8000-000000000001",
+	notes: "m1000000-0000-4000-8000-000000000002",
+	backup: "m1000000-0000-4000-8000-000000000003",
+	old: "m1000000-0000-4000-8000-000000000000",
+};
 
 export const AGENT_IDS = {
 	architect: "a0000000-0000-4000-8000-0000000000a1",
@@ -467,6 +476,21 @@ export class MockBackend {
 	hardDeleteRefusedAfterSoftDelete = false;
 	projects: MockProject[] = [];
 	agents: MockAgent[] = [];
+	// ── Project conversation (Projects v3, PROJECT_CONVERSATION.md D1) ──
+	/** PROJECT_CONVERSATION_ENABLED: `features.projectConversation` + the §5 routes. */
+	projectConversation = false;
+	/** The project log, persisted lines in seq order (§2.2 shape). */
+	projectLog: Array<Record<string, unknown>> = [];
+	/** The events page never holds more than this (a test lowers it to exercise paging). */
+	projectPageCap = 500;
+	/** What a send to each agent ends as (default: delivered). */
+	projectSendOutcome = new Map<string, { state: string; reason?: string }>();
+	/** clientMessageId → msg_id (idempotency, §3.4 rule 2). */
+	private projectSends = new Map<string, { msgId: string; hash: string }>();
+	/** Agent text in the captures, by `${sid}\n${cid}\n${seq}` (what a reply_ref points at). */
+	projectCaptures = new Map<string, Record<string, unknown>>();
+	/** Every POST body the conversation route received. */
+	projectMessagePosts: Array<Record<string, unknown>> = [];
 	/** Idempotency records, by `${owner}\n${clientRequestId}`. */
 	private creations = new Map<string, { hash: string; kind: "project" | "agent"; id: string }>();
 	/**
@@ -646,6 +670,170 @@ export class MockBackend {
 				},
 			},
 		];
+	}
+
+	// ── Project conversation (Projects v3) ──
+
+	private projectSeq = 0;
+
+	/** Append a line to the project log (seq assigned here, like the writer). */
+	appendProjectEvent(line: Record<string, unknown>): Record<string, unknown> {
+		const e = { seq: ++this.projectSeq, ts: line.ts ?? iso(30 * 60 - 60 + this.projectSeq), ...line };
+		this.projectLog.push(e);
+		return e;
+	}
+
+	/** An owner message plus its deliveries, as the server would write them. */
+	projectTask(
+		msgId: string,
+		to: string[],
+		text: string,
+		extra: Record<string, unknown> = {},
+		outcome: (agentId: string) => { state: string; reason?: string } = (a) =>
+			this.projectSendOutcome.get(a) ?? { state: "delivered" },
+	): void {
+		this.appendProjectEvent({
+			ev: "message",
+			msg_id: msgId,
+			client_message_id: `cm-${msgId}`,
+			by: "u-alice",
+			kind: "owner",
+			to,
+			text,
+			artifacts: [],
+			...extra,
+		});
+		for (const a of to) {
+			const o = outcome(a);
+			this.appendProjectEvent({ ev: "delivery", msg_id: msgId, agent_id: a, state: "planned" });
+			if (o.state !== "not-sent")
+				this.appendProjectEvent({ ev: "delivery", msg_id: msgId, agent_id: a, state: "sending" });
+			this.appendProjectEvent({
+				ev: "delivery",
+				msg_id: msgId,
+				agent_id: a,
+				state: o.state,
+				...(o.reason ? { reason: o.reason } : {}),
+			});
+		}
+	}
+
+	/** The agent's turn ends: its text lands in its capture and the log gets a reply_ref. */
+	async projectReply(msgId: string, agentId: string, text: string, attribution = "exact"): Promise<void> {
+		const a = this.agent(agentId);
+		const sid = a.bindings[0]!.sessionId;
+		const cid = `conv-${agentId.slice(-4)}`;
+		const turnEndSeq = 1000 + this.projectCaptures.size;
+		this.projectCaptures.set(`${sid}\n${cid}\n${turnEndSeq}`, {
+			seq: turnEndSeq,
+			ts: iso(30 * 60 - 30),
+			ev: "turn_end",
+			prompt_id: `p-${msgId}-${agentId.slice(-4)}`,
+			turn_id: null,
+			agent_id: null,
+			pane: null,
+			data: { last_assistant_message: text },
+		});
+		const digest = createHash("sha256").update(text, "utf8").digest("hex");
+		this.appendProjectEvent({
+			ev: "reply_ref",
+			msg_id: msgId,
+			agent_id: agentId,
+			sid,
+			cid,
+			prompt_id: `p-${msgId}-${agentId.slice(-4)}`,
+			seq_from: turnEndSeq - 3,
+			seq_to: turnEndSeq,
+			turn_end_seq: turnEndSeq,
+			report_sha256: digest,
+			report_bytes: Buffer.byteLength(text),
+			truncated: false,
+			attribution,
+		});
+	}
+
+	/** Projects on, plus the conversation log, seeded with three concurrent threads. */
+	async enableProjectConversation(): Promise<void> {
+		this.enableProjects();
+		this.projectConversation = true;
+		const dev = AGENT_IDS.developer;
+		const arch = AGENT_IDS.architect;
+		const dev2 = AGENT_IDS.developer2;
+		this.projectTask(PROJECT_MSG_IDS.polling, [dev], "Make the project page poll adaptively\n5 s while an agent works, 15 s at rest.");
+		this.projectTask(PROJECT_MSG_IDS.notes, [arch], "Write the release notes", {}, () => ({
+			state: "refused",
+			reason: "busy",
+		}));
+		this.projectTask(PROJECT_MSG_IDS.backup, [arch, dev2], "Check the VM backups", {}, (a) =>
+			a === dev2 ? { state: "unconfirmed" } : { state: "delivered" },
+		);
+		await this.projectReply(PROJECT_MSG_IDS.polling, dev, "Done: adaptive cadence, timer stopped on logout. 628 tests pass.");
+		await this.projectReply(PROJECT_MSG_IDS.backup, arch, "Backups verified: 3 of 3 manifests are fresh.");
+	}
+
+	private async projectConversationRoute(
+		method: string,
+		kind: string,
+		id: string | undefined,
+		req: ReturnType<Route["request"]>,
+		body: Record<string, unknown> | null,
+		json: (status: number, body: unknown) => Promise<void>,
+	): Promise<void> {
+		if (kind === "events" && method === "GET" && id === undefined) {
+			const url = new URL(req.url());
+			const before = Number(url.searchParams.get("before") ?? Number.POSITIVE_INFINITY);
+			const limit = Math.min(Number(url.searchParams.get("limit") ?? 200), this.projectPageCap);
+			const older = this.projectLog.filter((e) => (e.seq as number) < before);
+			const page = older.slice(Math.max(0, older.length - limit));
+			await json(200, { events: page, hasMore: page.length < older.length });
+			return;
+		}
+		if (kind === "messages" && method === "GET" && id !== undefined) {
+			const msgId = decodeURIComponent(id);
+			const lines = this.projectLog.filter((e) => e.msg_id === msgId);
+			if (!lines.some((e) => e.ev === "message")) return json(404, { error: "not-found" });
+			return json(200, { events: lines });
+		}
+		if (kind === "messages" && method === "POST" && id === undefined) {
+			this.projectMessagePosts.push(body ?? {});
+			const cmid = body?.clientMessageId;
+			const to = Array.isArray(body?.to) ? (body.to as string[]) : [];
+			const text = typeof body?.text === "string" ? body.text : "";
+			if (typeof cmid !== "string" || to.length < 1 || to.length > 8 || text.trim() === "")
+				return json(400, { error: "invalid-body" });
+			const hash = JSON.stringify({ text, to: [...to].sort(), q: body?.quoteRef ?? null, r: body?.inReplyTo ?? null });
+			const prev = this.projectSends.get(cmid);
+			const deliveriesOf = (msgId: string) =>
+				to.map((agentId) => {
+					const last = [...this.projectLog]
+						.reverse()
+						.find((e) => e.ev === "delivery" && e.msg_id === msgId && e.agent_id === agentId);
+					return { agentId, state: last?.state, ...(last?.reason ? { reason: last.reason } : {}) };
+				});
+			if (prev) {
+				if (prev.hash !== hash) return json(409, { error: "idempotency-conflict" });
+				return json(202, { msgId: prev.msgId, deliveries: deliveriesOf(prev.msgId) });
+			}
+			const msgId = `m0000000-0000-4000-8000-${String(this.projectLog.length).padStart(12, "0")}`;
+			const q = body?.quoteRef as Record<string, unknown> | undefined;
+			this.projectTask(msgId, to, text, {
+				client_message_id: cmid,
+				...(typeof body?.inReplyTo === "string" ? { in_reply_to: body.inReplyTo } : {}),
+				...(q
+					? {
+							quote_ref: {
+								msg_id: q.msgId,
+								agent_id: q.agentId,
+								prompt_id: q.promptId,
+								report_sha256: q.reportSha256,
+							},
+						}
+					: {}),
+			});
+			this.projectSends.set(cmid, { msgId, hash });
+			return json(202, { msgId, deliveries: deliveriesOf(msgId) });
+		}
+		return json(404, { error: `No mock for ${method} conversation/${kind}` });
 	}
 
 	agent(agentId: string): MockAgent {
@@ -858,6 +1046,16 @@ export class MockBackend {
 				id: p.projectId,
 			});
 			await answer(201, { ...this.projectSummary(p), replayed: false });
+			return true;
+		}
+		const cv = /^\/projects\/([^/]+)\/conversation\/(events|messages)(?:\/([^/]+))?$/.exec(path);
+		if (cv) {
+			const project = own(decodeURIComponent(cv[1]!));
+			if (!project || !this.projectConversation) {
+				await json(404, { error: "not-found" });
+				return true;
+			}
+			await this.projectConversationRoute(method, cv[2]!, cv[3], req, body, json);
 			return true;
 		}
 		const m = /^\/projects\/([^/]+)\/agents(?:\/([^/]+))?$/.exec(path);
@@ -1168,7 +1366,13 @@ export class MockBackend {
 				resourceCaps: { cpuMaxCores: 8, memMaxMiB: 16384 },
 				uiShell: this.uiShell,
 				// P3a: present only with the flag on (byte-identical answer otherwise).
-				...(this.projectChat ? { features: { projectChat: true } } : {}),
+				...(this.projectChat
+					? {
+							features: this.projectConversation
+								? { projectChat: true, projectConversation: true }
+								: { projectChat: true },
+						}
+					: {}),
 			});
 		}
 		if (path === "/auth/login" && method === "POST") {
@@ -1491,6 +1695,15 @@ export class MockBackend {
 				}
 				if (fail) return json(fail.status, { error: fail.error });
 				return json(200, this.summary(conv));
+			}
+			const one = /^\/conversations\/([^/]+)\/events\/(\d+)$/.exec(rest);
+			if (one && method === "GET") {
+				const cid = decodeURIComponent(one[1]!);
+				const seq = Number(one[2]);
+				const cap = this.projectCaptures.get(`${id}\n${cid}\n${seq}`);
+				if (cap) return json(200, cap);
+				const e = this.conversations.find((c) => c.cid === cid)?.events.find((x) => x.seq === seq);
+				return e ? json(200, e) : json(404, { error: "Event not found" });
 			}
 			const ev = /^\/conversations\/([^/]+)\/events$/.exec(rest);
 			if (ev) {
