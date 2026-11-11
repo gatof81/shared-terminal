@@ -190,7 +190,7 @@ de este contrato tiene **su propia exclusión, aplicada por el kernel:**
 | `delivery` | `msg_id`, `agent_id`, `state` (§3.1), `binding{binding_id, epoch, sid, cid}` (desde `planned`, fijo), `composer_client_message_id` (UUID v4, fijo desde `planned`), `reason?`, `http?` (`{status, result, promptId?, seq?}` de la respuesta del Composer), `artifacts[]?` (en `placing`: lo que se va a colocar), `artifacts_placed?` (§6.4), `files_possibly_placed?`, `binding_verified_at?` (en `sending`, §3.3 c0), `authorized_by` (`owner` \| `collab:<grant_id>`) | `msg_id` + `agent_id` + `state` |
 | `reply_settling` | los mismos campos que `reply_ref` salvo `attribution`, más `settle_until` (ISO) — informativo: empezó el asentamiento de §4.1; **no** es una respuesta ni da elegibilidad. Si el asentamiento no se observa entero, la recuperación escribe con esos campos el `reply_ref{ambiguous{settle-unobserved}}` | `msg_id` + `agent_id` + `turn_end_seq` |
 | `reply_ref` | `msg_id`, `agent_id`, `sid`, `cid`, `prompt_id`, `seq_from`, `seq_to`, `turn_end_seq`, `report_sha256`, `report_bytes`, `truncated`, `attribution: exact\|ambiguous` | `msg_id` + `agent_id` + `prompt_id` |
-| `reply_late_close` | `msg_id`, `agent_id`, `prompt_id`, `seq` (del cierre tardío en la captura) | `msg_id` + `agent_id` + `seq` |
+| `reply_late_close` | `msg_id`, `agent_id`, `prompt_id`, `capture_seq` (el seq del cierre tardío en la captura) | `msg_id` + `agent_id` + `capture_seq` |
 | `artifact` | `sha256`, `name`, `bytes`, `source{kind: owner\|relay, sid, path}`, `by` | `sha256` + `source` |
 | `grant` | `grant_id`, `event: created\|revoked\|ended`, `task_msg_id`, `start` (agent_id), `initial_relay_from` (delivery o `null`, §7.2), `pairs[]` (`{from, to}` de agent_ids), `bindings[]` (`{agent_id, binding_id, epoch, sid}` de cada agente del permiso, fijados al crearlo), `bindings_read_at`, `max_relays`, `expires_at`, `artifacts: bool`, `by` (user_id, en `created`/`revoked`), `reason?` (en `ended`: §7.4), `relays_used` | `grant_id` + `event` |
 | `owner_ack` | `ack_id`, `client_ack_id`, `by` (user_id), `target{msg_id, agent_id?, report_sha256?}` — la persona marcó un elemento como atendido (§4.3); sin entrega ni efecto | `client_ack_id` |
@@ -422,7 +422,7 @@ Un observador del backend sigue las conversaciones con entregas `delivered` que 
      `turn_failed` con `P` dentro de esos 10 s ⇒ `ambiguous{second-close}`. Lo mismo ocurre con
      cualquier prompt, cierre o `gap` de las condiciones 2–4 que llegue en esos 10 s.
   6. **Cierre tardío.** Un cierre con `P` que llega **después** de escrito el `reply_ref` no lo cambia,
-     porque el registro es append-only. Se escribe `reply_late_close{msg_id, agent_id, prompt_id, seq}`,
+     porque el registro es append-only. Se escribe `reply_late_close{msg_id, agent_id, prompt_id, capture_seq}`,
      que la UI muestra junto a la respuesta.
 
   Si falla una ⇒ `attribution: ambiguous{reason}`, y la UI no la muestra como «la respuesta». Un
@@ -996,7 +996,7 @@ type ReplyRefEv = Base & {
   report_sha256: string | null; report_bytes: number; truncated: boolean;
   attribution: "exact" | "failed" | `ambiguous{${string}}`;
 };
-type ReplyLateCloseEv = Base & { ev: "reply_late_close"; msg_id: string; agent_id: string; prompt_id: string; seq: number };
+type ReplyLateCloseEv = Base & { ev: "reply_late_close"; msg_id: string; agent_id: string; prompt_id: string; capture_seq: number };
 type OwnerAckEv = Base & { ev: "owner_ack"; ack_id: string; client_ack_id: string; by: string;
   target: { msg_id: string; agent_id?: string; report_sha256?: string } };
 type RecoveryEv = Base & { ev: "recovery"; boot_id: string; source: "boot" | "restore";
