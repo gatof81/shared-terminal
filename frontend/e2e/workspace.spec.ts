@@ -190,17 +190,7 @@ test.describe("workspace — flag on", () => {
 		backend,
 		page,
 	}) => {
-		let dropped = false;
-		backend.override = async (method, path, route) => {
-			if (!dropped && method === "POST" && path.endsWith("/conversation/messages")) {
-				dropped = true;
-				// The server got it (the write lands) but the answer is lost.
-				await route.fetch().catch(() => null);
-				await route.abort("connectionreset");
-				return true;
-			}
-			return false;
-		};
+		backend.loseNextMessageAnswer = true;
 		await app.login("alice", `${projectHash}/new`);
 		const c = composer(page);
 		await c.locator(".tw-chip-add").click();

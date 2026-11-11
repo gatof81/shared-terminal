@@ -274,17 +274,36 @@ export class ProjectLog {
 	newestSeq = -1;
 	oldestSeq = Number.POSITIVE_INFINITY;
 
-	/** Fold events (any order, duplicates allowed); they are applied in seq order. */
+	/**
+	 * Fold events of the loaded window (any order, duplicates allowed); they
+	 * are applied in seq order and move the window's bounds.
+	 */
 	add(events: readonly LogEvent[]): void {
+		this.fold(events, true);
+	}
+
+	/**
+	 * A message fetched by id, with its deliveries and replies — the anchor
+	 * of a thread whose original is older than the loaded window. Folded
+	 * like the rest, but it does NOT move the window's bounds: "Earlier
+	 * threads" must keep paging from the oldest event the window holds, not
+	 * from an old message that was fetched out of order.
+	 */
+	addFetched(events: readonly LogEvent[]): void {
+		this.fold(events, false);
+	}
+
+	private fold(events: readonly LogEvent[], window: boolean): void {
 		const fresh = events.filter((e) => !this.seen.has(e.seq)).sort((a, b) => a.seq - b.seq);
+		for (const e of fresh) this.seen.add(e.seq);
+		if (window)
+			for (const e of events) {
+				if (e.seq > this.newestSeq) this.newestSeq = e.seq;
+				if (e.seq < this.oldestSeq) this.oldestSeq = e.seq;
+			}
 		// Apply in global seq order including orphans waiting on these messages,
 		// so a delivery older than its (just fetched) message never applies after
 		// a newer one.
-		for (const e of fresh) {
-			this.seen.add(e.seq);
-			if (e.seq > this.newestSeq) this.newestSeq = e.seq;
-			if (e.seq < this.oldestSeq) this.oldestSeq = e.seq;
-		}
 		const pending: LogEvent[] = [...fresh];
 		for (const e of fresh) {
 			if (e.ev === "message") {
@@ -297,14 +316,6 @@ export class ProjectLog {
 		}
 		pending.sort((a, b) => a.seq - b.seq);
 		for (const e of pending) this.apply(e);
-	}
-
-	/**
-	 * A message fetched by id, with its folded deliveries and replies — the
-	 * anchor of a thread whose original is older than the loaded window.
-	 */
-	addFetched(events: readonly LogEvent[]): void {
-		this.add(events);
 	}
 
 	has(msgId: string): boolean {

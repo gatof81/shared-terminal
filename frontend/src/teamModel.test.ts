@@ -233,6 +233,19 @@ describe("threads", () => {
 		expect(unrootedMessages(log)).toEqual([]);
 	});
 
+	it("a message fetched by id never moves the window's bounds (paging continues from the window)", () => {
+		const log = logOf([
+			msg(50, "f1", ["qa"], "follow-up", { in_reply_to: "m-old" }),
+			del(51, "f1", "qa", "delivered"),
+		]);
+		log.addFetched(parsed([msg(3, "m-old", ["dev"], "Old task")]));
+		expect(log.oldestSeq).toBe(50);
+		expect(log.newestSeq).toBe(51);
+		// An event already folded by id and then met again in a page still bounds the window.
+		log.add(parsed([msg(3, "m-old", ["dev"], "Old task")]));
+		expect(log.oldestSeq).toBe(3);
+	});
+
 	it("puts a relay under its grant's task thread", () => {
 		const log = logOf([
 			msg(1, "t1", ["dev"], "task"),

@@ -491,6 +491,8 @@ export class MockBackend {
 	projectCaptures = new Map<string, Record<string, unknown>>();
 	/** Every POST body the conversation route received. */
 	projectMessagePosts: Array<Record<string, unknown>> = [];
+	/** The next message POST is written, then its answer is lost (the connection resets). */
+	loseNextMessageAnswer = false;
 	/** Idempotency records, by `${owner}\n${clientRequestId}`. */
 	private creations = new Map<string, { hash: string; kind: "project" | "agent"; id: string }>();
 	/**
@@ -778,6 +780,7 @@ export class MockBackend {
 		req: ReturnType<Route["request"]>,
 		body: Record<string, unknown> | null,
 		json: (status: number, body: unknown) => Promise<void>,
+		route: Route,
 	): Promise<void> {
 		if (kind === "events" && method === "GET" && id === undefined) {
 			const url = new URL(req.url());
@@ -831,6 +834,11 @@ export class MockBackend {
 					: {}),
 			});
 			this.projectSends.set(cmid, { msgId, hash });
+			if (this.loseNextMessageAnswer) {
+				// Written, but the client never hears back.
+				this.loseNextMessageAnswer = false;
+				return route.abort("connectionreset");
+			}
 			return json(202, { msgId, deliveries: deliveriesOf(msgId) });
 		}
 		return json(404, { error: `No mock for ${method} conversation/${kind}` });
@@ -1055,7 +1063,7 @@ export class MockBackend {
 				await json(404, { error: "not-found" });
 				return true;
 			}
-			await this.projectConversationRoute(method, cv[2]!, cv[3], req, body, json);
+			await this.projectConversationRoute(method, cv[2]!, cv[3], req, body, json, route);
 			return true;
 		}
 		const m = /^\/projects\/([^/]+)\/agents(?:\/([^/]+))?$/.exec(path);
