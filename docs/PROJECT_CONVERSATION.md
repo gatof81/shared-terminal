@@ -144,7 +144,10 @@ de este contrato tiene **su propia exclusión, aplicada por el kernel:**
 1. **Lock de escritor.** Antes de abrir cualquier registro de proyecto, de recuperar o de aceptar una
    request, el backend lanza un proceso auxiliar:
 
-   `/usr/bin/flock --exclusive --nonblock <WORKSPACE_ROOT>/.projects/.writer.lock sh -c 'echo held; exec cat'`
+   `/usr/bin/flock --exclusive --nonblock --close <WORKSPACE_ROOT>/.projects/.writer.lock /bin/sh -c 'echo held; exec cat'`
+
+   (`--close`: el descriptor del lock no pasa al hijo, así que el lock vive exactamente lo que vive el
+   proceso `flock`, que es el proceso cuya salida observa el backend.)
 
    con `stdin` conectado a un pipe del backend.
    - **El lock está tomado** solo cuando llega la línea `held`. Un fallo inmediato (exit 1) significa
