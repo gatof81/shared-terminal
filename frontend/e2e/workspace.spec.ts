@@ -456,6 +456,38 @@ test.describe("workspace — layout", () => {
 		}
 	});
 
+	test("columns really sit side by side (they stacked as rows: the container query styled its own container)", async ({
+		app,
+		page,
+	}) => {
+		const box = (sel: string) => page.locator(`#project-view ${sel}`).first().boundingBox();
+		await page.setViewportSize({ width: 1280, height: 800 });
+		await app.login("alice", threadHash(PROJECT_MSG_IDS.polling));
+		await expect(page.locator("#project-view .tw-main .tw-timeline")).toBeVisible();
+		let now = (await box(".tw-now"))!;
+		let main = (await box(".tw-main"))!;
+		expect(now.x + now.width).toBeLessThanOrEqual(main.x + 1);
+		expect(Math.abs(now.y - main.y)).toBeLessThan(2);
+		// The two rules base rules used to override: no "‹ Now" beside Now, and
+		// "+ New task" leads the column instead of floating over its cards.
+		await expect(page.locator("#project-view .tw-back")).toBeHidden();
+		const newTask = (await box(".tw-new"))!;
+		const firstAgent = (await box(".tw-agent"))!;
+		expect(newTask.y + newTask.height).toBeLessThanOrEqual(firstAgent.y);
+		// Both columns take the page's full height: the thread is not a strip.
+		const page_ = (await box(""))!;
+		expect(main.height).toBeGreaterThan(page_.height - 2);
+		await page.setViewportSize({ width: 1700, height: 900 });
+		await expect(page.locator("#project-view .tw-side")).toBeVisible();
+		now = (await box(".tw-now"))!;
+		main = (await box(".tw-main"))!;
+		const side = (await box(".tw-side"))!;
+		expect(now.x + now.width).toBeLessThanOrEqual(main.x + 1);
+		expect(main.x + main.width).toBeLessThanOrEqual(side.x + 1);
+		expect(Math.abs(side.y - main.y)).toBeLessThan(2);
+		await noHorizontalScroll(page);
+	});
+
 	test("wide page: For you moves to its own column; medium: it folds into Now", async ({ app, page }) => {
 		await page.setViewportSize({ width: 1700, height: 900 });
 		await app.login("alice", projectHash);
