@@ -14,9 +14,16 @@ function scroller(top: number): HTMLElement {
 	return sc;
 }
 
+const realExec = document.execCommand;
+const realClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+
 afterEach(() => {
 	document.body.replaceChildren();
 	vi.restoreAllMocks();
+	// Assigned directly below (jsdom has no execCommand to spy on): put back.
+	document.execCommand = realExec;
+	if (realClipboard) Object.defineProperty(navigator, "clipboard", realClipboard);
+	else delete (navigator as { clipboard?: unknown }).clipboard;
 });
 
 describe("copyWithTextarea", () => {
@@ -41,8 +48,22 @@ describe("copyWithTextarea", () => {
 			sc.scrollTop = 0; // the browser scrolled to reveal the field
 			return true;
 		});
+		sc.style.scrollBehavior = "smooth"; // the Chat thread's own style
+		let behaviorAtWrite = "";
+		const desc = Object.getOwnPropertyDescriptor(Element.prototype, "scrollTop")!;
+		Object.defineProperty(sc, "scrollTop", {
+			get: () => desc.get!.call(sc),
+			set: (v: number) => {
+				behaviorAtWrite = sc.style.scrollBehavior;
+				desc.set!.call(sc, v);
+			},
+			configurable: true,
+		});
 		expect(copyWithTextarea("the report")).toBe(true);
 		expect(sc.scrollTop).toBe(1234);
+		// The restore lands at once (a smooth one would pass through "Load earlier").
+		expect(behaviorAtWrite).toBe("auto");
+		expect(sc.style.scrollBehavior).toBe("smooth");
 		expect(focusOpts).toEqual({ preventScroll: true });
 		expect(seen!.selectionStart).toBe(0);
 		expect(seen!.selectionEnd).toBe("the report".length);

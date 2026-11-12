@@ -14,7 +14,10 @@
  * 16 px font: no zoom-on-focus), is focused with `preventScroll`, selected
  * with setSelectionRange (iOS ignores select() on a readonly field), and
  * focus goes back to where it was, again without scrolling. As a last
- * guard, every scroll container that moved anyway is put back.
+ * guard, every scroll container that moved anyway is put back — layout
+ * scrollers only: an iOS visual-viewport pan is not a scroll position and
+ * can't be undone here, which is why preventScroll and the pinned
+ * position come first. This path runs only when the Clipboard API refuses.
  */
 export async function copyText(text: string, origin?: Element | null): Promise<boolean> {
 	try {
@@ -75,10 +78,17 @@ export function copyWithTextarea(text: string, origin?: Element | null): boolean
 	} finally {
 		ta.remove();
 		active?.focus({ preventScroll: true });
+		// Instantly: the Chat thread has `scroll-behavior: smooth`, and an
+		// animated restore would pass through positions that trigger its
+		// "Load earlier" fetch and mislead its at-the-end tracking.
 		for (const [el, top, left] of positions)
 			if (el.scrollTop !== top || el.scrollLeft !== left) {
+				const style = (el as HTMLElement).style;
+				const prev = style?.scrollBehavior;
+				if (style) style.scrollBehavior = "auto";
 				el.scrollTop = top;
 				el.scrollLeft = left;
+				if (style) style.scrollBehavior = prev ?? "";
 			}
 	}
 	return ok;
