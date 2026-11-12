@@ -42,7 +42,9 @@ const rowTop = (page: Page, text: string) =>
 	page
 		.locator(`${TL} > li`, { hasText: text })
 		.first()
-		.evaluate((li) => li.getBoundingClientRect().top - li.parentElement!.getBoundingClientRect().top);
+		.evaluate(
+			(li) => li.getBoundingClientRect().top - li.parentElement!.getBoundingClientRect().top,
+		);
 
 test.describe("project chat — thread scroll", () => {
 	test.beforeEach(async ({ backend }) => {
@@ -72,13 +74,13 @@ test.describe("project chat — thread scroll", () => {
 		await app.login("alice", `#/projects/${PID}/threads/${PROJECT_MSG_IDS.polling}`);
 		await expect(page.locator(TL)).toContainText("Follow-up 11");
 		await scrollTo(page, 0.3);
-		const reading = await page
-			.locator(`${TL} > li`)
-			.evaluateAll((lis) => {
-				const top = lis[0]!.parentElement!.getBoundingClientRect().top;
-				const li = lis.find((l) => l.getBoundingClientRect().bottom > top + 1)!;
-				return li.querySelector(".tw-bubble")?.textContent?.split("\n")[0] ?? li.textContent!.slice(0, 20);
-			});
+		const reading = await page.locator(`${TL} > li`).evaluateAll((lis) => {
+			const top = lis[0]!.parentElement!.getBoundingClientRect().top;
+			const li = lis.find((l) => l.getBoundingClientRect().bottom > top + 1)!;
+			return (
+				li.querySelector(".tw-bubble")?.textContent?.split("\n")[0] ?? li.textContent!.slice(0, 20)
+			);
+		});
 		const before = await rowTop(page, reading);
 		await backend.projectReply(followUp(11), AGENT_IDS.developer, "A live reply.\n".repeat(10));
 		await expect(page.locator(TL)).toContainText("A live reply.");
@@ -103,7 +105,26 @@ test.describe("project chat — thread scroll", () => {
 		await expect.poll(async () => Math.abs((await metrics(page)).top - top)).toBeLessThan(2);
 	});
 
-	test("phone keyboard: opening it keeps the end of the thread in view", async ({ app, page, isMobile }) => {
+	test("leaving the workspace (Manage agents) and coming back keeps the place (independent review of #611)", async ({
+		app,
+		page,
+	}) => {
+		await app.login("alice", `#/projects/${PID}/threads/${PROJECT_MSG_IDS.polling}`);
+		await expect(page.locator(TL)).toContainText("Follow-up 11");
+		await scrollTo(page, 0.25);
+		const top = (await metrics(page)).top;
+		await page.goto(`/#/projects/${PID}/agents`);
+		await expect(page.locator(TL)).toHaveCount(0);
+		await page.goBack();
+		await expect(page.locator(TL)).toContainText("Follow-up 11");
+		await expect.poll(async () => Math.abs((await metrics(page)).top - top)).toBeLessThan(2);
+	});
+
+	test("phone keyboard: opening it keeps the end of the thread in view", async ({
+		app,
+		page,
+		isMobile,
+	}) => {
 		test.skip(!isMobile, "the soft keyboard is a phone concern");
 		await app.login("alice", `#/projects/${PID}/threads/${PROJECT_MSG_IDS.polling}`);
 		await expect(page.locator(TL)).toContainText("Follow-up 11");
