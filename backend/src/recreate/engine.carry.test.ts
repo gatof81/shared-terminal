@@ -572,6 +572,24 @@ describe("carry-over recreation (§2.7.7)", () => {
 		expect(oName).toMatch(RESERVED_NAME_RE);
 		expect((await recordOf(h))?.retained).toMatchObject({ containerId: O_ID, role: "O" });
 	});
+
+	it("#549: the rollback in a LATER millisecond than the carry-over — N's parking and O's rename-back share one; still 409", async () => {
+		// The collision #549 reported: the forward run in an earlier ms, then
+		// N parked and O renamed back within one ms. This case pins the
+		// rename-back half; the frozen-throughout case above pins the parking half.
+		let clock = 1_800_000_000_000;
+		const h = await setup(undefined, () => clock);
+		dirtyLayer(h);
+		expect((await h.engine.recreate(SID, IMG_N, { preserve: true })).ok).toBe(true);
+		clock += 1000;
+		const nId = nIdOf(h) as string;
+		await h.docker.stop(nId);
+		h.d1.casMode = "rejected";
+		const r = await h.engine.rollbackToRetained(SID);
+		expect(r).toMatchObject({ ok: false, status: 409, code: "rollback-not-applied" });
+		expect(h.docker.containers.get(nId)?.name).toBe(CANONICAL);
+		expect(h.docker.containers.get(O_ID)?.name).toMatch(RESERVED_NAME_RE);
+	});
 });
 
 // ── D8 recovery ─────────────────────────────────────────────────────────────
