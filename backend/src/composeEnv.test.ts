@@ -12,6 +12,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { parsePolicy } from "./conversation/cliPolicy.js";
 import { composerFlagEnabled, parseCliVersions } from "./conversation/composer.js";
+import { projectConversationFlagEnabled } from "./projects/conversation/store.js";
 
 const compose = readFileSync(path.resolve(__dirname, "../../docker-compose.yml"), "utf8");
 
@@ -100,6 +101,27 @@ describe("docker-compose.yml → composer env (3.2)", () => {
 					CONVERSATION_COMPOSER_ENABLED: "yes",
 				}),
 			),
+		).toBe(false);
+	});
+});
+
+describe("docker-compose.yml → project conversation flag (D1)", () => {
+	it("PROJECT_CONVERSATION_ENABLED is forwarded with the empty default ⇒ off; only true/1 turn it on", () => {
+		const env = appEnvironment();
+		const shape = (name: string) => `$\{${name}:-}`;
+		expect(env.get("PROJECT_CONVERSATION_ENABLED")).toBe(shape("PROJECT_CONVERSATION_ENABLED"));
+		expect(env.get("PROJECT_CHAT_ENABLED")).toBe(shape("PROJECT_CHAT_ENABLED"));
+		const tpl = env.get("PROJECT_CONVERSATION_ENABLED")!;
+		expect(interpolate(tpl, {})).toBe("");
+		expect(projectConversationFlagEnabled(interpolate(tpl, {}))).toBe(false);
+		expect(
+			projectConversationFlagEnabled(interpolate(tpl, { PROJECT_CONVERSATION_ENABLED: "true" })),
+		).toBe(true);
+		expect(
+			projectConversationFlagEnabled(interpolate(tpl, { PROJECT_CONVERSATION_ENABLED: "1" })),
+		).toBe(true);
+		expect(
+			projectConversationFlagEnabled(interpolate(tpl, { PROJECT_CONVERSATION_ENABLED: "yes" })),
 		).toBe(false);
 	});
 });

@@ -1143,6 +1143,19 @@ until the agent is removed, with the flag on or off (bindings outlive the flag).
 flag has been on is not free:** the previous backend does not guard bound sessions and its backup does
 not export the directory — prefer turning the flag off, and see PROJECTS.md §8 for the conditions.
 
+## Project conversation (D1, `docs/PROJECT_CONVERSATION.md`)
+
+Off by default (`PROJECT_CONVERSATION_ENABLED` unset; `docker-compose.yml` forwards it with the empty
+default). It is effective only when `PROJECT_CHAT_ENABLED` and `CONVERSATION_COMPOSER_ENABLED` are also
+on; otherwise the routes are not mounted (404), `/ws/project/` is not admitted, nothing is written
+under `<WORKSPACE_ROOT>/.projects/` and `GET /api/auth/status` is byte-identical (with it on, it gains
+`features.projectConversation`). No D1 migration. When on, the backend holds the single-writer lock
+`<WORKSPACE_ROOT>/.projects/.writer.lock` through `/usr/bin/flock` (in the image, checked in CI): a
+second backend on the same `WORKSPACE_ROOT` gets 503 `project-writer-unavailable` and writes nothing.
+`npm run backup` includes `.projects/`; a restore of it refuses while the flag is on (§8). Rollback =
+unset it and restart the backend; the log under `.projects/` stays on disk, inert. Turning it on is a
+separate decision from deploying the code.
+
 ## Backup & restore (#240)
 
 Operator-level, host-shell only (deliberately not API surface — a dump
