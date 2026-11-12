@@ -2193,7 +2193,7 @@ incertidumbre no se envía**; nunca "por si acaso".
 
 | Código | Condición |
 | --- | --- |
-| `send-in-progress` | el pane está **bloqueado** (§8.1.4): su registro de pane (§8.1.4.1) tiene una operación con **otro** `clientMessageId` cuyo `result` está pendiente o cuyos `effects` están pendientes, viva o persistida; `detail: in-progress\|effects-pending\|unverifiable` y `clientMessageId` de esa operación. **(#546)** `unverifiable` también, sin `clientMessageId`, cuando el archivo de eventos de la conversación no se puede leer para la búsqueda de idempotencia (§8.1.4, regla 9): termina cuando el archivo vuelve a ser legible, sin resolución en `composer/panes`. El mismo id pendiente no es 409: es 202 `uncertain` (§8.1.4, regla 9) |
+| `send-in-progress` | el pane está **bloqueado** (§8.1.4): su registro de pane (§8.1.4.1) tiene una operación con **otro** `clientMessageId` cuyo `result` está pendiente o cuyos `effects` están pendientes, viva o persistida; `detail: in-progress\|effects-pending\|unverifiable` y `clientMessageId` de esa operación. **(#546)** `unverifiable` también, sin `clientMessageId`, cuando el archivo de eventos de la conversación (o su `.1`, cuando la búsqueda lo necesita) no se puede leer para la búsqueda de idempotencia (§8.1.4, regla 9): termina cuando vuelve a ser legible, sin resolución en `composer/panes`. El mismo id pendiente no es 409: es 202 `uncertain` (§8.1.4, regla 9) |
 | `not-interactive` | `kind ≠ interactive`, o la conversación no tiene binding (`pane_id` nulo) |
 | `session-not-running` | el contenedor no está `running` |
 | `capture-inactive` | `capture.effective = false` en un probe fresco del relay (D7): sin hooks no hay ack |
@@ -2395,10 +2395,10 @@ Reglas (*MUST*):
    con el mismo `promptId`; un 502 jamás se convierte en 202—; (c) si no está en ninguno, es un
    intento nuevo. **(#546)** La búsqueda (b) no depende de que el snapshot esté al día: si el id no
    está en el snapshot, se reconstruye la ventana desde el archivo de eventos (y `.1` cuando el
-   snapshot es de una generación L7 anterior), sin escribir nada. Si el archivo de eventos **no se
-   puede leer** (un error distinto de "no existe"), el envío es 409 `send-in-progress{detail:
-   unverifiable}` —nunca un intento nuevo— y deja de serlo en cuanto el archivo vuelve a poder
-   leerse; no hay nada que resolver en `composer/panes` (no hay registro de pane implicado).
+   snapshot es de una generación L7 anterior), sin escribir nada. Si el archivo de eventos (o su
+   `.1`, cuando la búsqueda lo necesita) **no se puede leer** (un error distinto de "no existe"),
+   el envío es 409 `send-in-progress{detail: unverifiable}` —nunca un intento nuevo— y deja de
+   serlo en cuanto vuelve a poder leerse; no hay nada que resolver en `composer/panes` (no hay registro de pane implicado).
    Un id **distinto** sobre un pane bloqueado es 409 `send-in-progress`. Un doble
    clic produce **como máximo una** secuencia de entrega. La recuperación tras reinicio **nunca
    reenvía** un intento incompleto.
