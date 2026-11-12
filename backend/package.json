@@ -22,6 +22,7 @@
     "conversation:attest": "node dist/conversation/attestCli.js attest",
     "composer:resolve": "node dist/conversation/composerCli.js",
     "recreate:admin": "node dist/recreate/adminCli.js",
+    "projects:check-log": "node dist/projects/conversation/logCheckCli.js",
     "restore": "node dist/backup.js restore",
     "backup:harden": "node dist/backup.js harden",
     "docker:build-session": "../scripts/build-session-image.sh"
