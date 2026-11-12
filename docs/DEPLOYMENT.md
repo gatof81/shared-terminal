@@ -724,7 +724,7 @@ Each stage can be stopped and rolled back, and moving to the next one needs
 explicit authorization. The detailed plan, with the pilot checklist, is in
 [design/phase3-3.0d-audit.md §6–§7](./design/phase3-3.0d-audit.md).
 
-**Preflight (no change to the VM):**
+**Preflight (no change to what is running: backend, image, sessions and `.env` stay as they are; step 2 only writes a backup directory on the host):**
 
 1. Record the SHA running today (`git rev-parse HEAD`) and the session
    image id (`docker image inspect shared-terminal-session --format
