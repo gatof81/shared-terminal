@@ -118,6 +118,9 @@ describe("docker-compose.yml → project conversation flag (D1)", () => {
 			projectConversationFlagEnabled(interpolate(tpl, { PROJECT_CONVERSATION_ENABLED: "true" })),
 		).toBe(true);
 		expect(
+			projectConversationFlagEnabled(interpolate(tpl, { PROJECT_CONVERSATION_ENABLED: "1" })),
+		).toBe(true);
+		expect(
 			projectConversationFlagEnabled(interpolate(tpl, { PROJECT_CONVERSATION_ENABLED: "yes" })),
 		).toBe(false);
 	});
