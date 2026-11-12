@@ -281,12 +281,52 @@ describe("For you", () => {
 		]);
 	});
 
-	it("a reply closes only the item it quotes, never its sibling (two recipients, one message)", () => {
-		const q = { msg_id: "t1", agent_id: "dev", prompt_id: "pd", report_sha256: "ab".repeat(32) };
-		const items = forYou(
-			logOf([...base, msg(6, "r1", ["dev"], "thanks", { in_reply_to: "t1", quote_ref: q })]),
-		);
-		expect(items.filter((i) => i.kind === "replied").map((i) => i.agentId)).toEqual(["qa"]);
+	const qDev = { msg_id: "t1", agent_id: "dev", prompt_id: "pd", report_sha256: "ab".repeat(32) };
+	const quoting = (deliveries: unknown[], to = ["dev"]) =>
+		forYou(
+			logOf([
+				...base,
+				msg(6, "r1", to, "thanks", { in_reply_to: "t1", quote_ref: qDev }),
+				...deliveries,
+			]),
+		)
+			.filter((i) => i.kind === "replied")
+			.map((i) => i.agentId);
+
+	it("a delivered quote closes only the reply it quotes, never its sibling (two recipients, one message)", () => {
+		expect(quoting([del(7, "r1", "dev", "delivered")])).toEqual(["qa"]);
+	});
+
+	it("a quote that didn't reach the agent closes nothing: refused, not sent, unsure, still sending", () => {
+		for (const d of [
+			del(7, "r1", "dev", "refused", { reason: "busy" }),
+			del(7, "r1", "dev", "not-sent", { reason: "binding-changed" }),
+			del(7, "r1", "dev", "uncertain"),
+			del(7, "r1", "dev", "unconfirmed"),
+			del(7, "r1", "dev", "failed"),
+			del(7, "r1", "dev", "sending"),
+		])
+			expect(quoting([d]), JSON.stringify(d)).toEqual(["qa", "dev"]);
+		// No delivery recorded yet at all.
+		expect(quoting([])).toEqual(["qa", "dev"]);
+	});
+
+	it("an uncertain quote that is later settled as delivered closes it", () => {
+		expect(
+			quoting([
+				del(7, "r1", "dev", "uncertain"),
+				del(8, "r1", "dev", "settled", { result: "delivered" }),
+			]),
+		).toEqual(["qa"]);
+	});
+
+	it("a quote delivered to someone else doesn't close the quoted agent's reply", () => {
+		// Quoting dev's reply in a message that only qa received.
+		expect(quoting([del(7, "r1", "qa", "delivered")], ["qa"])).toEqual(["qa", "dev"]);
+		// Sent to both; dev refused, qa delivered: dev's reply stays, qa's too (not quoted).
+		expect(
+			quoting([del(7, "r1", "dev", "refused"), del(8, "r1", "qa", "delivered")], ["dev", "qa"]),
+		).toEqual(["qa", "dev"]);
 	});
 
 	it("answering the thread without quoting closes nothing", () => {

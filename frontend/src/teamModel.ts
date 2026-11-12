@@ -622,9 +622,10 @@ export interface ForYouItem {
  * clears on every device at once:
  *
  *  - "replied": a reply (`reply_ref`, any attribution) that nothing passed
- *    on. It clears when the person sends a message whose `quote_ref` names
- *    exactly that reply (msg, agent, prompt) — "Reply…" on the card always
- *    sets it. A message answering the same original for ANOTHER agent's
+ *    on. It clears when a message whose `quote_ref` names exactly that
+ *    reply (msg, agent, prompt) was DELIVERED to that agent — "Reply…" on
+ *    the card always sets it; a refused / not-sent / pending / unsure quote
+ *    clears nothing. A message answering the same original for ANOTHER agent's
  *    reply clears only that one (owner criterion 3: a reply closes only the
  *    item it corresponds to). (D3 relays are not handled here yet.)
  *  - "not-delivered" / "unsure": a delivery that didn't land. It clears
@@ -640,8 +641,13 @@ export function forYou(log: ProjectLog): ForYouItem[] {
 	// Later deliveries to an agent, per thread: the clearing evidence.
 	const laterOk = new Map<string, number>(); // `${root}\n${agent}` → newest delivered seq
 	for (const m of log.messages.values()) {
+		// A reply is answered only once the message quoting it reached THAT
+		// agent: a quote that was refused, never sent, still on its way or of
+		// unknown fate (unsure) answers nothing, and the card stays (owner
+		// review of #589). A later `settled{delivered}` counts.
 		const q = m.message.quoteRef;
-		if (q) quoted.add(`${q.msgId}\n${q.agentId}\n${q.promptId}`);
+		if (q && m.message.kind === "owner" && m.deliveries.get(q.agentId)?.state === "delivered")
+			quoted.add(`${q.msgId}\n${q.agentId}\n${q.promptId}`);
 		if (m.message.kind !== "owner") continue;
 		const root = threadRootOf(log, m.message.msgId);
 		if (root === null) continue;
