@@ -108,13 +108,19 @@ function hueOf(id: string): number {
 	return h;
 }
 
-function avatar(agents: Agents, id: string, small = false): HTMLElement {
+/**
+ * `dot`: the live presence dot. Left off the avatars inside a thread's
+ * replies: presence changes on its own (evidence ages), and a dot in a row
+ * would make that row — and the timeline — differ without any reply
+ * changing, which would reset the person's text selection there.
+ */
+function avatar(agents: Agents, id: string, small = false, dot = true): HTMLElement {
 	const a = agents.byId.get(id);
 	const av = el("span", small ? "tw-av tw-av-s" : "tw-av", a ? initials(a.handle) : "?");
 	av.setAttribute("aria-hidden", "true");
 	av.style.setProperty("--tw-hue", String(hueOf(id)));
 	const p = agents.presence.get(id);
-	if (p) av.appendChild(el("span", `tw-dot tw-dot-${p.tone}`));
+	if (p && dot) av.appendChild(el("span", `tw-dot tw-dot-${p.tone}`));
 	return av;
 }
 
@@ -1123,7 +1129,7 @@ class Workspace {
 		li.style.setProperty("--tw-hue", String(hueOf(agentId)));
 		const meta = el("div", "tw-meta");
 		meta.append(
-			avatar(this.agents, agentId, true),
+			avatar(this.agents, agentId, true, false),
 			el("b", undefined, handleOf(this.agents, agentId)),
 			el("span", "tw-muted", ` · ${clockText(r.ts)}`),
 		);
@@ -1190,7 +1196,7 @@ class Workspace {
 		li.style.setProperty("--tw-hue", String(hueOf(agentId)));
 		const meta = el("div", "tw-meta");
 		meta.append(
-			avatar(this.agents, agentId, true),
+			avatar(this.agents, agentId, true, false),
 			el("b", undefined, handleOf(this.agents, agentId)),
 			el("span", "tw-muted", " · reply received, confirming…"),
 		);
@@ -1229,8 +1235,16 @@ class Workspace {
  * place survive it (independent review of #589). Returns true if replaced.
  */
 function replaceIfChanged(container: Element, nodes: readonly Node[]): boolean {
-	const cur = container.childNodes;
+	const cur = [...container.childNodes];
 	if (cur.length === nodes.length && nodes.every((n, i) => cur[i]!.isEqualNode(n))) return false;
+	if (cur.length === nodes.length) {
+		// Same shape: swap only the children that differ, so a change in one
+		// row keeps the others (and a selection inside them) in place.
+		nodes.forEach((n, i) => {
+			if (!cur[i]!.isEqualNode(n)) container.replaceChild(n, cur[i]!);
+		});
+		return true;
+	}
 	container.replaceChildren(...nodes);
 	return true;
 }
