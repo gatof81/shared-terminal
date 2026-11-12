@@ -981,3 +981,29 @@
 .tw-attach-note:empty {
 	display: none;
 }
+
+/* "↓ N new" — rows that landed below a reader of earlier messages
+   (ThreadScroll in teamView.ts). Overlaps the bottom of the timeline with
+   no net height (margin-top = -height), so showing it never moves rows. */
+.tw-newer {
+	align-self: center;
+	position: relative;
+	z-index: 2;
+	height: 32px;
+	margin-top: -32px;
+	transform: translateY(-10px);
+	padding: 0 14px;
+	border-radius: 16px;
+	border: 1px solid var(--c-accent);
+	background: var(--c-surface);
+	color: var(--c-text);
+	font: inherit;
+	font-size: 0.82rem;
+	font-weight: 600;
+	box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+	cursor: pointer;
+}
+
+.tw-newer[hidden] {
+	display: none;
+}

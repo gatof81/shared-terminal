@@ -892,6 +892,143 @@ class AttachPicker {
 	}
 }
 
+// ── Thread scroll ───────────────────────────────────────────────────────────
+
+/** Within this many px of the end, the reader is "at the end" and is followed. */
+const FOLLOW_PX = 64;
+
+/**
+ * Where the reader is in a thread's timeline (the one scroll area of the
+ * main column), per thread:
+ *  - a thread opens at its newest messages, or where the reader left it;
+ *  - new rows are followed only while the reader is at the end — a reader
+ *    of earlier messages keeps their place (by the row they are looking at,
+ *    not by a distance: rows are also inserted above, e.g. a reply landing
+ *    between two messages) and is told how many arrived below;
+ *  - a height change with no scroll (the phone keyboard opening, the
+ *    composer growing a line) keeps the end in view for a reader who was
+ *    there — `atEnd` still holds the truth from before the shrink, which
+ *    fires no scroll event.
+ * Every position write is instant: a smooth scroll would animate a restore.
+ */
+class ThreadScroll {
+	private root: string | null = null;
+	private atEnd = true;
+	private saved = new Map<string, { top: number; atEnd: boolean }>();
+	/** Rows (by seq) the reader has had at the end; anything newer below is "new". */
+	private seenSeq = -1;
+	readonly pill = el("button", "tw-newer");
+
+	constructor(private readonly box: HTMLElement) {
+		this.pill.type = "button";
+		this.pill.hidden = true;
+		this.pill.addEventListener("click", () => this.toEnd());
+		box.addEventListener(
+			"scroll",
+			() => {
+				this.atEnd = this.isAtEnd();
+				if (this.root !== null)
+					this.saved.set(this.root, { top: box.scrollTop, atEnd: this.atEnd });
+				if (this.atEnd) this.clearNew();
+			},
+			{ passive: true },
+		);
+		if (typeof ResizeObserver !== "undefined")
+			new ResizeObserver(() => {
+				if (this.atEnd && box.isConnected) this.set(box.scrollHeight);
+			}).observe(box);
+	}
+
+	private isAtEnd(): boolean {
+		return this.box.scrollHeight - this.box.scrollTop - this.box.clientHeight < FOLLOW_PX;
+	}
+
+	private set(top: number): void {
+		const prev = this.box.style.scrollBehavior;
+		this.box.style.scrollBehavior = "auto";
+		this.box.scrollTop = top;
+		this.box.style.scrollBehavior = prev;
+	}
+
+	private toEnd(): void {
+		this.set(this.box.scrollHeight);
+		this.atEnd = true;
+		this.clearNew();
+	}
+
+	private clearNew(): void {
+		this.seenSeq = this.lastSeq();
+		this.pill.hidden = true;
+	}
+
+	private lastSeq(): number {
+		let max = -1;
+		for (const c of this.box.children) {
+			const n = Number((c as HTMLElement).dataset.seq);
+			if (Number.isFinite(n) && n !== Number.MAX_SAFE_INTEGER && n > max) max = n;
+		}
+		return max;
+	}
+
+	/** The first row at least partly in view, and where its top edge sits. */
+	private anchor(): { seq: string; offset: number } | null {
+		const top = this.box.getBoundingClientRect().top;
+		for (const c of this.box.children) {
+			const r = c.getBoundingClientRect();
+			const seq = (c as HTMLElement).dataset.seq;
+			if (seq !== undefined && r.bottom > top) return { seq, offset: r.top - top };
+		}
+		return null;
+	}
+
+	/**
+	 * Run `update` (which replaces the rows and puts the timeline in place),
+	 * keeping the reader where they should be. `rootId` is the open thread.
+	 */
+	render(rootId: string, update: () => boolean): void {
+		const wasShown = this.box.isConnected && this.box.clientHeight > 0;
+		const switched = this.root !== rootId || !wasShown;
+		const anchor = !switched && !this.atEnd ? this.anchor() : null;
+		const changed = update();
+		if (switched) {
+			this.root = rootId;
+			const s = this.saved.get(rootId);
+			if (s && !s.atEnd) {
+				this.set(s.top);
+				this.atEnd = this.isAtEnd();
+			} else this.toEnd();
+			// What a thread shows when it is (re)opened is not "new".
+			this.clearNew();
+			return;
+		}
+		if (!changed) return;
+		if (this.atEnd) {
+			this.toEnd();
+			return;
+		}
+		if (anchor) {
+			const node = [...this.box.children].find(
+				(c) => (c as HTMLElement).dataset.seq === anchor.seq,
+			) as HTMLElement | undefined;
+			if (node) {
+				const now = node.getBoundingClientRect().top - this.box.getBoundingClientRect().top;
+				this.set(this.box.scrollTop + (now - anchor.offset));
+			}
+		}
+		const last = this.lastSeq();
+		if (this.seenSeq < 0) this.seenSeq = last;
+		const fresh = [...this.box.children].filter((c) => {
+			const n = Number((c as HTMLElement).dataset.seq);
+			return n > this.seenSeq && n !== Number.MAX_SAFE_INTEGER;
+		}).length;
+		if (fresh > 0) {
+			this.pill.textContent = `↓ ${fresh} new`;
+			this.pill.setAttribute("aria-label", `${fresh} new below — go to the latest`);
+			this.pill.hidden = false;
+		}
+	}
+}
+
 // ── Workspace ───────────────────────────────────────────────────────────────
 
 class Workspace {
@@ -961,6 +1098,7 @@ class Workspace {
 
 	private mainHead = el("div", "tw-main-head");
 	private timeline = el("ol", "tw-timeline");
+	private scroll = new ThreadScroll(this.timeline);
 
 	/** Off screen: stop polling (the log stays, a return renders at once). */
 	suspend(): void {
@@ -1435,11 +1573,16 @@ class Workspace {
 			}
 		}
 		rows.sort((a, b) => a.seq - b.seq);
-		replaceIfChanged(
-			timeline,
-			rows.map((r) => r.node),
-		);
-		this.setMain(syncHead(), timeline, composer.root);
+		// The row's place in the log: what the reader's place is kept by.
+		for (const r of rows) r.node.dataset.seq = String(r.seq);
+		this.scroll.render(rootId, () => {
+			const changed = replaceIfChanged(
+				timeline,
+				rows.map((r) => r.node),
+			);
+			this.setMain(syncHead(), timeline, this.scroll.pill, composer.root);
+			return changed;
+		});
 	}
 
 	private async fetchThreadRoot(msgId: string): Promise<void> {
