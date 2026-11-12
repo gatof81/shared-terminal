@@ -1374,8 +1374,9 @@ git -c safe.directory='*' -C proj rev-parse HEAD && git -c safe.directory='*' -C
 	// #475 — the checks above prove the CLI stops SENDING; this proves the
 	// receiver itself refuses what still ARRIVES. One well-formed
 	// UserPromptSubmit, shaped and addressed as relay.py forwards it, is
-	// POSTed from N with N's own ST_INGEST_TOKEN (expanded inside N's shell,
-	// never in this process nor on a command line), for a fresh Claude
+	// POSTed from N with N's own ST_INGEST_TOKEN (expanded by N's shell into
+	// the stdin of curl through the `printf` builtin — never in this process,
+	// nor in any argv readable from /proc/<pid>/cmdline), for a fresh Claude
 	// session id so the only effect a revocation may leave is the `gap
 	// revoked` it writes into the conversations already open.
 	const probeToken = (await tokenOf(n1)) ?? "";
@@ -1412,9 +1413,11 @@ git -c safe.directory='*' -C proj rev-parse HEAD && git -c safe.directory='*' -C
 			prompt,
 			prompt_id: randomUUID(),
 		});
+		// `-H @-` (curl ≥ 7.55; the image's Ubuntu 24.04 ships 8.5) reads the
+		// header from stdin: the token is in no process's argv.
 		const post = await sh(
 			n1,
-			`curl -s -o /dev/null -w '%{http_code}' -X POST http://${host}:3001/ingest/claude/hook -H 'Content-Type: application/json' -H "Authorization: Bearer $ST_INGEST_TOKEN" -H 'X-ST-Session: ${s1.sid}' -H 'X-ST-Tmux-Pane: %0' --data-binary '${body}'`,
+			`printf 'Authorization: Bearer %s\\n' "$ST_INGEST_TOKEN" | curl -s -o /dev/null -w '%{http_code}' -X POST http://${host}:3001/ingest/claude/hook -H @- -H 'Content-Type: application/json' -H 'X-ST-Session: ${s1.sid}' -H 'X-ST-Tmux-Pane: %0' --data-binary '${body}'`,
 		);
 		// The 204 goes out before `ingest` runs: wait for its outcome, then
 		// for the store's worker, which writes after the outcome.
@@ -1435,11 +1438,19 @@ git -c safe.directory='*' -C proj rev-parse HEAD && git -c safe.directory='*' -C
 		for (const [f, n] of evAfter) {
 			const from = evBefore.get(f) ?? 0;
 			if (n <= from) continue;
-			for (const l of (await asRoot(`tail -c +${from + 1} /wr/.conversations/${s1.sid}/${f}`)).out
-				.split("\n")
-				.filter(Boolean)) {
-				const e = JSON.parse(l) as { ev?: unknown; data?: { reason?: unknown } };
-				newEvents.push({ ev: e.ev, reason: e.data?.reason });
+			const out = (await asRoot(`tail -c +${from + 1} /wr/.conversations/${s1.sid}/${f}`)).out;
+			const lines = out.split("\n");
+			// The store may be mid-append: only newline-terminated lines are
+			// events; the trailing piece (empty, or a partial line) is not.
+			lines.pop();
+			for (const l of lines.filter(Boolean)) {
+				try {
+					const e = JSON.parse(l) as { ev?: unknown; data?: { reason?: unknown } };
+					newEvents.push({ ev: e.ev, reason: e.data?.reason });
+				} catch {
+					// Recorded, never thrown: it fails the rule below as a check.
+					newEvents.push({ ev: "(unparseable line)", reason: f });
+				}
 			}
 		}
 		return {
@@ -1463,13 +1474,19 @@ git -c safe.directory='*' -C proj rev-parse HEAD && git -c safe.directory='*' -C
 	const outcomeOf = (o: Probe["outcomes"][number]) =>
 		o.outcome as { accepted?: boolean; reason?: string; ok?: boolean };
 	const anyAccepted = (p: Probe) => p.outcomes.some((o) => outcomeOf(o).accepted === true);
+	// Tied to the probe: exactly ONE ingest outcome landed after it was sent.
+	const ingestOutcomes = (p: Probe) => p.outcomes.filter((o) => o.step === "ingest");
+	const onlyIngest = (p: Probe) => {
+		const i = ingestOutcomes(p);
+		return i.length === 1 ? outcomeOf(i[0]) : null;
+	};
 	// The assertion S7 makes, as one predicate so the mutant below is judged
 	// by exactly the same rule.
 	const rejectedByRevocation = (p: Probe) =>
 		p.reached === 1 &&
 		p.sameToken &&
 		!p.outcomes.some((o) => o.step === "authorize") &&
-		p.outcomes.some((o) => o.step === "ingest" && outcomeOf(o).reason === "revoked") &&
+		onlyIngest(p)?.reason === "revoked" &&
 		!anyAccepted(p) &&
 		p.newFiles.length === 0 &&
 		p.newEvents.every((e) => e.ev === "gap" && e.reason === "revoked");
@@ -1481,8 +1498,8 @@ git -c safe.directory='*' -C proj rev-parse HEAD && git -c safe.directory='*' -C
 		{ reached: real.reached, sameToken: real.sameToken },
 	);
 	check(
-		"direct POST: authorized, then refused by the revocation (outcome `revoked`), nothing accepted",
-		real.outcomes.some((o) => o.step === "ingest" && outcomeOf(o).reason === "revoked") &&
+		"direct POST: authorized, then exactly one ingest outcome — refused by the revocation (`revoked`), nothing accepted",
+		onlyIngest(real)?.reason === "revoked" &&
 			!anyAccepted(real) &&
 			!real.outcomes.some((o) => o.step === "authorize"),
 		real.outcomes,
@@ -1525,7 +1542,7 @@ git -c safe.directory='*' -C proj rev-parse HEAD && git -c safe.directory='*' -C
 	);
 	check(
 		"mutant: the same probe reached it and was accepted and persisted (the check is load-bearing)",
-		mut.reached === 1 && anyAccepted(mut) && mutPersisted,
+		mut.reached === 1 && onlyIngest(mut)?.accepted === true && mutPersisted,
 		{ reached: mut.reached, outcomes: mut.outcomes, persisted: mutPersisted },
 	);
 	check("mutant: the S7 rule fails on it", !rejectedByRevocation(mut));
