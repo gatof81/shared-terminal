@@ -9,13 +9,17 @@
    No width ever needs horizontal scrolling: every column can shrink to
    0 and long words wrap. */
 
+/* The page, not .tw, is the size container: a container query styles only a
+   container's DESCENDANTS, so with .tw as the container the column rules
+   below (on .tw itself) never applied and every width stacked Now, the
+   thread and For you as rows (owner review 2026-11-12). */
 #project-view:has(> .tw) {
 	padding: 0;
 	overflow: hidden;
+	container-type: inline-size;
 }
 
 .tw {
-	container-type: inline-size;
 	height: 100%;
 	display: grid;
 	grid-template-columns: minmax(0, 1fr);
@@ -76,11 +80,24 @@
 	.tw-main {
 		display: flex;
 	}
-	.tw-back {
+	/* `.tw` prefix: the base .tw-back / .tw-new rules come later in this
+	   file with the same specificity and would win otherwise. */
+	.tw .tw-back {
 		display: none;
 	}
-	.tw-new {
+	/* Beside a thread there is room: the primary action leads the column
+	   (after the project header) instead of floating over For you's cards
+	   and their Done buttons. Phones keep the floating button in thumb reach. */
+	.tw .tw-now > :first-child {
+		order: -2;
+	}
+	.tw .tw-new {
+		order: -1;
 		position: static;
+		align-self: stretch;
+		justify-content: center;
+		min-height: 44px;
+		box-shadow: none;
 	}
 }
 
