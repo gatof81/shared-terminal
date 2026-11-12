@@ -12,6 +12,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { parsePolicy } from "./conversation/cliPolicy.js";
 import { composerFlagEnabled, parseCliVersions } from "./conversation/composer.js";
+import { projectArtifactsFlagEnabled } from "./projects/conversation/artifacts.js";
 import { projectConversationFlagEnabled } from "./projects/conversation/store.js";
 
 const compose = readFileSync(path.resolve(__dirname, "../../docker-compose.yml"), "utf8");
@@ -123,5 +124,25 @@ describe("docker-compose.yml → project conversation flag (D1)", () => {
 		expect(
 			projectConversationFlagEnabled(interpolate(tpl, { PROJECT_CONVERSATION_ENABLED: "yes" })),
 		).toBe(false);
+	});
+});
+
+describe("docker-compose.yml → project artifacts flag (D2)", () => {
+	it("PROJECT_ARTIFACTS_ENABLED is forwarded with the empty default ⇒ off; only true/1 turn it on", () => {
+		const env = appEnvironment();
+		const tpl = env.get("PROJECT_ARTIFACTS_ENABLED");
+		expect(tpl).toBe(`$\{PROJECT_ARTIFACTS_ENABLED:-}`);
+		expect(interpolate(tpl as string, {})).toBe("");
+		expect(projectArtifactsFlagEnabled(interpolate(tpl as string, {}))).toBe(false);
+		for (const [v, on] of [
+			["true", true],
+			["1", true],
+			["yes", false],
+			["false", false],
+		] as const) {
+			expect(
+				projectArtifactsFlagEnabled(interpolate(tpl as string, { PROJECT_ARTIFACTS_ENABLED: v })),
+			).toBe(on);
+		}
 	});
 });

@@ -16,6 +16,7 @@ import type { ExecRegistry } from "../execRegistry.js";
 import type { IdleSweeperStats } from "../idleSweeper.js";
 import { logger } from "../logger.js";
 import type { ProjectConversationApi } from "../projects/conversation/api.js";
+import type { ProjectArtifacts } from "../projects/conversation/artifacts.js";
 import type { ProjectDirectory } from "../projects/directory.js";
 import { AgentActiveError } from "../projects/directory.js";
 import type { createAuthRateLimiters, RateLimitConfig, UsernameRateLimiter } from "../rateLimit.js";
@@ -73,7 +74,13 @@ export interface RouteContext {
 	// when PROJECT_CONVERSATION_ENABLED is effective; `api` is null until the
 	// store has started (or for good if it could not take the writer lock),
 	// and the routes then answer 503 `project-writer-unavailable`.
-	projectConversation?: { api: ProjectConversationApi | null };
+	// D2 adds `artifacts`, and the KEY is present only when
+	// PROJECT_ARTIFACTS_ENABLED is effective (§1): absent ⇒ no artifact route
+	// is mounted and `features` does not announce it.
+	projectConversation?: {
+		api: ProjectConversationApi | null;
+		artifacts?: ProjectArtifacts | null;
+	};
 }
 
 // Exported so wsHandler can apply the same upper bound when validating

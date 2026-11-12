@@ -1156,6 +1156,23 @@ second backend on the same `WORKSPACE_ROOT` gets 503 `project-writer-unavailable
 unset it and restart the backend; the log under `.projects/` stays on disk, inert. Turning it on is a
 separate decision from deploying the code.
 
+### Project artifacts (D2, §6)
+
+Off by default (`PROJECT_ARTIFACTS_ENABLED` unset; forwarded with the empty default). Effective only with
+the project conversation effective; otherwise the artifact routes are not mounted (404), a message with
+`artifacts[]` is refused with 409 `artifacts-off`, `GET /api/auth/status` has no
+`features.projectArtifacts`, and no workspace file is read or written by this subsystem. When on:
+
+- **Picking a file.** The owner picks a text file from a bound agent's workspace. It goes through the
+  Files opener (denylist, no links), must be ≤ 1 MiB and UTF-8 without NUL, and is stored at
+  `<WORKSPACE_ROOT>/.projects/<pid>/artifacts/<sha256>` (0600). The project total is capped at 256 MiB,
+  and nothing is deleted to make room.
+- **Sending.** Each recipient gets a copy in its own `~/workspace/.st-inbox/<sha12>-<name>` (0644,
+  owned by `WORKSPACE_UID:WORKSPACE_GID`). An existing file is never overwritten.
+
+`npm run backup` already includes the artifacts. Rollback means unsetting the flag and restarting:
+stored artifacts and inbox copies stay where they are.
+
 ## Backup & restore (#240)
 
 Operator-level, host-shell only (deliberately not API surface — a dump

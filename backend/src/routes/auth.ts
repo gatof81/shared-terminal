@@ -115,6 +115,10 @@ export function registerAuthRoutes(router: Router, ctx: RouteContext): void {
 						features: {
 							projectChat: true,
 							...(ctx.projectConversation ? { projectConversation: true } : {}),
+							// D2: only with PROJECT_ARTIFACTS_ENABLED effective (the key's presence).
+							...(ctx.projectConversation && "artifacts" in ctx.projectConversation
+								? { projectArtifacts: true }
+								: {}),
 						},
 					}
 				: {}),

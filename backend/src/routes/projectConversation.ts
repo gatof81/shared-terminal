@@ -12,10 +12,19 @@
 import type { Request, Response, Router } from "express";
 import type { AuthedRequest } from "../auth.js";
 import { requireAuth } from "../auth.js";
+import { InFlightLimiter } from "../inFlightLimiter.js";
 import { logger } from "../logger.js";
 import type { ProjectConversationApi } from "../projects/conversation/api.js";
 import { logErrorToHttp } from "../projects/conversation/api.js";
+import type { ProjectArtifacts } from "../projects/conversation/artifacts.js";
+import { contentDispositionFilename } from "../workspaceFiles.js";
+import { holdSlotUntilResponseEnds } from "./files.js";
 import type { RouteContext } from "./shared.js";
+
+// Artifact reads and registrations each hold ≤ 1 MiB in memory (§6.1); the
+// per-minute limiter does not bound memory, these slots do (as in Files).
+const ARTIFACT_IN_FLIGHT_PER_USER = 2;
+const ARTIFACT_IN_FLIGHT_TOTAL = 8;
 
 export function registerProjectConversationRoutes(router: Router, ctx: RouteContext): void {
 	const holder = ctx.projectConversation;
@@ -94,5 +103,83 @@ export function registerProjectConversationRoutes(router: Router, ctx: RouteCont
 		requireAuth,
 		projectIp,
 		handle("ack", (api, userId, req) => api.ack(userId, req.params.pid as string, req.body)),
+	);
+
+	// ── D2 artifacts (§6), mounted only with PROJECT_ARTIFACTS_ENABLED effective ──
+	if (!("artifacts" in holder)) return;
+	const slots = new InFlightLimiter(ARTIFACT_IN_FLIGHT_PER_USER, ARTIFACT_IN_FLIGHT_TOTAL);
+	const withSlot = (req: Request, res: Response): boolean => {
+		const outcome = holdSlotUntilResponseEnds(slots, (req as AuthedRequest).userId, res);
+		if (outcome === "busy") {
+			res.setHeader("Retry-After", "1");
+			res.status(429).json({ error: "busy" });
+		}
+		return outcome === "held";
+	};
+	/** Owner + started artifacts + an in-flight slot, else the answer has been sent. */
+	const artifactGate = async (
+		req: Request,
+		res: Response,
+	): Promise<{ art: ProjectArtifacts; userId: string } | null> => {
+		const g = await gate(req, res);
+		if (!g) return null;
+		const art = holder.artifacts;
+		if (!art) {
+			res.status(503).json({ error: "project-writer-unavailable" });
+			return null;
+		}
+		return withSlot(req, res) ? { art, userId: g.userId } : null;
+	};
+	const failed = (what: string, res: Response, err: unknown) => {
+		const h = logErrorToHttp(err);
+		if (h) {
+			res.status(h.status).json(h.body);
+			return;
+		}
+		logger.error(`[projects] artifact ${what} failed: ${(err as Error).message}`);
+		res.status(500).json({ error: "internal" });
+	};
+	router.post(
+		"/projects/:pid/conversation/artifacts",
+		requireAuth,
+		projectIp,
+		async (req: Request, res: Response) => {
+			try {
+				const g = await artifactGate(req, res);
+				if (!g) return;
+				const r = await g.art.register(g.userId, req.params.pid as string, req.body);
+				res.status(r.status).json(r.body);
+			} catch (err) {
+				failed("register", res, err);
+			}
+		},
+	);
+	router.get(
+		"/projects/:pid/conversation/artifacts/:sha",
+		requireAuth,
+		projectIp,
+		async (req: Request, res: Response) => {
+			try {
+				const g = await artifactGate(req, res);
+				if (!g) return;
+				const r = await g.art.content(req.params.pid as string, req.params.sha as string);
+				if (!("ok" in r)) {
+					res.status(r.status).json(r.body);
+					return;
+				}
+				// Another agent's bytes (§6.5): text only, never rendered by the
+				// browser as anything else, and downloaded rather than navigated.
+				res.setHeader("Content-Type", "text/plain; charset=utf-8");
+				res.setHeader("X-Content-Type-Options", "nosniff");
+				res.setHeader("Content-Security-Policy", "sandbox; default-src 'none'");
+				res.setHeader(
+					"Content-Disposition",
+					`attachment; filename="${contentDispositionFilename(r.name)}"`,
+				);
+				res.status(200).send(r.content);
+			} catch (err) {
+				failed("read", res, err);
+			}
+		},
 	);
 }

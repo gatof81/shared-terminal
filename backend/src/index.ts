@@ -37,12 +37,17 @@ import { ConversationService } from "./conversation/service.js";
 import { ConversationStore } from "./conversation/store.js";
 import { ConversationWsHub } from "./conversation/ws.js";
 import { migrateDb, validateD1Config } from "./db.js";
-import { DockerManager } from "./dockerManager.js";
+import { DockerManager, WORKSPACE_GID, WORKSPACE_UID } from "./dockerManager.js";
 import { IdleSweeper, listRunningSessionIds } from "./idleSweeper.js";
 import { logger } from "./logger.js";
 import { createPortDispatcher, validatePortProxyBaseDomain } from "./portDispatcher.js";
 import { ProjectConversationApi } from "./projects/conversation/api.js";
+import {
+	ProjectArtifacts,
+	projectArtifactsFlagEnabled,
+} from "./projects/conversation/artifacts.js";
 import { ProjectFanout, pickTarget } from "./projects/conversation/fanout.js";
+import { placeArtifacts } from "./projects/conversation/placement.js";
 import { ReplyWatcher } from "./projects/conversation/replies.js";
 import {
 	ProjectConversationStore,
@@ -61,6 +66,7 @@ import { sessionLifecycleLock } from "./sessionLifecycleLock.js";
 import { ForbiddenError, NotFoundError, SessionManager } from "./sessionManager.js";
 import { parseTrustProxy, TrustProxyError, warnIfProductionMisconfigured } from "./trustProxy.js";
 import { configureWebPush, isPushEnabled, sendToUser } from "./webPush.js";
+import { openWorkspaceFile } from "./workspaceFiles.js";
 import { handleWsConnection, startWsHeartbeat } from "./wsHandler.js";
 import { createWsUpgradeHandler, PROJECT_WS_PREFIX } from "./wsUpgrade.js";
 import { createWsUpgradeRateLimiter } from "./wsUpgradeRateLimit.js";
@@ -297,13 +303,32 @@ if (PROJECT_CONVERSATION_FLAG && !PROJECT_CONVERSATION_ENABLED) {
 			"CONVERSATION_COMPOSER_ENABLED — project conversation stays OFF",
 	);
 }
+// D2 — artifacts (§6). Needs D1 effective; set without it, logged and OFF.
+// Off ⇒ no artifact route, `artifacts[]` stays 409 `artifacts-off`, and no
+// workspace file is read or written by this subsystem.
+const PROJECT_ARTIFACTS_FLAG = projectArtifactsFlagEnabled(process.env.PROJECT_ARTIFACTS_ENABLED);
+const PROJECT_ARTIFACTS_ENABLED = PROJECT_ARTIFACTS_FLAG && PROJECT_CONVERSATION_ENABLED;
+if (PROJECT_ARTIFACTS_FLAG && !PROJECT_ARTIFACTS_ENABLED) {
+	logger.warn(
+		"[server] PROJECT_ARTIFACTS_ENABLED is set but needs PROJECT_CONVERSATION_ENABLED " +
+			"effective — project artifacts stay OFF",
+	);
+}
 let projectConversation: ProjectConversationStore | undefined;
 let projectReplies: ReplyWatcher | undefined;
 // Built before the store exists (the router is built at load, the store
 // takes its lock in start()); the routes answer 503 until `api` is set.
+// The `artifacts` key exists only with D2 effective (routes and features
+// read its presence).
 const projectConversationHolder:
-	| { api: ProjectConversationApi | null; hub: ProjectWsHub | null }
-	| undefined = PROJECT_CONVERSATION_ENABLED ? { api: null, hub: null } : undefined;
+	| {
+			api: ProjectConversationApi | null;
+			hub: ProjectWsHub | null;
+			artifacts?: ProjectArtifacts | null;
+	  }
+	| undefined = PROJECT_CONVERSATION_ENABLED
+	? { api: null, hub: null, ...(PROJECT_ARTIFACTS_ENABLED ? { artifacts: null } : {}) }
+	: undefined;
 // Single shared bootstrap broadcaster (PR 185b2b). Owned at the server
 // scope so the route's runAsyncBootstrap and the WS handler's
 // /ws/bootstrap subscriber see the same per-session listener sets and
@@ -600,6 +625,16 @@ async function start() {
 				log: logger,
 			});
 			projectReplies = replies;
+			const artifacts = PROJECT_ARTIFACTS_ENABLED
+				? new ProjectArtifacts({
+						store,
+						workspaceRoot: WORKSPACE_ROOT_FOR_CONVERSATION,
+						bindings: (ownerId, pid) => directory.projectBindings(ownerId, pid),
+						openSource: (sid, rel, o) => openWorkspaceFile(sid, rel, o),
+						assertOwner: (sid, ownerId) => sessions.assertOwnedBy(sid, ownerId),
+						isForbidden: (e) => e instanceof NotFoundError || e instanceof ForbiddenError,
+					})
+				: undefined;
 			const fanout = new ProjectFanout({
 				store,
 				bindings: (ownerId, pid) => directory.projectBindings(ownerId, pid),
@@ -639,6 +674,22 @@ async function start() {
 				onDelivered: (d) => replies.watch(d),
 				onUncertain: (d) => replies.watchUncertain(d),
 				isForbidden: (e) => e instanceof NotFoundError || e instanceof ForbiddenError,
+				...(artifacts
+					? {
+							artifacts: {
+								lookup: (pid, shas) => artifacts.lookup(pid, shas),
+								readContent: (pid, sha) => artifacts.readContent(pid, sha),
+								place: (sid, list) =>
+									placeArtifacts({
+										workspaceRoot: WORKSPACE_ROOT_FOR_CONVERSATION,
+										sessionId: sid,
+										artifacts: list,
+										uid: WORKSPACE_UID,
+										gid: WORKSPACE_GID,
+									}),
+							},
+						}
+					: {}),
 			});
 			const api = new ProjectConversationApi({
 				store,
@@ -646,6 +697,7 @@ async function start() {
 				ownsProject: (ownerId, pid) => directory.ownsProject(ownerId, pid),
 			});
 			projectConversationHolder.api = api;
+			if (artifacts) projectConversationHolder.artifacts = artifacts;
 			projectConversationHolder.hub = new ProjectWsHub(store);
 			// Recovery of every project now, then resume the replies being decided.
 			for (const pid of await store.openAll()) {
@@ -657,6 +709,7 @@ async function start() {
 			}
 		}
 		logger.info("[server] project conversation ENABLED (D1)");
+		if (PROJECT_ARTIFACTS_ENABLED) logger.info("[server] project artifacts ENABLED (D2)");
 	}
 	// #355 — configure Web Push from VAPID env (or warn + disable). Must run
 	// AFTER migrateDb so the push_subscriptions table exists before any

@@ -75,6 +75,10 @@ export interface Folded {
 	acks: Map<string, LogLine>;
 	/** restore_ids already applied by a `recovery{source: restore}`. */
 	restoresApplied: Set<string>;
+	/** sha256 → its first registration's name and bytes, and every `sid:path` it came from (§6.2). */
+	artifacts: Map<string, { name: string; bytes: number; sources: Set<string> }>;
+	/** Bytes of distinct registered artifacts: what PROJECT_ARTIFACTS_MAX_BYTES counts (§6.1). */
+	artifactBytes: number;
 	writers: Set<string>;
 }
 
@@ -91,6 +95,8 @@ export function emptyFold(): Folded {
 		lateCloses: new Set(),
 		acks: new Map(),
 		restoresApplied: new Set(),
+		artifacts: new Map(),
+		artifactBytes: 0,
 		writers: new Set(),
 	};
 }
@@ -160,13 +166,25 @@ export function fold(f: Folded, lines: readonly LogLine[]): Folded {
 			case "owner_ack":
 				f.acks.set(l.client_ack_id as string, l);
 				break;
+			case "artifact": {
+				const sha = l.sha256 as string;
+				const src = l.source as { sid?: string; path?: string } | undefined;
+				let a = f.artifacts.get(sha);
+				if (!a) {
+					a = { name: l.name as string, bytes: l.bytes as number, sources: new Set() };
+					f.artifacts.set(sha, a);
+					f.artifactBytes += a.bytes;
+				}
+				a.sources.add(`${src?.sid}:${src?.path}`);
+				break;
+			}
 			case "recovery":
 				if (l.source === "restore" && typeof l.restore_id === "string") {
 					f.restoresApplied.add(l.restore_id);
 				}
 				break;
 			default:
-				// Unknown kinds (a newer writer's, D2/D3 events) fold to nothing here.
+				// Unknown kinds (a newer writer's, D3 events) fold to nothing here.
 				break;
 		}
 	}
