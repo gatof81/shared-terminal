@@ -178,8 +178,13 @@ describe("reply attribution (§4.1)", () => {
 			await sleep(5);
 			breakIt();
 			emit("turn_end", { prompt_id: "P", data: { last_assistant_message: "x" } });
-			await sleep(SETTLE + 30);
-			const r = (await store.view(PID)).lines.find((l) => l.ev === "reply_ref" && l.msg_id === id);
+			// Poll rather than sleep a fixed time: under CI load the window's
+			// timer can fire late; the attribution, not the latency, is the point.
+			let r: LogLine | undefined;
+			for (let i = 0; i < 100 && !r; i++) {
+				await sleep(i === 0 ? SETTLE + 30 : 20);
+				r = (await store.view(PID)).lines.find((l) => l.ev === "reply_ref" && l.msg_id === id);
+			}
 			expect(r?.attribution, reason).toBe(`ambiguous{${reason}}`);
 		}
 	});
