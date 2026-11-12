@@ -485,6 +485,15 @@ export class MockBackend {
 	projectPageCap = 500;
 	/** What a send to each agent ends as (default: delivered). */
 	projectSendOutcome = new Map<string, { state: string; reason?: string }>();
+	// ── D2 artifacts (Appendix A.2) ──
+	/** PROJECT_ARTIFACTS_ENABLED: `features.projectArtifacts` + the …/artifacts routes. */
+	projectArtifacts = false;
+	/** Registered file contents by sha256 (what GET …/artifacts/:sha serves). */
+	projectArtifactContent = new Map<string, string>();
+	/** Placing into this agent's inbox fails with this artifact_error (not-sent, files maybe placed). */
+	projectPlacementError = new Map<string, string>();
+	/** Every POST …/artifacts body received. */
+	projectArtifactPosts: Array<Record<string, unknown>> = [];
 	/** clientMessageId → msg_id (idempotency, §3.4 rule 2). */
 	private projectSends = new Map<string, { msgId: string; hash: string }>();
 	/** Agent text in the captures, by `${sid}\n${cid}\n${seq}` (what a reply_ref points at). */
@@ -729,12 +738,44 @@ export class MockBackend {
 			artifacts: [],
 			...extra,
 		});
+		const files = (extra.artifacts as Array<{ sha256: string; name: string }> | undefined) ?? [];
 		for (const a of to) {
 			const o = outcome(a);
 			const base = { ev: "delivery", msg_id: msgId, agent_id: a, authorized_by: "owner" };
 			this.appendProjectEvent({ ...base, state: "planned" });
-			if (o.state !== "not-sent") this.appendProjectEvent({ ...base, state: "sending" });
-			this.appendProjectEvent({ ...base, state: o.state, ...(o.reason ? { reason: o.reason } : {}) });
+			if (files.length > 0) {
+				// §6.4: placing is durable before the inbox is touched.
+				this.appendProjectEvent({ ...base, state: "placing", artifacts: files });
+				const err = this.projectPlacementError.get(a);
+				if (err) {
+					this.appendProjectEvent({
+						...base,
+						state: "not-sent",
+						reason: "artifact-failed",
+						artifact_error: err,
+						files_possibly_placed: true,
+					});
+					continue;
+				}
+			}
+			if (o.state !== "not-sent")
+				this.appendProjectEvent({
+					...base,
+					state: "sending",
+					...(files.length > 0
+						? {
+								artifacts_placed: files.map((f) => ({
+									sha256: f.sha256,
+									path: `.st-inbox/${f.sha256.slice(0, 12)}-${f.name}`,
+								})),
+							}
+						: {}),
+				});
+			this.appendProjectEvent({
+				...base,
+				state: o.state,
+				...(o.reason ? { reason: o.reason } : {}),
+			});
 		}
 	}
 
@@ -863,14 +904,36 @@ export class MockBackend {
 			const text = typeof body?.text === "string" ? body.text : "";
 			if (typeof cmid !== "string" || to.length < 1 || to.length > 8 || text.trim() === "")
 				return json(400, { error: "invalid-body" });
-			const hash = JSON.stringify({ text, to: [...to].sort(), q: body?.quoteRef ?? null, r: body?.inReplyTo ?? null });
+			const shas = Array.isArray(body?.artifacts) ? (body.artifacts as string[]) : [];
+			if (shas.length > 0 && !this.projectArtifacts) return json(409, { error: "artifacts-off" });
+			if (shas.length > 4) return json(400, { error: "too-many-artifacts" });
+			const firstOf = (sha: string) =>
+				this.projectLog.find((e) => e.ev === "artifact" && e.sha256 === sha);
+			for (const sha of shas)
+				if (!firstOf(sha)) return json(400, { error: "artifact-unknown", detail: sha });
+			const refs = shas.map((sha) => {
+				const a = firstOf(sha)!;
+				return { sha256: sha, name: a.name, bytes: a.bytes };
+			});
+			const hash = JSON.stringify({
+				text,
+				to: [...to].sort(),
+				q: body?.quoteRef ?? null,
+				r: body?.inReplyTo ?? null,
+				a: shas,
+			});
 			const prev = this.projectSends.get(cmid);
 			const deliveriesOf = (msgId: string) =>
 				to.map((agentId) => {
 					const last = [...this.projectLog]
 						.reverse()
 						.find((e) => e.ev === "delivery" && e.msg_id === msgId && e.agent_id === agentId);
-					return { agentId, state: last?.state, ...(last?.reason ? { reason: last.reason } : {}) };
+					return {
+						agentId,
+						state: last?.state,
+						...(last?.reason ? { reason: last.reason } : {}),
+						...(last?.files_possibly_placed ? { filesPossiblyPlaced: true } : {}),
+					};
 				});
 			if (prev) {
 				if (prev.hash !== hash) return json(409, { error: "idempotency-conflict" });
@@ -880,6 +943,7 @@ export class MockBackend {
 			const q = body?.quoteRef as Record<string, unknown> | undefined;
 			this.projectTask(msgId, to, text, {
 				client_message_id: cmid,
+				artifacts: refs,
 				...(typeof body?.inReplyTo === "string" ? { in_reply_to: body.inReplyTo } : {}),
 				...(q
 					? {
@@ -925,6 +989,68 @@ export class MockBackend {
 				target,
 			});
 			return json(201, { ackId: line.ack_id, seq: line.seq, replayed: false });
+		}
+		if (kind === "artifacts" && this.projectArtifacts) {
+			if (method === "POST" && id === undefined) {
+				this.projectArtifactPosts.push(body ?? {});
+				const agentId = body?.agentId;
+				const rel = body?.path;
+				if (typeof agentId !== "string" || typeof rel !== "string" || rel.startsWith("/"))
+					return json(400, { error: "invalid-body" });
+				const bound = this.agents.find((a) => a.agentId === agentId);
+				const binding = bound ? this.liveBinding(bound) : null;
+				if (!binding) return json(409, { error: "agent-not-bound" });
+				const node = this.resolve(rel);
+				if (!node) return json(404, { error: "artifact-not-found" });
+				if (node.restricted) return json(403, { error: "artifact-restricted" });
+				if (node.type !== "file") return json(400, { error: "invalid-body" });
+				if (node.content.length > 1024 * 1024) return json(413, { error: "artifact-too-large" });
+				if (node.content === "" || node.content.includes("\0"))
+					return json(415, { error: "artifact-not-text" });
+				const sha256 = createHash("sha256").update(node.content, "utf8").digest("hex");
+				const name = rel
+					.split("/")
+					.pop()!
+					.replace(/[^A-Za-z0-9._-]/g, "_")
+					.replace(/^\./, "_");
+				const bytes = Buffer.byteLength(node.content);
+				const same = this.projectLog.find(
+					(e) =>
+						e.ev === "artifact" &&
+						e.sha256 === sha256 &&
+						(e.source as { sid: string; path: string }).sid === binding.sessionId &&
+						(e.source as { sid: string; path: string }).path === rel,
+				);
+				if (same) return json(200, { sha256, name: same.name, bytes, replayed: true });
+				this.projectArtifactContent.set(sha256, node.content);
+				this.appendProjectEvent({
+					ev: "artifact",
+					sha256,
+					name,
+					bytes,
+					source: { kind: "owner", sid: binding.sessionId, path: rel, agent_id: agentId },
+					by: "u-alice",
+				});
+				return json(201, { sha256, name, bytes, replayed: false });
+			}
+			if (method === "GET" && id !== undefined) {
+				const sha = decodeURIComponent(id);
+				const content = this.projectArtifactContent.get(sha);
+				if (
+					content === undefined ||
+					!this.projectLog.some((e) => e.ev === "artifact" && e.sha256 === sha)
+				)
+					return json(404, { error: "artifact-not-found" });
+				return route.fulfill({
+					status: 200,
+					headers: {
+						"Content-Type": "text/plain; charset=utf-8",
+						"X-Content-Type-Options": "nosniff",
+						"Content-Disposition": "attachment",
+					},
+					body: content,
+				});
+			}
 		}
 		return json(404, { error: `No mock for ${method} conversation/${kind}` });
 	}
@@ -1141,7 +1267,7 @@ export class MockBackend {
 			await answer(201, { ...this.projectSummary(p), replayed: false });
 			return true;
 		}
-		const cv = /^\/projects\/([^/]+)\/conversation\/(events|messages|acks)(?:\/([^/]+))?$/.exec(path);
+		const cv = /^\/projects\/([^/]+)\/conversation\/(events|messages|acks|artifacts)(?:\/([^/]+))?$/.exec(path);
 		if (cv) {
 			const project = own(decodeURIComponent(cv[1]!));
 			if (!project || !this.projectConversation) {
@@ -1487,7 +1613,11 @@ export class MockBackend {
 				...(this.projectChat
 					? {
 							features: this.projectConversation
-								? { projectChat: true, projectConversation: true }
+								? {
+										projectChat: true,
+										projectConversation: true,
+										...(this.projectArtifacts ? { projectArtifacts: true } : {}),
+									}
 								: { projectChat: true },
 						}
 					: {}),

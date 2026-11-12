@@ -14,6 +14,19 @@ const api = vi.hoisted(() => ({
 		close: vi.fn(),
 	})),
 	readConversationEvent: vi.fn(),
+	// D2
+	projectArtifactsEnabled: vi.fn(() => false),
+	registerProjectArtifact: vi.fn(),
+	fetchProjectArtifactText: vi.fn(),
+	listWorkspaceDir: vi.fn(),
+	WorkspaceFsError: class extends Error {
+		constructor(
+			m: string,
+			readonly status: number,
+		) {
+			super(m);
+		}
+	},
 }));
 vi.mock("./api.js", () => api);
 
@@ -501,5 +514,211 @@ describe("live mode recovery (independent review of #599)", () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+});
+
+describe("attachments (D2)", () => {
+	const DIFF = "--- a/x.ts\n+++ b/x.ts\n@@ -1,1 +1,1 @@\n-old\n+new\n";
+	const FIX = { sha256: sha(DIFF), name: "fix.diff", bytes: DIFF.length };
+	const withFile = [
+		...log,
+		{
+			seq: 6,
+			at: NOW,
+			ev: "artifact",
+			sha256: FIX.sha256,
+			name: FIX.name,
+			bytes: FIX.bytes,
+			source: { kind: "owner", sid: "s-a-dev", path: "out/fix.diff", agent_id: DEV },
+			by: "u1",
+		},
+		{
+			seq: 7,
+			at: NOW,
+			ev: "message",
+			msg_id: "t3",
+			kind: "owner",
+			to: [QA],
+			text: "Apply this",
+			artifacts: [FIX],
+		},
+		{
+			seq: 8,
+			at: NOW,
+			ev: "delivery",
+			msg_id: "t3",
+			agent_id: QA,
+			state: "placing",
+			artifacts: [FIX],
+		},
+		{
+			seq: 9,
+			at: NOW,
+			ev: "delivery",
+			msg_id: "t3",
+			agent_id: QA,
+			state: "uncertain",
+			reason: "uncertain{restored}",
+			files_possibly_placed: true,
+		},
+	];
+
+	it("flag off: no attach control, a message's files are names only, and nothing is requested", async () => {
+		api.fetchProjectEvents.mockResolvedValue({
+			ok: true,
+			status: 200,
+			body: { events: withFile, hasMore: false },
+		});
+		const root = mount({ kind: "thread", msgId: "t3" });
+		await flush();
+		expect(root.querySelector(".tw-attach")).toBeNull();
+		expect(root.querySelector(".tw-msg-files")?.textContent).toBe("fix.diff · 48 B");
+		expect(root.querySelector(".tw-file-open")).toBeNull();
+		expect(api.fetchProjectArtifactText).not.toHaveBeenCalled();
+		expect(api.registerProjectArtifact).not.toHaveBeenCalled();
+	});
+
+	it("uncertain after placing warns that files may already be in the inbox (restore, §8)", async () => {
+		api.fetchProjectEvents.mockResolvedValue({
+			ok: true,
+			status: 200,
+			body: { events: withFile, hasMore: false },
+		});
+		const root = mount({ kind: "thread", msgId: "t3" });
+		await flush();
+		expect(root.querySelector(".tw-deliveries")?.textContent).toBe(
+			"@qa-pilor · Not sure it arrived. Some files may already be in its inbox.",
+		);
+	});
+
+	it("flag on: a file opens as a verified diff in place and stays open across a poll", async () => {
+		api.projectArtifactsEnabled.mockReturnValue(true);
+		api.fetchProjectEvents.mockResolvedValue({
+			ok: true,
+			status: 200,
+			body: { events: withFile, hasMore: false },
+		});
+		api.fetchProjectArtifactText.mockResolvedValue({ ok: true, text: DIFF });
+		const root = mount({ kind: "thread", msgId: "t3" });
+		await flush();
+		root.querySelector<HTMLButtonElement>(".tw-file-open")!.click();
+		await flush();
+		expect(api.fetchProjectArtifactText).toHaveBeenCalledWith(PID, FIX.sha256);
+		expect(root.querySelectorAll(".tw-file-body .git-diff-row.kind-add")).toHaveLength(1);
+		mount({ kind: "thread", msgId: "t3" });
+		await flush();
+		expect(root.querySelector(".tw-file-body")).not.toBeNull();
+		expect(api.fetchProjectArtifactText).toHaveBeenCalledTimes(1);
+	});
+
+	it("a file whose bytes don't match its hash is never shown", async () => {
+		api.projectArtifactsEnabled.mockReturnValue(true);
+		api.fetchProjectEvents.mockResolvedValue({
+			ok: true,
+			status: 200,
+			body: { events: withFile, hasMore: false },
+		});
+		api.fetchProjectArtifactText.mockResolvedValue({
+			ok: false,
+			status: 200,
+			code: "hash-mismatch",
+		});
+		const root = mount({ kind: "thread", msgId: "t3" });
+		await flush();
+		root.querySelector<HTMLButtonElement>(".tw-file-open")!.click();
+		await flush();
+		expect(root.querySelector(".tw-file-body")?.textContent).toBe(
+			"The stored file doesn't match its hash; it isn't shown.",
+		);
+	});
+
+	it("attach: browse the agent's session, register the file, send its sha256; a refusal attaches nothing", async () => {
+		api.projectArtifactsEnabled.mockReturnValue(true);
+		api.listWorkspaceDir.mockImplementation(async (_sid: string, path: string) =>
+			path === ""
+				? {
+						path: "",
+						truncated: false,
+						entries: [
+							{ name: "out", type: "dir", size: null, mtime: null, restricted: false },
+							{ name: ".env", type: "file", size: 10, mtime: null, restricted: true },
+							{ name: "big.log", type: "file", size: 2_000_000, mtime: null, restricted: false },
+							{ name: "bin.dat", type: "file", size: 10, mtime: null, restricted: false },
+						],
+					}
+				: {
+						path: "out",
+						truncated: false,
+						entries: [{ name: "fix.diff", type: "file", size: 75, mtime: null, restricted: false }],
+					},
+		);
+		api.registerProjectArtifact
+			.mockResolvedValueOnce({ ok: false, status: 415, code: "artifact-not-text" })
+			.mockResolvedValueOnce({ ok: true, status: 201, body: { ...FIX, replayed: false } });
+		const root = mount({ kind: "new" });
+		await flush();
+		root.querySelector<HTMLButtonElement>(".tw-attach-btn")!.click();
+		const agentsBtns = [...root.querySelectorAll<HTMLButtonElement>(".tw-attach-agent")];
+		agentsBtns[0]!.click(); // @dev-pilot
+		await flush();
+		expect(api.listWorkspaceDir).toHaveBeenCalledWith("s-a-dev", "");
+		const entries = () => [...root.querySelectorAll<HTMLButtonElement>(".tw-attach-entry")];
+		expect(entries().map((b) => [b.textContent, b.disabled])).toEqual([
+			["out/Folder", false],
+			[".envprotected", true],
+			["big.logbigger than 1 MiB", true],
+			["bin.dat10 B", false],
+		]);
+		entries()[3]!.click();
+		await flush();
+		expect(api.registerProjectArtifact).toHaveBeenLastCalledWith(PID, {
+			agentId: DEV,
+			path: "bin.dat",
+		});
+		expect(root.querySelector(".tw-attach-note")?.textContent).toBe(
+			"Only text files can be attached (no binaries, no empty files).",
+		);
+		expect(root.querySelector(".tw-files")?.childElementCount).toBe(0);
+		entries()[0]!.click();
+		await flush();
+		entries()[1]!.click(); // out/fix.diff (entry 0 is "..")
+		await flush();
+		expect(api.registerProjectArtifact).toHaveBeenLastCalledWith(PID, {
+			agentId: DEV,
+			path: "out/fix.diff",
+		});
+		expect(root.querySelector(".tw-files")?.textContent).toBe("fix.diff48 B×");
+		// Recipient + text, then send: the body carries the sha256.
+		root.querySelector<HTMLButtonElement>(".tw-chip-add")!.click();
+		root.querySelectorAll<HTMLButtonElement>(".tw-option:not(:disabled)")[1]!.click(); // @qa-pilor
+		root.querySelector<HTMLTextAreaElement>(".tw-composer textarea")!.value = "Apply this";
+		root.querySelector<HTMLFormElement>(".tw-composer")!.requestSubmit();
+		await flush();
+		expect(api.postProjectMessage.mock.calls[0]![1].artifacts).toEqual([FIX.sha256]);
+		expect(root.querySelector(".tw-files")?.childElementCount).toBe(0);
+	});
+
+	it("a delivery answered not-sent after placing says so in the send's results", async () => {
+		api.projectArtifactsEnabled.mockReturnValue(true);
+		api.postProjectMessage.mockResolvedValueOnce({
+			ok: true,
+			status: 202,
+			body: {
+				msgId: "m-x",
+				deliveries: [
+					{ agentId: QA, state: "not-sent", reason: "binding-changed", filesPossiblyPlaced: true },
+				],
+			},
+		});
+		const root = mount({ kind: "new" });
+		await flush();
+		root.querySelector<HTMLButtonElement>(".tw-chip-add")!.click();
+		root.querySelectorAll<HTMLButtonElement>(".tw-option:not(:disabled)")[1]!.click();
+		root.querySelector<HTMLTextAreaElement>(".tw-composer textarea")!.value = "x";
+		root.querySelector<HTMLFormElement>(".tw-composer")!.requestSubmit();
+		await flush();
+		expect(root.querySelector(".tw-results")?.textContent).toBe(
+			"@qa-pilor · Not delivered: its session changed. Some files may already be in its inbox.",
+		);
 	});
 });

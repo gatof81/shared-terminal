@@ -29,7 +29,8 @@ import {
 	type GitDiff,
 	type GitStatus,
 } from "./api.js";
-import { lineNumberDigits, parseUnifiedDiff } from "./diff.js";
+import { parseUnifiedDiff } from "./diff.js";
+import { appendDiffRows } from "./diffTable.js";
 import { relativeDate } from "./format.js";
 import { activeSessionId, isMobile, sessions } from "./main.js";
 import { runSessionAction } from "./sessionCore.js";
@@ -147,10 +148,6 @@ function findChangeByKey(data: GitStatus, key: string): GitChange | undefined {
 	const path = key.slice(i + 1);
 	return data.changes.find((c) => c.area === area && c.path === path);
 }
-
-// Past this many rendered rows the diff pane stops: it's a browser pane,
-// not an IDE, and the server already caps the patch bytes.
-const MAX_DIFF_ROWS = 5000;
 
 // ── View switching ──────────────────────────────────────────────────────────
 
@@ -771,43 +768,6 @@ function renderDiff(): void {
 		);
 	}
 	diffEl.appendChild(scroller);
-}
-
-/** The rows, capped at MAX_DIFF_ROWS on every path that renders them. */
-function appendDiffRows(
-	scroller: HTMLElement,
-	rows: ReturnType<typeof parseUnifiedDiff>["rows"],
-): void {
-	if (rows.length === 0) return;
-	scroller.appendChild(diffTable(rows.slice(0, MAX_DIFF_ROWS)));
-	if (rows.length > MAX_DIFF_ROWS) {
-		scroller.appendChild(
-			el("div", "files-tree-note", `Showing the first ${MAX_DIFF_ROWS} lines of this diff.`),
-		);
-	}
-}
-
-function diffTable(rows: ReturnType<typeof parseUnifiedDiff>["rows"]): HTMLElement {
-	const table = el("div", "git-diff-table");
-	table.style.setProperty("--no-w", `${lineNumberDigits(rows)}ch`);
-	const frag = document.createDocumentFragment();
-	for (const r of rows) {
-		const row = el("div", `git-diff-row kind-${r.kind}`);
-		if (r.kind === "hunk" || r.kind === "meta" || r.kind === "note") {
-			const cell = el("span", "git-diff-span", r.text);
-			row.appendChild(cell);
-		} else {
-			row.appendChild(el("span", "git-diff-no", r.oldNo === null ? "" : String(r.oldNo)));
-			row.appendChild(el("span", "git-diff-no", r.newNo === null ? "" : String(r.newNo)));
-			row.appendChild(
-				el("span", "git-diff-mark", r.kind === "add" ? "+" : r.kind === "del" ? "−" : " "),
-			);
-			row.appendChild(el("span", "git-diff-text", r.text));
-		}
-		frag.appendChild(row);
-	}
-	table.appendChild(frag);
-	return table;
 }
 
 export { relativeDate };

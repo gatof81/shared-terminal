@@ -595,3 +595,114 @@ describe("review regressions (independent review of #589)", () => {
 		expect(log.add(parsed([msg(1, "t1", ["dev"], "x")]))).toBe(0);
 	});
 });
+
+describe("D2 artifacts (Appendix A.2)", () => {
+	const A = "a".repeat(64);
+	const B = "b".repeat(64);
+	const fold = (events: unknown[]) => {
+		const log = new ProjectLog();
+		log.add(events.map(parseLogEvent).filter((e): e is LogEvent => e !== null));
+		return log;
+	};
+	const art = (seq: number, sha256: string, name: string) => ({
+		seq,
+		at: "2026-11-12T10:00:00.000Z",
+		w: "w",
+		bn: 0,
+		ev: "artifact",
+		sha256,
+		name,
+		bytes: 12,
+		source: { kind: "owner", sid: "s1", path: `out/${name}`, agent_id: "dev" },
+		by: "u1",
+	});
+	const del = (seq: number, state: string, extra: Record<string, unknown> = {}) => ({
+		seq,
+		at: "2026-11-12T10:00:00.000Z",
+		ev: "delivery",
+		msg_id: "m",
+		agent_id: "qa",
+		state,
+		...extra,
+	});
+
+	it("parses artifact events; the first one of a sha256 is the one kept", () => {
+		const log = fold([art(2, A, "second.diff"), art(1, A, "first.diff"), art(3, B, "other.txt")]);
+		expect(log.artifacts.get(A)).toMatchObject({
+			name: "first.diff",
+			sourcePath: "out/first.diff",
+		});
+		expect(log.artifacts.get(B)?.sourceAgentId).toBe("dev");
+		expect(parseLogEvent({ ...art(4, "XYZ", "bad"), sha256: "XYZ" })).toBeNull();
+	});
+
+	it("a message keeps only well-formed artifacts; absent ⇒ []", () => {
+		const m = parseLogEvent({
+			seq: 1,
+			ev: "message",
+			msg_id: "m",
+			kind: "owner",
+			to: ["qa"],
+			text: "t",
+			artifacts: [
+				{ sha256: A, name: "f.diff", bytes: 3 },
+				{ sha256: "nope", name: "x", bytes: 1 },
+				null,
+			],
+		});
+		expect(m?.ev === "message" && m.artifacts).toEqual([{ sha256: A, name: "f.diff", bytes: 3 }]);
+		const plain = parseLogEvent({
+			seq: 2,
+			ev: "message",
+			msg_id: "n",
+			kind: "owner",
+			to: ["qa"],
+			text: "t",
+		});
+		expect(plain?.ev === "message" && plain.artifacts).toEqual([]);
+	});
+
+	it("placing reads as in progress; artifact-failed names the step; the files warning sticks", () => {
+		const msgEv = { seq: 1, ev: "message", msg_id: "m", kind: "owner", to: ["qa"], text: "t" };
+		let log = fold([msgEv, del(2, "planned"), del(3, "placing", { artifacts: [] })]);
+		expect(deliveryText(log.messages.get("m")!.deliveries.get("qa")!)).toBe("Placing files…");
+		log = fold([
+			msgEv,
+			del(2, "placing"),
+			del(3, "not-sent", {
+				reason: "artifact-failed",
+				artifact_error: "exists-different",
+				files_possibly_placed: true,
+			}),
+		]);
+		expect(deliveryText(log.messages.get("m")!.deliveries.get("qa")!)).toBe(
+			"Not delivered: a file couldn't be placed: a different file already has that name in its inbox. Some files may already be in its inbox.",
+		);
+		// uncertain{restored} later settled: the warning stays with the delivery.
+		log = fold([
+			msgEv,
+			del(2, "placing"),
+			del(3, "uncertain", { reason: "uncertain{restored}", files_possibly_placed: true }),
+			del(4, "settled", { result: "failed" }),
+		]);
+		const d = log.messages.get("m")!.deliveries.get("qa")!;
+		expect(d.state).toBe("failed");
+		expect(deliveryText(d)).toBe(
+			"Not sure it arrived: the send failed part-way. Some files may already be in its inbox.",
+		);
+	});
+
+	it("sending lists where the files landed", () => {
+		const e = parseLogEvent(
+			del(4, "sending", {
+				artifacts_placed: [
+					{ sha256: A, path: `.st-inbox/${A.slice(0, 12)}-f.diff` },
+					{ sha256: "bad", path: "x" },
+				],
+			}),
+		);
+		expect(e?.ev === "delivery" && e.artifactsPlaced).toEqual([
+			{ sha256: A, path: `.st-inbox/${A.slice(0, 12)}-f.diff` },
+		]);
+	});
+});
