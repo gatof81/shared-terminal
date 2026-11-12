@@ -76,7 +76,13 @@ LOG
 expect_eq "a line in the restart's own second is kept (fraction vs Z)" "$(log_since "$T/boundary.log" 2026-11-12T17:16:00Z | grep -c writer-unavailable)" 1
 printf 'app-1  | {"msg":"no timestamps here"}\n' >"$T/nots.log"
 expect_false "a log without --timestamps fails (rc 1), never an empty pass" 'log_since "$T/nots.log" 2026-11-12T17:16:00Z >/dev/null'
-expect_true "the awk program has no {n} repetition (old mawk reads it literally)" '! grep -E "\[0-9\]\{[0-9]+\}" "$HERE/../lib/checks.sh" >/dev/null' 
+for badt in "" "2026-11-12T14:16:00-03:00" "2026-11-12T17:16Z" "17:16:00Z" "2026-11-12 17:16:00Z"; do
+	log_since "$T/app.log" "$badt" >/dev/null; rc=$?
+	expect_eq "a malformed time [$badt] is rc 2, never 'every line'" "$rc" 2
+done
+expect_eq "a fractional UTC time is accepted" "$(log_since "$T/app.log" 2026-11-12T17:16:00.250Z | wc -l | tr -d ' ')" 2
+# Only the AWK program matters (bash's =~ is ERE and fine): from `awk -v t=` to its END.
+expect_true "the awk program has no {n} repetition (old mawk reads it literally)" '! sed -n "/awk -v t=/,/END {/p" "$HERE/../lib/checks.sh" | grep -E "\[0-9\]\{[0-9]+\}" >/dev/null' 
 
 # ── kernel lock table: device AND inode ──
 touch "$T/.writer.lock"

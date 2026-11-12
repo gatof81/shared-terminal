@@ -75,9 +75,13 @@ flag_transition() {
 # log_since <log> <iso-time> — the lines of a `--timestamps` compose log at or after a time,
 # compared to the second (both sides cut to YYYY-MM-DDTHH:MM:SS: a fractional `…00.123Z` must not
 # sort before `…00Z`, or the restart's first second would be dropped). Returns 1 when NO line has a
-# timestamp (a log captured without --timestamps), so "0 refusals since …" can't pass vacuously.
+# timestamp (a log captured without --timestamps), so "0 refusals since …" can't pass vacuously,
+# and 2 when the time itself is not a UTC second-precision ISO time.
 # Digits are spelled out: mawk before 2020 reads `{4}` literally and would match nothing.
 log_since() {
+	# The time must be UTC to the second: an EMPTY one (a failed capture) would keep every line, so a
+	# positive gate could pass on the previous boot; an offset or a minute-only form compares wrong.
+	[[ "$2" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?Z$ ]] || return 2
 	awk -v t="${2:0:19}" '
 		{ for (i = 1; i <= NF; i++) if ($i ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]/) { seen = 1; if (substr($i, 1, 19) >= t) print; break } }
 		END { exit !seen }' "$1"
