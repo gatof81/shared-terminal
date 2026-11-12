@@ -664,6 +664,14 @@ El workspace destino lo controla el agente y el backend es root en el host. Por 
 **Reglas generales:**
 - **v0.3.2:** antes de abrir el workspace destino se verifica el sha256 de cada contenido. Uno que no
   coincide no llega ni a crear el inbox (`hash-mismatch`, T13).
+- **v0.3.2:** también antes de abrir el destino, la colocación vuelve a validar el nombre y el hash
+  que recibe: el nombre contra el conjunto de §6.1, sin `.` inicial, y el hash como 64 hex. No los
+  toma como válidos solo porque vienen del registro. Un registro alterado o restaurado nunca puede
+  hacer que root escriba fuera de `.st-inbox` (`io`).
+- **v0.3.2:** la colocación es un efecto, igual que la llamada de d. Por eso, después de escribir
+  `placing`, el mismo `mayEffect` de d0 la detiene si ya se conoce una pérdida del lock o un
+  escritor envenenado (§2.1 punto 3). La respuesta es `not-sent{persist-failed}` con
+  `filesPossiblyPlaced`, y al reabrir, `not-sent{persist-failed, files_possibly_placed}`.
 - **v0.3.2:** `delivery{not-sent, artifact-failed}` lleva `artifact_error`, que puede ser:
   - `workspace-unavailable`: el workspace no existe o no es exactamente `<WORKSPACE_ROOT>/<sid>`;
   - `inbox-not-dir`;

@@ -289,14 +289,17 @@ export function mapComposer(r: HttpResult | Error): {
 
 /** The answer for an existing message (replay): its deliveries as they stand now. */
 function answerFor(
-	state: { deliveries: Map<string, { state: DeliveryState; reason?: string }> },
+	state: { deliveries: Map<string, { state: DeliveryState; reason?: string; placed?: boolean }> },
 	msg: { msgId: string; to: string[] },
 ): DeliveryAnswer[] {
 	return msg.to.map((agentId) => {
 		const d = state.deliveries.get(deliveryKey(msg.msgId, agentId));
-		return d?.reason
+		const a: DeliveryAnswer = d?.reason
 			? { agentId, state: d.state, reason: d.reason }
 			: { agentId, state: d?.state ?? "planned" };
+		// A replay is the same answer (§3.4): the inbox warning included.
+		if (d?.placed && d.state === "not-sent") a.filesPossiblyPlaced = true;
+		return a;
 	});
 }
 
@@ -616,6 +619,9 @@ export class ProjectFanout {
 			}
 			placing = true;
 			set({ state: "placing" });
+			// A loss already known stops this effect too (§2.1 point 3): the
+			// placement is an effect on the target, like the Composer call at d0.
+			if (!this.deps.store.mayEffect(projectId)) return notSent("persist-failed");
 			let r: PlacementResult;
 			try {
 				const contents = [];

@@ -32,6 +32,9 @@ import { ARTIFACT_MAX_BYTES, type ArtifactRef, inboxName, sha256Hex } from "./ar
 
 export const INBOX_DIR = ".st-inbox";
 const SID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SHA_RE = /^[0-9a-f]{64}$/;
+/** What sanitizeName (artifacts.ts) can produce: §6.1's set, never a leading dot. */
+const NAME_RE = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,95}$/;
 
 export type PlacementError =
 	| "workspace-unavailable"
@@ -74,8 +77,13 @@ export async function placeArtifacts(input: PlacementInput): Promise<PlacementRe
 	try {
 		if (!SID_RE.test(input.sessionId))
 			throw new Fail("workspace-unavailable", "invalid session id");
-		// Bytes that are not the artifact never reach the target, not even its inbox (T13).
+		// Bytes that are not the artifact never reach the target, not even its
+		// inbox (T13); and the name is re-checked HERE, where root writes into
+		// the agent's filesystem, not trusted from the log that produced it
+		// (a tampered log or restored backup could carry a `/`).
 		for (const a of input.artifacts) {
+			if (!SHA_RE.test(a.sha256) || !NAME_RE.test(a.name))
+				throw new Fail("io", `invalid artifact name or hash: ${JSON.stringify(a.name)}`);
 			if (sha256Hex(a.content) !== a.sha256) throw new Fail("hash-mismatch", a.sha256);
 		}
 		// 1. The workspace, proven to be exactly <realpath(WORKSPACE_ROOT)>/<sid>.

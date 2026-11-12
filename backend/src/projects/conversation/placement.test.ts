@@ -140,6 +140,21 @@ describe("placement (§6.4)", () => {
 		expect(await fs.readdir(ws)).toEqual([]);
 	});
 
+	it("T14: a name or hash that sanitizeName could not have produced is refused before the target is opened", async () => {
+		const evil = { ...art("x"), name: "x/../../../ESCAPED" };
+		await fs.mkdir(path.join(ws, INBOX_DIR, `${evil.sha256.slice(0, 12)}-x`), { recursive: true });
+		expect(await place([evil])).toMatchObject({ ok: false, error: "io" });
+		expect(await place([{ ...art("y"), name: ".bashrc" }])).toMatchObject({
+			ok: false,
+			error: "io",
+		});
+		expect(await place([{ ...art("z"), sha256: "../x" }])).toMatchObject({
+			ok: false,
+			error: "io",
+		});
+		expect(await fs.readdir(root)).toEqual([SID]);
+	});
+
 	it("T14: names come prefixed by the hash and never leave the inbox", async () => {
 		const a = art("n", "x");
 		const r = await place([a]);

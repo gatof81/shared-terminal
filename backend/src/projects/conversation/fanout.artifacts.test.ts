@@ -225,11 +225,18 @@ describe("delivery with artifacts (§3.3 b–S2b, §6.4)", () => {
 		const r1 = reg("contenido", "a.txt");
 		for (const s of [SA, SB]) await fs.symlink("/etc", path.join(root, s, INBOX_DIR));
 		const f = new ProjectFanout(deps());
-		const r = await send(f, { artifacts: [r1.sha256] });
-		expect((r.body as { deliveries: unknown[] }).deliveries).toEqual([
+		const id = crypto.randomUUID();
+		const r = await send(f, { clientMessageId: id, artifacts: [r1.sha256] });
+		const expected = [
 			{ agentId: A, state: "not-sent", reason: "artifact-failed", filesPossiblyPlaced: true },
 			{ agentId: B, state: "not-sent", reason: "artifact-failed", filesPossiblyPlaced: true },
-		]);
+		];
+		expect((r.body as { deliveries: unknown[] }).deliveries).toEqual(expected);
+		// A replay is the same answer, the inbox warning included (review NIT).
+		expect(await send(f, { clientMessageId: id, artifacts: [r1.sha256] })).toMatchObject({
+			status: 202,
+			body: { replayed: true, deliveries: expected },
+		});
 		const failed = (await log()).filter((l) => l.state === "not-sent");
 		expect(failed).toHaveLength(2);
 		for (const l of failed) {
@@ -284,8 +291,18 @@ describe("delivery with artifacts (§3.3 b–S2b, §6.4)", () => {
 
 	it("T12b: death between placing and sending ⇒ on reopen not-sent{persist-failed, files_possibly_placed}, 0 calls, no partial final name", async () => {
 		const r1 = reg("contenido", "a.txt");
-		place = () => new Promise(() => {}); // the process "dies" during the placement
-		const f = new ProjectFanout(deps({ tHttpMs: 50 }));
+		// The process "dies" inside the real placement: temp written and
+		// verified, link never reached.
+		place = (sid, list) =>
+			placeArtifacts({
+				workspaceRoot: root,
+				sessionId: sid,
+				artifacts: list,
+				uid,
+				gid,
+				beforeLink: () => new Promise(() => {}),
+			});
+		const f = new ProjectFanout(deps({ tHttpMs: 200 }));
 		const r = await send(f, { to: [A], artifacts: [r1.sha256] });
 		expect((r.body as { deliveries: unknown[] }).deliveries).toEqual([
 			{ agentId: A, state: "placing" },
@@ -307,7 +324,51 @@ describe("delivery with artifacts (§3.3 b–S2b, §6.4)", () => {
 			files_possibly_placed: true,
 		});
 		expect(calls).toEqual([]);
+		// Only our hidden temp: never a partial file under a final name.
+		const inbox = await fs.readdir(path.join(root, SA, INBOX_DIR));
+		expect(inbox).toHaveLength(1);
+		expect(inbox[0]).toMatch(/^\.[0-9a-f]{16}\.tmp$/);
+	});
+
+	it("§2.1 point 3: a writer loss known after placing stops the placement too (no file touched)", async () => {
+		const r1 = reg("contenido", "a.txt");
+		await store.close();
+		let lost = false;
+		store = await ProjectConversationStore.start({
+			workspaceRoot: root,
+			bootId: "boot-lost",
+			acquire: async () => ({
+				ok: true,
+				lock: { held: () => !lost, onLost: () => {}, release: () => {} },
+			}),
+		});
+		store.onAppend((_p, lines) => {
+			if (lines.some((l) => l.state === "placing")) lost = true;
+		});
+		let placed = 0;
+		place = async () => {
+			placed++;
+			return { ok: true, placed: [] };
+		};
+		const f = new ProjectFanout(deps());
+		const r = await send(f, { to: [A], artifacts: [r1.sha256] });
+		expect((r.body as { deliveries: unknown[] }).deliveries).toEqual([
+			{ agentId: A, state: "not-sent", reason: "persist-failed", filesPossiblyPlaced: true },
+		]);
+		expect(placed).toBe(0);
+		expect(calls).toEqual([]);
 		await expect(fs.readdir(path.join(root, SA, INBOX_DIR))).rejects.toThrow();
+		lost = false;
+		await store.close();
+		store = await ProjectConversationStore.start({
+			workspaceRoot: root,
+			bootId: "after-loss",
+			acquire: async () => ({ ok: true, lock: lock() }),
+		});
+		expect((await store.view(PID)).lines.find((l) => l.state === "not-sent")).toMatchObject({
+			reason: "persist-failed",
+			files_possibly_placed: true,
+		});
 	});
 
 	it("without D2 (no artifacts dep) a message with artifacts is 409 artifacts-off and nothing is read", async () => {
