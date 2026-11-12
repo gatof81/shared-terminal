@@ -350,6 +350,89 @@ test.describe("workspace — flag on", () => {
 	});
 });
 
+test.describe("workspace — attachments (D2)", () => {
+	test.beforeEach(async ({ backend }) => {
+		await backend.enableProjectConversation();
+	});
+
+	const artifactRequests = (backend: MockBackend) =>
+		backend.requests.filter((r) => r.path.includes("/conversation/artifacts"));
+
+	test("projectArtifacts absent: no Attach control and no request to …/artifacts", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		await app.login("alice", `${projectHash}/new`);
+		await expect(composer(page).locator("textarea")).toBeVisible();
+		await expect(composer(page).getByRole("button", { name: "Attach file" })).toHaveCount(0);
+		await page.waitForTimeout(300);
+		expect(artifactRequests(backend)).toEqual([]);
+	});
+
+	test("attach a file from an agent's workspace, send it, open it in the thread", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.projectArtifacts = true;
+		await app.login("alice", `${projectHash}/new`);
+		const c = composer(page);
+		await c.getByRole("button", { name: "Attach file" }).click();
+		const panel = c.getByRole("group", { name: "Attach a file" });
+		await panel.getByRole("button", { name: "@architect-hz" }).click();
+		// Protected files are listed but can't be chosen.
+		await expect(panel.locator(".tw-attach-entry", { hasText: ".env" })).toBeDisabled();
+		await panel.locator(".tw-attach-entry", { hasText: "src/" }).click();
+		await panel.locator(".tw-attach-entry", { hasText: "auth.ts" }).click();
+		await expect(c.locator(".tw-files .tw-file-chip")).toContainText("auth.ts");
+		expect(backend.projectArtifactPosts.at(-1)).toEqual({
+			agentId: AGENT_IDS.architect,
+			path: "src/auth.ts",
+		});
+		await c.locator("textarea").fill("Apply this to your branch");
+		await c.locator(".tw-chip-add").click();
+		await c.getByRole("option", { name: /architect-hz/ }).click();
+		await c.getByRole("button", { name: "Send" }).click();
+		await expect(page).toHaveURL(/\/threads\/c0000000-/);
+		const post = backend.projectMessagePosts.at(-1)!;
+		expect(post.artifacts).toHaveLength(1);
+		expect(String((post.artifacts as string[])[0])).toMatch(/^[0-9a-f]{64}$/);
+		const file = page.locator("#project-view .tw-file-open");
+		await expect(file).toHaveText(/auth\.ts · \d+ B/);
+		await file.click();
+		await expect(page.locator("#project-view .tw-file-text")).toContainText(
+			"export function login(user: string)",
+		);
+		await expect(page.locator("#project-view .tw-del")).toHaveText("@architect-hz · Delivered ✓");
+		await noHorizontalScroll(page);
+	});
+
+	test("a placement that failed says why, and that files may already be in the inbox", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.projectArtifacts = true;
+		backend.projectPlacementError.set(AGENT_IDS.architect, "exists-different");
+		await app.login("alice", `${projectHash}/new`);
+		const c = composer(page);
+		await c.getByRole("button", { name: "Attach file" }).click();
+		const panel = c.getByRole("group", { name: "Attach a file" });
+		await panel.getByRole("button", { name: "@architect-hz" }).click();
+		await panel.locator(".tw-attach-entry", { hasText: "README.md" }).click();
+		await expect(c.locator(".tw-files .tw-file-chip")).toContainText("README.md");
+		await c.locator("textarea").fill("Read this");
+		await c.locator(".tw-chip-add").click();
+		await c.getByRole("option", { name: /architect-hz/ }).click();
+		await c.getByRole("button", { name: "Send" }).click();
+		await expect(page).toHaveURL(/\/threads\/c0000000-/);
+		await expect(page.locator("#project-view .tw-del")).toHaveText(
+			"@architect-hz · Not delivered: a file couldn't be placed: a different file already has that name in its inbox. Some files may already be in its inbox.",
+		);
+	});
+});
+
 test.describe("workspace — layout", () => {
 	test.beforeEach(async ({ backend }) => {
 		await backend.enableProjectConversation();

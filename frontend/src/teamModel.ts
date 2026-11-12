@@ -39,6 +39,15 @@ export interface LogMessage {
 	inReplyTo: string | null;
 	/** kind relay only (D3): the grant it ran under. */
 	grantId: string | null;
+	/** D2 (§6.3): the files it carries, name/bytes from the first `artifact` of each sha256. */
+	artifacts: ArtifactRef[];
+}
+
+/** D2: a registered file as a message names it (identity = sha256; the name is informative). */
+export interface ArtifactRef {
+	sha256: string;
+	name: string;
+	bytes: number;
 }
 
 export type DeliveryState =
@@ -64,6 +73,22 @@ export interface LogDelivery {
 	result: DeliveryState | null;
 	reason: string | null;
 	filesPossiblyPlaced: boolean;
+	/** D2, on `not-sent{artifact-failed}`: which placement step failed (§6.4). */
+	artifactError: string | null;
+	/** D2, on `sending`: where each file landed in the agent's workspace. */
+	artifactsPlaced: Array<{ sha256: string; path: string }>;
+}
+
+/** D2 (§6.1): a file registered in the project, from one agent's workspace. */
+export interface LogArtifact {
+	ev: "artifact";
+	seq: number;
+	ts: string;
+	sha256: string;
+	name: string;
+	bytes: number;
+	sourceAgentId: string | null;
+	sourcePath: string | null;
 }
 
 export type Attribution = "exact" | "ambiguous" | "failed";
@@ -136,7 +161,8 @@ export type LogEvent =
 	| LogReplySettling
 	| LogLateClose
 	| LogGrant
-	| LogOwnerAck;
+	| LogOwnerAck
+	| LogArtifact;
 
 const DELIVERY_STATES: ReadonlySet<string> = new Set([
 	"planned",
@@ -152,6 +178,7 @@ const DELIVERY_STATES: ReadonlySet<string> = new Set([
 ]);
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
+const SHA256_RE = /^[0-9a-f]{64}$/;
 const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
 const nonEmpty = (v: unknown): string | null => (typeof v === "string" && v !== "" ? v : null);
 const int = (v: unknown): number | null =>
@@ -173,6 +200,20 @@ function quoteRefOf(v: unknown): QuoteRef | null {
  * a kind this UI doesn't render (artifact, recovery, a future kind) is
  * null — skipped, never guessed at.
  */
+function artifactRefOf(v: unknown): ArtifactRef | null {
+	if (!isObj(v)) return null;
+	const sha256 = str(v.sha256);
+	const name = nonEmpty(v.name);
+	const bytes = int(v.bytes);
+	if (!sha256 || !SHA256_RE.test(sha256) || !name || bytes === null) return null;
+	return { sha256, name, bytes };
+}
+
+function artifactsOf(v: unknown): ArtifactRef[] {
+	if (!Array.isArray(v)) return [];
+	return v.map(artifactRefOf).filter((a): a is ArtifactRef => a !== null);
+}
+
 export function parseLogEvent(raw: unknown): LogEvent | null {
 	if (!isObj(raw)) return null;
 	const seq = int(raw.seq);
@@ -199,6 +240,7 @@ export function parseLogEvent(raw: unknown): LogEvent | null {
 				quoteRef: quoteRefOf(raw.quote_ref),
 				inReplyTo: nonEmpty(raw.in_reply_to),
 				grantId: relay ? nonEmpty(relay.grant_id) : null,
+				artifacts: artifactsOf(raw.artifacts),
 			};
 		}
 		case "delivery": {
@@ -218,6 +260,26 @@ export function parseLogEvent(raw: unknown): LogEvent | null {
 				result: r !== null && DELIVERY_STATES.has(r) ? (r as DeliveryState) : null,
 				reason: nonEmpty(raw.reason),
 				filesPossiblyPlaced: raw.files_possibly_placed === true,
+				artifactError: nonEmpty(raw.artifact_error),
+				artifactsPlaced: Array.isArray(raw.artifacts_placed)
+					? raw.artifacts_placed
+							.filter(isObj)
+							.map((p) => ({ sha256: str(p.sha256) ?? "", path: str(p.path) ?? "" }))
+							.filter((p) => SHA256_RE.test(p.sha256) && p.path !== "")
+					: [],
+			};
+		}
+		case "artifact": {
+			const ref = artifactRefOf(raw);
+			if (!ref) return null;
+			const src = isObj(raw.source) ? raw.source : null;
+			return {
+				ev,
+				seq,
+				ts,
+				...ref,
+				sourceAgentId: src ? nonEmpty(src.agent_id) : null,
+				sourcePath: src ? nonEmpty(src.path) : null,
 			};
 		}
 		case "reply_ref": {
@@ -312,6 +374,7 @@ export interface DeliveryView {
 	state: DeliveryState;
 	reason: string | null;
 	filesPossiblyPlaced: boolean;
+	artifactError: string | null;
 	/** Seq of the event that set `state` (ordering in a thread). */
 	seq: number;
 	ts: string;
@@ -352,6 +415,8 @@ export class ProjectLog {
 	readonly grantTask = new Map<string, string>();
 	/** Every owner_ack loaded (window or fetched). */
 	readonly acks: LogOwnerAck[] = [];
+	/** D2: sha256 → its FIRST `artifact` event loaded (the one whose name/bytes a message uses). */
+	readonly artifacts = new Map<string, LogArtifact>();
 	newestSeq = -1;
 	oldestSeq = Number.POSITIVE_INFINITY;
 
@@ -438,6 +503,10 @@ export class ProjectLog {
 			case "grant":
 				if (e.taskMsgId) this.grantTask.set(e.grantId, e.taskMsgId);
 				return;
+			case "artifact":
+				// Folded in seq order, so the first one kept is the lowest seq loaded.
+				if (!this.artifacts.has(e.sha256)) this.artifacts.set(e.sha256, e);
+				return;
 			case "delivery":
 			case "reply_ref":
 			case "reply_settling":
@@ -511,6 +580,7 @@ function applyDelivery(m: MessageView, e: LogDelivery): void {
 			state: x.state,
 			reason: x.reason,
 			filesPossiblyPlaced: x.filesPossiblyPlaced || (cur?.filesPossiblyPlaced ?? false),
+			artifactError: x.artifactError,
 			seq: x.seq,
 			ts: x.ts,
 			settled: false,
@@ -569,35 +639,52 @@ const REFUSED_REASON: ReadonlyMap<string, string> = new Map([
 	["send-in-progress", "another send to it was in progress"],
 ]);
 
+/** §6.4: why a file couldn't be put in the agent's inbox (`artifact_error`). */
+const ARTIFACT_ERROR: ReadonlyMap<string, string> = new Map([
+	["workspace-unavailable", "its workspace wasn't available"],
+	["inbox-not-dir", "its .st-inbox isn't a plain folder"],
+	["exists-different", "a different file already has that name in its inbox"],
+	["hash-mismatch", "a stored file no longer matched its hash"],
+	["io", "writing the file failed"],
+]);
+
+/** Said whenever files may have landed although the message didn't (§6.4, §8 restore). */
+export const FILES_MAYBE_PLACED = "Some files may already be in its inbox.";
+
 /** The words for one delivery, e.g. "Not delivered: it was busy". */
 export function deliveryText(
-	d: Pick<DeliveryView, "state" | "reason" | "filesPossiblyPlaced">,
+	d: Pick<DeliveryView, "state" | "reason" | "filesPossiblyPlaced"> & {
+		artifactError?: string | null;
+	},
 ): string {
+	const files = (t: string) => (d.filesPossiblyPlaced ? `${t}. ${FILES_MAYBE_PLACED}` : t);
 	switch (d.state) {
 		case "planned":
-		case "placing":
 		case "sending":
 			return "Sending…";
+		case "placing":
+			return "Placing files…";
 		case "delivered":
 			return "Delivered";
 		case "not-sent": {
-			const why = (d.reason && NOT_SENT_REASON.get(d.reason)) ?? "it wasn't sent";
-			return d.filesPossiblyPlaced
-				? `Not delivered: ${why}. Some files may already be in its inbox.`
-				: `Not delivered: ${why}`;
+			let why = (d.reason && NOT_SENT_REASON.get(d.reason)) ?? "it wasn't sent";
+			const detail = d.reason === "artifact-failed" && d.artifactError;
+			if (detail) why = `a file couldn't be placed: ${ARTIFACT_ERROR.get(detail) ?? detail}`;
+			return files(`Not delivered: ${why}`);
 		}
 		case "refused": {
 			const why = (d.reason && REFUSED_REASON.get(d.reason)) ?? "it couldn't take it";
 			return `Not delivered: ${why}`;
 		}
 		case "unconfirmed":
-			return "Not sure it arrived: no confirmation from the agent";
+			return files("Not sure it arrived: no confirmation from the agent");
 		case "misdelivered":
-			return "Not sure it arrived: it may have gone to another conversation";
+			return files("Not sure it arrived: it may have gone to another conversation");
 		case "failed":
-			return "Not sure it arrived: the send failed part-way";
+			return files("Not sure it arrived: the send failed part-way");
 		default:
-			return "Not sure it arrived";
+			// `uncertain`, e.g. `uncertain{restored}` after a restore caught it placing (§8).
+			return files("Not sure it arrived");
 	}
 }
 
@@ -941,6 +1028,12 @@ const POST_ERROR: ReadonlyMap<string, string> = new Map([
 		"The server isn't accepting messages right now. Nothing was sent.",
 	],
 	["invalid-body", "The server rejected the message. Nothing was sent."],
+	["too-many-artifacts", "A message carries at most 4 files. Nothing was sent."],
+	[
+		"artifact-unknown",
+		"One of the attached files isn't registered in this project. Nothing was sent.",
+	],
+	["artifacts-off", "Attaching files is turned off on this server. Nothing was sent."],
 ]);
 
 /** The words for a refused POST (the server sent nothing to any agent). */
@@ -951,4 +1044,51 @@ export function postErrorText(code: string, status: number): string {
 			? "This project no longer exists. Nothing was sent."
 			: `The server refused the message (${code || status}). Nothing was sent.`)
 	);
+}
+
+// ── Attachments (D2, §6.1) ──────────────────────────────────────────────────
+
+/** §6.3: at most this many files per message (the server enforces it too). */
+export const MAX_ARTIFACTS = 4;
+/** §6.1: ARTIFACT_MAX_BYTES — a bigger file is refused (413) without being read. */
+export const ARTIFACT_MAX_BYTES = 1024 * 1024;
+
+const REGISTER_ERROR: ReadonlyMap<string, string> = new Map([
+	["invalid-body", "That isn't a file that can be attached."],
+	[
+		"artifact-restricted",
+		"That file is protected (credentials, keys, .git…) and can't leave the workspace.",
+	],
+	["artifact-not-found", "That file isn't there any more."],
+	["agent-not-bound", "That agent has no session bound right now."],
+	["foreign-session", "That session isn't this agent's."],
+	["artifacts-full", "This project has no room for more files. Nothing is deleted to make room."],
+	["artifact-corrupt", "The stored copy of that file is damaged; it can't be used."],
+	["artifact-too-large", "That file is bigger than 1 MiB."],
+	["artifact-not-text", "Only text files can be attached (no binaries, no empty files)."],
+	["busy", "Too many file operations at once — try again in a moment."],
+	["binding-unverified", "The agent's session couldn't be checked — try again."],
+	["persist-failed", "The server couldn't record the file — try again."],
+]);
+
+/** Words for a refused `POST …/artifacts` — none of them registered anything (§6.1.1). */
+export function registerErrorText(code: string, status: number): string {
+	return (
+		REGISTER_ERROR.get(code) ??
+		(status === 0
+			? "No answer from the server. Nothing is attached; try again."
+			: `The server couldn't attach that file (${code || status}).`)
+	);
+}
+
+/** "1.8 KiB" — a file's size for a chip. */
+export function sizeText(bytes: number): string {
+	if (bytes < 1024) return `${bytes} B`;
+	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+	return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+/** Whether a file reads as a unified diff by its name (shown with the diff renderer). */
+export function looksLikeDiff(name: string): boolean {
+	return /\.(diff|patch)$/i.test(name);
 }

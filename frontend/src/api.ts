@@ -86,6 +86,16 @@ export function projectConversationEnabled(): boolean {
 	return _projectChat && _projectConversation;
 }
 
+// D2 (Appendix A.2): `features.projectArtifacts`, present only with
+// PROJECT_ARTIFACTS_ENABLED on. Absent ⇒ no attach UI and no request to
+// …/artifacts at all; a message's files are still listed (read from the log).
+let _projectArtifacts = false;
+
+/** True only with the conversation on AND `features.projectArtifacts === true`. */
+export function projectArtifactsEnabled(): boolean {
+	return projectConversationEnabled() && _projectArtifacts;
+}
+
 /** True iff `users.is_admin = 1` for the current session (#50). Gates
  *  invite-mint UI in main.ts. Refreshes on every /auth/status call so a
  *  promotion / demotion takes effect on the next reload. */
@@ -141,7 +151,7 @@ export interface AuthStatus {
 	/** Which frontend shell to mount (UI unification §8.4); older backends omit it. */
 	uiShell?: "v1" | "v2";
 	/** P3a: present only with PROJECT_CHAT_ENABLED on. Absent ⇒ no project surface. */
-	features?: { projectChat?: boolean; projectConversation?: boolean };
+	features?: { projectChat?: boolean; projectConversation?: boolean; projectArtifacts?: boolean };
 }
 
 export async function checkAuthStatus(): Promise<AuthStatus> {
@@ -175,6 +185,10 @@ async function fetchAuthStatus(): Promise<AuthStatus> {
 		typeof data.features === "object" &&
 		data.features !== null &&
 		data.features.projectConversation === true;
+	_projectArtifacts =
+		typeof data.features === "object" &&
+		data.features !== null &&
+		data.features.projectArtifacts === true;
 	// #200: mirror caps if present. A pre-#200 backend omits the field
 	// and leaves the v1 defaults in place — same hardcoded ceilings the
 	// form would have used before this PR.
@@ -713,12 +727,93 @@ export interface ProjectMessageBody {
 	to: string[];
 	inReplyTo?: string;
 	quoteRef?: { msgId: string; agentId: string; promptId: string; reportSha256: string };
+	/** D2: sha256s registered in the project, ≤ 4, distinct; part of the idempotent body. */
+	artifacts?: string[];
 }
 
 export interface ProjectMessageAnswer {
 	msgId: string;
 	replayed?: boolean;
-	deliveries: Array<{ agentId: string; state: string; reason?: string }>;
+	deliveries: Array<{
+		agentId: string;
+		state: string;
+		reason?: string;
+		/** D2: files may already be in that agent's inbox although it wasn't delivered. */
+		filesPossiblyPlaced?: boolean;
+	}>;
+}
+
+export interface RegisteredArtifact {
+	sha256: string;
+	name: string;
+	bytes: number;
+	replayed: boolean;
+}
+
+/**
+ * §6.1.1: register a file of the session the agent has bound NOW (the
+ * server reads it through the same opener as Files). A refusal registers
+ * nothing; repeating the same file from the same place answers 200
+ * `replayed`. Only called with projectArtifactsEnabled().
+ */
+export function registerProjectArtifact(
+	projectId: string,
+	body: { agentId: string; path: string },
+): Promise<ProjectAnswer<RegisteredArtifact>> {
+	return projectRequest(
+		`/projects/${encodeURIComponent(projectId)}/conversation/artifacts`,
+		{ method: "POST", body: JSON.stringify(body) },
+		(b): b is RegisteredArtifact =>
+			isObj(b) &&
+			typeof b.sha256 === "string" &&
+			/^[0-9a-f]{64}$/.test(b.sha256) &&
+			typeof b.name === "string" &&
+			typeof b.bytes === "number",
+	);
+}
+
+/**
+ * A registered file's bytes AS TEXT (Appendix A.2: fetched, never
+ * navigated — it is another agent's data). The text is checked against
+ * its sha256 here too, so what is shown is exactly what the message names.
+ */
+export async function fetchProjectArtifactText(
+	projectId: string,
+	sha256: string,
+): Promise<{ ok: true; text: string } | { ok: false; status: number; code: string }> {
+	const epoch = authEpoch;
+	let res: Response;
+	try {
+		res = await apiFetch(
+			`/projects/${encodeURIComponent(projectId)}/conversation/artifacts/${encodeURIComponent(sha256)}`,
+		);
+	} catch {
+		return { ok: false, status: 0, code: epoch !== authEpoch ? "stale" : "network" };
+	}
+	if (epoch !== authEpoch) return { ok: false, status: res.status, code: "stale" };
+	if (!res.ok) {
+		const b: unknown = await res.json().catch(() => null);
+		return {
+			ok: false,
+			status: res.status,
+			code: isObj(b) && typeof b.error === "string" ? b.error : "",
+		};
+	}
+	// The body can still fail (a reset mid-body, up to 1 MiB) and so can the
+	// digest (no crypto.subtle outside a secure context): answered, never
+	// thrown, so the caller's "loading" always ends and can be retried.
+	let buf: ArrayBuffer;
+	let digest: ArrayBuffer;
+	try {
+		buf = await res.arrayBuffer();
+		digest = await crypto.subtle.digest("SHA-256", buf);
+	} catch {
+		return { ok: false, status: res.status, code: epoch !== authEpoch ? "stale" : "network" };
+	}
+	if (epoch !== authEpoch) return { ok: false, status: res.status, code: "stale" };
+	const got = [...new Uint8Array(digest)].map((x) => x.toString(16).padStart(2, "0")).join("");
+	if (got !== sha256) return { ok: false, status: res.status, code: "hash-mismatch" };
+	return { ok: true, text: new TextDecoder("utf-8", { fatal: false }).decode(buf) };
 }
 
 /**

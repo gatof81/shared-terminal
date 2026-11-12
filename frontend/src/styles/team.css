@@ -807,3 +807,177 @@
 	gap: 6px;
 	flex-basis: 100%;
 }
+
+/* ── Attachments (D2) ─────────────────────────────────────────────────── */
+
+.tw-files,
+.tw-msg-files {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+}
+
+.tw-msg-files {
+	margin-top: 6px;
+	flex-direction: column;
+	align-items: flex-start;
+}
+
+.tw-msg-file {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	max-width: 100%;
+	min-width: 0;
+}
+
+.tw-file-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	min-height: 32px;
+	max-width: 100%;
+	box-sizing: border-box;
+	padding: 0 6px 0 12px;
+	border-radius: 8px;
+	border: 1px solid var(--c-border);
+	background: var(--c-surface);
+	color: var(--c-text);
+	font: inherit;
+	font-size: 0.85rem;
+}
+
+.tw-file-open {
+	padding-right: 12px;
+	cursor: pointer;
+}
+
+.tw-file-open[aria-expanded="true"] {
+	border-color: var(--c-accent);
+}
+
+.tw-file-name {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-family: var(--font-mono, ui-monospace, monospace);
+}
+
+.tw-file-body {
+	max-width: 100%;
+	max-height: 420px;
+	overflow: auto;
+	border: 1px solid var(--c-border);
+	border-radius: 8px;
+	background: var(--c-surface);
+}
+
+.tw-file-warn {
+	margin: 0;
+	padding: 6px 10px;
+	font-size: 0.78rem;
+	border-bottom: 1px solid var(--c-border);
+}
+
+.tw-file-text {
+	margin: 0;
+	padding: 10px;
+	font-size: 0.8rem;
+	line-height: 1.45;
+	white-space: pre;
+}
+
+.tw-attach {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 6px;
+}
+
+.tw-attach-btn {
+	min-height: 32px;
+}
+
+.tw-attach-panel {
+	align-self: stretch;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 8px;
+	border: 1px solid var(--c-border);
+	border-radius: 12px;
+	background: var(--c-surface);
+}
+
+.tw-attach-agents {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px;
+}
+
+.tw-attach-agent {
+	padding: 0 12px;
+	font: inherit;
+	font-size: 0.85rem;
+	cursor: pointer;
+}
+
+.tw-attach-agent[aria-pressed="true"] {
+	border-color: var(--c-accent);
+}
+
+.tw-attach-agent:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+.tw-attach-path {
+	font-size: 0.8rem;
+	overflow-wrap: anywhere;
+}
+
+.tw-attach-list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	max-height: 240px;
+	overflow-y: auto;
+}
+
+.tw-attach-entry {
+	display: flex;
+	justify-content: space-between;
+	gap: 12px;
+	width: 100%;
+	min-height: 36px;
+	padding: 0 8px;
+	border: 0;
+	border-radius: 6px;
+	background: transparent;
+	color: var(--c-text);
+	font: inherit;
+	font-size: 0.85rem;
+	text-align: left;
+	cursor: pointer;
+}
+
+.tw-attach-entry:hover:not(:disabled),
+.tw-attach-entry:focus-visible {
+	background: var(--c-accent-bg);
+}
+
+.tw-attach-entry:disabled {
+	color: var(--c-muted);
+	cursor: default;
+}
+
+.tw-attach-note {
+	margin: 0;
+	font-size: 0.8rem;
+	color: var(--c-text-2);
+}
+
+.tw-attach-note:empty {
+	display: none;
+}

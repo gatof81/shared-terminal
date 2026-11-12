@@ -22,12 +22,20 @@
 
 import {
 	type AgentListEntry,
+	fetchProjectArtifactText,
+	listWorkspaceDir,
 	type ProjectMessageBody,
 	postProjectAck,
 	postProjectMessage,
+	projectArtifactsEnabled,
+	registerProjectArtifact,
+	type WorkspaceEntry,
+	WorkspaceFsError,
 } from "./api.js";
 import { explainCode, validateText } from "./composerText.js";
 import { clock as clockText } from "./conversationModel.js";
+import { type DiffRow, parseUnifiedDiff } from "./diff.js";
+import { appendDiffRows } from "./diffTable.js";
 import { relativeDate } from "./format.js";
 import {
 	POLL_ACTIVE_MS,
@@ -38,6 +46,8 @@ import {
 import { navigateProject, type ProjectPanel, projectRouteHash, routeHash } from "./router.js";
 import { logStore, type ProjectLogStore, resetLogStores } from "./teamLog.js";
 import {
+	ARTIFACT_MAX_BYTES,
+	type ArtifactRef,
 	ackTargetOf,
 	answerStates,
 	buildThreads,
@@ -49,6 +59,8 @@ import {
 	forYou,
 	type LogReplyRef,
 	type LogReplySettling,
+	looksLikeDiff,
+	MAX_ARTIFACTS,
 	MAX_RECIPIENTS,
 	type MessageView,
 	mentionAt,
@@ -57,6 +69,8 @@ import {
 	postErrorText,
 	type QuoteRef,
 	recipientsToSend,
+	registerErrorText,
+	sizeText,
 	type ThreadSummary,
 	threadRootOf,
 	unrootedMessages,
@@ -168,8 +182,16 @@ type SendPhase =
 	| {
 			kind: "sent";
 			msgId: string;
-			results: Array<{ agentId: string; state: DeliveryState | undefined; reason?: string }>;
+			results: SendResult[];
 	  };
+
+interface SendResult {
+	agentId: string;
+	state: DeliveryState | undefined;
+	reason?: string;
+	filesPossiblyPlaced?: boolean;
+	artifactError?: string | null;
+}
 
 interface ReplyTarget {
 	agentId: string;
@@ -192,6 +214,12 @@ class Composer {
 	private status = el("div", "tw-send-status");
 	private send = el("button", "tw-btn tw-btn-pri", "Send");
 	private quote = el("div", "tw-quote");
+	/** D2: the attached files (registered already), and the picker that adds them. */
+	private filesRow = el("div", "tw-files");
+	private attach: AttachPicker | null = null;
+	private files: ArtifactRef[] = [];
+	/** Bumped when a send starts: a file answered for an earlier draft never joins a later one. */
+	private draftGen = 0;
 	private chosen: string[] = [];
 	private agents: Agents = { byId: new Map(), list: [], presence: new Map() };
 	private phase: SendPhase = { kind: "idle" };
@@ -222,7 +250,20 @@ class Composer {
 		this.status.setAttribute("role", "status");
 		const row = el("div", "tw-compose-row");
 		row.append(this.text, this.send);
-		this.root.append(this.chips, this.quote, this.picker, row, this.hint, this.status);
+		this.filesRow.hidden = true;
+		this.root.append(this.chips, this.quote, this.picker);
+		// Attachments exist only with features.projectArtifacts: without it no
+		// control is shown and no request to …/artifacts is ever made (A.2).
+		if (projectArtifactsEnabled()) {
+			this.attach = new AttachPicker(
+				projectId,
+				(f, draft) => this.addFile(f, draft),
+				() => this.draftGen,
+			);
+			this.root.append(this.filesRow, this.attach.root);
+			this.renderFiles();
+		}
+		this.root.append(row, this.hint, this.status);
 		this.text.addEventListener("input", () => this.onInput());
 		this.text.addEventListener("keydown", (e) => this.onKey(e));
 		this.text.addEventListener("click", () => this.onInput());
@@ -241,18 +282,29 @@ class Composer {
 		if (this.phase.kind !== "sent") return;
 		const m = log.messages.get(this.phase.msgId);
 		if (!m) return;
-		const results = m.message.to.map((agentId) => {
+		const results: SendResult[] = m.message.to.map((agentId) => {
 			const d = m.deliveries.get(agentId);
-			return { agentId, state: d?.state, reason: d?.reason ?? undefined };
+			return {
+				agentId,
+				state: d?.state,
+				reason: d?.reason ?? undefined,
+				filesPossiblyPlaced: d?.filesPossiblyPlaced ?? false,
+				artifactError: d?.artifactError ?? null,
+			};
 		});
+		const prev = this.phase.results;
 		const same = results.every(
-			(r, i) => r.state === (this.phase as { results: typeof results }).results[i]?.state,
+			(r, i) =>
+				r.state === prev[i]?.state &&
+				r.filesPossiblyPlaced === (prev[i]?.filesPossiblyPlaced ?? false) &&
+				r.artifactError === (prev[i]?.artifactError ?? null),
 		);
 		if (!same) this.setPhase({ kind: "sent", msgId: this.phase.msgId, results });
 	}
 
 	setAgents(agents: Agents): void {
 		this.agents = agents;
+		this.attach?.setAgents(agents);
 		this.renderChips();
 		if (this.pickerOpen) this.renderPicker();
 	}
@@ -319,6 +371,43 @@ class Composer {
 	private add(id: string): void {
 		if (!this.chosen.includes(id) && this.chosen.length < MAX_RECIPIENTS) this.chosen.push(id);
 		this.renderChips();
+	}
+
+	private addFile(f: ArtifactRef, draft: number): string | null {
+		if (draft !== this.draftGen) return "Not attached: the draft changed meanwhile.";
+		if (this.phase.kind === "sending" || this.phase.kind === "unknown")
+			return "Wait until this message's outcome is known.";
+		if (this.files.some((x) => x.sha256 === f.sha256)) return "That file is already attached.";
+		if (this.files.length >= MAX_ARTIFACTS)
+			return `A message carries at most ${MAX_ARTIFACTS} files.`;
+		this.files.push(f);
+		this.renderFiles();
+		return null;
+	}
+
+	private renderFiles(): void {
+		const locked = this.phase.kind === "sending" || this.phase.kind === "unknown";
+		const nodes: HTMLElement[] = [];
+		for (const f of this.files) {
+			const chip = el("span", "tw-file-chip");
+			chip.append(el("span", "tw-file-name", f.name), el("span", "tw-muted", sizeText(f.bytes)));
+			if (!locked)
+				chip.append(
+					button(
+						"×",
+						"tw-x",
+						() => {
+							this.files = this.files.filter((x) => x.sha256 !== f.sha256);
+							this.renderFiles();
+						},
+						`Remove ${f.name}`,
+					),
+				);
+			nodes.push(chip);
+		}
+		this.filesRow.hidden = nodes.length === 0;
+		replaceIfChanged(this.filesRow, nodes);
+		this.attach?.setFull(this.files.length >= MAX_ARTIFACTS || locked);
 	}
 
 	private mentionQuery: { start: number; query: string } | null = null;
@@ -427,6 +516,7 @@ class Composer {
 		const busy = p.kind === "sending";
 		this.send.disabled = busy;
 		this.text.readOnly = busy || p.kind === "unknown";
+		if (this.attach) this.renderFiles();
 		this.status.replaceChildren();
 		this.status.className = `tw-send-status tw-send-${p.kind}`;
 		if (p.kind === "sending") {
@@ -464,7 +554,8 @@ class Composer {
 							: deliveryText({
 									state: r.state,
 									reason: r.reason ?? null,
-									filesPossiblyPlaced: false,
+									filesPossiblyPlaced: r.filesPossiblyPlaced ?? false,
+									artifactError: r.artifactError ?? null,
 								});
 				ul.append(el("li", `tw-del tw-del-${tone}`, `${who} · ${words}`));
 			}
@@ -490,6 +581,7 @@ class Composer {
 			text: this.text.value,
 			to: r.to,
 		};
+		if (this.files.length > 0) body.artifacts = this.files.map((f) => f.sha256);
 		const inReplyTo = this.replyTarget?.inReplyTo ?? this.rootId;
 		if (inReplyTo) body.inReplyTo = inReplyTo;
 		if (this.replyTarget && r.to.includes(this.replyTarget.agentId))
@@ -504,6 +596,8 @@ class Composer {
 	 * sent" — so the outcome stays unknown and the draft stays locked.
 	 */
 	private async post(body: ProjectMessageBody, check = false): Promise<void> {
+		// Whatever is being attached now belongs to the draft being sent away.
+		this.draftGen++;
 		this.setPhase({ kind: "sending", body });
 		const a = await postProjectMessage(this.projectId, body);
 		if (a.ok) {
@@ -511,11 +605,12 @@ class Composer {
 			this.text.readOnly = false;
 			this.clearReply();
 			if (this.mode === "task") this.chosen = [];
+			this.files = [];
 			this.renderChips();
-			const results = answerStates(body.to, a.body.deliveries).map((r) => ({
-				...r,
-				reason: a.body.deliveries.find((d) => d.agentId === r.agentId)?.reason,
-			}));
+			const results: SendResult[] = answerStates(body.to, a.body.deliveries).map((r) => {
+				const d = a.body.deliveries.find((x) => x.agentId === r.agentId);
+				return { ...r, reason: d?.reason, filesPossiblyPlaced: d?.filesPossiblyPlaced === true };
+			});
 			this.setPhase({ kind: "sent", msgId: a.body.msgId, results });
 			this.onSent(a.body.msgId);
 			return;
@@ -535,6 +630,265 @@ class Composer {
 		}
 		// The server refused before any effect: nothing was sent; the draft stays.
 		this.setPhase({ kind: "refused", message: postErrorText(a.code, a.status) });
+	}
+}
+
+// ── Attach a file (D2, §6.1) ────────────────────────────────────────────────
+
+type Listing =
+	| { kind: "loading" }
+	| { kind: "ok"; entries: WorkspaceEntry[]; truncated: boolean }
+	| { kind: "error"; message: string };
+
+/**
+ * Choose a file of an agent's bound session and register it (§6.1.1). The
+ * browsing is the Files view's own read-only listing (owner-only, host
+ * bind mount); registering is the server's decision every time — what the
+ * listing marks protected or too big is only explained here, not enforced.
+ * Nothing is attached until the server answered 200/201 with its sha256.
+ */
+class AttachPicker {
+	readonly root = el("div", "tw-attach");
+	private toggle = el("button", "tw-btn tw-btn-ghost tw-attach-btn", "Attach file");
+	private panel = el("div", "tw-attach-panel");
+	private note = el("p", "tw-attach-note");
+	private agents: Agents = { byId: new Map(), list: [], presence: new Map() };
+	private open = false;
+	private full = false;
+	private agentId: string | null = null;
+	private sessionId: string | null = null;
+	private path = "";
+	private listing: Listing = { kind: "loading" };
+	private gen = 0;
+	/**
+	 * The person's current choice (open panel, agent, session). Every change
+	 * of it — choosing another agent, the binding moving, closing the panel,
+	 * a send locking or emptying the draft — bumps it, so an answer to a
+	 * registration started under an earlier choice never edits the draft.
+	 */
+	private choice = 0;
+	private registering: { choice: number; name: string } | null = null;
+
+	constructor(
+		private projectId: string,
+		/** Returns why the file couldn't be added to the draft, or null. */
+		private onAttached: (f: ArtifactRef, draft: number) => string | null,
+		/** The composer's draft generation (a new one after every send). */
+		private draft: () => number,
+	) {
+		this.toggle.type = "button";
+		this.toggle.setAttribute("aria-expanded", "false");
+		this.toggle.addEventListener("click", () => this.setOpen(!this.open));
+		this.panel.hidden = true;
+		this.panel.setAttribute("role", "group");
+		this.panel.setAttribute("aria-label", "Attach a file");
+		this.note.setAttribute("role", "status");
+		this.root.append(this.toggle, this.panel, this.note);
+	}
+
+	setAgents(agents: Agents): void {
+		this.agents = agents;
+		if (!this.open) return;
+		// The agent's binding moved: what was being browsed is another session's.
+		const sid = this.boundSession(this.agentId);
+		if (this.agentId !== null && sid !== this.sessionId) this.choose(null);
+		else this.render();
+	}
+
+	setFull(full: boolean): void {
+		this.full = full;
+		this.toggle.disabled = full;
+		if (full && this.open) this.setOpen(false);
+	}
+
+	private boundSession(agentId: string | null): string | null {
+		if (agentId === null) return null;
+		const b = this.agents.byId.get(agentId)?.binding;
+		return b && b.state === "active" ? b.sessionId : null;
+	}
+
+	/** A new choice: whatever registration is in flight no longer edits the draft. */
+	private newChoice(): void {
+		this.choice++;
+		this.registering = null;
+	}
+
+	private setOpen(open: boolean): void {
+		this.newChoice();
+		this.open = open && !this.full;
+		this.toggle.setAttribute("aria-expanded", String(this.open));
+		this.panel.hidden = !this.open;
+		if (this.open) {
+			this.note.textContent = "";
+			const bound = this.agents.list.filter((a) => this.boundSession(a.agentId) !== null);
+			this.choose(bound.length === 1 ? bound[0]!.agentId : null);
+		}
+	}
+
+	private choose(agentId: string | null): void {
+		this.newChoice();
+		this.agentId = agentId;
+		this.sessionId = this.boundSession(agentId);
+		this.path = "";
+		if (this.sessionId) void this.load();
+		else this.render();
+	}
+
+	private async load(): Promise<void> {
+		const gen = ++this.gen;
+		const sid = this.sessionId;
+		if (!sid) return;
+		this.listing = { kind: "loading" };
+		this.render();
+		let next: Listing;
+		try {
+			const l = await listWorkspaceDir(sid, this.path);
+			next = { kind: "ok", entries: l.entries, truncated: l.truncated };
+		} catch (err) {
+			next = {
+				kind: "error",
+				message:
+					err instanceof WorkspaceFsError && err.status === 404
+						? "That folder isn't there any more."
+						: "Couldn't list this folder.",
+			};
+		}
+		if (gen !== this.gen) return; // another folder or agent was chosen meanwhile
+		this.listing = next;
+		this.render();
+	}
+
+	private go(path: string): void {
+		this.path = path;
+		void this.load();
+	}
+
+	private async register(name: string): Promise<void> {
+		const agentId = this.agentId;
+		const sid = this.sessionId;
+		if (!agentId || !sid || this.registering) return;
+		const path = this.path ? `${this.path}/${name}` : name;
+		const choice = this.choice;
+		const draft = this.draft();
+		this.registering = { choice, name };
+		this.note.textContent = `Attaching ${name}…`;
+		this.render();
+		const a = await registerProjectArtifact(this.projectId, { agentId, path });
+		if (a.ok === false && a.code === "stale") return;
+		// A late answer: the person moved on (another agent or session, closed
+		// the panel, or sent / is sending the draft). The file may be
+		// registered in the project, but it is NOT put in the current draft.
+		if (choice !== this.choice || draft !== this.draft()) {
+			// …and its note never covers a newer registration's "Attaching…".
+			if (this.registering === null)
+				this.note.textContent = `${name} was not attached: the choice changed while it was being registered.`;
+			return;
+		}
+		this.registering = null;
+		if (a.ok) {
+			const why = this.onAttached(
+				{ sha256: a.body.sha256, name: a.body.name, bytes: a.body.bytes },
+				draft,
+			);
+			this.note.textContent = why ?? `Attached ${a.body.name}.`;
+			if (!why) this.setOpen(false);
+			else this.render();
+			return;
+		}
+		this.note.textContent = registerErrorText(a.code, a.status);
+		this.render();
+	}
+
+	private render(): void {
+		if (!this.open) return;
+		const nodes: HTMLElement[] = [];
+		const head = el("div", "tw-attach-agents");
+		head.append(el("span", "tw-to-label", "From"));
+		for (const a of this.agents.list) {
+			const sid = this.boundSession(a.agentId);
+			const b = el("button", "tw-chip tw-attach-agent", `@${a.handle}`);
+			b.type = "button";
+			b.disabled = sid === null;
+			if (sid === null) b.title = "No session bound";
+			b.setAttribute("aria-pressed", String(a.agentId === this.agentId));
+			b.dataset.key = `attach-agent:${a.agentId}:${sid ?? ""}`;
+			b.addEventListener("click", () => this.choose(a.agentId));
+			head.append(b);
+		}
+		nodes.push(head);
+		if (!this.agentId) {
+			nodes.push(el("p", "tw-muted", "Choose whose workspace the file comes from."));
+			replaceIfChanged(this.panel, nodes);
+			return;
+		}
+		const crumbs = el("div", "tw-attach-path");
+		crumbs.append(el("span", "tw-muted", `~/workspace/${this.path}`));
+		nodes.push(crumbs);
+		const list = el("ul", "tw-attach-list");
+		if (this.path !== "") {
+			const up = this.path.split("/").slice(0, -1).join("/");
+			list.append(this.entryRow(`${up}/..`, "..", "Up one folder", false, () => this.go(up)));
+		}
+		if (this.listing.kind === "loading") nodes.push(el("p", "tw-muted", "Loading…"));
+		else if (this.listing.kind === "error") nodes.push(el("p", "tw-muted", this.listing.message));
+		else {
+			for (const e of this.listing.entries) {
+				const child = this.path ? `${this.path}/${e.name}` : e.name;
+				if (e.type === "dir") {
+					list.append(
+						this.entryRow(child, `${e.name}/`, "Folder", e.restricted, () => this.go(child)),
+					);
+					continue;
+				}
+				const why = e.restricted
+					? "protected"
+					: e.type !== "file"
+						? "not a regular file"
+						: e.size !== null && e.size > ARTIFACT_MAX_BYTES
+							? "bigger than 1 MiB"
+							: e.size === 0
+								? "empty"
+								: null;
+				list.append(
+					this.entryRow(
+						child,
+						e.name,
+						why ?? (e.size === null ? "" : sizeText(e.size)),
+						why !== null || this.registering !== null,
+						() => void this.register(e.name),
+					),
+				);
+			}
+			if (this.listing.entries.length === 0)
+				nodes.push(el("p", "tw-muted", "This folder is empty."));
+			if (this.listing.truncated)
+				nodes.push(el("p", "tw-muted", "Only part of this folder is listed."));
+		}
+		nodes.splice(2, 0, list);
+		// The workspace re-renders on every log event and poll (setAgents):
+		// nodes that didn't change stay, so focus and a click in progress
+		// survive. A kept node keeps its OLD listener, which is why each
+		// button carries what its listener acts on (data-key = its path).
+		replaceIfChanged(this.panel, nodes);
+	}
+
+	private entryRow(
+		/** What the listener acts on: part of the node, so an equal node is the same action. */
+		target: string,
+		label: string,
+		detail: string,
+		disabled: boolean,
+		onClick: () => void,
+	): HTMLElement {
+		const li = el("li");
+		const b = el("button", "tw-attach-entry");
+		b.type = "button";
+		b.disabled = disabled;
+		b.dataset.key = `attach:${this.sessionId}:${target}`;
+		b.append(el("span", "tw-file-name", label), el("span", "tw-muted", detail));
+		b.addEventListener("click", onClick);
+		li.append(b);
+		return li;
 	}
 }
 
@@ -1120,6 +1474,7 @@ class Workspace {
 				),
 			);
 		li.append(el("div", "tw-bubble tw-bubble-me", m.message.text));
+		if (m.message.artifacts.length > 0) li.append(this.messageFiles(m));
 		const partial = partialDeliveryText(m.message.to.map((id) => m.deliveries.get(id)?.state));
 		if (partial) li.append(el("p", "tw-partial", partial));
 		const chips = el("div", "tw-deliveries");
@@ -1127,6 +1482,111 @@ class Workspace {
 			chips.append(this.deliveryChip(id, m.deliveries.get(id) ?? null));
 		li.append(chips);
 		return li;
+	}
+
+	/** sha256 → the file's text as last fetched (shared by every message naming it). */
+	private artifactText = new Map<
+		string,
+		| { kind: "loading" }
+		/** `rows`: the diff, parsed once (a 1 MiB diff must not be re-parsed on every render). */
+		| { kind: "ok"; text: string; rows?: DiffRow[] | null }
+		| { kind: "error"; message: string }
+	>();
+	/** `${msgId}\n${sha256}` of each file shown open — kept here so a re-render keeps it open. */
+	private openArtifacts = new Set<string>();
+
+	/**
+	 * The files a message carried (§6.3). Their content is another agent's
+	 * data: fetched as text and shown through textContent only (a .diff /
+	 * .patch through the diff renderer), never navigated to. Without
+	 * features.projectArtifacts only the names are listed and nothing is
+	 * requested (A.2).
+	 */
+	private messageFiles(m: MessageView): HTMLElement {
+		const box = el("div", "tw-msg-files");
+		const enabled = projectArtifactsEnabled();
+		for (const f of m.message.artifacts) {
+			const key = `${m.message.msgId}\n${f.sha256}`;
+			const open = this.openArtifacts.has(key);
+			const item = el("div", "tw-msg-file");
+			const label = `${f.name} · ${sizeText(f.bytes)}`;
+			if (!enabled) {
+				item.append(el("span", "tw-file-chip", label));
+				box.append(item);
+				continue;
+			}
+			const b = el("button", "tw-file-chip tw-file-open", label);
+			b.type = "button";
+			b.dataset.key = `file:${key}`;
+			b.setAttribute("aria-expanded", String(open));
+			b.title = `sha256 ${f.sha256}`;
+			b.addEventListener("click", () => this.toggleArtifact(key, f.sha256));
+			item.append(b);
+			if (open) item.append(this.artifactBody(f));
+			box.append(item);
+		}
+		return box;
+	}
+
+	private toggleArtifact(key: string, sha256: string): void {
+		if (this.openArtifacts.has(key)) this.openArtifacts.delete(key);
+		else {
+			this.openArtifacts.add(key);
+			const cur = this.artifactText.get(sha256);
+			if (!cur || cur.kind === "error") void this.loadArtifact(sha256);
+		}
+		this.render();
+	}
+
+	private async loadArtifact(sha256: string): Promise<void> {
+		this.artifactText.set(sha256, { kind: "loading" });
+		const r = await fetchProjectArtifactText(this.projectId, sha256);
+		if (!r.ok && r.code === "stale") {
+			this.artifactText.delete(sha256);
+			return;
+		}
+		this.artifactText.set(
+			sha256,
+			r.ok
+				? { kind: "ok", text: r.text }
+				: {
+						kind: "error",
+						message:
+							r.code === "hash-mismatch" || r.code === "artifact-corrupt"
+								? "The stored file doesn't match its hash; it isn't shown."
+								: r.status === 404
+									? "This file isn't registered in this project."
+									: "Couldn't load this file. Open it again to retry.",
+					},
+		);
+		this.render();
+	}
+
+	private artifactBody(f: ArtifactRef): HTMLElement {
+		const body = el("div", "tw-file-body");
+		const st = this.artifactText.get(f.sha256);
+		if (!st || st.kind === "loading") {
+			body.append(el("p", "tw-muted", "Loading…"));
+			return body;
+		}
+		if (st.kind === "error") {
+			body.append(el("p", "tw-muted", st.message));
+			return body;
+		}
+		body.append(
+			el(
+				"p",
+				"tw-muted tw-file-warn",
+				"Another agent's data: review it before applying or running anything from it.",
+			),
+		);
+		if (st.rows === undefined) {
+			const parsed = looksLikeDiff(f.name) ? parseUnifiedDiff(st.text) : null;
+			st.rows = parsed?.hasHunks ? parsed.rows : null;
+		}
+		if (st.rows) appendDiffRows(body, st.rows);
+		else body.append(el("pre", "tw-file-text", st.text));
+		return body;
 	}
 
 	private deliveryChip(agentId: string, d: DeliveryView | null): HTMLElement {
