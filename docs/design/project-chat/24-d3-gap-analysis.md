@@ -25,7 +25,7 @@ authorization?** The binding contract is `docs/PROJECT_CONVERSATION.md` §7, wit
 - the grant state;
 - the relay engine;
 - its hooks into that machinery: a callback after a durable `reply_ref`, and a factored `deliver()` that takes an authorizer;
-- **five contract decisions that must be taken before code (§2)**.
+- **seven contract decisions that must be taken before code (§2)**.
 
 ## 1. Contract → code
 
@@ -46,7 +46,7 @@ authorization?** The binding contract is `docs/PROJECT_CONVERSATION.md` §7, wit
 | §7.3 (2) | Grant, binding and flag re-checked at S2 and S3 | **Without artifacts there is no S2 critical section**: `a` is compared outside the lock and only a failure is written | A locked S2 for relays | `fanout.ts`, check `a` |
 | §7.4 | End causes | S4 writes the result; `onUncertain`/`onDelivered` | Map result → `ended` | `deliver()` S4, `notSent()` |
 | §7.4 | `POST …/grants/:id/revoke` under the lock, never waiting for the Composer | Per-project chain; no section holds an effect | Route + handler | `grants.ts` |
-| §7.4 | Expiry (checked on every use, timer, recovery ⇒ `expired`/`interrupted`) | `recoveryEvents` has no clock; the store has `opts.now` but does not pass it on | Timer registry (cleared on `close()`), liveness predicate, `now` in recovery | `recovery.ts`, `store.ts` |
+| §7.4 | Expiry (checked on every use, timer, recovery ⇒ `expired`/`interrupted`) | `recoveryEvents` has no clock; the store passes `opts.now` to `ProjectLog.open` but not to `recoveryEvents` | Timer registry (cleared on `close()`), liveness predicate, `now` in recovery | `recovery.ts`, `store.ts` |
 | §7.4, §8 | Restart or restore ⇒ every live grant `ended` + `recovery.grants_closed[]` | `grants_closed` is always `[]`. Restore is idempotent by `restore_id` | Close them in the same append | `recovery.ts` |
 | §7.5 | `GET …/messages/:taskMsgId` with the whole chain | `api.message` filters by `msg_id` | Join grants (by `task_msg_id`) and relays (by `relay.grant_id`) | `api.ts` |
 | §7.5 | `GET /api/admin/stats → projectConversation` | Only `composer` and `conversation` exist | Everything | `routes/admin.ts` |
@@ -91,6 +91,12 @@ Also missing:
   - the shape of `source{kind: relay}`;
   - `artifacts: true` with D2 off ⇒ 409 `artifacts-off`?
 - **B5. Flags at creation:** with `PROJECT_RELAY_ENABLED=true` and origin `observe` (today's production), §1 says `relay-off` and §7.1 says `origin-binding-off`. One code.
+- **B6. A relay message would copy agent text into the project log, which §2 forbids.**
+  - §2: «Solo en la captura … el texto de los agentes. El registro guarda una referencia con hash (§4), nunca una copia.»
+  - But §2.2's `message` row requires `text` for every `kind`, and §7.3 makes the relay text the header plus the `last_assistant_message` «tal cual».
+  - Decide: the relay `message` stores **only the header** (or `null`) plus `text_sha256` of the composed text, and the body is read from the capture through `relay.from_delivery`'s `reply_ref`. Or §2 is amended explicitly to allow the copy, which puts up to 64 KiB of agent output per relay in `.projects/` and its backups, outside L7.
+  - This decision also fixes T20's golden test and the `logCheck` rules.
+- **B7. A full log (`project-log-full`) has no outcome for relays.** §2 refuses «un mensaje nuevo» but lets «entregas y permisos en curso» finish within a 1 MiB margin. A relay S1 is both. Decide, e.g.: relay S1 never uses the margin, and `project-log-full` ⇒ `grant{ended, log-full}` written in the margin. Add a T row.
 
 **CLARIFY (can go in the same contract PR):**
 
@@ -132,7 +138,7 @@ Also missing:
 
 ## 4. PR plan and contract tests
 
-1. **docs, contract v0.3.3:** B1–B5 decided; the CLARIFY rows; `GrantEv` and `source{kind: relay}` in Appendix A; §12 aligned with DEPLOYMENT.md. Needs the owner's approval (it changes a binding contract).
+1. **docs, contract v0.3.3:** B1–B7 decided; the CLARIFY rows; `GrantEv` and `source{kind: relay}` in Appendix A; §12 aligned with DEPLOYMENT.md. Needs the owner's approval (it changes a binding contract).
 2. **D3-a, pure layer + recovery:**
    - the grant fold (grants, the `relayed` index, `reply_ref` fields, relay on `MessageFold`);
    - `recoveryEvents` closes grants (with `now`);
@@ -163,4 +169,4 @@ Also missing:
 - `parseDeclaredArtifacts` (B4);
 - `checkLog` grant rules.
 
-They should be written **after** B1–B5, so they don't pin answers the owner has not given.
+They should be written **after** B1–B7, so they don't pin answers the owner has not given.
