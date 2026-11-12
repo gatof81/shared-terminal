@@ -41,6 +41,10 @@ expect_eq "a value change alone is not a key change" "$(env_key_delta "$T/env.be
 printf 'A=1\nC=\nD=1\n' >"$T/env.swap"
 expect_eq "removed + added keys both show" "$(env_key_delta "$T/env.before" "$T/env.swap" | tr '\n' ';')" "< B;> D;"
 expect_false "the delta never prints a value" '[[ "$(env_key_delta "$T/env.before" "$T/env.after")" == *secret* ]]'
+out=$( (env_key_delta "$T/nope.a" "$T/nope.b"); echo "rc=$?")
+expect_true "unreadable snapshots STOP (never 'same keys')" '[[ "$out" == *"STOP: env_key_delta: cannot read"*"rc=1" ]]'
+printf 'A=1\n' >"$T/env.min"; printf 'A=1\nexport NEWKEY=x\n  SPACED=1\nK2 = v\n' >"$T/env.compose"
+expect_eq "export-prefixed, indented and spaced keys are seen" "$(env_key_delta "$T/env.min" "$T/env.compose" | tr '\n' ';')" "> K2;> NEWKEY;> SPACED;"
 
 # ── flag transition: absent vs forwarded-empty (since #591) ──
 printf 'NODE_ENV=production\nPROJECT_CHAT_ENABLED=true\nPROJECT_CONVERSATION_ENABLED=\n' >"$T/f.empty"
@@ -65,16 +69,42 @@ expect_eq "log_since drops the old boot" "$(printf '%s\n' "$since" | wc -l | tr 
 expect_eq "the positive lock line is found literally" "$(count_fixed "$since" '[projects] writer lock held')" 1
 expect_eq "no refusal in it" "$(count_fixed "$since" 'project-writer-unavailable')" 0
 expect_eq "count_fixed treats brackets literally (not a regex class)" "$(count_fixed "$since" '[x]')" 0
+cat >"$T/boundary.log" <<'LOG'
+app-1  | 2026-11-12T17:16:00.000000000Z {"msg":"[projects] project-writer-unavailable"}
+app-1  | 2026-11-12T17:16:00.500000000Z {"msg":"[server] listening"}
+LOG
+expect_eq "a line in the restart's own second is kept (fraction vs Z)" "$(log_since "$T/boundary.log" 2026-11-12T17:16:00Z | grep -c writer-unavailable)" 1
+printf 'app-1  | {"msg":"no timestamps here"}\n' >"$T/nots.log"
+expect_false "a log without --timestamps fails (rc 1), never an empty pass" 'log_since "$T/nots.log" 2026-11-12T17:16:00Z >/dev/null'
+expect_true "the awk program has no {n} repetition (old mawk reads it literally)" '! grep -E "\[0-9\]\{[0-9]+\}" "$HERE/../lib/checks.sh" >/dev/null' 
 
-# ── kernel lock table: held / not held / missing file ──
-touch "$T/.writer.lock"; ino=$(stat -c '%i' "$T/.writer.lock")
-printf '1: FLOCK  ADVISORY  WRITE 4242 08:01:%s 0 EOF\n2: POSIX  ADVISORY  WRITE 1 08:01:999 0 EOF\n' "$ino" >"$T/locks.held"
-printf '1: POSIX  ADVISORY  WRITE 4242 08:01:%s 0 EOF\n2: FLOCK  ADVISORY  WRITE 7 08:01:%s1 0 EOF\n' "$ino" "$ino" >"$T/locks.not"
-expect_eq "FLOCK on the inode ⇒ held" "$(flock_held "$T/.writer.lock" "$T/locks.held")" held
-expect_eq "POSIX lock or another inode (prefix match) ⇒ not-held" "$(flock_held "$T/.writer.lock" "$T/locks.not")" not-held
+# ── kernel lock table: device AND inode ──
+touch "$T/.writer.lock"
+# The fixtures take the device from stat's %D (hex major/minor), NOT from the formula under test.
+read -r hexdev ino < <(stat -c '%D %i' "$T/.writer.lock")
+dev=$(printf '%02x:%02x' "$((16#$hexdev >> 8))" "$((16#$hexdev & 0xff))")
+printf '1: FLOCK  ADVISORY  WRITE 4242 %s:%s 0 EOF\n2: POSIX  ADVISORY  WRITE 1 %s:999 0 EOF\n' "$dev" "$ino" "$dev" >"$T/locks.held"
+expect_eq "FLOCK on this device+inode ⇒ held" "$(flock_held "$T/.writer.lock" "$T/locks.held")" held
+printf '1: POSIX  ADVISORY  WRITE 4242 %s:%s 0 EOF\n2: FLOCK  ADVISORY  WRITE 7 %s:%s1 0 EOF\n' "$dev" "$ino" "$dev" "$ino" >"$T/locks.not"
+expect_eq "POSIX lock, or another inode with the same prefix ⇒ not-held" "$(flock_held "$T/.writer.lock" "$T/locks.not")" not-held
+printf '1: FLOCK  ADVISORY  WRITE 4242 fe:ff:%s 0 EOF\n' "$ino" >"$T/locks.otherdev"
+expect_eq "same inode number on ANOTHER device ⇒ not-held" "$(flock_held "$T/.writer.lock" "$T/locks.otherdev")" not-held
+printf '1: FLOCK  ADVISORY  WRITE 99 %s:%s 0 EOF\n1: -> FLOCK  ADVISORY  WRITE 100 %s:%s 0 EOF\n' "$dev" "$((ino + 1))" "$dev" "$ino" >"$T/locks.waiter"
+expect_eq "only a blocked waiter (->) on it ⇒ not-held" "$(flock_held "$T/.writer.lock" "$T/locks.waiter")" not-held
 expect_eq "missing lock file ⇒ no-file" "$(flock_held "$T/nope" "$T/locks.held")" no-file
-printf '1: FLOCK  ADVISORY  WRITE 4242 00:2f:%s 0 EOF\n' "$ino" >"$T/locks.ovl"
-expect_eq "any MAJ:MIN prefix (overlay/bind mounts)" "$(flock_held "$T/.writer.lock" "$T/locks.ovl")" held
+# Independent of every formula above: a REAL flock, read back from the REAL /proc/locks.
+if command -v flock >/dev/null; then
+	# -o: the lock's fd is closed in the child, so ONLY the flock process holds it (as the backend's
+	# helper does); otherwise `sleep` inherits it and keeps the lock after flock is killed.
+	flock -n -o "$T/.writer.lock" sleep 30 &
+	holder=$!
+	for _ in 1 2 3 4 5 6 7 8 9 10; do grep -q FLOCK /proc/locks && [ "$(flock_held "$T/.writer.lock")" = held ] && break; sleep 0.1; done
+	expect_eq "a real flock on the file ⇒ held (kernel table)" "$(flock_held "$T/.writer.lock")" held
+	pkill -P "$holder" sleep 2>/dev/null; kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+	expect_eq "after its holder exits ⇒ not-held" "$(flock_held "$T/.writer.lock")" not-held
+else
+	bad "flock(1) missing: the real-lock test could not run"
+fi
 
 # ── docker: the --rm removal race ──
 mkdir "$T/bin"; cat >"$T/bin/docker" <<'STUB'
@@ -88,6 +118,8 @@ echo 2 >"$T/n"
 expect_true "waits out a container still being removed" 'PATH="$T/bin:$PATH" wait_image_unused st-backup-tool:x 5'
 echo 99 >"$T/n"
 expect_false "gives up (rc 1) if something keeps using it" 'PATH="$T/bin:$PATH" wait_image_unused st-backup-tool:x 2'
+mkdir "$T/bad"; printf '#!/bin/bash\necho "Cannot connect to the Docker daemon" >&2; exit 1\n' >"$T/bad/docker"; chmod +x "$T/bad/docker"
+PATH="$T/bad:$PATH" wait_image_unused st-backup-tool:x 2; expect_eq "an unreachable daemon is rc 2, not 'unused'" "$?" 2
 
 echo "checks.test.sh: $pass passed, $failed failed"
 [ "$failed" = 0 ]

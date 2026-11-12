@@ -47,13 +47,16 @@ require_uuid() {
 # ── .env and flags (values never printed) ────────────────────────────────────
 
 # env_key_names <file> — the KEY names of a dotenv file, sorted (values are never read out).
+# Accepts what Compose's .env parser accepts: leading spaces, an `export ` prefix, spaces around `=`.
 env_key_names() {
-	sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$1" | LC_ALL=C sort
+	sed -n -E 's/^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=.*/\2/p' "$1" | LC_ALL=C sort
 }
 
 # env_key_delta <before> <after> — only the changed key-name lines ("< K" removed, "> K" added),
-# never diff's hunk headers. Empty output = same key set.
+# never diff's hunk headers. Empty output = same key set. STOPS if either file can't be read: an
+# unreadable snapshot must never pass as "nothing changed".
 env_key_delta() {
+	if [ ! -r "$1" ] || [ ! -r "$2" ]; then stop "env_key_delta: cannot read [$1] / [$2]"; fi
 	diff <(env_key_names "$1") <(env_key_names "$2") | grep -E '^[<>] ' || true
 }
 
@@ -69,9 +72,15 @@ flag_transition() {
 
 # ── Logs ─────────────────────────────────────────────────────────────────────
 
-# log_since <log> <iso-time> — the lines of a `--timestamps` compose log at or after a time.
+# log_since <log> <iso-time> — the lines of a `--timestamps` compose log at or after a time,
+# compared to the second (both sides cut to YYYY-MM-DDTHH:MM:SS: a fractional `…00.123Z` must not
+# sort before `…00Z`, or the restart's first second would be dropped). Returns 1 when NO line has a
+# timestamp (a log captured without --timestamps), so "0 refusals since …" can't pass vacuously.
+# Digits are spelled out: mawk before 2020 reads `{4}` literally and would match nothing.
 log_since() {
-	awk -v t="$2" '{ for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}T/) { if ($i >= t) print; break } }' "$1"
+	awk -v t="${2:0:19}" '
+		{ for (i = 1; i <= NF; i++) if ($i ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]/) { seen = 1; if (substr($i, 1, 19) >= t) print; break } }
+		END { exit !seen }' "$1"
 }
 
 # count_fixed <text> <literal> — how many lines contain the literal (grep -F: a message is not a regex).
@@ -81,13 +90,18 @@ count_fixed() {
 
 # ── Kernel lock table ────────────────────────────────────────────────────────
 
-# flock_held <file> [locks] — "held" iff a FLOCK lock is on that file's inode, read from the kernel
-# lock table (default /proc/locks). Never tries to take the lock itself: doing so would ACQUIRE it
-# when the owner has lost it, hiding exactly the failure being checked.
+# flock_held <file> [locks] — "held" iff a FLOCK lock is on that file (device AND inode), read from
+# the kernel lock table (default /proc/locks, whose 6th field is `%02x:%02x:%lu` = major:minor:inode).
+# Never tries to take the lock itself: doing so would ACQUIRE it when the owner has lost it, hiding
+# exactly the failure being checked. Blocked waiters (`->` lines) shift the fields and never count.
 flock_held() {
-	local ino
-	ino=$(stat -c '%i' "$1" 2>/dev/null) || { echo "no-file"; return 0; }
-	awk -v ino="$ino" '$2 == "FLOCK" { n = split($6, f, ":"); if (f[n] == ino) c++ } END { print (c > 0) ? "held" : "not-held" }' "${2:-/proc/locks}"
+	local dev ino id
+	# %d is st_dev (the filesystem's device) in decimal; decode it like the kernel's new_decode_dev.
+	# NOT %t/%T: those are the major/minor a device FILE represents (0:0 for a regular file).
+	read -r dev ino < <(stat -c '%d %i' "$1" 2>/dev/null) || { echo "no-file"; return 0; }
+	[ -n "$ino" ] || { echo "no-file"; return 0; }
+	id=$(printf '%02x:%02x:%s' "$(((dev >> 8) & 0xfff))" "$(((dev & 0xff) | ((dev >> 12) & 0xfff00)))" "$ino")
+	awk -v id="$id" '$2 == "FLOCK" && $6 == id { c++ } END { print (c > 0) ? "held" : "not-held" }' "${2:-/proc/locks}"
 }
 
 # ── Docker ───────────────────────────────────────────────────────────────────
@@ -95,10 +109,12 @@ flock_held() {
 # wait_image_unused <image> [seconds] — wait until no container (any state) uses the image.
 # `docker run --rm` removes its container asynchronously after the process exits; an `image rm`
 # right after it can race that removal. Returns 1 if something still uses it after the wait.
+# Returns 2 if Docker itself can't answer: an unreachable daemon is not "unused".
 wait_image_unused() {
-	local i
+	local i out
 	for ((i = 0; i < ${2:-60}; i++)); do
-		[ -z "$(docker ps -aq --filter ancestor="$1")" ] && return 0
+		out=$(docker ps -aq --filter ancestor="$1") || return 2
+		[ -z "$out" ] && return 0
 		sleep 1
 	done
 	return 1
