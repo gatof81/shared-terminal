@@ -1177,7 +1177,7 @@ cualquier tarea no terminal.
 Salen de la presencia honesta (`projects/presence.ts`) y de la captura. Ninguno se infiere del texto
 de una respuesta.
 
-### 14.4 Validación bajo el lock
+### 14.4 Validación
 
 - **Referencias del log**, decididas dentro de la sección crítica:
   - `from_msg_id` debe existir;
@@ -1260,7 +1260,8 @@ de una respuesta.
   - `claimed`: otro claim vigente cubre esas rutas;
   - `none-observed{coverage: edit-tools-only}`: la captura es efectiva y no hay evidencia. **No es
     «libre»**, porque los cambios hechos por Bash (`sed -i`, `git checkout`, generadores) no se ven.
-    La UI lo muestra con esa salvedad;
+    La UI lo muestra con esa salvedad. Es un **subtipo de `unknown`** a efectos de la decisión 3
+    de #605, con la cobertura explicada (§14.11, punto 8);
   - `unknown`: sin captura efectiva, sin identidad de repo o con una lectura fallida.
 
   **Nunca** el resultado es «libre».
@@ -1276,7 +1277,7 @@ de una respuesta.
 | `POST` | `…/board/claims` y `…/board/claims/:claimId/release` | `claim`, `claim_released` |
 | `GET` | `…/board` | la proyección (§14.5) |
 
-- Sus códigos son los de §14.4, más los de §5.
+- Sus códigos son los de §14.4, más los de §5. Al aprobarse, §5 incorpora `board-off`, `state-conflict`, `invalid-transition`, `dependency-cycle`, `board-limit` y `unknown-<ref>`. Un `blocked` sin `note` es 400 `invalid-body`.
 - Las rutas van detrás de su propia bandera, `PROJECT_BOARD_ENABLED`, que exige
   `PROJECT_CONVERSATION_ENABLED`.
   - **Encendida:** `/api/auth/status` anuncia `features.projectBoard: true`.
@@ -1341,6 +1342,8 @@ cuentan como respuestas.
    handoffs se apoyan en D3, y la actividad, en los eventos existentes.
 7. La enmienda a §2 («una sola fuente de verdad por dato»): agregar que las tareas, decisiones y
    claims viven en el registro del proyecto.
+8. `none-observed` como subtipo de `unknown` bajo la decisión 3: distingue «captura efectiva sin
+   ediciones vistas» de «sin captura», y nunca se presenta como libre.
 
 ## Apéndice A. Integración con el frontend (D1)
 
