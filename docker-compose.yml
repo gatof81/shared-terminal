@@ -95,6 +95,11 @@ services:
       - CONVERSATION_COMPOSER_ENABLED=${CONVERSATION_COMPOSER_ENABLED:-}
       - UI_SHELL=${UI_SHELL:-}
       - PROJECT_CHAT_ENABLED=${PROJECT_CHAT_ENABLED:-}
+      # D1 project conversation (docs/PROJECT_CONVERSATION.md §1). Empty ⇒ off:
+      # no routes, no /ws/project/, nothing under .projects/, auth/status
+      # byte-identical. Effective only with PROJECT_CHAT_ENABLED and
+      # CONVERSATION_COMPOSER_ENABLED also on.
+      - PROJECT_CONVERSATION_ENABLED=${PROJECT_CONVERSATION_ENABLED:-}
       # #562 — who may read `npm run backup` output: unset ⇒ 0700/0600 root only;
       # a numeric GID ⇒ 0750/0640 in that group (the off-host mirror's user).
       - BACKUP_GROUP_GID=${BACKUP_GROUP_GID:-}

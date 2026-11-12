@@ -366,6 +366,11 @@ check "compose forwards CONVERSATION_COMPOSER_ENABLED=true when set" \
 	[ "$(compose_env CONVERSATION_COMPOSER_ENABLED CONVERSATION_COMPOSER_ENABLED=true)" = "true" ]
 check "compose forwards the CLI allowlist verbatim when set" \
 	[ "$(compose_env COMPOSER_CLI_VERSIONS COMPOSER_CLI_VERSIONS=2.1.314,2.1.320)" = "2.1.314,2.1.320" ]
+# D1 project conversation: same shape — empty when unset (off), verbatim when set.
+check "compose forwards PROJECT_CONVERSATION_ENABLED as empty when unset (D1 off)" \
+	[ "$(compose_env PROJECT_CONVERSATION_ENABLED)" = "" ]
+check "compose forwards PROJECT_CONVERSATION_ENABLED=true when set" \
+	[ "$(compose_env PROJECT_CONVERSATION_ENABLED PROJECT_CONVERSATION_ENABLED=true)" = "true" ]
 
 # ── Phase 1 ─────────────────────────────────────────────────────────────────
 phase "Phase 1: image layout and pin"
