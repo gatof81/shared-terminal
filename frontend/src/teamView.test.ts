@@ -9,6 +9,10 @@ const api = vi.hoisted(() => ({
 	fetchProjectMessage: vi.fn(),
 	postProjectMessage: vi.fn(),
 	postProjectAck: vi.fn(),
+	openProjectSocket: vi.fn((_pid: string, _frame: unknown, _state: unknown) => ({
+		follow: vi.fn(),
+		close: vi.fn(),
+	})),
 	readConversationEvent: vi.fn(),
 }));
 vi.mock("./api.js", () => api);
@@ -454,5 +458,48 @@ describe("composer", () => {
 		await flush();
 		expect(root.querySelector(".tw-send-status")?.textContent).toContain("conversation is full");
 		expect(text.value).toBe("second");
+	});
+});
+
+describe("live mode recovery (independent review of #599)", () => {
+	it("a first load that failed starts the socket once a later poll succeeds", async () => {
+		vi.useFakeTimers();
+		try {
+			api.fetchProjectEvents
+				.mockResolvedValueOnce({ ok: false, status: 0, code: "network" })
+				.mockResolvedValue({
+					ok: true,
+					status: 200,
+					body: { events: log, oldestSeq: 1, hasMore: false },
+				});
+			mount(null);
+			await vi.advanceTimersByTimeAsync(10);
+			expect(api.openProjectSocket).not.toHaveBeenCalled();
+			await vi.advanceTimersByTimeAsync(5_100); // the 5 s poll
+			expect(api.openProjectSocket).toHaveBeenCalledTimes(1);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("when the socket drops, the 5 s poll resumes at once (not after the 30 s safety timer)", async () => {
+		vi.useFakeTimers();
+		try {
+			let state: ((c: boolean, r?: boolean) => void) | undefined;
+			api.openProjectSocket.mockImplementation((_p: string, _f: unknown, st: unknown) => {
+				state = st as (c: boolean, r?: boolean) => void;
+				return { follow: vi.fn(), close: vi.fn() };
+			});
+			mount(null);
+			await vi.advanceTimersByTimeAsync(10);
+			state!(true); // live: the poll re-arms at 30 s
+			await vi.advanceTimersByTimeAsync(10);
+			const calls = api.fetchProjectEvents.mock.calls.length;
+			state!(false, true); // refused
+			await vi.advanceTimersByTimeAsync(5_100);
+			expect(api.fetchProjectEvents.mock.calls.length).toBeGreaterThan(calls);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

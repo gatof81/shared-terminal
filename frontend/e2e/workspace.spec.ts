@@ -223,6 +223,29 @@ test.describe("workspace — flag on", () => {
 		await expect(cards(page).filter({ hasText: "Bumped" })).toHaveCount(0);
 	});
 
+	test("live: a reply arrives over WS /ws/project faster than any poll", async ({ app, backend, page }) => {
+		backend.projectTask("c4000000-0000-4000-8000-000000000001", [AGENT_IDS.developer], "Live check");
+		await app.login("alice", threadHash("c4000000-0000-4000-8000-000000000001"));
+		await expect(page.locator("#project-view .tw-main-title")).toHaveText("Live check");
+		await expect.poll(() => backend.projectSockets.filter((s) => !s.closed && s.after !== null).length).toBe(1);
+		await backend.projectReply("c4000000-0000-4000-8000-000000000001", AGENT_IDS.developer, "Live reply.");
+		// The poll is 5 s (30 s while live): 2 s can only be the socket.
+		await expect(page.locator("#project-view .tw-bubble-agent")).toHaveText("Live reply.", { timeout: 2_000 });
+	});
+
+	test("a refused project socket falls back to polling: the reply still arrives", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.projectSocketsRefused = true;
+		backend.projectTask("c4000000-0000-4000-8000-000000000002", [AGENT_IDS.developer], "Poll check");
+		await app.login("alice", threadHash("c4000000-0000-4000-8000-000000000002"));
+		await expect(page.locator("#project-view .tw-main-title")).toHaveText("Poll check");
+		await backend.projectReply("c4000000-0000-4000-8000-000000000002", AGENT_IDS.developer, "Polled reply.");
+		await expect(page.locator("#project-view .tw-bubble-agent")).toHaveText("Polled reply.", { timeout: 12_000 });
+	});
+
 	test("New task: @ opens the picker; only chosen agents receive it, typed @names don't", async ({
 		app,
 		backend,

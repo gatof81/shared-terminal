@@ -25,7 +25,9 @@
 import {
 	fetchProjectEvents,
 	fetchProjectMessage,
+	openProjectSocket,
 	type ProjectMessageDetail,
+	type ProjectSocket,
 	readConversationEvent,
 } from "./api.js";
 import {
@@ -105,6 +107,65 @@ export class ProjectLogStore {
 
 	constructor(readonly projectId: string) {}
 
+	// ── Live (WS /ws/project/<pid>) ─────────────────────────────────────────
+	//
+	// After the first page is read, new events arrive over the socket the
+	// moment they are persisted — a reply shows within the settle window
+	// instead of up to one poll later. The poll stays as the safety net
+	// (slower while live); a refused socket (1008) or a dropped one falls
+	// back to it. The socket only ADDS events through the same fold, so
+	// it can never disagree with a page.
+
+	private socket: ProjectSocket | null = null;
+	/** True while the socket is open and following. */
+	live = false;
+
+	/** Follow the log live (idempotent). Starts after the first page, never before. */
+	startLive(): void {
+		if (this.socket || !this.loaded) return;
+		const gen = this.gen;
+		this.socket = openProjectSocket(
+			this.projectId,
+			(f) => {
+				if (gen !== this.gen) return;
+				if (f.type === "event") {
+					const e = parseLogEvent(f.event);
+					if (e && this.log.add([e]) > 0) {
+						this.changed();
+						void this.resolveMissing();
+					}
+				} else {
+					// The server stopped sending (backpressure): read the gap by
+					// GET, then follow again from what the log now holds.
+					void this.refresh().then(() => {
+						if (gen === this.gen) this.socket?.follow(Math.max(this.log.newestSeq, 0));
+					});
+				}
+			},
+			(connected) => {
+				if (gen !== this.gen) return;
+				const was = this.live;
+				this.live = connected;
+				// On (re)connect, catch up by GET first (a reconnect may have missed
+				// a resync), then follow from the newest seq the log holds.
+				if (connected)
+					void this.refresh().then(() => {
+						if (gen === this.gen) this.socket?.follow(Math.max(this.log.newestSeq, 0));
+					});
+				if (was !== connected) this.changed();
+			},
+		);
+	}
+
+	stopLive(): void {
+		this.socket?.close();
+		this.socket = null;
+		if (this.live) {
+			this.live = false;
+			this.changed();
+		}
+	}
+
 	onChange(fn: () => void): () => void {
 		this.listeners.add(fn);
 		return () => this.listeners.delete(fn);
@@ -116,6 +177,9 @@ export class ProjectLogStore {
 
 	/** Forget everything (logout). In-flight answers are dropped. */
 	reset(): void {
+		this.socket?.close();
+		this.socket = null;
+		this.live = false;
 		this.gen++;
 		this.log = new ProjectLog();
 		this.hasOlder = false;
