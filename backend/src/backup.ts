@@ -63,6 +63,12 @@ import {
 } from "./conversation/revocation.js";
 import { d1Query, migrateDb } from "./db.js";
 import { logger } from "./logger.js";
+import {
+	backupProjects,
+	type ProjectBackupEntry,
+	preflightProjectsRestore,
+	restoreProjects,
+} from "./projects/conversation/backupProjects.js";
 import { CONTROL_DIR, fsyncDir } from "./recreateAttempt.js";
 import { decryptSecret, deriveSubkey, type EncryptedSecret } from "./secrets.js";
 
@@ -116,6 +122,8 @@ export interface BackupManifest {
 	workspaces: Record<string, WorkspaceEntry>;
 	/** `.conversations/REVOKED_ALL` existed: copied to `<backup>/REVOKED_ALL`. */
 	globalRevocation?: true;
+	/** `.projects/<pid>` logs and artifacts (PROJECT_CONVERSATION.md §8). Absent ⇔ none on disk. */
+	projects?: Record<string, ProjectBackupEntry>;
 }
 
 export interface WorkspaceEntry {
@@ -275,6 +283,19 @@ export async function runBackup(outDir: string): Promise<BackupManifest> {
 		if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
 	}
 
+	// The project conversation logs (PROJECT_CONVERSATION.md §8): copied
+	// from a staging copy, never tarred live — see backupProjects.ts.
+	const projects = await backupProjects(
+		WORKSPACE_ROOT,
+		outDir,
+		(p) => secure(p, "file", perms),
+		logger,
+	);
+	if (Object.keys(projects).length > 0) {
+		await secure(path.join(outDir, "projects"), "dir", perms);
+		manifest.projects = projects;
+	}
+
 	// Manifest last: an interrupted run leaves a dir without manifest.json,
 	// which restore refuses — no half-backup can be replayed by accident.
 	await fs.writeFile(
@@ -403,6 +424,38 @@ export async function runRestore(inDir: string, opts: { force?: boolean } = {}):
 	});
 	const manifest = JSON.parse(manifestRaw) as BackupManifest;
 
+	// `.projects` needs the flag off and the backend's writer lock free, and
+	// its tarballs pass their allowlist here — all before the first write
+	// (migrateDb below is one). The lock is held until the restore ends.
+	// A refusal is about `.projects` alone (§8: "el restore de .projects se
+	// niega y no toca nada; las tablas y los workspaces siguen su
+	// procedimiento"): loud, a non-zero exit, and the rest is still restored.
+	let projectsPlan: Awaited<ReturnType<typeof preflightProjectsRestore>> = null;
+	try {
+		projectsPlan = await preflightProjectsRestore(inDir, manifest.projects, WORKSPACE_ROOT);
+	} catch (err) {
+		logger.error(
+			`[restore] .projects NOT restored: ${(err as Error).message}. Tables and workspaces are restored; ` +
+				"rerun with the flag off and the backend's writer lock free to restore the project conversations",
+		);
+		process.exitCode = 1;
+	}
+	try {
+		await restoreAll(inDir, manifest, opts);
+		if (projectsPlan) {
+			await restoreProjects(inDir, manifest.createdAt, projectsPlan, WORKSPACE_ROOT, opts, logger);
+		}
+	} finally {
+		projectsPlan?.lock.release();
+	}
+	logger.info(`[restore] complete from ${inDir} (backup of ${manifest.createdAt})`);
+}
+
+async function restoreAll(
+	inDir: string,
+	manifest: BackupManifest,
+	opts: { force?: boolean },
+): Promise<void> {
 	// Bring the target to current schema FIRST — a fresh D1 gets every
 	// table; an existing one no-ops. The dump's rows INSERT by explicit
 	// column list, so columns added by migrations newer than the backup
@@ -665,8 +718,6 @@ export async function runRestore(inDir: string, opts: { force?: boolean } = {}):
 			`[restore] the backup's control dirs and revocation markers are kept as evidence in ${evidenceDir} (nothing there is live)`,
 		);
 	}
-
-	logger.info(`[restore] complete from ${inDir} (backup of ${manifest.createdAt})`);
 }
 
 // ── Control evidence (restore) ──────────────────────────────────────────────
