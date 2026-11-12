@@ -218,6 +218,8 @@ class Composer {
 	private filesRow = el("div", "tw-files");
 	private attach: AttachPicker | null = null;
 	private files: ArtifactRef[] = [];
+	/** Bumped when a send starts: a file answered for an earlier draft never joins a later one. */
+	private draftGen = 0;
 	private chosen: string[] = [];
 	private agents: Agents = { byId: new Map(), list: [], presence: new Map() };
 	private phase: SendPhase = { kind: "idle" };
@@ -253,7 +255,11 @@ class Composer {
 		// Attachments exist only with features.projectArtifacts: without it no
 		// control is shown and no request to …/artifacts is ever made (A.2).
 		if (projectArtifactsEnabled()) {
-			this.attach = new AttachPicker(projectId, (f) => this.addFile(f));
+			this.attach = new AttachPicker(
+				projectId,
+				(f, draft) => this.addFile(f, draft),
+				() => this.draftGen,
+			);
 			this.root.append(this.filesRow, this.attach.root);
 			this.renderFiles();
 		}
@@ -366,7 +372,8 @@ class Composer {
 		this.renderChips();
 	}
 
-	private addFile(f: ArtifactRef): string | null {
+	private addFile(f: ArtifactRef, draft: number): string | null {
+		if (draft !== this.draftGen) return "Not attached: the draft changed meanwhile.";
 		if (this.phase.kind === "sending" || this.phase.kind === "unknown")
 			return "Wait until this message's outcome is known.";
 		if (this.files.some((x) => x.sha256 === f.sha256)) return "That file is already attached.";
@@ -588,6 +595,8 @@ class Composer {
 	 * sent" — so the outcome stays unknown and the draft stays locked.
 	 */
 	private async post(body: ProjectMessageBody, check = false): Promise<void> {
+		// Whatever is being attached now belongs to the draft being sent away.
+		this.draftGen++;
 		this.setPhase({ kind: "sending", body });
 		const a = await postProjectMessage(this.projectId, body);
 		if (a.ok) {
@@ -650,12 +659,21 @@ class AttachPicker {
 	private path = "";
 	private listing: Listing = { kind: "loading" };
 	private gen = 0;
-	private registering: string | null = null;
+	/**
+	 * The person's current choice (open panel, agent, session). Every change
+	 * of it — choosing another agent, the binding moving, closing the panel,
+	 * a send locking or emptying the draft — bumps it, so an answer to a
+	 * registration started under an earlier choice never edits the draft.
+	 */
+	private choice = 0;
+	private registering: { choice: number; name: string } | null = null;
 
 	constructor(
 		private projectId: string,
 		/** Returns why the file couldn't be added to the draft, or null. */
-		private onAttached: (f: ArtifactRef) => string | null,
+		private onAttached: (f: ArtifactRef, draft: number) => string | null,
+		/** The composer's draft generation (a new one after every send). */
+		private draft: () => number,
 	) {
 		this.toggle.type = "button";
 		this.toggle.setAttribute("aria-expanded", "false");
@@ -688,7 +706,14 @@ class AttachPicker {
 		return b && b.state === "active" ? b.sessionId : null;
 	}
 
+	/** A new choice: whatever registration is in flight no longer edits the draft. */
+	private newChoice(): void {
+		this.choice++;
+		this.registering = null;
+	}
+
 	private setOpen(open: boolean): void {
+		this.newChoice();
 		this.open = open && !this.full;
 		this.toggle.setAttribute("aria-expanded", String(this.open));
 		this.panel.hidden = !this.open;
@@ -700,6 +725,7 @@ class AttachPicker {
 	}
 
 	private choose(agentId: string | null): void {
+		this.newChoice();
 		this.agentId = agentId;
 		this.sessionId = this.boundSession(agentId);
 		this.path = "";
@@ -741,23 +767,33 @@ class AttachPicker {
 		const sid = this.sessionId;
 		if (!agentId || !sid || this.registering) return;
 		const path = this.path ? `${this.path}/${name}` : name;
-		this.registering = path;
+		const choice = this.choice;
+		const draft = this.draft();
+		this.registering = { choice, name };
 		this.note.textContent = `Attaching ${name}…`;
 		this.render();
 		const a = await registerProjectArtifact(this.projectId, { agentId, path });
+		if (a.ok === false && a.code === "stale") return;
+		// A late answer: the person moved on (another agent or session, closed
+		// the panel, or sent / is sending the draft). The file may be
+		// registered in the project, but it is NOT put in the current draft.
+		if (choice !== this.choice || draft !== this.draft()) {
+			// …and its note never covers a newer registration's "Attaching…".
+			if (this.registering === null)
+				this.note.textContent = `${name} was not attached: the choice changed while it was being registered.`;
+			return;
+		}
 		this.registering = null;
 		if (a.ok) {
-			const why = this.onAttached({
-				sha256: a.body.sha256,
-				name: a.body.name,
-				bytes: a.body.bytes,
-			});
+			const why = this.onAttached(
+				{ sha256: a.body.sha256, name: a.body.name, bytes: a.body.bytes },
+				draft,
+			);
 			this.note.textContent = why ?? `Attached ${a.body.name}.`;
 			if (!why) this.setOpen(false);
 			else this.render();
 			return;
 		}
-		if (a.code === "stale") return;
 		this.note.textContent = registerErrorText(a.code, a.status);
 		this.render();
 	}

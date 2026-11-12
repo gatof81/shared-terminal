@@ -102,11 +102,11 @@ async function flush(): Promise<void> {
 	for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0));
 }
 
-function mount(panel: Parameters<View["teamWorkspace"]>[0]["panel"]) {
+function mount(panel: Parameters<View["teamWorkspace"]>[0]["panel"], list: unknown[] = agents) {
 	const root = view.teamWorkspace({
 		projectId: PID,
 		panel,
-		agents: agents as never,
+		agents: list as never,
 		clock: { generatedAt: NOW, receivedAt: Date.now() },
 		header,
 	});
@@ -720,5 +720,119 @@ describe("attachments (D2)", () => {
 		expect(root.querySelector(".tw-results")?.textContent).toBe(
 			"@qa-pilor · Not delivered: its session changed. Some files may already be in its inbox.",
 		);
+	});
+
+	describe("late register answers never edit the current draft (review of #603)", () => {
+		const FILE = { name: "fix.diff", type: "file", size: 48, mtime: null, restricted: false };
+		const OTHER = { name: "notes.md", type: "file", size: 12, mtime: null, restricted: false };
+		const ok = (f: typeof FIX) => ({ ok: true, status: 201, body: { ...f, replayed: false } });
+		const deferred = () => {
+			let resolve!: (v: unknown) => void;
+			const promise = new Promise((r) => {
+				resolve = r;
+			});
+			return { promise, resolve };
+		};
+		let root: HTMLElement;
+		const entries = () => [...root.querySelectorAll<HTMLButtonElement>(".tw-attach-entry")];
+		const fromAgent = async (i: number) => {
+			root.querySelectorAll<HTMLButtonElement>(".tw-attach-agent")[i]!.click();
+			await flush();
+		};
+		const chips = () => root.querySelector(".tw-files")!.childElementCount;
+		const note = () => root.querySelector(".tw-attach-note")?.textContent;
+
+		beforeEach(async () => {
+			api.projectArtifactsEnabled.mockReturnValue(true);
+			api.listWorkspaceDir.mockImplementation(async (sid: string) => ({
+				path: "",
+				truncated: false,
+				entries: sid === "s-a-dev" ? [FILE] : [OTHER],
+			}));
+			root = mount({ kind: "new" });
+			await flush();
+			root.querySelector<HTMLButtonElement>(".tw-attach-btn")!.click();
+			await fromAgent(0); // @dev-pilot
+		});
+
+		it("another agent chosen while pending: the old answer adds nothing", async () => {
+			const d = deferred();
+			api.registerProjectArtifact.mockReturnValueOnce(d.promise);
+			entries()[0]!.click();
+			await fromAgent(1); // @qa-pilor
+			d.resolve(ok(FIX));
+			await flush();
+			expect(chips()).toBe(0);
+			expect(note()).toBe(
+				"fix.diff was not attached: the choice changed while it was being registered.",
+			);
+			// The new choice is fully usable.
+			expect(entries()[0]!.disabled).toBe(false);
+		});
+
+		it("panel closed while pending: the old answer adds nothing", async () => {
+			const d = deferred();
+			api.registerProjectArtifact.mockReturnValueOnce(d.promise);
+			entries()[0]!.click();
+			root.querySelector<HTMLButtonElement>(".tw-attach-btn")!.click(); // close
+			d.resolve(ok(FIX));
+			await flush();
+			expect(chips()).toBe(0);
+		});
+
+		it("the agent's binding moved to another session while pending: the old answer adds nothing", async () => {
+			const d = deferred();
+			api.registerProjectArtifact.mockReturnValueOnce(d.promise);
+			entries()[0]!.click();
+			const moved = agents.map((a) =>
+				a.agentId === DEV ? { ...a, binding: { ...a.binding, epoch: 2, sessionId: "s-new" } } : a,
+			);
+			mount({ kind: "new" }, moved); // the project page's poll brings the new directory
+			await flush();
+			d.resolve(ok(FIX));
+			await flush();
+			expect(chips()).toBe(0);
+		});
+
+		it("draft sent while pending: the answer never joins the next draft", async () => {
+			const d = deferred();
+			api.registerProjectArtifact.mockReturnValueOnce(d.promise);
+			entries()[0]!.click();
+			root.querySelector<HTMLButtonElement>(".tw-chip-add")!.click();
+			root.querySelectorAll<HTMLButtonElement>(".tw-option:not(:disabled)")[1]!.click();
+			root.querySelector<HTMLTextAreaElement>(".tw-composer textarea")!.value = "no file yet";
+			root.querySelector<HTMLFormElement>(".tw-composer")!.requestSubmit();
+			await flush();
+			expect(api.postProjectMessage.mock.calls[0]![1]).not.toHaveProperty("artifacts");
+			d.resolve(ok(FIX));
+			await flush();
+			expect(chips()).toBe(0);
+			// The next send carries nothing it didn't attach itself.
+			root.querySelector<HTMLButtonElement>(".tw-chip-add")!.click();
+			root.querySelectorAll<HTMLButtonElement>(".tw-option:not(:disabled)")[1]!.click();
+			root.querySelector<HTMLTextAreaElement>(".tw-composer textarea")!.value = "next";
+			root.querySelector<HTMLFormElement>(".tw-composer")!.requestSubmit();
+			await flush();
+			expect(api.postProjectMessage.mock.calls[1]![1]).not.toHaveProperty("artifacts");
+		});
+
+		it("a stale answer neither adds its file nor touches a newer registration in flight", async () => {
+			const first = deferred();
+			const second = deferred();
+			const NOTES = { sha256: sha("notes"), name: "notes.md", bytes: 12 };
+			api.registerProjectArtifact
+				.mockReturnValueOnce(first.promise)
+				.mockReturnValueOnce(second.promise);
+			entries()[0]!.click(); // dev: fix.diff
+			await fromAgent(1);
+			entries()[0]!.click(); // qa: notes.md
+			first.resolve(ok(FIX));
+			await flush();
+			expect(chips()).toBe(0);
+			expect(note()).toBe("Attaching notes.md…");
+			second.resolve(ok(NOTES));
+			await flush();
+			expect(root.querySelector(".tw-files")?.textContent).toBe("notes.md12 B×");
+		});
 	});
 });
