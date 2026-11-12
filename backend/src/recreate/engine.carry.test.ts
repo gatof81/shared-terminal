@@ -31,8 +31,11 @@ import { LABEL_ATTEMPT, RESERVED_NAME_RE } from "./ports.js";
 
 type H = Awaited<ReturnType<typeof harness>>;
 const roots: string[] = [];
-async function setup(config?: NonNullable<Parameters<typeof harness>[0]>["config"]): Promise<H> {
-	const h = await harness({ config });
+async function setup(
+	config?: NonNullable<Parameters<typeof harness>[0]>["config"],
+	now?: () => number,
+): Promise<H> {
+	const h = await harness({ config, ...(now ? { now } : {}) });
 	roots.push(h.root);
 	return h;
 }
@@ -548,6 +551,25 @@ describe("carry-over recreation (§2.7.7)", () => {
 			reverse: true,
 			outcome: { kind: "rolled-back" },
 		});
+		expect((await recordOf(h))?.retained).toMatchObject({ containerId: O_ID, role: "O" });
+	});
+
+	it("#549: the same rollback with a FROZEN clock — O's rename-back never takes N's parking name (409, not 500)", async () => {
+		// Every `-old-<ts>` the engine mints falls in one millisecond: before
+		// the fix O's rename-back reused N's parking name, Docker answered 409
+		// and the call ended 500 recreate-failed instead of rollback-not-applied.
+		const h = await setup(undefined, () => 1_800_000_000_000);
+		dirtyLayer(h);
+		expect((await h.engine.recreate(SID, IMG_N, { preserve: true })).ok).toBe(true);
+		const nId = nIdOf(h) as string;
+		await h.docker.stop(nId);
+		h.d1.casMode = "rejected";
+		const r = await h.engine.rollbackToRetained(SID);
+		expect(r).toMatchObject({ ok: false, status: 409, code: "rollback-not-applied" });
+		expect(h.docker.containers.get(nId)?.name).toBe(CANONICAL);
+		const oName = h.docker.containers.get(O_ID)?.name as string;
+		expect(oName).not.toBe(CANONICAL);
+		expect(oName).toMatch(RESERVED_NAME_RE);
 		expect((await recordOf(h))?.retained).toMatchObject({ containerId: O_ID, role: "O" });
 	});
 });

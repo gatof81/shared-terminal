@@ -1258,6 +1258,23 @@ export class RecreationEngine {
 		);
 	}
 
+	/**
+	 * A reserved `-old-<ts>` name that can never equal one already in play
+	 * (#549). The rollback mints names from the clock while O still holds the
+	 * `-old-<ts>` of its carry-over and N is parked under another; in one
+	 * millisecond two of them coincided, Docker answered 409 and the call
+	 * ended `recreate-failed` instead of its real outcome. The timestamp stays
+	 * numeric (RESERVED_NAME_RE) and strictly after every taken one.
+	 */
+	private oldNameAfter(canonical: string, ...taken: string[]): string {
+		let ts = this.now();
+		for (const t of taken) {
+			const m = RESERVED_NAME_RE.exec(t)?.[3];
+			if (m !== undefined && ts <= Number(m)) ts = Number(m) + 1;
+		}
+		return `${canonical}-old-${ts}`;
+	}
+
 	/** Step 2: O → -old-, N → canonical. */
 	private async swapNames(a: Attempt, oOldName: string): Promise<void> {
 		try {
@@ -2085,13 +2102,13 @@ export class RecreationEngine {
 		if (this.stopped) return { ok: false, status: 500, code: "recreate-failed" };
 
 		const attemptId = randomUUID();
-		const ts = String(this.now());
 		const canonical = row.container_name;
 		const identity = {
 			attemptId,
 			oContainerId: nId,
 			oCanonicalName: canonical,
-			oOldName: `${canonical}-old-${ts}`,
+			// N is parked under a name O does not already hold (#549).
+			oOldName: this.oldNameAfter(canonical, o.name),
 			nTempName: o.name,
 		};
 		try {
@@ -2238,9 +2255,9 @@ export class RecreationEngine {
 			// N back onto it.
 			const o = await act("inspect O", () => d.inspect(oId));
 			if (o && o.name === a.canonical) {
-				await act("rename O back", () => d.rename(oId, `${a.canonical}-old-${this.now()}`)).catch(
-					() => undefined,
-				);
+				await act("rename O back", () =>
+					d.rename(oId, this.oldNameAfter(a.canonical, a.oOldName)),
+				).catch(() => undefined);
 			}
 			const n2 = await act("inspect N", () => d.inspect(nId));
 			if (n2 && n2.name !== a.canonical) {
