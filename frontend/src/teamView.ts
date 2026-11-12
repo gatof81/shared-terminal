@@ -924,8 +924,11 @@ export class ThreadScroll {
 	readonly pill = el("button", "tw-newer");
 
 	constructor(private readonly box: HTMLElement) {
-		// Focus lands here when the pill (which hides itself) is activated.
-		box.tabIndex = -1;
+		// A labelled, Tab-reachable region: keyboard users scroll it with
+		// PageDown/arrows (a thread may hold no focusable control at all),
+		// and focus lands here when the pill (which hides itself) is used.
+		box.tabIndex = 0;
+		box.setAttribute("aria-label", "Messages in this thread");
 		this.pill.type = "button";
 		this.pill.hidden = true;
 		this.pill.addEventListener("click", () => {
@@ -1015,6 +1018,14 @@ export class ThreadScroll {
 	 * keeping the reader where they should be. `rootId` is the open thread.
 	 */
 	render(rootId: string, update: () => boolean): void {
+		// Self-heal: the ResizeObserver is the usual way out of a pending
+		// restore; a render that finds the box laid out does it too, so a
+		// missed observation can never freeze the reader's tracking.
+		if (this.pendingRestore && this.root === rootId && this.hasLayout()) {
+			update();
+			this.restore();
+			return;
+		}
 		const switched = this.root !== rootId || !this.hasLayout();
 		const anchor = !switched && !this.atEnd ? this.anchor() : null;
 		const changed = update();
