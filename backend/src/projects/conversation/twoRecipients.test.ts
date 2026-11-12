@@ -10,7 +10,7 @@
  *   the pilot's evidence.
  */
 
-import { promises as fs } from "node:fs";
+import { promises as fs, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -331,5 +331,57 @@ describe("logCheck (§3.4, §4.1 rules on a page)", () => {
 
 	it("refuses input that is not a page", () => {
 		expect(checkLog({ nope: 1 }).ok).toBe(false);
+	});
+});
+
+describe("the D1 pilot's evidence (VM100, 2026-11-12, redacted by A in #595)", () => {
+	// Ids and hashes pseudonymized consistently (equalities preserved), no text.
+	const page = JSON.parse(
+		readFileSync(path.join(__dirname, "fixtures/pilot-2026-11-12.json"), "utf8"),
+	) as { events: Array<Record<string, unknown>> };
+
+	it("passes every rule: 20 lines, one writer, no recovery", () => {
+		const r = checkLog(page);
+		expect(r).toMatchObject({
+			ok: true,
+			violations: [],
+			notes: [],
+			lines: 20,
+			firstSeq: 1,
+			lastSeq: 20,
+		});
+		expect(r.writers).toHaveLength(1);
+		expect(page.events.some((e) => e.ev === "recovery")).toBe(false);
+	});
+
+	it("one recipient, then two independent ones: delivered, exact, each closed by its own Done", () => {
+		const [one, two] = checkLog(page).messages;
+		expect(one?.deliveries.map((d) => [d.states.join(">"), d.reply?.attribution, d.acked])).toEqual(
+			[["planned>sending>delivered", "exact", true]],
+		);
+		expect(two?.deliveries.map((d) => [d.states.join(">"), d.reply?.attribution, d.acked])).toEqual(
+			[
+				["planned>sending>delivered", "exact", true],
+				["planned>sending>delivered", "exact", true],
+			],
+		);
+		expect(two?.independence).toEqual({
+			distinctComposerIds: true,
+			distinctSessions: true,
+			distinctPrompts: true,
+			individualAcks: 2,
+		});
+		expect(two?.pending).toEqual([]);
+	});
+
+	it("§4.1 timing: every reply_ref lands 10 s (± 50 ms) after its reply_settling", () => {
+		const at = (e: Record<string, unknown>) => Date.parse(e.at as string);
+		for (const ref of page.events.filter((e) => e.ev === "reply_ref")) {
+			const s = page.events.find(
+				(e) => e.ev === "reply_settling" && e.msg_id === ref.msg_id && e.agent_id === ref.agent_id,
+			) as Record<string, unknown>;
+			expect(Math.abs(at(ref) - at(s) - 10_000)).toBeLessThanOrEqual(50);
+			expect(at(ref)).toBeGreaterThanOrEqual(Date.parse(s.settle_until as string));
+		}
 	});
 });
