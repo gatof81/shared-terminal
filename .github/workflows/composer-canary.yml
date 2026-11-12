@@ -68,7 +68,7 @@ jobs:
     name: Composer + conversation smokes, CLI ${{ matrix.cli }}
     needs: resolve
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     # This job installs and runs an unvetted third-party release: it gets a
     # read-only token. The issue is opened by `report`, which runs no CLI.
     permissions:
@@ -94,15 +94,26 @@ jobs:
         working-directory: backend
         run: npm ci
 
-      # The build is the environment, not the CLI under test: an apt mirror
-      # hiccup failed all three versions on 2026-11-11 (#583–#585, green the
-      # next day). One retry, and a failure here is reported as such below.
+      # Most of the build is the environment, not the CLI under test: an apt
+      # mirror hiccup failed all three versions on 2026-11-11 (#583–#585,
+      # green the next day). One retry. But the CLI itself is installed in
+      # this build (`npm install -g @anthropic-ai/claude-code@X`), so a failure
+      # in THAT layer is a CLI failure and is reported as one (Verdict reads
+      # cli-install-failed, written below).
       - name: Build session image with CLI ${{ matrix.cli }}
         id: build
         run: |
-          docker build --build-arg CLAUDE_CODE_VERSION=${{ matrix.cli }} -t shared-terminal-session:canary ./session-image \
-            || { echo "::warning::image build failed, retrying once in 60 s"; sleep 60; \
-                 docker build --build-arg CLAUDE_CODE_VERSION=${{ matrix.cli }} -t shared-terminal-session:canary ./session-image; }
+          build() {
+            docker build --progress=plain --build-arg CLAUDE_CODE_VERSION=${{ matrix.cli }} \
+              -t shared-terminal-session:canary ./session-image 2>&1 | tee build.log
+          }
+          build || { echo "::warning::image build failed, retrying once in 60 s"; sleep 60; build; } || {
+            # The failing step is named in BuildKit's final error line.
+            if grep -E 'failed to solve: process .*npm install -g .*@anthropic-ai/claude-code@' build.log >/dev/null; then
+              touch cli-install-failed
+            fi
+            exit 1
+          }
 
       - name: Conversation hooks smoke (control dir validation)
         env:
@@ -128,9 +139,13 @@ jobs:
         run: |
           if [ "$OUTCOME" = "success" ]; then
             echo "PASS for $CLI — nothing to do (new stable releases are admitted by default)." >> "$GITHUB_STEP_SUMMARY"
+          elif [ -e cli-install-failed ]; then
+            # The CLI's own install layer failed: that IS a CLI failure.
+            echo "FAIL for $CLI — the CLI itself failed to install in the image; see the issue opened by this run." >> "$GITHUB_STEP_SUMMARY"
+            mkdir -p failed && echo "smoke" > "failed/$CLI"
           elif [ "$BUILD" != "success" ]; then
-            # No smoke ran: this says nothing about the CLI.
-            echo "NO VERDICT for $CLI — the image build failed (environment); no smoke ran. Re-run before judging the CLI." >> "$GITHUB_STEP_SUMMARY"
+            # No smoke ran and the CLI install was not the failing layer.
+            echo "NO VERDICT for $CLI — the image build (or an earlier setup step) failed outside the CLI install; no smoke ran. Re-run before judging the CLI." >> "$GITHUB_STEP_SUMMARY"
             mkdir -p failed && echo "build" > "failed/$CLI"
           else
             echo "FAIL for $CLI — see the issue opened by this run; exclude it with COMPOSER_CLI_DENY (and RECREATE_CLI_DENY if the conversation smoke failed)." >> "$GITHUB_STEP_SUMMARY"
@@ -176,7 +191,7 @@ jobs:
               # An environment failure gets its own issue, without the
               # exclusion procedure: denying a CLI for an apt outage is wrong.
               title="Composer CLI canary: image build failed (no verdict) for Claude Code $CLI"
-              body="The canary could not build the session image for **$CLI**: $RUN_URL. No smoke ran, so this says **nothing** about the CLI. Do not deny it. Re-run the canary (workflow_dispatch, cli=$CLI); close this issue when a run gets past the build."
+              body="The canary could not build the session image (or an earlier setup step failed) for **$CLI**: $RUN_URL. The failing layer was **not** the CLI install, and no smoke ran, so this is not a verdict on the CLI. Check the failing step in the run. If it is in fact the CLI, treat it as a CLI failure. Otherwise re-run the canary (workflow_dispatch, cli=$CLI), and close this issue when a run gets past the build."
               hit=$(gh issue list --state all --search "in:title \"$title\"" --json number,title,state \
                 --jq "map(select(.title == \"$title\")) | .[0] // empty")
               if [ -z "$hit" ]; then
