@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 import { hueOf } from "./teamView.js";
 
 describe("hueOf", () => {
-	it("ids that differ only in their last character get clearly different colours", () => {
-		// Before: 267, 268, 269, 270, 271 — five agents, one colour.
+	it("neighbouring ids (differing only in their last character) no longer share a colour", () => {
+		// Before: 267, 268, 269, 270, 271 — five agents, one colour. A hash onto
+		// 360 hues can still put two NON-neighbouring agents close (here a2/a5,
+		// 8° apart): colour is a second cue, name and initials are the identity,
+		// and a per-project assignment would cost "an agent keeps its colour".
 		const ids = ["a1", "a2", "a3", "a4", "a5"].map((x) => `a0000000-0000-4000-8000-0000000000${x}`);
 		const hues = ids.map(hueOf);
 		const dist = (a: number, b: number) => Math.min(Math.abs(a - b), 360 - Math.abs(a - b));

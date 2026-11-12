@@ -1815,7 +1815,6 @@ class Workspace {
 	): HTMLElement {
 		const li = el("li", "tw-row tw-row-agent");
 		li.style.setProperty("--tw-hue", String(hueOf(agentId)));
-		li.style.setProperty("--tw-hue", String(hueOf(agentId)));
 		const meta = el("div", "tw-meta");
 		meta.append(
 			avatar(this.agents, agentId, true, false),
@@ -1882,7 +1881,6 @@ class Workspace {
 	 */
 	private settlingRow(agentId: string, st: LogReplySettling): HTMLElement {
 		const li = el("li", "tw-row tw-row-agent tw-row-settling");
-		li.style.setProperty("--tw-hue", String(hueOf(agentId)));
 		li.style.setProperty("--tw-hue", String(hueOf(agentId)));
 		const meta = el("div", "tw-meta");
 		meta.append(
