@@ -228,3 +228,22 @@ jobs:
             frontend/playwright-report
             frontend/test-results
           retention-days: 7
+
+  ops:
+    name: Ops checks (shellcheck + tests)
+    # ops/lib/checks.sh is what the VM100 deploy/activation scripts source for
+    # their gates (ids, .env key delta, flag transition, flock, log lines, the
+    # docker --rm race). Seconds, no Docker, no network: it runs on every PR.
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # shellcheck ships on the ubuntu-24.04 runner image.
+      - name: shellcheck
+        run: shellcheck -x ops/lib/checks.sh ops/test/checks.test.sh
+
+      - name: tests
+        run: bash ops/test/checks.test.sh
