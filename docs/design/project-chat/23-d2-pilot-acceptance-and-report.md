@@ -15,8 +15,8 @@ Each runbook step ends as one of:
 | Result | Meaning |
 | --- | --- |
 | **PASS** | The step's PASS condition held, with its evidence recorded |
-| **FAIL** | The condition did not hold, or an abort condition of §7 was hit |
-| **NOT-EXERCISED** | The step ran, **every invariant of the step held in every round**, but the situation it targets did not occur. Only three steps may end this way, each observable in the log: <br>• K1: no round's kill found a delivery with a `placing` and no `sending`; <br>• K5: no delete landed after a `placing` (no `not-sent{binding-changed|agent-removed}` with `files_possibly_placed`); <br>• P7.3: no unfinished delivery in the backup (runbook P7.0). <br>**FAIL takes precedence**: a violated invariant in any round makes the step FAIL, window or not. The deterministic cover is T12b, T6 and the c0 test. It never counts as PASS |
+| **FAIL** | The condition did not hold, or an abort condition of §7 was hit, except loss of isolation (see below) |
+| **NOT-EXERCISED** | The step ran, **every invariant of the step held in every round**, but the situation it targets did not occur. Only three steps may end this way, each observable in the log: <br>• K1: no round's kill found a delivery with a `placing` and no `sending`; <br>• K5: no delete landed between a `placing` and c0, i.e. no `not-sent{binding-changed|binding-unverified}` with `files_possibly_placed` (`agent-removed` is decided before any placing; a delete after c0 ends `delivered` and isn't visible here, the conservative direction); <br>• P7.3: no unfinished delivery in the backup (runbook P7.0). <br>**FAIL takes precedence**: a violated invariant in any round makes the step FAIL, window or not. The deterministic cover is T12b, T6 and the c0 test. It never counts as PASS |
 | **ENV** | The environment, not D2, broke a precondition. It needs **positive evidence of an environmental cause**: a D1 or network error in the boot log, the pinned address wrong, the egress rule not matching, or an E-check failing. **B confirms the classification.** Any failure without such evidence (e.g. the app not reaching `[server] listening` after a K1 kill or a restore, which D2's recovery could also cause) is **FAIL** until B has diagnosed it. The step is repeated after the fix. The failed attempt and its evidence stay in the report (sections 3 and 9) even if the repeat passes |
 | **SKIPPED** | Excluded by the owner (K6 in this run, decision O3) |
 
@@ -74,7 +74,7 @@ One directory on the isolated host: mode 700, with a `SHA256SUMS` of every file.
 3. **The step table.** One row per runbook step, P0.0 to P9: `step | result (§1) | evidence file(s) | note`. Every non-PASS row has a note.
 4. **Log evidence.** **Both** project logs (`D2 run` and P5's second project), each as an array of pages (paged by `before=oldestSeq`). They are redacted as in the runbook §6: `del(.text)`, and ids **and hashes** pseudonymized, since the report leaves the host. Each log gets its own `npm run projects:check-log` report, which must have `ok: true` and its `notes` explained. The unredacted logs stay in the host's evidence directory.
 5. **Sweeps.** Both sweeps' output (expected: empty after the allowlist), and the `trap/` listings.
-6. **Placed files.** For every `artifacts_placed` claim in the log: the path, sha256, owner, mode and size as read on the host after the run.
+6. **Placed files.** For every `artifacts_placed` claim in the log: the path, sha256, owner, mode and size as read on the host after the run. In `REPORT.md` the hashes and the `<sha12>` prefixes in paths use section 4's pseudonym mapping. The raw values stay in the host's evidence directory.
 7. **K-row details.**
    - K1: per round, the kill delay and the states found after restart.
    - K3/K4: the loop markers, the stop time, the nesting depth seen, and every claimed file located.
