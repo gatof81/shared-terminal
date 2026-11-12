@@ -91,7 +91,9 @@ jobs:
           set -u
           decide() { echo "cli=$1" >>"$GITHUB_OUTPUT"; echo "CLI matrix: $1 ($2)"; }
           if [ "$EVENT" != "pull_request" ]; then decide true "event $EVENT"; exit 0; fi
-          if ! files=$(git diff --name-only "$BASE_SHA...$HEAD_SHA"); then decide true "diff failed"; exit 0; fi
+          # --no-renames: a moved file lists both paths; quotePath off: a non-ASCII
+          # name is not quoted past the regex's anchors.
+          if ! files=$(git -c core.quotePath=false diff --no-renames --name-only "$BASE_SHA...$HEAD_SHA"); then decide true "diff failed"; exit 0; fi
           if [ -z "$files" ]; then decide true "empty diff"; exit 0; fi
           printf '%s\n' "$files"
           if grep -qE '^(session-image/|backend/src/conversation/|backend/src/recreate/|backend/src/(dockerManager|recreateAttempt|sessionLifecycleLock)\.ts$|\.github/workflows/session-image\.yml$)' <<<"$files"; then
@@ -189,7 +191,9 @@ jobs:
   cli-variants:
     name: CLI ${{ matrix.cli }} — control dir, recreation and composer smokes
     needs: changes
-    if: needs.changes.outputs.cli == 'true'
+    # Runs unless `changes` positively answered false: a failed or empty
+    # decision runs the matrix (fail-safe); a cancelled run does not.
+    if: ${{ !cancelled() && needs.changes.outputs.cli != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
