@@ -48,7 +48,8 @@ preflight (§5, P0).
 
 ## 3. What is installed
 
-- **Checkout:** the frozen SHA `a09bf8a` (`git checkout --detach a09bf8a`, never `main`). Record it as the full SHA with `git rev-parse HEAD`. Plus the mock: `session-image/test/` is already in the repo.
+- **Checkout:** the frozen SHA `a09bf8a` (`git checkout --detach a09bf8a`, never `main`) for the backend and the session image. Record it as the full SHA with `git rev-parse HEAD`.
+- **The mock alone** comes from the O2 PR's merge SHA (#604), because `a09bf8a` predates the `sha256` scenario. Use a second checkout at that SHA, and mount only its `session-image/test/` as `/t`. Record the second SHA and the `sha256sum` of `mock-anthropic.mjs`. Nothing else is taken from it. Plus the mock: `session-image/test/` is already in the repo.
 - **Session image:** a plain `docker build -t shared-terminal-session ./session-image`. This is a fresh host with no sessions, so CLAUDE.md's first-install path applies. Record the image id.
 - **After every app start** (P2, K1, K2, P7, P8):
   - the boot log reaches `[server] listening on`, which comes only after the D1 migrations finished, so D1 is reachable;
@@ -56,7 +57,7 @@ preflight (§5, P0).
 - **Backend:** `docker compose up -d --build`. Record the image id and the sha256 of `dist/**/*.js` (same method as the VM100 deploys).
 - **Network,** before `up`:
   - `docker network create --subnet <cidr> --ip-range <cidr that excludes the reserved address> sessions-net`;
-  - a host-only `docker-compose.override.yml` pins `app`: `services: { app: { networks: { sessions-net: { ipv4_address: <reserved> } } } }`. The mock runs as uid 1000 and dies on its first request if it cannot write its log, so create its directory first: `install -d -o 1000 -g 1000 -m 0700 <evidence>/mock`. The mock runs on it as a container named and aliased `mock-api`, exactly like `conversation-smoke.sh` Phase 1: `docker run -d --name mock-api --network sessions-net --network-alias mock-api -v <repo>/session-image/test:/t:ro -v <evidence>/mock:/out --entrypoint node shared-terminal-session /t/mock-anthropic.mjs 8080 /out/model-requests.jsonl`.
+  - a host-only `docker-compose.override.yml` pins `app`: `services: { app: { networks: { sessions-net: { ipv4_address: <reserved> } } } }`. The mock runs as uid 1000 and dies on its first request if it cannot write its log, so create its directory first: `install -d -o 1000 -g 1000 -m 0700 <evidence>/mock`. The mock runs on it as a container named and aliased `mock-api`, exactly like `conversation-smoke.sh` Phase 1: `docker run -d --name mock-api --network sessions-net --network-alias mock-api -v <repo-at-O2-sha>/session-image/test:/t:ro -v <evidence>/mock:/out --entrypoint node shared-terminal-session /t/mock-anthropic.mjs 8080 /out/model-requests.jsonl`.
 - **`.env` (isolated host only).** Everything else stays unset:
 
   ```
@@ -149,8 +150,12 @@ With all fixtures in place and the flag unset:
 4. **Owner view.** `GET …/artifacts/<sha>` → 200, `text/plain; charset=utf-8`, `nosniff`, `attachment`, CSP `sandbox`, the exact bytes. The thread in A's UI (if built) shows the attachment and a "Delivered" chip.
 5. **The agent's own verification (O2, approved).** The stand-in gains one scripted scenario: `ST_SCENARIO=sha256:<path>`. It makes the CLI run `sha256sum -- <path>` through its own Bash tool, then the closing text echoes the hash the tool printed. The scenario accepts only an inbox path of the exact shape `.st-inbox/<12 hex>-<name>` (its own PR, `session-image/test/` only).
    - **Setup:** for this one prompt, `qa`'s CLI must be able to run that command without a dialog. Add `"permissions": {"allow": ["Bash(sha256sum:*)"]}` to the seeded `~/.claude/settings.json` (§4), rather than `--dangerously-skip-permissions`.
-   - **Send:** to `qa-a`, the text `ST_SCENARIO=sha256:.st-inbox/<sha12>-fix.diff`.
-   - **PASS:** the `reply_ref` is `exact`, and its text (the capture's `last_assistant_message`) contains `<sha>`. The hash was computed by the receiving CLI in its own container.
+   - **Send:** to `qa-a`, the text `ST_SCENARIO=sha256:.st-inbox/<sha12>-fix.diff`, **with `artifacts: [<sha>]`**. P3.3 had the agent delete its inbox, so the placement recreates the file this prompt hashes.
+   - **PASS:**
+     - the `reply_ref` is `exact`, and its text (the capture's `last_assistant_message`) is `sha256 <sha> .st-inbox/<sha12>-fix.diff`;
+     - **and** the mock's request log shows, for that turn, a `tool_result` whose output line is `<sha>  .st-inbox/<sha12>-fix.diff`. Record only that line's hash (§6).
+
+     The `<sha>` is also in the prompt (the artifact line), so the reply alone cannot prove the CLI computed it. The mock echoes **only** the line `sha256sum` printed for that exact path, and the request log shows that output came from the tool.
 
 ### P4. Two recipients and partial failures
 
@@ -212,16 +217,20 @@ Then one partial failure across two artifacts:
 Before P6: a backup (`docker compose exec app npm run backup`). Record its directory and manifest
 sha256. Each step ends by checking the log with `projects:check-log`.
 
-| # | Action | PASS |
-| --- | --- | --- |
 **K3 and K4: how they are judged.**
-- **Stop the competitors first.** The racing loops are the agent's own processes, so they are stopped first: kill them, then `wait` until `pgrep -u 1000 -f <loop marker>` is empty in the container. Only then is the final state evaluated, and never while a loop can still move something.
-- **What the loops can touch.** Neither ever writes a final name. K3 only renames the inbox directory or puts a link in its place, and K4 only replaces `.<16 hex>.tmp` names.
-- **Locating a claimed file.** It is located after the stop with `find <WORKSPACE_ROOT>/<ops> -xdev -type f -name '<sha12>-<name>'`, which also finds it inside a directory K3 renamed. It must have the claimed sha.
-- **Not a FAIL.** A claimed file that ended up under a directory the loop renamed, or a final name the agent itself published by swapping a temp (K4, judged as `exists-different` in the log), is the agent's own later move.
-- **A FAIL.** Only a claimed file whose bytes differ from its sha is a FAIL, or a claimed file that cannot be found anywhere in the workspace.
+- **Stop the competitors first.** The racing loops are the agent's own processes, started through a separate `docker exec`. They are stopped by `kill`, then a poll until `pgrep -u 1000 -f <loop marker>` inside the container is empty. Only then is the final state evaluated, and never while a loop can still move something.
+- **What the loops can touch.** Neither ever writes a final name. K3 only renames the inbox directory to `x` or puts a link in its place. A backend recreating `.st-inbox` mid-loop can leave `x` nested as `.st-inbox/x`, which is the agent's doing. K4 only replaces `.<16 hex>.tmp` names.
+- **Locating a claimed file.** It is located after the stop **only** in the allowed places: `find <WORKSPACE_ROOT>/<ops>/.st-inbox <WORKSPACE_ROOT>/<ops>/x <WORKSPACE_ROOT>/<ops>/.st-inbox/x -maxdepth 1 -type f -name '<sha12>-<name>'`.
+- **Not a FAIL.** A claimed file found in one of those places with its sha, or a final name the agent itself published by swapping a temp (K4, `exists-different` in the log).
+- **FAIL, an explicit list:**
+  - a claimed file whose bytes differ from its sha;
+  - a claimed file not found in the allowed places;
+  - **any file at all under `trap/`**: the link target, so something followed the link;
+  - any sweep hit (§6).
 - **Before the next row,** the inbox is restored to a plain directory.
 
+| # | Action | PASS |
+| --- | --- | --- |
 | K1 | **SIGKILL the backend during sends.** 10 rounds: send to `qa-a` + `ops-b` with an artifact, and `docker kill -s KILL <app>` at a random delay of 0–400 ms; then `up -d --no-build app` | After each restart: no delivery with two `sending` lines; every unfinished one is `not-sent{persist-failed[, files_possibly_placed]}` or `uncertain{orphaned}`; **0 new Composer calls after the restart** (capture `user_prompt` count). In every inbox, only complete files under final names (each sha256 matches) plus at most our hidden `.<16 hex>.tmp` files. The exact kill point is probabilistic; T12b proves the placement window deterministically |
 | K2 | **Lost writer lock:** the app image has no `pkill`, so from the **host**: `pgrep -af 'flock --exclusive --nonblock --close'`, check with `docker top <app>` that exactly one such pid belongs to the app container, then `kill <pid>` | The backend logs `[projects] writer lock LOST`. A send gets 503 or `not-sent{persist-failed}`. **No file placed and no Composer call after the loss.** After `up -d --force-recreate app`: lock held. Recovery lines are written **only if** a delivery was in flight at the loss. The log is `ok` |
 | K3 | **Real agent race.** In `ops`, as uid 1000, a loop for 60 s: `mv .st-inbox x; ln -s trap .st-inbox; rm .st-inbox; mv x .st-inbox` (relative `trap`, as F1). Meanwhile 20 sends to `ops-b` | Judge the **placement** only; any text-delivery state is acceptable (overlapping sends may give `send-in-progress` or `busy`). Each delivery is placed (the claimed `artifacts_placed` path is a regular file in a real directory of `ops`'s workspace, sha OK), or `artifact-failed`, or never reached `placing` (e.g. `no-target` while an overlapping send holds the pane). `<WORKSPACE_ROOT>/<ops>/trap/` stays empty (host view), and the sweep is clean |
@@ -294,7 +303,7 @@ This is the production rollback: no data step, only the flag.
 - **HTTP evidence is recorded by allowed fields only**, extracted with `jq`, never as raw bodies:
   - the status, plus the response's `error`/`detail`, `msgId`, `replayed`, `deliveries[].{agentId,state,reason,filesPossiblyPlaced}`, `sha256`, `name`, `bytes`, `features`, and the ids of the project, agents and sessions;
   - for a GET of artifact content: the status, the response headers and `sha256sum` of the body, never the body itself;
-  - **never the request or response bodies of setup, login, register, invites or any `/auth/*` call** (passwords, invite codes, tokens, `Set-Cookie`). For those, the status line alone.
+  - **never the request or response bodies of setup, login, register, invites or any other `/auth/*` call** (passwords, invite codes, tokens, `Set-Cookie`). For those, the status line alone. The one exception is `GET /api/auth/status`, from which `needsSetup`, `authenticated` and `features` are recorded (E3, P1, P2, P8).
   
   Also recorded: the command (with the cookie path, never its content) and timestamps.
 - The events, redacted with the same method as the D1 pilot (#595): `del(.text)`, plus consistent pseudonymization of ids and hashes if it leaves the host. Then `projects:check-log` on them. The checker reads one page of at most 500 lines: page with `before=oldestSeq` and concatenate the pages into one array before checking, or the report carries a "page has more" note.
