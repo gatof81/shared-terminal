@@ -612,6 +612,9 @@ export function postProjectAck(
 	);
 }
 
+/** A project socket that stayed open this long earned a fresh (fast) backoff. */
+const STABLE_SOCKET_MS = 10_000;
+
 /** Appendix A: `WS /ws/project/<pid>` server frames. Events are raw log lines (parseLogEvent reads them). */
 export type ProjectServerFrame =
 	| { type: "event"; event: unknown }
@@ -648,8 +651,13 @@ export function openProjectSocket(
 		if (closed) return;
 		const sock = new WebSocket(`${WS_BASE}/ws/project/${encodeURIComponent(projectId)}`);
 		ws = sock;
+		let openedAt = 0;
 		sock.addEventListener("open", () => {
-			backoff = 500;
+			// The backoff resets only once a connection has PROVED useful (close
+			// below): the server completes the handshake before it authorizes,
+			// and an immediate 1011 (store unavailable, D1 hiccup) must not turn
+			// into a reconnect + GET every 500 ms.
+			openedAt = Date.now();
 			onState?.(true);
 			subscribe();
 		});
@@ -675,6 +683,7 @@ export function openProjectSocket(
 			ws = null;
 			onState?.(false, e.code === 1008);
 			if (closed || e.code === 1008) return;
+			if (openedAt && Date.now() - openedAt > STABLE_SOCKET_MS) backoff = 500;
 			timer = setTimeout(connect, backoff);
 			backoff = Math.min(backoff * 2, 15_000);
 		});

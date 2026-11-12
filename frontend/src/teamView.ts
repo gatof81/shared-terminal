@@ -567,7 +567,18 @@ class Workspace {
 		if (!this.unsubscribe) {
 			// First show, or back on screen after a suspend: read the newest page
 			// now, then follow the log live (the poll stays as the safety net).
-			this.unsubscribe = this.store.onChange(() => this.render());
+			let wasLive = this.store.live;
+			this.unsubscribe = this.store.onChange(() => {
+				// The socket just dropped (or came back): re-arm the poll at the
+				// cadence that now applies, instead of waiting out a 30 s timer.
+				if (this.store.live !== wasLive) {
+					wasLive = this.store.live;
+					if (this.timer) clearTimeout(this.timer);
+					this.timer = null;
+					this.schedule();
+				}
+				this.render();
+			});
 			void this.store.refresh().then(() => this.unsubscribe && this.store.startLive());
 		}
 		this.schedule();
@@ -612,7 +623,10 @@ class Workspace {
 			() => {
 				this.timer = null;
 				if (!this.unsubscribe) return;
-				if (document.visibilityState === "visible") void this.store.refresh();
+				// A first load that failed never started the socket: each poll tries
+				// again (startLive is idempotent and needs a loaded log).
+				if (document.visibilityState === "visible")
+					void this.store.refresh().then(() => this.unsubscribe && this.store.startLive());
 				this.schedule();
 				// Live over the socket: the poll is only a safety net. Otherwise the
 				// usual 5 s.
