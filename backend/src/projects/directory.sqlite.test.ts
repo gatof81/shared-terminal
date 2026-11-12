@@ -1154,6 +1154,35 @@ describe("agents: reads, boundary and removal", () => {
 		);
 	});
 
+	it("D1 on, D2 off: the artifact routes do not exist and status has no projectArtifacts", async () => {
+		await startServer(true, { projectConversation: { api: null } });
+		const unknown = await api("GET", "/no-such-surface", OWNER);
+		const sha = "a".repeat(64);
+		for (const [m, p] of [
+			["POST", `/projects/${uuid()}/conversation/artifacts`],
+			["GET", `/projects/${uuid()}/conversation/artifacts/${sha}`],
+		] as const) {
+			const r = await api(m, p, OWNER, m === "POST" ? {} : undefined);
+			expect({ m, p, status: r.status }).toEqual({ m, p, status: unknown.status });
+		}
+		expect((await api("GET", "/auth/status", OWNER)).json.features).not.toHaveProperty(
+			"projectArtifacts",
+		);
+	});
+
+	it("D2 on: features.projectArtifacts, and the artifact routes exist behind auth (503 until the store starts)", async () => {
+		await startServer(true, { projectConversation: { api: null, artifacts: null } });
+		expect((await api("GET", "/auth/status", OWNER)).json.features).toEqual({
+			projectChat: true,
+			projectConversation: true,
+			projectArtifacts: true,
+		});
+		const p = `/projects/${uuid()}/conversation/artifacts`;
+		expect((await api("POST", p, OWNER, {})).status).toBe(503);
+		expect((await api("GET", `${p}/${"a".repeat(64)}`, OWNER)).status).toBe(503);
+		expect((await api("POST", p, null, {})).status).toBe(401);
+	});
+
 	it("hard delete of a bound session: 409 agent-active BEFORE any effect; after removing the agent it proceeds", async () => {
 		const r = await api("DELETE", `/sessions/${S.dev}?hard=true`, OWNER);
 		expect({ status: r.status, code: r.json.error }).toEqual({ status: 409, code: "agent-active" });

@@ -168,8 +168,8 @@ export const DEFAULT_NANO_CPUS = Math.min(2_000_000_000, EFFECTIVE_CPU_NANO_MAX)
 // Docker auto-creates missing bind sources as root, which locks the container
 // user out of its own workspace — we pre-create the dir with the right owner
 // instead.
-const WORKSPACE_UID = Number.parseInt(process.env.WORKSPACE_UID ?? "1000", 10);
-const WORKSPACE_GID = Number.parseInt(process.env.WORKSPACE_GID ?? "1000", 10);
+export const WORKSPACE_UID = Number.parseInt(process.env.WORKSPACE_UID ?? "1000", 10);
+export const WORKSPACE_GID = Number.parseInt(process.env.WORKSPACE_GID ?? "1000", 10);
 
 // Per-session disk cap on user-uploaded files. The IP rate limiter (30/5min)
 // bounds request count, not bytes — without this an authenticated user could

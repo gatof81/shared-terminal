@@ -1,7 +1,8 @@
 # Conversación de proyecto por el Composer (D1–D3)
 
-Estado: **contrato vinculante, v0.3** (aprobado por el responsable el 2026-11-12), con las dos
-precisiones de v0.3.1 propuestas en la PR de D1-b. D1-a está en main; D1-b, D2 y D3 no.
+Estado: **contrato vinculante, v0.3** (aprobado por el responsable el 2026-11-12), con las
+precisiones de v0.3.1 (D1-b) y v0.3.2 (D2, propuestas en su PR). D1 está en main y activo en VM100;
+D2 está en borrador, apagado; D3 no empezó.
 
 - **v0.1** pasó una revisión adversarial independiente: 2 BLOCKER, 9 SHOULD-FIX y 1 NIT, todos
   incorporados.
@@ -22,6 +23,15 @@ precisiones de v0.3.1 propuestas en la PR de D1-b. D1-a está en main; D1-b, D2 
     detectados impiden la llamada al Composer aunque el `sending` esté en disco (T2b);
   - la ventana de asentamiento se mide solo en el reloj monotónico, desde que **este proceso** vio
     llegar el `turn_end` en vivo; un `turn_end` que no vio en vivo nunca da `exact` (§4.1, T20e).
+- **v0.3.2** (PR de D2) fija lo que §6 dejaba abierto para implementarlo, sin cambiar garantías ni
+  alcance:
+  - el API de §6.1, con sus códigos (§6.1.1);
+  - el nombre y los bytes que lleva un mensaje (§6.3);
+  - la colocación además exige que el nombre final sea **el mismo inode** verificado. Si un agente
+    cambia el temporal entre la verificación y el `link`, la entrega falla en lugar de dar por
+    colocados bytes no verificados (§6.4 paso 4);
+  - los hashes se verifican antes de tocar el destino;
+  - `artifact_error` nombra la causa de un `artifact-failed`.
 
 Decisión que lo origina (responsable, 2026-11-11, sobre la evaluación de B en #512 a las 16:57Z):
 
@@ -511,6 +521,7 @@ asunto de la UI.
 - **Límites por usuario.** `projectSendIp` limita los POST de mensajes y permisos. Un `InFlightLimiter`
   limita las lecturas, y su slot se mantiene hasta que termina la respuesta, como en Files y Git.
 - **Errores.** 400 `invalid-body` y los códigos de `validateText`; 404 (proyecto ajeno o inexistente);
+  400 (D2) `too-many-artifacts`, `artifact-unknown`;
   409 `project-log-full`, `project-log-unverifiable`, `idempotency-conflict`, `artifacts-off`,
   `artifacts-full`, `relay-off`, `origin-binding-off`, `grant-active`, `foreign-session`;
   415 `artifact-not-text`; 503 `persist-failed`, `project-writer-unavailable`, `binding-unverified`. Los rechazos por destinatario del Composer van dentro de
@@ -537,13 +548,51 @@ asunto de la UI.
   por `.`; los caracteres fuera del conjunto pasan a `_`. El nombre es informativo: la identidad del
   artefacto es su sha256.
 
+#### 6.1.1 API (v0.3.2)
+
+`POST /api/projects/:pid/conversation/artifacts {agentId, path}` (dueño, `projectIp`)
+- **El origen es la sesión que el agente tiene ligada ahora.** Se lee en D1 sin caché, y el evento
+  guarda cuál fue (`source{kind: owner, sid, path, agent_id}`). `path` es relativo al workspace,
+  el mismo string que usa Files.
+- `201 {sha256, name, bytes, replayed: false}`.
+- `200 {…, replayed: true}` si ese contenido ya está registrado **desde ese mismo origen**
+  (`sha256` + `sid:path`, la identidad de §2.2). El mismo contenido desde otro origen es otro evento
+  `artifact`, pero cuenta una sola vez para el tope del proyecto.
+- **Errores, ninguno escribe nada:**
+  - 400 `invalid-body`, también para un directorio, un no-regular o un path absoluto;
+  - 403 `artifact-restricted`;
+  - 404 `artifact-not-found` (ausente, link o fuera del workspace: la misma respuesta, como en Files);
+  - 409 `agent-not-bound`, `artifacts-full`, `artifact-corrupt`;
+  - 413 `artifact-too-large`;
+  - 415 `artifact-not-text` (también un archivo vacío);
+  - 429 `busy`;
+  - 503 `binding-unverified` o `persist-failed`.
+
+`GET /api/projects/:pid/conversation/artifacts/:sha256`
+- Solo sirve un sha256 que el registro de **este** proyecto tiene en un evento `artifact`; la mera
+  existencia del archivo no basta.
+- El contenido se re-verifica contra su nombre en cada lectura. Si no coincide, 409
+  `artifact-corrupt` y no se sirve.
+
+Las dos rutas tienen además ranuras en vuelo (2 por usuario, 8 por proceso, como Files).
+**Con `PROJECT_ARTIFACTS_ENABLED` apagado no se montan** (404) y `/api/auth/status` no anuncia
+`features.projectArtifacts`.
+
 ### 6.2 Almacenamiento
 
 - **Content-addressed.** Va a `artifacts/<sha256>` (0600, root), creado `O_EXCL`. Si ya existe un
   archivo con ese hash, se reutiliza, previa comprobación del hash del existente.
 - **Metadatos.** `<sha256>.json` lleva nombre, bytes y origen, y se escribe un evento `artifact`.
-- **Atomicidad.** Se escribe en un temporal, se hace fsync, se verifica el hash y se renombra. Solo
+- **Atomicidad.** Se escribe en un temporal, se hace fsync, se verifica el hash y se publica. Solo
   después se escribe el evento.
+  - **v0.3.2:** se publica con `link(2)` del temporal al nombre final, no con `rename`. Un nombre que
+    ya existe nunca se reemplaza: se compara. Si sus bytes no son los de su nombre, es 409
+    `artifact-corrupt` y no se escribe el evento.
+  - El tope del proyecto se decide **en la misma sección crítica que escribe el evento**, contra el
+    registro plegado, así que dos altas concurrentes nunca lo exceden.
+  - Un archivo de contenido sin evento, por una muerte entre los dos pasos o por un rechazo en el
+    tope, queda sin referencia. No es visible por el API, lo reutiliza el próximo registro de los
+    mismos bytes y no se borra (§9).
 
 ### 6.3 Lo que lleva el mensaje
 
@@ -555,6 +604,15 @@ El agente recibe **una línea por artefacto**, agregada por el backend al final 
 
 - Cada línea es un paste corto, así que el texto no se acerca al límite de 48. Los artefactos cuentan
   en esa validación, que se hace antes del paso 2.
+- **v0.3.2:**
+  - el cuerpo lleva `artifacts: [sha256…]`: ≤ 4, distintos y todos registrados en el proyecto. Si
+    no, no se escribe nada y la respuesta es:
+    - 400 `too-many-artifacts` si son más de 4;
+    - 400 `artifact-unknown`, con el sha256 en `detail`, si alguno no está registrado;
+    - 400 `invalid-body` si alguno no es un sha256 o está repetido;
+  - `name` y `bytes` vienen del **primer** evento `artifact` de ese sha256;
+  - el `message` guarda el texto de la persona y `artifacts[]` como `{sha256, name, bytes}`;
+  - las líneas se arman al enviar, de forma determinista, a partir de esos datos.
 - El receptor verifica el hash y aplica el contenido, por ejemplo con `git apply`. En la conversación
   del proyecto, la persona ve el contenido; un diff se muestra con `diff.ts`.
 
@@ -591,13 +649,38 @@ El workspace destino lo controla el agente y el backend es root en el host. Por 
    - **solo entonces** se hace `fchown` a `WORKSPACE_UID:WORKSPACE_GID` (el mismo dueño que el backend
      da al bind mount; 1000:1000 por defecto);
    - se publica con `link(2)` del temporal al nombre final `<sha256-12>-<name>` (EEXIST ⇒ paso 3), se
-     borra el temporal y se hace `fsync` del inbox.
+     borra el temporal y se hace `fsync` del inbox;
+   - **v0.3.2:** `link` publica lo que tenga el **nombre** del temporal en ese momento. Por eso el
+     archivo cuenta como colocado solo si el nombre final es el **mismo inode** (`dev` + `ino`) que
+     el descriptor verificado. Si no lo es, ⇒ `exists-different`: lo publicado queda donde está y
+     la entrega no se envía;
+   - el temporal se borra solo mientras su nombre siga siendo ese inode. Si el agente puso otra cosa
+     en su lugar, no se toca.
 
    Así nunca queda un archivo parcial bajo el nombre final, y el agente no puede cambiar el contenido
    entre la escritura y la verificación.
 5. Se escribe `delivery{sending, artifacts_placed: [{sha256, path}]}` en S3 (§3.3).
 
 **Reglas generales:**
+- **v0.3.2:** antes de abrir el workspace destino se verifica el sha256 de cada contenido. Uno que no
+  coincide no llega ni a crear el inbox (`hash-mismatch`, T13).
+- **v0.3.2:** también antes de abrir el destino, la colocación vuelve a validar el nombre y el hash
+  que recibe: el nombre contra el conjunto de §6.1, sin `.` inicial, y el hash como 64 hex. No los
+  toma como válidos solo porque vienen del registro. Un registro alterado o restaurado nunca puede
+  hacer que root escriba fuera de `.st-inbox` (`io`).
+- **v0.3.2:** la colocación es un efecto, igual que la llamada de d. Por eso, después de escribir
+  `placing`, el mismo `mayEffect` de d0 la detiene si ya se conoce una pérdida del lock o un
+  escritor envenenado (§2.1 punto 3). La respuesta es `not-sent{persist-failed}` con
+  `filesPossiblyPlaced`, y al reabrir, `not-sent{persist-failed, files_possibly_placed}`.
+- **v0.3.2:** `delivery{not-sent, artifact-failed}` lleva `artifact_error`, que puede ser:
+  - `workspace-unavailable`: el workspace no existe o no es exactamente `<WORKSPACE_ROOT>/<sid>`;
+  - `inbox-not-dir`;
+  - `exists-different`;
+  - `hash-mismatch`;
+  - `io`: otro error del sistema de archivos.
+
+  **Todo `not-sent` posterior a un `placing`** lleva `files_possibly_placed: true`, aunque su razón
+  no sea `artifact-failed` (por ejemplo `binding-changed` en c0).
 - **Una sola sesión destino por colocación,** la del binding fijado en §3.2.
 - **Sin Docker exec.** Funciona también con la sesión detenida, aunque la entrega del texto no.
 - **Sin reintento.** Una colocación que falló no se repite: la entrega queda `not-sent`.
@@ -1025,6 +1108,9 @@ type DeliveryEv = Base & {
   binding?: Binding; composer_client_message_id?: string;
   http?: { status: number; result?: string; promptId?: string; seq?: number };
   files_possibly_placed?: boolean; binding_verified_at?: string;
+  artifacts?: { sha256: string; name: string; bytes: number }[];       // D2, en placing
+  artifacts_placed?: { sha256: string; path: string }[];               // D2, en sending
+  artifact_error?: string;                                             // D2, en not-sent{artifact-failed}
   authorized_by: "owner" | `collab:${string}`;
 };
 type ReplySettlingEv = Omit<ReplyRefEv, "ev" | "attribution"> & { ev: "reply_settling"; settle_until: string };
@@ -1040,13 +1126,13 @@ type OwnerAckEv = Base & { ev: "owner_ack"; ack_id: string; client_ack_id: strin
 type RecoveryEv = Base & { ev: "recovery"; boot_id: string; source: "boot" | "restore";
   manifest_at?: string; orphaned: { msg_id: string; agent_id: string; as: string }[];
   grants_closed: string[] /* grant_ids; el motivo de cada uno está en su grant{ended} */ };
-// grant / artifact: D2–D3 (§2.2), no aparecen con D1 solo.
+// grant: D3; artifact: D2 (Apéndice A.2). No aparecen con D1 solo.
 type ProjectEvent = MessageEv | DeliveryEv | ReplySettlingEv | ReplyRefEv | ReplyLateCloseEv | OwnerAckEv | RecoveryEv;
 
 // ── Requests ─────────────────────────────────────────────────────────────
 type SendBody = { clientMessageId: string /* UUID v4 */; text: string; to: string[] /* agentIds, 1–8 */;
   quoteRef?: { msgId: string; agentId: string; promptId: string; reportSha256: string };
-  inReplyTo?: string; artifacts?: [] /* D2 */ };
+  inReplyTo?: string; artifacts?: string[] /* D2, A.2 */ };
 type AckBody = { clientAckId: string; target: { msgId: string; agentId?: string; reportSha256?: string } };
 ```
 
@@ -1103,3 +1189,54 @@ no retenida».
 **Flag**: `GET /api/auth/status` → `features.projectConversation: true` sólo con la bandera encendida
 (la clave falta si está apagada, igual que `projectChat`; ausente ⇒ `false`). Con la bandera apagada las
 rutas no existen (404) y la respuesta de `/auth/status` queda byte-idéntica.
+
+### A.2 Artefactos (D2, v0.3.2)
+
+Solo con `features.projectArtifacts: true` en `/api/auth/status`. Si falta (bandera apagada), no hay
+UI de adjuntos ni ninguna request a `…/artifacts`, y un `artifacts[]` no vacío en un mensaje es 409
+`artifacts-off`.
+
+```ts
+// ── Eventos nuevos o ampliados ───────────────────────────────────────────
+type ArtifactEv = Base & {
+  ev: "artifact"; sha256: string; name: string; bytes: number;
+  source: { kind: "owner"; sid: string; path: string; agent_id: string };
+  by: string;                            // user_id
+};
+// MessageEv.artifacts ya existe: [{ sha256, name, bytes }] (name/bytes del PRIMER `artifact` de ese sha256).
+// DeliveryEv suma:
+//   state "placing" con artifacts: { sha256, name, bytes }[]   (antes de tocar el inbox destino)
+//   state "sending" con artifacts_placed?: { sha256: string; path: string }[]   (path relativo al workspace: ".st-inbox/<sha12>-<name>")
+//   state "not-sent" con reason "artifact-failed" y
+//     artifact_error: "workspace-unavailable" | "inbox-not-dir" | "exists-different" | "hash-mismatch" | "io"
+//   files_possibly_placed: true en TODO not-sent posterior a un placing (cualquier reason)
+type ProjectEventD2 = ProjectEvent | ArtifactEv;
+
+// ── Requests ─────────────────────────────────────────────────────────────
+type RegisterArtifactBody = { agentId: string; path: string /* relativo al workspace, como Files */ };
+// SendBody.artifacts: string[]  — sha256 en minúsculas, ≤ 4, distintos, registrados en el proyecto;
+// parte del cuerpo idempotente (mismo clientMessageId con otros o reordenados ⇒ 409 idempotency-conflict).
+
+// ── Respuesta de la entrega (POST …/messages) ───────────────────────────
+// DeliveryAnswer suma: state "placing" (T_http venció colocando) y filesPossiblyPlaced?: true.
+```
+
+**`POST …/artifacts`** → `201` (o `200` con `replayed: true`: mismo contenido desde el mismo `sid:path`)
+
+```json
+{ "sha256": "9f2c…", "name": "fix.diff", "bytes": 1834, "replayed": false }
+```
+
+Errores: 400 `invalid-body`; 403 `artifact-restricted`; 404 `artifact-not-found`; 409 `agent-not-bound`,
+`artifacts-full`, `artifact-corrupt`, `foreign-session`; 413 `artifact-too-large`; 415
+`artifact-not-text`; 429 `busy`; 503 `binding-unverified`, `persist-failed`. Ninguno escribe nada.
+
+**`POST …/messages` con adjuntos**: 400 `too-many-artifacts` / `artifact-unknown` (`detail` = el sha256)
+antes de escribir nada.
+
+**`GET …/artifacts/:sha256`** → `200 text/plain; charset=utf-8`, `X-Content-Type-Options: nosniff`,
+`Content-Disposition: attachment`, CSP `sandbox`. Pedirlo como texto (nunca navegarlo); 404 si el
+sha256 no está registrado en este proyecto; 409 `artifact-corrupt` si el archivo guardado no coincide
+con su hash.
+
+**Lista**: `GET …/events?ev=artifact`.

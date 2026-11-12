@@ -25,8 +25,15 @@ import { createHash, randomUUID } from "node:crypto";
 import type { HttpResult } from "../../conversation/composer.js";
 import { normalizeText, validateText } from "../../conversation/composerText.js";
 import { logErrorToHttp } from "./api.js";
+import {
+	ARTIFACTS_PER_MESSAGE,
+	type ArtifactRef,
+	ArtifactStoreCorrupt,
+	composeText,
+} from "./artifacts.js";
 import { type DeliveryState, deliveryKey } from "./fold.js";
 import type { LogLine } from "./log.js";
+import type { PlacementResult } from "./placement.js";
 import type { ProjectConversationStore } from "./store.js";
 
 export const T_HTTP_MS = 30_000;
@@ -98,6 +105,22 @@ export interface FanoutDeps {
 	}): void;
 	/** Is this error an authorization refusal (foreign or missing session)? */
 	isForbidden?(err: unknown): boolean;
+	/**
+	 * D2 (§6), present only with PROJECT_ARTIFACTS_ENABLED effective. Absent ⇒
+	 * a non-empty `artifacts[]` is 409 `artifacts-off` and no file is touched.
+	 */
+	artifacts?: {
+		lookup(
+			projectId: string,
+			shas: readonly string[],
+		): Promise<{ ok: true; refs: ArtifactRef[] } | { ok: false; unknown: string }>;
+		readContent(projectId: string, sha: string): Promise<Buffer | null>;
+		/** §6.4 into the fixed session's `.st-inbox/` (placement.ts). */
+		place(
+			sessionId: string,
+			artifacts: ReadonlyArray<ArtifactRef & { content: Buffer }>,
+		): Promise<PlacementResult>;
+	};
 	now?: () => number;
 	tHttpMs?: number;
 }
@@ -119,6 +142,8 @@ interface Body {
 	to: string[];
 	quoteRef: { msg_id: string; agent_id: string; prompt_id: string; report_sha256: string } | null;
 	inReplyTo: string | null;
+	/** sha256s, lowercase, in the order sent (§3.4 rule 2). */
+	artifacts: string[];
 }
 
 export interface DeliveryAnswer {
@@ -126,6 +151,8 @@ export interface DeliveryAnswer {
 	state: DeliveryState;
 	reason?: string;
 	http?: Record<string, unknown>;
+	/** Not sent after a `placing`: some files may be in the target's inbox (§3.1). */
+	filesPossiblyPlaced?: true;
 }
 
 const err = (status: number, code: string, detail?: string): HttpResult => ({
@@ -133,16 +160,22 @@ const err = (status: number, code: string, detail?: string): HttpResult => ({
 	body: detail ? { error: code, detail } : { error: code },
 });
 
-export function parseBody(raw: unknown): Body | HttpResult {
+export function parseBody(raw: unknown, artifactsOn = false): Body | HttpResult {
 	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return err(400, "invalid-body");
 	const b = raw as Record<string, unknown>;
 	if (typeof b.clientMessageId !== "string" || !UUID_V4_RE.test(b.clientMessageId)) {
 		return err(400, "invalid-body", "clientMessageId");
 	}
 	if (typeof b.text !== "string") return err(400, "invalid-body", "text");
+	let artifacts: string[] = [];
 	if (b.artifacts !== undefined && !(Array.isArray(b.artifacts) && b.artifacts.length === 0)) {
-		// D2 is not built: an attachment is refused, never dropped silently.
-		return err(409, "artifacts-off");
+		// D2 off: an attachment is refused, never dropped silently.
+		if (!artifactsOn) return err(409, "artifacts-off");
+		if (!Array.isArray(b.artifacts)) return err(400, "invalid-body", "artifacts");
+		if (b.artifacts.length > ARTIFACTS_PER_MESSAGE) return err(400, "too-many-artifacts");
+		artifacts = b.artifacts.map((x) => (typeof x === "string" ? x.toLowerCase() : ""));
+		if (artifacts.some((x) => !SHA_RE.test(x)) || new Set(artifacts).size !== artifacts.length)
+			return err(400, "invalid-body", "artifacts");
 	}
 	if (!Array.isArray(b.to) || b.to.length < 1 || b.to.length > MAX_RECIPIENTS) {
 		return err(400, "invalid-body", "to");
@@ -189,6 +222,7 @@ export function parseBody(raw: unknown): Body | HttpResult {
 		to,
 		quoteRef,
 		inReplyTo,
+		artifacts,
 	};
 }
 
@@ -199,7 +233,7 @@ export function parseBody(raw: unknown): Body | HttpResult {
  */
 export function requestSha256(b: Body): string {
 	const canon = {
-		artifacts: [] as string[],
+		artifacts: b.artifacts,
 		in_reply_to: b.inReplyTo,
 		quote_ref: b.quoteRef
 			? {
@@ -255,14 +289,17 @@ export function mapComposer(r: HttpResult | Error): {
 
 /** The answer for an existing message (replay): its deliveries as they stand now. */
 function answerFor(
-	state: { deliveries: Map<string, { state: DeliveryState; reason?: string }> },
+	state: { deliveries: Map<string, { state: DeliveryState; reason?: string; placed?: boolean }> },
 	msg: { msgId: string; to: string[] },
 ): DeliveryAnswer[] {
 	return msg.to.map((agentId) => {
 		const d = state.deliveries.get(deliveryKey(msg.msgId, agentId));
-		return d?.reason
+		const a: DeliveryAnswer = d?.reason
 			? { agentId, state: d.state, reason: d.reason }
 			: { agentId, state: d?.state ?? "planned" };
+		// A replay is the same answer (§3.4): the inbox warning included.
+		if (d?.placed && d.state === "not-sent") a.filesPossiblyPlaced = true;
+		return a;
 	});
 }
 
@@ -271,7 +308,7 @@ export class ProjectFanout {
 
 	async send(ownerId: string, projectId: string, raw: unknown): Promise<HttpResult> {
 		const started = (this.deps.now ?? Date.now)();
-		const parsed = parseBody(raw);
+		const parsed = parseBody(raw, this.deps.artifacts !== undefined);
 		if ("status" in parsed) return parsed;
 		const body = parsed;
 		const reqSha = requestSha256(body);
@@ -279,6 +316,25 @@ export class ProjectFanout {
 		// Cheap replay without the lock; the decision is retaken in S1.
 		const early = await this.replayIfKnown(projectId, body.clientMessageId, reqSha);
 		if (early) return early;
+
+		// §6.3: the artifact lines are part of what the agent receives, so
+		// they count in the text validation — before anything is resolved.
+		let refs: ArtifactRef[] = [];
+		if (body.artifacts.length > 0 && this.deps.artifacts) {
+			let found: Awaited<ReturnType<NonNullable<FanoutDeps["artifacts"]>["lookup"]>>;
+			try {
+				found = await this.deps.artifacts.lookup(projectId, body.artifacts);
+			} catch (e) {
+				const h = logErrorToHttp(e);
+				if (h) return h;
+				throw e;
+			}
+			if (!found.ok) return err(400, "artifact-unknown", found.unknown);
+			refs = found.refs;
+			const v = validateText(composeText(body.normalized, refs));
+			if (!v.ok) return err(400, v.code);
+		}
+		const sent = composeText(body.normalized, refs);
 
 		// ── resolve (§3.2), no lock ──
 		const bindings = await this.deps.bindings(ownerId, projectId).catch(() => undefined);
@@ -362,7 +418,7 @@ export class ProjectFanout {
 						request_sha256: reqSha,
 						quote_ref: body.quoteRef,
 						in_reply_to: body.inReplyTo,
-						artifacts: [],
+						artifacts: refs,
 						relay: null,
 					},
 					...plans.map((p) =>
@@ -406,7 +462,7 @@ export class ProjectFanout {
 				answers.set(p.agentId, { agentId: p.agentId, state: "not-sent", reason: p.notSent });
 		const runs = s1.planned.map(({ agentId, line }) => {
 			answers.set(agentId, { agentId, state: "planned" });
-			return this.deliver(ownerId, projectId, msgId, agentId, line, body.normalized, answers).catch(
+			return this.deliver(ownerId, projectId, msgId, agentId, line, sent, refs, answers).catch(
 				() => {
 					// deliver() records its own outcome; an escape here is a log error
 					// already reported in `answers`.
@@ -465,6 +521,7 @@ export class ProjectFanout {
 		agentId: string,
 		planned: LogLine,
 		text: string,
+		refs: readonly ArtifactRef[],
 		answers: Map<string, DeliveryAnswer>,
 	): Promise<void> {
 		const fixed = planned.binding as {
@@ -493,7 +550,9 @@ export class ProjectFanout {
 				? "ok"
 				: "binding-changed";
 		};
-		const notSent = async (reason: string) => {
+		// After a `placing`, every not-sent says files may be in the inbox (§3.1).
+		let placing = false;
+		const notSent = async (reason: string, extra: Record<string, unknown> = {}) => {
 			try {
 				await this.deps.store.critical(projectId, (tx) =>
 					tx.append(
@@ -504,6 +563,8 @@ export class ProjectFanout {
 								agent_id: agentId,
 								state: "not-sent",
 								reason,
+								...extra,
+								...(placing ? { files_possibly_placed: true } : {}),
 								authorized_by: "owner",
 							},
 						],
@@ -512,17 +573,75 @@ export class ProjectFanout {
 						},
 					),
 				);
-				set({ state: "not-sent", reason });
+				set({ state: "not-sent", reason, ...(placing ? { filesPossiblyPlaced: true } : {}) });
 			} catch {
 				// Poisoned: the planned line stays; recovery closes it not-sent{persist-failed}.
-				set({ state: "not-sent", reason: "persist-failed" });
+				set({
+					state: "not-sent",
+					reason: "persist-failed",
+					...(placing ? { filesPossiblyPlaced: true } : {}),
+				});
 			}
 		};
 
 		// a → S2
 		const a = await matches();
 		if (a !== "ok") return notSent(a);
-		// (S2 has nothing to write without artifacts: D2 adds `placing` here.)
+
+		// S2 → b' → S2b (§3.3, §6.4): the intent to touch the target's files
+		// is durable BEFORE the first file is touched; the placement itself
+		// runs without the lock; its failure is written in S2b and ends this
+		// delivery — never retried.
+		let placed: Array<{ sha256: string; path: string }> | undefined;
+		if (refs.length > 0) {
+			const art = this.deps.artifacts;
+			if (!art) return notSent("artifact-failed", { artifact_error: "artifacts-off" });
+			try {
+				await this.deps.store.critical(projectId, (tx) =>
+					tx.append(
+						[
+							{
+								ev: "delivery",
+								msg_id: msgId,
+								agent_id: agentId,
+								state: "placing",
+								artifacts: refs,
+								authorized_by: "owner",
+							},
+						],
+						{ allowMargin: true },
+					),
+				);
+			} catch {
+				// No `placing` on disk ⇒ nothing was touched; recovery closes the planned.
+				set({ state: "not-sent", reason: "persist-failed" });
+				return;
+			}
+			placing = true;
+			set({ state: "placing" });
+			// A loss already known stops this effect too (§2.1 point 3): the
+			// placement is an effect on the target, like the Composer call at d0.
+			if (!this.deps.store.mayEffect(projectId)) return notSent("persist-failed");
+			let r: PlacementResult;
+			try {
+				const contents = [];
+				for (const ref of refs) {
+					const content = await art.readContent(projectId, ref.sha256);
+					if (!content) throw new ArtifactStoreCorrupt(`${ref.sha256}: content missing`);
+					contents.push({ ...ref, content });
+				}
+				r = await art.place(fixed.sid, contents);
+			} catch (e) {
+				// The project's own copy failed its hash (or vanished): never placed (T13).
+				r = {
+					ok: false,
+					error: e instanceof ArtifactStoreCorrupt ? "hash-mismatch" : "io",
+					detail: (e as Error).message,
+				};
+			}
+			if (!r.ok) return notSent("artifact-failed", { artifact_error: r.error });
+			placed = r.placed;
+		}
 
 		// The session meta the Composer needs, read BEFORE the intent: a failure
 		// here must leave the delivery not-sent, never an `uncertain` that no
@@ -547,6 +666,7 @@ export class ProjectFanout {
 							agent_id: agentId,
 							state: "sending",
 							binding_verified_at: tC,
+							...(placed ? { artifacts_placed: placed } : {}),
 							authorized_by: "owner",
 						},
 					],
@@ -555,7 +675,11 @@ export class ProjectFanout {
 			);
 		} catch {
 			// No intent on disk ⇒ never sent (§3.3 3c).
-			set({ state: "not-sent", reason: "persist-failed" });
+			set({
+				state: "not-sent",
+				reason: "persist-failed",
+				...(placing ? { filesPossiblyPlaced: true } : {}),
+			});
 			return;
 		}
 		set({ state: "sending" });

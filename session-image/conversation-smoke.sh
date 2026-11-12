@@ -371,6 +371,10 @@ check "compose forwards PROJECT_CONVERSATION_ENABLED as empty when unset (D1 off
 	[ "$(compose_env PROJECT_CONVERSATION_ENABLED)" = "" ]
 check "compose forwards PROJECT_CONVERSATION_ENABLED=true when set" \
 	[ "$(compose_env PROJECT_CONVERSATION_ENABLED PROJECT_CONVERSATION_ENABLED=true)" = "true" ]
+check "compose forwards PROJECT_ARTIFACTS_ENABLED as empty when unset (D2 off)" \
+	[ "$(compose_env PROJECT_ARTIFACTS_ENABLED)" = "" ]
+check "compose forwards PROJECT_ARTIFACTS_ENABLED=true when set" \
+	[ "$(compose_env PROJECT_ARTIFACTS_ENABLED PROJECT_ARTIFACTS_ENABLED=true)" = "true" ]
 
 # ── Phase 1 ─────────────────────────────────────────────────────────────────
 phase "Phase 1: image layout and pin"
