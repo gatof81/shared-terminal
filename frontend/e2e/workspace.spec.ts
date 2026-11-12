@@ -528,6 +528,16 @@ test.describe("workspace — layout", () => {
 			{ y: bar.y + bar.height / 2, xs },
 		);
 		expect(onTop).toEqual(xs.map(() => true));
+		// At the very end, nothing of the column's last item is under the footer.
+		await page.locator("#project-view .tw-now").evaluate((col) => {
+			col.scrollTop = col.scrollHeight;
+		});
+		const footer = (await page.locator("#project-view .tw-new-bar").boundingBox())!;
+		const last = (await page.locator("#project-view .tw-now .tw-threads").boundingBox())!;
+		// The footer's fade reaches ~12 px above it: that must be the column's
+		// 14-px gap, not the last item (the previous bar was lifted 12 px by
+		// `bottom` and its shadow bands painted over the last row's end).
+		expect(last.y + last.height).toBeLessThanOrEqual(footer.y - 12);
 		expect(bar.width).toBeGreaterThan(350);
 	});
 

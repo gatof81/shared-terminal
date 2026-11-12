@@ -91,15 +91,17 @@
 	/* Beside a thread there is room: the primary action leads the column
 	   (after the project header, its DOM place) instead of floating over For
 	   you's cards and their Done buttons. */
-	.tw .tw-new {
+	.tw .tw-new-bar {
 		order: 0;
 		position: static;
-		align-self: stretch;
-		justify-content: center;
-		min-height: 44px;
 		margin: 0;
-		border-radius: 22px;
+		padding: 0;
+		background: none;
 		box-shadow: none;
+	}
+	.tw .tw-new-bar .tw-new {
+		min-height: 44px;
+		border-radius: 22px;
 	}
 }
 
@@ -188,16 +190,8 @@
 }
 
 .tw-new {
-	/* Phones: drawn last (a floating button in thumb reach) although it is
-	   second in the DOM; wide layouts put it back in place (order: 0). */
-	order: 1;
-	position: sticky;
-	bottom: 16px;
-	align-self: flex-end;
-	min-height: 52px;
 	padding: 0 22px;
 	border-radius: 26px;
-	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
 }
 
 .tw-x {
@@ -1111,21 +1105,30 @@
 	padding: 0 10px 10px 16px;
 }
 
-/* Phones: "+ New task" is a full-width bar at the bottom of Now, on a band
-   of page background — a floating pill on the right covered the cards'
-   right-hand "Done" buttons. The bands are shadows, not borders: they
-   take no taps and keep the focus ring on the visible button. z-index: the
-   thread rows' avatars (position: relative, later in the DOM) would paint
-   over a sticky element without one. Wide layouts reset it. */
-.tw-new {
-	align-self: stretch;
-	bottom: 12px;
+/* Phones: "+ New task" is a full-width bar at the bottom of Now, inside a
+   sticky footer of page background — a floating pill on the right covered
+   the cards' right-hand "Done" buttons. The footer is a real element: its
+   band takes stray taps (a near miss never lands on content hidden under
+   it), it sits in flow at the column's end (sticky never lifts it over the
+   last item), and z-index keeps later positioned content (thread-row
+   avatars) under it. The fade above stays within the column's 14-px gap.
+   Wide layouts reset the footer to a plain box. */
+.tw-new-bar {
+	order: 1;
+	position: sticky;
+	bottom: 0;
 	z-index: 1;
 	margin: 0 -16px;
-	border-radius: 0;
-	box-shadow:
-		0 -10px 0 var(--c-bg),
-		0 12px 0 var(--c-bg),
-		0 -22px 14px var(--c-bg);
+	padding: 8px 16px 12px;
+	background: var(--c-bg);
+	box-shadow: 0 -6px 8px var(--c-bg);
+}
+
+.tw-new-bar .tw-new {
+	position: static;
+	display: flex;
+	width: 100%;
+	box-sizing: border-box;
 	min-height: 52px;
+	box-shadow: none;
 }
