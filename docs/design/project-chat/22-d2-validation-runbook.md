@@ -34,20 +34,27 @@ preflight (§5, P0).
 | E3 | **No production credentials.** A **new, empty D1 database** in the dedicated account, created for this run, with a token scoped to it. Fresh `JWT_SECRET` and `SECRETS_ENCRYPTION_KEY` generated on the host. No VM100 `.env` is copied | `D1_DATABASE_ID` ≠ production's (compare the hash only). `GET /api/auth/status` → `needsSetup: true` before setup |
 | E4 | No mount or route to the NAS, to VM100 or to its backups | `findmnt`, `ip route` (no VM100 or NAS subnet routes beyond what the hypervisor needs) |
 | E5 | No public exposure: no Cloudflare Tunnel, and the backend published **on loopback only** (`PORT=127.0.0.1:3001` in `.env`; compose publishes `${PORT}:3001`, and Docker's NAT bypasses a host firewall) | `ss -ltnp` shows `127.0.0.1:3001` only |
-| E6 | **No model credentials, no session egress.** The agents' CLI talks to the scripted stand-in `session-image/test/mock-anthropic.mjs` (as the CI smokes do) through each session's `ANTHROPIC_BASE_URL`. Session egress is dropped by a `DOCKER-USER` rule keyed on the **`sessions-net` subnet**, so a session restart cannot make it stale. The rule allows traffic inside the subnet and exempts `app`'s address there, so `app` keeps D1. That address must be **fixed**, because `app` is restarted many times (P2, K1, K2, P7, P8):
-- create `sessions-net` with an `--ip-range` that leaves one address out;
-- pin `app` to it with `ipv4_address` in a host-only `docker-compose.override.yml`.
-
-`curl` check after every session start. Sessions also carry `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and `DISABLE_AUTOUPDATER=1`. `app` keeps its egress to the D1 API | `docker exec <s> printenv ANTHROPIC_BASE_URL` only, plus `printenv ANTHROPIC_API_KEY \| sha256sum`, never the value. An in-session `curl -m 5 https://example.com` **must fail**. The mock's request log is non-empty |
+| E6 | **No model credentials, no session egress** (details below the table) | `docker exec <s> printenv ANTHROPIC_BASE_URL` only, plus `printenv ANTHROPIC_API_KEY \| sha256sum`, never the value. An in-session `curl -m 5 https://example.com` **must fail**. The mock's request log is non-empty |
 | E7 | Root on the host (the backend container runs as root, as in production) and the session image's `developer` = uid/gid 1000 (`WORKSPACE_UID/GID` unset) | `docker exec <ctr> id developer` |
+
+**E6 in detail.**
+- **The model.** The agents' CLI talks to the scripted stand-in `session-image/test/mock-anthropic.mjs`, as the CI smokes do, through each session's `ANTHROPIC_BASE_URL`.
+- **Session egress** is dropped by a `DOCKER-USER` rule keyed on the **`sessions-net` subnet**, so a session restart cannot make it stale.
+- **`app`'s exemption.** The rule allows traffic inside the subnet and exempts `app`'s address there, so `app` keeps its egress to the D1 API. That address is **fixed** (§3, Network), because `app` is restarted many times (P2, K1, K2, P7, P8).
+- **The `curl` check** runs after every session start.
+- **Session env.** Sessions also carry `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and `DISABLE_AUTOUPDATER=1`.
 
 ## 3. What is installed
 
 - **Checkout:** `a09bf8a`, recorded as the full SHA with `git rev-parse HEAD`. Plus the mock: `session-image/test/` is already in the repo.
 - **Session image:** a plain `docker build -t shared-terminal-session ./session-image`. This is a fresh host with no sessions, so CLAUDE.md's first-install path applies. Record the image id.
-- **After every app start** (P2, K1, K2, P7, P8): the boot log goes past `migrateDb` (D1 reachable) and `docker inspect app` shows the pinned address. If not, the egress rule no longer matches: **stop and fix the environment**, it is not a D2 FAIL.
+- **After every app start** (P2, K1, K2, P7, P8):
+  - the boot log reaches `[server] listening on`, which comes only after the D1 migrations finished, so D1 is reachable;
+  - `docker inspect "$(docker compose ps -q app)" --format '{{(index .NetworkSettings.Networks "sessions-net").IPAddress}}'` shows the pinned address. If not, the egress rule no longer matches: **stop and fix the environment**, it is not a D2 FAIL.
 - **Backend:** `docker compose up -d --build`. Record the image id and the sha256 of `dist/**/*.js` (same method as the VM100 deploys).
-- **Network:** `docker network create sessions-net` before `up`. The mock runs as uid 1000 and dies on its first request if it cannot write its log, so create its directory first: `install -d -o 1000 -g 1000 -m 0700 <evidence>/mock`. The mock runs on it as a container named and aliased `mock-api`, exactly like `conversation-smoke.sh` Phase 1: `docker run -d --name mock-api --network sessions-net --network-alias mock-api -v <repo>/session-image/test:/t:ro -v <evidence>/mock:/out --entrypoint node shared-terminal-session /t/mock-anthropic.mjs 8080 /out/model-requests.jsonl`.
+- **Network,** before `up`:
+  - `docker network create --subnet <cidr> --ip-range <cidr that excludes the reserved address> sessions-net`;
+  - a host-only `docker-compose.override.yml` pins `app`: `services: { app: { networks: { sessions-net: { ipv4_address: <reserved> } } } }`. The mock runs as uid 1000 and dies on its first request if it cannot write its log, so create its directory first: `install -d -o 1000 -g 1000 -m 0700 <evidence>/mock`. The mock runs on it as a container named and aliased `mock-api`, exactly like `conversation-smoke.sh` Phase 1: `docker run -d --name mock-api --network sessions-net --network-alias mock-api -v <repo>/session-image/test:/t:ro -v <evidence>/mock:/out --entrypoint node shared-terminal-session /t/mock-anthropic.mjs 8080 /out/model-requests.jsonl`.
 - **`.env` (isolated host only).** Everything else stays unset:
 
   ```
@@ -77,7 +84,8 @@ preflight (§5, P0).
 | Sessions `dev`, `qa`, `ops`, `extra` | Created by `owner`, each with `envVars` `ANTHROPIC_BASE_URL=http://mock-api:8080`, a fake `ANTHROPIC_API_KEY`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and `DISABLE_AUTOUPDATER=1` (plain entries). Capture is requested at birth (`CONVERSATION_ALLOW_USERS`) | Before the first launch, seed the CLI's onboarding, key approval and workspace trust exactly as `conversation-smoke.sh`'s `seed_claude_state` does, so no prompt blocks it. Then start `claude` in the main tab. Wait until a plain `GET /api/sessions/<sid>/conversations` (**without** `?capture=0`) shows one interactive conversation with `canSendInput: true`. Only the full GET probes capture and refreshes the Composer's in-memory view of it. With `?capture=0` the value stays `false` after every backend restart. (Re-do this after any stop/start: §5 P5b, P7) |
 | Project `D2 run` | `POST /api/projects` | — |
 | Agents `dev-a`, `qa-a`, `ops-a` | `POST /api/projects/:pid/agents {handle, sessionId, clientRequestId}`, one per session (`extra` stays unbound until K5) | Each binding at epoch 1. Handles of removed agents stay reserved (PROJECTS.md §4.3), so a replacement always gets a **new** handle |
-| Source files in `dev`, created **as uid 1000** with `docker exec -u developer` | `out/fix.diff`: a real `git diff` of a small repo change. `out/report.md`: UTF-8 text with non-ASCII. `out/copy.diff`: a byte copy of `fix.diff`. `out/notes.txt`: a second small text file. **In `extra`**, as uid 1000: `out/other.txt`, with content used nowhere else (P5, the second project) `out/big.txt`: 1 MiB + 1 B. `out/bin.dat`: contains NUL. `.env`, `.git/config`, `out/link.diff -> fix.diff` | The T9 sources |
+| Source files in `dev`, created **as uid 1000** with `docker exec -u developer` | `out/fix.diff`: a real `git diff` of a small repo change. `out/report.md`: UTF-8 text with non-ASCII. `out/copy.diff`: a byte copy of `fix.diff`. `out/notes.txt`: a second small text file. `out/big.txt`: 1 MiB + 1 B. `out/bin.dat`: contains NUL. `.env`, `.git/config`, `out/link.diff -> fix.diff` | The T9 sources |
+| Source file in `extra`, as uid 1000 | `out/other.txt`, with content used nowhere else | P5, the second project |
 
 Helper on the host (no secrets echoed):
 `api() { curl -sS -b "$COOKIES" -H 'content-type: application/json' "http://127.0.0.1:3001/api$@"; }`
