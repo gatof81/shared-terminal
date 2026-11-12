@@ -181,7 +181,10 @@ describe("delivery with artifacts (§3.3 b–S2b, §6.4)", () => {
 
 	it("an unknown artifact, or lines past the paste limit, are refused before anything is written", async () => {
 		const f = new ProjectFanout(deps());
-		expect(await send(f, { artifacts: ["f".repeat(64)] })).toMatchObject({ status: 400 });
+		expect(await send(f, { artifacts: ["f".repeat(64)] })).toMatchObject({
+			status: 400,
+			body: { error: "artifact-unknown", detail: "f".repeat(64) },
+		});
 		const r1 = reg("x", "x.txt");
 		const text = Array.from({ length: 48 }, (_, i) => `línea ${i}`).join("\n");
 		expect(await send(f, { text, artifacts: [r1.sha256] })).toMatchObject({

@@ -171,8 +171,8 @@ export function parseBody(raw: unknown, artifactsOn = false): Body | HttpResult 
 	if (b.artifacts !== undefined && !(Array.isArray(b.artifacts) && b.artifacts.length === 0)) {
 		// D2 off: an attachment is refused, never dropped silently.
 		if (!artifactsOn) return err(409, "artifacts-off");
-		if (!Array.isArray(b.artifacts) || b.artifacts.length > ARTIFACTS_PER_MESSAGE)
-			return err(400, "invalid-body", "artifacts");
+		if (!Array.isArray(b.artifacts)) return err(400, "invalid-body", "artifacts");
+		if (b.artifacts.length > ARTIFACTS_PER_MESSAGE) return err(400, "too-many-artifacts");
 		artifacts = b.artifacts.map((x) => (typeof x === "string" ? x.toLowerCase() : ""));
 		if (artifacts.some((x) => !SHA_RE.test(x)) || new Set(artifacts).size !== artifacts.length)
 			return err(400, "invalid-body", "artifacts");
@@ -326,7 +326,7 @@ export class ProjectFanout {
 				if (h) return h;
 				throw e;
 			}
-			if (!found.ok) return err(400, "invalid-body", `artifacts: ${found.unknown} not registered`);
+			if (!found.ok) return err(400, "artifact-unknown", found.unknown);
 			refs = found.refs;
 			const v = validateText(composeText(body.normalized, refs));
 			if (!v.ok) return err(400, v.code);
