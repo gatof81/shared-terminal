@@ -85,9 +85,32 @@ describe("ST_SCENARIO=sha256:<path>", () => {
 		}
 	});
 
-	it("a path is only what follows the token up to whitespace: trailing words never reach the command", async () => {
-		const r = await ask([user(`ST_SCENARIO=sha256:${GOOD} ; rm -rf ~`)]);
-		assert.equal(r.tool.input.command, `sha256sum -- ${GOOD}`);
+	it("a path is only what follows the token up to whitespace (any Unicode space): trailing text never reaches the command", async () => {
+		for (const sep of [" ", "\n", "\r\n", "\t", "\u00a0", "\u2028", "\u3000"]) {
+			const r = await ask([user(`ST_SCENARIO=sha256:${GOOD}${sep}; rm -rf ~`)]);
+			assert.equal(r.tool?.input.command, `sha256sum -- ${GOOD}`, JSON.stringify(sep));
+		}
+	});
+
+	it("more than one token in the turn ⇒ refused, never the first or the last silently", async () => {
+		const other = `.st-inbox/${"b".repeat(12)}-other`;
+		for (const t of [
+			`ST_SCENARIO=sha256:${other} ST_SCENARIO=sha256:${GOOD}`,
+			`ST_SCENARIO=sha256:../x\nST_SCENARIO=sha256:${GOOD}`,
+		]) {
+			const r = await ask([user(t)]);
+			assert.equal(r.tool, undefined);
+			assert.match(r.text, /more than one token/);
+		}
+	});
+
+	it("a token outside the current turn (earlier turn, tool output) is not a request", async () => {
+		const r = await ask([
+			user(`ST_SCENARIO=sha256:${GOOD}`),
+			{ role: "assistant", content: [{ type: "text", text: "ok" }] },
+			user("hola"),
+		]);
+		assert.equal(r.text, "Hello from the mock.\nSecond line.\n");
 	});
 
 	it("without a Bash tool ⇒ refused, no call", async () => {
@@ -118,6 +141,22 @@ describe("ST_SCENARIO=sha256:<path>", () => {
 			(await ask(msgs(`sha256sum: ${GOOD}: No such file or directory\n`))).text,
 			`sha256 not computed for ${GOOD}\n`,
 		);
+		// A line that only starts and ends right, two matching lines, or a tool error: not echoed.
+		for (const out of [
+			`${SHA}  .st-inbox/x  ${GOOD}\n`,
+			`${SHA}  ${GOOD}\n${"c".repeat(64)}  ${GOOD}\n`,
+		]) {
+			assert.equal((await ask(msgs(out))).text, `sha256 not computed for ${GOOD}\n`);
+		}
+		const errored = [
+			user(`ST_SCENARIO=sha256:${GOOD}`),
+			{ role: "assistant", content: [call] },
+			{
+				role: "user",
+				content: [{ type: "tool_result", tool_use_id: "t1", is_error: true, content: `${SHA}  ${GOOD}\n` }],
+			},
+		];
+		assert.equal((await ask(errored)).text, `sha256 not computed for ${GOOD}\n`);
 	});
 });
 

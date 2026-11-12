@@ -49,7 +49,7 @@ function textOf(content) {
 // sanitizeName: no leading dot, no slash, the §6.1 set). No `..`, no
 // absolute path, no quoting or expansion possible in the command built from it.
 const SHA256_PATH_RE = /^\.st-inbox\/[0-9a-f]{12}-[A-Za-z0-9_-][A-Za-z0-9._-]{0,95}$/;
-const SHA256_TOKEN_RE = /ST_SCENARIO=sha256:(\S*)/;
+const SHA256_TOKEN_RE = /ST_SCENARIO=sha256:(\S*)/g;
 
 /** The tool_result's text, whatever shape the CLI sent it in. */
 function toolResultText(block) {
@@ -74,9 +74,13 @@ function plan(body) {
 		);
 		const asked = call && /^sha256sum -- (\S+)$/.exec(call.input.command)?.[1];
 		if (asked && SHA256_PATH_RE.test(asked)) {
-			const out = lastContent.filter((b) => b?.type === "tool_result").map(toolResultText).join("\n");
-			const line = out.split("\n").find((l) => l.endsWith(`  ${asked}`));
-			const hex = line && /^([0-9a-f]{64})  /.exec(line)?.[1];
+			const results = lastContent.filter((b) => b?.type === "tool_result");
+			const out = results.map(toolResultText).join("\n");
+			// Exactly one line that is `<64 hex>  <asked>` and nothing else — what a
+			// single-operand sha256sum prints — and no tool error.
+			const hits = out.split("\n").filter((l) => /^[0-9a-f]{64}  /.test(l) && l.slice(66) === asked);
+			const errored = results.some((b) => b?.is_error === true);
+			const hex = !errored && hits.length === 1 ? hits[0].slice(0, 64) : null;
 			return { text: hex ? `sha256 ${hex} ${asked}\n` : `sha256 not computed for ${asked}\n` };
 		}
 		return { text: "Tool finished.\nDone.\n" };
@@ -97,9 +101,10 @@ function plan(body) {
 		.join("\n");
 	const tools = new Set((body.tools ?? []).map((t) => t.name));
 	if (userTurns.some((t) => t.includes("ST_SUBAGENT"))) return { text: "Subagent reporting.\nAll good.\n" };
-	const sha = SHA256_TOKEN_RE.exec(prompt);
-	if (sha) {
-		const p = sha[1];
+	const tokens = [...prompt.matchAll(SHA256_TOKEN_RE)];
+	if (tokens.length > 1) return { text: "sha256 scenario refused: more than one token\n" };
+	if (tokens.length === 1) {
+		const p = tokens[0][1];
 		if (!SHA256_PATH_RE.test(p)) return { text: "sha256 scenario refused: not an inbox artifact path\n" };
 		if (!tools.has("Bash")) return { text: "sha256 scenario refused: no Bash tool\n" };
 		return { tool: { name: "Bash", input: { command: `sha256sum -- ${p}`, description: "Hash the received artifact" } } };
