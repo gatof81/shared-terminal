@@ -488,6 +488,31 @@ test.describe("workspace — layout", () => {
 		await noHorizontalScroll(page);
 	});
 
+	test("phone: For you's Done sits beside the card text, and the New task bar never hides the last one", async ({
+		app,
+		page,
+	}) => {
+		await page.setViewportSize({ width: 390, height: 844 });
+		await app.login("alice", projectHash);
+		const card = cards(page).filter({ has: page.locator(".tw-done") }).first();
+		await expect(card).toBeVisible();
+		const text = (await card.locator(".tw-card-link").boundingBox())!;
+		const done = (await card.locator(".tw-done").boundingBox())!;
+		// Same row: the button is beside the text, not on a row of its own.
+		expect(done.x).toBeGreaterThanOrEqual(text.x + text.width - 1);
+		expect(done.y).toBeLessThan(text.y + text.height);
+		expect(done.height).toBeGreaterThanOrEqual(44);
+		// Scrolled to the end, the last Done is above the bar (the bar used to be a pill
+		// floating over the cards' right-hand side).
+		await page.locator("#project-view .tw-now").evaluate((e) => {
+			e.scrollTop = e.scrollHeight;
+		});
+		const lastDone = (await cards(page).locator(".tw-done").last().boundingBox())!;
+		const bar = (await page.locator("#project-view .tw-new").boundingBox())!;
+		expect(lastDone.y + lastDone.height).toBeLessThanOrEqual(bar.y + 1);
+		expect(bar.width).toBeGreaterThan(350);
+	});
+
 	test("wide page: For you moves to its own column; medium: it folds into Now", async ({ app, page }) => {
 		await page.setViewportSize({ width: 1700, height: 900 });
 		await app.login("alice", projectHash);
