@@ -41,10 +41,14 @@
 	padding: 0 16px 88px;
 }
 
+/* The main column never scrolls as a whole: its header and composer are
+   fixed rows and the timeline between them is the scroll area, so the
+   composer can never sit on top of the last messages and their buttons. */
 .tw-main {
 	display: none;
 	flex-direction: column;
-	padding: 0 16px 16px;
+	padding: 0 16px;
+	overflow: hidden;
 }
 
 .tw-side {
@@ -401,9 +405,7 @@
 /* ── Main: thread & New task ── */
 
 .tw-main-head {
-	position: sticky;
-	top: 0;
-	z-index: 1;
+	flex: none;
 	display: flex;
 	flex-wrap: wrap;
 	align-items: center;
@@ -446,7 +448,10 @@
 	display: flex;
 	flex-direction: column;
 	gap: 16px;
-	flex: 1;
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow-y: auto;
+	overscroll-behavior: contain;
 }
 
 .tw-row {
@@ -559,8 +564,9 @@
 /* ── Composer ── */
 
 .tw-composer {
-	position: sticky;
-	bottom: 0;
+	flex: none;
+	max-height: 60%;
+	overflow-y: auto;
 	display: flex;
 	flex-direction: column;
 	gap: 8px;

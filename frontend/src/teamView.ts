@@ -784,12 +784,12 @@ class Workspace {
 		const send = (clientAckId: string) => void this.ack(it, clientAckId);
 		if (!st) {
 			box.append(
-				button(
-					"Done",
-					"tw-btn tw-btn-ghost tw-done",
-					() => send(crypto.randomUUID()),
-					"Mark as done — on every device",
-				),
+				(() => {
+					// A tooltip only: the accessible name stays the visible "Done".
+					const b = button("Done", "tw-btn tw-btn-ghost tw-done", () => send(crypto.randomUUID()));
+					b.title = "Mark as done — on every device";
+					return b;
+				})(),
 			);
 		} else if (st.phase === "sending") {
 			const b = button("Marking…", "tw-btn tw-btn-ghost tw-done", () => {});

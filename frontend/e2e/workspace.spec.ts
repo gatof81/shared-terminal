@@ -140,7 +140,7 @@ test.describe("workspace — flag on", () => {
 		backend.projectSendOutcome.set(AGENT_IDS.developer, { state: "refused", reason: "busy" });
 		await app.login("alice", `${projectHash}/new`);
 		const c = composer(page);
-		for (const name of [/architect-hz/, /developer-hz$/]) {
+		for (const name of [/architect-hz/, /^@developer-hz(?!-2)/]) {
 			await c.locator(".tw-chip-add").click();
 			await c.getByRole("option", { name }).click();
 		}

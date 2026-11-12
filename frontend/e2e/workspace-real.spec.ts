@@ -62,7 +62,13 @@ async function startHarness(): Promise<Harness> {
 	return { proc, base: `http://127.0.0.1:${port}`, token };
 }
 
-async function control(h: Harness, path: string, body: unknown): Promise<void> {
+function running(h: Harness | undefined): Harness {
+	if (!h) throw new Error("harness not started");
+	return h;
+}
+
+async function control(hh: Harness | undefined, path: string, body: unknown): Promise<void> {
+	const h = running(hh);
 	const r = await fetch(`${h.base}/__harness/${path}`, {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
@@ -71,8 +77,8 @@ async function control(h: Harness, path: string, body: unknown): Promise<void> {
 	expect(r.ok, `${path}: ${r.status}`).toBe(true);
 }
 
-async function realLog(h: Harness): Promise<Array<Record<string, unknown>>> {
-	return (await fetch(`${h.base}/__harness/log`)).json();
+async function realLog(h: Harness | undefined): Promise<Array<Record<string, unknown>>> {
+	return (await fetch(`${running(h).base}/__harness/log`)).json();
 }
 
 const cards = (page: Page) =>
@@ -80,13 +86,14 @@ const cards = (page: Page) =>
 const composer = (page: Page) =>
 	page.locator("#project-view .tw-composer").filter({ visible: true });
 
-let h: Harness;
+let h: Harness | undefined;
 
 test.describe("workspace — against the real D1 backend", () => {
 	test.skip(({ shell }) => shell === "v2", "the v1/v2 shell doesn't change this path; desktop + mobile suffice");
 
 	test.beforeEach(async ({ backend }) => {
-		h = await startHarness();
+		const harness = await startHarness();
+		h = harness;
 		backend.enableProjects();
 		backend.projectConversation = true; // the mock's flag; its own log stays unused
 		const forward = /^\/projects\/[^/]+\/conversation\/|^\/sessions\/[^/]+\/conversations\/[^/]+\/events\/\d+(\?|$)/;
@@ -97,8 +104,8 @@ test.describe("workspace — against the real D1 backend", () => {
 			const req = route.request();
 			const u = new URL(req.url());
 			const response = await route.fetch({
-				url: `${h.base}${u.pathname}${u.search}`,
-				headers: { ...req.headers(), cookie: `st_token=${h.token}` },
+				url: `${harness.base}${u.pathname}${u.search}`,
+				headers: { ...req.headers(), cookie: `st_token=${harness.token}` },
 			});
 			await route.fulfill({ response });
 			return true;
@@ -106,7 +113,9 @@ test.describe("workspace — against the real D1 backend", () => {
 	});
 
 	test.afterEach(() => {
-		h.proc.kill("SIGTERM");
+		// Also runs for a skipped test, which never started a harness.
+		h?.proc.kill("SIGTERM");
+		h = undefined;
 	});
 
 	test("a task to two agents: accepted, one delivered and one busy — each result from the real fan-out", async ({
@@ -116,7 +125,7 @@ test.describe("workspace — against the real D1 backend", () => {
 		await control(h, "composer", { sessionId: DEV.sessionId, answers: [{ status: 409, error: "busy" }] });
 		await app.login("alice", `${projectHash}/new`);
 		const c = composer(page);
-		for (const name of [/architect-hz/, /developer-hz$/]) {
+		for (const name of [/architect-hz/, /^@developer-hz(?!-2)/]) {
 			await c.locator(".tw-chip-add").click();
 			await c.getByRole("option", { name }).click();
 		}
@@ -190,7 +199,7 @@ test.describe("workspace — against the real D1 backend", () => {
 		await app.login("alice", `${projectHash}/new`);
 		const c = composer(page);
 		await c.locator(".tw-chip-add").click();
-		await c.getByRole("option", { name: /developer-hz$/ }).click();
+		await c.getByRole("option", { name: /^@developer-hz(?!-2)/ }).click();
 		await c.locator("textarea").fill("Bump the version");
 		await c.getByRole("button", { name: "Send" }).click();
 		await expect(page).toHaveURL(/\/threads\//);
