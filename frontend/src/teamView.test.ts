@@ -835,4 +835,139 @@ describe("attachments (D2)", () => {
 			expect(root.querySelector(".tw-files")?.textContent).toBe("notes.md12 B×");
 		});
 	});
+
+	describe("independent review of #603", () => {
+		beforeEach(() => {
+			api.projectArtifactsEnabled.mockReturnValue(true);
+		});
+
+		it("an open picker survives a re-render: same nodes, focus kept", async () => {
+			api.listWorkspaceDir.mockResolvedValue({
+				path: "",
+				truncated: false,
+				entries: [{ name: "a.txt", type: "file", size: 3, mtime: null, restricted: false }],
+			});
+			const root = mount({ kind: "new" });
+			await flush();
+			root.querySelector<HTMLButtonElement>(".tw-attach-btn")!.click();
+			root.querySelectorAll<HTMLButtonElement>(".tw-attach-agent")[0]!.click();
+			await flush();
+			const entry = root.querySelector<HTMLButtonElement>(".tw-attach-entry")!;
+			entry.focus();
+			mount({ kind: "new" }); // the project page's poll / a live event
+			await flush();
+			expect(root.querySelector(".tw-attach-entry")).toBe(entry);
+			expect(document.activeElement).toBe(entry);
+		});
+
+		it("a kept node never acts on a stale path: a/ inside a/ goes to a/a", async () => {
+			api.listWorkspaceDir.mockImplementation(async (_sid: string, path: string) => ({
+				path,
+				truncated: false,
+				entries: [{ name: "a", type: "dir", size: null, mtime: null, restricted: false }],
+			}));
+			const root = mount({ kind: "new" });
+			await flush();
+			root.querySelector<HTMLButtonElement>(".tw-attach-btn")!.click();
+			root.querySelectorAll<HTMLButtonElement>(".tw-attach-agent")[0]!.click();
+			await flush();
+			const dirIn = () =>
+				[...root.querySelectorAll<HTMLButtonElement>(".tw-attach-entry")].find(
+					(b) => b.querySelector(".tw-file-name")?.textContent === "a/",
+				)!;
+			// "a" and "a/a" list identically (.. and a/): only the path in each
+			// button's key keeps the kept node from replaying the previous level.
+			for (let i = 0; i < 3; i++) {
+				dirIn().click();
+				await flush();
+			}
+			expect(api.listWorkspaceDir.mock.calls.map((c) => c[1])).toEqual(["", "a", "a/a", "a/a/a"]);
+		});
+
+		it("a failed read ends in a retryable error, never a stuck Loading…", async () => {
+			api.fetchProjectEvents.mockResolvedValue({
+				ok: true,
+				status: 200,
+				body: { events: withFile, hasMore: false },
+			});
+			api.fetchProjectArtifactText
+				.mockResolvedValueOnce({ ok: false, status: 200, code: "network" })
+				.mockResolvedValueOnce({ ok: true, text: DIFF });
+			const root = mount({ kind: "thread", msgId: "t3" });
+			await flush();
+			const open = () => root.querySelector<HTMLButtonElement>(".tw-file-open")!.click();
+			open();
+			await flush();
+			expect(root.querySelector(".tw-file-body")?.textContent).toBe(
+				"Couldn't load this file. Open it again to retry.",
+			);
+			open(); // close
+			open(); // open again: retried
+			await flush();
+			expect(api.fetchProjectArtifactText).toHaveBeenCalledTimes(2);
+			expect(root.querySelectorAll(".tw-file-body .git-diff-row.kind-add")).toHaveLength(1);
+		});
+
+		it("the send's results take artifact_error from the log once it is folded", async () => {
+			const MX = "m-x";
+			api.postProjectMessage.mockResolvedValueOnce({
+				ok: true,
+				status: 202,
+				body: {
+					msgId: MX,
+					deliveries: [
+						{
+							agentId: QA,
+							state: "not-sent",
+							reason: "artifact-failed",
+							filesPossiblyPlaced: true,
+						},
+					],
+				},
+			});
+			const root = mount({ kind: "thread", msgId: "t1" });
+			await flush();
+			root.querySelector<HTMLButtonElement>(".tw-chip-add")!.click();
+			root.querySelectorAll<HTMLButtonElement>(".tw-option:not(:disabled)")[1]!.click();
+			root.querySelector<HTMLTextAreaElement>(".tw-composer textarea")!.value = "x";
+			api.fetchProjectEvents.mockResolvedValue({
+				ok: true,
+				status: 200,
+				body: {
+					events: [
+						...log,
+						{
+							seq: 10,
+							at: NOW,
+							ev: "message",
+							msg_id: MX,
+							kind: "owner",
+							to: [QA],
+							text: "x",
+							in_reply_to: "t1",
+						},
+						{
+							seq: 11,
+							at: NOW,
+							ev: "delivery",
+							msg_id: MX,
+							agent_id: QA,
+							state: "not-sent",
+							reason: "artifact-failed",
+							artifact_error: "exists-different",
+							files_possibly_placed: true,
+						},
+					],
+					hasMore: false,
+				},
+			});
+			root.querySelector<HTMLFormElement>(".tw-composer")!.requestSubmit();
+			await flush();
+			mount({ kind: "thread", msgId: "t1" });
+			await flush();
+			expect(root.querySelector(".tw-results")?.textContent).toBe(
+				"@qa-pilor · Not delivered: a file couldn't be placed: a different file already has that name in its inbox. Some files may already be in its inbox.",
+			);
+		});
+	});
 });

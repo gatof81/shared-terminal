@@ -184,4 +184,21 @@ describe("D2: features.projectArtifacts and the artifact reads", () => {
 			code: "artifact-too-large",
 		});
 	});
+
+	it("a body that fails mid-read is answered as a network error, never thrown", async () => {
+		const api = await loadApi();
+		fetchSpy.mockResolvedValueOnce({
+			status: 200,
+			ok: true,
+			arrayBuffer: async () => {
+				throw new TypeError("network error");
+			},
+			json: async () => null,
+		} as unknown as Response);
+		expect(await api.fetchProjectArtifactText("p", "a".repeat(64))).toEqual({
+			ok: false,
+			status: 200,
+			code: "network",
+		});
+	});
 });

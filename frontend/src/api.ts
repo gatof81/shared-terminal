@@ -799,8 +799,18 @@ export async function fetchProjectArtifactText(
 			code: isObj(b) && typeof b.error === "string" ? b.error : "",
 		};
 	}
-	const buf = await res.arrayBuffer();
-	const digest = await crypto.subtle.digest("SHA-256", buf);
+	// The body can still fail (a reset mid-body, up to 1 MiB) and so can the
+	// digest (no crypto.subtle outside a secure context): answered, never
+	// thrown, so the caller's "loading" always ends and can be retried.
+	let buf: ArrayBuffer;
+	let digest: ArrayBuffer;
+	try {
+		buf = await res.arrayBuffer();
+		digest = await crypto.subtle.digest("SHA-256", buf);
+	} catch {
+		return { ok: false, status: res.status, code: epoch !== authEpoch ? "stale" : "network" };
+	}
+	if (epoch !== authEpoch) return { ok: false, status: res.status, code: "stale" };
 	const got = [...new Uint8Array(digest)].map((x) => x.toString(16).padStart(2, "0")).join("");
 	if (got !== sha256) return { ok: false, status: res.status, code: "hash-mismatch" };
 	return { ok: true, text: new TextDecoder("utf-8", { fatal: false }).decode(buf) };

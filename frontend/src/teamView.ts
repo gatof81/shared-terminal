@@ -34,7 +34,7 @@ import {
 } from "./api.js";
 import { explainCode, validateText } from "./composerText.js";
 import { clock as clockText } from "./conversationModel.js";
-import { parseUnifiedDiff } from "./diff.js";
+import { type DiffRow, parseUnifiedDiff } from "./diff.js";
 import { appendDiffRows } from "./diffTable.js";
 import { relativeDate } from "./format.js";
 import {
@@ -296,7 +296,8 @@ class Composer {
 		const same = results.every(
 			(r, i) =>
 				r.state === prev[i]?.state &&
-				r.filesPossiblyPlaced === (prev[i]?.filesPossiblyPlaced ?? false),
+				r.filesPossiblyPlaced === (prev[i]?.filesPossiblyPlaced ?? false) &&
+				r.artifactError === (prev[i]?.artifactError ?? null),
 		);
 		if (!same) this.setPhase({ kind: "sent", msgId: this.phase.msgId, results });
 	}
@@ -810,13 +811,14 @@ class AttachPicker {
 			b.disabled = sid === null;
 			if (sid === null) b.title = "No session bound";
 			b.setAttribute("aria-pressed", String(a.agentId === this.agentId));
+			b.dataset.key = `attach-agent:${a.agentId}:${sid ?? ""}`;
 			b.addEventListener("click", () => this.choose(a.agentId));
 			head.append(b);
 		}
 		nodes.push(head);
 		if (!this.agentId) {
 			nodes.push(el("p", "tw-muted", "Choose whose workspace the file comes from."));
-			this.panel.replaceChildren(...nodes);
+			replaceIfChanged(this.panel, nodes);
 			return;
 		}
 		const crumbs = el("div", "tw-attach-path");
@@ -825,7 +827,7 @@ class AttachPicker {
 		const list = el("ul", "tw-attach-list");
 		if (this.path !== "") {
 			const up = this.path.split("/").slice(0, -1).join("/");
-			list.append(this.entryRow("..", "Up one folder", false, () => this.go(up)));
+			list.append(this.entryRow(`${up}/..`, "..", "Up one folder", false, () => this.go(up)));
 		}
 		if (this.listing.kind === "loading") nodes.push(el("p", "tw-muted", "Loading…"));
 		else if (this.listing.kind === "error") nodes.push(el("p", "tw-muted", this.listing.message));
@@ -833,7 +835,9 @@ class AttachPicker {
 			for (const e of this.listing.entries) {
 				const child = this.path ? `${this.path}/${e.name}` : e.name;
 				if (e.type === "dir") {
-					list.append(this.entryRow(`${e.name}/`, "Folder", e.restricted, () => this.go(child)));
+					list.append(
+						this.entryRow(child, `${e.name}/`, "Folder", e.restricted, () => this.go(child)),
+					);
 					continue;
 				}
 				const why = e.restricted
@@ -847,6 +851,7 @@ class AttachPicker {
 								: null;
 				list.append(
 					this.entryRow(
+						child,
 						e.name,
 						why ?? (e.size === null ? "" : sizeText(e.size)),
 						why !== null || this.registering !== null,
@@ -860,10 +865,16 @@ class AttachPicker {
 				nodes.push(el("p", "tw-muted", "Only part of this folder is listed."));
 		}
 		nodes.splice(2, 0, list);
-		this.panel.replaceChildren(...nodes);
+		// The workspace re-renders on every log event and poll (setAgents):
+		// nodes that didn't change stay, so focus and a click in progress
+		// survive. A kept node keeps its OLD listener, which is why each
+		// button carries what its listener acts on (data-key = its path).
+		replaceIfChanged(this.panel, nodes);
 	}
 
 	private entryRow(
+		/** What the listener acts on: part of the node, so an equal node is the same action. */
+		target: string,
 		label: string,
 		detail: string,
 		disabled: boolean,
@@ -873,6 +884,7 @@ class AttachPicker {
 		const b = el("button", "tw-attach-entry");
 		b.type = "button";
 		b.disabled = disabled;
+		b.dataset.key = `attach:${this.sessionId}:${target}`;
 		b.append(el("span", "tw-file-name", label), el("span", "tw-muted", detail));
 		b.addEventListener("click", onClick);
 		li.append(b);
@@ -1475,7 +1487,10 @@ class Workspace {
 	/** sha256 → the file's text as last fetched (shared by every message naming it). */
 	private artifactText = new Map<
 		string,
-		{ kind: "loading" } | { kind: "ok"; text: string } | { kind: "error"; message: string }
+		| { kind: "loading" }
+		/** `rows`: the diff, parsed once (a 1 MiB diff must not be re-parsed on every render). */
+		| { kind: "ok"; text: string; rows?: DiffRow[] | null }
+		| { kind: "error"; message: string }
 	>();
 	/** `${msgId}\n${sha256}` of each file shown open — kept here so a re-render keeps it open. */
 	private openArtifacts = new Set<string>();
@@ -1565,8 +1580,11 @@ class Workspace {
 				"Another agent's data: review it before applying or running anything from it.",
 			),
 		);
-		const parsed = looksLikeDiff(f.name) ? parseUnifiedDiff(st.text) : null;
-		if (parsed?.hasHunks) appendDiffRows(body, parsed.rows);
+		if (st.rows === undefined) {
+			const parsed = looksLikeDiff(f.name) ? parseUnifiedDiff(st.text) : null;
+			st.rows = parsed?.hasHunks ? parsed.rows : null;
+		}
+		if (st.rows) appendDiffRows(body, st.rows);
 		else body.append(el("pre", "tw-file-text", st.text));
 		return body;
 	}
