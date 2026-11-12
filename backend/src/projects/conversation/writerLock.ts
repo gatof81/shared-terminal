@@ -24,6 +24,7 @@
  */
 
 import { type ChildProcess, spawn as nodeSpawn } from "node:child_process";
+import { constants as FS, promises as fs } from "node:fs";
 
 export const FLOCK_PATH = "/usr/bin/flock";
 export const ACQUIRE_TIMEOUT_MS = 5_000;
@@ -52,6 +53,11 @@ export async function acquireWriterLock(
 > {
 	const spawn = opts.spawn ?? defaultSpawn;
 	const timeoutMs = opts.timeoutMs ?? ACQUIRE_TIMEOUT_MS;
+	try {
+		await prepareLockFile(lockPath);
+	} catch (err) {
+		return { ok: false, reason: "error", detail: (err as Error).message };
+	}
 	let child: ChildProcess;
 	try {
 		child = spawn(opts.flockPath ?? FLOCK_PATH, [
@@ -134,4 +140,26 @@ export async function acquireWriterLock(
 			if (!released) lostCb?.();
 		});
 	});
+}
+
+/**
+ * The lock file exists, is a regular file and is 0600 BEFORE flock opens it
+ * (§2: files under `.projects/` are 0600). flock would create it with the
+ * process umask (0644 seen on VM100, 2026-11-12 pilot). An existing file is
+ * narrowed through its own descriptor; a symlink is refused (O_NOFOLLOW), so
+ * the helper never locks — or creates — something outside `.projects/`.
+ */
+async function prepareLockFile(lockPath: string): Promise<void> {
+	const fh = await fs.open(
+		lockPath,
+		FS.O_CREAT | FS.O_RDONLY | FS.O_NOFOLLOW | FS.O_NONBLOCK,
+		0o600,
+	);
+	try {
+		const st = await fh.stat();
+		if (!st.isFile()) throw new Error(`${lockPath} is not a regular file`);
+		if ((st.mode & 0o777) !== 0o600) await fh.chmod(0o600);
+	} finally {
+		await fh.close();
+	}
 }
