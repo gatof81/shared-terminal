@@ -102,6 +102,9 @@ jobs:
       # cli-install-failed, written below).
       - name: Build session image with CLI ${{ matrix.cli }}
         id: build
+        # `shell: bash` = -eo pipefail: without it `docker build | tee` takes
+        # tee's status and a failed build reads as a success.
+        shell: bash
         run: |
           build() {
             docker build --progress=plain --build-arg CLAUDE_CODE_VERSION=${{ matrix.cli }} \
