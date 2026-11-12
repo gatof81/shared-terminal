@@ -1227,7 +1227,16 @@ class Workspace {
 	// ── Now ──
 
 	private renderNow(ctx: WorkspaceContext, items: ReturnType<Workspace["forYouItems"]>): void {
-		const nodes: HTMLElement[] = [ctx.header];
+		// "+ New task" right after the header in the DOM, so Tab reaches the
+		// primary action where wide layouts draw it; phones draw it last as a
+		// floating button (CSS order), in thumb reach.
+		const newBtn = link(
+			"+ New task",
+			"tw-btn tw-btn-pri tw-new",
+			panelHref(this.projectId, { kind: "new" }),
+			() => go(this.projectId, { kind: "new" }),
+		);
+		const nodes: HTMLElement[] = [ctx.header, newBtn];
 		// Agents
 		const strip = el("nav", "tw-agents");
 		strip.setAttribute("aria-label", "Agents");
@@ -1258,13 +1267,6 @@ class Workspace {
 		nodes.push(fy);
 		// Threads
 		nodes.push(this.threadsList());
-		const newBtn = link(
-			"+ New task",
-			"tw-btn tw-btn-pri tw-new",
-			panelHref(this.projectId, { kind: "new" }),
-			() => go(this.projectId, { kind: "new" }),
-		);
-		nodes.push(newBtn);
 		replaceIfChanged(this.nowCol, nodes);
 	}
 

@@ -460,7 +460,7 @@ test.describe("workspace — layout", () => {
 		app,
 		page,
 	}) => {
-		const box = (sel: string) => page.locator(`#project-view ${sel}`).boundingBox();
+		const box = (sel: string) => page.locator(`#project-view ${sel}`).first().boundingBox();
 		await page.setViewportSize({ width: 1280, height: 800 });
 		await app.login("alice", threadHash(PROJECT_MSG_IDS.polling));
 		await expect(page.locator("#project-view .tw-main .tw-timeline")).toBeVisible();
@@ -468,6 +468,12 @@ test.describe("workspace — layout", () => {
 		let main = (await box(".tw-main"))!;
 		expect(now.x + now.width).toBeLessThanOrEqual(main.x + 1);
 		expect(Math.abs(now.y - main.y)).toBeLessThan(2);
+		// The two rules base rules used to override: no "‹ Now" beside Now, and
+		// "+ New task" leads the column instead of floating over its cards.
+		await expect(page.locator("#project-view .tw-back")).toBeHidden();
+		const newTask = (await box(".tw-new"))!;
+		const firstAgent = (await box(".tw-agent"))!;
+		expect(newTask.y + newTask.height).toBeLessThanOrEqual(firstAgent.y);
 		// Both columns take the page's full height: the thread is not a strip.
 		const page_ = (await box(""))!;
 		expect(main.height).toBeGreaterThan(page_.height - 2);

@@ -86,13 +86,10 @@
 		display: none;
 	}
 	/* Beside a thread there is room: the primary action leads the column
-	   (after the project header) instead of floating over For you's cards
-	   and their Done buttons. Phones keep the floating button in thumb reach. */
-	.tw .tw-now > :first-child {
-		order: -2;
-	}
+	   (after the project header, its DOM place) instead of floating over For
+	   you's cards and their Done buttons. */
 	.tw .tw-new {
-		order: -1;
+		order: 0;
 		position: static;
 		align-self: stretch;
 		justify-content: center;
@@ -186,6 +183,9 @@
 }
 
 .tw-new {
+	/* Phones: drawn last (a floating button in thumb reach) although it is
+	   second in the DOM; wide layouts put it back in place (order: 0). */
+	order: 1;
 	position: sticky;
 	bottom: 16px;
 	align-self: flex-end;
