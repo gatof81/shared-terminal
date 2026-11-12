@@ -98,9 +98,10 @@ export const TABLES: ReadonlyArray<{ name: string; orderBy: string; sinceSchema?
 	// accepts a message signed with VAPID_PRIVATE_KEY, which lives in the
 	// environment and never in a backup. INSIDE the deployment, though, the
 	// endpoint is the subscription's identity: `POST /api/push/subscribe`
-	// re-owns an existing endpoint and the DELETE route is keyed on it alone,
-	// so a backup reader who also has an account could send their own
-	// notifications to another user's browser, or silence that user's. That is why the backup's permissions
+	// re-assigns an existing endpoint to the caller (the DELETE is
+	// owner-scoped since #566), so a backup reader who also has an account can
+	// point another user's browser at their own notifications, taking the row
+	// away from that user (docs/SECURITY.md, Web Push endpoints). That is why the backup's permissions
 	// matter (#562). Before #560 the table was missing here, so every restore
 	// emptied it.
 	{ name: "push_subscriptions", orderBy: "id", sinceSchema: 14 },

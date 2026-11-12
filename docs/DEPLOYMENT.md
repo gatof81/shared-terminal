@@ -1308,11 +1308,12 @@ What a row is worth to someone who reads the backup:
   lives in `.env` and never in a backup; the manifest records only the
   public key (`vapidPublicKey`).
 - **Inside the deployment, the endpoint is the subscription's identity.**
-  `POST /api/push/subscribe` re-owns an existing endpoint, and the DELETE
-  route is keyed on the endpoint alone. Someone who can read a backup **and**
-  has an account can therefore send their own notifications to another
-  user's browser, or silence that user's. They never receive the other
-  user's notifications.
+  `POST /api/push/subscribe` re-assigns an existing endpoint to the caller.
+  The DELETE is owner-scoped since #566. So someone who can read a backup **and**
+  has an account can point another user's browser at their own notifications,
+  which also takes the row away from that user. They never receive the other
+  user's notifications. See
+  [SECURITY.md → Web Push endpoints](./SECURITY.md#web-push-endpoints-566).
 - This is the reason to protect backups (#562), on top of what they already
   carry: password hashes, ciphertext, workspaces and `.env` files written by
   `writeEnvFile`.
