@@ -94,8 +94,15 @@ jobs:
         working-directory: backend
         run: npm ci
 
+      # The build is the environment, not the CLI under test: an apt mirror
+      # hiccup failed all three versions on 2026-11-11 (#583–#585, green the
+      # next day). One retry, and a failure here is reported as such below.
       - name: Build session image with CLI ${{ matrix.cli }}
-        run: docker build --build-arg CLAUDE_CODE_VERSION=${{ matrix.cli }} -t shared-terminal-session:canary ./session-image
+        id: build
+        run: |
+          docker build --build-arg CLAUDE_CODE_VERSION=${{ matrix.cli }} -t shared-terminal-session:canary ./session-image \
+            || { echo "::warning::image build failed, retrying once in 60 s"; sleep 60; \
+                 docker build --build-arg CLAUDE_CODE_VERSION=${{ matrix.cli }} -t shared-terminal-session:canary ./session-image; }
 
       - name: Conversation hooks smoke (control dir validation)
         env:
@@ -117,12 +124,17 @@ jobs:
         env:
           CLI: ${{ matrix.cli }}
           OUTCOME: ${{ job.status }}
+          BUILD: ${{ steps.build.outcome }}
         run: |
           if [ "$OUTCOME" = "success" ]; then
             echo "PASS for $CLI — nothing to do (new stable releases are admitted by default)." >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$BUILD" != "success" ]; then
+            # No smoke ran: this says nothing about the CLI.
+            echo "NO VERDICT for $CLI — the image build failed (environment); no smoke ran. Re-run before judging the CLI." >> "$GITHUB_STEP_SUMMARY"
+            mkdir -p failed && echo "build" > "failed/$CLI"
           else
             echo "FAIL for $CLI — see the issue opened by this run; exclude it with COMPOSER_CLI_DENY (and RECREATE_CLI_DENY if the conversation smoke failed)." >> "$GITHUB_STEP_SUMMARY"
-            mkdir -p failed && echo "$CLI" > "failed/$CLI"
+            mkdir -p failed && echo "smoke" > "failed/$CLI"
           fi
 
       - name: Record a failure for the report job
@@ -160,6 +172,22 @@ jobs:
             [ -e "$f" ] || continue
             CLI=$(basename "$f")
             [[ "$CLI" =~ $plain ]] || continue
+            if [ "$(cat "$f")" = "build" ]; then
+              # An environment failure gets its own issue, without the
+              # exclusion procedure: denying a CLI for an apt outage is wrong.
+              title="Composer CLI canary: image build failed (no verdict) for Claude Code $CLI"
+              body="The canary could not build the session image for **$CLI**: $RUN_URL. No smoke ran, so this says **nothing** about the CLI. Do not deny it. Re-run the canary (workflow_dispatch, cli=$CLI); close this issue when a run gets past the build."
+              hit=$(gh issue list --state all --search "in:title \"$title\"" --json number,title,state \
+                --jq "map(select(.title == \"$title\")) | .[0] // empty")
+              if [ -z "$hit" ]; then
+                gh issue create --title "$title" --body "$body"
+              else
+                n=$(jq -r .number <<<"$hit")
+                [ "$(jq -r .state <<<"$hit")" = "OPEN" ] || gh issue reopen "$n"
+                gh issue comment "$n" --body "Build failed again: $RUN_URL"
+              fi
+              continue
+            fi
             title="Composer CLI canary FAILED for Claude Code $CLI"
             body=$(cat <<MD
           The §8.2.6 revalidation failed against Claude Code **$CLI**: $RUN_URL
