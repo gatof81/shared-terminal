@@ -1,10 +1,12 @@
 # D2 artifacts: real validation runbook (isolated environment)
 
-Status: **proposal for the owner's scope review. Not executed. Nothing here runs without a
-separate operational GO**, and none of it runs on VM100.
+Status: **scope approved by the owner (2026-11-12, decisions in §9). Not executed.** Approving the
+scope is not a GO to run it: execution needs a **separate operational GO**, after the owner has
+reviewed A's exact VM, resources and preflight. None of it runs on VM100.
 
-The code under test is main `a09bf8a`: D2 is merged and `PROJECT_ARTIFACTS_ENABLED` is off
-everywhere. The contract is `docs/PROJECT_CONVERSATION.md` §6 (v0.3.2), §3.3 steps b–S2b and §8.
+The code under test is **`a09bf8a`, the experiment's frozen SHA**. That is the main at which D2
+was merged; it is **not** "whatever main is now". The run checks out exactly that commit even if main
+has moved, and a later main is a different experiment. `PROJECT_ARTIFACTS_ENABLED` is off everywhere. The contract is `docs/PROJECT_CONVERSATION.md` §6 (v0.3.2), §3.3 steps b–S2b and §8.
 The unit and integration evidence is the matrix in #600. This runbook covers what that matrix lists
 under **"needs a real smoke"**:
 - a root backend writing into the workspaces of uid-1000 agents;
@@ -46,7 +48,7 @@ preflight (§5, P0).
 
 ## 3. What is installed
 
-- **Checkout:** `a09bf8a`, recorded as the full SHA with `git rev-parse HEAD`. Plus the mock: `session-image/test/` is already in the repo.
+- **Checkout:** the frozen SHA `a09bf8a` (`git checkout --detach a09bf8a`, never `main`). Record it as the full SHA with `git rev-parse HEAD`. Plus the mock: `session-image/test/` is already in the repo.
 - **Session image:** a plain `docker build -t shared-terminal-session ./session-image`. This is a fresh host with no sessions, so CLAUDE.md's first-install path applies. Record the image id.
 - **After every app start** (P2, K1, K2, P7, P8):
   - the boot log reaches `[server] listening on`, which comes only after the D1 migrations finished, so D1 is reachable;
@@ -99,7 +101,7 @@ re-check) says so.
 ### P0. Preflight (abort conditions)
 
 1. E1–E7 checked and recorded. **Any miss ⇒ abort, nothing started.**
-2. `git rev-parse HEAD` = `a09bf8a…`. `docker compose config --format json | jq -r '.services.app.environment.PROJECT_ARTIFACTS_ENABLED'` prints an empty line while unset. **Never record the full `docker compose config`: it prints every secret.**
+2. `git rev-parse HEAD` = `a09bf8a…`, the frozen SHA, whatever main is at run time. `docker compose config --format json | jq -r '.services.app.environment.PROJECT_ARTIFACTS_ENABLED'` prints an empty line while unset. **Never record the full `docker compose config`: it prints every secret.**
 3. Backend boot log: `writer lock held` and `project conversation ENABLED (D1)`, with **no** `project artifacts ENABLED (D2)`. `.projects/.writer.lock` is mode `0600` (#601).
 4. The outside-write marker: `touch <evidence>/run-start` (§6).
 
@@ -145,7 +147,10 @@ With all fixtures in place and the flag unset:
    - `git apply --check` of it succeeds in `qa`'s copy of the repo;
    - the agent can `rm` the file and the empty inbox. The next placement recreates the inbox.
 4. **Owner view.** `GET …/artifacts/<sha>` → 200, `text/plain; charset=utf-8`, `nosniff`, `attachment`, CSP `sandbox`, the exact bytes. The thread in A's UI (if built) shows the attachment and a "Delivered" chip.
-5. **The agent's own verification (optional, decision O2).** With the stand-in extended by one scripted scenario (`ST_SCENARIO=sha256:<path>`, which makes the CLI run `sha256sum <path>` through its Bash tool), the CLI in `qa` computes the hash itself. **PASS:** the reply's text names `<sha>`.
+5. **The agent's own verification (O2, approved).** The stand-in gains one scripted scenario: `ST_SCENARIO=sha256:<path>`. It makes the CLI run `sha256sum -- <path>` through its own Bash tool, then the closing text echoes the hash the tool printed. The scenario accepts only an inbox path of the exact shape `.st-inbox/<12 hex>-<name>` (its own PR, `session-image/test/` only).
+   - **Setup:** for this one prompt, `qa`'s CLI must be able to run that command without a dialog. Add `"permissions": {"allow": ["Bash(sha256sum:*)"]}` to the seeded `~/.claude/settings.json` (§4), rather than `--dangerously-skip-permissions`.
+   - **Send:** to `qa-a`, the text `ST_SCENARIO=sha256:.st-inbox/<sha12>-fix.diff`.
+   - **PASS:** the `reply_ref` is `exact`, and its text (the capture's `last_assistant_message`) contains `<sha>`. The hash was computed by the receiving CLI in its own container.
 
 ### P4. Two recipients and partial failures
 
@@ -209,12 +214,20 @@ sha256. Each step ends by checking the log with `projects:check-log`.
 
 | # | Action | PASS |
 | --- | --- | --- |
+**K3 and K4: how they are judged.**
+- **Stop the competitors first.** The racing loops are the agent's own processes, so they are stopped first: kill them, then `wait` until `pgrep -u 1000 -f <loop marker>` is empty in the container. Only then is the final state evaluated, and never while a loop can still move something.
+- **What the loops can touch.** Neither ever writes a final name. K3 only renames the inbox directory or puts a link in its place, and K4 only replaces `.<16 hex>.tmp` names.
+- **Locating a claimed file.** It is located after the stop with `find <WORKSPACE_ROOT>/<ops> -xdev -type f -name '<sha12>-<name>'`, which also finds it inside a directory K3 renamed. It must have the claimed sha.
+- **Not a FAIL.** A claimed file that ended up under a directory the loop renamed, or a final name the agent itself published by swapping a temp (K4, judged as `exists-different` in the log), is the agent's own later move.
+- **A FAIL.** Only a claimed file whose bytes differ from its sha is a FAIL, or a claimed file that cannot be found anywhere in the workspace.
+- **Before the next row,** the inbox is restored to a plain directory.
+
 | K1 | **SIGKILL the backend during sends.** 10 rounds: send to `qa-a` + `ops-b` with an artifact, and `docker kill -s KILL <app>` at a random delay of 0–400 ms; then `up -d --no-build app` | After each restart: no delivery with two `sending` lines; every unfinished one is `not-sent{persist-failed[, files_possibly_placed]}` or `uncertain{orphaned}`; **0 new Composer calls after the restart** (capture `user_prompt` count). In every inbox, only complete files under final names (each sha256 matches) plus at most our hidden `.<16 hex>.tmp` files. The exact kill point is probabilistic; T12b proves the placement window deterministically |
 | K2 | **Lost writer lock:** the app image has no `pkill`, so from the **host**: `pgrep -af 'flock --exclusive --nonblock --close'`, check with `docker top <app>` that exactly one such pid belongs to the app container, then `kill <pid>` | The backend logs `[projects] writer lock LOST`. A send gets 503 or `not-sent{persist-failed}`. **No file placed and no Composer call after the loss.** After `up -d --force-recreate app`: lock held. Recovery lines are written **only if** a delivery was in flight at the loss. The log is `ok` |
 | K3 | **Real agent race.** In `ops`, as uid 1000, a loop for 60 s: `mv .st-inbox x; ln -s trap .st-inbox; rm .st-inbox; mv x .st-inbox` (relative `trap`, as F1). Meanwhile 20 sends to `ops-b` | Judge the **placement** only; any text-delivery state is acceptable (overlapping sends may give `send-in-progress` or `busy`). Each delivery is placed (the claimed `artifacts_placed` path is a regular file in a real directory of `ops`'s workspace, sha OK), or `artifact-failed`, or never reached `placing` (e.g. `no-target` while an overlapping send holds the pane). `<WORKSPACE_ROOT>/<ops>/trap/` stays empty (host view), and the sweep is clean |
 | K4 | **Temp swap by the agent.** Loop in `ops`: for every `.*.tmp` that appears in the inbox, `mv` it away and write another file under its name. Meanwhile 10 sends to `ops-b` | No delivery claims `artifacts_placed` for bytes that differ from the sha (check each **claimed** path). Swapped cases are `exists-different`. The agent's own file may then sit under the final name: §6.4 publishes by `link` and judges afterwards. That is expected, not an abort |
 | K5 | **Binding changed mid-flight.** P3a has no rebind API, so the change is a removal, and an agent can be removed only once. 10 rounds, each with a fresh agent `x-1` … `x-10` on `extra` (only live bindings are unique, so `extra` is free again after each removal): one send to it with an artifact, and `DELETE /projects/:pid/agents/<x-n>` at a random delay of 0–300 ms | Each delivery is `delivered` to the session fixed at `planned`, or `not-sent{agent-removed|binding-changed|binding-unverified}`, with `files_possibly_placed` when it comes after a `placing`. Never a retry. The exact interleaving is probabilistic; T6 and the c0 test prove it deterministically |
-| K6 | **Disk pressure (optional, decision O3):** a small loop-mounted filesystem as `qa`'s workspace, **mounted on the host before `qa` and `app` start** (or bind propagation hides it), filled to the last KiB | `not-sent{artifact-failed, io}`, no partial file under a final name; the backend keeps serving |
+| K6 | **Excluded from the first run (O3).** Kept here for a later run. **Disk pressure:** a small loop-mounted filesystem as `qa`'s workspace, **mounted on the host before `qa` and `app` start** (or bind propagation hides it), filled to the last KiB | `not-sent{artifact-failed, io}`, no partial file under a final name; the backend keeps serving |
 
 ### P7. Backup and restore with artifacts
 
@@ -278,7 +291,12 @@ This is the production rollback: no data step, only the flag.
 ## 6. Evidence (no secrets)
 
 **What is recorded:**
-- For each step: the command (with the cookie path, never its content), the HTTP status and body, and timestamps.
+- **HTTP evidence is recorded by allowed fields only**, extracted with `jq`, never as raw bodies:
+  - the status, plus the response's `error`/`detail`, `msgId`, `replayed`, `deliveries[].{agentId,state,reason,filesPossiblyPlaced}`, `sha256`, `name`, `bytes`, `features`, and the ids of the project, agents and sessions;
+  - for a GET of artifact content: the status, the response headers and `sha256sum` of the body, never the body itself;
+  - **never the request or response bodies of setup, login, register, invites or any `/auth/*` call** (passwords, invite codes, tokens, `Set-Cookie`). For those, the status line alone.
+  
+  Also recorded: the command (with the cookie path, never its content) and timestamps.
 - The events, redacted with the same method as the D1 pilot (#595): `del(.text)`, plus consistent pseudonymization of ids and hashes if it leaves the host. Then `projects:check-log` on them. The checker reads one page of at most 500 lines: page with `before=oldestSeq` and concatenate the pages into one array before checking, or the report carries a "page has more" note.
 - `stat` lines (owner, mode, size, mtime) and `sha256sum` of every artifact, inbox file and source.
 - The relevant boot-log lines (`[projects]`, `[server]`).
@@ -322,16 +340,19 @@ nothing to roll back there.
 - Multi-host or multi-backend behaviour. The single-writer lock is already T22b.
 - The frontend, which A validates separately against Appendix A.2.
 
-## 9. Decisions for the owner (scope review)
+## 9. Decisions (owner, 2026-11-12)
 
-| # | Decision | B's recommendation |
-| --- | --- | --- |
-| O1 | The isolated host: a new disposable VM, or the PASS-B-style isolated VM on the same Proxmox | Either, if E1–E7 hold. A disposable D1 database in the dedicated account is required (E3) |
-| O2 | Extend the stand-in with one scripted scenario (`ST_SCENARIO=sha256:<path>`, in `session-image/test/mock-anthropic.mjs`, test-only) so the receiving **CLI** computes the hash itself, in addition to the uid-1000 check of P3.3 | Yes. Small, test-only, and it runs through the Session Image CI. It needs your OK because it touches `session-image/` |
-| O3 | Include K6 (disk full, a loop-mounted workspace) | Optional. The `io` mapping is generic; include it only if the host allows loop devices |
-| O4 | Include the hand-repacked T17 in P7.4 | Yes, on a copy of the backup only |
-| O5 | Who runs it, and when | A, after the D1/WS smoke closes. B stays reachable in #595 during the run |
-| O6 | A real model instead of the stand-in | No, for this run. It needs a credential and egress, and adds nothing to D2's guarantees |
+| # | Decision |
+| --- | --- |
+| O1 | A **new, disposable VM on the same Proxmox**. E1–E7 isolation is mandatory |
+| O2 | **Approved:** extend the stand-in so the receiving CLI computes the SHA-256 (P3.5). Its own PR, only under `session-image/test/`, with tests and strict validation of the path the scenario accepts. No production change |
+| O3 | **K6 (disk full) excluded** from this first run |
+| O4 | **T17 included**, altering only a **copy** of the backup |
+| O5 | **A is the operator**, after closing the D1/WS smoke. A prepares the VM plan and its preflight for the owner's review **without running any scenario** |
+| O6 | **The stand-in model**, no real credentials |
+
+**Scope approval is not an execution GO.** The run starts only after the owner reviews A's exact
+environment, resources and procedure, and gives the operational GO.
 
 After a PASS, activation on VM100 is still a separate operational GO with its own plan, prepared with
 A: flag only, `--no-build`, rollback = P8.
