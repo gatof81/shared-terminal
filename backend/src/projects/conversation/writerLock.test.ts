@@ -4,7 +4,8 @@
  * the helper goes away, and the loss is reported.
  */
 
-import { existsSync, promises as fs } from "node:fs";
+import { spawn as nodeSpawn } from "node:child_process";
+import { existsSync, promises as fs, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -17,6 +18,54 @@ beforeEach(async () => {
 });
 afterEach(async () => {
 	await fs.rm(dir, { recursive: true, force: true });
+});
+
+describe.skipIf(!haveFlock)("the lock file (§2: 0600)", () => {
+	const real = (cmd: string, args: string[]) =>
+		nodeSpawn(cmd, args, { stdio: ["pipe", "pipe", "ignore"] });
+
+	it("is created 0600 before the helper runs, and an existing 0644 one is narrowed", async () => {
+		const p = path.join(dir, ".writer.lock");
+		let modeSeen = -1;
+		const r = await acquireWriterLock(p, {
+			spawn: (cmd, args) => {
+				modeSeen = statSync(p).mode & 0o777;
+				return real(cmd, args);
+			},
+		});
+		expect(r.ok).toBe(true);
+		expect(modeSeen).toBe(0o600);
+		if (r.ok) r.lock.release();
+
+		await fs.chmod(p, 0o644);
+		let r2 = await acquireWriterLock(p);
+		for (let i = 0; i < 20 && !r2.ok; i++) {
+			await new Promise((res) => setTimeout(res, 50));
+			r2 = await acquireWriterLock(p);
+		}
+		expect(r2.ok).toBe(true);
+		expect((await fs.stat(p)).mode & 0o777).toBe(0o600);
+		if (r2.ok) r2.lock.release();
+	});
+
+	it("a symlink or a directory at the lock path is refused before any helper runs", async () => {
+		const target = path.join(dir, "elsewhere");
+		await fs.writeFile(target, "", { mode: 0o644 });
+		await fs.chmod(target, 0o644);
+		const p = path.join(dir, ".writer.lock");
+		await fs.symlink(target, p);
+		let spawned = false;
+		const spawn = (cmd: string, args: string[]) => {
+			spawned = true;
+			return real(cmd, args);
+		};
+		expect(await acquireWriterLock(p, { spawn })).toMatchObject({ ok: false, reason: "error" });
+		await fs.rm(p);
+		await fs.mkdir(p);
+		expect(await acquireWriterLock(p, { spawn })).toMatchObject({ ok: false, reason: "error" });
+		expect(spawned).toBe(false);
+		expect((await fs.stat(target)).mode & 0o777).toBe(0o644);
+	});
 });
 
 describe.skipIf(!haveFlock)("acquireWriterLock (real flock)", () => {
