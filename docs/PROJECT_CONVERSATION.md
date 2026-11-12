@@ -1,7 +1,8 @@
 # Conversación de proyecto por el Composer (D1–D3)
 
-Estado: **contrato vinculante, v0.3** (aprobado por el responsable el 2026-11-12), con las dos
-precisiones de v0.3.1 propuestas en la PR de D1-b. D1-a está en main; D1-b, D2 y D3 no.
+Estado: **contrato vinculante, v0.3** (aprobado por el responsable el 2026-11-12), con las
+precisiones de v0.3.1 (D1-b) y v0.3.2 (D2, propuestas en su PR). D1 está en main y activo en VM100;
+D2 está en borrador, apagado; D3 no empezó.
 
 - **v0.1** pasó una revisión adversarial independiente: 2 BLOCKER, 9 SHOULD-FIX y 1 NIT, todos
   incorporados.
@@ -22,6 +23,15 @@ precisiones de v0.3.1 propuestas en la PR de D1-b. D1-a está en main; D1-b, D2 
     detectados impiden la llamada al Composer aunque el `sending` esté en disco (T2b);
   - la ventana de asentamiento se mide solo en el reloj monotónico, desde que **este proceso** vio
     llegar el `turn_end` en vivo; un `turn_end` que no vio en vivo nunca da `exact` (§4.1, T20e).
+- **v0.3.2** (PR de D2) fija lo que §6 dejaba abierto para implementarlo, sin cambiar garantías ni
+  alcance:
+  - el API de §6.1, con sus códigos (§6.1.1);
+  - el nombre y los bytes que lleva un mensaje (§6.3);
+  - la colocación además exige que el nombre final sea **el mismo inode** verificado. Si un agente
+    cambia el temporal entre la verificación y el `link`, la entrega falla en lugar de dar por
+    colocados bytes no verificados (§6.4 paso 4);
+  - los hashes se verifican antes de tocar el destino;
+  - `artifact_error` nombra la causa de un `artifact-failed`.
 
 Decisión que lo origina (responsable, 2026-11-11, sobre la evaluación de B en #512 a las 16:57Z):
 
@@ -537,13 +547,51 @@ asunto de la UI.
   por `.`; los caracteres fuera del conjunto pasan a `_`. El nombre es informativo: la identidad del
   artefacto es su sha256.
 
+#### 6.1.1 API (v0.3.2)
+
+`POST /api/projects/:pid/conversation/artifacts {agentId, path}` (dueño, `projectIp`)
+- **El origen es la sesión que el agente tiene ligada ahora.** Se lee en D1 sin caché, y el evento
+  guarda cuál fue (`source{kind: owner, sid, path, agent_id}`). `path` es relativo al workspace,
+  el mismo string que usa Files.
+- `201 {sha256, name, bytes, replayed: false}`.
+- `200 {…, replayed: true}` si ese contenido ya está registrado **desde ese mismo origen**
+  (`sha256` + `sid:path`, la identidad de §2.2). El mismo contenido desde otro origen es otro evento
+  `artifact`, pero cuenta una sola vez para el tope del proyecto.
+- **Errores, ninguno escribe nada:**
+  - 400 `invalid-body`, también para un directorio, un no-regular o un path absoluto;
+  - 403 `artifact-restricted`;
+  - 404 `artifact-not-found` (ausente, link o fuera del workspace: la misma respuesta, como en Files);
+  - 409 `agent-not-bound`, `artifacts-full`, `artifact-corrupt`;
+  - 413 `artifact-too-large`;
+  - 415 `artifact-not-text` (también un archivo vacío);
+  - 429 `busy`;
+  - 503 `binding-unverified` o `persist-failed`.
+
+`GET /api/projects/:pid/conversation/artifacts/:sha256`
+- Solo sirve un sha256 que el registro de **este** proyecto tiene en un evento `artifact`; la mera
+  existencia del archivo no basta.
+- El contenido se re-verifica contra su nombre en cada lectura. Si no coincide, 409
+  `artifact-corrupt` y no se sirve.
+
+Las dos rutas tienen además ranuras en vuelo (2 por usuario, 8 por proceso, como Files).
+**Con `PROJECT_ARTIFACTS_ENABLED` apagado no se montan** (404) y `/api/auth/status` no anuncia
+`features.projectArtifacts`.
+
 ### 6.2 Almacenamiento
 
 - **Content-addressed.** Va a `artifacts/<sha256>` (0600, root), creado `O_EXCL`. Si ya existe un
   archivo con ese hash, se reutiliza, previa comprobación del hash del existente.
 - **Metadatos.** `<sha256>.json` lleva nombre, bytes y origen, y se escribe un evento `artifact`.
-- **Atomicidad.** Se escribe en un temporal, se hace fsync, se verifica el hash y se renombra. Solo
+- **Atomicidad.** Se escribe en un temporal, se hace fsync, se verifica el hash y se publica. Solo
   después se escribe el evento.
+  - **v0.3.2:** se publica con `link(2)` del temporal al nombre final, no con `rename`. Un nombre que
+    ya existe nunca se reemplaza: se compara. Si sus bytes no son los de su nombre, es 409
+    `artifact-corrupt` y no se escribe el evento.
+  - El tope del proyecto se decide **en la misma sección crítica que escribe el evento**, contra el
+    registro plegado, así que dos altas concurrentes nunca lo exceden.
+  - Un archivo de contenido sin evento, por una muerte entre los dos pasos o por un rechazo en el
+    tope, queda sin referencia. No es visible por el API, lo reutiliza el próximo registro de los
+    mismos bytes y no se borra (§9).
 
 ### 6.3 Lo que lleva el mensaje
 
@@ -555,6 +603,12 @@ El agente recibe **una línea por artefacto**, agregada por el backend al final 
 
 - Cada línea es un paste corto, así que el texto no se acerca al límite de 48. Los artefactos cuentan
   en esa validación, que se hace antes del paso 2.
+- **v0.3.2:**
+  - el cuerpo lleva `artifacts: [sha256…]`: ≤ 4, distintos y todos registrados en el proyecto. Si
+    no, 400 `invalid-body` y nada escrito;
+  - `name` y `bytes` vienen del **primer** evento `artifact` de ese sha256;
+  - el `message` guarda el texto de la persona y `artifacts[]` como `{sha256, name, bytes}`;
+  - las líneas se arman al enviar, de forma determinista, a partir de esos datos.
 - El receptor verifica el hash y aplica el contenido, por ejemplo con `git apply`. En la conversación
   del proyecto, la persona ve el contenido; un diff se muestra con `diff.ts`.
 
@@ -591,13 +645,30 @@ El workspace destino lo controla el agente y el backend es root en el host. Por 
    - **solo entonces** se hace `fchown` a `WORKSPACE_UID:WORKSPACE_GID` (el mismo dueño que el backend
      da al bind mount; 1000:1000 por defecto);
    - se publica con `link(2)` del temporal al nombre final `<sha256-12>-<name>` (EEXIST ⇒ paso 3), se
-     borra el temporal y se hace `fsync` del inbox.
+     borra el temporal y se hace `fsync` del inbox;
+   - **v0.3.2:** `link` publica lo que tenga el **nombre** del temporal en ese momento. Por eso el
+     archivo cuenta como colocado solo si el nombre final es el **mismo inode** (`dev` + `ino`) que
+     el descriptor verificado. Si no lo es, ⇒ `exists-different`: lo publicado queda donde está y
+     la entrega no se envía;
+   - el temporal se borra solo mientras su nombre siga siendo ese inode. Si el agente puso otra cosa
+     en su lugar, no se toca.
 
    Así nunca queda un archivo parcial bajo el nombre final, y el agente no puede cambiar el contenido
    entre la escritura y la verificación.
 5. Se escribe `delivery{sending, artifacts_placed: [{sha256, path}]}` en S3 (§3.3).
 
 **Reglas generales:**
+- **v0.3.2:** antes de abrir el workspace destino se verifica el sha256 de cada contenido. Uno que no
+  coincide no llega ni a crear el inbox (`hash-mismatch`, T13).
+- **v0.3.2:** `delivery{not-sent, artifact-failed}` lleva `artifact_error`, que puede ser:
+  - `workspace-unavailable`: el workspace no existe o no es exactamente `<WORKSPACE_ROOT>/<sid>`;
+  - `inbox-not-dir`;
+  - `exists-different`;
+  - `hash-mismatch`;
+  - `io`: otro error del sistema de archivos.
+
+  **Todo `not-sent` posterior a un `placing`** lleva `files_possibly_placed: true`, aunque su razón
+  no sea `artifact-failed` (por ejemplo `binding-changed` en c0).
 - **Una sola sesión destino por colocación,** la del binding fijado en §3.2.
 - **Sin Docker exec.** Funciona también con la sesión detenida, aunque la entrega del texto no.
 - **Sin reintento.** Una colocación que falló no se repite: la entrega queda `not-sent`.
