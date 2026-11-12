@@ -546,7 +546,10 @@ export function removeAgent(projectId: string, agentId: string): Promise<Project
 
 /** A backward page of the project log: raw persisted lines (teamModel.parseLogEvent reads them). */
 export interface ProjectEventsPage {
+	/** Ascending seq (§5). */
 	events: unknown[];
+	/** The last line examined; the next page backward is `before = oldestSeq`. */
+	oldestSeq: number | null;
 	hasMore: boolean;
 }
 
@@ -566,20 +569,46 @@ export function fetchProjectEvents(
 	);
 }
 
+/** Appendix A: `GET …/messages/:msgId`, the message with its lines grouped (raw log lines inside). */
+export interface ProjectMessageDetail {
+	message: unknown;
+	deliveries: Array<{ agentId: string; state: string; events: unknown[] }>;
+	replies: Array<{ agentId: string; settling: unknown; ref: unknown; lateCloses: unknown[] }>;
+	acks: unknown[];
+}
+
 /**
- * One message by id with its deliveries and replies — the anchor of a
- * thread whose original is older than the loaded window. Read as the same
- * persisted lines as the events page (`events`: the message line, then its
- * delivery / reply_ref / reply_late_close lines), so one parser serves both.
+ * One message by id — the anchor of a thread whose original is older than
+ * the loaded window (a late reply, a follow-up to an old task).
  */
 export function fetchProjectMessage(
 	projectId: string,
 	msgId: string,
-): Promise<ProjectAnswer<{ events: unknown[] }>> {
+): Promise<ProjectAnswer<ProjectMessageDetail>> {
 	return projectRequest(
 		`/projects/${encodeURIComponent(projectId)}/conversation/messages/${encodeURIComponent(msgId)}`,
 		undefined,
-		(b): b is { events: unknown[] } => isObj(b) && Array.isArray(b.events),
+		(b): b is ProjectMessageDetail =>
+			isObj(b) &&
+			isObj(b.message) &&
+			Array.isArray(b.deliveries) &&
+			Array.isArray(b.replies) &&
+			Array.isArray(b.acks),
+	);
+}
+
+/**
+ * §4.3 "Done": one click, one clientAckId; repeating the same body with the
+ * same id is answered from the log (`replayed`), never written twice.
+ */
+export function postProjectAck(
+	projectId: string,
+	body: { clientAckId: string; target: { msgId: string; agentId?: string; reportSha256?: string } },
+): Promise<ProjectAnswer<{ ackId: string; replayed: boolean }>> {
+	return projectRequest(
+		`/projects/${encodeURIComponent(projectId)}/conversation/acks`,
+		{ method: "POST", body: JSON.stringify(body) },
+		(b): b is { ackId: string; replayed: boolean } => isObj(b) && typeof b.ackId === "string",
 	);
 }
 
@@ -593,6 +622,7 @@ export interface ProjectMessageBody {
 
 export interface ProjectMessageAnswer {
 	msgId: string;
+	replayed?: boolean;
 	deliveries: Array<{ agentId: string; state: string; reason?: string }>;
 }
 

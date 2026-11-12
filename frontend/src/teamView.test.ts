@@ -8,6 +8,7 @@ const api = vi.hoisted(() => ({
 	fetchProjectEvents: vi.fn(),
 	fetchProjectMessage: vi.fn(),
 	postProjectMessage: vi.fn(),
+	postProjectAck: vi.fn(),
 	readConversationEvent: vi.fn(),
 }));
 vi.mock("./api.js", () => api);
@@ -50,19 +51,19 @@ const REPLY = "Done: adaptive cadence. 628 tests pass.";
 const log = [
 	{
 		seq: 1,
-		ts: NOW,
+		at: NOW,
 		ev: "message",
 		msg_id: "t1",
 		kind: "owner",
 		to: [DEV],
 		text: "Adaptive polling\nbody",
 	},
-	{ seq: 2, ts: NOW, ev: "delivery", msg_id: "t1", agent_id: DEV, state: "delivered" },
-	{ seq: 3, ts: NOW, ev: "message", msg_id: "t2", kind: "owner", to: [QA], text: "Release notes" },
-	{ seq: 4, ts: NOW, ev: "delivery", msg_id: "t2", agent_id: QA, state: "refused", reason: "busy" },
+	{ seq: 2, at: NOW, ev: "delivery", msg_id: "t1", agent_id: DEV, state: "delivered" },
+	{ seq: 3, at: NOW, ev: "message", msg_id: "t2", kind: "owner", to: [QA], text: "Release notes" },
+	{ seq: 4, at: NOW, ev: "delivery", msg_id: "t2", agent_id: QA, state: "refused", reason: "busy" },
 	{
 		seq: 5,
-		ts: NOW,
+		at: NOW,
 		ev: "reply_ref",
 		msg_id: "t1",
 		agent_id: DEV,
@@ -159,6 +160,60 @@ describe("Now", () => {
 		const root = mount({ kind: "thread", msgId: "t1" });
 		await flush();
 		expect(root.querySelector(".tw-timeline")?.textContent).toContain("Reply no longer retained");
+	});
+});
+
+describe("Done", () => {
+	it("writes an owner_ack for exactly that item; the card goes only when the log shows it", async () => {
+		let events: unknown[] = [...log];
+		api.fetchProjectEvents.mockImplementation(async () => ({
+			ok: true,
+			status: 200,
+			body: { events, oldestSeq: 1, hasMore: false },
+		}));
+		api.postProjectAck.mockResolvedValueOnce({ ok: false, status: 0, code: "network" });
+		const root = mount(null);
+		await flush();
+		const card = () => root.querySelector(".tw-foryou-inline .tw-card-replied");
+		const done = () =>
+			[...(card()?.querySelectorAll("button") ?? [])].find((b) =>
+				/Done|Check/.test(b.textContent ?? ""),
+			)!;
+		done().click();
+		await flush();
+		expect(card()?.textContent).toContain("it may or may not be marked");
+		const first = api.postProjectAck.mock.calls[0]![1];
+		expect(first.target).toEqual({ msgId: "t1", agentId: DEV, reportSha256: sha(REPLY) });
+		// Check: the same clientAckId again (the server answers from the log).
+		api.postProjectAck.mockResolvedValueOnce({
+			ok: true,
+			status: 201,
+			body: { ackId: "k1", replayed: false },
+		});
+		done().click();
+		await flush();
+		expect(api.postProjectAck.mock.calls[1]![1].clientAckId).toBe(first.clientAckId);
+		// The log doesn't show the ack yet: the card stays, marking.
+		expect(card()?.textContent).toContain("Marking…");
+		// Now it does (as any other device would read it): the card is gone; the refusal stays.
+		events = [
+			...log,
+			{
+				seq: 6,
+				at: NOW,
+				ev: "owner_ack",
+				ack_id: "k1",
+				client_ack_id: first.clientAckId,
+				by: "u",
+				target: { msg_id: "t1", agent_id: DEV, report_sha256: sha(REPLY) },
+			},
+		];
+		// The next poll (any device's) reads it.
+		const { logStore } = await import("./teamLog.js");
+		await logStore(PID).refresh();
+		await flush();
+		expect(card()).toBeNull();
+		expect(root.querySelector(".tw-foryou-inline .tw-card-not-delivered")).not.toBeNull();
 	});
 });
 

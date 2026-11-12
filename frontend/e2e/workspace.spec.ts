@@ -132,6 +132,67 @@ test.describe("workspace — flag on", () => {
 		await expect(cards(page).filter({ hasText: "@developer-hz replied to you" })).toHaveCount(0);
 	});
 
+	test("a quote that wasn't delivered leaves the reply pending; a delivered one clears only it", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.projectSendOutcome.set(AGENT_IDS.developer, { state: "refused", reason: "busy" });
+		await app.login("alice", threadHash(PROJECT_MSG_IDS.polling));
+		const timeline = page.locator("#project-view .tw-timeline");
+		await timeline.getByRole("button", { name: "Reply…" }).click();
+		await composer(page).locator("textarea").fill("Also the hidden-tab case.");
+		await composer(page).getByRole("button", { name: "Send" }).click();
+		await expect(page.locator("#project-view .tw-del").last()).toHaveText(
+			"@developer-hz · Not delivered: it was busy",
+		);
+		await page.goto(`/${projectHash}`);
+		// The reply is still pending, and the refused quote is its own item.
+		await expect(cards(page).filter({ hasText: "@developer-hz replied to you" })).toBeVisible();
+		await expect(cards(page).filter({ hasText: "Not delivered to @developer-hz" })).toBeVisible();
+	});
+
+	test("Done writes an owner_ack: the card stays gone after a reload (another device reads the same log)", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		await app.login("alice", projectHash);
+		const card = cards(page).filter({ hasText: "@architect-hz replied to you" });
+		await card.getByRole("button", { name: /Done/ }).click();
+		await expect(card).toHaveCount(0);
+		expect(backend.projectAckPosts.at(-1)).toMatchObject({
+			target: { msgId: PROJECT_MSG_IDS.backup, agentId: AGENT_IDS.architect },
+		});
+		expect(typeof (backend.projectAckPosts.at(-1)!.target as { reportSha256?: unknown }).reportSha256).toBe(
+			"string",
+		);
+		// A fresh page (no memory of the click) reads the ack from the log.
+		await page.reload();
+		await expect(cards(page).filter({ hasText: "@developer-hz replied to you" })).toBeVisible();
+		await expect(cards(page).filter({ hasText: "@architect-hz replied to you" })).toHaveCount(0);
+		// The other items of that thread are untouched.
+		await expect(cards(page).filter({ hasText: "Not sure it arrived · @developer-hz-2" })).toBeVisible();
+	});
+
+	test("a reply in its settle window shows its text as confirming, not in For you", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.projectTask("c3000000-0000-4000-8000-000000000001", [AGENT_IDS.developer], "Bump the version");
+		await backend.projectReply("c3000000-0000-4000-8000-000000000001", AGENT_IDS.developer, "Bumped to 1.4.0.", "exact", {
+			settleOnly: true,
+		});
+		await app.login("alice", threadHash("c3000000-0000-4000-8000-000000000001"));
+		const row = page.locator("#project-view .tw-row-settling");
+		await expect(row).toContainText("reply received, confirming…");
+		await expect(row.locator(".tw-bubble-agent")).toHaveText("Bumped to 1.4.0.");
+		await expect(row.getByRole("button", { name: "Reply…" })).toHaveCount(0);
+		await page.goto(`/${projectHash}`);
+		await expect(cards(page).filter({ hasText: "Bumped" })).toHaveCount(0);
+	});
+
 	test("New task: @ opens the picker; only chosen agents receive it, typed @names don't", async ({
 		app,
 		backend,
@@ -159,7 +220,7 @@ test.describe("workspace — flag on", () => {
 		await text.press("Escape");
 		await expect(c.locator(".tw-hint")).toHaveText("Only @architect-hz will receive this.");
 		await c.getByRole("button", { name: "Send" }).click();
-		await expect(page).toHaveURL(/\/threads\/m0000000-/);
+		await expect(page).toHaveURL(/\/threads\/c0000000-/);
 		expect(backend.projectMessagePosts.at(-1)!.to).toEqual([AGENT_IDS.architect]);
 		await expect(page.locator("#project-view .tw-main-title")).toHaveText(
 			"Review the diff with @architect-hz and tell @qa-hz",
@@ -214,7 +275,7 @@ test.describe("workspace — flag on", () => {
 		backend.projectLog = [];
 		backend.projectTask(PROJECT_MSG_IDS.old, [AGENT_IDS.architect], "Old task: audit the CSP");
 		for (let i = 0; i < 6; i++)
-			backend.projectTask(`m2000000-0000-4000-8000-00000000000${i}`, [AGENT_IDS.developer], `Filler task ${i}`);
+			backend.projectTask(`c2000000-0000-4000-8000-00000000000${i}`, [AGENT_IDS.developer], `Filler task ${i}`);
 		await backend.projectReply(PROJECT_MSG_IDS.old, AGENT_IDS.architect, "CSP audit done: 2 findings.");
 		backend.projectPageCap = 5;
 		await app.login("alice", projectHash);

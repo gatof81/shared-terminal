@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { detailLines } from "./teamLog.js";
 import {
+	ackTargetOf,
 	buildThreads,
 	deliveryText,
 	deliveryTone,
@@ -26,7 +28,7 @@ function msg(
 ): unknown {
 	return {
 		seq,
-		ts: `2026-11-11T12:${String(seq).padStart(2, "0")}:00Z`,
+		at: `2026-11-11T12:${String(seq).padStart(2, "0")}:00Z`,
 		ev: "message",
 		msg_id: msgId,
 		client_message_id: `c-${++n}`,
@@ -43,7 +45,7 @@ function del(
 	state: string,
 	extra: Record<string, unknown> = {},
 ): unknown {
-	return { seq, ts: "t", ev: "delivery", msg_id: msgId, agent_id: agentId, state, ...extra };
+	return { seq, at: "t", ev: "delivery", msg_id: msgId, agent_id: agentId, state, ...extra };
 }
 function reply(
 	seq: number,
@@ -54,7 +56,7 @@ function reply(
 ): unknown {
 	return {
 		seq,
-		ts: "t",
+		at: "t",
 		ev: "reply_ref",
 		msg_id: msgId,
 		agent_id: agentId,
@@ -249,7 +251,7 @@ describe("threads", () => {
 	it("puts a relay under its grant's task thread", () => {
 		const log = logOf([
 			msg(1, "t1", ["dev"], "task"),
-			{ seq: 2, ts: "t", ev: "grant", grant_id: "g1", event: "created", task_msg_id: "t1" },
+			{ seq: 2, at: "t", ev: "grant", grant_id: "g1", event: "created", task_msg_id: "t1" },
 			msg(3, "rl1", ["qa"], "From @dev…", { kind: "relay", relay: { grant_id: "g1", round: 1 } }),
 		]);
 		expect(threadRootOf(log, "rl1")).toBe("t1");
@@ -393,5 +395,116 @@ describe("compose", () => {
 		expect(mentionAt("@", 1)).toEqual({ start: 0, query: "" });
 		expect(mentionAt("mail me@host", 12)).toBeNull();
 		expect(mentionAt("ask @qa done", 12)).toBeNull();
+	});
+});
+
+// ── Appendix A shapes: settling, ambiguity, owner_ack, by-id ────────────────
+
+function settling(seq: number, msgId: string, agentId: string, promptId: string): unknown {
+	const r = reply(seq, msgId, agentId, promptId) as Record<string, unknown>;
+	const { attribution: _a, ...rest } = r;
+	return { ...rest, ev: "reply_settling", settle_until: "2026-11-12T10:03:50.002Z" };
+}
+function ack(seq: number, msgId: string, agentId?: string, sha?: string): unknown {
+	return {
+		seq,
+		at: "t",
+		ev: "owner_ack",
+		ack_id: `ack-${seq}`,
+		client_ack_id: `cak-${seq}`,
+		by: "u",
+		target: {
+			msg_id: msgId,
+			...(agentId ? { agent_id: agentId } : {}),
+			...(sha ? { report_sha256: sha } : {}),
+		},
+	};
+}
+
+describe("Appendix A", () => {
+	it("reads `ambiguous{<reason>}` and keeps the reason; anything else is refused", () => {
+		expect(parseLogEvent(reply(1, "m", "a", "p", "ambiguous{second-close}"))).toMatchObject({
+			attribution: "ambiguous",
+			attributionReason: "second-close",
+		});
+		expect(parseLogEvent(reply(1, "m", "a", "p", "ambiguous"))).toBeNull();
+		expect(parseLogEvent(reply(1, "m", "a", "p", "ambiguous{x"))).toBeNull();
+	});
+
+	it("a settling reply is shown as confirming, is no For you item, and yields to its reply_ref", () => {
+		const raws = [
+			msg(1, "t1", ["dev"], "x"),
+			del(2, "t1", "dev", "delivered"),
+			settling(3, "t1", "dev", "pd"),
+		];
+		const log = logOf(raws);
+		expect(log.messages.get("t1")!.settling.get("dev")).toMatchObject({ promptId: "pd" });
+		expect(forYou(log)).toEqual([]);
+		log.add(parsed([reply(4, "t1", "dev", "pd")]));
+		expect(log.messages.get("t1")!.settling.size).toBe(0);
+		expect(forYou(log).map((i) => i.kind)).toEqual(["replied"]);
+	});
+
+	it("Done (owner_ack) clears exactly the item it names, on any device that reads the log", () => {
+		const raws = [
+			msg(1, "t1", ["dev", "qa"], "task"),
+			del(2, "t1", "dev", "delivered"),
+			del(3, "t1", "qa", "refused", { reason: "busy" }),
+			reply(4, "t1", "dev", "pd"),
+		];
+		const items = forYou(logOf(raws));
+		const replied = items.find((i) => i.kind === "replied")!;
+		const refused = items.find((i) => i.kind === "not-delivered")!;
+		expect(ackTargetOf(replied)).toEqual({
+			msgId: "t1",
+			agentId: "dev",
+			reportSha256: "ab".repeat(32),
+		});
+		expect(ackTargetOf(refused)).toEqual({ msgId: "t1", agentId: "qa" });
+		// The reply's Done: the refusal stays.
+		expect(
+			forYou(logOf([...raws, ack(5, "t1", "dev", "ab".repeat(32))])).map((i) => i.kind),
+		).toEqual(["not-delivered"]);
+		// The refusal's Done: the reply stays.
+		expect(forYou(logOf([...raws, ack(5, "t1", "qa")])).map((i) => i.kind)).toEqual(["replied"]);
+		// A Done for dev without the hash (a delivery item) never clears dev's reply.
+		expect(
+			forYou(logOf([...raws, ack(5, "t1", "dev")]))
+				.map((i) => i.kind)
+				.sort(),
+		).toEqual(["not-delivered", "replied"]);
+		// A Done naming another reply's hash clears nothing.
+		expect(forYou(logOf([...raws, ack(5, "t1", "dev", "cd".repeat(32))]))).toHaveLength(2);
+		// A message-wide Done (no agent) clears nothing: items are per agent.
+		expect(forYou(logOf([...raws, ack(5, "t1")]))).toHaveLength(2);
+	});
+
+	it("flattens GET …/messages/:msgId back into log lines", () => {
+		const lines = detailLines({
+			message: msg(10, "m-old", ["dev"], "Old task"),
+			deliveries: [
+				{
+					agentId: "dev",
+					state: "delivered",
+					events: [del(11, "m-old", "dev", "planned"), del(12, "m-old", "dev", "delivered")],
+				},
+			],
+			replies: [
+				{
+					agentId: "dev",
+					settling: settling(13, "m-old", "dev", "p"),
+					ref: reply(14, "m-old", "dev", "p"),
+					lateCloses: [],
+				},
+			],
+			acks: [ack(15, "m-old", "dev", "ab".repeat(32))],
+		});
+		const log = new ProjectLog();
+		log.addFetched(parsed(lines));
+		const m = log.messages.get("m-old")!;
+		expect(m.deliveries.get("dev")?.state).toBe("delivered");
+		expect(m.replies.get("dev")).toHaveLength(1);
+		expect(m.settling.size).toBe(0);
+		expect(forYou(log)).toEqual([]); // acked
 	});
 });

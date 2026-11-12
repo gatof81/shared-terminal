@@ -552,7 +552,7 @@
 }
 
 .tw-actions .tw-btn {
-	min-height: 36px;
+	min-height: 44px;
 	font-size: 0.85rem;
 }
 
@@ -746,4 +746,40 @@
 	align-items: center;
 	color: var(--c-accent);
 	text-decoration: none;
+}
+
+/* §4.1 settle window: the text is there, it isn't "the reply" yet. */
+.tw-bubble-settling {
+	opacity: 0.8;
+	border-style: dashed;
+}
+
+.tw-card {
+	padding: 0;
+}
+
+.tw-card-link {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	padding: 12px 14px 8px 16px;
+	color: var(--c-text);
+	text-decoration: none;
+}
+
+.tw-card-permission {
+	padding: 12px 14px 12px 16px;
+}
+
+.tw-card-actions {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+	padding: 0 10px 10px 16px;
+}
+
+.tw-done {
+	min-height: 44px;
+	font-size: 0.85rem;
 }

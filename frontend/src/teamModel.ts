@@ -103,7 +103,40 @@ export interface LogGrant {
 	taskMsgId: string | null;
 }
 
-export type LogEvent = LogMessage | LogDelivery | LogReplyRef | LogLateClose | LogGrant;
+/** §4.1: the settle window of a reply opened — informative, not a reply, eligible for nothing. */
+export interface LogReplySettling {
+	ev: "reply_settling";
+	seq: number;
+	ts: string;
+	msgId: string;
+	agentId: string;
+	sid: string;
+	cid: string;
+	promptId: string;
+	turnEndSeq: number | null;
+	reportSha256: string | null;
+	truncated: boolean;
+	settleUntil: string;
+}
+
+/** §4.3: the person marked something as dealt with. No effect but what the UI derives. */
+export interface LogOwnerAck {
+	ev: "owner_ack";
+	seq: number;
+	ts: string;
+	ackId: string;
+	clientAckId: string;
+	target: { msgId: string; agentId: string | null; reportSha256: string | null };
+}
+
+export type LogEvent =
+	| LogMessage
+	| LogDelivery
+	| LogReplyRef
+	| LogReplySettling
+	| LogLateClose
+	| LogGrant
+	| LogOwnerAck;
 
 const DELIVERY_STATES: ReadonlySet<string> = new Set([
 	"planned",
@@ -145,7 +178,8 @@ export function parseLogEvent(raw: unknown): LogEvent | null {
 	const seq = int(raw.seq);
 	const ev = str(raw.ev);
 	if (seq === null || ev === null) return null;
-	const ts = str(raw.ts) ?? "";
+	// Appendix A: every project event carries its time as `at` (ISO UTC).
+	const ts = str(raw.at) ?? "";
 	switch (ev) {
 		case "message": {
 			const msgId = nonEmpty(raw.msg_id);
@@ -192,9 +226,11 @@ export function parseLogEvent(raw: unknown): LogEvent | null {
 			const sid = nonEmpty(raw.sid);
 			const cid = nonEmpty(raw.cid);
 			const promptId = nonEmpty(raw.prompt_id);
-			const a = raw.attribution;
+			// Appendix A: "exact" | "failed" | "ambiguous{<reason>}".
+			const a = str(raw.attribution) ?? "";
+			const amb = /^ambiguous\{([a-z0-9-]*)\}$/.exec(a);
 			const attribution: Attribution | null =
-				a === "exact" || a === "ambiguous" || a === "failed" ? a : null;
+				a === "exact" || a === "failed" ? a : amb ? "ambiguous" : null;
 			if (!msgId || !agentId || !sid || !cid || !promptId || !attribution) return null;
 			return {
 				ev,
@@ -210,7 +246,44 @@ export function parseLogEvent(raw: unknown): LogEvent | null {
 				reportBytes: int(raw.report_bytes),
 				truncated: raw.truncated === true,
 				attribution,
-				attributionReason: nonEmpty(raw.attribution_reason) ?? nonEmpty(raw.reason),
+				attributionReason: amb ? nonEmpty(amb[1]) : null,
+			};
+		}
+		case "reply_settling": {
+			const msgId = nonEmpty(raw.msg_id);
+			const agentId = nonEmpty(raw.agent_id);
+			const sid = nonEmpty(raw.sid);
+			const cid = nonEmpty(raw.cid);
+			const promptId = nonEmpty(raw.prompt_id);
+			if (!msgId || !agentId || !sid || !cid || !promptId) return null;
+			return {
+				ev,
+				seq,
+				ts,
+				msgId,
+				agentId,
+				sid,
+				cid,
+				promptId,
+				turnEndSeq: int(raw.turn_end_seq),
+				reportSha256: nonEmpty(raw.report_sha256),
+				truncated: raw.truncated === true,
+				settleUntil: str(raw.settle_until) ?? "",
+			};
+		}
+		case "owner_ack": {
+			const ackId = nonEmpty(raw.ack_id);
+			const clientAckId = nonEmpty(raw.client_ack_id);
+			const t = isObj(raw.target) ? raw.target : null;
+			const msgId = t ? nonEmpty(t.msg_id) : null;
+			if (!ackId || !clientAckId || !t || !msgId) return null;
+			return {
+				ev,
+				seq,
+				ts,
+				ackId,
+				clientAckId,
+				target: { msgId, agentId: nonEmpty(t.agent_id), reportSha256: nonEmpty(t.report_sha256) },
 			};
 		}
 		case "reply_late_close": {
@@ -256,6 +329,8 @@ export interface MessageView {
 	deliveries: Map<string, DeliveryView>;
 	/** Per agent, in seq order (normally one; a second prompt id is possible). */
 	replies: Map<string, ReplyView[]>;
+	/** Per agent: a reply in its settle window (§4.1), until its reply_ref lands. */
+	settling: Map<string, LogReplySettling>;
 }
 
 /**
@@ -271,6 +346,8 @@ export class ProjectLog {
 	private seen = new Set<number>();
 	/** grant_id → task_msg_id, so a relay message finds its thread. */
 	readonly grantTask = new Map<string, string>();
+	/** Every owner_ack loaded (window or fetched). */
+	readonly acks: LogOwnerAck[] = [];
 	newestSeq = -1;
 	oldestSeq = Number.POSITIVE_INFINITY;
 
@@ -340,13 +417,22 @@ export class ProjectLog {
 		switch (e.ev) {
 			case "message":
 				if (!this.messages.has(e.msgId))
-					this.messages.set(e.msgId, { message: e, deliveries: new Map(), replies: new Map() });
+					this.messages.set(e.msgId, {
+						message: e,
+						deliveries: new Map(),
+						replies: new Map(),
+						settling: new Map(),
+					});
+				return;
+			case "owner_ack":
+				this.acks.push(e);
 				return;
 			case "grant":
 				if (e.taskMsgId) this.grantTask.set(e.grantId, e.taskMsgId);
 				return;
 			case "delivery":
 			case "reply_ref":
+			case "reply_settling":
 			case "reply_late_close": {
 				const m = this.messages.get(e.msgId);
 				if (!m) {
@@ -356,7 +442,11 @@ export class ProjectLog {
 					return;
 				}
 				if (e.ev === "delivery") applyDelivery(m, e);
-				else if (e.ev === "reply_ref") {
+				else if (e.ev === "reply_settling") {
+					if (!m.replies.get(e.agentId)?.some((r) => r.ref.promptId === e.promptId))
+						m.settling.set(e.agentId, e);
+				} else if (e.ev === "reply_ref") {
+					if (m.settling.get(e.agentId)?.promptId === e.promptId) m.settling.delete(e.agentId);
 					const list = m.replies.get(e.agentId) ?? [];
 					if (!list.some((r) => r.ref.promptId === e.promptId))
 						list.push({ ref: e, lateClose: false });
@@ -633,11 +723,19 @@ export interface ForYouItem {
  *    (delivered), or — for "unsure" — when the agent's reply to it arrives
  *    (then it evidently did arrive).
  *
- * There is no "done" without a reply: that needs an owner event in the log
- * (requested of B on #587); it is never simulated with local state.
+ * "Done" is the person's `owner_ack` (§4.3), in the log like everything
+ * else — so it holds on every device; it is never simulated with local
+ * state. It clears exactly the item it names.
  */
 export function forYou(log: ProjectLog): ForYouItem[] {
 	const quoted = new Set<string>();
+	// "Done" (owner_ack, §4.3), keyed exactly: a reply by msg + agent +
+	// report hash; a delivery item (or a failed turn, which has no hash) by
+	// msg + agent with no hash. An ack for one never clears another.
+	const acked = new Set<string>();
+	for (const a of log.acks)
+		if (a.target.agentId)
+			acked.add(`${a.target.msgId}\n${a.target.agentId}\n${a.target.reportSha256 ?? ""}`);
 	// Later deliveries to an agent, per thread: the clearing evidence.
 	const laterOk = new Map<string, number>(); // `${root}\n${agent}` → newest delivered seq
 	for (const m of log.messages.values()) {
@@ -665,6 +763,7 @@ export function forYou(log: ProjectLog): ForYouItem[] {
 		for (const [agentId, list] of m.replies) {
 			for (const r of list) {
 				if (quoted.has(`${r.ref.msgId}\n${agentId}\n${r.ref.promptId}`)) continue;
+				if (acked.has(`${r.ref.msgId}\n${agentId}\n${r.ref.reportSha256 ?? ""}`)) continue;
 				out.push({
 					kind: "replied",
 					key: `replied\n${m.message.msgId}\n${agentId}\n${r.ref.promptId}`,
@@ -684,6 +783,7 @@ export function forYou(log: ProjectLog): ForYouItem[] {
 			const later = laterOk.get(`${root}\n${d.agentId}`) ?? -1;
 			if (later > m.message.seq) continue;
 			if (tone === "unsure" && (m.replies.get(d.agentId)?.length ?? 0) > 0) continue;
+			if (acked.has(`${m.message.msgId}\n${d.agentId}\n`)) continue;
 			out.push({
 				kind: tone,
 				key: `${tone}\n${m.message.msgId}\n${d.agentId}`,
@@ -698,6 +798,20 @@ export function forYou(log: ProjectLog): ForYouItem[] {
 		}
 	}
 	return out.sort((a, b) => b.seq - a.seq);
+}
+
+/** The `owner_ack` target that marks exactly this item as done. */
+export function ackTargetOf(it: ForYouItem): {
+	msgId: string;
+	agentId: string;
+	reportSha256?: string;
+} {
+	const t: { msgId: string; agentId: string; reportSha256?: string } = {
+		msgId: it.msgId,
+		agentId: it.agentId,
+	};
+	if (it.reply?.reportSha256) t.reportSha256 = it.reply.reportSha256;
+	return t;
 }
 
 // ── Reply text (verified against the log's hash) ────────────────────────────

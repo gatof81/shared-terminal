@@ -20,7 +20,12 @@
  * owner event that would make it true on every device (#587).
  */
 
-import { type AgentListEntry, type ProjectMessageBody, postProjectMessage } from "./api.js";
+import {
+	type AgentListEntry,
+	type ProjectMessageBody,
+	postProjectAck,
+	postProjectMessage,
+} from "./api.js";
 import { explainCode, validateText } from "./composerText.js";
 import { clock as clockText } from "./conversationModel.js";
 import { relativeDate } from "./format.js";
@@ -33,6 +38,7 @@ import {
 import { navigateProject, type ProjectPanel, projectRouteHash, routeHash } from "./router.js";
 import { logStore, type ProjectLogStore, resetLogStores } from "./teamLog.js";
 import {
+	ackTargetOf,
 	buildThreads,
 	type DeliveryView,
 	deliveryText,
@@ -40,6 +46,7 @@ import {
 	type ForYouItem,
 	forYou,
 	type LogReplyRef,
+	type LogReplySettling,
 	MAX_RECIPIENTS,
 	type MessageView,
 	mentionAt,
@@ -528,7 +535,7 @@ class Workspace {
 		let c = this.composers.get(key);
 		if (!c) {
 			c = new Composer(this.projectId, mode, rootId, (msgId) => {
-				void this.store.refresh();
+				void this.store.refreshAfterWrite();
 				if (mode === "task") go(this.projectId, { kind: "thread", msgId });
 			});
 			this.composers.set(key, c);
@@ -570,7 +577,11 @@ class Workspace {
 			const v = this.agents.presence.get(a.agentId);
 			if (v?.tone === "attention") out.push({ kind: "permission", agent: a, view: v });
 		}
-		out.push(...forYou(this.store.log));
+		const logItems = forYou(this.store.log);
+		// A "Done" whose ack the log now shows: its item is gone, so is its state.
+		const live = new Set(logItems.map((i) => i.key));
+		for (const k of [...this.acks.keys()]) if (!live.has(k)) this.acks.delete(k);
+		out.push(...logItems);
 		return out;
 	}
 
@@ -614,10 +625,13 @@ class Workspace {
 		const href = panelHref(this.projectId, { kind: "thread", msgId: it.rootId });
 		const open = () => go(this.projectId, { kind: "thread", msgId: it.rootId });
 		const who = handleOf(this.agents, it.agentId);
-		const c = link("", `tw-card tw-card-${it.kind}`, href, open);
+		// The card is a box holding a link and its own actions (a button can't
+		// sit inside a link).
+		const c = el("div", `tw-card tw-card-${it.kind}`);
+		const main = link("", "tw-card-link", href, open);
 		if (it.kind === "replied" && it.reply) {
 			const r = it.reply;
-			c.append(
+			main.append(
 				el(
 					"b",
 					undefined,
@@ -626,7 +640,7 @@ class Workspace {
 			);
 			if (r.attribution === "exact") {
 				const t = this.store.replyText(r);
-				c.append(
+				main.append(
 					el(
 						"span",
 						"tw-card-quote",
@@ -634,22 +648,92 @@ class Workspace {
 					),
 				);
 			} else if (r.attribution === "ambiguous") {
-				c.append(
+				main.append(
 					el("span", "tw-card-sub", "A reply that couldn't be tied exactly to your message"),
 				);
 			}
 		} else if (it.delivery) {
-			c.append(
+			main.append(
 				el(
 					"b",
 					undefined,
 					it.kind === "not-delivered" ? `Not delivered to ${who}` : `Not sure it arrived · ${who}`,
 				),
 			);
-			c.append(el("span", "tw-card-sub", deliveryText(it.delivery)));
+			main.append(el("span", "tw-card-sub", deliveryText(it.delivery)));
 		}
-		c.append(el("span", "tw-card-meta", `${threadTitle} · ${relativeDate(it.ts)}`));
+		main.append(el("span", "tw-card-meta", `${threadTitle} · ${relativeDate(it.ts)}`));
+		c.append(main, this.doneControl(it));
 		return c;
+	}
+
+	// ── Done (owner_ack, §4.3) ──
+
+	/** In-flight / unanswered "Done" per item key: one click, one clientAckId. */
+	private acks = new Map<
+		string,
+		{ clientAckId: string; phase: "sending" | "unknown" | "refused"; message?: string }
+	>();
+
+	private doneControl(it: ForYouItem): HTMLElement {
+		const box = el("div", "tw-card-actions");
+		const st = this.acks.get(it.key);
+		const send = (clientAckId: string) => void this.ack(it, clientAckId);
+		if (!st) {
+			box.append(
+				button(
+					"Done",
+					"tw-btn tw-btn-ghost tw-done",
+					() => send(crypto.randomUUID()),
+					"Mark as done — on every device",
+				),
+			);
+		} else if (st.phase === "sending") {
+			const b = button("Marking…", "tw-btn tw-btn-ghost tw-done", () => {});
+			b.disabled = true;
+			box.append(b);
+		} else if (st.phase === "unknown") {
+			box.append(
+				el("span", "tw-card-sub", "No answer: it may or may not be marked."),
+				// The same id again: the server answers from the log, never writes twice.
+				button("Check", "tw-btn tw-btn-ghost tw-done", () => send(st.clientAckId)),
+			);
+		} else {
+			box.append(
+				el("span", "tw-card-sub", st.message ?? "Couldn't mark it as done."),
+				button("Done", "tw-btn tw-btn-ghost tw-done", () => send(crypto.randomUUID())),
+			);
+		}
+		return box;
+	}
+
+	private async ack(it: ForYouItem, clientAckId: string): Promise<void> {
+		this.acks.set(it.key, { clientAckId, phase: "sending" });
+		this.render();
+		const a = await postProjectAck(this.projectId, { clientAckId, target: ackTargetOf(it) });
+		if (a.ok) {
+			// The card goes when the log shows the ack (on every device); until
+			// then it stays "Marking…" (pruned in render once the item is gone).
+			await this.store.refreshAfterWrite();
+		} else if (a.code === "stale") {
+			this.acks.delete(it.key);
+		} else if (
+			a.code === "network" ||
+			a.code === "bad-answer" ||
+			(a.status >= 500 && a.code === "")
+		) {
+			this.acks.set(it.key, { clientAckId, phase: "unknown" });
+		} else {
+			this.acks.set(it.key, {
+				clientAckId,
+				phase: "refused",
+				message:
+					a.status === 404
+						? "That message no longer exists."
+						: `Couldn't mark it as done (${a.code || a.status}).`,
+			});
+		}
+		this.render();
 	}
 
 	private threadTitleOf(rootId: string): string {
@@ -772,6 +856,7 @@ class Workspace {
 			if (tone === "not-delivered") return `Not delivered to ${who}`;
 			if (tone === "unsure") return `Not sure it arrived · ${who}`;
 			if ((last.replies.get(id)?.length ?? 0) > 0) continue;
+			if (last.settling.has(id)) return `${who} replied · confirming…`;
 			if (this.agents.presence.get(id)?.tone === "working") return `${who} is working`;
 			return `Waiting for ${who}`;
 		}
@@ -847,10 +932,13 @@ class Workspace {
 						seq: r.ref.seq,
 						node: this.replyRow(m, agentId, r.ref, r.lateClose, composer),
 					});
+			for (const [agentId, st] of m.settling)
+				rows.push({ seq: st.seq, node: this.settlingRow(agentId, st) });
 			for (const agentId of m.message.to) {
 				const d = m.deliveries.get(agentId);
 				if (
 					d?.state === "delivered" &&
+					!m.settling.has(agentId) &&
 					!(m.replies.get(agentId)?.length ?? 0) &&
 					m === log.messages.get(ids[ids.length - 1]!)
 				)
@@ -977,6 +1065,30 @@ class Workspace {
 			);
 			li.append(actions);
 		}
+		return li;
+	}
+
+	/**
+	 * §4.1: the reply arrived and is being confirmed (≤ 10 s). Its text is
+	 * shown, verified like a reply's, but it isn't "the reply" yet: no
+	 * Reply…, nothing in For you, nothing derived from it.
+	 */
+	private settlingRow(agentId: string, st: LogReplySettling): HTMLElement {
+		const li = el("li", "tw-row tw-row-agent tw-row-settling");
+		li.style.setProperty("--tw-hue", String(hueOf(agentId)));
+		const meta = el("div", "tw-meta");
+		meta.append(
+			avatar(this.agents, agentId, true),
+			el("b", undefined, handleOf(this.agents, agentId)),
+			el("span", "tw-muted", " · reply received, confirming…"),
+		);
+		li.append(meta);
+		const t = this.store.replyText(st);
+		li.append(
+			t.kind === "ok"
+				? el("div", "tw-bubble tw-bubble-agent tw-bubble-settling", t.text)
+				: el("div", "tw-bubble tw-bubble-note", replyStateWords(t.kind, st.reportSha256)),
+		);
 		return li;
 	}
 

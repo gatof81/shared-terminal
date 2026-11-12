@@ -22,7 +22,12 @@
  * earlier account; the generation covers the store's own lifetime.
  */
 
-import { fetchProjectEvents, fetchProjectMessage, readConversationEvent } from "./api.js";
+import {
+	fetchProjectEvents,
+	fetchProjectMessage,
+	type ProjectMessageDetail,
+	readConversationEvent,
+} from "./api.js";
 import {
 	hex,
 	type LogEvent,
@@ -32,11 +37,30 @@ import {
 	type ReplyTextState,
 } from "./teamModel.js";
 
+/** What locates a reply's text in a capture: a reply_ref, or a reply_settling (same fields). */
+export type ReplyPointer = Pick<
+	LogReplyRef,
+	"sid" | "cid" | "turnEndSeq" | "reportSha256" | "truncated"
+>;
+
 export const PAGE_LIMIT = 200;
 /** Backward pages a single refresh may read to close a gap. */
 export const GAP_FILL_PAGES = 5;
 /** Missing originals fetched by id per pass (each is one request). */
 export const MISSING_PER_PASS = 8;
+
+/** The by-id answer flattened back to log lines, so one fold reads both. */
+export function detailLines(d: ProjectMessageDetail): unknown[] {
+	const out: unknown[] = [d.message];
+	for (const del of d.deliveries) if (Array.isArray(del.events)) out.push(...del.events);
+	for (const r of d.replies) {
+		if (r.settling) out.push(r.settling);
+		if (r.ref) out.push(r.ref);
+		if (Array.isArray(r.lateCloses)) out.push(...r.lateCloses);
+	}
+	out.push(...d.acks);
+	return out;
+}
 
 function parseAll(raw: unknown[]): LogEvent[] {
 	const out: LogEvent[] = [];
@@ -60,6 +84,12 @@ export class ProjectLogStore {
 	loaded = false;
 	/** Events between the loaded window and the newest page are not loaded yet. */
 	gapBefore: number | null = null;
+	/**
+	 * Where "Earlier threads" continues: the server's `oldestSeq` of the
+	 * oldest page read (the last line it examined — with unknown kinds
+	 * skipped by the parser, the oldest PARSED event can be newer).
+	 */
+	private olderCursor: number | null = null;
 	/** The newest seq loaded before the gap opened (what the gap ends at). */
 	private gapFloor: number | null = null;
 	error: LoadError | null = null;
@@ -92,6 +122,7 @@ export class ProjectLogStore {
 		this.loaded = false;
 		this.gapBefore = null;
 		this.gapFloor = null;
+		this.olderCursor = null;
 		this.error = null;
 		this.unreachable.clear();
 		this.refreshing = null;
@@ -109,6 +140,15 @@ export class ProjectLogStore {
 		return this.refreshing;
 	}
 
+	/**
+	 * A read that STARTS after a write the caller just made (a send, an
+	 * ack): a refresh already in flight left before it and may not show it.
+	 */
+	async refreshAfterWrite(): Promise<void> {
+		if (this.refreshing) await this.refreshing;
+		await this.refresh();
+	}
+
 	private async doRefresh(): Promise<void> {
 		const gen = this.gen;
 		const knownNewest = this.log.newestSeq;
@@ -124,7 +164,8 @@ export class ProjectLogStore {
 		const firstLoad = !this.loaded;
 		this.log.add(events);
 		this.loaded = true;
-		const pageOldest = minSeq(events);
+		if (firstLoad) this.olderCursor = a.body.oldestSeq ?? minSeq(events);
+		const pageOldest = a.body.oldestSeq ?? minSeq(events);
 		if (firstLoad) {
 			this.hasOlder = a.body.hasMore;
 		} else if (pageOldest !== null && pageOldest > knownNewest + 1 && a.body.hasMore) {
@@ -143,7 +184,7 @@ export class ProjectLogStore {
 			if (gen !== this.gen || !a.ok) return;
 			const events = parseAll(a.body.events);
 			this.log.add(events);
-			const oldest = minSeq(events);
+			const oldest = a.body.oldestSeq ?? minSeq(events);
 			if (oldest === null || oldest <= knownNewest + 1 || !a.body.hasMore) {
 				this.gapBefore = null;
 				this.gapFloor = null;
@@ -181,11 +222,13 @@ export class ProjectLogStore {
 
 	private async doLoadOlder(): Promise<void> {
 		const gen = this.gen;
-		const before = this.log.oldestSeq;
+		const before = this.olderCursor ?? this.log.oldestSeq;
 		if (!Number.isFinite(before)) return;
 		const a = await fetchProjectEvents(this.projectId, { before, limit: PAGE_LIMIT });
 		if (gen !== this.gen || !a.ok) return;
-		this.log.add(parseAll(a.body.events));
+		const events = parseAll(a.body.events);
+		this.log.add(events);
+		this.olderCursor = a.body.oldestSeq ?? minSeq(events) ?? before;
 		this.hasOlder = a.body.hasMore;
 		this.changed();
 		void this.resolveMissing();
@@ -214,7 +257,7 @@ export class ProjectLogStore {
 			const id = ids[i]!;
 			this.fetchingIds.delete(id);
 			if (a.ok) {
-				this.log.addFetched(parseAll(a.body.events));
+				this.log.addFetched(parseAll(detailLines(a.body)));
 				added = true;
 			} else if (a.status === 404) {
 				this.unreachable.add(id);
@@ -228,7 +271,7 @@ export class ProjectLogStore {
 	// ── Reply text ──────────────────────────────────────────────────────────
 
 	/** The verified text of a reply; starts the read on first ask. */
-	replyText(ref: LogReplyRef): ReplyTextState {
+	replyText(ref: ReplyPointer): ReplyTextState {
 		if (ref.turnEndSeq === null || ref.reportSha256 === null) return { kind: "gone" };
 		const key = `${ref.sid}\n${ref.cid}\n${ref.turnEndSeq}`;
 		const known = this.replyTexts.get(key);
@@ -238,7 +281,7 @@ export class ProjectLogStore {
 		return { kind: "loading" };
 	}
 
-	private async readReply(key: string, ref: LogReplyRef): Promise<void> {
+	private async readReply(key: string, ref: ReplyPointer): Promise<void> {
 		const gen = this.gen;
 		let state: ReplyTextState;
 		const a = await readConversationEvent(ref.sid, ref.cid, ref.turnEndSeq as number);
@@ -270,7 +313,7 @@ export class ProjectLogStore {
 	}
 
 	/** Forget a failed read so the next render asks again. */
-	retryReply(ref: LogReplyRef): void {
+	retryReply(ref: ReplyPointer): void {
 		if (ref.turnEndSeq === null) return;
 		this.replyTexts.delete(`${ref.sid}\n${ref.cid}\n${ref.turnEndSeq}`);
 		this.changed();

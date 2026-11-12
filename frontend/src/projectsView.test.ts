@@ -10,6 +10,7 @@ const api = vi.hoisted(() => ({
 	fetchProjectEvents: vi.fn(),
 	fetchProjectMessage: vi.fn(),
 	postProjectMessage: vi.fn(),
+	postProjectAck: vi.fn(),
 	readConversationEvent: vi.fn(),
 	isLoggedIn: vi.fn(() => true),
 	fetchProjects: vi.fn(),
