@@ -98,7 +98,6 @@
 		justify-content: center;
 		min-height: 44px;
 		margin: 0;
-		border: 1px solid transparent;
 		border-radius: 22px;
 		box-shadow: none;
 	}
@@ -1113,18 +1112,20 @@
 }
 
 /* Phones: "+ New task" is a full-width bar at the bottom of Now, on a band
-   of the page background — a floating pill on the right covered the cards'
-   right-hand "Done" buttons. Wide layouts reset it (static, in place). */
+   of page background — a floating pill on the right covered the cards'
+   right-hand "Done" buttons. The bands are shadows, not borders: they
+   take no taps and keep the focus ring on the visible button. z-index: the
+   thread rows' avatars (position: relative, later in the DOM) would paint
+   over a sticky element without one. Wide layouts reset it. */
 .tw-new {
 	align-self: stretch;
-	bottom: 0;
+	bottom: 12px;
+	z-index: 1;
 	margin: 0 -16px;
 	border-radius: 0;
-	box-shadow: 0 -10px 14px var(--c-bg);
-	border-top: 10px solid var(--c-bg);
-	border-bottom: 12px solid var(--c-bg);
-	background-clip: padding-box;
-	/* 52 px of visible button inside the two background bands. */
-	box-sizing: border-box;
-	min-height: 74px;
+	box-shadow:
+		0 -10px 0 var(--c-bg),
+		0 12px 0 var(--c-bg),
+		0 -22px 14px var(--c-bg);
+	min-height: 52px;
 }
