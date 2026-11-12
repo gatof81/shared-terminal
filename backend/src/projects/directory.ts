@@ -858,6 +858,66 @@ export class ProjectDirectory {
 	}
 
 	/**
+	 * Ownership of a project for the project conversation's reads (§5): owner
+	 * only, a foreign or missing project is the same `false`. Uncached here;
+	 * the caller may cache a positive answer (ownership never changes).
+	 */
+	async ownsProject(ownerId: string, projectId: string): Promise<boolean> {
+		if (!isDirectoryId(projectId)) return false;
+		const r = await d1Query<{ one: number }>(
+			"SELECT 1 AS one FROM projects WHERE project_id = ? AND owner_user_id = ?",
+			[projectId, ownerId],
+		);
+		return r.results.length > 0;
+	}
+
+	/**
+	 * The project conversation's binding reads (PROJECT_CONVERSATION.md §3.2,
+	 * §3.3 a/c0): every agent of the project with its live binding, in ONE
+	 * uncached statement — a send must see D1 as it is at that moment, never
+	 * the 30 s owner cache above. `null` ⇔ no such project for this owner.
+	 */
+	async projectBindings(
+		ownerId: string,
+		projectId: string,
+	): Promise<Map<
+		string,
+		{ removed: boolean; binding: { bindingId: string; epoch: number; sessionId: string } | null }
+	> | null> {
+		if (!isDirectoryId(projectId)) return null;
+		const r = await d1Query<{
+			agent_id: string | null;
+			removed_at: string | null;
+			binding_id: string | null;
+			epoch: number | null;
+			st_session_id: string | null;
+		}>(
+			`SELECT a.agent_id, a.removed_at, b.binding_id, b.epoch, b.st_session_id
+			 FROM projects p
+			 LEFT JOIN project_agents a ON a.project_id = p.project_id
+			 LEFT JOIN agent_bindings b ON b.agent_id = a.agent_id AND b.state IN ${LIVE}
+			 WHERE p.project_id = ? AND p.owner_user_id = ?`,
+			[projectId, ownerId],
+		);
+		if (r.results.length === 0) return null;
+		const out = new Map<
+			string,
+			{ removed: boolean; binding: { bindingId: string; epoch: number; sessionId: string } | null }
+		>();
+		for (const row of r.results) {
+			if (row.agent_id === null) continue;
+			out.set(row.agent_id, {
+				removed: row.removed_at !== null,
+				binding:
+					row.binding_id !== null && row.epoch !== null && row.st_session_id !== null
+						? { bindingId: row.binding_id, epoch: row.epoch, sessionId: row.st_session_id }
+						: null,
+			});
+		}
+		return out;
+	}
+
+	/**
 	 * Hard-delete guard (03 §2.1): a session with a live binding is refused
 	 * with 409 `agent-active` — the owner removes the agent first. Uncached
 	 * and fail-closed: a failed read refuses the delete (500), it never lets

@@ -33,6 +33,14 @@ export const WS_PATH_PREFIXES: readonly string[] = [
 	"/ws/conversation/",
 ];
 
+/**
+ * D1 — `/ws/project/<pid>` (docs/PROJECT_CONVERSATION.md §5). NOT in the list
+ * above: it is admitted only when the project conversation is on (passed as
+ * `extraPathPrefixes`), so with the flag off the upgrade filter answers
+ * exactly as before (404).
+ */
+export const PROJECT_WS_PREFIX = "/ws/project/";
+
 /** Does `url` (the raw request-target of an upgrade) name an app WebSocket? */
 export function isWsPath(url: string): boolean {
 	return WS_PATH_PREFIXES.some((prefix) => url.startsWith(prefix));
@@ -49,6 +57,8 @@ export interface WsUpgradeDeps {
 	trustProxyValue: TrustProxyValue | undefined;
 	corsOrigins: readonly string[];
 	nodeEnv: string | undefined;
+	/** Paths admitted besides WS_PATH_PREFIXES — only those of features that are on. */
+	extraPathPrefixes?: readonly string[];
 }
 
 export type WsUpgradeHandler = (req: IncomingMessage, socket: Duplex, head: Buffer) => void;
@@ -117,7 +127,7 @@ export function createWsUpgradeHandler(deps: WsUpgradeDeps): WsUpgradeHandler {
 			// existing /ws/* path mustn't also run.
 			if (portDispatcher.handleUpgrade(req, socket, head)) return;
 			const url = req.url ?? "";
-			if (!isWsPath(url)) {
+			if (!isWsPath(url) && !(deps.extraPathPrefixes ?? []).some((p) => url.startsWith(p))) {
 				// socket.end() drains the write buffer before closing, so the
 				// 404 line actually reaches the client. socket.write() +
 				// socket.destroy() (the previous form) issues immediate

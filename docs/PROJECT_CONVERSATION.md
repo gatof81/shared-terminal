@@ -1,7 +1,7 @@
 # Conversación de proyecto por el Composer (D1–D3)
 
-Estado: **contrato propuesto, v0.3, para aprobación del responsable** (B, 2026-11-11). Nada de lo
-que sigue está implementado.
+Estado: **contrato vinculante, v0.3** (aprobado por el responsable el 2026-11-12), con las dos
+precisiones de v0.3.1 propuestas en la PR de D1-b. D1-a está en main; D1-b, D2 y D3 no.
 
 - **v0.1** pasó una revisión adversarial independiente: 2 BLOCKER, 9 SHOULD-FIX y 1 NIT, todos
   incorporados.
@@ -17,6 +17,11 @@ que sigue está implementado.
     (§3.3 c0);
   - idempotencia por el cuerpo canónico normalizado (§3.4);
   - y los ajustes de la revisión independiente del head (diario antes del staging, relevo inicial por el camino normal, aviso de la UI sin comparar relojes, tablas al día).
+- **v0.3.1** (revisión del responsable sobre D1-b) precisa dos puntos, sin cambiar garantías:
+  - el punto de no retorno de un envío es **d0** (§3.3): un lock perdido o un escritor envenenado ya
+    detectados impiden la llamada al Composer aunque el `sending` esté en disco (T2b);
+  - la ventana de asentamiento se mide solo en el reloj monotónico, desde que **este proceso** vio
+    llegar el `turn_end` en vivo; un `turn_end` que no vio en vivo nunca da `exact` (§4.1, T20e).
 
 Decisión que lo origina (responsable, 2026-11-11, sobre la evaluación de B en #512 a las 16:57Z):
 
@@ -305,6 +310,8 @@ POST /api/projects/:pid/conversation/messages
           escritor no poisoned
           ESCRIBIR delivery{sending, artifacts_placed?, binding_verified_at: t_c} + fsync  ← la intención
      ── fin de S3 ──
+       d0. lock de escritor tomado y no perdido, escritor no poisoned  ← PUNTO DE NO RETORNO
+           (comprobado en la misma ejecución síncrona que la llamada de d; si no ⇒ no se llama)
        d. ComposerService.send({sid, cid, body: {text, clientMessageId: composer_client_message_id}})
           (sin el lock del proyecto: puede tardar hasta T_http)
      ── sección crítica S4, lock project:<pid> ──
@@ -346,6 +353,12 @@ POST /api/projects/:pid/conversation/messages
   `poisoned` (§2). Al reabrir, según lo que haya llegado al disco, la entrega aparece como `planned`
   (⇒ `not-sent{persist-failed}`) o como `sending` (⇒ `uncertain{orphaned}`). **En ningún caso se
   llama al Composer.**
+- **Si el lock se pierde (o el escritor se envenena) después de 3c,** la pérdida que ya se detectó
+  al llegar a d0 impide la llamada: nada inicia un efecto nuevo tras una pérdida conocida (§2.1 punto 3).
+  El `sending` queda en disco (sin lock no se escribe nada), la respuesta de esa entrega es
+  `uncertain{persist-failed}` y al reabrir es `uncertain{orphaned}`, con 0 llamadas. Una pérdida que
+  todavía no se detectó en d0 es el residual de §2.1 punto 4; en ese caso el envío ocurre una vez y
+  S4 no puede escribir (como en 3e).
 - **Si falla la del paso 3e,** el envío ocurrió pero su resultado no quedó escrito. La entrega queda en
   `sending` y la recuperación la trata como huérfana (§3.4).
 - **T_http.** El POST tiene un único presupuesto de 30 s, medido desde la llegada. Las entregas que
@@ -404,7 +417,10 @@ Un observador del backend sigue las conversaciones con entregas `delivered` que 
 
 - **Cuándo escribe un `reply_ref`.** **No** al recibir el `turn_end` cuyo `prompt_id` es el `promptId`
   que el Composer acusó, sino cuando **termina su ventana de asentamiento**: `T_SETTLE` = 10 s desde que
-  el backend recibió ese `turn_end` (reloj monotónico del proceso). Es la misma ventana en la que
+  el backend recibió ese `turn_end` (reloj monotónico del proceso). Se mide desde el momento en que
+  este proceso lo vio llegar en vivo, que es igual o posterior a su recepción, así que la ventana
+  observada siempre cubre los 10 s. El `ts` de la captura y la hora del sistema son de pared: un salto
+  del reloj solo puede alargar la ventana, nunca acortarla ni decidir un `exact`. Es la misma ventana en la que
   CONVERSATION.md §4.6 admite otro `Stop` en el mismo `prompt_id`.
   - Al empezar se escribe `reply_settling{settle_until}` (informativo). Mientras corre, la entrega
     muestra «respuesta recibida, confirmando…» con el texto de la captura, y **no es elegible para
@@ -420,8 +436,8 @@ Un observador del backend sigue las conversaciones con entregas `delivered` que 
     eventos que llegan durante la ventana deciden la atribución, pero no forman parte de la respuesta.
     Para ver por qué quedó ambigua, la UI enlaza el Chat del agente.
 - **El asentamiento tiene que observarse entero.** Si el proceso que recibió el `turn_end` no siguió
-  vivo durante los 10 s (un reinicio en medio, o un `turn_end` que se encuentra al recuperar), el
-  `reply_ref` es `ambiguous{settle-unobserved}`. El texto se sigue mostrando, marcado «sin confirmar».
+  vivo durante los 10 s (un reinicio en medio, un `turn_end` que se encuentra al recuperar, o uno que
+  este proceso no vio llegar en vivo), el `reply_ref` es `ambiguous{settle-unobserved}`. El texto se sigue mostrando, marcado «sin confirmar».
 - **`attribution: exact` exige todas estas condiciones.** Se miran sobre los eventos persistidos de
   `(sid, cid)`, en orden de `seq`, dentro de la **ventana**: desde el `user_prompt` con `P` que el
   Composer acusó (`P` = `promptId`) hasta el primer cierre (`turn_end` o `turn_failed`) con `P`.
@@ -888,6 +904,7 @@ el sistema de archivos real (carreras con `rename`/`symlink`).
 | --- | --- | --- |
 | T1 | fallo de `fsync` en la escritura de S1 | 503, sin `message`, sin llamada al Composer |
 | T2 | muerte del proceso tras 3c (`sending` escrito, Composer no llamado o a medias) | al reabrir: `uncertain{orphaned}`, **0** llamadas nuevas al Composer |
+| T2b | lock de escritor perdido (o escritor envenenado) tras 3c y antes de d | 0 llamadas al Composer; esa entrega `uncertain{persist-failed}`, las siguientes `not-sent`; al reabrir, `uncertain{orphaned}` y 0 llamadas |
 | T3 | muerte tras 3d antes de 3e | igual a T2; si el Composer resolvió, `settled` por su evidencia, nunca reenvío |
 | T4 | fallo de `write`/`fsync` en 3c (con 2 destinatarios) | ninguna de las dos se envía; escritor `poisoned`; al reabrir, `not-sent{persist-failed}` o `uncertain{orphaned}`, nunca un envío |
 | T4b | línea rota al final / línea ilegible en medio | truncada y recuperada / registro `unverifiable`, 409 a envíos |
@@ -929,6 +946,7 @@ el sistema de archivos real (carreras con `rename`/`symlink`).
 | T20b | segundo `turn_end` con `P` a los 9 s del primero | `ambiguous{second-close}`, ningún relevo; el Composer no se llama durante los 10 s |
 | T20c | segundo cierre con `P` a los 11 s, con el relevo ya enviado | `reply_late_close` y `ended{reply-late-close}`; ningún relevo más |
 | T20d | reinicio a los 5 s del `turn_end` | `ambiguous{settle-unobserved}`, ningún relevo |
+| T20e | salto del reloj del sistema (+1 h, o un `ts` en el pasado) durante la ventana; `turn_end` no visto en vivo | ningún `exact` antes de 10 s monotónicos en el proceso; un segundo cierre dentro de ellos ⇒ `ambiguous{second-close}`; no visto en vivo ⇒ `ambiguous{settle-unobserved}` |
 | T21 | reinicio con permiso vivo | `ended{interrupted}`; ningún relevo tras el arranque |
 | T22 | bandera de origen ≠ `true` al crear / durante | 409 `origin-binding-off` / `ended{origin-binding-off}` |
 | T22b | dos backends contra el mismo `WORKSPACE_ROOT` | el segundo responde 503 `project-writer-unavailable`, no escribe ni envía; al matar el primero con SIGKILL, el lock queda libre y el siguiente arranque lo toma |

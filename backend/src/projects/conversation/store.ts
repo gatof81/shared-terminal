@@ -50,7 +50,11 @@ export interface CriticalTx {
 interface OpenProject {
 	log: ProjectLog;
 	state: Folded;
+	/** Every acknowledged line, in seq order: reads are served from here (≤ the log's cap). */
+	lines: LogLine[];
 }
+
+export type AppendListener = (projectId: string, lines: readonly LogLine[]) => void;
 
 export interface StoreOptions {
 	workspaceRoot: string;
@@ -66,6 +70,7 @@ export interface StoreOptions {
 export class ProjectConversationStore {
 	private readonly open = new Map<string, OpenProject>();
 	private readonly chains = new Map<string, Promise<unknown>>();
+	private readonly listeners = new Set<AppendListener>();
 	private lost = false;
 	private closed = false;
 
@@ -107,6 +112,19 @@ export class ProjectConversationStore {
 
 	private lockHeld = (): boolean => !this.lost && (this.lock?.held() ?? false);
 
+	/**
+	 * Synchronous: may an effect start NOW for this project? False once the
+	 * writer lock is known lost (§2.1 point 3) or the project's log is
+	 * poisoned (§2): "no se envía nada más". The caller checks it with no
+	 * await between this and the effect's call — the point of no return
+	 * (§3.3 d0) — so a loss detected before the call stops it.
+	 */
+	mayEffect(pid: string): boolean {
+		if (this.closed || this.unavailable || !this.lockHeld()) return false;
+		const p = this.open.get(pid);
+		return p !== undefined && !p.log.isPoisoned;
+	}
+
 	/** Runs `fn` under the project's lock with its folded state (§3.3). */
 	async critical<T>(pid: string, fn: (tx: CriticalTx) => Promise<T>): Promise<T> {
 		if (!PROJECT_ID_RE.test(pid)) throw new Error(`invalid project id ${JSON.stringify(pid)}`);
@@ -133,6 +151,8 @@ export class ProjectConversationStore {
 			append: async (events, o) => {
 				const lines = await p.log.append(events, o);
 				fold(p.state, lines);
+				p.lines.push(...lines);
+				this.emit(pid, lines);
 				return lines;
 			},
 		};
@@ -166,7 +186,12 @@ export class ProjectConversationStore {
 				truncatedBytes,
 				interleavedWriters: interleavedWriters(lines),
 			});
-			if (events.length > 0) fold(state, await log.append(events, { allowMargin: true }));
+			const all = [...lines];
+			if (events.length > 0) {
+				const written = await log.append(events, { allowMargin: true });
+				fold(state, written);
+				all.push(...written);
+			}
 			if (marker) {
 				// After the recovery batch is durable. A death before this rename
 				// re-runs the restore rules next time; they are idempotent by
@@ -180,7 +205,7 @@ export class ProjectConversationStore {
 					`[projects] ${pid}: restored log opened under the restore rules (${marker.restoreId})`,
 				);
 			}
-			const p = { log, state };
+			const p = { log, state, lines: all };
 			if (this.lost) log.poison("writer lock lost");
 			this.open.set(pid, p);
 			return p;
@@ -188,6 +213,53 @@ export class ProjectConversationStore {
 			await log.close();
 			throw err;
 		}
+	}
+
+	/** Live lines after each durable append (the project WS, §5). Returns the unsubscribe. */
+	onAppend(listener: AppendListener): () => void {
+		this.listeners.add(listener);
+		return () => this.listeners.delete(listener);
+	}
+
+	private emit(pid: string, lines: readonly LogLine[]): void {
+		for (const l of this.listeners) {
+			try {
+				l(pid, lines);
+			} catch {
+				/* a listener never breaks a write */
+			}
+		}
+	}
+
+	/**
+	 * A read view of an opened project (opening it first, which runs its
+	 * recovery). The returned lines are the acknowledged log at this moment.
+	 */
+	async view(pid: string): Promise<{ state: Folded; lines: readonly LogLine[] }> {
+		return this.critical(pid, async (tx) => {
+			const p = this.open.get(pid);
+			return { state: tx.state, lines: p ? p.lines.slice() : [] };
+		});
+	}
+
+	/** Opens every project on disk (boot): recovery runs now, not at the first request. */
+	async openAll(): Promise<string[]> {
+		let names: string[];
+		try {
+			names = await fs.readdir(projectsRoot(this.opts.workspaceRoot));
+		} catch {
+			return [];
+		}
+		const opened: string[] = [];
+		for (const n of names.filter((x) => PROJECT_ID_RE.test(x))) {
+			try {
+				await this.critical(n, async () => {});
+				opened.push(n);
+			} catch (err) {
+				this.opts.log?.warn(`[projects] ${n}: not opened at boot (${(err as Error).message})`);
+			}
+		}
+		return opened;
 	}
 
 	/** Lets the helper go; for graceful shutdown and tests. */

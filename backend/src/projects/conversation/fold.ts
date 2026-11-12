@@ -43,6 +43,11 @@ export interface DeliveryFold {
 	binding?: { binding_id: string; epoch: number; sid: string; cid: string };
 	composerClientMessageId?: string;
 	promptId?: string;
+	/** The acknowledged `user_prompt`'s seq in the capture (Composer `seq`). */
+	ackSeq?: number;
+	reason?: string;
+	/** On `settled`: the Composer result it settled to. */
+	result?: string;
 	lastSeq: number;
 }
 
@@ -64,6 +69,8 @@ export interface Folded {
 	/** `${msg}/${agent}` → the settling line, until a reply_ref closes it. */
 	settling: Map<string, LogLine>;
 	replyRefs: Set<string>;
+	/** `${msg}/${agent}/${capture_seq}` of each reply_late_close. */
+	lateCloses: Set<string>;
 	/** client_ack_id → the owner_ack line. */
 	acks: Map<string, LogLine>;
 	/** restore_ids already applied by a `recovery{source: restore}`. */
@@ -81,6 +88,7 @@ export function emptyFold(): Folded {
 		deliveries: new Map(),
 		settling: new Map(),
 		replyRefs: new Set(),
+		lateCloses: new Set(),
 		acks: new Map(),
 		restoresApplied: new Set(),
 		writers: new Set(),
@@ -117,7 +125,7 @@ export function fold(f: Folded, lines: readonly LogLine[]): Folded {
 				const key = deliveryKey(msgId, agentId);
 				const prev = f.deliveries.get(key);
 				const state = l.state as DeliveryState;
-				const http = l.http as { promptId?: string } | undefined;
+				const http = l.http as { promptId?: string; seq?: number } | undefined;
 				f.deliveries.set(key, {
 					msgId,
 					agentId,
@@ -128,6 +136,9 @@ export function fold(f: Folded, lines: readonly LogLine[]): Folded {
 					composerClientMessageId:
 						(l.composer_client_message_id as string | undefined) ?? prev?.composerClientMessageId,
 					promptId: http?.promptId ?? (l.prompt_id as string | undefined) ?? prev?.promptId,
+					ackSeq: http?.seq ?? prev?.ackSeq,
+					reason: (l.reason as string | undefined) ?? undefined,
+					result: (l.result as string | undefined) ?? undefined,
 					lastSeq: l.seq,
 				});
 				break;
@@ -141,6 +152,11 @@ export function fold(f: Folded, lines: readonly LogLine[]): Folded {
 				f.settling.delete(key);
 				break;
 			}
+			case "reply_late_close":
+				f.lateCloses.add(
+					`${l.msg_id as string}/${l.agent_id as string}/${l.capture_seq as number}`,
+				);
+				break;
 			case "owner_ack":
 				f.acks.set(l.client_ack_id as string, l);
 				break;
