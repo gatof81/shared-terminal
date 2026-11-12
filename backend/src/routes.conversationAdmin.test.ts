@@ -1125,6 +1125,11 @@ describe("GET /admin/stats → conversation (§7)", () => {
 				"queueBytesMax",
 				"wsResyncsSinceBoot",
 				"recreateOrphans",
+				"indexWriteFailures",
+				"evictionWriteKept",
+				"evictionWriteKeptNow",
+				"evictionWriteDropped",
+				"indexWriteLastErrorCode",
 			].sort(),
 		);
 		expect(conv).toMatchObject({
@@ -1132,6 +1137,11 @@ describe("GET /admin/stats → conversation (§7)", () => {
 			effectiveSessions: 1,
 			rejectedSinceBoot: { byReason: {} },
 			recreateOrphans: 0,
+			indexWriteFailures: 0,
+			evictionWriteKept: 0,
+			evictionWriteKeptNow: 0,
+			evictionWriteDropped: 0,
+			indexWriteLastErrorCode: null,
 		});
 		for (const sid of [SID, SID2, SID3, SID4]) expect(text).not.toContain(sid);
 		expect(inspectCapture).not.toHaveBeenCalled();

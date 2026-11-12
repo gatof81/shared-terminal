@@ -181,6 +181,9 @@ export interface StoreOptions {
 		indexBytes: number;
 		flushEveryEvents: number;
 		flushIntervalMs: number;
+		evictionKeepMax: number;
+		evictionRetryBaseMs: number;
+		evictionRetryMaxMs: number;
 	}>;
 }
 
@@ -200,6 +203,12 @@ interface Resident {
 	currentFileBytes: number;
 	/** True while `drain` runs — an append may be in flight with the queue empty (B2). */
 	busy: boolean;
+	/**
+	 * #546 — a G4-evicted entry whose snapshot write failed is kept (it holds
+	 * state that exists only in memory) and its write retried with backoff.
+	 */
+	retryTimer: NodeJS.Timeout | null;
+	retryAttempt: number;
 }
 
 /** Open (non-final) messages tracked for the L2 budget. */
@@ -207,6 +216,59 @@ export const MESSAGE_OPEN_MAX = 256;
 /** Sealed message ids remembered so a late delta can't restart a budget. */
 export const MESSAGE_SEALED_MAX = 4096;
 const AGENTS_MAX = 256;
+
+/**
+ * #546 — bounded overshoot past G4: at most this many evicted entries whose
+ * snapshot write failed are kept in memory (each ≤ G4_INDEX_BYTES, so ≤ 64
+ * MiB on top of G4's own bound). Past it the oldest kept entry is dropped and
+ * counted (`evictionWriteDropped`): what it held only in memory is lost, as
+ * before #546, but no longer silently.
+ */
+export const EVICTION_KEEP_MAX = 16;
+/** #546 — retry backoff of a kept entry's snapshot write: 1 s doubling, capped. */
+export const EVICTION_RETRY_BASE_MS = 1_000;
+export const EVICTION_RETRY_MAX_MS = 60_000;
+/**
+ * #546 — consecutive index-write failures (any conversation) after which the
+ * log escalates from warn to error, and again every this many after.
+ * Inode exhaustion or a quota (EDQUOT) fails only the temp-file creation
+ * while appends to existing events files keep working, so this log line and
+ * the admin counters are the only symptoms.
+ */
+export const INDEX_WRITE_ESCALATE_AFTER = 5;
+
+/**
+ * The kind a `session_start` declares (§5.2): the live path (service
+ * `applyMetadata`) and recovery from the file (#546) share this rule.
+ */
+export function sessionStartKind(data: EventData): ConversationKind {
+	const flags = Array.isArray(data.argv_flags)
+		? (data.argv_flags as unknown[]).filter((f): f is string => typeof f === "string")
+		: [];
+	if (flags.includes("-p") || flags.includes("--print")) return "headless";
+	if (flags.some((f) => f.startsWith("--agent-name") || f === "--agent-id")) return "teammate";
+	return "interactive";
+}
+
+/**
+ * The title evidence an event carries (§5.1), shared by the live path and
+ * recovery (#546): the CLI's `session_title` (on a session start or a prompt)
+ * always wins; otherwise the default title is the first prompt the PERSON
+ * wrote — not an injected source, not a prompt whose origin could not be
+ * verified (§4.2.1), never an `internal_prompt`.
+ */
+export function applyTitleEvidence(index: ConversationIndex, ev: EventName, data: EventData): void {
+	if (ev === "user_prompt") {
+		if (
+			index.title === null &&
+			(data.source === undefined || data.source === "user") &&
+			data.origin !== "unverified"
+		) {
+			index.title = String(data.prompt).slice(0, 80);
+		}
+	} else if (ev !== "session_start" && ev !== "internal_prompt") return;
+	if (typeof data.session_title === "string") index.title = data.session_title;
+}
 
 /**
  * B6 — end a message's L2 tally: forget its open-set entries and remember
@@ -318,8 +380,26 @@ export class ConversationStore {
 	/** High-water mark of `totalQueueBytes` since boot (admin stats, §7). */
 	private maxTotalQueueBytes = 0;
 	private readonly lim: Required<NonNullable<StoreOptions["limits"]>>;
-	/** Counters for admin stats (3.0d exposes them). */
-	readonly stats = { persisted: 0, dropped: 0, appendFailures: 0, rotations: 0, evictions: 0 };
+	/**
+	 * #546 — the `evicting` entries kept after a failed snapshot write, oldest
+	 * first (the order the K bound drops them in). A subset of `evicting`.
+	 */
+	private readonly kept = new Map<string, Resident>();
+	/** Counters for admin stats (3.0d exposes them; #546 adds the index-write ones). */
+	readonly stats = {
+		persisted: 0,
+		dropped: 0,
+		appendFailures: 0,
+		rotations: 0,
+		evictions: 0,
+		indexWriteFailures: 0,
+		evictionWriteKept: 0,
+		evictionWriteDropped: 0,
+	};
+	/** #546 — the errno code of the last failed index write (`null` until one fails). */
+	lastIndexWriteErrorCode: string | null = null;
+	/** #546 — index writes failed in a row, any conversation; reset by a success. */
+	private consecutiveIndexWriteFailures = 0;
 
 	constructor(private readonly opts: StoreOptions) {
 		this.fs = opts.fs ?? (nodeFs as unknown as StoreFs);
@@ -333,6 +413,9 @@ export class ConversationStore {
 			indexBytes: G4_INDEX_BYTES,
 			flushEveryEvents: INDEX_FLUSH_EVERY_EVENTS,
 			flushIntervalMs: INDEX_FLUSH_INTERVAL_MS,
+			evictionKeepMax: EVICTION_KEEP_MAX,
+			evictionRetryBaseMs: EVICTION_RETRY_BASE_MS,
+			evictionRetryMaxMs: EVICTION_RETRY_MAX_MS,
 			...opts.limits,
 		};
 	}
@@ -387,7 +470,11 @@ export class ConversationStore {
 		const leaving = this.evicting.get(key);
 		if (leaving) {
 			this.evicting.delete(key);
+			// #546 — a kept entry (its eviction write failed) is resident again:
+			// no retry timer of its own; the ordinary flush path writes it.
+			this.forgetKept(key, leaving);
 			this.resident.set(key, leaving);
+			if (leaving.dirty) this.scheduleFlush(leaving);
 			await this.evictIfNeeded();
 			return leaving.index;
 		}
@@ -431,6 +518,8 @@ export class ConversationStore {
 			pendingDrop: null,
 			currentFileBytes: fileBytes,
 			busy: false,
+			retryTimer: null,
+			retryAttempt: 0,
 		};
 		this.resident.set(key, r);
 		await this.evictIfNeeded();
@@ -480,6 +569,46 @@ export class ConversationStore {
 		} catch {
 			return null;
 		}
+	}
+
+	/**
+	 * §8.1.4 rules 9b/10 — the recorded answer of a RELEASED composer
+	 * operation, or null when `clientMessageId` is not in the window.
+	 *
+	 * In memory (resident or evicting) the index is complete: it was rebuilt
+	 * from the file when opened and every append since went through it. A
+	 * snapshot alone is only a cache that may be stale — its write can fail
+	 * (#546: EDQUOT, inode exhaustion) while the `released` lines still reach
+	 * the events file — so a miss there is settled by rebuilding the window
+	 * the way `open` would (snapshot + scan of the file past its offset),
+	 * without making the conversation resident and without writing anything.
+	 * A replay must never depend on a snapshot write having landed: an id
+	 * the file proves released and that is treated as new is a second
+	 * delivery. A read error other than "no file" throws (fail closed).
+	 */
+	async releasedComposerSend(
+		stSessionId: string,
+		cid: string,
+		clientMessageId: string,
+	): Promise<{ status: number; body: unknown; at: string } | null> {
+		const key = `${stSessionId}/${cid}`;
+		const lookup = (index: ConversationIndex) => index.composerSends?.[clientMessageId] ?? null;
+		const mem = this.resident.get(key) ?? this.evicting.get(key);
+		if (mem) return lookup(mem.index);
+		const loading = this.opening.get(key);
+		if (loading) {
+			const index = await loading.catch(() => null);
+			if (index) return lookup(index);
+		}
+		const { index, legacyPromptCorrelation, fromSnapshot } = await this.loadIndex(stSessionId, cid);
+		if (fromSnapshot) {
+			const hit = lookup(index);
+			if (hit) return hit;
+		}
+		await this.recoverFromFile(stSessionId, cid, index, legacyPromptCorrelation, fromSnapshot, {
+			readOnly: true,
+		});
+		return lookup(index);
 	}
 
 	getResidentIndex(stSessionId: string, cid: string): ConversationIndex | undefined {
@@ -577,13 +706,17 @@ export class ConversationStore {
 		index: ConversationIndex,
 		legacyPromptCorrelation: boolean,
 		fromSnapshot = true,
+		opts: { readOnly?: boolean } = {},
 	): Promise<number> {
 		if (legacyPromptCorrelation) index.persistedPromptId = null;
 		const file = this.eventsPath(stSessionId, cid);
 		let content: string;
 		try {
 			content = await this.fs.readFile(file, "utf8");
-		} catch {
+		} catch (err) {
+			// `readOnly` (a rebuild that is not registered, #546) must not take
+			// an unreadable file for an absent one: its caller decides on it.
+			if (opts.readOnly && (err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
 			// No file: whatever the index claims about seq is unproven.
 			// Keep lastSeq (a rotated-away file can be gone) but reset offset.
 			index.offset = 0;
@@ -593,7 +726,7 @@ export class ConversationStore {
 			return 0;
 		}
 		let size = Buffer.byteLength(content, "utf8");
-		if (size > 0 && !content.endsWith("\n")) {
+		if (size > 0 && !content.endsWith("\n") && !opts.readOnly) {
 			// A torn last line (crash mid-append). Terminate it so the next
 			// append starts a fresh line instead of gluing onto the fragment;
 			// the fragment itself is skipped by the parse below.
@@ -654,6 +787,16 @@ export class ConversationStore {
 				index.lastPromptId = ev.prompt_id;
 			}
 			trackComposerSend(index, ev);
+			// #546 — what only the in-memory index held is rebuilt from the
+			// lines where the file carries it: the agents (lost on a crash too,
+			// before), the session-start metadata, the title and the revocation
+			// note. Bindings (`paneId`/`tabId`) and `state` are not: they
+			// converge through the stop/boot reconcile, the next event with a
+			// pane, a hook or a probe (CONVERSATION.md v1.7.2).
+			if (ev.data && typeof ev.data === "object") {
+				this.trackMessageAndAgents(index, ev);
+				this.recoverMetadata(index, ev);
+			}
 			if (ev.ev === "assistant_delta") {
 				// B6 — the L2 budget must survive a restart: lines past the
 				// snapshot's offset re-add their bytes to the message tally.
@@ -758,6 +901,9 @@ export class ConversationStore {
 			await r.chain;
 			await this.writeIndex(r);
 		}
+		// #546 — one more attempt for the entries kept after a failed eviction
+		// write (shutdown): a success lets them leave, a failure keeps them.
+		for (const r of Array.from(this.kept.values())) await this.writeIndex(r);
 	}
 
 	private async drain(stSessionId: string, cid: string, r: Resident): Promise<void> {
@@ -848,6 +994,18 @@ export class ConversationStore {
 		return event;
 	}
 
+	/** #546 — the metadata a persisted line carries, applied in file order (see recoverFromFile). */
+	private recoverMetadata(index: ConversationIndex, ev: PersistedEvent): void {
+		if (ev.ev === "session_start") {
+			index.kind = sessionStartKind(ev.data);
+			// As live (§5.2 v1.8.5): a `claude -p` never holds a pane.
+			if (index.kind === "headless") index.paneId = null;
+			if (typeof ev.data.claude_version === "string") index.claudeVersion = ev.data.claude_version;
+		}
+		applyTitleEvidence(index, ev.ev, ev.data);
+		if (ev.ev === "gap" && ev.data.reason === "revoked") index.revokedNoted = true;
+	}
+
 	private trackMessageAndAgents(index: ConversationIndex, event: PersistedEvent): void {
 		if (event.ev === "agent_start") {
 			const id = String(event.data.agent_id ?? "");
@@ -904,9 +1062,18 @@ export class ConversationStore {
 		const done = () => {
 			if (this.indexWrites.get(key) !== next) return;
 			this.indexWrites.delete(key);
+			if (this.evicting.get(key) !== r) return;
+			// #546 — the last write of a leaving entry failed: the entry is the
+			// only copy of what it held in memory, so it stays (bounded, retried)
+			// instead of leaving with it. A purge never keeps anything.
+			if (r.dirty && !this.purging.has(r.index.stSessionId)) {
+				this.keepAfterFailedWrite(key, r);
+				return;
+			}
 			// The last write of a leaving entry landed, whoever queued it (an
-			// eviction, a flush timer, a flush): it no longer needs to answer.
-			if (this.evicting.get(key) === r) this.evicting.delete(key);
+			// eviction, a flush timer, a flush, a retry): it no longer needs to answer.
+			this.evicting.delete(key);
+			this.forgetKept(key, r);
 		};
 		void next.then(done, done);
 		return next;
@@ -952,10 +1119,76 @@ export class ConversationStore {
 			await this.fs.rename(tmp, file);
 		} catch (err) {
 			r.dirty = true;
-			logger.warn(
-				`[conversation] index write failed for ${r.index.cid}: ${(err as Error).message}`,
+			this.noteIndexWriteFailure(r, err);
+			return;
+		}
+		this.consecutiveIndexWriteFailures = 0;
+	}
+
+	/** #546 — count a failed index write; escalate the log after N in a row. */
+	private noteIndexWriteFailure(r: Resident, err: unknown): void {
+		this.stats.indexWriteFailures++;
+		const code = (err as NodeJS.ErrnoException | null)?.code;
+		this.lastIndexWriteErrorCode = typeof code === "string" && code ? code : "UNKNOWN";
+		const streak = ++this.consecutiveIndexWriteFailures;
+		const msg = `[conversation] index write failed for ${r.index.cid}: ${(err as Error)?.message ?? String(err)}`;
+		if (streak % INDEX_WRITE_ESCALATE_AFTER === 0) {
+			logger.error(
+				`${msg} (${streak} index writes failed in a row, last ${this.lastIndexWriteErrorCode}: the capture snapshots are not reaching ${this.opts.workspaceRoot})`,
+			);
+		} else logger.warn(msg);
+	}
+
+	/**
+	 * #546 — keep an evicted entry whose snapshot write failed: it stays in
+	 * `evicting` (so `open` adopts it and `peekIndex` answers from it) and its
+	 * write is retried with backoff. At most `evictionKeepMax` are kept; past
+	 * that the oldest is dropped, counted and logged as an error.
+	 */
+	private keepAfterFailedWrite(key: string, r: Resident): void {
+		if (!this.kept.has(key)) {
+			this.kept.set(key, r);
+			this.stats.evictionWriteKept++;
+		}
+		r.retryAttempt++;
+		const delay = Math.min(
+			this.lim.evictionRetryBaseMs * 2 ** Math.min(r.retryAttempt - 1, 30),
+			this.lim.evictionRetryMaxMs,
+		);
+		if (r.retryTimer) clearTimeout(r.retryTimer);
+		r.retryTimer = setTimeout(() => {
+			r.retryTimer = null;
+			if (this.evicting.get(key) === r) void this.writeIndex(r);
+		}, delay);
+		r.retryTimer.unref?.();
+		while (this.kept.size > this.lim.evictionKeepMax) {
+			const [oldKey, old] = this.kept.entries().next().value as [string, Resident];
+			this.forgetKept(oldKey, old);
+			if (this.evicting.get(oldKey) === old) this.evicting.delete(oldKey);
+			if (old.flushTimer) {
+				clearTimeout(old.flushTimer);
+				old.flushTimer = null;
+			}
+			this.stats.evictionWriteDropped++;
+			logger.error(
+				`[conversation] evicted index of ${old.index.cid} dropped after failed snapshot writes (more than ${this.lim.evictionKeepMax} kept): its in-memory state is lost; recovery rebuilds what the events file holds`,
 			);
 		}
+	}
+
+	/** #546 — the entry is no longer kept: drop its retry timer and its place in the bound. */
+	private forgetKept(key: string, r: Resident): void {
+		if (this.kept.get(key) === r) this.kept.delete(key);
+		if (r.retryTimer) {
+			clearTimeout(r.retryTimer);
+			r.retryTimer = null;
+		}
+		r.retryAttempt = 0;
+	}
+
+	/** #546 — evicted entries currently kept after a failed snapshot write (admin stats). */
+	keptCount(): number {
+		return this.kept.size;
 	}
 
 	private async rotate(stSessionId: string, cid: string, r: Resident): Promise<void> {
@@ -1138,6 +1371,11 @@ export class ConversationStore {
 				r.dirty = false;
 				this.resident.delete(key);
 			}
+			// #546 — kept entries (failed eviction writes) of the session: their
+			// retry timers must not fire after the rm.
+			for (const [key, r] of Array.from(this.kept)) {
+				if (key.startsWith(`${stSessionId}/`)) this.forgetKept(key, r);
+			}
 			// A write already running would recreate the directory after the
 			// rm: wait for every write of this session to settle first (new ones
 			// refuse, see writeIndexNow).
@@ -1151,8 +1389,15 @@ export class ConversationStore {
 			// Defensive: every evicting entry left with its last write above, so
 			// this normally finds nothing; nothing of the session may stay
 			// readable from memory (peekIndex/open) whatever the order was.
-			for (const key of Array.from(this.evicting.keys())) {
-				if (key.startsWith(`${stSessionId}/`)) this.evicting.delete(key);
+			for (const [key, r] of Array.from(this.evicting)) {
+				if (!key.startsWith(`${stSessionId}/`)) continue;
+				this.evicting.delete(key);
+				this.forgetKept(key, r);
+				if (r.flushTimer) {
+					clearTimeout(r.flushTimer);
+					r.flushTimer = null;
+				}
+				r.dirty = false;
 			}
 			await this.fs.rm(dir, { force: true, recursive: true });
 		} finally {

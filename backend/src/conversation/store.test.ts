@@ -9,8 +9,15 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ConversationStore, NO_ACTIVITY_TIME, type PendingEvent, type StoreFs } from "./store.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { logger } from "../logger.js";
+import {
+	ConversationStore,
+	INDEX_WRITE_ESCALATE_AFTER,
+	NO_ACTIVITY_TIME,
+	type PendingEvent,
+	type StoreFs,
+} from "./store.js";
 
 let root: string;
 beforeEach(async () => {
@@ -808,5 +815,382 @@ describe("ConversationStore — G4 resident LRU", () => {
 		release();
 		await opening;
 		expect((await store.peekIndex("s1", "c0"))?.paneId).toBe("%0");
+	});
+});
+
+// ── #546: a failed snapshot write must not drop in-memory state ─────────────
+
+/**
+ * A StoreFs where creating the index temp file fails with `code` while
+ * `state.failing` holds — the inode-exhaustion / quota shape: appends to the
+ * existing events file keep working. `failEventsRead` makes reading the
+ * events file fail too (EIO on the read side).
+ */
+function snapshotFailingFs(code: string) {
+	const state = { failing: false, failEventsRead: false };
+	const err = () => Object.assign(new Error(`${code}: simulated`), { code });
+	const fsx: StoreFs = {
+		mkdir: (p, o) => fs.mkdir(p, o),
+		appendFile: (p, d) => fs.appendFile(p, d),
+		writeFile: async (p, d) => {
+			if (state.failing && /\.index\.json\.tmp\./.test(String(p))) throw err();
+			return fs.writeFile(p, d);
+		},
+		rename: (a, b) => fs.rename(a, b),
+		rm: (p, o) => fs.rm(p, o),
+		stat: (p) => fs.stat(p),
+		readFile: async (p, e) => {
+			if (state.failEventsRead && String(p).endsWith(".events.jsonl")) throw err();
+			return fs.readFile(p, e);
+		},
+		readdir: (p) => fs.readdir(p),
+	} as StoreFs;
+	return { fs: fsx, state };
+}
+
+const agentEv = (
+	ev: "agent_start" | "agent_end" | "tool_start",
+	agent: string,
+	data: Record<string, unknown> = {},
+): PendingEvent => ({
+	ev,
+	prompt_id: null,
+	turn_id: null,
+	agent_id: ev === "tool_start" ? agent : null,
+	pane: "%0",
+	data: ev === "tool_start" ? { tool: "Bash", ...data } : { agent_id: agent, ...data },
+});
+
+const releasedEv = (id: string, status: number, body: unknown): PendingEvent => ({
+	ev: "composer_send",
+	prompt_id: null,
+	turn_id: null,
+	agent_id: null,
+	pane: null,
+	data: { state: "released", client_message_id: id, http: { status, body } },
+});
+
+const MSG_ID = "11111111-1111-4111-8111-111111111111";
+
+async function waitFor(pred: () => boolean, label: string): Promise<void> {
+	const deadline = Date.now() + 2000;
+	while (!pred()) {
+		if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
+		await tick();
+	}
+}
+
+describe("#546 — a G4 eviction whose snapshot write fails keeps the entry (bounded)", () => {
+	for (const code of ["EDQUOT", "ENOSPC", "EMFILE", "EIO"]) {
+		it(`${code} on the temp-file create, appends still working: nothing only-in-memory is lost; counted; the retry lands once the disk heals`, async () => {
+			const f = snapshotFailingFs(code);
+			const store = new ConversationStore({
+				workspaceRoot: root,
+				fs: f.fs,
+				limits: { residentIndexes: 1, evictionKeepMax: 2, evictionRetryBaseMs: 20 },
+			});
+			await store.open("s1", "c0");
+			store.enqueue("s1", "c0", ev(0));
+			await store.flush("s1", "c0"); // a snapshot on disk: paneId null
+			store.update("s1", "c0", (i) => {
+				i.paneId = "%7"; // only in memory
+				i.kind = "interactive";
+				i.state = { ...i.state, status: "ended" };
+			});
+			f.state.failing = true;
+			await store.open("s1", "c1"); // evicts c0: its write fails
+			// Appends keep working (the quiet case): c1 persists its events.
+			expect(store.enqueue("s1", "c1", ev(1))).toBe("queued");
+			expect(await store.flush("s1", "c1")).toBe(false); // its own snapshot fails too
+			expect((await readLines(store.eventsPath("s1", "c1"))).length).toBe(1);
+
+			expect(store.residentCount()).toBe(1); // G4's bound is unchanged
+			expect(store.keptCount()).toBe(1);
+			const peek = await store.peekIndex("s1", "c0");
+			expect(peek?.paneId).toBe("%7");
+			expect(peek?.kind).toBe("interactive");
+			expect(peek?.state.status).toBe("ended");
+			expect(store.stats.indexWriteFailures).toBeGreaterThanOrEqual(2);
+			expect(store.stats.evictionWriteKept).toBe(1);
+			expect(store.stats.evictionWriteDropped).toBe(0);
+			expect(store.lastIndexWriteErrorCode).toBe(code);
+
+			// The disk heals: the backoff retry writes the kept entry and it leaves.
+			f.state.failing = false;
+			await waitFor(() => store.keptCount() === 0, "the retry");
+			const onDisk = JSON.parse(await fs.readFile(store.indexPath("s1", "c0"), "utf8"));
+			expect(onDisk.paneId).toBe("%7");
+			expect(onDisk.state.status).toBe("ended");
+			await waitFor(
+				() => (store as unknown as { evicting: Map<string, unknown> }).evicting.size === 0,
+				"the evicting map to empty",
+			);
+		});
+	}
+
+	it("a kept entry reopened is adopted with its in-memory state, and leaves the bound", async () => {
+		const f = snapshotFailingFs("EDQUOT");
+		const store = new ConversationStore({
+			workspaceRoot: root,
+			fs: f.fs,
+			limits: { residentIndexes: 1, evictionRetryBaseMs: 60_000 },
+		});
+		await store.open("s1", "c0");
+		store.enqueue("s1", "c0", ev(0));
+		await store.flush("s1", "c0");
+		store.update("s1", "c0", (i) => {
+			i.paneId = "%7";
+		});
+		f.state.failing = true;
+		await store.open("s1", "c1");
+		expect(store.keptCount()).toBe(1);
+		store.enqueue("s1", "c1", ev(1)); // c1 dirty: its snapshot write fails too
+		await store.flush("s1", "c1");
+		const back = await store.open("s1", "c0"); // evicts c1: kept in turn
+		expect(back.paneId).toBe("%7");
+		expect(back.lastSeq).toBe(1);
+		const kept = (store as unknown as { kept: Map<string, unknown> }).kept;
+		expect(kept.has("s1/c0")).toBe(false);
+		expect(kept.has("s1/c1")).toBe(true);
+		await store.purgeSession("s1");
+	});
+
+	it("past K kept entries the oldest is dropped and counted; the others keep their state", async () => {
+		const f = snapshotFailingFs("ENOSPC");
+		const store = new ConversationStore({
+			workspaceRoot: root,
+			fs: f.fs,
+			limits: { residentIndexes: 1, evictionKeepMax: 2, evictionRetryBaseMs: 60_000 },
+		});
+		f.state.failing = true;
+		for (let i = 0; i < 5; i++) {
+			await store.open("s1", `c${i}`);
+			store.enqueue("s1", `c${i}`, ev(i));
+			await store.flush("s1", `c${i}`);
+			store.update("s1", `c${i}`, (x) => {
+				x.paneId = `%${i}`;
+			});
+		}
+		// c0..c3 evicted with failing writes; K = 2 keeps c2 and c3.
+		expect(store.residentCount()).toBe(1);
+		expect(store.keptCount()).toBe(2);
+		expect(store.stats.evictionWriteKept).toBe(4);
+		expect(store.stats.evictionWriteDropped).toBe(2);
+		expect((await store.peekIndex("s1", "c2"))?.paneId).toBe("%2");
+		expect((await store.peekIndex("s1", "c3"))?.paneId).toBe("%3");
+		// c0 never got a snapshot: dropped, it is what its events file holds.
+		expect(await store.peekIndex("s1", "c0")).toBeNull();
+		const reopened = await store.open("s1", "c0");
+		expect(reopened.lastSeq).toBe(1);
+		await store.purgeSession("s1");
+	});
+
+	it("a purge clears the kept entries and their retry timers: nothing recreates the directory", async () => {
+		const f = snapshotFailingFs("EDQUOT");
+		const store = new ConversationStore({
+			workspaceRoot: root,
+			fs: f.fs,
+			limits: { residentIndexes: 1, evictionRetryBaseMs: 40 },
+		});
+		await store.open("s1", "c0");
+		store.enqueue("s1", "c0", ev(0));
+		f.state.failing = true;
+		await store.flush("s1", "c0");
+		await store.open("s2", "c1"); // evicts s1/c0 (another session): kept, retry armed
+		expect(store.keptCount()).toBe(1);
+		await store.purgeSession("s1");
+		f.state.failing = false; // a retry firing now would write the snapshot back
+		await new Promise((r) => setTimeout(r, 150));
+		expect(store.keptCount()).toBe(0);
+		expect(await store.peekIndex("s1", "c0")).toBeNull();
+		await expect(fs.stat(store.sessionDir("s1"))).rejects.toThrow();
+	});
+
+	it("consecutive failures escalate the log to error every N; a success resets the streak", async () => {
+		const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => undefined);
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+		try {
+			const f = snapshotFailingFs("EDQUOT");
+			const store = new ConversationStore({ workspaceRoot: root, fs: f.fs });
+			await store.open("s1", "c0");
+			f.state.failing = true;
+			let n = 0;
+			const failOnce = async () => {
+				store.update("s1", "c0", (i) => {
+					i.title = `t${n++}`;
+				});
+				expect(await store.flush("s1", "c0")).toBe(false);
+			};
+			for (let i = 0; i < INDEX_WRITE_ESCALATE_AFTER - 1; i++) await failOnce();
+			expect(errorSpy).not.toHaveBeenCalled();
+			await failOnce();
+			expect(errorSpy).toHaveBeenCalledTimes(1);
+			expect(String(errorSpy.mock.calls[0]?.[0])).toContain("EDQUOT");
+			f.state.failing = false;
+			expect(await store.flush("s1", "c0")).toBe(true);
+			f.state.failing = true;
+			for (let i = 0; i < INDEX_WRITE_ESCALATE_AFTER - 1; i++) await failOnce();
+			expect(errorSpy).toHaveBeenCalledTimes(1); // the streak restarted
+			expect(store.stats.indexWriteFailures).toBe(2 * INDEX_WRITE_ESCALATE_AFTER - 1);
+		} finally {
+			errorSpy.mockRestore();
+			warnSpy.mockRestore();
+		}
+	});
+});
+
+describe("#546 — composer idempotency window after a restart with a stale snapshot", () => {
+	it("a `released` line the snapshot missed (its write failed) is found by rebuilding from the file", async () => {
+		const f = snapshotFailingFs("EDQUOT");
+		const store = new ConversationStore({ workspaceRoot: root, fs: f.fs });
+		await store.open("s1", "c0");
+		store.enqueue("s1", "c0", ev(0));
+		await store.flush("s1", "c0"); // snapshot without composerSends
+		f.state.failing = true;
+		store.enqueue("s1", "c0", releasedEv(MSG_ID, 202, { result: "delivered" }));
+		expect(await store.flush("s1", "c0")).toBe(false); // the line is on disk, the snapshot is not
+		// Restart: a new process over the same files.
+		const after = new ConversationStore({ workspaceRoot: root });
+		expect((await after.peekIndex("s1", "c0"))?.composerSends?.[MSG_ID]).toBeUndefined();
+		expect(await after.releasedComposerSend("s1", "c0", MSG_ID)).toMatchObject({
+			status: 202,
+			body: { result: "delivered" },
+		});
+		expect(after.residentCount()).toBe(0); // a read, nothing made resident
+		expect(await after.releasedComposerSend("s1", "c0", "other-id")).toBeNull();
+	});
+
+	it("no snapshot at all (every write failed): the file alone answers", async () => {
+		const f = snapshotFailingFs("ENOSPC");
+		f.state.failing = true;
+		const store = new ConversationStore({ workspaceRoot: root, fs: f.fs });
+		await store.open("s1", "c0");
+		store.enqueue("s1", "c0", releasedEv(MSG_ID, 502, { error: "delivery-failed" }));
+		await store.flush("s1", "c0");
+		await expect(fs.stat(store.indexPath("s1", "c0"))).rejects.toThrow();
+		const after = new ConversationStore({ workspaceRoot: root });
+		expect(await after.releasedComposerSend("s1", "c0", MSG_ID)).toMatchObject({ status: 502 });
+	});
+
+	it("an unreadable events file is not an empty window: the lookup throws (the composer fails closed)", async () => {
+		const f = snapshotFailingFs("EIO");
+		const store = new ConversationStore({ workspaceRoot: root, fs: f.fs });
+		await store.open("s1", "c0");
+		store.enqueue("s1", "c0", ev(0));
+		await store.flush("s1", "c0");
+		await store.close("s1", "c0");
+		f.state.failEventsRead = true;
+		await expect(store.releasedComposerSend("s1", "c0", MSG_ID)).rejects.toThrow(/EIO/);
+	});
+
+	it("a torn last line is not repaired by the read-only rebuild", async () => {
+		const store = new ConversationStore({ workspaceRoot: root });
+		await store.open("s1", "c0");
+		store.enqueue("s1", "c0", releasedEv(MSG_ID, 202, { ok: true }));
+		await store.flush("s1", "c0");
+		await store.close("s1", "c0");
+		await fs.rm(store.indexPath("s1", "c0"));
+		await fs.appendFile(store.eventsPath("s1", "c0"), '{"seq":2,"torn');
+		const before = await fs.readFile(store.eventsPath("s1", "c0"), "utf8");
+		const after = new ConversationStore({ workspaceRoot: root });
+		expect(await after.releasedComposerSend("s1", "c0", MSG_ID)).toMatchObject({ status: 202 });
+		expect(await fs.readFile(store.eventsPath("s1", "c0"), "utf8")).toBe(before);
+	});
+});
+
+describe("#546 — recovery from the file rebuilds agents and session-start metadata", () => {
+	const sessionStart = (data: Record<string, unknown>): PendingEvent => ({
+		ev: "session_start",
+		prompt_id: null,
+		turn_id: null,
+		agent_id: null,
+		pane: "%0",
+		data: { source: "startup", ...data },
+	});
+
+	it("crash before any snapshot: agents, kind, claudeVersion, title and the revocation note come back from the lines", async () => {
+		const store = new ConversationStore({ workspaceRoot: root });
+		await store.open("s1", "c0");
+		store.enqueue(
+			"s1",
+			"c0",
+			sessionStart({ argv_flags: [], claude_version: "2.1.314", session_title: "Fix it" }),
+		);
+		store.enqueue("s1", "c0", agentEv("agent_start", "a1", { agent_type: "Explore" }));
+		store.enqueue("s1", "c0", agentEv("tool_start", "a1"));
+		store.enqueue("s1", "c0", agentEv("tool_start", "a1"));
+		store.enqueue("s1", "c0", agentEv("agent_end", "a1", { last_assistant_message: "done" }));
+		store.enqueue("s1", "c0", agentEv("agent_start", "a2", { agent_type: "Plan" }));
+		store.enqueue("s1", "c0", ev(1, { ev: "gap", prompt_id: null, data: { reason: "revoked" } }));
+		await store.flush("s1", "c0");
+		const live = store.getResidentIndex("s1", "c0")!;
+		// The snapshot is lost (a crash before the first one landed).
+		await fs.rm(store.indexPath("s1", "c0"));
+		const after = new ConversationStore({ workspaceRoot: root });
+		const idx = await after.open("s1", "c0");
+		expect(idx.agents).toEqual(live.agents);
+		expect(idx.agents.a1).toMatchObject({
+			agentType: "Explore",
+			status: "done",
+			toolCount: 2,
+			hasResult: true,
+		});
+		expect(idx.agents.a2).toMatchObject({ agentType: "Plan", status: "running" });
+		expect(idx.kind).toBe("interactive");
+		expect(idx.claudeVersion).toBe("2.1.314");
+		expect(idx.title).toBe("Fix it");
+		expect(idx.revokedNoted).toBe(true);
+	});
+
+	it("stale snapshot (its write failed): the tail past its offset updates agents and metadata", async () => {
+		const f = snapshotFailingFs("EDQUOT");
+		const store = new ConversationStore({ workspaceRoot: root, fs: f.fs });
+		await store.open("s1", "c0");
+		store.enqueue("s1", "c0", agentEv("agent_start", "a1", { agent_type: "Explore" }));
+		await store.flush("s1", "c0"); // snapshot: a1 running, kind unknown
+		f.state.failing = true;
+		store.enqueue("s1", "c0", sessionStart({ argv_flags: ["--print"], claude_version: "2.1.316" }));
+		store.enqueue("s1", "c0", agentEv("tool_start", "a1"));
+		store.enqueue("s1", "c0", agentEv("agent_end", "a1"));
+		store.enqueue("s1", "c0", ev(2, { data: { prompt: "first words of the person" } }));
+		expect(await store.flush("s1", "c0")).toBe(false);
+		const after = new ConversationStore({ workspaceRoot: root });
+		const idx = await after.open("s1", "c0");
+		expect(idx.agents.a1).toMatchObject({ status: "done", toolCount: 1, hasResult: false });
+		expect(idx.kind).toBe("headless");
+		expect(idx.paneId).toBeNull();
+		expect(idx.claudeVersion).toBe("2.1.316");
+		expect(idx.title).toBe("first words of the person");
+	});
+
+	it("the title rules are the live ones: an injected or unverified prompt never titles; the CLI's session_title wins", async () => {
+		const store = new ConversationStore({ workspaceRoot: root });
+		await store.open("s1", "c0");
+		store.enqueue("s1", "c0", ev(1, { data: { prompt: "injected", source: "sdk" } }));
+		store.enqueue(
+			"s1",
+			"c0",
+			ev(2, { data: { prompt: "maybe not a person", origin: "unverified" } }),
+		);
+		store.enqueue("s1", "c0", ev(3, { data: { prompt: "the person" } }));
+		store.enqueue("s1", "c0", ev(4, { data: { prompt: "later" } }));
+		await store.flush("s1", "c0");
+		await store.close("s1", "c0");
+		await fs.rm(store.indexPath("s1", "c0"));
+		const a = await new ConversationStore({ workspaceRoot: root }).open("s1", "c0");
+		expect(a.title).toBe("the person");
+		const internal = {
+			seq: 5,
+			ts: new Date().toISOString(),
+			ev: "internal_prompt",
+			prompt_id: null,
+			turn_id: null,
+			agent_id: null,
+			pane: null,
+			data: { notice: "x", session_title: "CLI title" },
+		};
+		await fs.appendFile(store.eventsPath("s1", "c0"), `${JSON.stringify(internal)}\n`);
+		const b = await new ConversationStore({ workspaceRoot: root }).open("s1", "c0");
+		expect(b.title).toBe("CLI title");
 	});
 });
