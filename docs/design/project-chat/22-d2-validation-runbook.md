@@ -34,7 +34,7 @@ preflight (§5, P0).
 | E3 | **No production credentials.** A **new, empty D1 database** in the dedicated account, created for this run, with a token scoped to it. Fresh `JWT_SECRET` and `SECRETS_ENCRYPTION_KEY` generated on the host. No VM100 `.env` is copied | `D1_DATABASE_ID` ≠ production's (compare the hash only). `GET /api/auth/status` → `needsSetup: true` before setup |
 | E4 | No mount or route to the NAS, to VM100 or to its backups | `findmnt`, `ip route` (no VM100 or NAS subnet routes beyond what the hypervisor needs) |
 | E5 | No public exposure: no Cloudflare Tunnel, and the backend published **on loopback only** (`PORT=127.0.0.1:3001` in `.env`; compose publishes `${PORT}:3001`, and Docker's NAT bypasses a host firewall) | `ss -ltnp` shows `127.0.0.1:3001` only |
-| E6 | **No model credentials, no session egress.** The agents' CLI talks to the scripted stand-in `session-image/test/mock-anthropic.mjs` (as the CI smokes do) through each session's `ANTHROPIC_BASE_URL`. Session egress is dropped by a `DOCKER-USER` rule for the session containers' addresses (allowing `sessions-net` itself, where `st-backend` and `mock-api` live). Sessions also carry `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and `DISABLE_AUTOUPDATER=1`. `app` keeps its egress to the D1 API | `docker exec <s> printenv ANTHROPIC_BASE_URL` only, plus `printenv ANTHROPIC_API_KEY \| sha256sum`, never the value. An in-session `curl -m 5 https://example.com` **must fail**. The mock's request log is non-empty |
+| E6 | **No model credentials, no session egress.** The agents' CLI talks to the scripted stand-in `session-image/test/mock-anthropic.mjs` (as the CI smokes do) through each session's `ANTHROPIC_BASE_URL`. Session egress is dropped by a `DOCKER-USER` rule keyed on the **`sessions-net` subnet**, so a session restart cannot make it stale. The rule allows traffic inside the subnet and exempts `app`'s address there, so `app` keeps D1. `curl` check after every session start. Sessions also carry `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and `DISABLE_AUTOUPDATER=1`. `app` keeps its egress to the D1 API | `docker exec <s> printenv ANTHROPIC_BASE_URL` only, plus `printenv ANTHROPIC_API_KEY \| sha256sum`, never the value. An in-session `curl -m 5 https://example.com` **must fail**. The mock's request log is non-empty |
 | E7 | Root on the host (the backend container runs as root, as in production) and the session image's `developer` = uid/gid 1000 (`WORKSPACE_UID/GID` unset) | `docker exec <ctr> id developer` |
 
 ## 3. What is installed
@@ -42,7 +42,7 @@ preflight (§5, P0).
 - **Checkout:** `a09bf8a`, recorded as the full SHA with `git rev-parse HEAD`. Plus the mock: `session-image/test/` is already in the repo.
 - **Session image:** a plain `docker build -t shared-terminal-session ./session-image`. This is a fresh host with no sessions, so CLAUDE.md's first-install path applies. Record the image id.
 - **Backend:** `docker compose up -d --build`. Record the image id and the sha256 of `dist/**/*.js` (same method as the VM100 deploys).
-- **Network:** `docker network create sessions-net` before `up`. The mock runs on it as a container named and aliased `mock-api`, exactly like `conversation-smoke.sh` Phase 1: `docker run -d --name mock-api --network sessions-net --network-alias mock-api -v <repo>/session-image/test:/t:ro -v <evidence>/mock:/out --entrypoint node shared-terminal-session /t/mock-anthropic.mjs 8080 /out/model-requests.jsonl`.
+- **Network:** `docker network create sessions-net` before `up`. The mock runs as uid 1000 and dies on its first request if it cannot write its log, so create its directory first: `install -d -o 1000 -g 1000 -m 0700 <evidence>/mock`. The mock runs on it as a container named and aliased `mock-api`, exactly like `conversation-smoke.sh` Phase 1: `docker run -d --name mock-api --network sessions-net --network-alias mock-api -v <repo>/session-image/test:/t:ro -v <evidence>/mock:/out --entrypoint node shared-terminal-session /t/mock-anthropic.mjs 8080 /out/model-requests.jsonl`.
 - **`.env` (isolated host only).** Everything else stays unset:
 
   ```
@@ -69,10 +69,10 @@ preflight (§5, P0).
 | --- | --- | --- |
 | `owner` | The first account (`needsSetup`), so it is admin. Then put its user id in `CONVERSATION_ALLOW_USERS` and recreate `app` (`up -d --no-build --force-recreate app`) **before** creating sessions | Its JWT is kept in a cookie file (600), only on the host |
 | `other` | A second user via an invite | The cross-user checks (P5) |
-| Sessions `dev`, `qa`, `ops`, `extra` | Created by `owner`, each with `envVars` `ANTHROPIC_BASE_URL=http://mock-api:8080`, a fake `ANTHROPIC_API_KEY`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and `DISABLE_AUTOUPDATER=1` (plain entries). Capture is requested at birth (`CONVERSATION_ALLOW_USERS`) | Before the first launch, seed the CLI's onboarding, key approval and workspace trust exactly as `conversation-smoke.sh`'s `seed_claude_state` does, so no prompt blocks it. Then start `claude` in the main tab. Wait until `GET /api/sessions/<sid>/conversations?capture=0` shows one interactive conversation with `canSendInput: true`. (Re-do this after any stop/start: §5 P5b, P7) |
+| Sessions `dev`, `qa`, `ops`, `extra` | Created by `owner`, each with `envVars` `ANTHROPIC_BASE_URL=http://mock-api:8080`, a fake `ANTHROPIC_API_KEY`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and `DISABLE_AUTOUPDATER=1` (plain entries). Capture is requested at birth (`CONVERSATION_ALLOW_USERS`) | Before the first launch, seed the CLI's onboarding, key approval and workspace trust exactly as `conversation-smoke.sh`'s `seed_claude_state` does, so no prompt blocks it. Then start `claude` in the main tab. Wait until a plain `GET /api/sessions/<sid>/conversations` (**without** `?capture=0`) shows one interactive conversation with `canSendInput: true`. Only the full GET probes capture and refreshes the Composer's in-memory view of it. With `?capture=0` the value stays `false` after every backend restart. (Re-do this after any stop/start: §5 P5b, P7) |
 | Project `D2 run` | `POST /api/projects` | — |
 | Agents `dev-a`, `qa-a`, `ops-a` | `POST /api/projects/:pid/agents {handle, sessionId, clientRequestId}`, one per session (`extra` stays unbound until K5) | Each binding at epoch 1. Handles of removed agents stay reserved (PROJECTS.md §4.3), so a replacement always gets a **new** handle |
-| Source files in `dev`, created **as uid 1000** with `docker exec -u developer` | `out/fix.diff`: a real `git diff` of a small repo change. `out/report.md`: UTF-8 text with non-ASCII. `out/big.txt`: 1 MiB + 1 B. `out/bin.dat`: contains NUL. `.env`, `.git/config`, `out/link.diff -> fix.diff` | The T9 sources |
+| Source files in `dev`, created **as uid 1000** with `docker exec -u developer` | `out/fix.diff`: a real `git diff` of a small repo change. `out/report.md`: UTF-8 text with non-ASCII. `out/copy.diff`: a byte copy of `fix.diff`. `out/notes.txt`: a second small text file. `out/big.txt`: 1 MiB + 1 B. `out/bin.dat`: contains NUL. `.env`, `.git/config`, `out/link.diff -> fix.diff` | The T9 sources |
 
 Helper on the host (no secrets echoed):
 `api() { curl -sS -b "$COOKIES" -H 'content-type: application/json' "http://127.0.0.1:3001/api$@"; }`
@@ -164,20 +164,30 @@ Each case is one message to **`qa-a` and `ops-a`**, with one artifact. Each reci
 | `out/big.txt`, `out/bin.dat`, an empty file | 413 / 415 / 415 |
 | `ops-a` (removed in F6) as source | 409 `agent-not-bound`, nothing read |
 | `other` user: `GET …/artifacts/<sha>` and `POST …/artifacts` on the owner's project | 404 `project-not-found` and **zero bytes**; the same 404 for an unknown or malformed sha |
-
 | a sha registered only in a **second project** of the same owner, sent in this project / fetched here | 400 `artifact-unknown` / 404 |
 | 5 artifacts in one message | 400 `too-many-artifacts`, nothing written |
-| the same content as `out/fix.diff` registered from `out/copy.diff` | 201, a second `artifact` event; the project's `artifactBytes` does not grow (counted once) |
+| the same content as `out/fix.diff` registered from `out/copy.diff` | 201 with `name: "fix.diff"` (taken from the first registration), and a second `artifact` event for a sha already in the log, so it counts once toward the quota |
 
 **PASS:** each row as listed, and no `artifact` event for any refused request.
+
+The second project in the first row binds its agent to `extra`. Remove that agent before K5.
 
 ### P5b. Re-arm `ops` for P6
 
 P4 stopped `ops` and removed `ops-a`. `POST /api/sessions/<ops>/start`, seed and relaunch `claude`
-(§4), wait for `canSendInput`, and create **`ops-b`** on `ops`. P6 uses `ops-b`. Also one
-two-artifact message to `qa-a` + `ops-b` with `ops`'s inbox prepared as F2 for the **second**
-artifact only. **PASS:** `qa-a` `delivered`, and `ops-b` `not-sent{artifact-failed, exists-different,
-files_possibly_placed}` with the **first** artifact present in `ops`'s inbox, verified by its sha.
+(§4), wait for `canSendInput`, and create **`ops-b`** on `ops`. P6 uses `ops-b`.
+
+Then one partial failure across two artifacts:
+1. In `ops`, as uid 1000, clear what F2 and F3 left: `rm -rf ~/workspace/.st-inbox`.
+2. Register `out/report.md` and `out/notes.txt`.
+3. In `ops`, create `.st-inbox` with a foreign file **only** at the second one's `<sha12>-notes.txt`.
+4. Send one message with both, to `qa-a` + `ops-b`.
+
+**PASS:**
+- `qa-a` is `delivered` with both artifacts;
+- `ops-b` is `not-sent{artifact-failed, exists-different, files_possibly_placed}`;
+- the **first** artifact is present in `ops`'s inbox, verified by its sha;
+- the foreign file is untouched.
 
 ### P6. Destructive (isolated host only)
 
@@ -188,7 +198,7 @@ sha256. Each step ends by checking the log with `projects:check-log`.
 | --- | --- | --- |
 | K1 | **SIGKILL the backend during sends.** 10 rounds: send to `qa-a` + `ops-b` with an artifact, and `docker kill -s KILL <app>` at a random delay of 0–400 ms; then `up -d --no-build app` | After each restart: no delivery with two `sending` lines; every unfinished one is `not-sent{persist-failed[, files_possibly_placed]}` or `uncertain{orphaned}`; **0 new Composer calls after the restart** (capture `user_prompt` count). In every inbox, only complete files under final names (each sha256 matches) plus at most our hidden `.<16 hex>.tmp` files. The exact kill point is probabilistic; T12b proves the placement window deterministically |
 | K2 | **Lost writer lock:** the app image has no `pkill`, so from the **host**: `pgrep -af 'flock --exclusive --nonblock --close'`, check with `docker top <app>` that exactly one such pid belongs to the app container, then `kill <pid>` | The backend logs `[projects] writer lock LOST`. A send gets 503 or `not-sent{persist-failed}`. **No file placed and no Composer call after the loss.** After `up -d --force-recreate app`: lock held. Recovery lines are written **only if** a delivery was in flight at the loss. The log is `ok` |
-| K3 | **Real agent race.** In `ops`, as uid 1000, a loop for 60 s: `mv .st-inbox x; ln -s trap .st-inbox; rm .st-inbox; mv x .st-inbox` (relative `trap`, as F1). Meanwhile 20 sends to `ops-b` | Judge the **placement** only; any text-delivery state is acceptable (overlapping sends may give `send-in-progress` or `busy`). Each delivery is either placed (the claimed `artifacts_placed` path is a regular file in a real directory of `ops`'s workspace, sha OK) or `artifact-failed`. `<WORKSPACE_ROOT>/<ops>/trap/` stays empty (host view), and the sweep is clean |
+| K3 | **Real agent race.** In `ops`, as uid 1000, a loop for 60 s: `mv .st-inbox x; ln -s trap .st-inbox; rm .st-inbox; mv x .st-inbox` (relative `trap`, as F1). Meanwhile 20 sends to `ops-b` | Judge the **placement** only; any text-delivery state is acceptable (overlapping sends may give `send-in-progress` or `busy`). Each delivery is placed (the claimed `artifacts_placed` path is a regular file in a real directory of `ops`'s workspace, sha OK), or `artifact-failed`, or never reached `placing` (e.g. `no-target` while an overlapping send holds the pane). `<WORKSPACE_ROOT>/<ops>/trap/` stays empty (host view), and the sweep is clean |
 | K4 | **Temp swap by the agent.** Loop in `ops`: for every `.*.tmp` that appears in the inbox, `mv` it away and write another file under its name. Meanwhile 10 sends to `ops-b` | No delivery claims `artifacts_placed` for bytes that differ from the sha (check each **claimed** path). Swapped cases are `exists-different`. The agent's own file may then sit under the final name: §6.4 publishes by `link` and judges afterwards. That is expected, not an abort |
 | K5 | **Binding changed mid-flight.** P3a has no rebind API, so the change is a removal, and an agent can be removed only once. 10 rounds, each with a fresh agent `x-1` … `x-10` on `extra` (only live bindings are unique, so `extra` is free again after each removal): one send to it with an artifact, and `DELETE /projects/:pid/agents/<x-n>` at a random delay of 0–300 ms | Each delivery is `delivered` to the session fixed at `planned`, or `not-sent{agent-removed|binding-changed|binding-unverified}`, with `files_possibly_placed` when it comes after a `placing`. Never a retry. The exact interleaving is probabilistic; T6 and the c0 test prove it deterministically |
 | K6 | **Disk pressure (optional, decision O3):** a small loop-mounted filesystem as `qa`'s workspace, **mounted on the host before `qa` and `app` start** (or bind propagation hides it), filled to the last KiB | `not-sent{artifact-failed, io}`, no partial file under a final name; the backend keeps serving |
@@ -199,19 +209,24 @@ sha256. Each step ends by checking the log with `projects:check-log`.
 - `npm run restore` also restores the D1 tables, marking every `running` session `stopped` with no container.
 - It untars every workspace into `WORKSPACE_ROOT`, overwriting files, `.st-inbox` included.
 
-So:
-- **stop `dev`, `qa` and `ops` (`POST …/stop`) before the backup**, which makes the backup and the restore consistent;
-- after P7.3, **start them again**, then seed and relaunch `claude` (§4) before P8.
+So all four sessions (`dev`, `qa`, `ops`, `extra`) are stopped before the restore, and started
+again only **after P7.4** (which restores a second time). "Nothing deleted" below refers to
+`.projects`.
 
-"Nothing deleted" below refers to `.projects`.
+0. **An unfinished delivery inside the backup.** Otherwise P7.3's `uncertain{restored}` has nothing to show.
+   1. With the sessions running, SIGKILL the app mid-send, as in K1.
+   2. From the host, confirm that `.projects/<pid>/conversation.events.jsonl` has a delivery with no result.
+   3. Take the backup **with the app down**: `docker compose run --rm --no-deps app npm run backup` (a backup takes no lock).
+   4. `up -d --no-build app`. Boot recovery closes that delivery in the live log, but the backup keeps it open.
+   5. `POST …/stop` for all four sessions, then `docker compose stop app`.
 
-0. Leave one delivery unfinished in the backup: stop `qa`'s CLI mid-send or take the backup right after a K1 round. Otherwise P7.3's `uncertain{restored}` has nothing to show. Record which.
-1. **Backup:** `docker compose exec app npm run backup`.
+   If no round leaves an unfinished delivery, record that and judge P7.3's `uncertain{restored}` as "not exercised", not FAIL.
+1. **The backup from step 0.**
    **PASS:**
    - the manifest's `projects.<pid>` lists `artifacts: N` (the registered count) with no `skipped`;
    - the tarball holds exactly `conversation.events.jsonl` and `artifacts/<64 hex>[.json]`, with no temps.
 2. **Restore,** with the app stopped and the restore process's flag off:
-   `docker compose stop app && docker compose run --rm --no-deps -e PROJECT_CONVERSATION_ENABLED= app npm run restore -- /var/shared-terminal/workspaces/.backups/<ts> --force`. The path is the in-container one.
+   `docker compose run --rm --no-deps -e PROJECT_CONVERSATION_ENABLED= app npm run restore -- /var/shared-terminal/workspaces/.backups/<ts> --force`. The path is the in-container one.
    **PASS:**
    - the journal is closed;
    - `.projects/<pid>` is published with `RESTORED`;
@@ -224,7 +239,8 @@ So:
    - registering the same source again → 200 `replayed`.
 4. **T17, real (decision O4).** In a copy of the backup, repack the tarball with one artifact's bytes changed. **List regular files only**, as `backupProjects` does, because the restore preflight refuses any directory member:
    `tar -czf <pid>.tar.gz -C <stage> -- .projects/<pid>/conversation.events.jsonl .projects/<pid>/artifacts/<sha> .projects/<pid>/artifacts/<sha>.json …`.
-   Update that tarball's sha256 in the copy's manifest. With the app stopped again, restore it. **PASS:**
+   Update that tarball's sha256 in the copy's manifest. With the app stopped again, restore it.
+5. **Re-arm for P8.** Start the app and the four sessions, seed and relaunch `claude` (§4), wait for `canSendInput`, and re-check E6's `curl`. **PASS:**
    - the artifact goes to `.restore-evidence/projects/<pid>/` and is not published;
    - `GET` of that sha → 409 `artifact-corrupt`;
    - nothing else changes.
@@ -251,14 +267,16 @@ This is the production rollback: no data step, only the flag.
 - `stat` lines (owner, mode, size, mtime) and `sha256sum` of every artifact, inbox file and source.
 - The relevant boot-log lines (`[projects]`, `[server]`).
 - **The outside-write sweep:** files owned by **uid 0**, newer than `<evidence>/run-start`, under `WORKSPACE_ROOT`:
-  `find /var/shared-terminal/workspaces -xdev -uid 0 -newer <evidence>/run-start -print`.
+  `find /var/shared-terminal/workspaces -xdev -uid 0 -type f -newer <evidence>/run-start -print`. Files only: root's own directories change mtime as a matter of course.
   - It is minus an allowlist of where root legitimately writes:
     - `.projects/`;
-    - `.st-control/*/composer/`, the Composer's pane records;
+    - `.st-control/` (pane records, `relay.enabled`, `defer-skill-seed`);
+    - `.claude-managed/` (each capturing session's `conversation.json`);
+    - `.uploads/`;
     - `.conversations/`;
     - `.backups/`, `.restore-*`, `.restore-evidence/`.
   - **Inside a session's workspace, uid-0 files may appear only under its `.st-inbox`.** Inbox files are root's only until their `fchown`, and an orphan temp may stay root's.
-  - A second sweep checks that no uid-1000 path outside the workspaces is newer than the marker.
+  - A second sweep looks for uid-1000 **files** outside the workspaces, newer than the marker: `find / -xdev \( -path /var/lib/docker -o -path /proc -o -path /home -o -path <evidence> -o -path /var/shared-terminal/workspaces \) -prune -o -uid 1000 -type f -newer <evidence>/run-start -print`. It must find nothing.
 - The image ids, the full SHA and the `dist` hash.
 
 **What is never recorded:**
