@@ -1,0 +1,700 @@
+{
+ "post1": {
+  "status": 202,
+  "body": {
+   "msgId": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+   "replayed": false,
+   "deliveries": [
+    {
+     "agentId": "a0000000-0000-4000-8000-00000000000a",
+     "state": "delivered",
+     "http": {
+      "status": 202,
+      "result": "delivered",
+      "promptId": "P1",
+      "seq": 1
+     }
+    },
+    {
+     "agentId": "b0000000-0000-4000-8000-00000000000b",
+     "state": "refused",
+     "reason": "busy",
+     "http": {
+      "status": 409
+     }
+    }
+   ]
+  }
+ },
+ "post2": {
+  "status": 202,
+  "body": {
+   "msgId": "8b11b8fd-1fed-44ea-b72c-2f08231c803d",
+   "replayed": false,
+   "deliveries": [
+    {
+     "agentId": "b0000000-0000-4000-8000-00000000000b",
+     "state": "refused",
+     "reason": "busy",
+     "http": {
+      "status": 409
+     }
+    }
+   ]
+  }
+ },
+ "ack": {
+  "status": 201,
+  "body": {
+   "ackId": "c95b5447-d8db-4351-9483-0335fb6716a6",
+   "seq": 14,
+   "replayed": false
+  }
+ },
+ "midPage": {
+  "status": 200,
+  "body": {
+   "events": [
+    {
+     "seq": 1,
+     "ev": "message",
+     "at": "2026-11-12T10:53:48.315Z",
+     "w": "boot",
+     "bn": 2,
+     "msg_id": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+     "client_message_id": "5336deec-089f-4160-9dcc-3ceab316a505",
+     "by": "u",
+     "kind": "owner",
+     "to": [
+      "a0000000-0000-4000-8000-00000000000a",
+      "b0000000-0000-4000-8000-00000000000b"
+     ],
+     "text": "Task one\nbody",
+     "text_sha256": "98656c8300a92fbe4c9dbe44a80d3edf9b0d7fc49eff52c1cfed67b13b571067",
+     "request_sha256": "bda4f92d88a0cce6379dcee7a2f2729f00f35cf1163f586d9255271673a55387",
+     "quote_ref": null,
+     "in_reply_to": null,
+     "artifacts": [],
+     "relay": null
+    },
+    {
+     "seq": 2,
+     "ev": "delivery",
+     "at": "2026-11-12T10:53:48.315Z",
+     "w": "boot",
+     "bn": 1,
+     "msg_id": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+     "agent_id": "a0000000-0000-4000-8000-00000000000a",
+     "state": "planned",
+     "binding": {
+      "binding_id": "bind-a",
+      "epoch": 1,
+      "sid": "5a000000-0000-4000-8000-0000000000aa",
+      "cid": "c-5a"
+     },
+     "composer_client_message_id": "c56e1e35-8f33-4985-bf71-4d78dc6567bb",
+     "authorized_by": "owner"
+    },
+    {
+     "seq": 3,
+     "ev": "delivery",
+     "at": "2026-11-12T10:53:48.315Z",
+     "w": "boot",
+     "bn": 0,
+     "msg_id": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+     "agent_id": "b0000000-0000-4000-8000-00000000000b",
+     "state": "planned",
+     "binding": {
+      "binding_id": "bind-b",
+      "epoch": 1,
+      "sid": "5b000000-0000-4000-8000-0000000000bb",
+      "cid": "c-5b"
+     },
+     "composer_client_message_id": "a852f32f-f60b-49db-b70c-d8cd2c076800",
+     "authorized_by": "owner"
+    },
+    {
+     "seq": 4,
+     "ev": "delivery",
+     "at": "2026-11-12T10:53:48.319Z",
+     "w": "boot",
+     "bn": 0,
+     "msg_id": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+     "agent_id": "a0000000-0000-4000-8000-00000000000a",
+     "state": "sending",
+     "binding_verified_at": "2026-11-12T10:53:48.319Z",
+     "authorized_by": "owner"
+    },
+    {
+     "seq": 5,
+     "ev": "delivery",
+     "at": "2026-11-12T10:53:48.321Z",
+     "w": "boot",
+     "bn": 0,
+     "msg_id": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+     "agent_id": "b0000000-0000-4000-8000-00000000000b",
+     "state": "sending",
+     "binding_verified_at": "2026-11-12T10:53:48.319Z",
+     "authorized_by": "owner"
+    },
+    {
+     "seq": 6,
+     "ev": "delivery",
+     "at": "2026-11-12T10:53:48.325Z",
+     "w": "boot",
+     "bn": 0,
+     "msg_id": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+     "agent_id": "a0000000-0000-4000-8000-00000000000a",
+     "state": "delivered",
+     "http": {
+      "status": 202,
+      "result": "delivered",
+      "promptId": "P1",
+      "seq": 1
+     },
+     "authorized_by": "owner"
+    },
+    {
+     "seq": 7,
+     "ev": "delivery",
+     "at": "2026-11-12T10:53:48.327Z",
+     "w": "boot",
+     "bn": 0,
+     "msg_id": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+     "agent_id": "b0000000-0000-4000-8000-00000000000b",
+     "state": "refused",
+     "reason": "busy",
+     "http": {
+      "status": 409
+     },
+     "authorized_by": "owner"
+    },
+    {
+     "seq": 8,
+     "ev": "reply_settling",
+     "at": "2026-11-12T10:53:48.340Z",
+     "w": "boot",
+     "bn": 0,
+     "msg_id": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+     "agent_id": "a0000000-0000-4000-8000-00000000000a",
+     "sid": "5a000000-0000-4000-8000-0000000000aa",
+     "cid": "c-5a",
+     "prompt_id": "P1",
+     "seq_from": 1,
+     "seq_to": 2,
+     "turn_end_seq": 2,
+     "report_sha256": "0110ba91244ea575518b953ed5045dfd39fb97bf4e2ea58db5d585afe9483eb7",
+     "report_bytes": 9,
+     "truncated": false,
+     "settle_until": "2026-11-12T10:53:48.399Z"
+    }
+   ],
+   "oldestSeq": 1,
+   "hasMore": false
+  }
+ },
+ "page": {
+  "status": 200,
+  "body": {
+   "events": [
+    {
+     "seq": 1,
+     "ev": "message",
+     "at": "2026-11-12T10:53:48.315Z",
+     "w": "boot",
+     "bn": 2,
+     "msg_id": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+     "client_message_id": "5336deec-089f-4160-9dcc-3ceab316a505",
+     "by": "u",
+     "kind": "owner",
+     "to": [
+      "a0000000-0000-4000-8000-00000000000a",
+      "b0000000-0000-4000-8000-00000000000b"
+     ],
+     "text": "Task one\nbody",
+     "text_sha256": "98656c8300a92fbe4c9dbe44a80d3edf9b0d7fc49eff52c1cfed67b13b571067",
+     "request_sha256": "bda4f92d88a0cce6379dcee7a2f2729f00f35cf1163f586d9255271673a55387",
+     "quote_ref": null,
+     "in_reply_to": null,
+     "artifacts": [],
+     "relay": null
+    },
+    {
+     "seq": 2,
+     "ev": "delivery",
+     "at": "2026-11-12T10:53:48.315Z",
+     "w": "boot",
+     "bn": 1,
+     "msg_id": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+     "agent_id": "a0000000-0000-4000-8000-00000000000a",
+     "state": "planned",
+     "binding": {
+      "binding_id": "bind-a",
+      "epoch": 1,
+      "sid": "5a000000-0000-4000-8000-0000000000aa",
+      "cid": "c-5a"
+     },
+     "composer_client_message_id": "c56e1e35-8f33-4985-bf71-4d78dc6567bb",
+     "authorized_by": "owner"
+    },
+    {
+     "seq": 3,
+     "ev": "delivery",
+     "at": "2026-11-12T10:53:48.315Z",
+     "w": "boot",
+     "bn": 0,
+     "msg_id": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+     "agent_id": "b0000000-0000-4000-8000-00000000000b",
+     "state": "planned",
+     "binding": {
+      "binding_id": "bind-b",
+      "epoch": 1,
+      "sid": "5b000000-0000-4000-8000-0000000000bb",
+      "cid": "c-5b"
+     },
+     "composer_client_message_id": "a852f32f-f60b-49db-b70c-d8cd2c076800",
+     "authorized_by": "owner"
+    },
+    {
+     "seq": 4,
+     "ev": "delivery",
+     "at": "2026-11-12T10:53:48.319Z",
+     "w": "boot",
+     "bn": 0,
+     "msg_id": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+     "agent_id": "a0000000-0000-4000-8000-00000000000a",
+     "state": "sending",
+     "binding_verified_at": "2026-11-12T10:53:48.319Z",
+     "authorized_by": "owner"
+    },
+    {
+     "seq": 5,
+     "ev": "delivery",
+     "at": "2026-11-12T10:53:48.321Z",
+     "w": "boot",
+     "bn": 0,
+     "msg_id": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+     "agent_id": "b0000000-0000-4000-8000-00000000000b",
+     "state": "sending",
+     "binding_verified_at": "2026-11-12T10:53:48.319Z",
+     "authorized_by": "owner"
+    },
+    {
+     "seq": 6,
+     "ev": "delivery",
+     "at": "2026-11-12T10:53:48.325Z",
+     "w": "boot",
+     "bn": 0,
+     "msg_id": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+     "agent_id": "a0000000-0000-4000-8000-00000000000a",
+     "state": "delivered",
+     "http": {
+      "status": 202,
+      "result": "delivered",
+      "promptId": "P1",
+      "seq": 1
+     },
+     "authorized_by": "owner"
+    },
+    {
+     "seq": 7,
+     "ev": "delivery",
+     "at": "2026-11-12T10:53:48.327Z",
+     "w": "boot",
+     "bn": 0,
+     "msg_id": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+     "agent_id": "b0000000-0000-4000-8000-00000000000b",
+     "state": "refused",
+     "reason": "busy",
+     "http": {
+      "status": 409
+     },
+     "authorized_by": "owner"
+    },
+    {
+     "seq": 8,
+     "ev": "reply_settling",
+     "at": "2026-11-12T10:53:48.340Z",
+     "w": "boot",
+     "bn": 0,
+     "msg_id": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+     "agent_id": "a0000000-0000-4000-8000-00000000000a",
+     "sid": "5a000000-0000-4000-8000-0000000000aa",
+     "cid": "c-5a",
+     "prompt_id": "P1",
+     "seq_from": 1,
+     "seq_to": 2,
+     "turn_end_seq": 2,
+     "report_sha256": "0110ba91244ea575518b953ed5045dfd39fb97bf4e2ea58db5d585afe9483eb7",
+     "report_bytes": 9,
+     "truncated": false,
+     "settle_until": "2026-11-12T10:53:48.399Z"
+    },
+    {
+     "seq": 9,
+     "ev": "reply_ref",
+     "at": "2026-11-12T10:53:48.401Z",
+     "w": "boot",
+     "bn": 0,
+     "msg_id": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+     "agent_id": "a0000000-0000-4000-8000-00000000000a",
+     "sid": "5a000000-0000-4000-8000-0000000000aa",
+     "cid": "c-5a",
+     "prompt_id": "P1",
+     "seq_from": 1,
+     "seq_to": 2,
+     "turn_end_seq": 2,
+     "report_sha256": "0110ba91244ea575518b953ed5045dfd39fb97bf4e2ea58db5d585afe9483eb7",
+     "report_bytes": 9,
+     "truncated": false,
+     "attribution": "exact"
+    },
+    {
+     "seq": 10,
+     "ev": "message",
+     "at": "2026-11-12T10:53:48.477Z",
+     "w": "boot",
+     "bn": 1,
+     "msg_id": "8b11b8fd-1fed-44ea-b72c-2f08231c803d",
+     "client_message_id": "03a5dbfd-99dd-489b-a65d-0676eb5eb85a",
+     "by": "u",
+     "kind": "owner",
+     "to": [
+      "b0000000-0000-4000-8000-00000000000b"
+     ],
+     "text": "follow",
+     "text_sha256": "a3ce0b6106cdb3982d7b2bd5c7be5e1e74d973c4a3018b03beb01fc5dc3ec6f5",
+     "request_sha256": "0742f5e7f2226d707469322198a2e20ddb07176cbe36b15af0f5fd256c578087",
+     "quote_ref": {
+      "msg_id": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+      "agent_id": "a0000000-0000-4000-8000-00000000000a",
+      "prompt_id": "P1",
+      "report_sha256": "0110ba91244ea575518b953ed5045dfd39fb97bf4e2ea58db5d585afe9483eb7"
+     },
+     "in_reply_to": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+     "artifacts": [],
+     "relay": null
+    },
+    {
+     "seq": 11,
+     "ev": "delivery",
+     "at": "2026-11-12T10:53:48.477Z",
+     "w": "boot",
+     "bn": 0,
+     "msg_id": "8b11b8fd-1fed-44ea-b72c-2f08231c803d",
+     "agent_id": "b0000000-0000-4000-8000-00000000000b",
+     "state": "planned",
+     "binding": {
+      "binding_id": "bind-b",
+      "epoch": 1,
+      "sid": "5b000000-0000-4000-8000-0000000000bb",
+      "cid": "c-5b"
+     },
+     "composer_client_message_id": "34f9ed4e-33fd-4cee-94a0-fb3c8457f08e",
+     "authorized_by": "owner"
+    },
+    {
+     "seq": 12,
+     "ev": "delivery",
+     "at": "2026-11-12T10:53:48.485Z",
+     "w": "boot",
+     "bn": 0,
+     "msg_id": "8b11b8fd-1fed-44ea-b72c-2f08231c803d",
+     "agent_id": "b0000000-0000-4000-8000-00000000000b",
+     "state": "sending",
+     "binding_verified_at": "2026-11-12T10:53:48.485Z",
+     "authorized_by": "owner"
+    },
+    {
+     "seq": 13,
+     "ev": "delivery",
+     "at": "2026-11-12T10:53:48.489Z",
+     "w": "boot",
+     "bn": 0,
+     "msg_id": "8b11b8fd-1fed-44ea-b72c-2f08231c803d",
+     "agent_id": "b0000000-0000-4000-8000-00000000000b",
+     "state": "refused",
+     "reason": "busy",
+     "http": {
+      "status": 409
+     },
+     "authorized_by": "owner"
+    },
+    {
+     "seq": 14,
+     "ev": "owner_ack",
+     "at": "2026-11-12T10:53:48.491Z",
+     "w": "boot",
+     "bn": 0,
+     "ack_id": "c95b5447-d8db-4351-9483-0335fb6716a6",
+     "client_ack_id": "f46e0fdb-7742-44b0-b6aa-718876e9a5df",
+     "by": "u",
+     "target": {
+      "msg_id": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+      "agent_id": "b0000000-0000-4000-8000-00000000000b"
+     },
+     "request_sha256": "6a33efc13185d005df1c7decbf0572e2dc7872ced8f2ae4b9d1ab5cc46971b06"
+    }
+   ],
+   "oldestSeq": 1,
+   "hasMore": false
+  }
+ },
+ "small": {
+  "status": 200,
+  "body": {
+   "events": [
+    {
+     "seq": 12,
+     "ev": "delivery",
+     "at": "2026-11-12T10:53:48.485Z",
+     "w": "boot",
+     "bn": 0,
+     "msg_id": "8b11b8fd-1fed-44ea-b72c-2f08231c803d",
+     "agent_id": "b0000000-0000-4000-8000-00000000000b",
+     "state": "sending",
+     "binding_verified_at": "2026-11-12T10:53:48.485Z",
+     "authorized_by": "owner"
+    },
+    {
+     "seq": 13,
+     "ev": "delivery",
+     "at": "2026-11-12T10:53:48.489Z",
+     "w": "boot",
+     "bn": 0,
+     "msg_id": "8b11b8fd-1fed-44ea-b72c-2f08231c803d",
+     "agent_id": "b0000000-0000-4000-8000-00000000000b",
+     "state": "refused",
+     "reason": "busy",
+     "http": {
+      "status": 409
+     },
+     "authorized_by": "owner"
+    },
+    {
+     "seq": 14,
+     "ev": "owner_ack",
+     "at": "2026-11-12T10:53:48.491Z",
+     "w": "boot",
+     "bn": 0,
+     "ack_id": "c95b5447-d8db-4351-9483-0335fb6716a6",
+     "client_ack_id": "f46e0fdb-7742-44b0-b6aa-718876e9a5df",
+     "by": "u",
+     "target": {
+      "msg_id": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+      "agent_id": "b0000000-0000-4000-8000-00000000000b"
+     },
+     "request_sha256": "6a33efc13185d005df1c7decbf0572e2dc7872ced8f2ae4b9d1ab5cc46971b06"
+    }
+   ],
+   "oldestSeq": 12,
+   "hasMore": true
+  }
+ },
+ "msg": {
+  "status": 200,
+  "body": {
+   "message": {
+    "seq": 1,
+    "ev": "message",
+    "at": "2026-11-12T10:53:48.315Z",
+    "w": "boot",
+    "bn": 2,
+    "msg_id": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+    "client_message_id": "5336deec-089f-4160-9dcc-3ceab316a505",
+    "by": "u",
+    "kind": "owner",
+    "to": [
+     "a0000000-0000-4000-8000-00000000000a",
+     "b0000000-0000-4000-8000-00000000000b"
+    ],
+    "text": "Task one\nbody",
+    "text_sha256": "98656c8300a92fbe4c9dbe44a80d3edf9b0d7fc49eff52c1cfed67b13b571067",
+    "request_sha256": "bda4f92d88a0cce6379dcee7a2f2729f00f35cf1163f586d9255271673a55387",
+    "quote_ref": null,
+    "in_reply_to": null,
+    "artifacts": [],
+    "relay": null
+   },
+   "deliveries": [
+    {
+     "agentId": "a0000000-0000-4000-8000-00000000000a",
+     "state": "delivered",
+     "events": [
+      {
+       "seq": 2,
+       "ev": "delivery",
+       "at": "2026-11-12T10:53:48.315Z",
+       "w": "boot",
+       "bn": 1,
+       "msg_id": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+       "agent_id": "a0000000-0000-4000-8000-00000000000a",
+       "state": "planned",
+       "binding": {
+        "binding_id": "bind-a",
+        "epoch": 1,
+        "sid": "5a000000-0000-4000-8000-0000000000aa",
+        "cid": "c-5a"
+       },
+       "composer_client_message_id": "c56e1e35-8f33-4985-bf71-4d78dc6567bb",
+       "authorized_by": "owner"
+      },
+      {
+       "seq": 4,
+       "ev": "delivery",
+       "at": "2026-11-12T10:53:48.319Z",
+       "w": "boot",
+       "bn": 0,
+       "msg_id": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+       "agent_id": "a0000000-0000-4000-8000-00000000000a",
+       "state": "sending",
+       "binding_verified_at": "2026-11-12T10:53:48.319Z",
+       "authorized_by": "owner"
+      },
+      {
+       "seq": 6,
+       "ev": "delivery",
+       "at": "2026-11-12T10:53:48.325Z",
+       "w": "boot",
+       "bn": 0,
+       "msg_id": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+       "agent_id": "a0000000-0000-4000-8000-00000000000a",
+       "state": "delivered",
+       "http": {
+        "status": 202,
+        "result": "delivered",
+        "promptId": "P1",
+        "seq": 1
+       },
+       "authorized_by": "owner"
+      }
+     ]
+    },
+    {
+     "agentId": "b0000000-0000-4000-8000-00000000000b",
+     "state": "refused",
+     "events": [
+      {
+       "seq": 3,
+       "ev": "delivery",
+       "at": "2026-11-12T10:53:48.315Z",
+       "w": "boot",
+       "bn": 0,
+       "msg_id": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+       "agent_id": "b0000000-0000-4000-8000-00000000000b",
+       "state": "planned",
+       "binding": {
+        "binding_id": "bind-b",
+        "epoch": 1,
+        "sid": "5b000000-0000-4000-8000-0000000000bb",
+        "cid": "c-5b"
+       },
+       "composer_client_message_id": "a852f32f-f60b-49db-b70c-d8cd2c076800",
+       "authorized_by": "owner"
+      },
+      {
+       "seq": 5,
+       "ev": "delivery",
+       "at": "2026-11-12T10:53:48.321Z",
+       "w": "boot",
+       "bn": 0,
+       "msg_id": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+       "agent_id": "b0000000-0000-4000-8000-00000000000b",
+       "state": "sending",
+       "binding_verified_at": "2026-11-12T10:53:48.319Z",
+       "authorized_by": "owner"
+      },
+      {
+       "seq": 7,
+       "ev": "delivery",
+       "at": "2026-11-12T10:53:48.327Z",
+       "w": "boot",
+       "bn": 0,
+       "msg_id": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+       "agent_id": "b0000000-0000-4000-8000-00000000000b",
+       "state": "refused",
+       "reason": "busy",
+       "http": {
+        "status": 409
+       },
+       "authorized_by": "owner"
+      }
+     ]
+    }
+   ],
+   "replies": [
+    {
+     "agentId": "a0000000-0000-4000-8000-00000000000a",
+     "settling": {
+      "seq": 8,
+      "ev": "reply_settling",
+      "at": "2026-11-12T10:53:48.340Z",
+      "w": "boot",
+      "bn": 0,
+      "msg_id": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+      "agent_id": "a0000000-0000-4000-8000-00000000000a",
+      "sid": "5a000000-0000-4000-8000-0000000000aa",
+      "cid": "c-5a",
+      "prompt_id": "P1",
+      "seq_from": 1,
+      "seq_to": 2,
+      "turn_end_seq": 2,
+      "report_sha256": "0110ba91244ea575518b953ed5045dfd39fb97bf4e2ea58db5d585afe9483eb7",
+      "report_bytes": 9,
+      "truncated": false,
+      "settle_until": "2026-11-12T10:53:48.399Z"
+     },
+     "ref": {
+      "seq": 9,
+      "ev": "reply_ref",
+      "at": "2026-11-12T10:53:48.401Z",
+      "w": "boot",
+      "bn": 0,
+      "msg_id": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+      "agent_id": "a0000000-0000-4000-8000-00000000000a",
+      "sid": "5a000000-0000-4000-8000-0000000000aa",
+      "cid": "c-5a",
+      "prompt_id": "P1",
+      "seq_from": 1,
+      "seq_to": 2,
+      "turn_end_seq": 2,
+      "report_sha256": "0110ba91244ea575518b953ed5045dfd39fb97bf4e2ea58db5d585afe9483eb7",
+      "report_bytes": 9,
+      "truncated": false,
+      "attribution": "exact"
+     },
+     "lateCloses": []
+    }
+   ],
+   "acks": [
+    {
+     "seq": 14,
+     "ev": "owner_ack",
+     "at": "2026-11-12T10:53:48.491Z",
+     "w": "boot",
+     "bn": 0,
+     "ack_id": "c95b5447-d8db-4351-9483-0335fb6716a6",
+     "client_ack_id": "f46e0fdb-7742-44b0-b6aa-718876e9a5df",
+     "by": "u",
+     "target": {
+      "msg_id": "3bf22365-dc2b-4eeb-9027-439fbc21a96a",
+      "agent_id": "b0000000-0000-4000-8000-00000000000b"
+     },
+     "request_sha256": "6a33efc13185d005df1c7decbf0572e2dc7872ced8f2ae4b9d1ab5cc46971b06"
+    }
+   ]
+  }
+ },
+ "captureTurnEnd": {
+  "seq": 2,
+  "ts": "2026-11-12T10:53:48.340Z",
+  "ev": "turn_end",
+  "prompt_id": "P1",
+  "turn_id": null,
+  "agent_id": null,
+  "pane": "%1",
+  "data": {
+   "last_assistant_message": "Done one."
+  }
+ }
+}
