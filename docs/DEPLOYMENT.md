@@ -664,6 +664,16 @@ Admin surface (`requireAdmin`; the writes also go through `adminActionIp`):
     `bytesOnDisk` (re-measured at most once a minute), `queueBytesNow`,
     `queueBytesMax`, `wsResyncsSinceBoot` (0 until the 3.1 Conversation WS
     exists) and `recreateOrphans`;
+  - the index-snapshot health (#546): `indexWriteFailures` since boot,
+    `indexWriteLastErrorCode` (an errno such as `EDQUOT`, `ENOSPC`, `EIO`;
+    `null` while none failed), and the evicted indexes kept in memory after
+    a failed snapshot write (`evictionWriteKept` since boot,
+    `evictionWriteKeptNow`) or dropped past the bound of 16
+    (`evictionWriteDropped`: in-memory state lost). A non-zero value with
+    no `gap disk` events usually means inode exhaustion or a quota on
+    `WORKSPACE_ROOT` — appends still work, only the snapshot temp file
+    cannot be created; the log escalates to `error` every 5 failures in a
+    row;
   - no titles or ids;
   - `effectiveSessions` is an **estimate of configuration**, computed without
     probing any relay, never verified availability. The probed value is per

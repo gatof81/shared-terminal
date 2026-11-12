@@ -1744,7 +1744,7 @@ Por eso **L5 ≥ 6 × L3 + 1 MiB de envoltura**.
 | **G1** | suma de colas en memoria de todas las conversaciones | 64 MiB | `gap backpressure{scope: global}` en la conversación cuya cola es mayor |
 | **G2** | cuerpos de ingesta > 1 MiB en vuelo simultáneos | 4 | 204 + `gap backpressure{scope: ingest}` |
 | **G3** | bytes en vuelo por socket WS (`bufferedAmount` + frame a enviar), comprobado **antes de cada frame**, no por lote | replay: ≤ 2 MiB, con una única excepción de un frame cuando el buffer está vacío (máx. en vuelo = 2 MiB + el **frame serializado** más grande; un contenido de L3 escapado puede serializar a ~6 MiB, así que la cota es ~8 MiB, no L3); live: resync a 8 MiB (§6.1) | esperar `drain`, 1013 o `resync`; nada se pierde: el cliente re-suscribe desde su último `seq` |
-| **G4** | índices (`index.json`) residentes en memoria | LRU de 64 conversaciones; cada índice ≤ 4 MiB (se resume por turnos, no por eventos) | desalojo; recarga desde disco al siguiente acceso |
+| **G4** | índices (`index.json`) residentes en memoria | LRU de 64 conversaciones; cada índice ≤ 4 MiB (se resume por turnos, no por eventos) | desalojo; recarga desde disco al siguiente acceso. Si la escritura del snapshot al desalojar falla (#546), la entrada se conserva en memoria —hasta 16 por encima de G4— y se reintenta con espera exponencial (1 s … 60 s); pasado ese margen se descarta la más antigua y se cuenta (`evictionWriteDropped`) |
 | **G5** | bytes por respuesta de `GET …/events` | 8 MiB | corta antes y devuelve `hasMore: true` |
 | **R1/R2** | tasa por sesión ST | §3.1 | `gap rate_limited` |
 
@@ -2122,7 +2122,7 @@ FK). El borrado permanente de una conversación individual **no** forma parte de
 | `CONVERSATION_ALLOW_USERS=<id,id>` | env | sesiones nuevas de esos usuarios nacen con `conversation_requested=1` |
 | `npm run conversation:disable -- <sid>\|--all` | shell host | fila "Emergencia" de §2.4 con el orden de §2.5: marca de revocación, D1, archivos; si D1 falla, deja la marca, no borra archivos y sale ≠ 0 |
 | `npm run conversation:enable-all` | shell host | quita `REVOKED_ALL`; no toca filas ni marcas por sesión |
-| `GET /api/admin/stats` → `conversation` | admin | `{ enabledSessions, effectiveSessions, eventsSinceBoot, rejectedSinceBoot{byReason}, gapsSinceBoot, unattributedGaps, bytesOnDisk, queueBytesNow, queueBytesMax, wsResyncsSinceBoot, recreateOrphans }`; **sin** títulos ni ids de conversación. `effectiveSessions` cuenta según §2.7.6 sin probe por sesión: es una cota superior ("configurada"), y el valor con probe solo se da por sesión |
+| `GET /api/admin/stats` → `conversation` | admin | `{ enabledSessions, effectiveSessions, eventsSinceBoot, rejectedSinceBoot{byReason}, gapsSinceBoot, unattributedGaps, bytesOnDisk, queueBytesNow, queueBytesMax, wsResyncsSinceBoot, recreateOrphans, indexWriteFailures, evictionWriteKept, evictionWriteKeptNow, evictionWriteDropped, indexWriteLastErrorCode }`; **sin** títulos ni ids de conversación. `effectiveSessions` cuenta según §2.7.6 sin probe por sesión: es una cota superior ("configurada"), y el valor con probe solo se da por sesión |
 
 ---
 
