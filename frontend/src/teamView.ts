@@ -294,7 +294,7 @@ class Composer {
 			nodes.push(
 				button("+ add", "tw-chip tw-chip-add", () => this.openPicker(null), "Add a recipient"),
 			);
-		this.chips.replaceChildren(...nodes);
+		replaceIfChanged(this.chips, nodes);
 		this.hint.textContent =
 			this.chosen.length === 0
 				? "Nobody receives it until you choose agents. An @name in the text is just text."
@@ -881,7 +881,7 @@ class Workspace {
 			() => go(this.projectId, { kind: "new" }),
 		);
 		nodes.push(newBtn);
-		this.nowCol.replaceChildren(...nodes);
+		replaceIfChanged(this.nowCol, nodes);
 	}
 
 	private threadsList(): HTMLElement {
@@ -968,7 +968,7 @@ class Workspace {
 	}
 
 	private renderSide(items: ReturnType<Workspace["forYouItems"]>): void {
-		this.sideCol.replaceChildren(this.forYouList(items));
+		replaceIfChanged(this.sideCol, [this.forYouList(items)]);
 	}
 
 	private renderEmptyMain(): void {
@@ -989,24 +989,28 @@ class Workspace {
 
 	private renderNew(): void {
 		const c = this.composer("new", "task", null);
-		const head = this.mainHead;
-		head.replaceChildren(this.back(), el("h3", "tw-main-title", "New task"));
-		this.setMain(head, c.root);
+		replaceIfChanged(this.mainHead, [this.back(), el("h3", "tw-main-title", "New task")]);
+		this.setMain(this.mainHead, c.root);
 	}
 
 	// ── Thread ──
 
 	private renderThread(msgId: string): void {
 		const log = this.store.log;
-		const head = this.mainHead;
-		head.replaceChildren(this.back());
+		// Built apart, then synced into the kept header only if it changed.
+		const head = el("div");
+		head.append(this.back());
+		const syncHead = (): HTMLElement => {
+			replaceIfChanged(this.mainHead, [...head.childNodes]);
+			return this.mainHead;
+		};
 		if (!log.has(msgId)) {
 			if (this.store.unreachable.has(msgId)) {
 				head.append(el("h3", "tw-main-title", "Thread not found"));
-				this.setMain(head, el("p", "tw-muted", "This thread doesn't exist in this project."));
+				this.setMain(syncHead(), el("p", "tw-muted", "This thread doesn't exist in this project."));
 			} else {
 				head.append(el("h3", "tw-main-title", "Loading thread…"));
-				this.setMain(head);
+				this.setMain(syncHead());
 				if (this.store.loaded) void this.fetchThreadRoot(msgId);
 			}
 			return;
@@ -1047,8 +1051,11 @@ class Workspace {
 			}
 		}
 		rows.sort((a, b) => a.seq - b.seq);
-		timeline.replaceChildren(...rows.map((r) => r.node));
-		this.setMain(head, timeline, composer.root);
+		replaceIfChanged(
+			timeline,
+			rows.map((r) => r.node),
+		);
+		this.setMain(syncHead(), timeline, composer.root);
 	}
 
 	private async fetchThreadRoot(msgId: string): Promise<void> {
@@ -1212,6 +1219,20 @@ class Workspace {
 		);
 		return li;
 	}
+}
+
+/**
+ * Put `nodes` in `container` only if they differ from what is there
+ * (`isEqualNode`: same structure, attributes and text). A poll that
+ * changes nothing — the log's or the agent directory's — then touches no
+ * DOM at all, so the person's text selection, focus and screen-reader
+ * place survive it (independent review of #589). Returns true if replaced.
+ */
+function replaceIfChanged(container: Element, nodes: readonly Node[]): boolean {
+	const cur = container.childNodes;
+	if (cur.length === nodes.length && nodes.every((n, i) => cur[i]!.isEqualNode(n))) return false;
+	container.replaceChildren(...nodes);
+	return true;
 }
 
 function firstLine(text: string): string {

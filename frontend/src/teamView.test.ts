@@ -351,6 +351,20 @@ describe("composer", () => {
 		expect(now.dataset.key).toBe(reply.dataset.key);
 	});
 
+	it("the project page's own re-render (agent poll) leaves an unchanged thread's DOM untouched", async () => {
+		const root = mount({ kind: "thread", msgId: "t1" });
+		await flush();
+		const bubble = root.querySelector(".tw-bubble-agent")!;
+		const card = root.querySelector(".tw-foryou-inline .tw-card")!;
+		const sel = document.getSelection()!;
+		sel.selectAllChildren(bubble);
+		mount({ kind: "thread", msgId: "t1" }); // what projectsView does on every 5–15 s agent poll
+		await flush();
+		expect(root.querySelector(".tw-bubble-agent")).toBe(bubble);
+		expect(root.querySelector(".tw-foryou-inline .tw-card")).toBe(card);
+		expect(sel.toString()).toBe(REPLY);
+	});
+
 	it("results after a 202 follow the log once the message is folded (a 'sending' that ends later)", async () => {
 		api.postProjectMessage.mockResolvedValueOnce({
 			ok: true,
