@@ -96,6 +96,9 @@ test.describe("workspace — against the real D1 backend", () => {
 		h = harness;
 		backend.enableProjects();
 		backend.projectConversation = true; // the mock's flag; its own log stays unused
+		// The harness serves HTTP only: the mock refuses the project socket so the
+		// client polls the REAL log (which also exercises the fallback path).
+		backend.projectSocketsRefused = true;
 		const forward = /^\/projects\/[^/]+\/conversation\/|^\/sessions\/[^/]+\/conversations\/[^/]+\/events\/\d+(\?|$)/;
 		backend.override = async (_method, path, route) => {
 			if (!forward.test(path)) return false;

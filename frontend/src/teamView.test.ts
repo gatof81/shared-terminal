@@ -9,6 +9,7 @@ const api = vi.hoisted(() => ({
 	fetchProjectMessage: vi.fn(),
 	postProjectMessage: vi.fn(),
 	postProjectAck: vi.fn(),
+	openProjectSocket: vi.fn(() => ({ follow: vi.fn(), close: vi.fn() })),
 	readConversationEvent: vi.fn(),
 }));
 vi.mock("./api.js", () => api);

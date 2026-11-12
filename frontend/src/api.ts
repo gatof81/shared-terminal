@@ -612,6 +612,92 @@ export function postProjectAck(
 	);
 }
 
+/** Appendix A: `WS /ws/project/<pid>` server frames. Events are raw log lines (parseLogEvent reads them). */
+export type ProjectServerFrame =
+	| { type: "event"; event: unknown }
+	| { type: "resync"; fromSeq: number };
+
+export interface ProjectSocket {
+	/** (Re)subscribe from this seq: the server sends every persisted event > after, once, in order, then live. */
+	follow(after: number): void;
+	close(): void;
+}
+
+/**
+ * The project's live log (PROJECT_CONVERSATION.md §5). Reconnects with
+ * backoff, except after 1008 (refused: not the owner, or the feature went
+ * off) — then `onState(false, true)` and the caller falls back to polling.
+ * A `resync` means the server stopped sending (backpressure): the caller
+ * re-reads by GET and follows again.
+ */
+export function openProjectSocket(
+	projectId: string,
+	onFrame: (f: ProjectServerFrame) => void,
+	onState?: (connected: boolean, refused?: boolean) => void,
+): ProjectSocket {
+	let ws: WebSocket | null = null;
+	let closed = false;
+	let after: number | null = null;
+	let backoff = 500;
+	let timer: ReturnType<typeof setTimeout> | null = null;
+	const subscribe = () => {
+		if (ws?.readyState === WebSocket.OPEN && after !== null)
+			ws.send(JSON.stringify({ type: "subscribe", after }));
+	};
+	const connect = () => {
+		if (closed) return;
+		const sock = new WebSocket(`${WS_BASE}/ws/project/${encodeURIComponent(projectId)}`);
+		ws = sock;
+		sock.addEventListener("open", () => {
+			backoff = 500;
+			onState?.(true);
+			subscribe();
+		});
+		sock.addEventListener("message", (e) => {
+			let f: unknown;
+			try {
+				f = JSON.parse(e.data as string);
+			} catch {
+				return;
+			}
+			if (!isObj(f)) return;
+			if (f.type === "event" && isObj(f.event) && typeof f.event.seq === "number") {
+				// Our cursor follows what arrived, so a reconnect resumes after it.
+				if (after !== null && f.event.seq <= after) return;
+				after = f.event.seq;
+				onFrame({ type: "event", event: f.event });
+			} else if (f.type === "resync" && typeof f.fromSeq === "number") {
+				onFrame({ type: "resync", fromSeq: f.fromSeq });
+			}
+		});
+		sock.addEventListener("close", (e) => {
+			if (ws !== sock) return;
+			ws = null;
+			onState?.(false, e.code === 1008);
+			if (closed || e.code === 1008) return;
+			timer = setTimeout(connect, backoff);
+			backoff = Math.min(backoff * 2, 15_000);
+		});
+	};
+	connect();
+	return {
+		follow(seq) {
+			after = seq;
+			subscribe();
+		},
+		close() {
+			closed = true;
+			if (timer) clearTimeout(timer);
+			try {
+				ws?.close(1000, "view closed");
+			} catch {
+				/* already closed */
+			}
+			ws = null;
+		},
+	};
+}
+
 export interface ProjectMessageBody {
 	clientMessageId: string;
 	text: string;

@@ -63,6 +63,9 @@ import {
 } from "./teamModel.js";
 import { button, el } from "./ui.js";
 
+/** While the project socket is live, the log is still re-read this often (a missed frame can't linger). */
+const LIVE_SAFETY_POLL_MS = 30_000;
+
 // ── Context from the project page ───────────────────────────────────────────
 
 export interface WorkspaceContext {
@@ -562,9 +565,10 @@ class Workspace {
 		this.ctx = ctx;
 		this.agents = agentsOf(ctx);
 		if (!this.unsubscribe) {
-			// First show, or back on screen after a suspend: read the newest page now.
+			// First show, or back on screen after a suspend: read the newest page
+			// now, then follow the log live (the poll stays as the safety net).
 			this.unsubscribe = this.store.onChange(() => this.render());
-			void this.store.refresh();
+			void this.store.refresh().then(() => this.unsubscribe && this.store.startLive());
 		}
 		this.schedule();
 		this.render();
@@ -599,16 +603,22 @@ class Workspace {
 		this.timer = null;
 		this.unsubscribe?.();
 		this.unsubscribe = null;
+		this.store.stopLive();
 	}
 
 	private schedule(): void {
 		if (this.timer) return;
-		this.timer = setTimeout(() => {
-			this.timer = null;
-			if (!this.unsubscribe) return;
-			if (document.visibilityState === "visible") void this.store.refresh();
-			this.schedule();
-		}, POLL_ACTIVE_MS);
+		this.timer = setTimeout(
+			() => {
+				this.timer = null;
+				if (!this.unsubscribe) return;
+				if (document.visibilityState === "visible") void this.store.refresh();
+				this.schedule();
+				// Live over the socket: the poll is only a safety net. Otherwise the
+				// usual 5 s.
+			},
+			this.store.live ? LIVE_SAFETY_POLL_MS : POLL_ACTIVE_MS,
+		);
 	}
 
 	private composer(key: string, mode: "task" | "thread", rootId: string | null): Composer {

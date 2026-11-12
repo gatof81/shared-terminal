@@ -680,6 +680,20 @@ export class MockBackend {
 
 	private projectSeq = 0;
 
+	/** Open project sockets (WS /ws/project/<pid>). */
+	projectSockets: Array<{ route: WebSocketRoute; after: number | null; closed: boolean }> = [];
+	/** Refuse every project socket (1008): the frontend must fall back to polling. */
+	projectSocketsRefused = false;
+
+	private sendProjectEvent(
+		sock: { route: WebSocketRoute; after: number | null; closed: boolean },
+		e: Record<string, unknown>,
+	): void {
+		if (sock.closed || sock.after === null || (e.seq as number) <= sock.after) return;
+		sock.after = e.seq as number;
+		sock.route.send(JSON.stringify({ type: "event", event: e }));
+	}
+
 	/** Append a line to the project log (seq assigned here, like the writer). */
 	appendProjectEvent(line: Record<string, unknown>): Record<string, unknown> {
 		// Appendix A: `at` (ISO UTC) and the writer's identity on every line.
@@ -691,6 +705,7 @@ export class MockBackend {
 			...line,
 		};
 		this.projectLog.push(e);
+		for (const sock of this.projectSockets) this.sendProjectEvent(sock, e);
 		return e;
 	}
 
@@ -1334,6 +1349,31 @@ export class MockBackend {
 		const sessionId = decodeURIComponent(parts[2] ?? "");
 		if (!this.current) {
 			ws.close({ code: 1008, reason: "Unauthorized" });
+			return;
+		}
+		if (kind === "project") {
+			// D1 — WS /ws/project/<pid> (Appendix A): every event > after, once, in order, then live.
+			const pid = sessionId;
+			const own = this.projects.some((p) => p.projectId === pid && p.ownerUserId === this.current?.userId);
+			if (!this.projectConversation || !own || this.projectSocketsRefused) {
+				ws.close({ code: 1008, reason: "Forbidden" });
+				return;
+			}
+			const sock = { route: ws, after: null as number | null, closed: false };
+			this.projectSockets.push(sock);
+			ws.onMessage((raw) => {
+				try {
+					const msg = JSON.parse(String(raw)) as { type?: string; after?: number };
+					if (msg.type !== "subscribe") return;
+					sock.after = typeof msg.after === "number" ? msg.after : 0;
+					for (const e of this.projectLog) this.sendProjectEvent(sock, e);
+				} catch {
+					/* ignore non-JSON */
+				}
+			});
+			ws.onClose(() => {
+				sock.closed = true;
+			});
 			return;
 		}
 		if (kind === "sessions") {
