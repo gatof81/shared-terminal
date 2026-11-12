@@ -16,14 +16,19 @@ Each runbook step ends as one of:
 | --- | --- |
 | **PASS** | The step's PASS condition held, with its evidence recorded |
 | **FAIL** | The condition did not hold, or an abort condition of §7 was hit |
-| **NOT-EXERCISED** | The step ran, but the situation it tests did not occur. Only two steps may end this way: K1/K5 (a kill or a removal that never landed inside the window) and P7.3 (no unfinished delivery in the backup, runbook P7.0). It never counts as PASS |
-| **ENV** | The environment broke a precondition, not D2. Examples: E1–E7, the app not reaching D1 after a restart, the egress rule stale. The step is repeated after the environment is fixed. An ENV is never turned into a PASS or a FAIL by judgement |
+| **NOT-EXERCISED** | The step ran, **every invariant of the step held in every round**, but the situation it targets did not occur. Only three steps may end this way, each observable in the log: <br>• K1: no round's kill found a delivery with a `placing` and no `sending`; <br>• K5: no delete landed after a `placing` (no `not-sent{binding-changed|agent-removed}` with `files_possibly_placed`); <br>• P7.3: no unfinished delivery in the backup (runbook P7.0). <br>**FAIL takes precedence**: a violated invariant in any round makes the step FAIL, window or not. The deterministic cover is T12b, T6 and the c0 test. It never counts as PASS |
+| **ENV** | The environment, not D2, broke a precondition. It needs **positive evidence of an environmental cause**: a D1 or network error in the boot log, the pinned address wrong, the egress rule not matching, or an E-check failing. **B confirms the classification.** Any failure without such evidence (e.g. the app not reaching `[server] listening` after a K1 kill or a restore, which D2's recovery could also cause) is **FAIL** until B has diagnosed it. The step is repeated after the fix. The failed attempt and its evidence stay in the report (sections 3 and 9) even if the repeat passes |
 | **SKIPPED** | Excluded by the owner (K6 in this run, decision O3) |
 
 **The run's verdict:**
 - **PASS** only if every step from P0 to P8 is PASS, except the steps excluded by the owner and at most the NOT-EXERCISED cases above, each explained.
 - **FAIL** if any step is FAIL.
 - **INCOMPLETE** otherwise: an open ENV, or a step not run.
+
+**Loss of isolation** (any E1–E7 check failing, or any sign of it, runbook §7) is not a D2 result:
+- the run is aborted, and the verdict is **INCOMPLETE**;
+- **every step since the last passing E1–E7 check is void** and must be re-run;
+- it blocks any recommendation until that re-run.
 
 An INCOMPLETE run is not a partial PASS. The steps it did not settle are re-run, on the same host if
 it is still intact (§4).
@@ -33,7 +38,9 @@ it is still intact (§4).
 - any file in a `trap/`;
 - a claimed path whose bytes do not match its sha;
 - two `sending` lines for one delivery;
-- a Composer call after a known loss or after a restore;
+- a Composer call **or a file placed** after a known loss or after a restore;
+- a refused source admitted: a 2xx or an `artifact` event for `.env`, `.git/config`, a link, a traversal or an absolute path;
+- a delivery sent to a session other than the one fixed at `planned`, or a second Composer call (a retry) for one delivery;
 - a hang over 30 s;
 - a foreign user getting bytes;
 - a secret in the evidence.
@@ -65,7 +72,7 @@ One directory on the isolated host: mode 700, with a `SHA256SUMS` of every file.
    - the host's `machine-id` hash, and start and end times (UTC).
 2. **E1–E7.** One line each: the check, its result and the evidence file. No secret values (runbook §6).
 3. **The step table.** One row per runbook step, P0.0 to P9: `step | result (§1) | evidence file(s) | note`. Every non-PASS row has a note.
-4. **Log evidence.** The full project log as an array of pages (paged by `before=oldestSeq`), redacted (`del(.text)`, ids pseudonymized if it leaves the host). Then the `npm run projects:check-log` report on it, which must have `ok: true` and its `notes` explained.
+4. **Log evidence.** **Both** project logs (`D2 run` and P5's second project), each as an array of pages (paged by `before=oldestSeq`). They are redacted as in the runbook §6: `del(.text)`, and ids **and hashes** pseudonymized, since the report leaves the host. Each log gets its own `npm run projects:check-log` report, which must have `ok: true` and its `notes` explained. The unredacted logs stay in the host's evidence directory.
 5. **Sweeps.** Both sweeps' output (expected: empty after the allowlist), and the `trap/` listings.
 6. **Placed files.** For every `artifacts_placed` claim in the log: the path, sha256, owner, mode and size as read on the host after the run.
 7. **K-row details.**
@@ -84,6 +91,6 @@ One directory on the isolated host: mode 700, with a `SHA256SUMS` of every file.
   - or re-run steps Y.
 
   B also confirms, from the evidence and not from the summary, that the blocking FAILs of §1 are absent.
-- **A FAIL in D2** gets an issue with the evidence, a fix PR with a regression test (owner's GO for a functional change), and a re-run of the affected steps. Re-running from P0 is needed only if the fix touches placement, the store or recovery.
+- **A FAIL in D2** gets an issue with the evidence and a fix PR with a regression test (owner's GO for a functional change). **A fix is a new experiment**: a new frozen SHA, recorded in section 1, and a re-run **from P0**. A partial re-run that mixes builds is allowed only if the owner explicitly accepts it, and then the report records the SHA of every step.
 - **The host stays intact** until the owner accepts the report (runbook P9). It is not reused for anything else meanwhile.
 - **Activation on VM100** is a separate operational plan with A and a separate GO: the flag only, `--no-build`, and rollback means turning the flag off (runbook P8).
