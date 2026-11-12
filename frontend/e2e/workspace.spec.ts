@@ -132,6 +132,36 @@ test.describe("workspace — flag on", () => {
 		await expect(cards(page).filter({ hasText: "@developer-hz replied to you" })).toHaveCount(0);
 	});
 
+	test("one send to two agents: accepted, but each recipient has its own result", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.projectSendOutcome.set(AGENT_IDS.developer, { state: "refused", reason: "busy" });
+		await app.login("alice", `${projectHash}/new`);
+		const c = composer(page);
+		for (const name of [/architect-hz/, /developer-hz$/]) {
+			await c.locator(".tw-chip-add").click();
+			await c.getByRole("option", { name }).click();
+		}
+		await expect(c.locator(".tw-hint")).toHaveText("Only @architect-hz, @developer-hz will receive this.");
+		await c.locator("textarea").fill("Both of you: review the CSP");
+		await c.getByRole("button", { name: "Send" }).click();
+		await expect(page).toHaveURL(/\/threads\//);
+		const row = page.locator("#project-view .tw-row-me").last();
+		await expect(row.locator(".tw-partial")).toHaveText(
+			"Not every agent received this: 1 of 2 received it, 1 not delivered.",
+		);
+		await expect(row.locator(".tw-del")).toHaveText([
+			"@architect-hz · Delivered ✓",
+			"@developer-hz · Not delivered: it was busy",
+		]);
+		await page.goto(`/${projectHash}`);
+		await expect(
+			cards(page).filter({ hasText: "Not delivered to @developer-hz" }).filter({ hasText: "Both of you" }),
+		).toBeVisible();
+	});
+
 	test("a quote that wasn't delivered leaves the reply pending; a delivered one clears only it", async ({
 		app,
 		backend,

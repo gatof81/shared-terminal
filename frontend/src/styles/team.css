@@ -783,3 +783,20 @@
 	min-height: 44px;
 	font-size: 0.85rem;
 }
+
+/* A 202 / a logged message is not every agent's receipt (§3.3 step 4). */
+.tw-partial {
+	margin: 0;
+	font-size: 0.82rem;
+	color: var(--c-warn);
+}
+
+.tw-results {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	flex-basis: 100%;
+}

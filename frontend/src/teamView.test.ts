@@ -246,6 +246,38 @@ describe("composer", () => {
 		expect(body.clientMessageId).toMatch(/^[0-9a-f-]{36}$/);
 	});
 
+	it("an accepted send lists each recipient's own result — a 202 isn't everyone's receipt", async () => {
+		api.postProjectMessage.mockResolvedValueOnce({
+			ok: true,
+			status: 202,
+			body: {
+				msgId: "m-mixed",
+				replayed: false,
+				deliveries: [
+					{ agentId: DEV, state: "delivered" },
+					{ agentId: QA, state: "refused", reason: "busy" },
+				],
+			},
+		});
+		const root = mount({ kind: "thread", msgId: "t1" });
+		await flush();
+		for (const i of [0, 0]) {
+			root.querySelector<HTMLButtonElement>(".tw-chip-add")!.click();
+			root.querySelectorAll<HTMLButtonElement>(".tw-option:not(:disabled)")[i]!.click();
+		}
+		root.querySelector<HTMLTextAreaElement>(".tw-composer textarea")!.value = "both of you";
+		root.querySelector<HTMLFormElement>(".tw-composer")!.requestSubmit();
+		await flush();
+		const status = root.querySelector(".tw-send-status")!;
+		expect(status.querySelector(".tw-partial")?.textContent).toBe(
+			"Not every agent received this: 1 of 2 received it, 1 not delivered.",
+		);
+		expect([...status.querySelectorAll(".tw-results li")].map((l) => l.textContent)).toEqual([
+			"@dev-pilot · Delivered ✓",
+			"@qa-pilor · Not delivered: it was busy",
+		]);
+	});
+
 	it("keeps focus and draft across a poll (the composer is never re-inserted)", async () => {
 		const root = mount({ kind: "thread", msgId: "t1" });
 		await flush();

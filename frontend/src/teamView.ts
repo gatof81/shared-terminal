@@ -39,7 +39,9 @@ import { navigateProject, type ProjectPanel, projectRouteHash, routeHash } from 
 import { logStore, type ProjectLogStore, resetLogStores } from "./teamLog.js";
 import {
 	ackTargetOf,
+	answerStates,
 	buildThreads,
+	type DeliveryState,
 	type DeliveryView,
 	deliveryText,
 	deliveryTone,
@@ -50,6 +52,7 @@ import {
 	MAX_RECIPIENTS,
 	type MessageView,
 	mentionAt,
+	partialDeliveryText,
 	postErrorText,
 	type QuoteRef,
 	recipientsToSend,
@@ -147,7 +150,12 @@ type SendPhase =
 	| { kind: "sending"; body: ProjectMessageBody }
 	/** No answer (network) or an unreadable one: the outcome is NOT known. */
 	| { kind: "unknown"; body: ProjectMessageBody }
-	| { kind: "refused"; message: string };
+	| { kind: "refused"; message: string }
+	/** Accepted (202): the answer's per-recipient results, until the next send. */
+	| {
+			kind: "sent";
+			results: Array<{ agentId: string; state: DeliveryState | undefined; reason?: string }>;
+	  };
 
 interface ReplyTarget {
 	agentId: string;
@@ -405,11 +413,34 @@ class Composer {
 			);
 		} else if (p.kind === "refused") {
 			this.status.append(el("span", undefined, p.message));
+		} else if (p.kind === "sent") {
+			// A 202 is the server's acceptance, not every agent's receipt:
+			// each recipient's result, in words (§3.3 step 4).
+			const partial = partialDeliveryText(p.results.map((r) => r.state));
+			if (partial) this.status.append(el("b", "tw-partial", partial));
+			const ul = el("ul", "tw-results");
+			for (const r of p.results) {
+				const who = handleOf(this.agents, r.agentId);
+				const tone = r.state === undefined ? "pending" : deliveryTone(r.state);
+				const words =
+					r.state === undefined
+						? "Sending…"
+						: tone === "ok"
+							? "Delivered ✓"
+							: deliveryText({
+									state: r.state,
+									reason: r.reason ?? null,
+									filesPossiblyPlaced: false,
+								});
+				ul.append(el("li", `tw-del tw-del-${tone}`, `${who} · ${words}`));
+			}
+			this.status.append(ul);
 		}
 	}
 
 	private async submit(): Promise<void> {
 		if (this.phase.kind === "sending" || this.phase.kind === "unknown") return;
+		if (this.phase.kind === "sent") this.setPhase({ kind: "idle" });
 		const r = recipientsToSend(this.chosen);
 		if ("error" in r) {
 			this.setPhase({ kind: "refused", message: r.error });
@@ -441,7 +472,11 @@ class Composer {
 			this.clearReply();
 			if (this.mode === "task") this.chosen = [];
 			this.renderChips();
-			this.setPhase({ kind: "idle" });
+			const results = answerStates(body.to, a.body.deliveries).map((r) => ({
+				...r,
+				reason: a.body.deliveries.find((d) => d.agentId === r.agentId)?.reason,
+			}));
+			this.setPhase({ kind: "sent", results });
 			this.onSent(a.body.msgId);
 			return;
 		}
@@ -982,6 +1017,8 @@ class Workspace {
 				),
 			);
 		li.append(el("div", "tw-bubble tw-bubble-me", m.message.text));
+		const partial = partialDeliveryText(m.message.to.map((id) => m.deliveries.get(id)?.state));
+		if (partial) li.append(el("p", "tw-partial", partial));
 		const chips = el("div", "tw-deliveries");
 		for (const id of m.message.to)
 			chips.append(this.deliveryChip(id, m.deliveries.get(id) ?? null));

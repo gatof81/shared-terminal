@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { detailLines } from "./teamLog.js";
 import {
 	ackTargetOf,
+	answerStates,
 	buildThreads,
 	deliveryText,
 	deliveryTone,
@@ -10,6 +11,7 @@ import {
 	mentionAt,
 	ProjectLog,
 	parseLogEvent,
+	partialDeliveryText,
 	recipientsToSend,
 	threadRootOf,
 	threadTitle,
@@ -506,5 +508,36 @@ describe("Appendix A", () => {
 		expect(m.replies.get("dev")).toHaveLength(1);
 		expect(m.settling.size).toBe(0);
 		expect(forYou(log)).toEqual([]); // acked
+	});
+});
+
+describe("per-recipient results (a 202 is not everyone's receipt)", () => {
+	it("says when not every agent received it, and how", () => {
+		expect(partialDeliveryText(["delivered", "delivered"])).toBeNull();
+		expect(partialDeliveryText(["delivered", "sending"])).toBeNull();
+		expect(partialDeliveryText(["refused"])).toBeNull(); // one recipient: its chip says it
+		expect(partialDeliveryText(["delivered", "refused", "uncertain"])).toBe(
+			"Not every agent received this: 1 of 3 received it, 1 not delivered, 1 not sure.",
+		);
+		expect(partialDeliveryText(["not-sent", "refused"])).toBe(
+			"Not every agent received this: 2 not delivered.",
+		);
+	});
+
+	it("maps the POST answer onto the recipients in `to` order; unknown states stay unknown", () => {
+		expect(
+			answerStates(
+				["a", "b", "c"],
+				[
+					{ agentId: "b", state: "refused" },
+					{ agentId: "a", state: "delivered" },
+					{ agentId: "c", state: "teleported" },
+				],
+			),
+		).toEqual([
+			{ agentId: "a", state: "delivered" },
+			{ agentId: "b", state: "refused" },
+			{ agentId: "c", state: undefined },
+		]);
 	});
 });

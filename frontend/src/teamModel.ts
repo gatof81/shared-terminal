@@ -579,6 +579,43 @@ export function deliveryText(
 	}
 }
 
+/**
+ * A message's recipients, summed up: an accepted POST (202) or a message in
+ * the log does NOT mean every agent got it — each delivery has its own
+ * result (§3.3: "uno ocupado o rechazado no frena a otro"). Null when there
+ * is nothing to point out (every recipient delivered, or still on its way).
+ */
+export function partialDeliveryText(
+	states: ReadonlyArray<DeliveryState | undefined>,
+): string | null {
+	const tones = states.map((s) => (s === undefined ? "pending" : deliveryTone(s)));
+	const missed = tones.filter((t) => t === "not-delivered").length;
+	const unsure = tones.filter((t) => t === "unsure").length;
+	if (missed === 0 && unsure === 0) return null;
+	if (states.length === 1) return null; // the one chip says it
+	const ok = tones.filter((t) => t === "ok").length;
+	const parts: string[] = [];
+	if (ok > 0) parts.push(`${ok} of ${states.length} received it`);
+	if (missed > 0) parts.push(`${missed} not delivered`);
+	if (unsure > 0) parts.push(`${unsure} not sure`);
+	return `Not every agent received this: ${parts.join(", ")}.`;
+}
+
+/** The POST's per-recipient answer (§3.3 step 4) as states this model knows. */
+export function answerStates(
+	to: readonly string[],
+	deliveries: ReadonlyArray<{ agentId: string; state: string }>,
+): Array<{ agentId: string; state: DeliveryState | undefined }> {
+	const by = new Map(deliveries.map((d) => [d.agentId, d.state]));
+	return to.map((agentId) => {
+		const st = by.get(agentId);
+		return {
+			agentId,
+			state: st !== undefined && DELIVERY_STATES.has(st) ? (st as DeliveryState) : undefined,
+		};
+	});
+}
+
 // ── Threads ─────────────────────────────────────────────────────────────────
 
 /**
