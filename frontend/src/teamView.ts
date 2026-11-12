@@ -892,6 +892,175 @@ class AttachPicker {
 	}
 }
 
+// ── Thread scroll ───────────────────────────────────────────────────────────
+
+/** Within this many px of the end, the reader is "at the end" and is followed. */
+const FOLLOW_PX = 64;
+
+/**
+ * Where the reader is in a thread's timeline (the one scroll area of the
+ * main column), per thread:
+ *  - a thread opens at its newest messages, or where the reader left it;
+ *  - new rows are followed only while the reader is at the end — a reader
+ *    of earlier messages keeps their place (by the row they are looking at,
+ *    not by a distance: a row above can grow, e.g. a reply's text loading)
+ *    and is told how many rows arrived;
+ *  - a height change with no scroll (the phone keyboard opening, the
+ *    composer growing a line) keeps the end in view for a reader who was
+ *    there — `atEnd` still holds the truth from before the shrink, which
+ *    fires no scroll event.
+ * Rows are identified by `data-anchor`, not by seq: a reply in its settle
+ * window and the confirmed reply that replaces it are the same row to the
+ * reader (different event seqs). Every position write is instant.
+ */
+export class ThreadScroll {
+	private root: string | null = null;
+	private atEnd = true;
+	private saved = new Map<string, { top: number; atEnd: boolean }>();
+	/** Rows the reader has had in front of them; anything else that appears is "new". */
+	private seen = new Set<string>();
+	/** A restore asked for while the timeline had no layout (detached, hidden). */
+	private pendingRestore = false;
+	readonly pill = el("button", "tw-newer");
+
+	constructor(private readonly box: HTMLElement) {
+		// A labelled, Tab-reachable region: keyboard users scroll it with
+		// PageDown/arrows (a thread may hold no focusable control at all),
+		// and focus lands here when the pill (which hides itself) is used.
+		box.tabIndex = 0;
+		box.setAttribute("aria-label", "Messages in this thread");
+		this.pill.type = "button";
+		this.pill.hidden = true;
+		this.pill.addEventListener("click", () => {
+			const hadFocus = document.activeElement === this.pill;
+			this.toEnd();
+			if (hadFocus) box.focus({ preventScroll: true });
+		});
+		box.addEventListener(
+			"scroll",
+			() => {
+				if (this.pendingRestore) return;
+				this.atEnd = this.isAtEnd();
+				if (this.root !== null)
+					this.saved.set(this.root, { top: box.scrollTop, atEnd: this.atEnd });
+				if (this.atEnd) this.clearNew();
+			},
+			{ passive: true },
+		);
+		if (typeof ResizeObserver !== "undefined")
+			new ResizeObserver(() => {
+				if (!box.isConnected || box.clientHeight === 0) return;
+				if (this.pendingRestore) this.restore();
+				else if (this.atEnd) this.set(box.scrollHeight);
+			}).observe(box);
+	}
+
+	private hasLayout(): boolean {
+		return this.box.isConnected && this.box.clientHeight > 0;
+	}
+
+	private isAtEnd(): boolean {
+		return this.box.scrollHeight - this.box.scrollTop - this.box.clientHeight < FOLLOW_PX;
+	}
+
+	private set(top: number): void {
+		const prev = this.box.style.scrollBehavior;
+		this.box.style.scrollBehavior = "auto";
+		this.box.scrollTop = top;
+		this.box.style.scrollBehavior = prev;
+	}
+
+	private toEnd(): void {
+		this.set(this.box.scrollHeight);
+		this.atEnd = true;
+		this.clearNew();
+	}
+
+	private anchors(): string[] {
+		const out: string[] = [];
+		for (const c of this.box.children) {
+			const a = (c as HTMLElement).dataset.anchor;
+			if (a && !a.startsWith("wait:")) out.push(a);
+		}
+		return out;
+	}
+
+	private clearNew(): void {
+		this.seen = new Set(this.anchors());
+		this.pill.hidden = true;
+	}
+
+	/** Land the open thread where its reader left it, or at its newest rows. */
+	private restore(): void {
+		this.pendingRestore = false;
+		const s = this.root === null ? undefined : this.saved.get(this.root);
+		if (s && !s.atEnd) {
+			this.set(s.top);
+			this.atEnd = this.isAtEnd();
+		} else this.toEnd();
+		// What a thread shows when it is (re)opened is not "new".
+		this.clearNew();
+	}
+
+	/** The first row at least partly in view, and where its top edge sits. */
+	private anchor(): { id: string; offset: number } | null {
+		const top = this.box.getBoundingClientRect().top;
+		for (const c of this.box.children) {
+			const r = c.getBoundingClientRect();
+			const id = (c as HTMLElement).dataset.anchor;
+			if (id !== undefined && r.bottom > top) return { id, offset: r.top - top };
+		}
+		return null;
+	}
+
+	/**
+	 * Run `update` (which replaces the rows and puts the timeline in place),
+	 * keeping the reader where they should be. `rootId` is the open thread.
+	 */
+	render(rootId: string, update: () => boolean): void {
+		// Self-heal: the ResizeObserver is the usual way out of a pending
+		// restore; a render that finds the box laid out does it too, so a
+		// missed observation can never freeze the reader's tracking.
+		if (this.pendingRestore && this.root === rootId && this.hasLayout()) {
+			update();
+			this.restore();
+			return;
+		}
+		const switched = this.root !== rootId || !this.hasLayout();
+		const anchor = !switched && !this.atEnd ? this.anchor() : null;
+		const changed = update();
+		if (switched) {
+			this.root = rootId;
+			// A write to a box with no layout (the workspace re-rendered before
+			// it was attached again, a hidden column) is lost: the restore waits
+			// for the box to have a size (ResizeObserver).
+			if (this.hasLayout()) this.restore();
+			else this.pendingRestore = true;
+			return;
+		}
+		if (!changed) return;
+		if (this.atEnd) {
+			this.toEnd();
+			return;
+		}
+		if (anchor) {
+			const node = [...this.box.children].find(
+				(c) => (c as HTMLElement).dataset.anchor === anchor.id,
+			) as HTMLElement | undefined;
+			if (node) {
+				const now = node.getBoundingClientRect().top - this.box.getBoundingClientRect().top;
+				this.set(this.box.scrollTop + (now - anchor.offset));
+			}
+		}
+		const fresh = this.anchors().filter((a) => !this.seen.has(a)).length;
+		if (fresh > 0) {
+			this.pill.textContent = `↓ ${fresh} new`;
+			this.pill.setAttribute("aria-label", `${fresh} new — go to the latest`);
+			this.pill.hidden = false;
+		}
+	}
+}
+
 // ── Workspace ───────────────────────────────────────────────────────────────
 
 class Workspace {
@@ -961,6 +1130,7 @@ class Workspace {
 
 	private mainHead = el("div", "tw-main-head");
 	private timeline = el("ol", "tw-timeline");
+	private scroll = new ThreadScroll(this.timeline);
 
 	/** Off screen: stop polling (the log stays, a return renders at once). */
 	suspend(): void {
@@ -1410,21 +1580,28 @@ class Workspace {
 		head.append(el("span", "tw-muted tw-main-sub", participants ? `you, ${participants}` : ""));
 		const timeline = this.timeline;
 		const ids = thread?.messageIds ?? [msgId];
-		type Row = { seq: number; node: HTMLElement };
+		// `anchor`: the row's identity to the reader (ThreadScroll) — a reply
+		// in its settle window and its confirmed form share one.
+		type Row = { seq: number; anchor: string; node: HTMLElement };
 		const rows: Row[] = [];
 		const composer = this.composer(`t:${rootId}`, "thread", rootId);
 		for (const id of ids) {
 			const m = log.messages.get(id);
 			if (!m) continue;
-			rows.push({ seq: m.message.seq, node: this.messageRow(m) });
+			rows.push({ seq: m.message.seq, anchor: `msg:${id}`, node: this.messageRow(m) });
 			for (const [agentId, list] of m.replies)
 				for (const r of list)
 					rows.push({
 						seq: r.ref.seq,
+						anchor: `reply:${id}:${agentId}:${r.ref.promptId}`,
 						node: this.replyRow(m, agentId, r.ref, r.lateClose, composer),
 					});
 			for (const [agentId, st] of m.settling)
-				rows.push({ seq: st.seq, node: this.settlingRow(agentId, st) });
+				rows.push({
+					seq: st.seq,
+					anchor: `reply:${id}:${agentId}:${st.promptId}`,
+					node: this.settlingRow(agentId, st),
+				});
 			for (const agentId of m.message.to) {
 				const d = m.deliveries.get(agentId);
 				if (
@@ -1433,15 +1610,23 @@ class Workspace {
 					!(m.replies.get(agentId)?.length ?? 0) &&
 					m === log.messages.get(ids[ids.length - 1]!)
 				)
-					rows.push({ seq: Number.MAX_SAFE_INTEGER, node: this.waitingRow(agentId) });
+					rows.push({
+						seq: Number.MAX_SAFE_INTEGER,
+						anchor: `wait:${agentId}`,
+						node: this.waitingRow(agentId),
+					});
 			}
 		}
 		rows.sort((a, b) => a.seq - b.seq);
-		replaceIfChanged(
-			timeline,
-			rows.map((r) => r.node),
-		);
-		this.setMain(syncHead(), timeline, composer.root);
+		for (const r of rows) r.node.dataset.anchor = r.anchor;
+		this.scroll.render(rootId, () => {
+			const changed = replaceIfChanged(
+				timeline,
+				rows.map((r) => r.node),
+			);
+			this.setMain(syncHead(), timeline, this.scroll.pill, composer.root);
+			return changed;
+		});
 	}
 
 	private async fetchThreadRoot(msgId: string): Promise<void> {
