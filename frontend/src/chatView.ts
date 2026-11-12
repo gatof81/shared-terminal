@@ -57,6 +57,7 @@ import {
 	titleProblem,
 	writeFilter,
 } from "./chatMeta.js";
+import { copyText } from "./clipboard.js";
 import { openActionMenu } from "./components/actionMenu.js";
 import { promptDialog } from "./components/dialog.js";
 import { explainCode, normalizeText, validateText } from "./composerText.js";
@@ -2565,41 +2566,18 @@ function renderPendingBubble(): void {
 // ── Copy ────────────────────────────────────────────────────────────────────
 
 function copyButton(label: string, text: () => string, title?: string): HTMLButtonElement {
-	return button(
+	const b = button(
 		label,
 		"files-btn chat-copy",
 		() => {
-			void copyText(text()).then(
+			void copyText(text(), b).then(
 				(ok) => (ok ? showCopySuccessToast() : showToast("Copy failed", true)),
 				() => showToast("Copy failed", true),
 			);
 		},
 		title,
 	);
-}
-
-/** Clipboard API, falling back to a hidden textarea (older or non-secure contexts). */
-export async function copyText(text: string): Promise<boolean> {
-	try {
-		await navigator.clipboard.writeText(text);
-		return true;
-	} catch {
-		const ta = document.createElement("textarea");
-		ta.value = text;
-		ta.setAttribute("readonly", "");
-		ta.style.position = "fixed";
-		ta.style.opacity = "0";
-		document.body.appendChild(ta);
-		ta.select();
-		let ok = false;
-		try {
-			ok = document.execCommand("copy");
-		} catch {
-			ok = false;
-		}
-		ta.remove();
-		return ok;
-	}
+	return b;
 }
 
 function toolIcon(state: string): string {

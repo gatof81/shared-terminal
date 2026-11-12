@@ -25,6 +25,7 @@ import {
 	type WorkspaceListing,
 	type WorkspacePreview,
 } from "./api.js";
+import { copyText } from "./clipboard.js";
 import { formatBytes } from "./format.js";
 import { highlightCode, languageForFile } from "./highlight.js";
 import { activeSessionId, isMobile, sessions, showCopySuccessToast, showToast } from "./main.js";
@@ -338,26 +339,6 @@ async function refresh(): Promise<void> {
 	}
 }
 refreshBtn.addEventListener("click", () => void refresh());
-
-async function copyText(text: string): Promise<boolean> {
-	try {
-		await navigator.clipboard.writeText(text);
-		return true;
-	} catch {
-		// Clipboard API unavailable (insecure context) or denied — the
-		// legacy execCommand path still works on most browsers.
-		const ta = document.createElement("textarea");
-		ta.value = text;
-		ta.setAttribute("readonly", "");
-		ta.style.position = "fixed";
-		ta.style.opacity = "0";
-		document.body.appendChild(ta);
-		ta.select();
-		const ok = document.execCommand("copy");
-		ta.remove();
-		return ok;
-	}
-}
 
 async function downloadSelected(path: string): Promise<void> {
 	const sessionId = stateSessionId;
@@ -750,21 +731,19 @@ function renderPreview(): void {
 		actions.push(b);
 	}
 	const content = data.content;
-	actions.push(
-		button(
-			"Copy",
-			"files-btn",
-			() => {
-				void copyText(content).then((ok) => {
-					if (!ok) showToast("Copy failed — clipboard permission denied?", true);
-					else if (data.truncated) showToast("Copied the previewed part only (file is truncated)");
-					else showCopySuccessToast();
-				});
-			},
-			"Copy file contents",
-		),
-		download,
+	const copyBtn = button(
+		"Copy",
+		"files-btn",
+		() => {
+			void copyText(content, copyBtn).then((ok) => {
+				if (!ok) showToast("Copy failed — clipboard permission denied?", true);
+				else if (data.truncated) showToast("Copied the previewed part only (file is truncated)");
+				else showCopySuccessToast();
+			});
+		},
+		"Copy file contents",
 	);
+	actions.push(copyBtn, download);
 	previewEl.appendChild(previewHeader(name, meta, actions));
 
 	if (data.truncated) {
