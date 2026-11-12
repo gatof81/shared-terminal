@@ -59,6 +59,49 @@ permissions:
   contents: read
 
 jobs:
+  # #592: the per-CLI matrix (below) is the expensive part (two image builds
+  # and every smoke, ~15 min each). It runs on every push to main and on any
+  # PR whose diff touches what it exercises: the image, the Composer, the
+  # capture, the recreation engine (with its record and lock) and this
+  # workflow (which defines the matrix). A PR that only touches
+  # docker-compose.yml keeps the single-image job, whose Phase 0 runs the real
+  # `docker compose config`. Fail-safe: any doubt (not a PR, a diff that can't
+  # be computed, an empty diff) runs the matrix. Both validated versions run
+  # on every PR that runs it — no version is first exercised on main.
+  changes:
+    name: Which smokes this change needs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      cli: ${{ steps.diff.outputs.cli }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Decide whether the CLI matrix runs
+        id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -u
+          decide() { echo "cli=$1" >>"$GITHUB_OUTPUT"; echo "CLI matrix: $1 ($2)"; }
+          if [ "$EVENT" != "pull_request" ]; then decide true "event $EVENT"; exit 0; fi
+          # --no-renames: a moved file lists both paths; quotePath off: a non-ASCII
+          # name is not quoted past the regex's anchors.
+          if ! files=$(git -c core.quotePath=false diff --no-renames --name-only "$BASE_SHA...$HEAD_SHA"); then decide true "diff failed"; exit 0; fi
+          if [ -z "$files" ]; then decide true "empty diff"; exit 0; fi
+          printf '%s\n' "$files"
+          if grep -qE '^(session-image/|backend/src/conversation/|backend/src/recreate/|backend/src/(dockerManager|recreateAttempt|sessionLifecycleLock)\.ts$|\.github/workflows/session-image\.yml$)' <<<"$files"; then
+            decide true "matrix inputs changed"
+          else
+            decide false "no matrix input changed"
+          fi
+
   smoke:
     name: Build + docker smoke test
     runs-on: ubuntu-latest
@@ -147,6 +190,10 @@ jobs:
   # in parallel with the pinned image's job.
   cli-variants:
     name: CLI ${{ matrix.cli }} — control dir, recreation and composer smokes
+    needs: changes
+    # Runs unless `changes` positively answered false: a failed or empty
+    # decision runs the matrix (fail-safe); a cancelled run does not.
+    if: ${{ !cancelled() && needs.changes.outputs.cli != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
