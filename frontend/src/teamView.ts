@@ -52,6 +52,7 @@ import {
 	MAX_RECIPIENTS,
 	type MessageView,
 	mentionAt,
+	type ProjectLog,
 	partialDeliveryText,
 	postErrorText,
 	type QuoteRef,
@@ -148,12 +149,16 @@ function panelHref(projectId: string, panel: ProjectPanel | null): string {
 type SendPhase =
 	| { kind: "idle" }
 	| { kind: "sending"; body: ProjectMessageBody }
-	/** No answer (network) or an unreadable one: the outcome is NOT known. */
-	| { kind: "unknown"; body: ProjectMessageBody }
+	/**
+	 * No answer (network), an unreadable one, or — after a Check — ANY
+	 * error: the outcome is NOT known (the first POST may have delivered).
+	 */
+	| { kind: "unknown"; body: ProjectMessageBody; reason?: string }
 	| { kind: "refused"; message: string }
 	/** Accepted (202): the answer's per-recipient results, until the next send. */
 	| {
 			kind: "sent";
+			msgId: string;
 			results: Array<{ agentId: string; state: DeliveryState | undefined; reason?: string }>;
 	  };
 
@@ -216,6 +221,25 @@ class Composer {
 			e.preventDefault();
 			void this.submit();
 		});
+	}
+
+	/**
+	 * Once the sent message is in the log, its per-recipient results come
+	 * from there (a delivery still `sending` at the 202 ends later, §3.3);
+	 * the 202's snapshot is only what is shown before that.
+	 */
+	syncResults(log: ProjectLog): void {
+		if (this.phase.kind !== "sent") return;
+		const m = log.messages.get(this.phase.msgId);
+		if (!m) return;
+		const results = m.message.to.map((agentId) => {
+			const d = m.deliveries.get(agentId);
+			return { agentId, state: d?.state, reason: d?.reason ?? undefined };
+		});
+		const same = results.every(
+			(r, i) => r.state === (this.phase as { results: typeof results }).results[i]?.state,
+		);
+		if (!same) this.setPhase({ kind: "sent", msgId: this.phase.msgId, results });
 	}
 
 	setAgents(agents: Agents): void {
@@ -408,7 +432,8 @@ class Composer {
 					undefined,
 					"No answer from the server: it may or may not have been sent. Checking asks the server about this same message — it never sends it twice.",
 				),
-				button("Check", "tw-btn", () => void this.post(p.body)),
+				...(p.reason ? [el("span", "tw-muted", p.reason)] : []),
+				button("Check", "tw-btn", () => void this.post(p.body, true)),
 				button("Discard", "tw-btn tw-btn-ghost", () => this.setPhase({ kind: "idle" })),
 			);
 		} else if (p.kind === "refused") {
@@ -463,7 +488,13 @@ class Composer {
 		await this.post(body);
 	}
 
-	private async post(body: ProjectMessageBody): Promise<void> {
+	/**
+	 * `check`: this is the SAME message again (same clientMessageId) after a
+	 * lost answer. The server answers what it stored (§3.4 rule 2); an error
+	 * here only means it couldn't answer the check — never "nothing was
+	 * sent" — so the outcome stays unknown and the draft stays locked.
+	 */
+	private async post(body: ProjectMessageBody, check = false): Promise<void> {
 		this.setPhase({ kind: "sending", body });
 		const a = await postProjectMessage(this.projectId, body);
 		if (a.ok) {
@@ -476,13 +507,21 @@ class Composer {
 				...r,
 				reason: a.body.deliveries.find((d) => d.agentId === r.agentId)?.reason,
 			}));
-			this.setPhase({ kind: "sent", results });
+			this.setPhase({ kind: "sent", msgId: a.body.msgId, results });
 			this.onSent(a.body.msgId);
 			return;
 		}
 		if (a.code === "stale") return;
 		if (a.code === "network" || a.code === "bad-answer" || (a.status >= 500 && a.code === "")) {
 			this.setPhase({ kind: "unknown", body });
+			return;
+		}
+		if (check) {
+			this.setPhase({
+				kind: "unknown",
+				body,
+				reason: `The server couldn't answer the check (${a.code || a.status}). Try Check again later; don't send it again until you know.`,
+			});
 			return;
 		}
 		// The server refused before any effect: nothing was sent; the draft stays.
@@ -576,10 +615,32 @@ class Workspace {
 			this.composers.set(key, c);
 		}
 		c.setAgents(this.agents);
+		c.syncResults(this.store.log);
 		return c;
 	}
 
+	/**
+	 * Re-render, keeping the keyboard user's place: the focused control is
+	 * found again by its `data-key` (a For you card exists twice — inline
+	 * and in the side column — so the visible one wins).
+	 */
 	private render(): void {
+		const focused = document.activeElement;
+		const key =
+			focused instanceof HTMLElement && this.root.contains(focused)
+				? focused.dataset.key
+				: undefined;
+		this.renderNow2();
+		if (key === undefined || this.root.contains(document.activeElement)) return;
+		// Compared as a property, not interpolated into a selector (keys carry server ids).
+		const all = [...this.root.querySelectorAll<HTMLElement>("[data-key]")].filter(
+			(n) => n.dataset.key === key,
+		);
+		const target = all.find((n) => n.getClientRects().length > 0) ?? all[0];
+		target?.focus({ preventScroll: true });
+	}
+
+	private renderNow2(): void {
 		const ctx = this.ctx;
 		if (!ctx) return;
 		const panel = ctx.panel;
@@ -664,6 +725,7 @@ class Workspace {
 		// sit inside a link).
 		const c = el("div", `tw-card tw-card-${it.kind}`);
 		const main = link("", "tw-card-link", href, open);
+		main.dataset.key = `card:${it.key}`;
 		if (it.kind === "replied" && it.reply) {
 			const r = it.reply;
 			main.append(
@@ -739,6 +801,8 @@ class Workspace {
 				button("Done", "tw-btn tw-btn-ghost tw-done", () => send(crypto.randomUUID())),
 			);
 		}
+		// One key for the control whatever its phase: focus follows Done → Marking… → Check.
+		for (const b of box.querySelectorAll<HTMLElement>("button")) b.dataset.key = `done:${it.key}`;
 		return box;
 	}
 
@@ -790,6 +854,7 @@ class Workspace {
 			const card = link("", `tw-agent tw-tone-${v?.tone ?? "unknown"}`, href, () =>
 				navigateProject({ projectId: this.projectId, agentId: a.agentId }),
 			);
+			card.dataset.key = `agent:${a.agentId}`;
 			card.append(avatar(this.agents, a.agentId));
 			card.append(el("b", "tw-agent-name", a.handle));
 			card.append(el("span", "tw-agent-state", v?.label ?? "State unknown"));
@@ -847,6 +912,7 @@ class Workspace {
 				panelHref(this.projectId, { kind: "thread", msgId: t.rootId }),
 				() => go(this.projectId, { kind: "thread", msgId: t.rootId }),
 			);
+			a.dataset.key = `thread:${t.rootId}`;
 			if (t.rootId === current) a.setAttribute("aria-current", "page");
 			const avs = el("span", "tw-avs");
 			for (const id of t.agents.slice(0, 3)) avs.append(avatar(this.agents, id, true));
@@ -1100,6 +1166,8 @@ class Workspace {
 					}),
 				),
 			);
+			for (const b of actions.querySelectorAll<HTMLElement>("button"))
+				b.dataset.key = `reply:${m.message.msgId}:${agentId}:${r.promptId}`;
 			li.append(actions);
 		}
 		return li;

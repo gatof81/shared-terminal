@@ -155,45 +155,60 @@ export class ProjectLogStore {
 		const a = await fetchProjectEvents(this.projectId, { limit: PAGE_LIMIT });
 		if (gen !== this.gen || (!a.ok && a.code === "stale")) return;
 		if (!a.ok) {
+			const was = this.error;
 			this.error = { status: a.status, code: a.code };
-			this.changed();
+			if (!was || was.status !== a.status || was.code !== a.code) this.changed();
 			return;
 		}
+		const hadError = this.error !== null;
 		this.error = null;
 		const events = parseAll(a.body.events);
 		const firstLoad = !this.loaded;
-		this.log.add(events);
+		let folded = this.log.add(events);
 		this.loaded = true;
 		if (firstLoad) this.olderCursor = a.body.oldestSeq ?? minSeq(events);
 		const pageOldest = a.body.oldestSeq ?? minSeq(events);
 		if (firstLoad) {
 			this.hasOlder = a.body.hasMore;
 		} else if (pageOldest !== null && pageOldest > knownNewest + 1 && a.body.hasMore) {
-			// Something happened between what we had and this page.
-			await this.fillGap(gen, knownNewest, pageOldest);
+			// Something happened between what we had and this page. A gap still
+			// open from before merges with this one (its floor is lower): the
+			// overlap re-reads events already folded, which changes nothing.
+			const floor = this.gapFloor === null ? knownNewest : Math.min(this.gapFloor, knownNewest);
+			folded += await this.fillGap(gen, floor, pageOldest);
 			if (gen !== this.gen) return;
 		}
-		this.changed();
+		// A poll that brought nothing new re-renders nothing: a re-render
+		// would drop the person's text selection and keyboard place.
+		if (folded > 0 || firstLoad || hadError) this.changed();
 		void this.resolveMissing();
 	}
 
-	private async fillGap(gen: number, knownNewest: number, pageOldest: number): Promise<void> {
-		let before = pageOldest;
+	/**
+	 * Read backward from `before` until the window meets `floor`. The gap
+	 * is recorded BEFORE the first request and cleared only when it closes,
+	 * so a failed read leaves it visible ("Some recent activity isn't
+	 * loaded yet") instead of silently losing it. Returns events folded.
+	 */
+	private async fillGap(gen: number, floor: number, before: number): Promise<number> {
+		this.gapBefore = before;
+		this.gapFloor = floor;
+		let folded = 0;
 		for (let i = 0; i < GAP_FILL_PAGES; i++) {
 			const a = await fetchProjectEvents(this.projectId, { before, limit: PAGE_LIMIT });
-			if (gen !== this.gen || !a.ok) return;
+			if (gen !== this.gen || !a.ok) return folded;
 			const events = parseAll(a.body.events);
-			this.log.add(events);
+			folded += this.log.add(events);
 			const oldest = a.body.oldestSeq ?? minSeq(events);
-			if (oldest === null || oldest <= knownNewest + 1 || !a.body.hasMore) {
+			if (oldest === null || oldest <= floor + 1 || !a.body.hasMore) {
 				this.gapBefore = null;
 				this.gapFloor = null;
-				return;
+				return folded;
 			}
 			before = oldest;
+			this.gapBefore = before;
 		}
-		this.gapBefore = before;
-		this.gapFloor = knownNewest;
+		return folded;
 	}
 
 	/** Continue filling a gap the last refresh left open. */

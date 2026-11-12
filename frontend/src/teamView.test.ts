@@ -291,6 +291,108 @@ describe("composer", () => {
 		expect(text.value).toBe("half-typed");
 	});
 
+	it("Check answered by an error stays UNKNOWN (never 'nothing was sent'); the draft stays locked", async () => {
+		api.postProjectMessage
+			.mockResolvedValueOnce({ ok: false, status: 0, code: "network" })
+			.mockResolvedValueOnce({ ok: false, status: 503, code: "project-writer-unavailable" });
+		const root = mount({ kind: "thread", msgId: "t1" });
+		await flush();
+		const text = root.querySelector<HTMLTextAreaElement>(".tw-composer textarea")!;
+		root.querySelector<HTMLButtonElement>(".tw-chip-add")!.click();
+		root.querySelectorAll<HTMLButtonElement>(".tw-option")[0]!.click();
+		text.value = "ship it";
+		root.querySelector<HTMLFormElement>(".tw-composer")!.requestSubmit();
+		await flush();
+		const check = () =>
+			[...root.querySelectorAll<HTMLButtonElement>(".tw-send-status button")].find(
+				(b) => b.textContent === "Check",
+			)!;
+		check().click();
+		await flush();
+		const status = root.querySelector(".tw-send-status")!.textContent ?? "";
+		expect(status).toContain("may or may not have been sent");
+		expect(status).toContain("couldn't answer the check");
+		expect(status).not.toContain("Nothing was sent");
+		expect(text.readOnly).toBe(true);
+		expect(check()).toBeDefined();
+		const ids = api.postProjectMessage.mock.calls.map((c) => c[1].clientMessageId);
+		expect(new Set(ids).size).toBe(1);
+	});
+
+	it("a poll keeps the keyboard place: the focused Reply… is the same control after a re-render", async () => {
+		const root = mount({ kind: "thread", msgId: "t1" });
+		await flush();
+		const reply = [...root.querySelectorAll<HTMLButtonElement>(".tw-timeline button")].find(
+			(b) => b.textContent === "Reply…",
+		)!;
+		reply.focus();
+		const { logStore } = await import("./teamLog.js");
+		// Nothing new: no re-render at all (same node keeps focus).
+		await logStore(PID).refresh();
+		await flush();
+		expect(document.activeElement).toBe(reply);
+		// Something new: the timeline is rebuilt, focus lands on the same control by key.
+		api.fetchProjectEvents.mockResolvedValue({
+			ok: true,
+			status: 200,
+			body: {
+				events: [
+					...log,
+					{ seq: 6, at: NOW, ev: "delivery", msg_id: "t2", agent_id: QA, state: "refused" },
+				],
+				oldestSeq: 1,
+				hasMore: false,
+			},
+		});
+		await logStore(PID).refresh();
+		await flush();
+		const now = document.activeElement as HTMLElement;
+		expect(now.textContent).toBe("Reply…");
+		expect(now.dataset.key).toBe(reply.dataset.key);
+	});
+
+	it("results after a 202 follow the log once the message is folded (a 'sending' that ends later)", async () => {
+		api.postProjectMessage.mockResolvedValueOnce({
+			ok: true,
+			status: 202,
+			body: { msgId: "m7", replayed: false, deliveries: [{ agentId: QA, state: "sending" }] },
+		});
+		const root = mount({ kind: "thread", msgId: "t1" });
+		await flush();
+		root.querySelector<HTMLButtonElement>(".tw-chip-add")!.click();
+		[...root.querySelectorAll<HTMLButtonElement>(".tw-option")]
+			.find((o) => o.textContent?.includes("qa-pilor"))!
+			.click();
+		root.querySelector<HTMLTextAreaElement>(".tw-composer textarea")!.value = "late one";
+		api.fetchProjectEvents.mockResolvedValue({
+			ok: true,
+			status: 200,
+			body: {
+				events: [
+					...log,
+					{
+						seq: 6,
+						at: NOW,
+						ev: "message",
+						msg_id: "m7",
+						kind: "owner",
+						to: [QA],
+						text: "late one",
+						in_reply_to: "t1",
+					},
+					{ seq: 7, at: NOW, ev: "delivery", msg_id: "m7", agent_id: QA, state: "delivered" },
+				],
+				oldestSeq: 1,
+				hasMore: false,
+			},
+		});
+		root.querySelector<HTMLFormElement>(".tw-composer")!.requestSubmit();
+		await flush();
+		expect(
+			[...root.querySelectorAll(".tw-send-status .tw-results li")].map((l) => l.textContent),
+		).toEqual(["@qa-pilor · Delivered ✓"]);
+	});
+
 	it("Reply… quotes exactly that reply and answers its message", async () => {
 		const root = mount({ kind: "thread", msgId: "t1" });
 		await flush();

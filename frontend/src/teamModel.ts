@@ -331,6 +331,10 @@ export interface MessageView {
 	replies: Map<string, ReplyView[]>;
 	/** Per agent: a reply in its settle window (§4.1), until its reply_ref lands. */
 	settling: Map<string, LogReplySettling>;
+	/** Every delivery line per agent (the state is recomputed from them in seq order). */
+	deliveryEvents: Map<string, LogDelivery[]>;
+	/** `${agent}\n${prompt}` of each reply_late_close, kept whether or not its reply_ref is loaded yet. */
+	lateCloses: Set<string>;
 }
 
 /**
@@ -355,8 +359,8 @@ export class ProjectLog {
 	 * Fold events of the loaded window (any order, duplicates allowed); they
 	 * are applied in seq order and move the window's bounds.
 	 */
-	add(events: readonly LogEvent[]): void {
-		this.fold(events, true);
+	add(events: readonly LogEvent[]): number {
+		return this.fold(events, true);
 	}
 
 	/**
@@ -366,11 +370,12 @@ export class ProjectLog {
 	 * threads" must keep paging from the oldest event the window holds, not
 	 * from an old message that was fetched out of order.
 	 */
-	addFetched(events: readonly LogEvent[]): void {
-		this.fold(events, false);
+	addFetched(events: readonly LogEvent[]): number {
+		return this.fold(events, false);
 	}
 
-	private fold(events: readonly LogEvent[], window: boolean): void {
+	/** Returns how many events were new (0 = nothing changed). */
+	private fold(events: readonly LogEvent[], window: boolean): number {
 		const fresh = events.filter((e) => !this.seen.has(e.seq)).sort((a, b) => a.seq - b.seq);
 		for (const e of fresh) this.seen.add(e.seq);
 		if (window)
@@ -393,6 +398,7 @@ export class ProjectLog {
 		}
 		pending.sort((a, b) => a.seq - b.seq);
 		for (const e of pending) this.apply(e);
+		return fresh.length;
 	}
 
 	has(msgId: string): boolean {
@@ -422,6 +428,8 @@ export class ProjectLog {
 						deliveries: new Map(),
 						replies: new Map(),
 						settling: new Map(),
+						deliveryEvents: new Map(),
+						lateCloses: new Set(),
 					});
 				return;
 			case "owner_ack":
@@ -449,9 +457,14 @@ export class ProjectLog {
 					if (m.settling.get(e.agentId)?.promptId === e.promptId) m.settling.delete(e.agentId);
 					const list = m.replies.get(e.agentId) ?? [];
 					if (!list.some((r) => r.ref.promptId === e.promptId))
-						list.push({ ref: e, lateClose: false });
+						list.push({
+							ref: e,
+							// A late close folded before its reply_ref (out-of-order pages) still counts.
+							lateClose: m.lateCloses.has(`${e.agentId}\n${e.promptId}`),
+						});
 					m.replies.set(e.agentId, list);
 				} else {
+					m.lateCloses.add(`${e.agentId}\n${e.promptId}`);
 					const r = m.replies.get(e.agentId)?.find((x) => x.ref.promptId === e.promptId);
 					if (r) r.lateClose = true;
 				}
@@ -472,29 +485,38 @@ const TERMINAL: ReadonlySet<DeliveryState> = new Set([
 	"not-sent",
 ]);
 
+/**
+ * A delivery's state, recomputed from ALL its events in seq order — never
+ * incrementally — so the order pages arrive in (newest first, then a gap
+ * filled backward) can't drop a `settled` that landed before its
+ * `uncertain`, nor let a later line overwrite a terminal state.
+ */
 function applyDelivery(m: MessageView, e: LogDelivery): void {
-	const cur = m.deliveries.get(e.agentId);
-	if (e.state === "settled") {
-		if (!cur || cur.state !== "uncertain" || e.result === null) return;
-		m.deliveries.set(e.agentId, {
-			...cur,
-			state: e.result,
-			seq: e.seq,
-			ts: e.ts,
-			settled: true,
-		});
-		return;
+	const list = m.deliveryEvents.get(e.agentId) ?? [];
+	if (list.some((x) => x.seq === e.seq)) return;
+	list.push(e);
+	list.sort((a, b) => a.seq - b.seq);
+	m.deliveryEvents.set(e.agentId, list);
+	let cur: DeliveryView | undefined;
+	for (const x of list) {
+		if (x.state === "settled") {
+			// §3.1: only an `uncertain` is resolved by a later `settled`.
+			if (!cur || cur.state !== "uncertain" || x.result === null) continue;
+			cur = { ...cur, state: x.result, seq: x.seq, ts: x.ts, settled: true };
+			continue;
+		}
+		if (cur && TERMINAL.has(cur.state)) continue; // a terminal state never changes
+		cur = {
+			agentId: x.agentId,
+			state: x.state,
+			reason: x.reason,
+			filesPossiblyPlaced: x.filesPossiblyPlaced || (cur?.filesPossiblyPlaced ?? false),
+			seq: x.seq,
+			ts: x.ts,
+			settled: false,
+		};
 	}
-	if (cur && TERMINAL.has(cur.state)) return;
-	m.deliveries.set(e.agentId, {
-		agentId: e.agentId,
-		state: e.state,
-		reason: e.reason,
-		filesPossiblyPlaced: e.filesPossiblyPlaced || (cur?.filesPossiblyPlaced ?? false),
-		seq: e.seq,
-		ts: e.ts,
-		settled: false,
-	});
+	if (cur) m.deliveries.set(e.agentId, cur);
 }
 
 // ── Delivery wording ────────────────────────────────────────────────────────
@@ -604,9 +626,12 @@ export function partialDeliveryText(
 /** The POST's per-recipient answer (§3.3 step 4) as states this model knows. */
 export function answerStates(
 	to: readonly string[],
-	deliveries: ReadonlyArray<{ agentId: string; state: string }>,
+	deliveries: ReadonlyArray<{ agentId: string; state: string; result?: string }>,
 ): Array<{ agentId: string; state: DeliveryState | undefined }> {
-	const by = new Map(deliveries.map((d) => [d.agentId, d.state]));
+	// A replayed answer can carry `settled` with the result it settled to.
+	const by = new Map(
+		deliveries.map((d) => [d.agentId, d.state === "settled" && d.result ? d.result : d.state]),
+	);
 	return to.map((agentId) => {
 		const st = by.get(agentId);
 		return {

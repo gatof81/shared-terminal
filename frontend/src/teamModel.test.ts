@@ -541,3 +541,57 @@ describe("per-recipient results (a 202 is not everyone's receipt)", () => {
 		]);
 	});
 });
+
+describe("review regressions (independent review of #589)", () => {
+	it("a `settled` folded before its `uncertain` (newest page first, gap after) still resolves it", () => {
+		const log = new ProjectLog();
+		log.add(
+			parsed([msg(1, "t1", ["dev"], "x"), del(9, "t1", "dev", "settled", { result: "delivered" })]),
+		);
+		log.add(
+			parsed([
+				del(2, "t1", "dev", "planned"),
+				del(3, "t1", "dev", "sending"),
+				del(4, "t1", "dev", "uncertain"),
+			]),
+		);
+		expect(log.messages.get("t1")!.deliveries.get("dev")).toMatchObject({
+			state: "delivered",
+			settled: true,
+		});
+		expect(forYou(log).filter((i) => i.kind === "unsure")).toEqual([]);
+	});
+
+	it("a terminal state still never moves, whatever the arrival order", () => {
+		const log = new ProjectLog();
+		log.add(parsed([msg(1, "t1", ["dev"], "x"), del(5, "t1", "dev", "failed")]));
+		log.add(parsed([del(4, "t1", "dev", "refused", { reason: "busy" })]));
+		expect(log.messages.get("t1")!.deliveries.get("dev")?.state).toBe("refused");
+	});
+
+	it("a reply_late_close folded before its reply_ref still marks it", () => {
+		const log = new ProjectLog();
+		log.add(
+			parsed([
+				msg(1, "t1", ["dev"], "x"),
+				{
+					seq: 9,
+					at: "t",
+					ev: "reply_late_close",
+					msg_id: "t1",
+					agent_id: "dev",
+					prompt_id: "pd",
+					capture_seq: 70,
+				},
+			]),
+		);
+		log.add(parsed([reply(5, "t1", "dev", "pd")]));
+		expect(log.messages.get("t1")!.replies.get("dev")?.[0]?.lateClose).toBe(true);
+	});
+
+	it("add() says how many events were new (a no-op poll changes nothing)", () => {
+		const log = new ProjectLog();
+		expect(log.add(parsed([msg(1, "t1", ["dev"], "x")]))).toBe(1);
+		expect(log.add(parsed([msg(1, "t1", ["dev"], "x")]))).toBe(0);
+	});
+});
