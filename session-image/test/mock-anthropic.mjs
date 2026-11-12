@@ -15,6 +15,12 @@
 //   - prompt contains ST_SCENARIO=long:<n>  → n lines of text (streaming load);
 //   - prompt contains ST_SCENARIO=slow:<n>:<ms> → n lines, one every <ms> ms
 //     (a paced stream, so the CLI displays it in several batches);
+//   - prompt contains ST_SCENARIO=sha256:<path> → one Bash tool_use running
+//     `sha256sum -- <path>`, then a closing text that echoes the hash the tool
+//     printed (`sha256 <hex> <path>`), so the receiving CLI computes it itself
+//     (D2 validation runbook, P3.5). <path> must be exactly an inbox artifact
+//     name, `.st-inbox/<12 hex>-<name>` (the shape placement.ts publishes);
+//     anything else is refused with a text and no tool call;
 //   - anything else                         → two lines of text.
 // Anything that is not /v1/messages gets an empty 200 JSON object, so side
 // calls the CLI makes on startup never fail the run.
@@ -38,6 +44,21 @@ function textOf(content) {
 		.join("\n");
 }
 
+// The only paths the sha256 scenario will hand to a shell: an artifact's
+// inbox name as placement.ts publishes it (`<sha12>-<name>`, name from
+// sanitizeName: no leading dot, no slash, the §6.1 set). No `..`, no
+// absolute path, no quoting or expansion possible in the command built from it.
+const SHA256_PATH_RE = /^\.st-inbox\/[0-9a-f]{12}-[A-Za-z0-9_-][A-Za-z0-9._-]{0,95}$/;
+const SHA256_TOKEN_RE = /ST_SCENARIO=sha256:(\S*)/g;
+
+/** The tool_result's text, whatever shape the CLI sent it in. */
+function toolResultText(block) {
+	const c = block?.content;
+	if (typeof c === "string") return c;
+	if (Array.isArray(c)) return c.map((b) => (b?.type === "text" ? b.text : "")).join("\n");
+	return "";
+}
+
 function plan(body) {
 	// The CLI interleaves `system`-role context messages (environment, token
 	// budget) with the conversation; only user/assistant turns matter here.
@@ -45,6 +66,23 @@ function plan(body) {
 	const last = messages[messages.length - 1];
 	const lastContent = Array.isArray(last?.content) ? last.content : [];
 	if (lastContent.some((b) => b?.type === "tool_result")) {
+		// The sha256 scenario's second step: echo what `sha256sum` printed for
+		// the path it was asked about, and nothing else.
+		const prev = messages[messages.length - 2];
+		const call = (Array.isArray(prev?.content) ? prev.content : []).find(
+			(b) => b?.type === "tool_use" && b.name === "Bash" && typeof b.input?.command === "string",
+		);
+		const asked = call && /^sha256sum -- (\S+)$/.exec(call.input.command)?.[1];
+		if (asked && SHA256_PATH_RE.test(asked)) {
+			const results = lastContent.filter((b) => b?.type === "tool_result");
+			const out = results.map(toolResultText).join("\n");
+			// Exactly one line that is `<64 hex>  <asked>` and nothing else — what a
+			// single-operand sha256sum prints — and no tool error.
+			const hits = out.split("\n").filter((l) => /^[0-9a-f]{64}  /.test(l) && l.slice(66) === asked);
+			const errored = results.some((b) => b?.is_error === true);
+			const hex = !errored && hits.length === 1 ? hits[0].slice(0, 64) : null;
+			return { text: hex ? `sha256 ${hex} ${asked}\n` : `sha256 not computed for ${asked}\n` };
+		}
 		return { text: "Tool finished.\nDone.\n" };
 	}
 	// The scenario comes from the current turn only (every user message after
@@ -63,6 +101,14 @@ function plan(body) {
 		.join("\n");
 	const tools = new Set((body.tools ?? []).map((t) => t.name));
 	if (userTurns.some((t) => t.includes("ST_SUBAGENT"))) return { text: "Subagent reporting.\nAll good.\n" };
+	const tokens = [...prompt.matchAll(SHA256_TOKEN_RE)];
+	if (tokens.length > 1) return { text: "sha256 scenario refused: more than one token\n" };
+	if (tokens.length === 1) {
+		const p = tokens[0][1];
+		if (!SHA256_PATH_RE.test(p)) return { text: "sha256 scenario refused: not an inbox artifact path\n" };
+		if (!tools.has("Bash")) return { text: "sha256 scenario refused: no Bash tool\n" };
+		return { tool: { name: "Bash", input: { command: `sha256sum -- ${p}`, description: "Hash the received artifact" } } };
+	}
 	if (prompt.includes("ST_SCENARIO=bashwrite") && tools.has("Bash")) {
 		return { tool: { name: "Bash", input: { command: "touch smoke-permission.txt", description: "Write a file" } } };
 	}
