@@ -560,6 +560,18 @@ export class ProjectFanout {
 		}
 		set({ state: "sending" });
 
+		// d0 — the point of no return (§3.3). A writer lock lost (or a log
+		// poisoned) after the intent became durable stops the effect here: the
+		// subsystem sends nothing more once a loss is known (§2.1 point 3). The
+		// check and the call are in the same synchronous run, so nothing can be
+		// detected in between that this check did not see; the residual (the
+		// helper dying unseen) is the one §2.1 point 4 already names. The
+		// `sending` stays on disk — nothing can be written without the lock —
+		// and recovery makes it uncertain{orphaned}: fail closed, never resent.
+		if (!this.deps.store.mayEffect(projectId)) {
+			set({ state: "uncertain", reason: "persist-failed" });
+			return;
+		}
 		// d — the effect, exactly once.
 		let r: HttpResult | Error;
 		try {

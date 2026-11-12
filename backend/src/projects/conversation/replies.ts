@@ -12,12 +12,15 @@
  *              breaking attribution (another prompt, a close with another or
  *              no prompt id, a gap, P not new) is remembered as a violation.
  *   settling — `turn_end` with P seen: write `reply_settling`, wait
- *              T_SETTLE = 10 s from its receipt (CONVERSATION.md §4.6's
- *              repeated-Stop window), watching for the same violations plus a
- *              second close with P. Then write `reply_ref`, `exact` only if
- *              nothing broke it AND this process observed the whole window:
- *              a `turn_end` received before this process started (found when
- *              catching up from the file) is `ambiguous{settle-unobserved}`.
+ *              T_SETTLE = 10 s (CONVERSATION.md §4.6's repeated-Stop
+ *              window), watching for the same violations plus a second close
+ *              with P. Then write `reply_ref`, `exact` only if nothing broke
+ *              it AND this process observed the whole window: the window is
+ *              measured on the MONOTONIC clock from the moment this process
+ *              saw the `turn_end` live, never from wall-clock stamps, so a
+ *              jump of the system clock can only lengthen it. A `turn_end`
+ *              this process did not see live (received before it started,
+ *              or before the watch existed) is `ambiguous{settle-unobserved}`.
  *   after    — a later close with P is `reply_late_close`, until the next
  *              prompt (a new turn) or LATE_WINDOW_MS.
  *
@@ -56,7 +59,10 @@ export interface ReplyDeps {
 	readCapture(sid: string, cid: string, after: number): Promise<PersistedEvent[]>;
 	/** When this process started: a capture event received before it was not observed live. */
 	bootAt: number;
+	/** Wall clock: only for stamps written to the log. */
 	now?: () => number;
+	/** Monotonic clock (ms): the settle and late windows are measured on it alone. */
+	monoNow?: () => number;
 	settleMs?: number;
 	log?: { warn(m: string): void };
 }
@@ -71,6 +77,8 @@ interface Watch {
 	lastSeq: number;
 	queue: PersistedEvent[];
 	turnEnd?: PersistedEvent;
+	/** Monotonic time at which this process saw each `turn_end` with P live, by capture seq. */
+	liveAt: Map<number, number>;
 	timer?: NodeJS.Timeout;
 	lateUntil?: number;
 	/** Every step of this watch runs on this chain: never two at once (an
@@ -119,6 +127,10 @@ export class ReplyWatcher {
 		return (this.deps.now ?? Date.now)();
 	}
 
+	private mono(): number {
+		return (this.deps.monoNow ?? (() => performance.now()))();
+	}
+
 	private step(w: Watch | Settle, fn: () => Promise<void>): void {
 		w.chain = w.chain.then(fn).catch((err) => {
 			this.deps.log?.warn(`[projects] reply watch step failed: ${(err as Error).message}`);
@@ -155,6 +167,7 @@ export class ReplyWatcher {
 			violation: null,
 			lastSeq: 0,
 			queue: [],
+			liveAt: new Map(),
 			chain: Promise.resolve(),
 		};
 		this.add(ref.sid, ref.cid, w);
@@ -231,7 +244,13 @@ export class ReplyWatcher {
 	private onEvent(sid: string, cid: string, ev: PersistedEvent): void {
 		const list = this.byConv.get(`${sid}/${cid}`);
 		if (!list) return;
+		const seenAt = this.mono();
 		for (const w of [...list]) {
+			// Stamped on arrival, whatever the phase: a turn_end that lands while
+			// the watch catches up is applied from the file copy (same seq).
+			if (w.kind === "reply" && ev.ev === "turn_end" && ev.prompt_id === w.ref.promptId) {
+				if (!w.liveAt.has(ev.seq)) w.liveAt.set(ev.seq, seenAt);
+			}
 			if (w.phase === "catching-up") {
 				w.queue.push(ev);
 				continue;
@@ -276,7 +295,7 @@ export class ReplyWatcher {
 		const withP = ev.prompt_id === P;
 
 		if (w.phase === "after") {
-			if (isPrompt || (w.lateUntil !== undefined && this.now() > w.lateUntil)) {
+			if (isPrompt || (w.lateUntil !== undefined && this.mono() > w.lateUntil)) {
 				this.finish(w);
 				return;
 			}
@@ -322,11 +341,16 @@ export class ReplyWatcher {
 			this.finish(w);
 			return;
 		}
-		// turn_end with P: the settle window starts at its receipt by the backend.
+		// turn_end with P. The window starts when this process saw it live, on
+		// the monotonic clock: that moment is at or after its receipt, so the
+		// window observed here always covers the 10 s after the receipt. The
+		// capture's `ts` and Date.now() are wall clock — a step of the system
+		// clock (NTP, an operator) between the two would shorten the window
+		// to nothing — so neither ever decides `exact`.
 		w.turnEnd = ev;
-		const received = Date.parse(ev.ts);
+		const seenAt = w.liveAt.get(ev.seq);
 		const settleMs = this.deps.settleMs ?? T_SETTLE_MS;
-		const until = received + settleMs;
+		const remaining = seenAt === undefined ? 0 : Math.max(0, seenAt + settleMs - this.mono());
 		await this.write(w.ref.projectId, (st) =>
 			st.settling.has(deliveryKey(w.ref.msgId, w.ref.agentId)) ||
 			st.replyRefs.has(deliveryKey(w.ref.msgId, w.ref.agentId))
@@ -334,34 +358,44 @@ export class ReplyWatcher {
 				: {
 						ev: "reply_settling",
 						...this.refFields(w, ev),
-						settle_until: new Date(until).toISOString(),
+						// Informational (wall clock); the window itself is monotonic.
+						settle_until: new Date(this.now() + remaining).toISOString(),
 					},
 		);
-		// The capture stamps an event when the backend receives it: one stamped
-		// before this process started was received by a previous one, so the
-		// window was not observed whole here — never exact (§4.1). Whether this
-		// watch saw it live or read it from the file does not matter: every
-		// event of the window is in the file and is applied either way.
-		if (!(received >= this.deps.bootAt)) {
+		// Not seen live by this process ⇒ the window was not observed whole
+		// here — never exact (§4.1). The wall-clock stamp is kept as a second,
+		// fail-closed check: one before this process started is never exact
+		// either (a clock stepped back can only make this stricter).
+		if (seenAt === undefined || !(Date.parse(ev.ts) >= this.deps.bootAt)) {
 			await this.writeRef(w, ev, "ambiguous{settle-unobserved}");
 			this.toAfter(w);
 			return;
 		}
 		w.phase = "settling";
+		this.armSettle(w, ev, seenAt + settleMs);
+	}
+
+	/** `exact` is decided only once the monotonic clock is past `deadline`. */
+	private armSettle(w: Watch, ev: PersistedEvent, deadline: number): void {
 		w.timer = setTimeout(
 			() =>
 				this.step(w, async () => {
 					if (w.phase !== "settling" || this.stopped) return;
+					// A timer may fire a little early (rounding); never decide before the end.
+					if (this.mono() < deadline) {
+						this.armSettle(w, ev, deadline);
+						return;
+					}
 					await this.writeRef(w, ev, w.violation ? `ambiguous{${w.violation}}` : "exact");
 					this.toAfter(w);
 				}),
-			Math.max(0, until - this.now()),
+			Math.max(0, Math.ceil(deadline - this.mono())),
 		);
 	}
 
 	private toAfter(w: Watch): void {
 		w.phase = "after";
-		w.lateUntil = this.now() + LATE_WINDOW_MS;
+		w.lateUntil = this.mono() + LATE_WINDOW_MS;
 		if (w.timer) clearTimeout(w.timer);
 		w.timer = setTimeout(() => this.step(w, async () => this.finish(w)), LATE_WINDOW_MS);
 		w.timer.unref?.();

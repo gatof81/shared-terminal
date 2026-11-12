@@ -112,6 +112,19 @@ export class ProjectConversationStore {
 
 	private lockHeld = (): boolean => !this.lost && (this.lock?.held() ?? false);
 
+	/**
+	 * Synchronous: may an effect start NOW for this project? False once the
+	 * writer lock is known lost (§2.1 point 3) or the project's log is
+	 * poisoned (§2): "no se envía nada más". The caller checks it with no
+	 * await between this and the effect's call — the point of no return
+	 * (§3.3 d0) — so a loss detected before the call stops it.
+	 */
+	mayEffect(pid: string): boolean {
+		if (this.closed || this.unavailable || !this.lockHeld()) return false;
+		const p = this.open.get(pid);
+		return p !== undefined && !p.log.isPoisoned;
+	}
+
 	/** Runs `fn` under the project's lock with its folded state (§3.3). */
 	async critical<T>(pid: string, fn: (tx: CriticalTx) => Promise<T>): Promise<T> {
 		if (!PROJECT_ID_RE.test(pid)) throw new Error(`invalid project id ${JSON.stringify(pid)}`);

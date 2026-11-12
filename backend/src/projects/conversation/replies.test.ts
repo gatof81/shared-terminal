@@ -198,9 +198,11 @@ describe("reply attribution (§4.1)", () => {
 
 	it("review regression: a gap in the file after the turn_end, with live events during catch-up ⇒ ambiguous{gap}", async () => {
 		const ack = emit("user_prompt", { prompt_id: "P" });
+		// Seen live (so the window is observed) but emitted before the
+		// catch-up read runs: both in the file and in the live queue.
+		watcher.watch(ref(ack.seq));
 		emit("turn_end", { prompt_id: "P", data: { last_assistant_message: "a" } });
 		emit("gap", { data: { reason: "relay_dropped" } });
-		watcher.watch(ref(ack.seq));
 		emit("tool_end", { prompt_id: "P" });
 		await sleep(SETTLE + 40);
 		expect((await events()).find((l) => l.ev === "reply_ref")?.attribution).toBe("ambiguous{gap}");
@@ -208,9 +210,11 @@ describe("reply attribution (§4.1)", () => {
 
 	it("review regression: live events landing during the settling write still see a gap read from the file", async () => {
 		const ack = emit("user_prompt", { prompt_id: "P" });
+		// Seen live (so the window is observed) but emitted before the
+		// catch-up read runs: both in the file and in the live queue.
+		watcher.watch(ref(ack.seq));
 		emit("turn_end", { prompt_id: "P", data: { last_assistant_message: "a" } });
 		emit("gap", { data: { reason: "relay_dropped" } });
-		watcher.watch(ref(ack.seq));
 		for (let i = 0; i < 5; i++) {
 			await new Promise((r) => setImmediate(r));
 			emit("tool_end", { prompt_id: "P" });
@@ -266,6 +270,122 @@ describe("reply attribution (§4.1)", () => {
 		const ev = await events();
 		expect(ev.filter((l) => l.ev === "reply_ref")).toHaveLength(1);
 		expect(ev.filter((l) => l.ev === "reply_settling")).toHaveLength(1);
+	});
+});
+
+/** Replaces the default watcher with one on the given clocks. */
+function rewatch(clocks: { now?: () => number; monoNow?: () => number }): void {
+	watcher.stop();
+	watcher = new ReplyWatcher({
+		store,
+		onCaptureEvent: (l) => {
+			listener = l;
+			return () => {
+				listener = null;
+			};
+		},
+		readCapture: async (_s, _c, after) => capture.filter((e) => e.seq > after),
+		bootAt,
+		settleMs: SETTLE,
+		...clocks,
+	});
+}
+
+describe("the settle window is measured on the monotonic clock (owner review of #590)", () => {
+	it("the system clock jumps forward 1 h right after the turn_end: no exact before the whole window, and a second close inside it is seen", async () => {
+		let jump = 0;
+		rewatch({ now: () => Date.now() + jump });
+		const ack = emit("user_prompt", { prompt_id: "P" });
+		watcher.watch(ref(ack.seq));
+		await sleep(10);
+		emit("turn_end", { prompt_id: "P", data: { last_assistant_message: "a" } });
+		// The capture stamps from here on are an hour ahead, as are the watcher's.
+		jump = 3_600_000;
+		await sleep(SETTLE / 2);
+		expect((await events()).map((l) => l.ev)).toEqual(["reply_settling"]);
+		emit("turn_end", {
+			prompt_id: "P",
+			ts: new Date(Date.now() + jump).toISOString(),
+			data: { last_assistant_message: "a" },
+		});
+		await sleep(SETTLE + 30);
+		const refs = (await events()).filter((l) => l.ev === "reply_ref");
+		expect(refs).toHaveLength(1);
+		expect(refs[0]?.attribution).toBe("ambiguous{second-close}");
+	});
+
+	it("the same jump with a clean window ⇒ exact, but only once the window has elapsed in this process", async () => {
+		let jump = 0;
+		rewatch({ now: () => Date.now() + jump });
+		const ack = emit("user_prompt", { prompt_id: "P" });
+		watcher.watch(ref(ack.seq));
+		await sleep(10);
+		const t0 = performance.now();
+		emit("turn_end", { prompt_id: "P", data: { last_assistant_message: "a" } });
+		jump = 3_600_000;
+		let decidedAt: number | null = null;
+		while (decidedAt === null && performance.now() - t0 < SETTLE * 4) {
+			if ((await events()).some((l) => l.ev === "reply_ref")) decidedAt = performance.now();
+			else await sleep(2);
+		}
+		expect(decidedAt).not.toBeNull();
+		expect((decidedAt as number) - t0).toBeGreaterThanOrEqual(SETTLE);
+		expect((await events()).find((l) => l.ev === "reply_ref")?.attribution).toBe("exact");
+	});
+
+	it("a turn_end stamped in the past (clock stepped back after it) still waits the whole window", async () => {
+		rewatch({});
+		const ack = emit("user_prompt", { prompt_id: "P" });
+		watcher.watch(ref(ack.seq));
+		await sleep(10);
+		// Stamped after boot but long enough ago that ts + T_SETTLE is already past.
+		emit("turn_end", {
+			prompt_id: "P",
+			ts: new Date(Date.now() - 10 * SETTLE).toISOString(),
+			data: { last_assistant_message: "a" },
+		});
+		await sleep(SETTLE / 2);
+		expect((await events()).some((l) => l.ev === "reply_ref")).toBe(false);
+		emit("turn_end", { prompt_id: "P", data: { last_assistant_message: "a" } });
+		await sleep(SETTLE + 30);
+		expect((await events()).find((l) => l.ev === "reply_ref")?.attribution).toBe(
+			"ambiguous{second-close}",
+		);
+	});
+
+	it("the monotonic clock decides: while it has not reached the end, a fired timer re-arms and writes nothing", async () => {
+		let frozen: number | null = null;
+		rewatch({ monoNow: () => frozen ?? performance.now() });
+		const ack = emit("user_prompt", { prompt_id: "P" });
+		watcher.watch(ref(ack.seq));
+		await sleep(10);
+		emit("turn_end", { prompt_id: "P", data: { last_assistant_message: "a" } });
+		await sleep(5);
+		frozen = performance.now();
+		await sleep(SETTLE * 2);
+		expect((await events()).some((l) => l.ev === "reply_ref")).toBe(false);
+		frozen = null;
+		await sleep(SETTLE);
+		expect((await events()).find((l) => l.ev === "reply_ref")?.attribution).toBe("exact");
+	});
+
+	it("a turn_end stamped after boot but never seen live by this process (a previous process with its clock ahead) ⇒ settle-unobserved", async () => {
+		const ack = emit("user_prompt", { prompt_id: "P" });
+		capture.push({
+			seq: capture.length + 1,
+			ts: new Date(Date.now() + 3_600_000).toISOString(),
+			ev: "turn_end",
+			prompt_id: "P",
+			turn_id: null,
+			agent_id: null,
+			pane: "%1",
+			data: { last_assistant_message: "a" },
+		} as PersistedEvent);
+		watcher.watch(ref(ack.seq));
+		await sleep(20);
+		expect((await events()).find((l) => l.ev === "reply_ref")?.attribution).toBe(
+			"ambiguous{settle-unobserved}",
+		);
 	});
 });
 

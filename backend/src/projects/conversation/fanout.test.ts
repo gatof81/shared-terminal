@@ -470,6 +470,93 @@ describe("send — persistence failures (T4, S4)", () => {
 		expect(h.calls).toHaveLength(0);
 	});
 
+	it("owner review of #590: the writer lock lost after `sending` is durable and before the call ⇒ no effect; the other recipient is not sent; reopened, uncertain{orphaned} and 0 calls", async () => {
+		await store.close();
+		let held = true;
+		let lost: (() => void) | null = null;
+		const lossy: WriterLock = {
+			held: () => held,
+			onLost: (cb) => {
+				lost = cb;
+			},
+			release: () => {},
+		};
+		store = await ProjectConversationStore.start({
+			workspaceRoot: root,
+			bootId: "boot-lost",
+			acquire: async () => ({ ok: true, lock: lossy }),
+		});
+		// The helper dies the moment the first intent is on disk: after S3's
+		// fsync, before the fan-out gets to the Composer call.
+		store.onAppend((_p, ls) => {
+			if (held && ls.some((l) => l.ev === "delivery" && l.state === "sending")) {
+				held = false;
+				(lost as (() => void) | null)?.();
+			}
+		});
+		const h = harness();
+		const r = await send(h, { clientMessageId: cmid(), text: "x", to: [A, B] });
+		expect(h.calls).toHaveLength(0);
+		const ds = (
+			r.body as { deliveries: Array<{ agentId: string; state: string; reason?: string }> }
+		).deliveries;
+		expect(ds.find((d) => d.agentId === A)).toEqual({
+			agentId: A,
+			state: "uncertain",
+			reason: "persist-failed",
+		});
+		expect(ds.find((d) => d.agentId === B)).toMatchObject({ state: "not-sent" });
+		// Nothing written after the loss.
+		expect((await lines()).filter((l) => l.ev === "delivery").map((l) => l.state)).toEqual([
+			"planned",
+			"planned",
+			"sending",
+		]);
+		await store.close();
+		store = await ProjectConversationStore.start({
+			workspaceRoot: root,
+			bootId: "boot-after",
+			acquire: async () => ({ ok: true, lock: lock() }),
+		});
+		const st = await store.critical(PID, async (tx) => tx.state);
+		const byAgent = new Map([...st.deliveries.values()].map((d) => [d.agentId, d]));
+		expect(byAgent.get(A)).toMatchObject({ state: "uncertain", reason: "orphaned" });
+		expect(byAgent.get(B)).toMatchObject({ state: "not-sent", reason: "persist-failed" });
+		expect(h.calls).toHaveLength(0);
+	});
+
+	it("the same with only `held()` turning false (the loss callback not delivered yet) ⇒ no effect", async () => {
+		await store.close();
+		let held = true;
+		store = await ProjectConversationStore.start({
+			workspaceRoot: root,
+			bootId: "boot-held",
+			acquire: async () => ({
+				ok: true,
+				lock: { held: () => held, onLost: () => {}, release: () => {} },
+			}),
+		});
+		store.onAppend((_p, ls) => {
+			if (ls.some((l) => l.ev === "delivery" && l.state === "sending")) held = false;
+		});
+		const h = harness();
+		await send(h, { clientMessageId: cmid(), text: "x", to: [A] });
+		expect(h.calls).toHaveLength(0);
+	});
+
+	it("a log poisoned after the intent (another write failed) ⇒ no effect", async () => {
+		const h = harness();
+		store.onAppend((p, ls) => {
+			if (ls.some((l) => l.ev === "delivery" && l.state === "sending")) {
+				(store as unknown as { open: Map<string, { log: { poison(r: string): void } }> }).open
+					.get(p)
+					?.log.poison("test");
+			}
+		});
+		await send(h, { clientMessageId: cmid(), text: "x", to: [A] });
+		expect(h.calls).toHaveLength(0);
+	});
+
 	it("S4 cannot be made durable ⇒ sent exactly once; reopened it is delivered or uncertain{orphaned}, never resent", async () => {
 		await store.close();
 		let n = 0;
