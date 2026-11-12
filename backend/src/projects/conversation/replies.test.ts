@@ -198,11 +198,9 @@ describe("reply attribution (§4.1)", () => {
 
 	it("review regression: a gap in the file after the turn_end, with live events during catch-up ⇒ ambiguous{gap}", async () => {
 		const ack = emit("user_prompt", { prompt_id: "P" });
-		// Seen live (so the window is observed) but emitted before the
-		// catch-up read runs: both in the file and in the live queue.
-		watcher.watch(ref(ack.seq));
 		emit("turn_end", { prompt_id: "P", data: { last_assistant_message: "a" } });
 		emit("gap", { data: { reason: "relay_dropped" } });
+		watcher.watch(ref(ack.seq));
 		emit("tool_end", { prompt_id: "P" });
 		await sleep(SETTLE + 40);
 		expect((await events()).find((l) => l.ev === "reply_ref")?.attribution).toBe("ambiguous{gap}");
@@ -210,11 +208,9 @@ describe("reply attribution (§4.1)", () => {
 
 	it("review regression: live events landing during the settling write still see a gap read from the file", async () => {
 		const ack = emit("user_prompt", { prompt_id: "P" });
-		// Seen live (so the window is observed) but emitted before the
-		// catch-up read runs: both in the file and in the live queue.
-		watcher.watch(ref(ack.seq));
 		emit("turn_end", { prompt_id: "P", data: { last_assistant_message: "a" } });
 		emit("gap", { data: { reason: "relay_dropped" } });
+		watcher.watch(ref(ack.seq));
 		for (let i = 0; i < 5; i++) {
 			await new Promise((r) => setImmediate(r));
 			emit("tool_end", { prompt_id: "P" });
@@ -366,6 +362,16 @@ describe("the settle window is measured on the monotonic clock (owner review of 
 		expect((await events()).some((l) => l.ev === "reply_ref")).toBe(false);
 		frozen = null;
 		await sleep(SETTLE);
+		expect((await events()).find((l) => l.ev === "reply_ref")?.attribution).toBe("exact");
+	});
+
+	it("review NIT: a turn_end seen live BEFORE its watch exists (a fast turn, the watch starts after S4) still counts as observed", async () => {
+		const ack = emit("user_prompt", { prompt_id: "P" });
+		emit("turn_end", { prompt_id: "P", data: { last_assistant_message: "a" } });
+		watcher.watch(ref(ack.seq));
+		await sleep(10);
+		expect((await events()).map((l) => l.ev)).toEqual(["reply_settling"]);
+		await sleep(SETTLE + 30);
 		expect((await events()).find((l) => l.ev === "reply_ref")?.attribution).toBe("exact");
 	});
 

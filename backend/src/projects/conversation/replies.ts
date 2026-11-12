@@ -19,8 +19,8 @@
  *              measured on the MONOTONIC clock from the moment this process
  *              saw the `turn_end` live, never from wall-clock stamps, so a
  *              jump of the system clock can only lengthen it. A `turn_end`
- *              this process did not see live (received before it started,
- *              or before the watch existed) is `ambiguous{settle-unobserved}`.
+ *              this process did not see live (received before it started)
+ *              is `ambiguous{settle-unobserved}`.
  *   after    — a later close with P is `reply_late_close`, until the next
  *              prompt (a new turn) or LATE_WINDOW_MS.
  *
@@ -48,6 +48,13 @@ export const SETTLE_WATCH_MS = 24 * 60 * 60_000;
  * events back. Reading from here instead of from 0 bounds the catch-up.
  */
 export const PRE_ACK_SCAN = 2_000;
+/**
+ * How many live `turn_end` sightings the watcher remembers (all
+ * conversations). A watch starts after the Composer's ack and S4, so a fast
+ * turn can end before it exists; the sighting is kept here, not per watch.
+ * Evicting one only makes that reply `settle-unobserved` (fail closed).
+ */
+export const LIVE_SIGHTINGS_MAX = 4_096;
 
 const PROMPTS = new Set(["user_prompt", "internal_prompt"]);
 const CLOSES = new Set(["turn_end", "turn_failed"]);
@@ -77,8 +84,6 @@ interface Watch {
 	lastSeq: number;
 	queue: PersistedEvent[];
 	turnEnd?: PersistedEvent;
-	/** Monotonic time at which this process saw each `turn_end` with P live, by capture seq. */
-	liveAt: Map<number, number>;
 	timer?: NodeJS.Timeout;
 	lateUntil?: number;
 	/** Every step of this watch runs on this chain: never two at once (an
@@ -105,6 +110,8 @@ const COMPOSER_FINAL = new Set(["delivered", "unconfirmed", "misdelivered", "fai
 
 export class ReplyWatcher {
 	private readonly byConv = new Map<string, Array<Watch | Settle>>();
+	/** Monotonic time at which this process saw each `turn_end` live, by `sid/cid/seq`. */
+	private readonly liveAt = new Map<string, number>();
 	private readonly unlisten: () => void;
 	private stopped = false;
 	/** Catch-up reads load a capture file each; one at a time bounds memory. */
@@ -167,7 +174,6 @@ export class ReplyWatcher {
 			violation: null,
 			lastSeq: 0,
 			queue: [],
-			liveAt: new Map(),
 			chain: Promise.resolve(),
 		};
 		this.add(ref.sid, ref.cid, w);
@@ -242,15 +248,20 @@ export class ReplyWatcher {
 	}
 
 	private onEvent(sid: string, cid: string, ev: PersistedEvent): void {
+		// Stamped on arrival, whether or not a watch exists yet or is catching
+		// up: the watch may apply the file copy (same seq) later.
+		if (ev.ev === "turn_end") {
+			const k = `${sid}/${cid}/${ev.seq}`;
+			if (!this.liveAt.has(k)) {
+				this.liveAt.set(k, this.mono());
+				if (this.liveAt.size > LIVE_SIGHTINGS_MAX) {
+					this.liveAt.delete(this.liveAt.keys().next().value as string);
+				}
+			}
+		}
 		const list = this.byConv.get(`${sid}/${cid}`);
 		if (!list) return;
-		const seenAt = this.mono();
 		for (const w of [...list]) {
-			// Stamped on arrival, whatever the phase: a turn_end that lands while
-			// the watch catches up is applied from the file copy (same seq).
-			if (w.kind === "reply" && ev.ev === "turn_end" && ev.prompt_id === w.ref.promptId) {
-				if (!w.liveAt.has(ev.seq)) w.liveAt.set(ev.seq, seenAt);
-			}
 			if (w.phase === "catching-up") {
 				w.queue.push(ev);
 				continue;
@@ -348,7 +359,7 @@ export class ReplyWatcher {
 		// clock (NTP, an operator) between the two would shorten the window
 		// to nothing — so neither ever decides `exact`.
 		w.turnEnd = ev;
-		const seenAt = w.liveAt.get(ev.seq);
+		const seenAt = this.liveAt.get(`${w.ref.sid}/${w.ref.cid}/${ev.seq}`);
 		const settleMs = this.deps.settleMs ?? T_SETTLE_MS;
 		const remaining = seenAt === undefined ? 0 : Math.max(0, seenAt + settleMs - this.mono());
 		await this.write(w.ref.projectId, (st) =>

@@ -380,8 +380,9 @@ where `features.projectChat` is on. It adds **no backend, no route, no table and
 - **Temporary:** P7 (the host conversation with guests) replaces it. Its retirement is evaluated then,
   keeping a way to ask several agents at once.
 
-## 10. Project conversation (proposed)
+## 10. Project conversation
 
 The project-level conversation, artifacts and per-task Dev ↔ QA relay (D1–D3, the Composer track the
-v0.3, approved as binding on 2026-11-12 (v0.3.1 precisions with D1-b); D1-a (the store) is in main, D1-b–D3 are not; nothing in §1–§9 changes.
-Proposal v0.3, awaiting the owner's approval as binding; not implemented; nothing in §1–§9 changes.
+owner approved on 2026-11-11) have their own binding contract: [PROJECT_CONVERSATION.md](./PROJECT_CONVERSATION.md).
+v0.3, approved as binding on 2026-11-12 (v0.3.1 precisions with D1-b); D1-a (the store) is in main,
+D1-b–D3 are not; nothing in §1–§9 changes.
