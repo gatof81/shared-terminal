@@ -49,7 +49,7 @@ preflight (§5, P0).
 ## 3. What is installed
 
 - **Checkout:** the frozen SHA `a09bf8a` (`git checkout --detach a09bf8a`, never `main`) for the backend and the session image. Record it as the full SHA with `git rev-parse HEAD`.
-- **The mock alone** comes from the O2 PR's merge SHA (#604), because `a09bf8a` predates the `sha256` scenario. Use a second checkout at that SHA, and mount only its `session-image/test/` as `/t`. Record the second SHA and the `sha256sum` of `mock-anthropic.mjs`. Nothing else is taken from it. Plus the mock: `session-image/test/` is already in the repo.
+- **The mock alone** comes from the O2 PR's merge SHA (#604), because `a09bf8a` predates the `sha256` scenario. Use a second checkout at that SHA, and mount only its `session-image/test/` as `/t`. Record the second SHA and the `sha256sum` of `mock-anthropic.mjs`. Nothing else is taken from it.
 - **Session image:** a plain `docker build -t shared-terminal-session ./session-image`. This is a fresh host with no sessions, so CLAUDE.md's first-install path applies. Record the image id.
 - **After every app start** (P2, K1, K2, P7, P8):
   - the boot log reaches `[server] listening on`, which comes only after the D1 migrations finished, so D1 is reachable;
@@ -101,6 +101,7 @@ re-check) says so.
 
 ### P0. Preflight (abort conditions)
 
+0. **#604 (the O2 mock) is merged**, and its merge SHA is recorded for the mock checkout (§3). Without it, P3.5 cannot run.
 1. E1–E7 checked and recorded. **Any miss ⇒ abort, nothing started.**
 2. `git rev-parse HEAD` = `a09bf8a…`, the frozen SHA, whatever main is at run time. `docker compose config --format json | jq -r '.services.app.environment.PROJECT_ARTIFACTS_ENABLED'` prints an empty line while unset. **Never record the full `docker compose config`: it prints every secret.**
 3. Backend boot log: `writer lock held` and `project conversation ENABLED (D1)`, with **no** `project artifacts ENABLED (D2)`. `.projects/.writer.lock` is mode `0600` (#601).
@@ -152,7 +153,7 @@ With all fixtures in place and the flag unset:
    - **Setup:** for this one prompt, `qa`'s CLI must be able to run that command without a dialog. Add `"permissions": {"allow": ["Bash(sha256sum:*)"]}` to the seeded `~/.claude/settings.json` (§4), rather than `--dangerously-skip-permissions`.
    - **Send:** to `qa-a`, the text `ST_SCENARIO=sha256:.st-inbox/<sha12>-fix.diff`, **with `artifacts: [<sha>]`**. P3.3 had the agent delete its inbox, so the placement recreates the file this prompt hashes.
    - **PASS:**
-     - the `reply_ref` is `exact`, and its text (the capture's `last_assistant_message`) is `sha256 <sha> .st-inbox/<sha12>-fix.diff`;
+     - the `reply_ref` is `exact`, and its text (the capture's `last_assistant_message`) is, after trimming whitespace, `sha256 <sha> .st-inbox/<sha12>-fix.diff`;
      - **and** the mock's request log shows, for that turn, a `tool_result` whose output line is `<sha>  .st-inbox/<sha12>-fix.diff`. Record only that line's hash (§6).
 
      The `<sha>` is also in the prompt (the artifact line), so the reply alone cannot prove the CLI computed it. The mock echoes **only** the line `sha256sum` printed for that exact path, and the request log shows that output came from the tool.
@@ -218,9 +219,9 @@ Before P6: a backup (`docker compose exec app npm run backup`). Record its direc
 sha256. Each step ends by checking the log with `projects:check-log`.
 
 **K3 and K4: how they are judged.**
-- **Stop the competitors first.** The racing loops are the agent's own processes, started through a separate `docker exec`. They are stopped by `kill`, then a poll until `pgrep -u 1000 -f <loop marker>` inside the container is empty. Only then is the final state evaluated, and never while a loop can still move something.
+- **Stop the competitors first.** The racing loops are the agent's own processes, started through a separate `docker exec`. They are stopped with `docker exec <ops> pkill -u 1000 -f <loop marker>`, then a poll until `docker exec <ops> pgrep -u 1000 -f <loop marker>` is empty. Both run **without a `bash -c` wrapper**, which would itself match the marker. Only then is the final state evaluated, and never while a loop can still move something.
 - **What the loops can touch.** Neither ever writes a final name. K3 only renames the inbox directory to `x` or puts a link in its place. A backend recreating `.st-inbox` mid-loop can leave `x` nested as `.st-inbox/x`, which is the agent's doing. K4 only replaces `.<16 hex>.tmp` names.
-- **Locating a claimed file.** It is located after the stop **only** in the allowed places: `find <WORKSPACE_ROOT>/<ops>/.st-inbox <WORKSPACE_ROOT>/<ops>/x <WORKSPACE_ROOT>/<ops>/.st-inbox/x -maxdepth 1 -type f -name '<sha12>-<name>'`.
+- **Locating a claimed file.** It is located after the stop **only** in the allowed places: the inbox, or a chain of real directories named `x` below `.st-inbox` or `x`. Each backend recreation mid-loop pushes the old inbox one level deeper. The command is `find <WORKSPACE_ROOT>/<ops>/.st-inbox <WORKSPACE_ROOT>/<ops>/x -name trap -prune -o -type f -name '<sha12>-<name>' -print`, and the relative path of every hit must match `^(\.st-inbox|x)(/x)*/<sha12>-<name>$`. Record the depth seen.
 - **Not a FAIL.** A claimed file found in one of those places with its sha, or a final name the agent itself published by swapping a temp (K4, `exists-different` in the log).
 - **FAIL, an explicit list:**
   - a claimed file whose bytes differ from its sha;
