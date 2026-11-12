@@ -488,6 +488,59 @@ test.describe("workspace — layout", () => {
 		await noHorizontalScroll(page);
 	});
 
+	test("phone: For you's Done sits beside the card text, and the New task bar is on top of what scrolls under it", async ({
+		app,
+		page,
+	}) => {
+		await page.setViewportSize({ width: 390, height: 844 });
+		await app.login("alice", projectHash);
+		const card = cards(page).filter({ has: page.locator(".tw-done") }).first();
+		await expect(card).toBeVisible();
+		const text = (await card.locator(".tw-card-link").boundingBox())!;
+		const done = (await card.locator(".tw-done").boundingBox())!;
+		// Same row: the button is beside the text, not on a row of its own.
+		expect(done.x).toBeGreaterThanOrEqual(text.x + text.width - 1);
+		expect(done.y).toBeLessThan(text.y + text.height);
+		expect(done.height).toBeGreaterThanOrEqual(44);
+		// With a thread row (avatars on its left) scrolled under it, the bar is on
+		// top across its whole width — those avatars once painted over it.
+		let bar = (await page.locator("#project-view .tw-new").boundingBox())!;
+		const row = page.locator("#project-view .tw-now .tw-thread-row").first();
+		await page.locator("#project-view .tw-now").evaluate(
+			(col, { y }) => {
+				const r = col.querySelector(".tw-thread-row")!.getBoundingClientRect();
+				col.scrollTop += r.top - y;
+			},
+			{ y: bar.y + bar.height / 2 - 20 },
+		);
+		bar = (await page.locator("#project-view .tw-new").boundingBox())!;
+		const under = (await row.boundingBox())!;
+		expect(under.y).toBeLessThan(bar.y + bar.height / 2);
+		expect(under.y + under.height).toBeGreaterThan(bar.y + bar.height / 2);
+		// Probe the bar's edges, its middle, and every avatar of that row.
+		const avatarXs = await row
+			.locator(".tw-av")
+			.evaluateAll((avs) => avs.map((a) => a.getBoundingClientRect().x + 8));
+		expect(avatarXs.length).toBeGreaterThan(0);
+		const xs = [bar.x + 12, bar.x + bar.width / 2, bar.x + bar.width - 12, ...avatarXs];
+		const onTop = await page.evaluate(
+			({ y, xs }) => xs.map((x) => !!document.elementFromPoint(x, y)?.closest(".tw-new")),
+			{ y: bar.y + bar.height / 2, xs },
+		);
+		expect(onTop).toEqual(xs.map(() => true));
+		// At the very end, nothing of the column's last item is under the footer.
+		await page.locator("#project-view .tw-now").evaluate((col) => {
+			col.scrollTop = col.scrollHeight;
+		});
+		const footer = (await page.locator("#project-view .tw-new-bar").boundingBox())!;
+		const last = (await page.locator("#project-view .tw-now .tw-threads").boundingBox())!;
+		// The footer's fade reaches ~12 px above it: that must be the column's
+		// 14-px gap, not the last item (the previous bar was lifted 12 px by
+		// `bottom` and its shadow bands painted over the last row's end).
+		expect(last.y + last.height).toBeLessThanOrEqual(footer.y - 12);
+		expect(bar.width).toBeGreaterThan(350);
+	});
+
 	test("wide page: For you moves to its own column; medium: it folds into Now", async ({ app, page }) => {
 		await page.setViewportSize({ width: 1700, height: 900 });
 		await app.login("alice", projectHash);

@@ -42,7 +42,10 @@
 	display: flex;
 	flex-direction: column;
 	gap: 14px;
-	padding: 0 16px 88px;
+	/* No bottom padding on phones: "+ New task" is the last thing in the
+	   column (a sticky bar taking its own room), so nothing hides under it
+	   at the end. */
+	padding: 0 16px;
 }
 
 /* The main column never scrolls as a whole: its header and composer are
@@ -88,13 +91,17 @@
 	/* Beside a thread there is room: the primary action leads the column
 	   (after the project header, its DOM place) instead of floating over For
 	   you's cards and their Done buttons. */
-	.tw .tw-new {
+	.tw .tw-new-bar {
 		order: 0;
 		position: static;
-		align-self: stretch;
-		justify-content: center;
-		min-height: 44px;
+		margin: 0;
+		padding: 0;
+		background: none;
 		box-shadow: none;
+	}
+	.tw .tw-new-bar .tw-new {
+		min-height: 44px;
+		border-radius: 22px;
 	}
 }
 
@@ -183,16 +190,8 @@
 }
 
 .tw-new {
-	/* Phones: drawn last (a floating button in thumb reach) although it is
-	   second in the DOM; wide layouts put it back in place (order: 0). */
-	order: 1;
-	position: sticky;
-	bottom: 16px;
-	align-self: flex-end;
-	min-height: 52px;
 	padding: 0 22px;
 	border-radius: 26px;
-	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
 }
 
 .tw-x {
@@ -1074,4 +1073,62 @@
 		font-size: 0.8rem;
 		font-weight: 500;
 	}
+}
+
+/* For you, denser (owner review 2026-11-12: easier to supervise several
+   agents): "Done" sits beside the card's text instead of on a row of its
+   own — one row less per card, still a 44-px target. When the control has
+   something to say ("No answer…" + Check), the card goes back to a column
+   so the words have room. */
+.tw-card:has(> .tw-card-actions) {
+	flex-direction: row;
+	align-items: center;
+}
+
+.tw-card:has(> .tw-card-actions) > .tw-card-link {
+	flex: 1 1 auto;
+	min-width: 0;
+	padding-bottom: 12px;
+}
+
+.tw-card > .tw-card-actions {
+	flex-shrink: 0;
+	padding: 8px 12px 8px 0;
+}
+
+.tw-card:has(> .tw-card-actions .tw-card-sub) {
+	flex-direction: column;
+	align-items: stretch;
+}
+
+.tw-card:has(> .tw-card-actions .tw-card-sub) > .tw-card-actions {
+	padding: 0 10px 10px 16px;
+}
+
+/* Phones: "+ New task" is a full-width bar at the bottom of Now, inside a
+   sticky footer of page background — a floating pill on the right covered
+   the cards' right-hand "Done" buttons. The footer is a real element: its
+   band takes stray taps (a near miss never lands on content hidden under
+   it), it sits in flow at the column's end (sticky never lifts it over the
+   last item), and z-index keeps later positioned content (thread-row
+   avatars) under it. The fade above stays within the column's 14-px gap.
+   Wide layouts reset the footer to a plain box. */
+.tw-new-bar {
+	order: 1;
+	position: sticky;
+	bottom: 0;
+	z-index: 1;
+	margin: 0 -16px;
+	padding: 8px 16px 12px;
+	background: var(--c-bg);
+	box-shadow: 0 -6px 8px var(--c-bg);
+}
+
+.tw-new-bar .tw-new {
+	position: static;
+	display: flex;
+	width: 100%;
+	box-sizing: border-box;
+	min-height: 52px;
+	box-shadow: none;
 }

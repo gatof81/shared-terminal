@@ -1423,7 +1423,12 @@ class Workspace {
 			panelHref(this.projectId, { kind: "new" }),
 			() => go(this.projectId, { kind: "new" }),
 		);
-		const nodes: HTMLElement[] = [ctx.header, newBtn];
+		// Its own footer element on phones (a sticky band of page background
+		// that takes stray taps instead of the content scrolled beneath it);
+		// on wide layouts the box is plain and the button sits under the header.
+		const newBar = el("div", "tw-new-bar");
+		newBar.append(newBtn);
+		const nodes: HTMLElement[] = [ctx.header, newBar];
 		// Agents
 		const strip = el("nav", "tw-agents");
 		strip.setAttribute("aria-label", "Agents");
