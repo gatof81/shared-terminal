@@ -153,6 +153,38 @@ describe("project routes (P3a)", () => {
 		}
 	});
 
+	it("parses the v3 workspace panels and round-trips them", () => {
+		const MID = "m0000000-0000-4000-8000-000000000001";
+		expect(parseProjectRoute(`#/projects/${PID}/threads/${MID}`)).toEqual({
+			projectId: PID,
+			agentId: null,
+			panel: { kind: "thread", msgId: MID },
+		});
+		expect(parseProjectRoute(`#/projects/${PID}/new`)).toEqual({
+			projectId: PID,
+			agentId: null,
+			panel: { kind: "new" },
+		});
+		expect(parseProjectRoute(`#/projects/${PID}/agents`)).toEqual({
+			projectId: PID,
+			agentId: null,
+			panel: { kind: "agents" },
+		});
+		for (const r of [
+			{ projectId: PID, agentId: null, panel: { kind: "thread" as const, msgId: "a/b c" } },
+			{ projectId: PID, agentId: null, panel: { kind: "new" as const } },
+			{ projectId: PID, agentId: null, panel: { kind: "agents" as const } },
+		]) {
+			expect(parseProjectRoute(projectRouteHash(r))).toEqual(r);
+		}
+		for (const h of [
+			`#/projects/${PID}/threads/`,
+			`#/projects/${PID}/threads/x/y`,
+			`#/projects/${PID}/new/x`,
+		])
+			expect(parseProjectRoute(h), h).toBeNull();
+	});
+
 	it("rejects other shapes — the chat route of a later phase included", () => {
 		for (const h of [
 			"",

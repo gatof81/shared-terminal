@@ -27,5 +27,6 @@
 @import "./dialog.css";
 @import "./switcher.css";
 @import "./projects.css";
+@import "./team.css";
 /* Shell v2 overrides, keyed on html[data-shell="v2"] (uiShell.ts). Last on purpose. */
 @import "./shell-v2.css";

@@ -190,14 +190,23 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          cache-dependency-path: |
+            frontend/package-lock.json
+            backend/package-lock.json
 
       - name: Install
         run: npm ci
 
+      # workspace-real.spec.ts runs the REAL project-conversation backend
+      # (backend/src/projects/conversation/e2eHarness.testutil.ts, via tsx)
+      # behind the browser, so it needs the backend's dependencies too.
+      - name: Install backend (real-backend e2e harness)
+        working-directory: backend
+        run: npm ci
+
       # The harness runs the app on the Vite dev server against the
-      # deterministic mock backend in e2e/mockBackend.ts — no real backend,
-      # no Docker. Only Chromium is needed; `--with-deps` installs the
+      # deterministic mock backend in e2e/mockBackend.ts — no Docker; the
+      # one exception is workspace-real.spec.ts (see the step above). Only Chromium is needed; `--with-deps` installs the
       # shared libraries it links against.
       - name: Playwright browser
         run: npx playwright install --with-deps chromium

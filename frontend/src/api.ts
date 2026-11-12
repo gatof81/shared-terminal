@@ -75,6 +75,17 @@ export function projectChatEnabled(): boolean {
 	return _projectChat;
 }
 
+// Projects v3 (docs/PROJECT_CONVERSATION.md, D1): `features.projectConversation`
+// on /auth/status, present only with PROJECT_CONVERSATION_ENABLED on (whose
+// routes 404 otherwise). It is the v3 workspace's flag: absent ⇒ the project
+// page is exactly the P3a one, and no conversation request is ever sent.
+let _projectConversation = false;
+
+/** True only when the last /auth/status said `features.projectConversation === true` (and projectChat). */
+export function projectConversationEnabled(): boolean {
+	return _projectChat && _projectConversation;
+}
+
 /** True iff `users.is_admin = 1` for the current session (#50). Gates
  *  invite-mint UI in main.ts. Refreshes on every /auth/status call so a
  *  promotion / demotion takes effect on the next reload. */
@@ -130,7 +141,7 @@ export interface AuthStatus {
 	/** Which frontend shell to mount (UI unification §8.4); older backends omit it. */
 	uiShell?: "v1" | "v2";
 	/** P3a: present only with PROJECT_CHAT_ENABLED on. Absent ⇒ no project surface. */
-	features?: { projectChat?: boolean };
+	features?: { projectChat?: boolean; projectConversation?: boolean };
 }
 
 export async function checkAuthStatus(): Promise<AuthStatus> {
@@ -160,6 +171,10 @@ async function fetchAuthStatus(): Promise<AuthStatus> {
 		typeof data.features === "object" &&
 		data.features !== null &&
 		data.features.projectChat === true;
+	_projectConversation =
+		typeof data.features === "object" &&
+		data.features !== null &&
+		data.features.projectConversation === true;
 	// #200: mirror caps if present. A pre-#200 backend omits the field
 	// and leaves the v1 defaults in place — same hardcoded ceilings the
 	// form would have used before this PR.
@@ -524,6 +539,109 @@ export function removeAgent(projectId: string, agentId: string): Promise<Project
 		`/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agentId)}`,
 		{ method: "DELETE" },
 		(b): b is null => b === null,
+	);
+}
+
+// ── Project conversation (Projects v3, PROJECT_CONVERSATION.md §5) ──────────
+
+/** A backward page of the project log: raw persisted lines (teamModel.parseLogEvent reads them). */
+export interface ProjectEventsPage {
+	/** Ascending seq (§5). */
+	events: unknown[];
+	/** The last line examined; the next page backward is `before = oldestSeq`. */
+	oldestSeq: number | null;
+	hasMore: boolean;
+}
+
+/** One page of the project log; no `before` = the newest page. */
+export function fetchProjectEvents(
+	projectId: string,
+	opts: { before?: number; limit?: number } = {},
+): Promise<ProjectAnswer<ProjectEventsPage>> {
+	const qs = new URLSearchParams();
+	if (opts.before !== undefined) qs.set("before", String(opts.before));
+	qs.set("limit", String(opts.limit ?? 200));
+	return projectRequest(
+		`/projects/${encodeURIComponent(projectId)}/conversation/events?${qs}`,
+		undefined,
+		(b): b is ProjectEventsPage =>
+			isObj(b) && Array.isArray(b.events) && typeof b.hasMore === "boolean",
+	);
+}
+
+/** Appendix A: `GET …/messages/:msgId`, the message with its lines grouped (raw log lines inside). */
+export interface ProjectMessageDetail {
+	message: unknown;
+	deliveries: Array<{ agentId: string; state: string; events: unknown[] }>;
+	replies: Array<{ agentId: string; settling: unknown; ref: unknown; lateCloses: unknown[] }>;
+	acks: unknown[];
+}
+
+/**
+ * One message by id — the anchor of a thread whose original is older than
+ * the loaded window (a late reply, a follow-up to an old task).
+ */
+export function fetchProjectMessage(
+	projectId: string,
+	msgId: string,
+): Promise<ProjectAnswer<ProjectMessageDetail>> {
+	return projectRequest(
+		`/projects/${encodeURIComponent(projectId)}/conversation/messages/${encodeURIComponent(msgId)}`,
+		undefined,
+		(b): b is ProjectMessageDetail =>
+			isObj(b) &&
+			isObj(b.message) &&
+			Array.isArray(b.deliveries) &&
+			Array.isArray(b.replies) &&
+			Array.isArray(b.acks),
+	);
+}
+
+/**
+ * §4.3 "Done": one click, one clientAckId; repeating the same body with the
+ * same id is answered from the log (`replayed`), never written twice.
+ */
+export function postProjectAck(
+	projectId: string,
+	body: { clientAckId: string; target: { msgId: string; agentId?: string; reportSha256?: string } },
+): Promise<ProjectAnswer<{ ackId: string; replayed: boolean }>> {
+	return projectRequest(
+		`/projects/${encodeURIComponent(projectId)}/conversation/acks`,
+		{ method: "POST", body: JSON.stringify(body) },
+		(b): b is { ackId: string; replayed: boolean } => isObj(b) && typeof b.ackId === "string",
+	);
+}
+
+export interface ProjectMessageBody {
+	clientMessageId: string;
+	text: string;
+	to: string[];
+	inReplyTo?: string;
+	quoteRef?: { msgId: string; agentId: string; promptId: string; reportSha256: string };
+}
+
+export interface ProjectMessageAnswer {
+	msgId: string;
+	replayed?: boolean;
+	deliveries: Array<{ agentId: string; state: string; reason?: string }>;
+}
+
+/**
+ * §3.3: one click, one clientMessageId. The answer can take up to the
+ * Composer's T_http per recipient (the server sends before answering).
+ * Repeating THIS body with THIS id is safe — the server answers what it
+ * stored and sends nothing again (§3.4 rule 2) — which is what "Check
+ * again" after a lost answer does; a new send is always a new id.
+ */
+export function postProjectMessage(
+	projectId: string,
+	body: ProjectMessageBody,
+): Promise<ProjectAnswer<ProjectMessageAnswer>> {
+	return projectRequest(
+		`/projects/${encodeURIComponent(projectId)}/conversation/messages`,
+		{ method: "POST", body: JSON.stringify(body) },
+		(b): b is ProjectMessageAnswer =>
+			isObj(b) && typeof b.msgId === "string" && Array.isArray(b.deliveries),
 	);
 }
 
@@ -2155,6 +2273,31 @@ export async function fetchConversationEvent(
 	);
 	if (!res.ok) throw new Error(await errorMessage(res));
 	return res.json();
+}
+
+/**
+ * The same read as fetchConversationEvent, answering the status instead of
+ * throwing: the v3 workspace tells "the capture no longer holds it" (404)
+ * apart from a failure it can retry.
+ */
+export async function readConversationEvent(
+	sessionId: string,
+	cid: string,
+	seq: number,
+): Promise<{ ok: true; event: ConversationEvent } | { ok: false; status: number }> {
+	let res: Response;
+	try {
+		res = await apiFetch(
+			`/sessions/${encodeURIComponent(sessionId)}/conversations/${encodeURIComponent(cid)}/events/${seq}`,
+		);
+	} catch {
+		return { ok: false, status: 0 };
+	}
+	if (!res.ok) return { ok: false, status: res.status };
+	const event = (await res.json().catch(() => null)) as ConversationEvent | null;
+	return event && typeof event === "object"
+		? { ok: true, event }
+		: { ok: false, status: res.status };
 }
 
 async function errorMessage(res: Response): Promise<string> {

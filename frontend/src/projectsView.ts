@@ -34,6 +34,7 @@ import {
 	isLoggedIn,
 	type ProjectAnswer,
 	projectChatEnabled,
+	projectConversationEnabled,
 	removeAgent,
 	type SessionInfo,
 } from "./api.js";
@@ -82,6 +83,7 @@ import {
 	pushSessionAddress,
 	readProjectRoute,
 	routeHash,
+	sameProjectRoute,
 } from "./router.js";
 import {
 	refreshSessions,
@@ -90,6 +92,7 @@ import {
 	sessionListLoaded,
 } from "./sessionCore.js";
 import { setTitlePage } from "./tabTitle.js";
+import { resetWorkspaces, suspendWorkspaces, teamWorkspace } from "./teamView.js";
 import { button, el, stateBox } from "./ui.js";
 import { readLastConversation, readLastConversationTitle } from "./viewPolicy.js";
 
@@ -313,7 +316,7 @@ function sync(): void {
 		hidePage();
 		return;
 	}
-	const changed = shown === null || shown.projectId !== r.projectId || shown.agentId !== r.agentId;
+	const changed = !sameProjectRoute(shown, r);
 	shown = r;
 	if (!pageEl) return;
 	document.body.classList.add("project-page-on");
@@ -341,6 +344,7 @@ function hidePage(): void {
 	if (shown === null && pageEl?.hidden !== false) return;
 	shown = null;
 	suspendPilot();
+	suspendWorkspaces();
 	document.body.classList.remove("project-page-on");
 	if (pageEl) {
 		pageEl.hidden = true;
@@ -363,6 +367,11 @@ let pilotOn = false;
 /** The re-rendered part of the page; the pilot panel sits beside it, never inside. */
 const contentHost = el("div", "pv-content");
 
+/** The v3 workspace owns the project page (not the agent page, not "Manage agents"). */
+function v3Workspace(r: ProjectRoute): boolean {
+	return projectConversationEnabled() && r.agentId === null && r.panel?.kind !== "agents";
+}
+
 // Re-rendered on every poll: keep the keyboard user's place (by data-key).
 function renderPage(): void {
 	if (!pageEl || !shown) return;
@@ -370,15 +379,50 @@ function renderPage(): void {
 		"#project-view [data-key]",
 	)?.dataset.key;
 	const scroll = pageEl.scrollTop;
+	// Projects v3: the workspace (Now · Threads · New task) is the project
+	// page; the P3a directory is its "Manage agents" panel.
+	if (v3Workspace(shown)) {
+		suspendPilot();
+		const name = projectName(shown.projectId);
+		setTitlePage(pageTitle(name, null));
+		const state = agentLists.get(shown.projectId);
+		if (!state?.data && state?.error?.status === 404) {
+			pageEl.replaceChildren(contentHost);
+			contentHost.replaceChildren(projectNotFoundPage());
+			return;
+		}
+		const ws = teamWorkspace({
+			projectId: shown.projectId,
+			panel: shown.panel ?? null,
+			agents: state?.data?.agents ?? null,
+			clock: listClock(state),
+			header: pageHeader(name ?? "Project", null),
+		});
+		if (pageEl.childNodes.length !== 1 || pageEl.firstChild !== ws) pageEl.replaceChildren(ws);
+		return;
+	}
+	suspendWorkspaces();
 	const content =
 		shown.agentId === null
 			? renderProjectPage(shown.projectId)
 			: renderAgentPage(shown.projectId, shown.agentId);
+	if (shown.agentId === null && shown.panel?.kind === "agents" && projectConversationEnabled()) {
+		const back = el("a", "pv-back", "‹ Now");
+		back.href = projectRouteHash({ projectId: shown.projectId, agentId: null });
+		back.dataset.key = "back-now";
+		const pid = shown.projectId;
+		back.addEventListener("click", (e) => {
+			if (!plainClick(e)) return;
+			e.preventDefault();
+			navigateProject({ projectId: pid, agentId: null });
+		});
+		content.prepend(back);
+	}
 	// The panel is kept as one element across polls (its draft, selection and
 	// focus live in it), so it is re-attached only when the page's shape
 	// changes — re-inserting it on every poll would blur the textarea.
 	const pilot =
-		pilotOn && shown.agentId === null
+		pilotOn && shown.agentId === null && !projectConversationEnabled()
 			? pilotPanel(shown.projectId, agentLists.get(shown.projectId)?.data?.agents ?? null)
 			: null;
 	// Off screen (the agent page): its sockets close, its lanes stay.
@@ -1322,6 +1366,7 @@ export function resetProjects(): void {
 	openDialogs.clear();
 	clearProjects();
 	resetPilot();
+	resetWorkspaces();
 	projectsState = blank();
 	agentLists = new Map();
 	agentDetails = new Map();

@@ -5,6 +5,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const api = vi.hoisted(() => ({
 	projectChatEnabled: vi.fn(() => true),
+	// Projects v3 off here: these tests are the P3a page (teamView has its own).
+	projectConversationEnabled: vi.fn(() => false),
+	fetchProjectEvents: vi.fn(),
+	fetchProjectMessage: vi.fn(),
+	postProjectMessage: vi.fn(),
+	postProjectAck: vi.fn(),
+	readConversationEvent: vi.fn(),
 	isLoggedIn: vi.fn(() => true),
 	fetchProjects: vi.fn(),
 	fetchProjectAgents: vi.fn(),
