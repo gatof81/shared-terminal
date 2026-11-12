@@ -563,10 +563,11 @@
 
 /* ── Composer ── */
 
+/* A fixed row under the timeline: when the recipient picker opens inside
+   it, it grows and the timeline (min-height: 0) gives up the space — the
+   picker is never clipped by a scroll box of its own. */
 .tw-composer {
 	flex: none;
-	max-height: 60%;
-	overflow-y: auto;
 	display: flex;
 	flex-direction: column;
 	gap: 8px;
