@@ -119,10 +119,27 @@ function initials(handle: string): string {
 }
 
 /** A stable hue per agent id, so an agent keeps its colour everywhere. */
-function hueOf(id: string): number {
-	let h = 0;
-	for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) % 360;
-	return h;
+/**
+ * A stable colour per agent (the same agent keeps its colour everywhere and
+ * whatever else joins the project). FNV-1a plus murmur3's final mix, not
+ * `h*31+c mod 360`: ids that differ only in their last characters (UUIDs
+ * minted together) got hues 1–2° apart under the old fold — the same
+ * colour — and FNV alone still left them in pairs (the last character only
+ * reaches the low bits). Colour is a second cue; the name and initials are
+ * the identity.
+ */
+export function hueOf(id: string): number {
+	let h = 0x811c9dc5;
+	for (let i = 0; i < id.length; i++) {
+		h ^= id.charCodeAt(i);
+		h = Math.imul(h, 0x01000193);
+	}
+	h ^= h >>> 16;
+	h = Math.imul(h, 0x85ebca6b);
+	h ^= h >>> 13;
+	h = Math.imul(h, 0xc2b2ae35);
+	h ^= h >>> 16;
+	return (h >>> 0) % 360;
 }
 
 /**
@@ -1798,6 +1815,7 @@ class Workspace {
 	): HTMLElement {
 		const li = el("li", "tw-row tw-row-agent");
 		li.style.setProperty("--tw-hue", String(hueOf(agentId)));
+		li.style.setProperty("--tw-hue", String(hueOf(agentId)));
 		const meta = el("div", "tw-meta");
 		meta.append(
 			avatar(this.agents, agentId, true, false),
@@ -1864,6 +1882,7 @@ class Workspace {
 	 */
 	private settlingRow(agentId: string, st: LogReplySettling): HTMLElement {
 		const li = el("li", "tw-row tw-row-agent tw-row-settling");
+		li.style.setProperty("--tw-hue", String(hueOf(agentId)));
 		li.style.setProperty("--tw-hue", String(hueOf(agentId)));
 		const meta = el("div", "tw-meta");
 		meta.append(

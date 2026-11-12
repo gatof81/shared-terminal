@@ -498,7 +498,7 @@
 }
 
 .tw-bubble-agent {
-	--tw-hue: 220;
+	/* --tw-hue comes from its row (the agent's colour); 220 is the default. */
 	background: hsl(var(--tw-hue) 35% 13%);
 	border: 1px solid hsl(var(--tw-hue) 35% 26%);
 }
@@ -1035,4 +1035,43 @@
 	outline: 2px solid var(--c-accent);
 	outline-offset: -2px;
 	border-radius: 6px;
+}
+
+/* ── Who said what (owner review 2026-11-12) ─────────────────────────────
+   The person's own messages sit on the right, as in the session Chat;
+   each agent's reply carries its colour on the left edge, so a thread
+   with several agents reads by colour before by name. Relay rows (DATA)
+   keep the left. */
+.tw-row-me {
+	align-self: flex-end;
+	align-items: flex-end;
+	max-width: min(760px, 88%);
+}
+
+.tw-row-me .tw-bubble-me {
+	border-radius: 16px 4px 16px 16px;
+}
+
+.tw-row-me .tw-deliveries {
+	justify-content: flex-end;
+}
+
+.tw-row-me .tw-partial,
+.tw-row-me .tw-quoted {
+	text-align: right;
+}
+
+.tw-bubble-agent {
+	border-left: 3px solid hsl(var(--tw-hue) 60% 58%);
+}
+
+/* "Reply…" under every reply was a 44-px pill: the loudest thing in a
+   thread. With a mouse it is a compact ghost button; touch keeps 44 px. */
+@media (pointer: fine) {
+	.tw-actions .tw-btn {
+		min-height: 30px;
+		padding: 0 12px;
+		font-size: 0.8rem;
+		font-weight: 500;
+	}
 }
