@@ -12,11 +12,13 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { logger } from "../logger.js";
 import {
+	COMPOSER_IDEMPOTENCY_WINDOW,
 	ConversationStore,
 	INDEX_WRITE_ESCALATE_AFTER,
 	NO_ACTIVITY_TIME,
 	type PendingEvent,
 	type StoreFs,
+	WindowUnprovenError,
 } from "./store.js";
 
 let root: string;
@@ -1192,5 +1194,142 @@ describe("#546 — recovery from the file rebuilds agents and session-start meta
 		await fs.appendFile(store.eventsPath("s1", "c0"), `${JSON.stringify(internal)}\n`);
 		const b = await new ConversationStore({ workspaceRoot: root }).open("s1", "c0");
 		expect(b.title).toBe("CLI title");
+	});
+});
+
+describe("#546 review — a snapshot from an older L7 generation is never trusted for its offset", () => {
+	const ID_A = "aaaaaaaa-1111-4111-8111-111111111111";
+	const ID_B = "bbbbbbbb-2222-4222-8222-222222222222";
+	const ID_NEW = "cccccccc-3333-4333-8333-333333333333";
+	const pad = (i: number) => ev(i, { data: { prompt: `line ${i} ${"x".repeat(120)}` } });
+	const sizeOf = async (store: ConversationStore) =>
+		(await fs.stat(store.eventsPath("s1", "c0"))).size;
+	const snapshotOf = async (store: ConversationStore) =>
+		JSON.parse(await fs.readFile(store.indexPath("s1", "c0"), "utf8")) as {
+			offset: number;
+			lastSeq: number;
+		};
+
+	/** A healthy snapshot near the end of generation 1, then every snapshot write fails. */
+	async function staleAfterHealthy(fileBytes: number) {
+		const f = snapshotFailingFs("EDQUOT");
+		const store = new ConversationStore({ workspaceRoot: root, fs: f.fs, limits: { fileBytes } });
+		await store.open("s1", "c0");
+		let i = 0;
+		while ((await sizeOf(store).catch(() => 0)) < fileBytes - 500) {
+			store.enqueue("s1", "c0", pad(i++));
+			expect(await store.flush("s1", "c0")).toBe(true);
+		}
+		expect(store.stats.rotations).toBe(0);
+		f.state.failing = true;
+		return { store, f, next: () => pad(i++) };
+	}
+
+	it("`released` early in the NEW file, which grows past the stale offset: the replay finds it (and open() too)", async () => {
+		const { store, next } = await staleAfterHealthy(4000);
+		const stale = await snapshotOf(store);
+		while (store.stats.rotations === 0) {
+			store.enqueue("s1", "c0", next());
+			await store.flush("s1", "c0");
+		}
+		store.enqueue("s1", "c0", releasedEv(ID_B, 202, { result: "delivered" }));
+		await store.flush("s1", "c0");
+		while ((await sizeOf(store)) <= stale.offset + 50) {
+			store.enqueue("s1", "c0", next());
+			await store.flush("s1", "c0");
+		}
+		expect(store.stats.rotations).toBe(1);
+		expect((await snapshotOf(store)).offset).toBe(stale.offset); // still the old generation's
+		const after = new ConversationStore({ workspaceRoot: root });
+		expect(await after.releasedComposerSend("s1", "c0", ID_B)).toMatchObject({ status: 202 });
+		expect(await after.releasedComposerSend("s1", "c0", ID_NEW)).toBeNull();
+		const opened = await after.open("s1", "c0");
+		expect(opened.composerSends?.[ID_B]?.status).toBe(202);
+		expect(opened.lastSeq).toBe(store.getResidentIndex("s1", "c0")?.lastSeq);
+		expect(opened.eventsCount).toBe(store.getResidentIndex("s1", "c0")?.eventsCount);
+	});
+
+	it("`released` in `.1` past the stale offset, new file still small: the archive is read", async () => {
+		const { store, next } = await staleAfterHealthy(4000);
+		store.enqueue("s1", "c0", releasedEv(ID_A, 502, { error: "delivery-failed" }));
+		await store.flush("s1", "c0");
+		while (store.stats.rotations === 0) {
+			store.enqueue("s1", "c0", next());
+			await store.flush("s1", "c0");
+		}
+		const after = new ConversationStore({ workspaceRoot: root });
+		expect(await after.releasedComposerSend("s1", "c0", ID_A)).toMatchObject({ status: 502 });
+		expect(await after.releasedComposerSend("s1", "c0", ID_NEW)).toBeNull();
+		const opened = await after.open("s1", "c0");
+		expect(opened.composerSends?.[ID_A]?.status).toBe(502);
+		expect(opened.lastSeq).toBe(store.getResidentIndex("s1", "c0")?.lastSeq);
+	});
+
+	it("two rotations since the snapshot: the window cannot be proven — the lookup throws (resident or not), never null", async () => {
+		const { store, next } = await staleAfterHealthy(4000);
+		store.enqueue("s1", "c0", releasedEv(ID_A, 202, { result: "delivered" }));
+		await store.flush("s1", "c0");
+		while (store.stats.rotations < 2) {
+			store.enqueue("s1", "c0", next());
+			await store.flush("s1", "c0");
+		}
+		const after = new ConversationStore({ workspaceRoot: root });
+		await expect(after.releasedComposerSend("s1", "c0", ID_A)).rejects.toThrow(WindowUnprovenError);
+		await expect(after.releasedComposerSend("s1", "c0", ID_NEW)).rejects.toThrow(
+			WindowUnprovenError,
+		);
+		await after.open("s1", "c0");
+		await expect(after.releasedComposerSend("s1", "c0", ID_NEW)).rejects.toThrow(
+			WindowUnprovenError,
+		);
+		// A full window of newer releases pushes anything lost out of it.
+		for (let k = 0; k < COMPOSER_IDEMPOTENCY_WINDOW; k++) {
+			after.enqueue("s1", "c0", releasedEv(`id-${k}`, 202, {}));
+		}
+		await after.flush("s1", "c0");
+		expect(await after.releasedComposerSend("s1", "c0", ID_NEW)).toBeNull();
+	});
+
+	it("a valid snapshot: the lookup reads only the tail past its offset (plus the first-line probe), never the whole file", async () => {
+		const f = snapshotFailingFs("EDQUOT");
+		const reads = { whole: 0, rangeBytes: 0 };
+		const counting: StoreFs = {
+			...f.fs,
+			readFile: async (p, e) => {
+				if (String(p).endsWith(".events.jsonl")) reads.whole++;
+				return f.fs.readFile(p, e);
+			},
+			readRange: async (p, start, length) => {
+				reads.rangeBytes += length;
+				const fh = await fs.open(p, "r");
+				try {
+					const buf = Buffer.alloc(length);
+					const { bytesRead } = await fh.read(buf, 0, length, start);
+					return buf.subarray(0, bytesRead);
+				} finally {
+					await fh.close();
+				}
+			},
+		};
+		const store = new ConversationStore({ workspaceRoot: root, fs: counting });
+		await store.open("s1", "c0");
+		for (let i = 0; i < 400; i++) {
+			store.enqueue("s1", "c0", pad(i));
+			if (i % 100 === 99) expect(await store.flush("s1", "c0")).toBe(true);
+		}
+		// The snapshot is valid here, ~70 KiB into the file.
+		f.state.failing = true;
+		store.enqueue("s1", "c0", releasedEv(ID_B, 202, { ok: true }));
+		await store.flush("s1", "c0");
+		const size = await sizeOf(store);
+		const offset = (await snapshotOf(store)).offset;
+		expect(size).toBeGreaterThan(64 * 1024);
+
+		const after = new ConversationStore({ workspaceRoot: root, fs: counting });
+		reads.whole = 0;
+		reads.rangeBytes = 0;
+		expect(await after.releasedComposerSend("s1", "c0", ID_B)).toMatchObject({ status: 202 });
+		expect(reads.whole).toBe(0);
+		expect(reads.rangeBytes).toBeLessThanOrEqual(4096 + (size - offset));
 	});
 });

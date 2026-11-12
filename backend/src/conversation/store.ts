@@ -165,6 +165,12 @@ export interface StoreFs {
 	stat(p: string): Promise<{ size: number }>;
 	readFile(p: string, enc: "utf8"): Promise<string>;
 	readdir(p: string): Promise<string[]>;
+	/**
+	 * Optional positional read (`length` bytes from `start`). Without it an
+	 * injected fs falls back to reading the whole file; the default (node)
+	 * fs always reads positionally.
+	 */
+	readRange?(p: string, start: number, length: number): Promise<Buffer>;
 }
 
 export interface StoreOptions {
@@ -189,6 +195,44 @@ export interface StoreOptions {
 
 export type EventListener = (stSessionId: string, cid: string, event: PersistedEvent) => void;
 
+/** What recoverFromFile hands back: the current file's size and the window proof (#546). */
+interface Recovered {
+	size: number;
+	/** 0 when the composer window is proven; else the releases still needed (windowUnprovenLeft). */
+	windowUnprovenLeft: number;
+}
+
+interface CurrentFile {
+	size: number;
+	/** The snapshot was taken on an older L7 generation (or the file was rewritten). */
+	otherGeneration: boolean;
+	/** The lines to scan (from the valid offset, or the whole file). */
+	tail: string;
+	/** The bytes before the offset, read only for a legacy snapshot (case C). */
+	head: string | null;
+}
+
+/**
+ * #546 review — the composer's idempotency window cannot be proven from
+ * disk: a released id may have been lost with a rotated-away file. The
+ * composer answers `send-in-progress{unverifiable}`, never "a new attempt".
+ */
+export class WindowUnprovenError extends Error {
+	constructor(cid: string) {
+		super(`composer idempotency window of ${cid} cannot be proven from disk`);
+		this.name = "WindowUnprovenError";
+	}
+}
+
+/** Longest first line read to identify a file's generation; past it the file is rescanned whole. */
+const FIRST_LINE_MAX_BYTES = 16 * 1024 * 1024;
+
+function isReleasedComposerSend(ev: { ev: unknown; data?: unknown }): boolean {
+	return (
+		ev.ev === "composer_send" && (ev.data as { state?: unknown } | undefined)?.state === "released"
+	);
+}
+
 interface Resident {
 	index: ConversationIndex;
 	queue: PendingEvent[];
@@ -209,6 +253,13 @@ interface Resident {
 	 */
 	retryTimer: NodeJS.Timeout | null;
 	retryAttempt: number;
+	/**
+	 * #546 review — > 0 while the composer window cannot be proven from disk
+	 * (a rotated-away file may have held released ids the snapshot never
+	 * recorded): a miss then is "unknown", never "new". Counts down with each
+	 * release appended; at 0 anything lost has left the window anyway.
+	 */
+	windowUnprovenLeft: number;
 }
 
 /** Open (non-final) messages tracked for the L2 budget. */
@@ -496,7 +547,7 @@ export class ConversationStore {
 		key: string,
 	): Promise<ConversationIndex> {
 		const { index, legacyPromptCorrelation, fromSnapshot } = await this.loadIndex(stSessionId, cid);
-		const fileBytes = await this.recoverFromFile(
+		const recovered = await this.recoverFromFile(
 			stSessionId,
 			cid,
 			index,
@@ -516,10 +567,11 @@ export class ConversationStore {
 			flushTimer: null,
 			dirty: false,
 			pendingDrop: null,
-			currentFileBytes: fileBytes,
+			currentFileBytes: recovered.size,
 			busy: false,
 			retryTimer: null,
 			retryAttempt: 0,
+			windowUnprovenLeft: recovered.windowUnprovenLeft,
 		};
 		this.resident.set(key, r);
 		await this.evictIfNeeded();
@@ -584,7 +636,9 @@ export class ConversationStore {
 	 * without making the conversation resident and without writing anything.
 	 * A replay must never depend on a snapshot write having landed: an id
 	 * the file proves released and that is treated as new is a second
-	 * delivery. A read error other than "no file" throws (fail closed).
+	 * delivery. A read error other than "no file" throws (fail closed), and
+	 * so does a miss while the window cannot be proven from disk
+	 * (WindowUnprovenError: a rotated-away file may have held the id).
 	 */
 	async releasedComposerSend(
 		stSessionId: string,
@@ -592,23 +646,33 @@ export class ConversationStore {
 		clientMessageId: string,
 	): Promise<{ status: number; body: unknown; at: string } | null> {
 		const key = `${stSessionId}/${cid}`;
-		const lookup = (index: ConversationIndex) => index.composerSends?.[clientMessageId] ?? null;
-		const mem = this.resident.get(key) ?? this.evicting.get(key);
-		if (mem) return lookup(mem.index);
-		const loading = this.opening.get(key);
-		if (loading) {
-			const index = await loading.catch(() => null);
-			if (index) return lookup(index);
+		const answer = (index: ConversationIndex, unprovenLeft: number) => {
+			const hit = index.composerSends?.[clientMessageId];
+			if (hit) return hit;
+			if (unprovenLeft > 0) throw new WindowUnprovenError(cid);
+			return null;
+		};
+		const inMemory = () => this.resident.get(key) ?? this.evicting.get(key);
+		let mem = inMemory();
+		if (!mem && this.opening.has(key)) {
+			await this.opening.get(key)?.catch(() => null);
+			mem = inMemory();
 		}
+		if (mem) return answer(mem.index, mem.windowUnprovenLeft);
 		const { index, legacyPromptCorrelation, fromSnapshot } = await this.loadIndex(stSessionId, cid);
 		if (fromSnapshot) {
-			const hit = lookup(index);
+			const hit = index.composerSends?.[clientMessageId];
 			if (hit) return hit;
 		}
-		await this.recoverFromFile(stSessionId, cid, index, legacyPromptCorrelation, fromSnapshot, {
-			readOnly: true,
-		});
-		return lookup(index);
+		const recovered = await this.recoverFromFile(
+			stSessionId,
+			cid,
+			index,
+			legacyPromptCorrelation,
+			fromSnapshot,
+			{ readOnly: true },
+		);
+		return answer(index, recovered.windowUnprovenLeft);
 	}
 
 	getResidentIndex(stSessionId: string, cid: string): ConversationIndex | undefined {
@@ -707,42 +771,48 @@ export class ConversationStore {
 		legacyPromptCorrelation: boolean,
 		fromSnapshot = true,
 		opts: { readOnly?: boolean } = {},
-	): Promise<number> {
+	): Promise<Recovered> {
 		if (legacyPromptCorrelation) index.persistedPromptId = null;
 		const file = this.eventsPath(stSessionId, cid);
-		let content: string;
+		// What the snapshot covers: every line with a seq above this is newer.
+		const baseSeq = fromSnapshot ? index.lastSeq : 0;
+		let current: CurrentFile | null;
 		try {
-			content = await this.fs.readFile(file, "utf8");
+			current = await this.readCurrentFile(
+				file,
+				index,
+				legacyPromptCorrelation,
+				fromSnapshot,
+				opts,
+			);
 		} catch (err) {
 			// `readOnly` (a rebuild that is not registered, #546) must not take
 			// an unreadable file for an absent one: its caller decides on it.
 			if (opts.readOnly && (err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+			current = null;
+		}
+		// #546 — the snapshot does not cover the lines between its own offset
+		// and the rotation when it belongs to an OLDER L7 generation (its
+		// writes failed across a rotation), when there is no snapshot, or when
+		// the current file is gone: those lines can only be in `.1`. Only the
+		// state that is not a per-file counter is taken from them.
+		const archive =
+			!fromSnapshot || current === null || current.otherGeneration
+				? await this.applyArchiveTail(file, index, baseSeq, opts.readOnly === true)
+				: { oldestSeq: null, releases: 0 };
+		if (current === null) {
 			// No file: whatever the index claims about seq is unproven.
 			// Keep lastSeq (a rotated-away file can be gone) but reset offset.
 			index.offset = 0;
 			index.lastPromptId = index.persistedPromptId;
 			// A rotation whose `gap rotated` append failed leaves only `.1`.
 			if (!fromSnapshot) await this.lastEventAtFromArchive(file, index, null);
-			return 0;
+			return {
+				size: 0,
+				windowUnprovenLeft: this.windowUnprovenLeft(archive.oldestSeq, baseSeq, archive.releases),
+			};
 		}
-		let size = Buffer.byteLength(content, "utf8");
-		if (size > 0 && !content.endsWith("\n") && !opts.readOnly) {
-			// A torn last line (crash mid-append). Terminate it so the next
-			// append starts a fresh line instead of gluing onto the fragment;
-			// the fragment itself is skipped by the parse below.
-			try {
-				await this.fs.appendFile(file, "\n");
-				content += "\n";
-				size += 1;
-			} catch {
-				/* read-only or failing disk: the scan still works */
-			}
-		}
-		if (index.offset > size) index.offset = 0; // truncated/rewritten file
-		const tail =
-			index.offset === 0
-				? content
-				: Buffer.from(content, "utf8").subarray(index.offset).toString("utf8");
+		const { size, tail } = current;
 		if (index.offset === 0) {
 			index.eventsCount = 0;
 			index.eventsBytes = 0;
@@ -753,14 +823,14 @@ export class ConversationStore {
 		} else if (legacyPromptCorrelation) {
 			// Case C: the counters stay trusted up to `offset`, but the
 			// correlation is proven only by the lines before it.
-			index.persistedPromptId = lastPromptIdIn(
-				Buffer.from(content, "utf8").subarray(0, index.offset).toString("utf8"),
-			);
+			index.persistedPromptId = lastPromptIdIn(current.head ?? "");
 		}
 		index.lastPromptId = index.persistedPromptId;
 		let scannedSeq = index.offset === 0 ? 0 : index.lastSeq;
 		let sawActivity = false;
 		let oldestAny: { ts: string; seq: number } | null = null;
+		let oldestSeq: number | null = null;
+		let releases = archive.releases;
 		for (const line of tail.split("\n")) {
 			if (!line) continue;
 			let ev: PersistedEvent;
@@ -770,6 +840,7 @@ export class ConversationStore {
 				continue; // a torn last line from a crash mid-append
 			}
 			if (typeof ev.seq !== "number") continue;
+			oldestSeq ??= ev.seq;
 			if (index.firstRetainedSeq === 0) index.firstRetainedSeq = ev.seq;
 			scannedSeq = Math.max(scannedSeq, ev.seq);
 			index.eventsCount++;
@@ -786,17 +857,8 @@ export class ConversationStore {
 				index.persistedPromptId = ev.prompt_id;
 				index.lastPromptId = ev.prompt_id;
 			}
-			trackComposerSend(index, ev);
-			// #546 — what only the in-memory index held is rebuilt from the
-			// lines where the file carries it: the agents (lost on a crash too,
-			// before), the session-start metadata, the title and the revocation
-			// note. Bindings (`paneId`/`tabId`) and `state` are not: they
-			// converge through the stop/boot reconcile, the next event with a
-			// pane, a hook or a probe (CONVERSATION.md v1.7.2).
-			if (ev.data && typeof ev.data === "object") {
-				this.trackMessageAndAgents(index, ev);
-				this.recoverMetadata(index, ev);
-			}
+			if (isReleasedComposerSend(ev)) releases++;
+			this.recoverIndexState(index, ev);
 			if (ev.ev === "assistant_delta") {
 				// B6 — the L2 budget must survive a restart: lines past the
 				// snapshot's offset re-add their bytes to the message tally.
@@ -835,7 +897,180 @@ export class ConversationStore {
 		// value, when there is one, is kept as is.
 		if (!fromSnapshot && !sawActivity) await this.lastEventAtFromArchive(file, index, oldestAny);
 		index.offset = size;
-		return size;
+		// A snapshot valid for this file covers everything before its offset,
+		// so only the archive path can leave a hole between it and the disk.
+		const checked =
+			!fromSnapshot || current.otherGeneration ? (archive.oldestSeq ?? oldestSeq) : null;
+		return { size, windowUnprovenLeft: this.windowUnprovenLeft(checked, baseSeq, releases) };
+	}
+
+	/**
+	 * #546 — the composer's idempotency window (§8.1.4 rule 10) can only be
+	 * proven when the disk holds every line after what the snapshot covers.
+	 * The oldest line on disk being newer than `baseSeq + 1` means released
+	 * ids may have been lost with a rotated-away file: the window stays
+	 * unproven until COMPOSER_IDEMPOTENCY_WINDOW newer releases have pushed
+	 * anything lost out of it. Returns how many releases are still needed.
+	 */
+	private windowUnprovenLeft(oldestSeq: number | null, baseSeq: number, releases: number): number {
+		if (oldestSeq === null || oldestSeq <= baseSeq + 1) return 0;
+		return Math.max(0, COMPOSER_IDEMPOTENCY_WINDOW - releases);
+	}
+
+	/**
+	 * The current events file as recovery needs it. With a snapshot whose
+	 * offset is valid for THIS file only the tail past the offset is read
+	 * (a positional read: a lookup on the request path must not read up to
+	 * L7 bytes); otherwise the whole file.
+	 *
+	 * A snapshot's offset is valid only for the L7 generation it was taken
+	 * on: the file's first line must be the snapshot's `firstRetainedSeq`.
+	 * A rotation starts the new file at a seq above everything the snapshot
+	 * saw, so a snapshot left behind by failing writes (#546) never matches —
+	 * and trusting its offset would start the scan in the middle of the newer
+	 * file, past `released` lines the composer's replay depends on.
+	 */
+	private async readCurrentFile(
+		file: string,
+		index: ConversationIndex,
+		legacyPromptCorrelation: boolean,
+		fromSnapshot: boolean,
+		opts: { readOnly?: boolean },
+	): Promise<CurrentFile> {
+		let size = (await this.fs.stat(file)).size;
+		if (size > 0 && !opts.readOnly) {
+			const last = await this.readRange(file, size - 1, 1);
+			if (last[0] !== 0x0a) {
+				// A torn last line (crash mid-append). Terminate it so the next
+				// append starts a fresh line instead of gluing onto the fragment;
+				// the fragment itself is skipped by the parse.
+				try {
+					await this.fs.appendFile(file, "\n");
+					size += 1;
+				} catch {
+					/* read-only or failing disk: the scan still works */
+				}
+			}
+		}
+		let otherGeneration = false;
+		if (index.offset > size) {
+			// Truncated or rewritten — or a later generation still shorter.
+			index.offset = 0;
+			otherGeneration = fromSnapshot;
+		} else if (fromSnapshot && index.offset > 0) {
+			if ((await this.firstLineSeq(file, size)) !== index.firstRetainedSeq) {
+				index.offset = 0;
+				otherGeneration = true;
+			}
+		}
+		if (index.offset === 0 || legacyPromptCorrelation) {
+			const all = await this.readRange(file, 0, size);
+			return {
+				size,
+				otherGeneration,
+				tail: all.subarray(index.offset).toString("utf8"),
+				head: legacyPromptCorrelation ? all.subarray(0, index.offset).toString("utf8") : null,
+			};
+		}
+		const tail = await this.readRange(file, index.offset, size - index.offset);
+		return { size, otherGeneration, tail: tail.toString("utf8"), head: null };
+	}
+
+	/** The `seq` of a file's first line; null when it cannot be read as one. */
+	private async firstLineSeq(file: string, size: number): Promise<number | null> {
+		let len = Math.min(size, 4 * 1024);
+		for (;;) {
+			const buf = await this.readRange(file, 0, len);
+			const nl = buf.indexOf(0x0a);
+			if (nl === -1 && len < size && len < FIRST_LINE_MAX_BYTES) {
+				len = Math.min(size, len * 4, FIRST_LINE_MAX_BYTES);
+				continue;
+			}
+			if (nl === -1 && len < size) return null;
+			try {
+				const line = buf.subarray(0, nl === -1 ? buf.length : nl).toString("utf8");
+				const seq = (JSON.parse(line) as { seq?: unknown }).seq;
+				return typeof seq === "number" ? seq : null;
+			} catch {
+				return null;
+			}
+		}
+	}
+
+	/** `length` bytes of `p` from `start`: a positional read when the fs offers one. */
+	private async readRange(p: string, start: number, length: number): Promise<Buffer> {
+		if (length <= 0) return Buffer.alloc(0);
+		if (this.fs.readRange) return this.fs.readRange(p, start, length);
+		if (!this.opts.fs) {
+			const fh = await nodeFs.open(p, "r");
+			try {
+				const buf = Buffer.alloc(length);
+				const { bytesRead } = await fh.read(buf, 0, length, start);
+				return buf.subarray(0, bytesRead);
+			} finally {
+				await fh.close();
+			}
+		}
+		// An injected fs without positional reads (tests): the whole file.
+		const all = Buffer.from(await this.fs.readFile(p, "utf8"), "utf8");
+		return all.subarray(start, start + length);
+	}
+
+	/**
+	 * #546 — lines of the `.1` archive newer than the snapshot (`seq >
+	 * baseSeq`): their seq, composer window, agents and metadata. Counters,
+	 * the prompt correlation and the L2 tallies belong to the current file
+	 * and are left alone. Returns the archive's oldest seq (for the window
+	 * proof) and the releases it holds past `baseSeq`.
+	 */
+	private async applyArchiveTail(
+		file: string,
+		index: ConversationIndex,
+		baseSeq: number,
+		readOnly: boolean,
+	): Promise<{ oldestSeq: number | null; releases: number }> {
+		let content: string;
+		try {
+			content = await this.fs.readFile(`${file}.1`, "utf8");
+		} catch (err) {
+			if (readOnly && (err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+			return { oldestSeq: null, releases: 0 };
+		}
+		let oldestSeq: number | null = null;
+		let releases = 0;
+		for (const line of content.split("\n")) {
+			if (!line) continue;
+			let ev: PersistedEvent;
+			try {
+				ev = JSON.parse(line) as PersistedEvent;
+			} catch {
+				continue;
+			}
+			if (typeof ev.seq !== "number") continue;
+			oldestSeq ??= ev.seq;
+			if (ev.seq <= baseSeq) continue;
+			// Seq never goes backwards, whichever file proves it.
+			index.lastSeq = Math.max(index.lastSeq, ev.seq);
+			if (isReleasedComposerSend(ev)) releases++;
+			this.recoverIndexState(index, ev);
+		}
+		return { oldestSeq, releases };
+	}
+
+	/**
+	 * #546 — what only the in-memory index held, rebuilt from a persisted
+	 * line where the file carries it: the composer window, the agents (lost
+	 * on a crash too, before), the session-start metadata, the title and the
+	 * revocation note. Bindings (`paneId`/`tabId`) and `state` are not: they
+	 * converge through the stop/boot reconcile, the next event with a pane, a
+	 * hook or a probe (CONVERSATION.md v1.7.2).
+	 */
+	private recoverIndexState(index: ConversationIndex, ev: PersistedEvent): void {
+		trackComposerSend(index, ev);
+		if (ev.data && typeof ev.data === "object") {
+			this.trackMessageAndAgents(index, ev);
+			this.recoverMetadata(index, ev);
+		}
 	}
 
 	// ── Append ─────────────────────────────────────────────────────────────
@@ -981,6 +1216,7 @@ export class ConversationStore {
 		this.stats.persisted++;
 		this.trackMessageAndAgents(r.index, event);
 		trackComposerSend(r.index, event);
+		if (r.windowUnprovenLeft > 0 && isReleasedComposerSend(event)) r.windowUnprovenLeft--;
 		for (const l of this.listeners) {
 			try {
 				l(stSessionId, cid, event);
