@@ -1744,7 +1744,7 @@ Por eso **L5 ≥ 6 × L3 + 1 MiB de envoltura**.
 | **G1** | suma de colas en memoria de todas las conversaciones | 64 MiB | `gap backpressure{scope: global}` en la conversación cuya cola es mayor |
 | **G2** | cuerpos de ingesta > 1 MiB en vuelo simultáneos | 4 | 204 + `gap backpressure{scope: ingest}` |
 | **G3** | bytes en vuelo por socket WS (`bufferedAmount` + frame a enviar), comprobado **antes de cada frame**, no por lote | replay: ≤ 2 MiB, con una única excepción de un frame cuando el buffer está vacío (máx. en vuelo = 2 MiB + el **frame serializado** más grande; un contenido de L3 escapado puede serializar a ~6 MiB, así que la cota es ~8 MiB, no L3); live: resync a 8 MiB (§6.1) | esperar `drain`, 1013 o `resync`; nada se pierde: el cliente re-suscribe desde su último `seq` |
-| **G4** | índices (`index.json`) residentes en memoria | LRU de 64 conversaciones; cada índice ≤ 4 MiB (se resume por turnos, no por eventos) | desalojo; recarga desde disco al siguiente acceso. Si la escritura del snapshot al desalojar falla (#546), la entrada se conserva en memoria —hasta 16 por encima de G4— y se reintenta con espera exponencial (1 s … 60 s); pasado ese margen se descarta la más antigua y se cuenta (`evictionWriteDropped`). Al recuperar, el `offset` de un snapshot solo vale para la generación L7 en que se tomó (la primera línea del archivo debe ser su `firstRetainedSeq`); si no, se relee el archivo entero y las líneas de `.1` posteriores al snapshot, y si falta historia entre el snapshot y lo que hay en disco la ventana de idempotencia del composer no se da por probada (409 `send-in-progress{unverifiable}`, nunca intento nuevo) |
+| **G4** | índices (`index.json`) residentes en memoria | LRU de 64 conversaciones; cada índice ≤ 4 MiB (se resume por turnos, no por eventos) | desalojo; recarga desde disco al siguiente acceso. Si la escritura del snapshot al desalojar falla (#546), la entrada se conserva en memoria —hasta 16 por encima de G4— y se reintenta con espera exponencial (1 s … 60 s); pasado ese margen se descarta la más antigua y se cuenta (`evictionWriteDropped`). Al recuperar, el `offset` de un snapshot solo vale para la generación L7 en que se tomó (la primera línea del archivo debe ser su `firstRetainedSeq`); si no, se relee el archivo entero y las líneas de `.1` posteriores al snapshot. Lo que una rotación ya borró (historia anterior a `.1`) queda fuera de la ventana de idempotencia del composer y sus ids se tratan como nuevos (§8.1.4, regla 10) |
 | **G5** | bytes por respuesta de `GET …/events` | 8 MiB | corta antes y devuelve `hasMore: true` |
 | **R1/R2** | tasa por sesión ST | §3.1 | `gap rate_limited` |
 
@@ -2193,7 +2193,7 @@ incertidumbre no se envía**; nunca "por si acaso".
 
 | Código | Condición |
 | --- | --- |
-| `send-in-progress` | el pane está **bloqueado** (§8.1.4): su registro de pane (§8.1.4.1) tiene una operación con **otro** `clientMessageId` cuyo `result` está pendiente o cuyos `effects` están pendientes, viva o persistida; `detail: in-progress\|effects-pending\|unverifiable` y `clientMessageId` de esa operación. El mismo id pendiente no es 409: es 202 `uncertain` (§8.1.4, regla 9) |
+| `send-in-progress` | el pane está **bloqueado** (§8.1.4): su registro de pane (§8.1.4.1) tiene una operación con **otro** `clientMessageId` cuyo `result` está pendiente o cuyos `effects` están pendientes, viva o persistida; `detail: in-progress\|effects-pending\|unverifiable` y `clientMessageId` de esa operación. **(#546)** `unverifiable` también, sin `clientMessageId`, cuando el archivo de eventos de la conversación no se puede leer para la búsqueda de idempotencia (§8.1.4, regla 9): termina cuando el archivo vuelve a ser legible, sin resolución en `composer/panes`. El mismo id pendiente no es 409: es 202 `uncertain` (§8.1.4, regla 9) |
 | `not-interactive` | `kind ≠ interactive`, o la conversación no tiene binding (`pane_id` nulo) |
 | `session-not-running` | el contenedor no está `running` |
 | `capture-inactive` | `capture.effective = false` en un probe fresco del relay (D7): sin hooks no hay ack |
@@ -2393,7 +2393,13 @@ Reglas (*MUST*):
    está con resultado final, devuelve **la misma respuesta HTTP registrada** en ese evento
    (`http.status`, `http.body`): un `failed` vuelve a ser **502**, un `delivered` vuelve a ser 202
    con el mismo `promptId`; un 502 jamás se convierte en 202—; (c) si no está en ninguno, es un
-   intento nuevo. Un id **distinto** sobre un pane bloqueado es 409 `send-in-progress`. Un doble
+   intento nuevo. **(#546)** La búsqueda (b) no depende de que el snapshot esté al día: si el id no
+   está en el snapshot, se reconstruye la ventana desde el archivo de eventos (y `.1` cuando el
+   snapshot es de una generación L7 anterior), sin escribir nada. Si el archivo de eventos **no se
+   puede leer** (un error distinto de "no existe"), el envío es 409 `send-in-progress{detail:
+   unverifiable}` —nunca un intento nuevo— y deja de serlo en cuanto el archivo vuelve a poder
+   leerse; no hay nada que resolver en `composer/panes` (no hay registro de pane implicado).
+   Un id **distinto** sobre un pane bloqueado es 409 `send-in-progress`. Un doble
    clic produce **como máximo una** secuencia de entrega. La recuperación tras reinicio **nunca
    reenvía** un intento incompleto.
 10. **Ventana de idempotencia**: solo las operaciones **`released`** entran en la ventana: el índice
@@ -2401,7 +2407,9 @@ Reglas (*MUST*):
     archivo actual o un snapshot válido los respalden (§4.4, L7). Las operaciones con `result`
     pendiente o `effects: pending` **no** están sujetas a la ventana ni a la rotación: viven en
     el registro de pane hasta `released`. Fuera de la ventana —rotación del archivo, conversación
-    purgada (§9), más de 256 liberaciones— un id liberado se trata como un intento nuevo. Por eso
+    purgada (§9), más de 256 liberaciones— un id liberado se trata como un intento nuevo; también
+    cuando el snapshot no llegó a escribirse (#546) y la rotación L7 ya borró el archivo que tenía
+    su `released` (lo que siga en el archivo actual o en `.1` sí cuenta, regla 9). Por eso
     **no se promete "exactamente una entrega"**: se garantiza *como máximo una secuencia de entrega
     por id mientras la operación exista o esté en la ventana* y *nunca un reenvío automático*; el
     cliente genera un id nuevo por cada acción de la persona y nunca reutiliza uno pasado.

@@ -12,13 +12,11 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { logger } from "../logger.js";
 import {
-	COMPOSER_IDEMPOTENCY_WINDOW,
 	ConversationStore,
 	INDEX_WRITE_ESCALATE_AFTER,
 	NO_ACTIVITY_TIME,
 	type PendingEvent,
 	type StoreFs,
-	WindowUnprovenError,
 } from "./store.js";
 
 let root: string;
@@ -1265,7 +1263,7 @@ describe("#546 review — a snapshot from an older L7 generation is never truste
 		expect(opened.lastSeq).toBe(store.getResidentIndex("s1", "c0")?.lastSeq);
 	});
 
-	it("two rotations since the snapshot: the window cannot be proven — the lookup throws (resident or not), never null", async () => {
+	it("two rotations since the snapshot (a hole older than `.1`): the lost id is out of the window — null, a new attempt (§8.1.4 rule 10), read-only and resident; a fresh id is never refused", async () => {
 		const { store, next } = await staleAfterHealthy(4000);
 		store.enqueue("s1", "c0", releasedEv(ID_A, 202, { result: "delivered" }));
 		await store.flush("s1", "c0");
@@ -1274,20 +1272,16 @@ describe("#546 review — a snapshot from an older L7 generation is never truste
 			await store.flush("s1", "c0");
 		}
 		const after = new ConversationStore({ workspaceRoot: root });
-		await expect(after.releasedComposerSend("s1", "c0", ID_A)).rejects.toThrow(WindowUnprovenError);
-		await expect(after.releasedComposerSend("s1", "c0", ID_NEW)).rejects.toThrow(
-			WindowUnprovenError,
-		);
-		await after.open("s1", "c0");
-		await expect(after.releasedComposerSend("s1", "c0", ID_NEW)).rejects.toThrow(
-			WindowUnprovenError,
-		);
-		// A full window of newer releases pushes anything lost out of it.
-		for (let k = 0; k < COMPOSER_IDEMPOTENCY_WINDOW; k++) {
-			after.enqueue("s1", "c0", releasedEv(`id-${k}`, 202, {}));
-		}
-		await after.flush("s1", "c0");
+		// Read-only rebuild: resolves (never rejects) to "not in the window".
+		expect(await after.releasedComposerSend("s1", "c0", ID_A)).toBeNull();
 		expect(await after.releasedComposerSend("s1", "c0", ID_NEW)).toBeNull();
+		// Resident: the same answers, and seq still never goes backwards.
+		const opened = await after.open("s1", "c0");
+		expect(opened.lastSeq).toBe(store.getResidentIndex("s1", "c0")?.lastSeq);
+		expect(await after.releasedComposerSend("s1", "c0", ID_A)).toBeNull();
+		for (const id of [ID_NEW, "dddddddd-4444-4444-8444-444444444444"]) {
+			expect(await after.releasedComposerSend("s1", "c0", id)).toBeNull();
+		}
 	});
 
 	it("a valid snapshot: the lookup reads only the tail past its offset (plus the first-line probe), never the whole file", async () => {
