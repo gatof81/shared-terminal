@@ -126,6 +126,12 @@ jobs:
         working-directory: backend
         run: npm ci
 
+      # The scripted model's own tests (no Docker, < 1 s). Its sha256 scenario
+      # hands a path to the CLI's Bash tool (D2 runbook P3.5); these pin the
+      # path rule so a later edit can't loosen it while every smoke stays green.
+      - name: mock-anthropic unit tests
+        run: node --test session-image/test/mock-anthropic.test.mjs
+
       # Plain `docker build`, no buildx cache: the job only runs when the
       # image's inputs changed, i.e. exactly when a cache would be cold.
       - name: Build session image
