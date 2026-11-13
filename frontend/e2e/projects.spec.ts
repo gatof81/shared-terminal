@@ -25,6 +25,11 @@ const projectRequests = (backend: MockBackend) =>
 function sidebarGroups(page: Page): Promise<Record<string, string[]>> {
 	return page.locator("#session-list").evaluate((list) => {
 		const out: Record<string, string[]> = {};
+		// A row outside every group would be a bug: it shows up under "(none)".
+		const stray = Array.from(list.querySelectorAll(":scope > .session-item .session-name")).map(
+			(n) => n.textContent ?? "",
+		);
+		if (stray.length > 0) out["(none)"] = stray;
 		for (const g of Array.from(list.querySelectorAll(".sgroup"))) {
 			const title = g.querySelector(".sgroup-name")?.textContent ?? "";
 			out[title] = Array.from(g.querySelectorAll(".session-item .session-name")).map(
@@ -150,8 +155,12 @@ test.describe("projects — feature on", () => {
 		await expect(toggle).toBeFocused();
 		// The other groups are untouched.
 		await expect(app.sessionRow("scratch")).toBeVisible();
-		// The 5 s list poll re-renders the tree: still folded, focus kept.
-		await page.waitForTimeout(5_500);
+		// The 5 s list poll rebuilds the tree: wait until THIS node is gone,
+		// then the new one must be folded and hold the focus.
+		const before = await toggle.elementHandle();
+		await expect
+			.poll(() => before!.evaluate((el) => el.isConnected), { timeout: 12_000 })
+			.toBe(false);
 		await expect(toggle).toHaveAttribute("aria-expanded", "false");
 		await expect(toggle).toBeFocused();
 
@@ -232,6 +241,10 @@ test.describe("projects — feature on", () => {
 				],
 			});
 		await expect(page.locator(".session-agent-link")).toHaveCount(0);
+		// …and the project's heading claims neither a number nor "none".
+		const hz = page.locator("#session-list .sgroup", { hasText: "Educación HZ" });
+		await expect(hz.locator(".sgroup-count")).toHaveText("–");
+		await expect(hz.locator(".sgroup-empty")).toHaveCount(0);
 		await page.locator("#project-view button", { hasText: "+ New agent" }).click();
 		await expect(dialog(page).locator("select option")).toHaveText(["No unassigned session"]);
 		await expect(dialog(page).locator(".pv-dialog-status")).toContainText(

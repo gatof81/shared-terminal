@@ -59,6 +59,7 @@ import { onRoute, readRoute, start as startRouter } from "./router.js";
 import { initTerminalSearch } from "./searchBar.js";
 import {
 	applyRoute,
+	forgetSidebarCollapsed,
 	invalidateSessionList,
 	openSession,
 	refreshSessions,
@@ -646,6 +647,7 @@ function handleLogout(toastMessage?: string): void {
 	// loading them: close it before the login view shows.
 	closeSwitcher();
 	forgetAllLastConversationTitles();
+	forgetSidebarCollapsed();
 	// Unsent drafts are the person's words: none survives for the next account.
 	forgetComposerState();
 	void logout();
@@ -947,7 +949,7 @@ sessionList.addEventListener("click", (e) => {
 document.getElementById("project-section")?.addEventListener("click", (e) => {
 	if (!isMobile()) return;
 	const target = e.target as HTMLElement;
-	if (target.closest(".project-item, #new-project-btn")) setSidebarOpen(false);
+	if (target.closest("#new-project-btn")) setSidebarOpen(false);
 });
 
 // Crossing the breakpoint resets to the default state for that mode —

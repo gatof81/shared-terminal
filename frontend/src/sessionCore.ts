@@ -596,9 +596,11 @@ function renderGroupedSessions(): void {
 				cls: "sgroup-project",
 				tooltip: `Open ${p.name} · ${agentCountText(p.agentCount)}`,
 				rows: rows.map(({ session, binding }) => buildSessionItem(session, binding)),
-				// Not when the bindings couldn't be read: its sessions may be the
-				// ones under "Assignment unknown".
-				empty: groups.unknown.length === 0 ? "No sessions yet." : undefined,
+				// With the bindings unread, its sessions may be the ones under
+				// "Assignment unknown": neither a count nor "none" is known.
+				countUnknown: groups.unknown.length > 0,
+				// "shown": its sessions may also be terminated ones the list hides.
+				empty: p.agentCount === 0 ? "No agents yet." : "No sessions shown.",
 			}),
 		);
 	}
@@ -665,6 +667,16 @@ function collapsed(): Set<string> {
 	return collapsedGroups;
 }
 
+/** Logout: the next person on this browser starts with every group open. */
+export function forgetSidebarCollapsed(): void {
+	collapsedGroups = null;
+	try {
+		localStorage.removeItem(COLLAPSED_KEY);
+	} catch {
+		// Nothing was stored then.
+	}
+}
+
 function setCollapsed(key: string, on: boolean): void {
 	const set = collapsed();
 	if (on) set.add(key);
@@ -691,11 +703,15 @@ function buildGroup(g: {
 	tooltip?: string;
 	note?: string;
 	empty?: string;
+	/** The rows are not the whole truth (bindings unread): show no number. */
+	countUnknown?: boolean;
 }): HTMLElement {
 	const isCollapsed = collapsed().has(g.key);
 	const section = document.createElement("section");
 	section.className = `sgroup ${g.cls}${isCollapsed ? " collapsed" : ""}`;
 	section.dataset.group = g.key;
+	section.setAttribute("role", "group");
+	section.setAttribute("aria-label", g.title);
 	const rowsId = `sgroup-rows-${g.key.replace(/[^a-zA-Z0-9-]/g, "_")}`;
 
 	const head = document.createElement("div");
@@ -761,8 +777,15 @@ function buildGroup(g: {
 
 	const count = document.createElement("span");
 	count.className = "sgroup-count";
-	count.textContent = String(g.rows.length);
-	count.title = g.rows.length === 1 ? "1 session" : `${g.rows.length} sessions`;
+	if (g.countUnknown) {
+		// Never a known zero for an unknown (PROJECTS.md §4.6).
+		count.textContent = "–";
+		count.title = "Couldn't read which sessions belong to this project";
+	} else {
+		count.textContent = String(g.rows.length);
+		count.title = g.rows.length === 1 ? "1 session" : `${g.rows.length} sessions`;
+	}
+	count.setAttribute("aria-label", count.title);
 	head.appendChild(count);
 	section.appendChild(head);
 
@@ -776,7 +799,7 @@ function buildGroup(g: {
 		note.textContent = g.note;
 		rows.appendChild(note);
 	}
-	if (g.rows.length === 0 && g.empty) {
+	if (g.rows.length === 0 && g.empty && !g.countUnknown) {
 		const empty = document.createElement("p");
 		empty.className = "sgroup-empty";
 		empty.textContent = g.empty;
@@ -826,7 +849,7 @@ function buildSessionItem(s: SessionInfo, binding: SessionBinding | null): HTMLE
 	meta.className = "session-meta";
 	// The tree (project feature on) names a row by its session and its agent;
 	// CPU / memory are infrastructure detail there — in the row's tooltip, and
-	// on the row only when one of them runs hot (UX audit N2: they took two of
+	// on the row only when memory runs hot (UX audit N2: they took two of
 	// each row's three lines and pushed the agent out of the phone's row).
 	const tree = projectChatEnabled();
 	if (tree && s.status === "running" && s.usage) {
