@@ -1189,7 +1189,9 @@
 		right: 0;
 		bottom: 100%;
 		z-index: 3;
-		max-height: 60cqh;
+		/* 40 %, not more: the composer can be taller than the field (a reply
+		   quote, a refusal), and the picker hangs from its top. */
+		max-height: 40cqh;
 		overflow-y: auto;
 	}
 }

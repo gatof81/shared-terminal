@@ -483,6 +483,10 @@ class Composer {
 		});
 		this.picker.replaceChildren(...nodes);
 		this.picker.hidden = false;
+		// The picker can scroll (short heights): keep the highlighted option in view.
+		this.picker
+			.querySelector<HTMLElement>('[aria-selected="true"]')
+			?.scrollIntoView?.({ block: "nearest" });
 	}
 
 	private pick(a: AgentListEntry): void {
