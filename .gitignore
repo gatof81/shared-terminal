@@ -34,7 +34,8 @@ Thumbs.db
 REVIEW.md
 
 # Claude Code worktrees / local agent state — never commit
-.claude/
+.claude/*
+!.claude/skills/
 
 # Local environment artifacts that leak into the workspace when the dev
 # sandbox runs with $HOME or $XDG_CONFIG_HOME resolving here. Neither
