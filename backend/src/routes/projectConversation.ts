@@ -114,10 +114,10 @@ export function registerProjectConversationRoutes(router: Router, ctx: RouteCont
 	 * response ends — right for a read, whose only cost is the bytes the
 	 * client drains. `"work"`: held until the returned `done()` is called AND
 	 * the response has ended. A registration keeps reading, copying and
-	 * appending after its client disconnects (nothing cancels it), and §6.2's
-	 * bound on unreferenced bytes is "budget + what in-flight registrations
-	 * copy", so the slots must count those registrations until they settle,
-	 * not until their client goes away.
+	 * appending after its client disconnects (nothing cancels it) and holds
+	 * up to 1 MiB plus a §6.2 reservation meanwhile, so the slots must count
+	 * those registrations until they settle, not until their client goes
+	 * away.
 	 */
 	const withSlot = (req: Request, res: Response, hold: "response" | "work") => {
 		const userId = (req as AuthedRequest).userId;

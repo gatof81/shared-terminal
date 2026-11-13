@@ -39,9 +39,13 @@ en borrador, apagado; D3 no empezó.
     evento. Si no, la respuesta es la que daría el `append` (409 `project-log-full`, 503
     `persist-failed`) y no se escribe nada (§6.1.1);
   - los bytes sin referencia bajo `artifacts/` (contenido, `.json` y temporales, medidos en disco, así
-    que cuentan también los restos de una muerte anterior) tienen un presupuesto. La cota es
-    **16 MiB + escrituras en vuelo**, no 16 MiB estrictos. Un registro que agregaría bytes nuevos más
-    allá de él recibe 409 `artifacts-full` con `detail: "unreferenced"`, antes de copiar (§6.2);
+    que cuentan también los restos de una muerte anterior) tienen un presupuesto de 16 MiB. Toda
+    escritura bajo `artifacts/`, temporales incluidos, está reservada contra él antes de empezar, así
+    que la cota es **16 MiB, también con escrituras en curso** (en bytes de archivo, ver §6.2). Un
+    registro que agregaría bytes nuevos más allá de él recibe 409 `artifacts-full` con
+    `detail: "unreferenced"`, antes de copiar (§6.2);
+  - reutilizar un contenido que ya está en disco (registrado o no) no escribe nada, ni temporal: solo
+    verifica el existente;
   - medición y reserva en la misma sección crítica; si el consumo no se puede medir, 503
     `artifact-store-unverifiable` (falla cerrada);
   - un temporal propio de una escritura fallida se borra (nunca fue publicado), y la ranura en vuelo
@@ -635,16 +639,33 @@ Las dos rutas tienen además ranuras en vuelo (2 por usuario, 8 por proceso, com
       deciden sobre la misma medición.
     - **Si no se puede medir** (error de `readdir`/`lstat`, entrada que no es archivo regular): 503
       `artifact-store-unverifiable`, sin copiar nada.
-    - **La cota es 16 MiB + escrituras en vuelo**, no 16 MiB estrictos. Las escrituras en vuelo son los
-      temporales de las altas que reutilizan un contenido ya existente (no reservan: no dejan nada
-      durable). Cada uno ≤ 1 MiB más su `.json`, y su número lo limitan las ranuras de la ruta, que se
-      sostienen hasta que el alta termina.
-    - Un temporal de una escritura propia que falla (`write`/`fsync`/relectura/`link`) se borra. Tiene
-      nombre aleatorio `O_EXCL` y nunca se publicó, así que nada puede referenciarlo. No es una
-      eliminación de artefactos. Solo una muerte puede dejar uno, y ese cuenta en el presupuesto.
+    - **Solo se escribe lo reservado.** Un alta escribe (por temporal + `link`) únicamente las partes
+      que reservó: el contenido y/o su `.json` cuyo nombre final no existía al medir. Una parte que ya
+      existía solo se verifica (hash del contenido, `sha256` del `.json`); nunca se republica ni abre
+      un temporal. Si un contenido no reservado falta o no coincide con su nombre: 409
+      `artifact-corrupt`, nada escrito. Un `.json` ausente no reservado se acepta (es informativo).
+      Reutilizar un contenido existente (repetición, otro origen, en paralelo, o un huérfano) no
+      escribe ningún byte.
+    - **La cota, exacta.** En todo momento, los bytes de archivo sin referencia bajo `artifacts/` son
+      ≤ `PROJECT_ARTIFACTS_UNREFERENCED_MAX_BYTES` (16 MiB), **escrituras en curso incluidas**. Cada
+      escritura en curso es de un alta admitida y no supera su reserva, y cada admisión cumple
+      `medido + reservado + lo suyo ≤ 16 MiB`. No hay término aparte de "escrituras en vuelo": las
+      ranuras de la ruta, sostenidas hasta que el alta termina, limitan la memoria y el trabajo, no
+      este presupuesto. Precisiones:
+      - se cuenta el tamaño de archivo (`st_size`), no los bloques del sistema de archivos ni la
+        entrada del directorio;
+      - un temporal ya enlazado a su nombre final comparte inodo con él y se cuenta dos veces:
+        conservador, solo puede rechazar antes;
+      - lo que un operador ponga a mano en el directorio también cuenta. Algo que no sea archivo
+        regular deja la medición en 503.
+    - **Tras una muerte o un reinicio.** Solo una escritura reservada puede dejar un temporal: la
+      reutilización no abre ninguno. Ese temporal se mide en disco desde el arranque siguiente, así
+      que reinicios repetidos no lo hacen crecer fuera del presupuesto. Un temporal de una escritura
+      propia que falla (`write`/`fsync`/relectura/`link`) se borra. Tiene nombre aleatorio `O_EXCL` y
+      nunca se publicó, así que nada puede referenciarlo, y no es una eliminación de artefactos. Si
+      ese borrado falla, se registra en el log y el temporal queda contado.
     - Un contenido que ya está en disco no agrega bytes. Registrarlo lo vuelve referenciado y libera
-      su parte del presupuesto. Reutilizarlo (repetición, otro origen, en paralelo) no escribe ni
-      `.json` ni temporales durables.
+      su parte del presupuesto.
     - Nada se libera solo y no hay política de retención nueva. Pasado el presupuesto, quitar archivos
       sin referencia es una decisión del operador (§9).
 
@@ -1286,7 +1307,7 @@ Errores: 400 `invalid-body`; 403 `artifact-restricted`; 404 `artifact-not-found`
 `foreign-session`, `project-log-full` y `project-log-unverifiable` (v0.3.3, antes de copiar); 413
 `artifact-too-large`; 415 `artifact-not-text`; 429 `busy`; 503 `binding-unverified`, `persist-failed`,
 `artifact-store-unverifiable` (v0.3.3). Ninguno escribe nada, salvo lo que §6.2 acota como contenido
-sin referencia (16 MiB + escrituras en vuelo).
+sin referencia (≤ 16 MiB, escrituras en curso incluidas).
 
 **`POST …/messages` con adjuntos**: 400 `too-many-artifacts` / `artifact-unknown` (`detail` = el sha256)
 antes de escribir nada.

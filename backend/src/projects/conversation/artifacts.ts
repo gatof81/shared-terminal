@@ -25,13 +25,15 @@
  * A death between 2 and 3, or a refusal in 3 the pre-check could not
  * foresee, leaves an unreferenced content file: content-addressed, reused by
  * the next registration of the same bytes, never deleted (§9), and bounded
- * by `PROJECT_ARTIFACTS_UNREFERENCED_MAX_BYTES` + in-flight writes.
+ * by `PROJECT_ARTIFACTS_UNREFERENCED_MAX_BYTES`, writes in progress included
+ * (only reserved bytes are ever written; reuse writes nothing).
  */
 
 import { createHash, randomBytes } from "node:crypto";
 import { constants as FS, promises as fs } from "node:fs";
 import path from "node:path";
 import type { HttpResult } from "../../conversation/composer.js";
+import { logger } from "../../logger.js";
 import { fsyncDir } from "../../recreateAttempt.js";
 import type { OpenedWorkspaceFile, WorkspaceFsError } from "../../workspaceFiles.js";
 import { logErrorToHttp } from "./api.js";
@@ -49,8 +51,9 @@ export const PROJECT_ARTIFACTS_MAX_BYTES = 256 * 1024 * 1024;
  * temps — measured on disk, so a restart's leftovers count). A registration
  * that would add new bytes is admitted only while measured + reserved + its
  * own ≤ this; otherwise refused before copying. Nothing is deleted to make
- * room. The bound is this + in-flight writes: the transient temps of
- * registrations that reuse existing content (route slots bound how many).
+ * room. The bound is strict, writes in progress included: a registration
+ * writes (temps too) only the parts it reserved, and reusing existing
+ * content writes nothing (storeContent `writes`).
  */
 export const PROJECT_ARTIFACTS_UNREFERENCED_MAX_BYTES = 16 * 1024 * 1024;
 const NAME_MAX = 96;
@@ -178,7 +181,14 @@ async function publishNoClobber(
 	// good. A death (no `catch` runs) can still leave one; that is what the
 	// budget bounds.
 	const dropTemp = async (cause: unknown): Promise<never> => {
-		await fs.unlink(tmp).catch(() => {});
+		await fs.unlink(tmp).catch((e: unknown) => {
+			// Not fatal for this answer (the cause is), but not silent either:
+			// the temp stays, and from now on it is measured on disk against
+			// the budget (also after a restart) until an operator removes it.
+			logger.warn(
+				`[projects] artifact temp ${tmp} could not be removed after a failed write: ${(e as Error).message}`,
+			);
+		});
 		throw cause;
 	};
 	try {
@@ -221,31 +231,59 @@ export function metaBuffer(sha: string, meta: Record<string, unknown>): Buffer {
 	return Buffer.from(`${JSON.stringify({ sha256: sha, ...meta })}\n`, "utf8");
 }
 
-/** Writes the content file (and its metadata, first registration only). */
+const isMetaOf =
+	(sha: string) =>
+	(b: Buffer): boolean => {
+		try {
+			return (JSON.parse(b.toString("utf8")) as { sha256?: unknown }).sha256 === sha;
+		} catch {
+			return false;
+		}
+	};
+const META_MAX = 64 * 1024;
+
+/**
+ * Makes the content file (and its metadata) present and verified. `writes`
+ * says which of the two this registration RESERVED (§6.2): only those may be
+ * written — through a temp, which is why they must be reserved, temps being
+ * bytes on disk too. A part not reserved existed when the budget was
+ * measured and is only verified, never re-published: reuse of existing
+ * content writes no byte at all (no temp, no metadata), so every byte any
+ * registration puts under `artifacts/` was admitted against the budget.
+ *   - content not reserved and absent / not matching its name ⇒
+ *     ArtifactStoreCorrupt (the store lost or changed a file it holds);
+ *   - metadata not reserved and absent ⇒ accepted (informative, §6.2);
+ *     present but not this sha's ⇒ ArtifactStoreCorrupt.
+ */
 export async function storeContent(
 	root: string,
 	pid: string,
 	content: Buffer,
 	meta: Record<string, unknown>,
+	writes: { content: boolean; meta: boolean } = { content: true, meta: true },
 ): Promise<string> {
 	const sha = sha256Hex(content);
-	const dir = await ensureArtifactsDir(root, pid);
-	await publishNoClobber(dir, sha, content, (b) => sha256Hex(b) === sha, ARTIFACT_MAX_BYTES);
+	const sameContent = (b: Buffer) => sha256Hex(b) === sha;
+	const dir =
+		writes.content || writes.meta ? await ensureArtifactsDir(root, pid) : artifactsDir(root, pid);
+	if (writes.content) {
+		await publishNoClobber(dir, sha, content, sameContent, ARTIFACT_MAX_BYTES);
+	} else {
+		const existing = await readCapped(path.join(dir, sha), ARTIFACT_MAX_BYTES);
+		if (!existing || !sameContent(existing)) {
+			throw new ArtifactStoreCorrupt(`${sha}: content file missing or not matching its name`);
+		}
+	}
 	// The metadata is informative (§6.2: the log's `artifact` events are the
 	// record); a first one wins and is never rewritten.
-	await publishNoClobber(
-		dir,
-		`${sha}.json`,
-		metaBuffer(sha, meta),
-		(b) => {
-			try {
-				return (JSON.parse(b.toString("utf8")) as { sha256?: unknown }).sha256 === sha;
-			} catch {
-				return false;
-			}
-		},
-		64 * 1024,
-	);
+	if (writes.meta) {
+		await publishNoClobber(dir, `${sha}.json`, metaBuffer(sha, meta), isMetaOf(sha), META_MAX);
+	} else {
+		const existing = await readCapped(path.join(dir, `${sha}.json`), META_MAX);
+		if (existing && !isMetaOf(sha)(existing)) {
+			throw new ArtifactStoreCorrupt(`${sha}.json: does not describe its content`);
+		}
+	}
 	return sha;
 }
 
@@ -281,18 +319,26 @@ async function unreferencedUsage(
 	sizes: { content: number; meta: number },
 	referenced: ReadonlyMap<string, unknown>,
 	stopAbove: number,
-): Promise<{ need: number; used: number }> {
+): Promise<{ need: number; used: number; writes: { content: boolean; meta: boolean } }> {
 	let names: string[];
 	try {
 		names = await fs.readdir(dir);
 	} catch (err) {
 		if ((err as NodeJS.ErrnoException).code === "ENOENT")
-			return { need: sizes.content + sizes.meta, used: 0 };
+			return {
+				need: sizes.content + sizes.meta,
+				used: 0,
+				writes: { content: true, meta: true },
+			};
 		throw new ArtifactUsageUnverifiable(`readdir: ${(err as Error).message}`);
 	}
-	const need =
-		(names.includes(sha) ? 0 : sizes.content) + (names.includes(`${sha}.json`) ? 0 : sizes.meta);
-	if (need === 0) return { need, used: 0 };
+	const present = new Set(names);
+	const writes = { content: !present.has(sha), meta: !present.has(`${sha}.json`) };
+	const need = (writes.content ? sizes.content : 0) + (writes.meta ? sizes.meta : 0);
+	if (need === 0) return { need, used: 0, writes };
+	// Lock-hold cost: one readdir plus an lstat per UNREFERENCED entry (referenced
+	// ones are skipped by name), stopping once past the budget — so it grows
+	// with the project's entry count only through the readdir itself.
 	let used = 0;
 	for (const n of names) {
 		const base = n.endsWith(".json") ? n.slice(0, -5) : n;
@@ -309,7 +355,7 @@ async function unreferencedUsage(
 		used += st.size;
 		if (used > stopAbove) break;
 	}
-	return { need, used };
+	return { need, used, writes };
 }
 
 // ── Registration (§6.1, POST …/artifacts) ───────────────────────────────────
@@ -430,6 +476,9 @@ export class ProjectArtifacts {
 		// Bytes this registration reserved against the unreferenced budget;
 		// returned in `finally`, after every write of this call has settled.
 		let reserved = 0;
+		// What this registration may write: only what it reserved. Known
+		// (referenced) content and content already on disk write nothing.
+		let writes = { content: false, meta: false };
 
 		try {
 			// Pre-check: a replay, a quota already exceeded, or a log that would
@@ -446,9 +495,8 @@ export class ProjectArtifacts {
 				// Throws the append's own ProjectLogError ⇒ logErrorToHttp below.
 				tx.assertAppendable([event]);
 				// Already referenced ⇒ its files are on disk and counted by the
-				// quota: the copy adds nothing durable and the directory is not
-				// read (its only writes are this call's own temps, removed
-				// before it returns — the "+ in-flight writes" of §6.2).
+				// quota: nothing is written (only verified) and the directory is
+				// not read.
 				if (known) return null;
 
 				// What the pre-check cannot exclude still leaves unreferenced
@@ -479,12 +527,13 @@ export class ProjectArtifacts {
 				if (usage.used + pending + usage.need > this.unreferencedMax)
 					return err(409, "artifacts-full", "unreferenced");
 				reserved = usage.need;
+				writes = usage.writes;
 				this.reservations.set(projectId, (this.reservations.get(projectId) ?? 0) + reserved);
 				return null;
 			});
 			if (pre) return pre;
 
-			await storeContent(this.deps.workspaceRoot, projectId, content, meta);
+			await storeContent(this.deps.workspaceRoot, projectId, content, meta, writes);
 
 			return await this.deps.store.critical(projectId, async (tx) => {
 				const known = tx.state.artifacts.get(sha);

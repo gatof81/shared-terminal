@@ -2,11 +2,10 @@
  * The artifact registration's in-flight slots (routes/projectConversation.ts)
  * through the REAL route behind the REAL requireAuth: a slot is held until
  * the registration has SETTLED and the response has ended, never released
- * by the client going away. §6.2 bounds unreferenced bytes by "budget +
- * in-flight writes"; a registration keeps copying after its client
+ * by the client going away. A registration keeps copying after its client
  * disconnects (or its HTTP request times out), so if `close` returned the
  * slot, a client that aborts in a loop would have unbounded registrations
- * in flight.
+ * (memory, I/O) in flight; the §6.2 byte budget is held by reservations.
  */
 
 import type { AddressInfo } from "node:net";
@@ -84,7 +83,7 @@ const until = async (cond: () => boolean) => {
 	expect(cond()).toBe(true);
 };
 
-describe("artifact registration slots (§6.2: budget + in-flight writes)", () => {
+describe("artifact registration slots: held until the work settles", () => {
 	it("a client that disconnects mid-register does not free its slot until the work settles", async () => {
 		// Fill the per-user slots (2) with registrations whose clients then leave.
 		const aborts = [new AbortController(), new AbortController()];

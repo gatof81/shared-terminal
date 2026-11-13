@@ -16,6 +16,7 @@ const ROOT = vi.hoisted(() => {
 	return dir;
 });
 
+import { logger } from "../../logger.js";
 import { openWorkspaceFile } from "../../workspaceFiles.js";
 import {
 	ARTIFACT_MAX_BYTES,
@@ -534,8 +535,18 @@ describe("a log that cannot take the event (§6.2)", () => {
 		expect(await diskBytes()).toBe(3 * need);
 		expect(await diskBytes()).toBeLessThanOrEqual(unreferencedMax);
 		expect((await fs.readdir(dir())).filter((n) => n.endsWith(".tmp"))).toEqual([]);
-		// A second wave measures the disk those left: nothing more is admitted.
-		const again = await Promise.all(bodies.slice(3).map((_, i) => reg(`p${i + 3}.txt`)));
+		// Order-independent: whichever K got in, the disk holds exactly theirs.
+		const admitted = codes.flatMap((c, i) => (c === "project-log-full" ? [i] : []));
+		expect((await fs.readdir(dir())).sort()).toEqual(
+			admitted
+				.flatMap((i) => [sha256Hex(bodies[i] as string), `${sha256Hex(bodies[i] as string)}.json`])
+				.sort(),
+		);
+		// A second wave of exactly the refused ones (which 3 got in is up to
+		// scheduling) measures the disk the first left: nothing more is admitted.
+		const refused = codes.flatMap((c, i) => (c === "unreferenced" ? [i] : []));
+		expect(refused).toHaveLength(N - 3);
+		const again = await Promise.all(refused.map((i) => reg(`p${i}.txt`)));
 		expect(again.every((r) => (r.body as { detail?: string }).detail === "unreferenced")).toBe(
 			true,
 		);
@@ -568,6 +579,139 @@ describe("a log that cannot take the event (§6.2)", () => {
 		for (let i = 0; i < 4; i++) expect(await reg("o.txt")).toMatchObject({ status: 409 });
 		expect(await diskBytes()).toBe(withOrphan);
 		expect((await fs.readdir(dir())).length).toBe(n);
+	});
+
+	it("(d') reuse of known or on-disk content opens no temp at all; only reserved bytes are ever written", async () => {
+		await restart(64 * 1024);
+		await put("a.txt", "a".repeat(500));
+		expect((await reg("a.txt")).status).toBe(201);
+		for (let i = 0; i < 4; i++) await put(`k${i}.txt`, "a".repeat(500));
+		// An orphan (content + metadata, no event) of other bytes.
+		await put("o.txt", "o".repeat(500));
+		const realOpen = fs.open.bind(fs);
+		const temps: string[] = [];
+		const spy = vi.spyOn(fs, "open").mockImplementation((async (
+			...args: Parameters<typeof fs.open>
+		) => {
+			if (String(args[0]).endsWith(".tmp")) temps.push(String(args[0]));
+			return realOpen(...args);
+		}) as typeof fs.open);
+		try {
+			// New bytes: exactly two temps (content + metadata), both reserved.
+			refuseArtifactAppends();
+			expect(await reg("o.txt")).toMatchObject({ status: 409 });
+			expect(temps).toHaveLength(2);
+			temps.length = 0;
+			await restart(64 * 1024);
+			// Known content from 4 new sources, a replay, and the orphan again
+			// (a crash loop re-registering it would hit exactly this path).
+			const rs = await Promise.all([
+				...[0, 1, 2, 3].map((i) => reg(`k${i}.txt`)),
+				reg("a.txt"),
+				reg("o.txt"),
+				reg("o.txt"),
+			]);
+			expect(rs.map((r) => r.status).sort()).toEqual([200, 200, 201, 201, 201, 201, 201]);
+			expect(temps).toEqual([]);
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
+	it("(d) across restarts: a crash mid-reuse leaves nothing; crash leftovers + repeated reuse = zero growth", async () => {
+		await restart(64 * 1024);
+		await put("a.txt", "a".repeat(400));
+		expect((await reg("a.txt")).status).toBe(201); // known content
+		await put("o.txt", "o".repeat(400));
+		refuseArtifactAppends();
+		expect(await reg("o.txt")).toMatchObject({ status: 409 }); // orphan on disk, unreferenced
+		// What a crash of a RESERVED new-bytes write leaves (the only kind of
+		// write that opens a temp): one partial temp. It is on disk, budget-counted.
+		await fs.writeFile(path.join(dir(), ".c0ffeec0ffeec0ff.tmp"), "p".repeat(123));
+
+		// "Crash mid-reuse": a reuse registration is cut at its first filesystem
+		// open, whatever it is, and the process restarts. Had reuse opened a
+		// temp, that is where it would be left.
+		for (let round = 0; round < 3; round++) {
+			await restart(64 * 1024);
+			await put(`k${round}.txt`, "a".repeat(400));
+			const realOpen = fs.open.bind(fs);
+			const opened: string[] = [];
+			const cut = vi.spyOn(fs, "open").mockImplementation((async (
+				...args: Parameters<typeof fs.open>
+			) => {
+				opened.push(String(args[0]));
+				if (String(args[0]).endsWith(".tmp")) throw new Error("crash");
+				return realOpen(...args);
+			}) as typeof fs.open);
+			try {
+				// Reuse of known content from a new source, a replay, and the orphan.
+				const rs = await Promise.all([reg(`k${round}.txt`), reg("a.txt"), reg("o.txt")]);
+				expect(rs.every((r) => r.status === 200 || r.status === 201)).toBe(true);
+			} finally {
+				cut.mockRestore();
+			}
+			expect(opened.filter((p) => p.endsWith(".tmp"))).toEqual([]);
+		}
+		const after = await diskBytes();
+		const names = (await fs.readdir(dir())).sort();
+		// Many more reuse rounds, each in a fresh process: nothing grows.
+		for (let round = 0; round < 5; round++) {
+			await restart(64 * 1024);
+			for (const r of ["a.txt", "o.txt", "k0.txt", "k1.txt", "k2.txt"])
+				expect([200, 201]).toContain((await reg(r)).status);
+		}
+		expect(await diskBytes()).toBe(after);
+		expect((await fs.readdir(dir())).sort()).toEqual(names);
+		expect(names.filter((n) => n.endsWith(".tmp"))).toEqual([".c0ffeec0ffeec0ff.tmp"]);
+	});
+
+	it("known content whose file was lost is 409 artifact-corrupt, never silently re-written", async () => {
+		await restart(64 * 1024);
+		await put("a.txt", "a".repeat(50));
+		await put("a2.txt", "a".repeat(50));
+		const sha = sha256Hex("a".repeat(50));
+		expect((await reg("a.txt")).status).toBe(201);
+		await fs.unlink(path.join(dir(), sha));
+		expect(await reg("a2.txt")).toMatchObject({ status: 409, body: { error: "artifact-corrupt" } });
+		expect(await fs.readdir(dir())).not.toContain(sha);
+		expect(await artifactEvents()).toHaveLength(1);
+	});
+
+	it("a temp that cannot be removed after a failed write is logged, not stranded silently", async () => {
+		await restart(64 * 1024);
+		await put("a.txt", "a".repeat(50));
+		const realOpen = fs.open.bind(fs);
+		const op = vi.spyOn(fs, "open").mockImplementation((async (
+			...args: Parameters<typeof fs.open>
+		) => {
+			const fh = await realOpen(...args);
+			if (String(args[0]).endsWith(".tmp")) {
+				fh.sync = async () => {
+					throw Object.assign(new Error("EIO: injected"), { code: "EIO" });
+				};
+			}
+			return fh;
+		}) as typeof fs.open);
+		const realUnlink = fs.unlink.bind(fs);
+		const ul = vi.spyOn(fs, "unlink").mockImplementation((async (
+			p: Parameters<typeof fs.unlink>[0],
+		) => {
+			if (String(p).endsWith(".tmp"))
+				throw Object.assign(new Error("EROFS: injected"), { code: "EROFS" });
+			return realUnlink(p);
+		}) as typeof fs.unlink);
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			await expect(reg("a.txt")).rejects.toThrow(/EIO/);
+			expect(warn).toHaveBeenCalledWith(expect.stringMatching(/could not be removed.*EROFS/));
+		} finally {
+			op.mockRestore();
+			ul.mockRestore();
+			warn.mockRestore();
+		}
+		// It stays and is measured (counted) from here on.
+		expect((await fs.readdir(dir())).filter((n) => n.endsWith(".tmp"))).toHaveLength(1);
 	});
 
 	it("(e) usage that cannot be measured refuses new bytes (503), copying nothing", async () => {
