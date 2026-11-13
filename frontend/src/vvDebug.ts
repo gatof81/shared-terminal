@@ -127,9 +127,13 @@ export function initVvDebug(): void {
 		const vv = s.vv as { h: number; top: number; pageTop: number } | null;
 		text.textContent = `${ev} vv.h=${vv?.h} top=${vv?.top} pageTop=${vv?.pageTop} sy=${s.sy} ih=${s.ih}\nappTop=${s.appTop} appVh=${s.appVh} kb=${s.kb} focusBox=${JSON.stringify(s.focusBox)}`;
 	};
+	// The clipboard fallback focuses a hidden textarea: not an event to record.
+	let copying = false;
 	copy.addEventListener("click", () => {
 		const header = `vvdebug ${navigator.userAgent} dpr=${window.devicePixelRatio} screen=${screen.width}x${screen.height}`;
+		copying = true;
 		void copyText([header, ...log].join("\n"), copy).then((ok) => {
+			copying = false;
 			copy.textContent = ok ? "Copied ✓" : "Copy failed";
 			setTimeout(() => {
 				copy.textContent = "Copy log";
@@ -150,14 +154,14 @@ export function initVvDebug(): void {
 	window.addEventListener("scroll", () => record("win-scroll"), { passive: true });
 	window.addEventListener("resize", () => record("win-resize"));
 	document.addEventListener("focusin", (e) => {
-		// Ignore the panel's own buttons.
-		if (panel.contains(e.target as Node)) return;
+		// Ignore the panel's own buttons and the copy's hidden textarea.
+		if (copying || panel.contains(e.target as Node)) return;
 		record("focusin");
 		// iOS moves the viewport a few hundred ms after focus: sample the settle too.
 		for (const ms of [100, 300, 600, 1000]) setTimeout(() => record(`focus+${ms}`), ms);
 	});
 	document.addEventListener("focusout", (e) => {
-		if (panel.contains(e.target as Node)) return;
+		if (copying || panel.contains(e.target as Node)) return;
 		record("focusout");
 		for (const ms of [300, 1000]) setTimeout(() => record(`blur+${ms}`), ms);
 	});

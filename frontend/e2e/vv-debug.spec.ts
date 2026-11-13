@@ -8,7 +8,8 @@ test("vvdebug (#616): off by default, on with ?vvdebug=1, records the focus; ?vv
 	await page.goto(`/?vvdebug=1#/projects/${PROJECT_IDS.hz}/threads/${PROJECT_MSG_IDS.polling}`);
 	await expect(page.locator("#vv-debug")).toBeVisible();
 	await page.locator("#project-view .tw-composer textarea").filter({ visible: true }).click();
-	await expect(page.locator("#vv-debug")).toContainText("focus");
+	// The event name, not the always-present "focusBox=" label.
+	await expect(page.locator("#vv-debug")).toContainText(/^focus(in|\+\d+) /m);
 	await page.goto(`/?vvdebug=0#/projects/${PROJECT_IDS.hz}`);
 	await expect(page.locator("#vv-debug")).toHaveCount(0);
 });
