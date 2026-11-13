@@ -34,6 +34,8 @@ export interface MockSession {
 	status: "running" | "stopped" | "terminated" | "failed";
 	tabs: Array<{ tabId: string; label: string; createdAt: number }>;
 	createdAt: string;
+	/** Reported memory use of a running session, in % (default 12.5). */
+	memPercent?: number;
 }
 
 interface FsDir {
@@ -2086,7 +2088,7 @@ export class MockBackend {
 							cpuPercent: 12.5,
 							memBytes: 268_435_456,
 							memLimitBytes: 2_147_483_648,
-							memPercent: 12.5,
+							memPercent: s.memPercent ?? 12.5,
 						}
 					: null,
 		};

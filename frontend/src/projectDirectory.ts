@@ -49,8 +49,21 @@ export function projectName(projectId: string): string | null {
 	return byId.get(projectId)?.name ?? null;
 }
 
+// The project whose page is on screen (projectsView.ts sets it): the
+// sidebar tree marks that project's heading as the current page.
+let currentId: string | null = null;
+
+export function setCurrentProject(projectId: string | null): void {
+	currentId = projectId;
+}
+
+export function currentProject(): string | null {
+	return currentId;
+}
+
 export function clearProjects(): void {
 	byId = new Map();
 	order = [];
 	loaded = false;
+	currentId = null;
 }

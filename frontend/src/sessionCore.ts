@@ -58,8 +58,8 @@ import { renderSidebarObservables } from "./myGroups.js";
 import { openBootstrapLogModal } from "./newSession.js";
 import { openObserveModalFor } from "./observeModal.js";
 import { openPortsModalFor } from "./ports.js";
-import { projectName } from "./projectDirectory.js";
-import { agentActiveDeleteText, groupSessionsByBinding } from "./projectModel.js";
+import { currentProject, projectName, projects } from "./projectDirectory.js";
+import { agentActiveDeleteText, agentCountText, groupSessionsByBinding } from "./projectModel.js";
 import {
 	clear as clearRoute,
 	navigateProject,
@@ -478,6 +478,11 @@ export function renderSessionList() {
 			? active.closest<HTMLElement>(".session-item")?.dataset.sessionId
 			: undefined;
 	const focusedRole = active instanceof HTMLElement ? (active.dataset.role ?? "select") : "select";
+	// …also on a group's heading (its chevron or its project link).
+	const focusedGroup =
+		active instanceof HTMLElement && sessionList.contains(active)
+			? active.closest<HTMLElement>(".sgroup-head")?.parentElement?.dataset.group
+			: undefined;
 	sessionList.replaceChildren();
 	// The compact phone rows (sidebar-sessions.css) belong to the grouped
 	// list only: with the project feature off the sidebar is exactly as before.
@@ -488,6 +493,12 @@ export function renderSessionList() {
 		sessionList
 			.querySelector<HTMLElement>(
 				`.session-item[data-session-id="${CSS.escape(focusedId)}"] [data-role="${CSS.escape(focusedRole)}"]`,
+			)
+			?.focus();
+	} else if (focusedGroup !== undefined) {
+		sessionList
+			.querySelector<HTMLElement>(
+				`.sgroup[data-group="${CSS.escape(focusedGroup)}"] .sgroup-head [data-role="${CSS.escape(focusedRole)}"]`,
 			)
 			?.focus();
 	}
@@ -559,50 +570,244 @@ function renderToolbarAgent(): void {
  */
 function renderGroupedSessions(): void {
 	const groups = groupSessionsByBinding(sessions);
-	const heading = (text: string, cls: string, title?: string) => {
-		const h = document.createElement("h3");
-		h.className = `session-group-title ${cls}`;
-		h.textContent = text;
-		if (title) h.title = title;
-		sessionList.appendChild(h);
-	};
-	// One heading per PROJECT (owner review 2026-11-13: projects, agent
-	// sessions and unassigned ones were hard to tell apart), in the order the
-	// list first meets each; a project whose name isn't loaded yet reads
-	// "Agent sessions" until the directory lands.
-	// Keyed by PROJECT (two projects may share a name); every project whose
-	// name isn't loaded shares one "Agent sessions" group instead of several
-	// identical headings.
-	const UNNAMED = "\u0000unnamed";
-	const byKey = new Map<string, { title: string; rows: Array<(typeof groups.bound)[number]> }>();
+	// One group per PROJECT, keyed by id (two projects may share a name), in
+	// the directory's order and including the ones without a session yet —
+	// the tree is where projects are listed (they used to appear twice: a
+	// list above the sessions and a heading among them; UX audit N1). A
+	// bound session whose project isn't in the loaded list (the list hasn't
+	// arrived, or it lags a creation) falls into one "Agent sessions" group
+	// instead of several identical headings.
+	type Row = (typeof groups.bound)[number];
+	const byProject = new Map<string, Row[]>();
+	const unnamed: Row[] = [];
+	for (const p of projects()) byProject.set(p.projectId, []);
 	for (const b of groups.bound) {
-		const name = projectName(b.binding.projectId);
-		const key = name === null ? UNNAMED : b.binding.projectId;
-		const group = byKey.get(key) ?? { title: name ?? "Agent sessions", rows: [] };
-		group.rows.push(b);
-		byKey.set(key, group);
+		const rows = byProject.get(b.binding.projectId);
+		if (rows) rows.push(b);
+		else unnamed.push(b);
 	}
-	for (const { title, rows } of byKey.values()) {
-		heading(title, "session-group-bound session-group-project");
-		for (const { session, binding } of rows)
-			sessionList.appendChild(buildSessionItem(session, binding));
+	for (const p of projects()) {
+		const rows = byProject.get(p.projectId) ?? [];
+		sessionList.appendChild(
+			buildGroup({
+				key: p.projectId,
+				title: p.name,
+				project: p.projectId,
+				cls: "sgroup-project",
+				tooltip: `Open ${p.name} · ${agentCountText(p.agentCount)}`,
+				rows: rows.map(({ session, binding }) => buildSessionItem(session, binding)),
+				// With the bindings unread, its sessions may be the ones under
+				// "Assignment unknown": neither a count nor "none" is known.
+				countUnknown: groups.unknown.length > 0,
+				// "shown": its sessions may also be terminated ones the list hides.
+				empty: p.agentCount === 0 ? "No agents yet." : "No sessions shown.",
+			}),
+		);
+	}
+	if (unnamed.length > 0) {
+		sessionList.appendChild(
+			buildGroup({
+				key: "~agents",
+				title: "Agent sessions",
+				project: null,
+				cls: "sgroup-project",
+				rows: unnamed.map(({ session, binding }) => buildSessionItem(session, binding)),
+			}),
+		);
 	}
 	if (groups.unassigned.length > 0) {
-		heading("Unassigned sessions", "session-group-unassigned");
-		for (const s of groups.unassigned) sessionList.appendChild(buildSessionItem(s, null));
+		sessionList.appendChild(
+			buildGroup({
+				key: "~unassigned",
+				title: "Unassigned",
+				project: null,
+				cls: "sgroup-unassigned",
+				tooltip: "Sessions that don't belong to any project's agent.",
+				rows: groups.unassigned.map((s) => buildSessionItem(s, null)),
+			}),
+		);
 	}
 	if (groups.unknown.length > 0) {
-		heading(
-			"Assignment unknown",
-			"session-group-unknown",
-			"The project directory could not be read: these sessions may or may not belong to an agent.",
+		sessionList.appendChild(
+			buildGroup({
+				key: "~unknown",
+				title: "Assignment unknown",
+				project: null,
+				cls: "sgroup-unknown",
+				tooltip:
+					"The project directory could not be read: these sessions may or may not belong to an agent.",
+				note: "Couldn't read which agent these belong to.",
+				rows: groups.unknown.map((s) => buildSessionItem(s, null)),
+			}),
 		);
+	}
+}
+
+// ── Sidebar tree: collapsible groups ────────────────────────────────────────
+
+/**
+ * Which groups this browser keeps collapsed (project ids and the "~…" keys
+ * of the non-project groups). A per-viewer convenience, so localStorage is
+ * the right place; unreadable storage just means "all expanded".
+ */
+const COLLAPSED_KEY = "st.sidebarCollapsed";
+let collapsedGroups: Set<string> | null = null;
+
+function collapsed(): Set<string> {
+	if (collapsedGroups) return collapsedGroups;
+	collapsedGroups = new Set();
+	try {
+		const raw = localStorage.getItem(COLLAPSED_KEY);
+		const list: unknown = raw ? JSON.parse(raw) : [];
+		if (Array.isArray(list))
+			for (const k of list) if (typeof k === "string") collapsedGroups.add(k);
+	} catch {
+		// Private mode / blocked storage / a corrupt value: start expanded.
+	}
+	return collapsedGroups;
+}
+
+/** Logout: the next person on this browser starts with every group open. */
+export function forgetSidebarCollapsed(): void {
+	collapsedGroups = null;
+	try {
+		localStorage.removeItem(COLLAPSED_KEY);
+	} catch {
+		// Nothing was stored then.
+	}
+}
+
+function setCollapsed(key: string, on: boolean): void {
+	const set = collapsed();
+	if (on) set.add(key);
+	else set.delete(key);
+	try {
+		localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...set]));
+	} catch {
+		// Not persisted: the choice still holds until the page is reloaded.
+	}
+}
+
+const CHEVRON_PATH = "M6 4l4 4-4 4";
+
+/** Memory use from which the tree row shows it (it is in the tooltip always). */
+const USAGE_HOT_PERCENT = 80;
+
+function buildGroup(g: {
+	key: string;
+	title: string;
+	/** A project's id: its title is then the link to its page. */
+	project: string | null;
+	cls: string;
+	rows: HTMLElement[];
+	tooltip?: string;
+	note?: string;
+	empty?: string;
+	/** The rows are not the whole truth (bindings unread): show no number. */
+	countUnknown?: boolean;
+}): HTMLElement {
+	const isCollapsed = collapsed().has(g.key);
+	const section = document.createElement("section");
+	section.className = `sgroup ${g.cls}${isCollapsed ? " collapsed" : ""}`;
+	section.dataset.group = g.key;
+	section.setAttribute("role", "group");
+	section.setAttribute("aria-label", g.title);
+	const rowsId = `sgroup-rows-${g.key.replace(/[^a-zA-Z0-9-]/g, "_")}`;
+
+	const head = document.createElement("div");
+	head.className = "sgroup-head";
+	const toggle = document.createElement("button");
+	toggle.type = "button";
+	toggle.className = "sgroup-toggle";
+	toggle.dataset.role = "toggle";
+	toggle.setAttribute("aria-expanded", String(!isCollapsed));
+	toggle.setAttribute("aria-controls", rowsId);
+	toggle.setAttribute("aria-label", `${isCollapsed ? "Expand" : "Collapse"} ${g.title}`);
+	const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+	svg.setAttribute("viewBox", "0 0 16 16");
+	svg.setAttribute("aria-hidden", "true");
+	const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+	path.setAttribute("d", CHEVRON_PATH);
+	svg.appendChild(path);
+	toggle.appendChild(svg);
+	const flip = () => {
+		setCollapsed(g.key, !collapsed().has(g.key));
+		renderSessionList();
+		// The list was rebuilt: keep the keyboard on the control just used.
+		sessionList
+			.querySelector<HTMLElement>(`.sgroup[data-group="${CSS.escape(g.key)}"] .sgroup-toggle`)
+			?.focus();
+	};
+	toggle.addEventListener("click", flip);
+	head.appendChild(toggle);
+
+	let title: HTMLElement;
+	if (g.project !== null) {
+		// A project's name opens its page (the chevron beside it folds the
+		// group): the same link the old Projects list was, same class.
+		const a = document.createElement("a");
+		const route = { projectId: g.project, agentId: null };
+		a.className = "sgroup-title project-item";
+		a.dataset.projectId = g.project;
+		a.dataset.role = "project";
+		a.href = projectRouteHash(route);
+		if (currentProject() === g.project) a.setAttribute("aria-current", "page");
+		a.addEventListener("click", (e) => {
+			if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+			e.preventDefault();
+			navigateProject(route);
+		});
+		title = a;
+	} else {
+		// No page behind these groups: the whole heading folds them.
+		const b = document.createElement("button");
+		b.type = "button";
+		b.className = "sgroup-title";
+		b.tabIndex = -1; // the chevron is the Tab stop; this is the bigger target
+		b.setAttribute("aria-hidden", "true");
+		b.addEventListener("click", flip);
+		title = b;
+	}
+	const name = document.createElement("span");
+	name.className = "sgroup-name project-item-name";
+	name.textContent = g.title;
+	title.appendChild(name);
+	title.title = g.tooltip ?? g.title;
+	head.appendChild(title);
+
+	const count = document.createElement("span");
+	count.className = "sgroup-count";
+	if (g.countUnknown) {
+		// Never a known zero for an unknown (PROJECTS.md §4.6).
+		count.textContent = "–";
+		count.title = "Couldn't read which sessions belong to this project";
+	} else {
+		count.textContent = String(g.rows.length);
+		count.title = g.rows.length === 1 ? "1 session" : `${g.rows.length} sessions`;
+	}
+	count.setAttribute("aria-label", count.title);
+	head.appendChild(count);
+	section.appendChild(head);
+
+	const rows = document.createElement("div");
+	rows.className = "sgroup-rows";
+	rows.id = rowsId;
+	rows.hidden = isCollapsed;
+	if (g.note) {
 		const note = document.createElement("p");
 		note.className = "session-group-note";
-		note.textContent = "Couldn't read which agent these belong to.";
-		sessionList.appendChild(note);
-		for (const s of groups.unknown) sessionList.appendChild(buildSessionItem(s, null));
+		note.textContent = g.note;
+		rows.appendChild(note);
 	}
+	if (g.rows.length === 0 && g.empty && !g.countUnknown) {
+		const empty = document.createElement("p");
+		empty.className = "sgroup-empty";
+		empty.textContent = g.empty;
+		rows.appendChild(empty);
+	}
+	for (const r of g.rows) rows.appendChild(r);
+	section.appendChild(rows);
+	return section;
 }
 
 function buildSessionItem(s: SessionInfo, binding: SessionBinding | null): HTMLElement {
@@ -642,8 +847,21 @@ function buildSessionItem(s: SessionInfo, binding: SessionBinding | null): HTMLE
 	nameCol.appendChild(name);
 	const meta = document.createElement("span");
 	meta.className = "session-meta";
-	// Live usage lines (#272). Only running sessions with a stats sample.
-	if (s.status === "running" && s.usage) {
+	// The tree (project feature on) names a row by its session and its agent;
+	// CPU / memory are infrastructure detail there — in the row's tooltip, and
+	// on the row only when memory runs hot (UX audit N2: they took two of
+	// each row's three lines and pushed the agent out of the phone's row).
+	const tree = projectChatEnabled();
+	if (tree && s.status === "running" && s.usage) {
+		const usage = `CPU ${formatCpuCores(s.usage.cpuPercent / 100)} cores (${formatCpuPercent(s.usage.cpuPercent)}) · Mem ${formatBytes(s.usage.memBytes)} (${s.usage.memPercent.toFixed(0)}%)`;
+		select.title = `${s.name}\n${usage}`;
+		if (s.usage.memPercent >= USAGE_HOT_PERCENT) {
+			const hot = document.createElement("span");
+			hot.className = "session-usage session-usage-hot";
+			hot.textContent = `Mem ${s.usage.memPercent.toFixed(0)}%`;
+			meta.appendChild(hot);
+		}
+	} else if (s.status === "running" && s.usage) {
 		const cpuCores = s.usage.cpuPercent / 100;
 		const cpuLine = document.createElement("span");
 		cpuLine.className = "session-usage session-usage-wide";
@@ -782,7 +1000,10 @@ function buildSessionItem(s: SessionInfo, binding: SessionBinding | null): HTMLE
 // ↑ / ↓ / Home / End move between rows; Enter / Space are the buttons' own.
 sessionList.addEventListener("keydown", (e) => {
 	if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
-	const rows = [...sessionList.querySelectorAll<HTMLButtonElement>(".session-select")];
+	// Rows inside a collapsed group are not on screen: skip them.
+	const rows = [...sessionList.querySelectorAll<HTMLButtonElement>(".session-select")].filter(
+		(r) => !r.closest("[hidden]"),
+	);
 	if (rows.length === 0) return;
 	const current = (e.target as HTMLElement).closest<HTMLElement>(".session-item");
 	const i = rows.findIndex((r) => r.closest(".session-item") === current);

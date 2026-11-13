@@ -21,19 +21,20 @@ const agentHash = (aid: string) => `${projectHash}/agents/${aid}`;
 const projectRequests = (backend: MockBackend) =>
 	backend.requests.filter((r) => r.path.startsWith("/projects"));
 
-/** The sidebar's session rows by group heading (DOM order), visible or not (mobile drawer). */
+/** The sidebar tree's session rows by group heading (DOM order), visible or not (mobile drawer, folded group). */
 function sidebarGroups(page: Page): Promise<Record<string, string[]>> {
 	return page.locator("#session-list").evaluate((list) => {
 		const out: Record<string, string[]> = {};
-		let cur = "(none)";
-		for (const c of Array.from(list.children)) {
-			if (c.matches(".session-group-title")) {
-				cur = c.textContent ?? "";
-				out[cur] = [];
-			} else if (c.matches(".session-item")) {
-				if (!out[cur]) out[cur] = [];
-				out[cur].push(c.querySelector(".session-name")?.textContent ?? "");
-			}
+		// A row outside every group would be a bug: it shows up under "(none)".
+		const stray = Array.from(list.querySelectorAll(":scope > .session-item .session-name")).map(
+			(n) => n.textContent ?? "",
+		);
+		if (stray.length > 0) out["(none)"] = stray;
+		for (const g of Array.from(list.querySelectorAll(".sgroup"))) {
+			const title = g.querySelector(".sgroup-name")?.textContent ?? "";
+			out[title] = Array.from(g.querySelectorAll(".session-item .session-name")).map(
+				(n) => n.textContent ?? "",
+			);
 		}
 		return out;
 	});
@@ -75,7 +76,7 @@ test.describe("projects — feature off", () => {
 		await app.openSidebar();
 		await expect(app.sessionRow("my-project")).toBeVisible();
 		await expect(page.locator("#project-section")).toBeHidden();
-		await expect(page.locator("#session-list .session-group-title")).toHaveCount(0);
+		await expect(page.locator("#session-list .sgroup")).toHaveCount(0);
 		await expect(page.locator(".session-agent-link")).toHaveCount(0);
 		await expect(page.locator("#project-view")).toBeHidden();
 		await expect(page.locator("#empty-state")).toBeVisible();
@@ -104,13 +105,17 @@ test.describe("projects — feature on", () => {
 	}) => {
 		await app.login("alice");
 		await app.openSidebar();
-		const item = page.locator("#project-list .project-item", { hasText: "Educación HZ" });
-		await expect(item).toContainText("5 agents");
+		const item = page.locator("#session-list .project-item", { hasText: "Educación HZ" });
+		// The heading: the project's name (its page), and how many sessions hang from it.
+		await expect(item).toHaveAttribute("title", "Open Educación HZ · 5 agents");
+		await expect(
+			page.locator("#session-list .sgroup", { hasText: "Educación HZ" }).locator(".sgroup-count"),
+		).toHaveText("5");
 		await expect
 			.poll(() => sidebarGroups(page))
 			.toEqual({
 				"Educación HZ": ["my-project", "docs", "hz-architect", "hz-dev-2", "hz-design"],
-				"Unassigned sessions": ["scratch"],
+				Unassigned: ["scratch"],
 			});
 		// The project is the group's heading; the row names its agent.
 		await expect(app.sessionRow("my-project").locator(".session-agent-link")).toHaveText(
@@ -130,6 +135,89 @@ test.describe("projects — feature on", () => {
 		expect(new URL(page.url()).hash).toBe(agentHash(AGENT_IDS.developer));
 	});
 
+	test("tree: a project folds on its chevron, stays folded after a reload, and its name still opens it", async ({
+		app,
+		page,
+	}) => {
+		await app.login("alice");
+		await app.openSidebar();
+		const group = page.locator("#session-list .sgroup", { hasText: "Educación HZ" });
+		const toggle = group.locator(".sgroup-toggle");
+		await expect(toggle).toHaveAttribute("aria-expanded", "true");
+		await expect(app.sessionRow("hz-architect")).toBeVisible();
+		await toggle.click();
+		await expect(toggle).toHaveAttribute("aria-expanded", "false");
+		await expect(toggle).toHaveAttribute("aria-label", "Expand Educación HZ");
+		// Folded: its rows are off screen, the heading keeps the count, and the
+		// keyboard stays on the control that was used.
+		await expect(app.sessionRow("hz-architect")).toBeHidden();
+		await expect(group.locator(".sgroup-count")).toHaveText("5");
+		await expect(toggle).toBeFocused();
+		// The other groups are untouched.
+		await expect(app.sessionRow("scratch")).toBeVisible();
+		// The 5 s list poll rebuilds the tree: wait until THIS node is gone,
+		// then the new one must be folded and hold the focus.
+		const before = await toggle.elementHandle();
+		await expect
+			.poll(() => before!.evaluate((el) => el.isConnected), { timeout: 12_000 })
+			.toBe(false);
+		await expect(toggle).toHaveAttribute("aria-expanded", "false");
+		await expect(toggle).toBeFocused();
+
+		await page.reload();
+		await app.openSidebar();
+		await expect(toggle).toHaveAttribute("aria-expanded", "false");
+		await expect(app.sessionRow("hz-architect")).toBeHidden();
+		// The name is the project's page, folded or not — and marks it current.
+		await group.locator(".project-item").click();
+		await expect(pageTitle(page)).toHaveText("Educación HZ");
+		await app.openSidebar();
+		await expect(group.locator(".project-item")).toHaveAttribute("aria-current", "page");
+		await toggle.click();
+		await expect(app.sessionRow("hz-architect")).toBeVisible();
+	});
+
+	test("tree: ↓ / ↑ walk the rows on screen and skip a folded group's", async ({ app, page }) => {
+		test.skip(app.mobile, "arrow keys: a keyboard");
+		await app.login("alice");
+		await page.locator("#session-list .sgroup", { hasText: "Unassigned" }).waitFor();
+		const names = () =>
+			page.evaluate(
+				() =>
+					document.activeElement?.closest(".session-item")?.querySelector(".session-name")
+						?.textContent ?? null,
+			);
+		await app.sessionRow("hz-design").locator(".session-select").focus();
+		await page.keyboard.press("ArrowDown");
+		expect(await names()).toBe("scratch");
+		await page
+			.locator("#session-list .sgroup", { hasText: "Educación HZ" })
+			.locator(".sgroup-toggle")
+			.click();
+		await app.sessionRow("scratch").locator(".session-select").focus();
+		await page.keyboard.press("ArrowUp");
+		// Nothing above it is on screen: it stays where it is.
+		expect(await names()).toBe("scratch");
+	});
+
+	test("tree rows: the agent on the row, usage in the tooltip, no CPU / memory lines", async ({
+		app,
+		backend,
+	}) => {
+		await app.login("alice");
+		await app.openSidebar();
+		const row = app.sessionRow("my-project");
+		await expect(row.locator(".session-usage-wide, .session-usage-compact")).toHaveCount(0);
+		await expect(row.locator(".session-select")).toHaveAttribute(
+			"title",
+			/^my-project\nCPU 0\.13 cores \(12\.5%\) · Mem 256 MiB \(13%\)$/,
+		);
+		await expect(row.locator(".session-usage-hot")).toHaveCount(0);
+		// Memory running hot is the one usage fact worth a place on the row.
+		backend.session(SESSION_IDS.running)!.memPercent = 91;
+		await expect(row.locator(".session-usage-hot")).toHaveText("Mem 91%", { timeout: 8_000 });
+	});
+
 	test("binding unknown (key absent) is never shown as unassigned, nor offered", async ({
 		app,
 		backend,
@@ -140,6 +228,9 @@ test.describe("projects — feature on", () => {
 		await expect
 			.poll(() => sidebarGroups(page))
 			.toEqual({
+				// The project is still a heading (its page is one click away);
+				// which sessions are its agents' is what couldn't be read.
+				"Educación HZ": [],
 				"Assignment unknown": [
 					"my-project",
 					"docs",
@@ -150,6 +241,10 @@ test.describe("projects — feature on", () => {
 				],
 			});
 		await expect(page.locator(".session-agent-link")).toHaveCount(0);
+		// …and the project's heading claims neither a number nor "none".
+		const hz = page.locator("#session-list .sgroup", { hasText: "Educación HZ" });
+		await expect(hz.locator(".sgroup-count")).toHaveText("–");
+		await expect(hz.locator(".sgroup-empty")).toHaveCount(0);
 		await page.locator("#project-view button", { hasText: "+ New agent" }).click();
 		await expect(dialog(page).locator("select option")).toHaveText(["No unassigned session"]);
 		await expect(dialog(page).locator(".pv-dialog-status")).toContainText(
@@ -165,7 +260,7 @@ test.describe("projects — feature on", () => {
 	}) => {
 		await app.login("alice");
 		await app.openSidebar();
-		await page.locator("#project-list .project-item", { hasText: "Educación HZ" }).click();
+		await page.locator("#session-list .project-item", { hasText: "Educación HZ" }).click();
 		await expect(pageTitle(page)).toHaveText("Educación HZ");
 		expect(new URL(page.url()).hash).toBe(projectHash);
 		await expect(page).toHaveTitle("Educación HZ — Shared Terminal");
@@ -359,7 +454,7 @@ test.describe("projects — feature on", () => {
 		await expect(view).toContainText("doesn't exist or isn't yours");
 		await view.locator("button", { hasText: "Back to Projects" }).click();
 		await expect(view).toBeHidden();
-		await expect(page.locator("#project-list .project-item").first()).toBeFocused();
+		await expect(page.locator("#session-list .project-item").first()).toBeFocused();
 	});
 
 	test("a removed agent keeps its page and its history", async ({ app, page }) => {
@@ -404,9 +499,10 @@ test.describe("projects — feature on", () => {
 		await expect(pageTitle(page)).toHaveText("Tienda");
 		expect(new URL(page.url()).hash).toMatch(/^#\/projects\/6b1f2c3d-/);
 		await app.openSidebar();
-		await expect(page.locator("#project-list .project-item", { hasText: "Tienda" })).toContainText(
-			"0 agents",
-		);
+		// A project without a session is still a heading of the tree.
+		await expect(
+			page.locator("#session-list .project-item", { hasText: "Tienda" }),
+		).toHaveAttribute("title", "Open Tienda · 0 agents");
 	});
 
 	test("create agent: only unassigned sessions are offered; success binds the session", async ({
@@ -438,14 +534,7 @@ test.describe("projects — feature on", () => {
 		await expect
 			.poll(() => sidebarGroups(page))
 			.toEqual({
-				"Educación HZ": [
-					"my-project",
-					"docs",
-					"hz-architect",
-					"hz-dev-2",
-					"hz-design",
-					"scratch",
-				],
+				"Educación HZ": ["my-project", "docs", "hz-architect", "hz-dev-2", "hz-design", "scratch"],
 			});
 		await expect(app.sessionRow("scratch").locator(".session-agent-link")).toHaveText("@tester");
 	});
@@ -521,7 +610,7 @@ test.describe("projects — feature on", () => {
 		await expect(view.locator("button", { hasText: "Remove agent" })).toHaveCount(0);
 		await expect(view.locator(".pv-history tbody tr").first()).toContainText("agent removed");
 		await expect
-			.poll(async () => (await sidebarGroups(page))["Unassigned sessions"])
+			.poll(async () => (await sidebarGroups(page)).Unassigned)
 			.toEqual(["docs", "scratch"]);
 	});
 
@@ -610,7 +699,7 @@ test.describe("projects — feature on", () => {
 		const frames = sock.sent.length;
 
 		await app.openSidebar();
-		await page.locator("#project-list .project-item", { hasText: "Educación HZ" }).click();
+		await page.locator("#session-list .project-item", { hasText: "Educación HZ" }).click();
 		await expect(pageTitle(page)).toHaveText("Educación HZ");
 		await expect(page.locator("#terminal-container")).toBeHidden();
 		await card(page, "developer-hz").locator(".pv-agent-handle").click();
@@ -648,9 +737,9 @@ test.describe("projects — feature on", () => {
 		await expect(row.locator(".session-agent-link")).toBeHidden();
 		const r = (await row.boundingBox())!;
 		expect(r.height).toBeLessThanOrEqual(56);
-		// Usage on one line (the two desktop lines are hidden), with the agent.
-		await expect(row.locator(".session-usage-compact")).toBeVisible();
-		await expect(row.locator(".session-usage-wide").first()).toBeHidden();
+		// The second line is the agent alone: CPU / memory moved to the tooltip
+		// (they truncated to "0.13 cores · 256 Mi…" and squeezed the agent).
+		await expect(row.locator(".session-usage-compact, .session-usage-wide")).toHaveCount(0);
 		// Screen readers get the agent in the row's name (the link is hidden here).
 		await expect(row.locator(".session-select")).toHaveAttribute(
 			"aria-label",
@@ -665,8 +754,12 @@ test.describe("projects — feature on", () => {
 		await app.login("alice");
 		await app.openSidebar();
 		// (Phones name a session's agent inside its row: no separate link there.)
-		await expectTouchTargets(page, ["#new-project-btn", "#project-list .project-item"]);
-		await page.locator("#project-list .project-item", { hasText: "Educación HZ" }).click();
+		await expectTouchTargets(page, [
+			"#new-project-btn",
+			"#session-list .project-item",
+			"#session-list .sgroup-toggle",
+		]);
+		await page.locator("#session-list .project-item", { hasText: "Educación HZ" }).click();
 		await expect(pageTitle(page)).toHaveText("Educación HZ");
 		await expect(page.locator("#project-view .pv-agent")).toHaveCount(5);
 		await expectTouchTargets(page, [
@@ -695,7 +788,7 @@ test.describe("projects — feature on", () => {
 	}) => {
 		test.skip(app.mobile, "keyboard focus");
 		await app.login("alice");
-		await page.locator("#project-list .project-item", { hasText: "Educación HZ" }).focus();
+		await page.locator("#session-list .project-item", { hasText: "Educación HZ" }).focus();
 		await page.keyboard.press("Enter");
 		await expect(pageTitle(page)).toBeFocused();
 		await expect(pageTitle(page)).toHaveCSS("outline-style", "none");
@@ -728,7 +821,7 @@ test.describe("projects — feature on", () => {
 		const menuBtn = (await page.locator("#session-menu-btn").boundingBox())!;
 
 		await app.openSidebar();
-		await page.locator("#project-list .project-item", { hasText: "Educación HZ" }).click();
+		await page.locator("#session-list .project-item", { hasText: "Educación HZ" }).click();
 		await expect(pageTitle(page)).toHaveText("Educación HZ");
 		await expect(page.locator("#view-switch")).toBeHidden();
 		await expect(page.locator("#session-menu-btn")).toBeHidden();
@@ -752,7 +845,7 @@ test.describe("projects — feature on", () => {
 		await expect(page.locator("#view-terminal-btn")).toHaveAttribute("aria-pressed", "true");
 
 		await app.openSidebar();
-		await page.locator("#project-list .project-item", { hasText: "Educación HZ" }).click();
+		await page.locator("#session-list .project-item", { hasText: "Educación HZ" }).click();
 		await expect(pageTitle(page)).toHaveText("Educación HZ");
 		await page.locator("#project-view .pv-close").click();
 		await expect(page.locator("#project-view")).toBeHidden();
