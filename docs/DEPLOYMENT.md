@@ -1296,10 +1296,57 @@ A table created by a migration newer than the source D1's schema (e.g.
 before upgrading) is skipped and absent from `tables`; restore treats it
 as empty. At or past that version a missing table fails the backup.
 
+**Web Push subscriptions (#560).** `push_subscriptions` is backed up
+from v14 on. Backups taken before #560 do not have it: restore logs
+`no push_subscriptions.jsonl although the backup is schema vN`, and every
+browser has to subscribe again, as before.
+
+What a row is worth to someone who reads the backup:
+- **Outside the deployment, nothing that pushes.** The frontend always
+  subscribes with this deployment's `applicationServerKey`, and push
+  services only accept a message signed with `VAPID_PRIVATE_KEY`. That key
+  lives in `.env` and never in a backup; the manifest records only the
+  public key (`vapidPublicKey`).
+- **Inside the deployment, the endpoint is the subscription's identity.**
+  `POST /api/push/subscribe` re-assigns an existing endpoint to the caller.
+  The DELETE is owner-scoped since #566. So someone who can read a backup **and**
+  has an account can point another user's browser at their own notifications,
+  which also takes the row away from that user. They never receive the other
+  user's notifications. See
+  [SECURITY.md → Web Push endpoints](./SECURITY.md#web-push-endpoints-566).
+- This is the reason to protect backups (#562), on top of what they already
+  carry: password hashes, ciphertext, workspaces and `.env` files written by
+  `writeEnvFile`.
+
+**The subscriptions only work on a target with the same VAPID keypair.**
+Restore still restores the rows, but warns when the target's key differs
+(push services answer 403, which is not a "gone" status, so nothing prunes
+the rows) or is unset (nothing is sent). Two ways out:
+- install the source's `VAPID_PUBLIC_KEY`/`VAPID_PRIVATE_KEY`; or
+- clear the rows (`DELETE FROM push_subscriptions` on the D1, or only the
+  rows created before the restore) and have each user turn notifications
+  **off and then on**. Turning them on while the browser still holds a
+  subscription for the old key fails, and `GET /api/push/status` keeps
+  answering `subscribed: true` while a row exists.
+
+A backup taken while push was not configured records no key; its rows are
+restored without the warning.
+
+On `--force`, `push_subscriptions` is replayed with `ON CONFLICT DO
+NOTHING`, unlike the other tables: when the target has a newer row for the
+same endpoint (a browser that switched accounts), the target's row wins,
+and the log line counts it (`N kept from the target`). A malformed row
+still fails the restore.
+
+**File permissions.** `push_subscriptions.jsonl` gets the same modes as every
+other file in the backup: 0640 in the `BACKUP_GROUP_GID` group in a daily
+`20*` backup, 0600 everywhere else (see "Who can read a backup (#562)" above).
+
 Restore guards:
 
 - **Non-empty target** (any `users`/`sessions` rows) refuses without
-  `--force`. Replays use `INSERT OR REPLACE`, so a `--force` re-run over a
+  `--force`. Replays use `INSERT OR REPLACE` (`ON CONFLICT DO
+  NOTHING` for `push_subscriptions`, see above), so a `--force` re-run over a
   partial restore converges.
 - **`SECRETS_ENCRYPTION_KEY` mismatch aborts before any write** and has
   NO `--force` override — a wrong key silently corrupts every secret with

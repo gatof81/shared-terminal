@@ -88,8 +88,23 @@ const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 // missing table still fails loudly. Restore reads a missing .jsonl as
 // zero rows, and its migrateDb() creates the table on the target; it warns
 // when the manifest's schema says the table should have been exported.
-const TABLES: ReadonlyArray<{ name: string; orderBy: string; sinceSchema?: number }> = [
+export const TABLES: ReadonlyArray<{ name: string; orderBy: string; sinceSchema?: number }> = [
 	{ name: "users", orderBy: "id" },
+	// #355 — no FK (user_id is a plain column). Each row is a browser's
+	// PushSubscription: `endpoint` (an unguessable URL) and `p256dh`/`auth`
+	// (the keys that encrypt a payload for that browser). Outside this
+	// deployment they are not enough to push: the frontend always subscribes
+	// with this deployment's applicationServerKey, and a push service only
+	// accepts a message signed with VAPID_PRIVATE_KEY, which lives in the
+	// environment and never in a backup. INSIDE the deployment, though, the
+	// endpoint is the subscription's identity: `POST /api/push/subscribe`
+	// re-assigns an existing endpoint to the caller (the DELETE is
+	// owner-scoped since #566), so a backup reader who also has an account can
+	// point another user's browser at their own notifications, taking the row
+	// away from that user (docs/SECURITY.md, Web Push endpoints). That is why the backup's permissions
+	// matter (#562). Before #560 the table was missing here, so every restore
+	// emptied it.
+	{ name: "push_subscriptions", orderBy: "id", sinceSchema: 14 },
 	{ name: "user_groups", orderBy: "id" },
 	{ name: "user_group_members", orderBy: "group_id, user_id" },
 	{ name: "sessions", orderBy: "session_id" },
@@ -124,6 +139,10 @@ export interface BackupManifest {
 	globalRevocation?: true;
 	/** `.projects/<pid>` logs and artifacts (PROJECT_CONVERSATION.md §8). Absent ⇔ none on disk. */
 	projects?: Record<string, ProjectBackupEntry>;
+	/** VAPID_PUBLIC_KEY when the backup was taken (public; absent = push not
+	 *  configured, or a backup older than #560). The subscriptions only work
+	 *  under the keypair they were created for: restore warns on a mismatch. */
+	vapidPublicKey?: string;
 }
 
 export interface WorkspaceEntry {
@@ -202,6 +221,9 @@ export async function runBackup(outDir: string): Promise<BackupManifest> {
 		schemaVersion,
 		tables: {},
 		workspaces: {},
+		...(process.env.VAPID_PUBLIC_KEY?.trim()
+			? { vapidPublicKey: process.env.VAPID_PUBLIC_KEY.trim() }
+			: {}),
 	};
 
 	for (const t of TABLES) {
@@ -558,7 +580,8 @@ async function restoreAll(
 		// A table the backup's schema already had but whose .jsonl is absent was
 		// not exported: a backend older than the table took the backup after a
 		// rollback (manifest = the D1 ledger, e.g. v19, while its TABLES list
-		// stops at v18). It restores as zero rows; say so instead of hiding it.
+		// stops at v18), or one that never exported it (push_subscriptions
+		// before #560). It restores as zero rows; say so instead of hiding it.
 		if (
 			(t.sinceSchema ?? 0) <= manifest.schemaVersion &&
 			!(await fs.stat(path.join(inDir, `${t.name}.jsonl`)).then(
@@ -572,6 +595,7 @@ async function restoreAll(
 			);
 		}
 		const rows = await readJsonl(inDir, t.name);
+		let keptFromTarget = 0;
 		for (const row of rows) {
 			const cols = Object.keys(row);
 			for (const col of cols) {
@@ -582,12 +606,55 @@ async function restoreAll(
 				}
 			}
 			const placeholders = cols.map(() => "?").join(", ");
+			const values = cols.map((c) => row[c] as string | number | null);
+			if (t.name === "push_subscriptions") {
+				// The target's row wins: the app re-owns a UNIQUE `endpoint` when a
+				// browser switches accounts, and OR REPLACE would hand that browser
+				// back to the backup's owner under --force. ON CONFLICT DO NOTHING,
+				// not OR IGNORE: only a uniqueness conflict is skipped — a NULL or
+				// malformed row still fails the restore. Identical rows (the --force
+				// re-run over a partial restore) converge either way.
+				const r = await d1Query(
+					`INSERT INTO ${t.name} (${cols.join(", ")}) VALUES (${placeholders}) ON CONFLICT DO NOTHING`,
+					values,
+				);
+				if (r.meta.changes === 0) keptFromTarget++;
+				continue;
+			}
 			await d1Query(
 				`INSERT OR REPLACE INTO ${t.name} (${cols.join(", ")}) VALUES (${placeholders})`,
-				cols.map((c) => row[c] as string | number | null),
+				values,
 			);
 		}
-		logger.info(`[restore] ${t.name}: ${rows.length} row(s)`);
+		logger.info(
+			`[restore] ${t.name}: ${rows.length} row(s)` +
+				(keptFromTarget > 0
+					? `, ${keptFromTarget} kept from the target (same endpoint or id already there)`
+					: ""),
+		);
+		// Restored either way (the operator may still install the source's keys),
+		// but a subscription only accepts pushes signed by the keypair it was
+		// created under: another key gets 403 from the push service, which is not
+		// a "gone" status, so sendToUser never prunes them on its own.
+		const here = process.env.VAPID_PUBLIC_KEY?.trim() || undefined;
+		// Only the rows this restore inserted: the ones kept from the target
+		// (same endpoint already there) belong to the target's own key.
+		const inserted = rows.length - keptFromTarget;
+		if (
+			t.name === "push_subscriptions" &&
+			inserted > 0 &&
+			manifest.vapidPublicKey !== undefined &&
+			manifest.vapidPublicKey !== here
+		) {
+			logger.warn(
+				`[restore] push_subscriptions: ${inserted} restored subscription(s) were created for another VAPID key — ` +
+					(here
+						? "this deployment's VAPID_PUBLIC_KEY differs, so push services will refuse them (403, never pruned)"
+						: "VAPID is not configured here, so nothing will be sent to them") +
+					". Install the source's VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY, or clear the rows and have each user " +
+					"turn notifications off and on (docs/DEPLOYMENT.md, Backup & restore)",
+			);
+		}
 	}
 
 	// The destination host has none of the source's containers — land

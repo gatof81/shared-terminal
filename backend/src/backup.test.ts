@@ -36,6 +36,8 @@ const dbState = vi.hoisted(() => ({
 	missingTables: new Set<string>(),
 	/** Runs before the first query of a backup (the schema read): lets a test look at the disk then. */
 	onSchemaRead: null as null | (() => Promise<void>),
+	/** push_subscriptions endpoints the target already holds: their INSERT changes nothing. */
+	pushConflicts: new Set<string>(),
 }));
 
 vi.mock("./db.js", () => ({
@@ -68,8 +70,14 @@ vi.mock("./db.js", () => ({
 				],
 			};
 		}
-		if (sql.startsWith("INSERT OR REPLACE")) {
+		if (sql.startsWith("INSERT OR REPLACE") || sql.startsWith("INSERT INTO")) {
 			dbState.inserts.push({ sql, params: params ?? [] });
+			if (
+				/^INSERT INTO push_subscriptions /.test(sql) &&
+				dbState.pushConflicts.has(String(params?.[2]))
+			) {
+				return { ...ok, meta: { ...ok.meta, changes: 0 }, results: [] };
+			}
 			return { ...ok, results: [] };
 		}
 		if (sql.startsWith("UPDATE sessions SET status = 'stopped'")) {
@@ -120,6 +128,7 @@ beforeEach(async () => {
 	dbState.selected.length = 0;
 	dbState.missingTables.clear();
 	dbState.onSchemaRead = null;
+	dbState.pushConflicts.clear();
 	outDir = mkdtempSync(path.join(os.tmpdir(), "st-backup-out-"));
 	// runBackup requires an EMPTY dir; mkdtemp gives us one, but it must
 	// not pre-create workspaces/ — runBackup does that itself.
@@ -367,6 +376,164 @@ describe("backup permissions (#562)", () => {
 	});
 });
 
+describe("push_subscriptions (#560)", () => {
+	const SUB = {
+		id: "p1",
+		user_id: "u1",
+		endpoint: "https://push.example/send/abc",
+		p256dh: "BPub",
+		auth: "secret-auth",
+		created_at: "2026-11-01 10:00:00",
+	};
+	afterEach(() => {
+		vi.unstubAllEnvs();
+	});
+
+	async function backupWithSub(vapid: string | undefined): Promise<void> {
+		dbState.schemaVersion = 14;
+		dbState.tables.set("users", [{ id: "u1", username: "diego" }]);
+		dbState.tables.set("push_subscriptions", [SUB]);
+		vi.stubEnv("VAPID_PUBLIC_KEY", vapid ?? "");
+		await runBackup(outDir);
+		dbState.tables.clear();
+	}
+	const pushWarnings = (warn: { mock: { calls: unknown[][] } }) =>
+		warn.mock.calls.map((c) => String(c[0])).filter((m) => /another VAPID key/.test(m));
+
+	it("is exported from v14 on, with the backup's VAPID public key in the manifest", async () => {
+		await backupWithSub("BKeyA");
+		const manifest = JSON.parse(await fs.readFile(path.join(outDir, "manifest.json"), "utf-8"));
+		expect(manifest.tables.push_subscriptions).toBe(1);
+		expect(manifest.vapidPublicKey).toBe("BKeyA");
+		const jsonl = await fs.readFile(path.join(outDir, "push_subscriptions.jsonl"), "utf-8");
+		expect(JSON.parse(jsonl.trim())).toEqual(SUB);
+	});
+
+	it("is skipped before v14 and carries no key when push is not configured", async () => {
+		dbState.tables.set("users", [{ id: "u1", username: "diego" }]);
+		const manifest = await runBackup(outDir); // schema v12
+		expect(dbState.selected).not.toContain("push_subscriptions");
+		expect(manifest.tables.push_subscriptions).toBeUndefined();
+		expect(manifest.vapidPublicKey).toBeUndefined();
+	});
+
+	it("round-trips: restore replays the rows", async () => {
+		await backupWithSub("BKeyA");
+		vi.stubEnv("VAPID_PUBLIC_KEY", "BKeyA");
+		await runRestore(outDir);
+		const ins = dbState.inserts.find((i) => /INTO push_subscriptions /.test(i.sql));
+		expect(ins?.sql).toMatch(
+			// ON CONFLICT DO NOTHING: on --force, a target row the app has re-owned
+			// since the backup (same endpoint, another user) is not handed back.
+			/^INSERT INTO push_subscriptions \(id, user_id, endpoint, p256dh, auth, created_at\) VALUES \(\?, \?, \?, \?, \?, \?\) ON CONFLICT DO NOTHING$/,
+		);
+		expect(ins?.params).toEqual([
+			SUB.id,
+			SUB.user_id,
+			SUB.endpoint,
+			SUB.p256dh,
+			SUB.auth,
+			SUB.created_at,
+		]);
+		// After users: no FK today, but the rows belong to them.
+		const order = dbState.inserts.map((i) => /INTO (\w+)/.exec(i.sql)?.[1]);
+		expect(order.indexOf("users")).toBeLessThan(order.indexOf("push_subscriptions"));
+	});
+
+	it("--force onto a target that already holds the endpoint keeps the target's row and says so", async () => {
+		await backupWithSub("BKeyA");
+		vi.stubEnv("VAPID_PUBLIC_KEY", "BKeyA");
+		dbState.pushConflicts.add(SUB.endpoint);
+		const info = vi.spyOn(logger, "info");
+		try {
+			await runRestore(outDir, { force: true });
+			expect(
+				info.mock.calls.some((c) =>
+					/\[restore\] push_subscriptions: 1 row\(s\), 1 kept from the target/.test(String(c[0])),
+				),
+			).toBe(true);
+		} finally {
+			info.mockRestore();
+		}
+	});
+
+	it("warns when the subscriptions were created for another VAPID key, and still restores them", async () => {
+		await backupWithSub("BKeyA");
+		const warn = vi.spyOn(logger, "warn");
+		try {
+			vi.stubEnv("VAPID_PUBLIC_KEY", "BKeyB");
+			await runRestore(outDir, { force: true });
+			expect(pushWarnings(warn)).toHaveLength(1);
+			expect(pushWarnings(warn)[0]).toMatch(/VAPID_PUBLIC_KEY differs/);
+			expect(dbState.inserts.some((i) => /INTO push_subscriptions /.test(i.sql))).toBe(true);
+
+			warn.mockClear();
+			vi.stubEnv("VAPID_PUBLIC_KEY", "");
+			await runRestore(outDir, { force: true });
+			expect(pushWarnings(warn)[0]).toMatch(
+				/VAPID is not configured here, so nothing will be sent/,
+			);
+
+			warn.mockClear();
+			vi.stubEnv("VAPID_PUBLIC_KEY", "BKeyA");
+			await runRestore(outDir, { force: true });
+			expect(pushWarnings(warn)).toHaveLength(0);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it("the key warning counts only the rows this restore inserted, not those kept from the target", async () => {
+		await backupWithSub("BKeyA");
+		vi.stubEnv("VAPID_PUBLIC_KEY", "BKeyB");
+		dbState.pushConflicts.add(SUB.endpoint); // the only row is already there: nothing inserted
+		const warn = vi.spyOn(logger, "warn");
+		try {
+			await runRestore(outDir, { force: true });
+			expect(pushWarnings(warn)).toHaveLength(0);
+			dbState.pushConflicts.clear();
+			warn.mockClear();
+			await runRestore(outDir, { force: true });
+			expect(pushWarnings(warn)[0]).toMatch(
+				/^\[restore\] push_subscriptions: 1 restored subscription\(s\)/,
+			);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it("does not warn about keys when the backup recorded none", async () => {
+		await backupWithSub(undefined);
+		const warn = vi.spyOn(logger, "warn");
+		try {
+			vi.stubEnv("VAPID_PUBLIC_KEY", "BKeyB");
+			await runRestore(outDir);
+			expect(pushWarnings(warn)).toHaveLength(0);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it("an older backup without the table (schema ≥ 14) restores none and says why", async () => {
+		await backupWithSub("BKeyA");
+		await fs.rm(path.join(outDir, "push_subscriptions.jsonl")); // what every backup before #560 looks like
+		const warn = vi.spyOn(logger, "warn");
+		try {
+			await runRestore(outDir);
+			expect(
+				warn.mock.calls.some((c) =>
+					/push_subscriptions: no push_subscriptions\.jsonl although the backup is schema v14/.test(
+						String(c[0]),
+					),
+				),
+			).toBe(true);
+			expect(dbState.inserts.some((i) => /INTO push_subscriptions /.test(i.sql))).toBe(false);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+});
+
 describe("runRestore", () => {
 	async function makeBackup(): Promise<void> {
 		dbState.tables.set("users", [{ id: "u1", username: "diego" }]);
@@ -429,8 +596,8 @@ describe("runRestore", () => {
 	it("warns for a table the backup's schema has but its files lack (backup by an older backend)", async () => {
 		await makeBackup();
 		// A rollback backend writes the D1 ledger's version (v19) but exports
-		// only the tables it knows. This fixture's source is v12, so the v16
-		// and v18 tables are absent too: every one of them must be named.
+		// only the tables it knows. This fixture's source is v12, so the v14,
+		// v16 and v18 tables are absent too: every one of them must be named.
 		const manifestPath = path.join(outDir, "manifest.json");
 		const manifest = JSON.parse(await fs.readFile(manifestPath, "utf-8"));
 		await fs.writeFile(manifestPath, JSON.stringify({ ...manifest, schemaVersion: 19 }));
@@ -442,6 +609,7 @@ describe("runRestore", () => {
 				.map((c) => String(c[0]))
 				.filter((m) => /no \w+\.jsonl although/.test(m));
 			expect(missing.map((m) => /\[restore\] (\w+):/.exec(m)?.[1])).toEqual([
+				"push_subscriptions",
 				"claude_conversations",
 				"conversation_user_meta",
 				"projects",
