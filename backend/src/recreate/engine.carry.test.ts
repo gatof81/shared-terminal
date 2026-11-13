@@ -534,6 +534,47 @@ describe("carry-over recreation (§2.7.7)", () => {
 		await expect(h.attempts.assertResolved(SID)).resolves.toBeUndefined();
 	});
 
+	it("the rollback's begin() fails after writing its record: resolved rolled-back with O still retained, and the next rollback works", async () => {
+		const h = await setup();
+		dirtyLayer(h);
+		expect((await h.engine.recreate(SID, IMG_N, { preserve: true })).ok).toBe(true);
+		const nId = nIdOf(h) as string;
+		await h.docker.stop(nId);
+		// The record lands (moving the previous one, which holds `retained`,
+		// into history), then begin() throws — an fsync error past the rename.
+		const realBegin = h.attempts.begin.bind(h.attempts);
+		h.attempts.begin = (async (...args: Parameters<typeof realBegin>) => {
+			await realBegin(...args);
+			throw new Error("EIO: fsync");
+		}) as typeof h.attempts.begin;
+		const renamesBefore = h.docker.log.filter((l) => l.startsWith("rename:")).length;
+		expect(await h.engine.rollbackToRetained(SID)).toMatchObject({
+			ok: false,
+			status: 500,
+			code: "recreate-failed",
+		});
+		expect(h.docker.log.filter((l) => l.startsWith("rename:")).length).toBe(renamesBefore);
+		expect(h.d1.row.container_id).toBe(nId);
+		const rec = await recordOf(h);
+		expect(rec).toMatchObject({
+			state: "resolved",
+			reverse: true,
+			outcome: { kind: "rolled-back" },
+		});
+		expect(rec?.retained).toMatchObject({ containerId: O_ID, role: "O" });
+		// The retained O is still known: a further recreation stays refused…
+		const pf = await h.engine.preflight(SID, { preserve: true });
+		expect(JSON.stringify(pf)).toContain("retained-pending");
+		// …and the rollback can be retried.
+		h.attempts.begin = realBegin;
+		expect(await h.engine.rollbackToRetained(SID)).toMatchObject({
+			ok: true,
+			body: { outcome: "rolled-back-to-retained", containerId: O_ID },
+		});
+		expect(h.d1.row.container_id).toBe(O_ID);
+		expect(h.docker.containers.get(O_ID)?.name).toBe(CANONICAL);
+	});
+
 	it("rollback whose D1 statement does not apply restores both names and resolves rolled-back; D1 stays on N", async () => {
 		const h = await setup();
 		dirtyLayer(h);
