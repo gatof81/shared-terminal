@@ -1137,10 +1137,13 @@ the host and without touching D1:
    the running `app` is not touched:
    `docker build -t st-backend:migrate-check .`
 3. Run the check in a throwaway container with no network, the backup
-   mounted read-only and no environment file:
+   mounted read-only and no environment file — only `NODE_ENV=production`,
+   which the logger needs: without it it asks for the dev transport
+   (`pino-pretty`), which the production image does not carry, and the
+   check refuses with `unexpected Error` (seen on the 2026-11-13 release):
 
    ```bash
-   docker run --rm --network none \
+   docker run --rm --network none -e NODE_ENV=production \
      -v <WORKSPACE_ROOT>/.backups/<timestamp>:/backup:ro \
      st-backend:migrate-check npm run -s db:migrate-check -- /backup
    ```
