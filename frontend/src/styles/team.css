@@ -16,7 +16,10 @@
 #project-view:has(> .tw) {
 	padding: 0;
 	overflow: hidden;
-	container-type: inline-size;
+	/* size, not inline-size: the short-height rules below query the HEIGHT
+	   too. Safe: #project-view is position:absolute; inset:0, so its size
+	   never depends on its content. */
+	container-type: size;
 }
 
 .tw {
@@ -1131,4 +1134,44 @@
 	box-sizing: border-box;
 	min-height: 52px;
 	box-shadow: none;
+}
+
+/* ── Short heights: the phone keyboard (owner report 2026-11-13) ─────────────
+   With the keyboard up an iPhone shows ~300–380 px of the app (it follows
+   the visual viewport, main.ts --app-vh). The thread's title (two lines +
+   participants) and the composer (To row, two-line field, two-line hint)
+   then took everything: the conversation shrank to 28 px and, at 290 px,
+   the composer no longer fit — "the input jumps to the top". Below 560 px
+   of page height the chrome folds: one-line title, no participants line,
+   no hint (the To chips say who receives it), a tighter field. */
+@container (max-height: 560px) {
+	.tw-main-head {
+		flex-wrap: nowrap;
+		gap: 0 8px;
+		padding: 2px 0;
+	}
+	.tw-main-title {
+		font-size: 0.95rem;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.tw-main-sub {
+		display: none;
+	}
+	.tw .tw-back {
+		min-height: 36px;
+	}
+	.tw-composer {
+		gap: 6px;
+		padding: 6px 0 8px;
+	}
+	.tw-hint {
+		display: none;
+	}
+	.tw-text {
+		min-height: 40px;
+		max-height: 4.6em;
+		padding: 8px 12px;
+	}
 }
