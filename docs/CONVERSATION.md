@@ -865,6 +865,28 @@ tampoco termina una petición ya enviada a D1. Por eso:
   - si la confirmación ganó (`container_id` ya en el destino), se converge sobre ese contenedor,
     que **no se borra**;
   - si no, la sentencia en vuelo ya no puede aplicarse, y el rollback borra `N` sin riesgo.
+- **La generación sola no prueba nada sobre la confirmación** (decisión del responsable,
+  2026-11-13). `recreate_fence > :fence` dice solo que la generación quedó invalidada, y la puede
+  haber movido la propia confirmación o una valla, de este proceso o de una recuperación anterior.
+  Toda decisión de «aplicada» o «no aplicada» se toma **con la generación probada y la identidad
+  del contenedor vigente juntas**, tanto para el CAS como para el `casBack`:
+  - generación probada y `container_id` = destino del intento (`N`; en uno inverso, el retenido
+    que vuelve) ⇒ aplicada;
+  - generación probada y `container_id` = el contenedor reemplazado (`O`; en uno inverso, `N`) ⇒
+    no aplicada, aunque la generación se haya movido;
+  - generación probada y `container_id` distinto de ambos (o la fila ausente) ⇒ ni lo uno ni lo
+    otro: no se borra nada, el intento sigue sin resolver y queda para el operador;
+  - generación sin probar ⇒ nada se decide.
+
+  El id de `N` es nuevo e irrepetible por intento, y solo la sentencia de confirmación lo escribe
+  en `container_id`. El id del retenido solo lo escribe el `casBack`. Por eso esa identidad basta.
+  El hash (`ingest_token_hash`) no es evidencia en una recuperación: el registro no lo guarda
+  (nunca guarda el token ni su hash), y una deshabilitación o revocación posterior lo mueve a
+  `…_suspended` sin deshacer la confirmación. En el proceso vivo, «aplicada» es la respuesta de
+  la propia sentencia (1 fila). Esa sentencia mueve `container_id`, el hash y la generación
+  juntos, en el CAS y en el `casBack`.
+- La valla no toca `revocation_seq` ni las condiciones de revocación: el CAS de la habilitación
+  (§2.7.5) y el `conversation_requested = 1` del CAS del paso 4 siguen igual.
 - **Sin prueba**, no se borra nada ni se resuelve, y el intento sigue `uncertain`. Es el caso de
   una valla rechazada (un error de D1 prueba que no se aplicó), con timeout o ambigua sin la
   generación movida en la relectura, o de una lectura fallida. La siguiente pasada repite la
@@ -1446,6 +1468,11 @@ y `/tmp` se transmite a `N` antes de su primer arranque.
     aplicarse dos veces. Con esa evidencia, `recover` procede como siempre (`committed`).
   - D1 en el contenedor reemplazado **no** es evidencia de que la sentencia no llegará. Ocurre
     también si `N` nunca llegó a existir o ya no está.
+  - **Tampoco lo es la captura deshabilitada** (`conversation_requested = 0`, decisión del
+    responsable, 2026-11-13). El CAS antiguo exige `= 1`, pero el lock de este proceso no gobierna
+    una petición que el proceso anterior ya envió, y una habilitación posterior volvería a abrir
+    la ventana. Con D1 todavía en `O`, el registro anterior sigue bloqueado, esté la captura como
+    esté.
   - En cualquier otro caso responde 409 `commit-unknown-legacy` **antes** de adoptar el intento
     o de tocar nada. La sesión sigue `recreate-unresolved`.
   - **Procedimiento del operador:**
@@ -1460,11 +1487,17 @@ y `/tmp` se transmite a `N` antes de su primer arranque.
        (si registran la respuesta de `d1 commit`/`d1 rollback`). Un cierre manual se documenta
        en el issue antes de ejecutarlo.
     3. Si D1 ya está en el destino, `recover` funciona sin pasos extra.
-  - **Volver a un backend anterior** después de v1.9.4: lee como ilegible todo registro que
-    lleve `commitFence`, y desde v1.9.4 eso incluye los resueltos (son claves desconocidas para
-    su parser estricto). Esas sesiones quedan `recreate-unresolved` (fail-closed) hasta volver a
-    v1.9.4. Es una condición del rollback de código. La columna `recreate_fence` no estorba al
-    backend anterior: nunca la lee ni la escribe.
+  - **Volver a un backend anterior** después de v1.9.4 es una **condición del rollback de
+    código**, aceptada por el responsable como limitación explícita (2026-11-13).
+    - El backend anterior lee como ilegible todo registro que lleve `commitFence`, y desde
+      v1.9.4 eso incluye los resueltos (son claves desconocidas para su parser estricto).
+    - Esas sesiones quedan `recreate-unresolved` (fail-closed) mientras corra.
+    - **Nunca** se borran, editan ni convierten los registros para esquivarlo: son la única
+      evidencia durable del intento, y quitar `commitFence` convertiría un intento vallado en uno
+      que el código anterior cree entender.
+    - La compatibilidad exige reinstalar una versión que los lea (v1.9.4 o posterior).
+    - La columna `recreate_fence` no estorba al backend anterior: nunca la lee ni la escribe.
+    - Receta en DEPLOYMENT.md, «Rollback (from 3.0d)».
 - **Auditoría.** Con owner ajeno, cada uno de los tres verbos escribe una fila `operate` puntual
   **antes** de la llamada, fail-closed (como el `start` de #429).
 - **Shell host**: `npm run recreate:admin -- <sid> preflight [--preserve] | recreate --image

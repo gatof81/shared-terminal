@@ -816,6 +816,22 @@ Fastest first:
   backend older than 3.0d knows neither the attempt record nor the
   `recreate-unresolved` gate, so `start`, `stop` and a hard delete would act
   on that session. Keep the 3.0d backend in place (next section).
+
+  **Rolling back past the commit fence (contract v1.9.4, #627) is a known
+  limitation, accepted by the owner.** From that version on, every attempt
+  record (`.st-control/<sid>/recreate-attempt.json`) carries `commitFence`,
+  resolved ones included. An older backend does not understand that key: its
+  strict parser reads the record as unreadable, and that session stays
+  `recreate-unresolved` (start, stop, recreate and hard delete refused) for
+  as long as the older backend runs.
+  - **Never delete, edit or convert those records** to get past this. The
+    record is the only durable evidence of the attempt (and of whether its
+    commit may have been sent); a record stripped of `commitFence` would
+    turn a fenced attempt into one the old backend thinks it understands.
+  - The only way to make those sessions usable again is to **reinstall a
+    backend version that reads them** (v1.9.4 or later).
+  - The `recreate_fence` column (migration v20) itself does not bother the
+    older backend: it never reads or writes it.
 - **Alias:** harmless to keep.
 
 Captured data stays under `.conversations/` until a hard delete (or manual
