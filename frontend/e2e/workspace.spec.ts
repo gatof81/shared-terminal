@@ -490,8 +490,17 @@ test.describe("workspace — layout", () => {
 
 	test("phone: For you's Done sits beside the card text, and the New task bar is on top of what scrolls under it", async ({
 		app,
+		backend,
 		page,
 	}) => {
+		// Enough threads that Now scrolls well past the bar (the denser phone
+		// layout made the seeded column too short to put a row under it).
+		for (let i = 0; i < 8; i++)
+			backend.projectTask(
+				`c8000000-0000-4000-8000-0000000000${String(i).padStart(2, "0")}`,
+				[AGENT_IDS.developer],
+				`Another task ${i}`,
+			);
 		await page.setViewportSize({ width: 390, height: 844 });
 		await app.login("alice", projectHash);
 		const card = cards(page).filter({ has: page.locator(".tw-done") }).first();
@@ -505,10 +514,13 @@ test.describe("workspace — layout", () => {
 		// With a thread row (avatars on its left) scrolled under it, the bar is on
 		// top across its whole width — those avatars once painted over it.
 		let bar = (await page.locator("#project-view .tw-new").boundingBox())!;
-		const row = page.locator("#project-view .tw-now .tw-thread-row").first();
+		// The LAST row: it starts below the bar, so scrolling can always bring it
+		// under the bar's middle (the first one may already sit above it).
+		const row = page.locator("#project-view .tw-now .tw-thread-row").last();
 		await page.locator("#project-view .tw-now").evaluate(
 			(col, { y }) => {
-				const r = col.querySelector(".tw-thread-row")!.getBoundingClientRect();
+				const rows = col.querySelectorAll(".tw-thread-row");
+				const r = rows[rows.length - 1]!.getBoundingClientRect();
 				col.scrollTop += r.top - y;
 			},
 			{ y: bar.y + bar.height / 2 - 20 },
@@ -539,6 +551,27 @@ test.describe("workspace — layout", () => {
 		// `bottom` and its shadow bands painted over the last row's end).
 		expect(last.y + last.height).toBeLessThanOrEqual(footer.y - 12);
 		expect(bar.width).toBeGreaterThan(350);
+	});
+
+	test("phone: the agents are one compact row, so For you starts high (owner: too much wasted space)", async ({
+		app,
+		page,
+	}) => {
+		await page.setViewportSize({ width: 390, height: 844 });
+		await app.login("alice", projectHash);
+		const strip = page.locator("#project-view .tw-agents");
+		await expect(strip.locator(".tw-agent")).toHaveCount(5);
+		const s = (await strip.boundingBox())!;
+		// One row of chips (was a grid of 84-px cards in two rows, ~200 px).
+		expect(s.height).toBeLessThanOrEqual(60);
+		const tops = await strip.locator(".tw-agent").evaluateAll((as) => as.map((a) => a.getBoundingClientRect().top));
+		expect(new Set(tops.map(Math.round)).size).toBe(1);
+		for (const box of await strip.locator(".tw-agent").evaluateAll((as) => as.map((a) => a.getBoundingClientRect().height)))
+			expect(box).toBeGreaterThanOrEqual(44);
+		// For you's heading sits in the top quarter of the phone (was ~355 px down).
+		const fy = (await page.locator("#project-view .tw-foryou-inline .tw-h3").boundingBox())!;
+		expect(fy.y).toBeLessThan(230);
+		await noHorizontalScroll(page);
 	});
 
 	test("wide page: For you moves to its own column; medium: it folds into Now", async ({ app, page }) => {
