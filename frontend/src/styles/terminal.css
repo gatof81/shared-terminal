@@ -29,8 +29,10 @@
   color: var(--c-text);
   font-weight: 500;
   flex: 0 1 auto;
-  /* Never squeezed to nothing: the phone bar (v1) scrolls sideways past this. */
-  min-width: 6ch;
+  /* 0, not a floor in ch: a floor also WIDENS a name shorter than it
+     ("docs" moved everything after it). The agent link below shrinks eight
+     times faster, so the name is the last text to give way. */
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
