@@ -30,8 +30,8 @@
   font-weight: 500;
   flex: 0 1 auto;
   /* 0, not a floor in ch: a floor also WIDENS a name shorter than it
-     ("docs" moved everything after it). The agent link below shrinks eight
-     times faster, so the name is the last text to give way. */
+     ("docs" moved everything after it). The agent link below gives way first
+     (shrink 1000 : 1), so the name is the last text to be cut. */
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -41,10 +41,13 @@
    beside it: the bar's height is part of the terminal's box. */
 #terminal-session-agent {
   /* Gives way long before the session name does: the name is the primary text. */
-  flex: 0 8 auto;
+  flex: 0 1000 auto;
   /* …but never to nothing: "@han…" still says the session has an agent. */
   min-width: 5ch;
-  max-width: 24rem;
+  /* No max-width: a clamped item is frozen by the flex algorithm and the
+     rest of the deficit then lands on the name alone ("st-fronte…" beside
+     a 24rem agent link). Unclamped, the link takes all of it down to its floor before the
+     name loses a pixel. */
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

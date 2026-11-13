@@ -23,6 +23,17 @@ test.describe("session bar", () => {
 		await expect(page.locator("#terminal-session-agent")).toBeVisible();
 		const short = (await bar.boundingBox())!.height;
 
+		// A long project name is the agent link's problem, not the session
+		// name's: the name stays whole while the link gives way.
+		backend.projects[0]!.name = "Shared Terminal — plataforma de agentes y sesiones (producción)";
+		await page.reload();
+		const shortName = page.locator("#terminal-session-name");
+		await expect(page.locator("#terminal-session-agent")).toContainText("plataforma");
+		expect(await shortName.evaluate((el) => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(
+			0,
+		);
+		expect((await bar.boundingBox())!.height).toBe(short);
+
 		backend.session(SESSION_IDS.running)!.name = LONG;
 		for (const width of [1920, 1440, 1280, 1024]) {
 			await page.setViewportSize({ width, height: 800 });
