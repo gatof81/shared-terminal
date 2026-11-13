@@ -78,6 +78,10 @@
   color: var(--c-faint);
   white-space: nowrap;
 }
+/* --c-faint on the selected item's fill is under AA (axe color-contrast). */
+.project-item[aria-current="page"] .project-item-count {
+  color: var(--c-text-2);
+}
 .project-list-note {
   font-size: 0.72rem;
   color: var(--c-muted);

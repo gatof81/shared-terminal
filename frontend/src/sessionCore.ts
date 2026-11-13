@@ -1125,6 +1125,8 @@ export function updateToolbar() {
 	// resolves.
 	emptyState.style.display = "none";
 	terminalSessionName.textContent = s.name;
+	// The bar shows a long name with an ellipsis (terminal.css): the full one on hover.
+	terminalSessionName.title = s.name;
 	// A running session whose terminal gave up reads "disconnected" until
 	// a pane is attached again (Reconnect) — the server-side status alone
 	// would say "running" over an empty area.

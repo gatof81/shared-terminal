@@ -16,9 +16,23 @@
   gap: 0.75rem;
   flex-shrink: 0;
 }
+/* The bar is ONE line, whatever it holds: its height is part of the
+   terminal's box, so a wrap refits xterm and resizes tmux for every viewer
+   (a 46-character session name did exactly that at 1440 px). Nothing in it
+   wraps or shrinks; the two texts of unbounded length — the session name
+   and the agent link below — give way with an ellipsis instead. */
+#terminal-toolbar > * {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
 #terminal-session-name {
   color: var(--c-text);
   font-weight: 500;
+  flex: 0 1 auto;
+  /* Never squeezed to nothing: the phone bar (v1) scrolls sideways past this. */
+  min-width: 6ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 /* P3a: "@handle · project" of a session bound to an agent (sessionCore.ts
    renderToolbarAgent). One line, ellipsis, never taller than the name
