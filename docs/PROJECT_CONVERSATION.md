@@ -41,7 +41,9 @@ en borrador, apagado; D3 no empezó.
   - los bytes sin referencia bajo `artifacts/` (contenido, `.json` y temporales, medidos en disco, así
     que cuentan también los restos de una muerte anterior) tienen un presupuesto de 16 MiB. Toda
     escritura bajo `artifacts/`, temporales incluidos, está reservada contra él antes de empezar, así
-    que la cota es **16 MiB, también con escrituras en curso** (en bytes de archivo, ver §6.2). Un
+    que la cota es **a lo sumo 16 MiB de contenido sin referencia, contando cada inodo una vez,
+    también con escrituras en curso**. La medición de admisión puede contar de más los enlaces duros,
+    lo que solo adelanta un rechazo (§6.2). Un
     registro que agregaría bytes nuevos más allá de él recibe 409 `artifacts-full` con
     `detail: "unreferenced"`, antes de copiar (§6.2);
   - reutilizar un contenido que ya está en disco (registrado o no) no escribe nada, ni temporal: solo
@@ -652,16 +654,19 @@ Las dos rutas tienen además ranuras en vuelo (2 por usuario, 8 por proceso, com
       **presente** que no coincide con su nombre nunca se reemplaza: 409 `artifact-corrupt`, nada
       escrito. Una repetición de un archivo presente no lee nada y sigue en 200; el `GET` se niega a
       servir esos bytes.
-    - **La cota, exacta.** En todo momento, los bytes de archivo sin referencia bajo `artifacts/` son
-      ≤ `PROJECT_ARTIFACTS_UNREFERENCED_MAX_BYTES` (16 MiB), **escrituras en curso incluidas**. Cada
-      escritura en curso es de un alta admitida y no supera su reserva, y cada admisión cumple
-      `medido + reservado + lo suyo ≤ 16 MiB`. No hay término aparte de "escrituras en vuelo": las
-      ranuras de la ruta, sostenidas hasta que el alta termina, limitan la memoria y el trabajo, no
-      este presupuesto. Precisiones:
-      - se cuenta el tamaño de archivo (`st_size`), no los bloques del sistema de archivos ni la
-        entrada del directorio;
-      - un temporal ya enlazado a su nombre final comparte inodo con él y se cuenta dos veces:
-        conservador, solo puede rechazar antes;
+    - **La cota, exacta.** En todo momento, el contenido sin referencia bajo `artifacts/` es **a lo sumo
+      `PROJECT_ARTIFACTS_UNREFERENCED_MAX_BYTES` (16 MiB), contando cada inodo una vez**, escrituras en
+      curso incluidas. Cada escritura en curso es de un alta admitida y no supera su reserva, y cada
+      admisión cumple `medido + reservado + lo suyo ≤ 16 MiB`. No hay término aparte de "escrituras
+      en vuelo": las ranuras de la ruta, sostenidas hasta que el alta termina, limitan la memoria y el
+      trabajo, no este presupuesto. Precisiones:
+      - la unidad es el tamaño de archivo (`st_size`) de cada inodo, no los bloques del sistema de
+        archivos ni la entrada del directorio;
+      - la **medición de admisión** suma `st_size` por **entrada**, así que puede contar de más los
+        enlaces duros. Entre el `link` de un temporal a su nombre final y el `unlink` del temporal,
+        los dos nombres comparten inodo y la medición los cuenta dos veces. Una suma por entrada no es
+        literalmente ≤ 16 MiB en ese intervalo; el contenido por inodo sí. El exceso es solo de la
+        medición: conservador, solo puede rechazar antes, nunca admitir de más;
       - lo que un operador ponga a mano en el directorio también cuenta. Algo que no sea archivo
         regular deja la medición en 503.
     - **Tras una muerte o un reinicio.** Solo una escritura reservada puede dejar un temporal: la
@@ -1313,7 +1318,7 @@ Errores: 400 `invalid-body`; 403 `artifact-restricted`; 404 `artifact-not-found`
 `foreign-session`, `project-log-full` y `project-log-unverifiable` (v0.3.3, antes de copiar); 413
 `artifact-too-large`; 415 `artifact-not-text`; 429 `busy`; 503 `binding-unverified`, `persist-failed`,
 `artifact-store-unverifiable` (v0.3.3). Ninguno escribe nada, salvo lo que §6.2 acota como contenido
-sin referencia (≤ 16 MiB, escrituras en curso incluidas).
+sin referencia (a lo sumo 16 MiB contando cada inodo una vez, escrituras en curso incluidas).
 
 **`POST …/messages` con adjuntos**: 400 `too-many-artifacts` / `artifact-unknown` (`detail` = el sha256)
 antes de escribir nada.

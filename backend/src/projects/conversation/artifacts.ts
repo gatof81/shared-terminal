@@ -25,8 +25,9 @@
  * A death between 2 and 3, or a refusal in 3 the pre-check could not
  * foresee, leaves an unreferenced content file: content-addressed, reused by
  * the next registration of the same bytes, never deleted (§9), and bounded
- * by `PROJECT_ARTIFACTS_UNREFERENCED_MAX_BYTES`, writes in progress included
- * (only reserved bytes are ever written; reuse writes nothing).
+ * by `PROJECT_ARTIFACTS_UNREFERENCED_MAX_BYTES` of content counting each inode
+ * once, writes in progress included (only reserved bytes are ever written;
+ * reuse writes nothing).
  */
 
 import { createHash, randomBytes } from "node:crypto";
@@ -51,9 +52,13 @@ export const PROJECT_ARTIFACTS_MAX_BYTES = 256 * 1024 * 1024;
  * temps — measured on disk, so a restart's leftovers count). A registration
  * that would add new bytes is admitted only while measured + reserved + its
  * own ≤ this; otherwise refused before copying. Nothing is deleted to make
- * room. The bound is strict, writes in progress included: a registration
- * writes (temps too) only the parts it reserved, and reusing existing
- * content writes nothing (storeContent `writes`).
+ * room. The bound — at most this much unreferenced content, counting each
+ * inode once — holds with writes in progress: a registration writes (temps
+ * too) only the parts it reserved, and reusing existing content writes
+ * nothing (storeContent `writes`). The admission measurement sums st_size
+ * per ENTRY, so between a temp's `link` and its `unlink` the two names of
+ * one inode are counted twice: an over-count of the measurement only, which
+ * can refuse earlier, never admit more.
  */
 export const PROJECT_ARTIFACTS_UNREFERENCED_MAX_BYTES = 16 * 1024 * 1024;
 const NAME_MAX = 96;
