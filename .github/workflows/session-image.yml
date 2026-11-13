@@ -20,7 +20,7 @@ name: Session Image
 # builder under backend/src/conversation/, the recreation engine under
 # backend/src/recreate/ (with the attempt record and lifecycle lock), and
 # the `st-backend` alias in docker-compose.yml — which is why those are in
-# the filter. The cost side is also different: a docker build is ~5 min of
+# the filter. The cost side is also different: a cold docker build is ~5 min of
 # critical path, not the <1 min ci.yml accepts as noise.
 #
 # Consequence: this can NOT be a required check in branch protection — it
@@ -132,10 +132,27 @@ jobs:
       - name: mock-anthropic unit tests
         run: node --test session-image/test/mock-anthropic.test.mjs
 
-      # Plain `docker build`, no buildx cache: the job only runs when the
-      # image's inputs changed, i.e. exactly when a cache would be cold.
+      # Buildx with the GitHub Actions layer cache. The job runs on backend
+      # changes too (the smokes drive dockerManager/conversation/recreate
+      # code), and on most of those PRs session-image/ is unchanged, so its
+      # layers are a cache hit. A push to main always builds from scratch
+      # (`no-cache`): the image's apt/npm steps reach the network, and main
+      # must keep proving that a fresh build works, not just a cached one
+      # (an apt outage once looked like a CLI failure, #583–#585). That fresh
+      # build then refreshes the cache PRs read; a PR's own writes stay in its
+      # ref's scope (GitHub's cache isolation), so a PR cannot seed main's.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
       - name: Build session image
-        run: docker build -t shared-terminal-session ./session-image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ./session-image
+          tags: shared-terminal-session
+          load: true
+          no-cache: ${{ github.event_name == 'push' }}
+          cache-from: type=gha,scope=session-image-pinned
+          cache-to: type=gha,mode=max,scope=session-image-pinned
 
       - name: Smoke test
         run: ./session-image/smoke-test.sh shared-terminal-session
@@ -223,8 +240,22 @@ jobs:
         working-directory: backend
         run: npm ci
 
+      # Same cache discipline as the smoke job's build (fresh on main), one
+      # scope per CLI version: the layers before the CLI install are shared
+      # in content but each scope holds its own copy.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
       - name: Build session image with CLI ${{ matrix.cli }}
-        run: docker build --build-arg CLAUDE_CODE_VERSION=${{ matrix.cli }} -t shared-terminal-session:cli-${{ matrix.cli }} ./session-image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ./session-image
+          build-args: CLAUDE_CODE_VERSION=${{ matrix.cli }}
+          tags: shared-terminal-session:cli-${{ matrix.cli }}
+          load: true
+          no-cache: ${{ github.event_name == 'push' }}
+          cache-from: type=gha,scope=session-image-cli-${{ matrix.cli }}
+          cache-to: type=gha,mode=max,scope=session-image-cli-${{ matrix.cli }}
 
       - name: Conversation hooks smoke test (control dir validation, CLI ${{ matrix.cli }})
         env:
