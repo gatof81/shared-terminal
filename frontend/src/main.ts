@@ -81,6 +81,7 @@ import {
 } from "./uiShell.js";
 import { forgetAllLastConversationTitles } from "./viewPolicy.js";
 import { getView, isOverlayActive, onViewChange, overlayLabel } from "./viewSwitch.js";
+import { initVvDebug } from "./vvDebug.js";
 
 // ── DOM refs ────────────────────────────────────────────────────────────────
 
@@ -195,6 +196,10 @@ syncViewportHeight();
 window.visualViewport?.addEventListener("resize", syncViewportHeight);
 window.visualViewport?.addEventListener("scroll", syncViewportHeight);
 window.addEventListener("resize", syncViewportHeight);
+// `?vvdebug=1`: on-device measurements of the keyboard viewport (#616).
+// AFTER the viewport listeners: listeners run in registration order, so
+// each sample then shows what the app applied for that same event.
+initVvDebug();
 
 // ── Font size ───────────────────────────────────────────────────────────────
 // Persisted across reloads via localStorage. Mobile users want ~16 px on a
