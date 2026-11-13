@@ -36,6 +36,10 @@ espaciado 2/4/6/8/12/16/24/32; radios 4/6/10; controles 24/28/36 px con área t�
 estado de sesión por **forma + color**, estado de Claude como texto aparte, y «Te necesita»
 solo con evidencia fresca del hook (regla vigente de presencia).
 
+## Estado (2026-11-13)
+
+Mergeados: #639 (B1, A1, A3), #640 (sidebar en árbol, N1–N3). En curso: #641 (drawer y toasts en el teléfono).
+
 ## Plan
 
 1. Correcciones (B1, A1–A4, toasts) — autónomo.
