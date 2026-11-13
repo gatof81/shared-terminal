@@ -1079,6 +1079,272 @@ Solo preparación y lecturas. **El cambio a `true` tiene una autorización opera
 - **Doc 18 §4:** se enmienda para registrar este camino. Channels, PASS-B, el monitor y G3-2 conservan
   sus gates.
 
+## 14. Tablero de coordinación (D4) — BORRADOR RFC (#605)
+
+> **Estado: borrador, no vinculante. Sin GO de implementación.** B lo redactó como base, a partir
+> de las decisiones del responsable en #605 y del análisis de A, para que Pilot lo revise o lo
+> reescriba. Lo aprueba el responsable. Mientras siga en borrador, no cambia nada de D1, D2 ni D3.
+
+### 14.1 Principios (del responsable, vinculantes para este RFC)
+
+- **Un solo estado.** El tablero es **otra proyección del mismo registro del proyecto** (§2), como el
+  chat. No hay subsistema, base de datos ni archivo aparte.
+- **Una tarea es una entidad explícita.** Nace de una acción de la persona y puede vincularse a un
+  mensaje o a un hilo. **Un mensaje, por sí solo, nunca crea una tarea.**
+- **MVP solo del dueño.** En el MVP, solo la persona escribe estados, asignaciones, dependencias,
+  claims y decisiones. Ningún agente escribe en el tablero (eso es la fase 2, §14.9).
+- **Los claims advierten, nunca bloquean.** Un claim es una intención declarada; un archivo editado
+  que la captura observó es evidencia. **Nunca se tratan como equivalentes (R2).**
+- **Sin evidencia, `unknown`.** Si la captura no es efectiva o no hay identidad de repo, el
+  solapamiento es `unknown`, nunca «libre».
+- **Las tareas sobreviven** a los reinicios de sesión, al backup/restore y a cualquier retención
+  (R4). Reflejan las interrupciones como **estados derivados**, sin inventar actividad (R1).
+- **Nada en D4 autoriza nada.** Una tarea, un claim, una decisión o un handoff no envían mensajes,
+  no crean permisos de D3 ni amplían ninguno.
+
+### 14.2 Eventos
+
+Son líneas del mismo `conversation.events.jsonl`: el mismo escritor (§2.1), `seq`, `fsync`,
+envenenamiento, recuperación y backup/restore (§8). Toda escritura D4 es **una sección crítica bajo
+`project:<pid>`**. Las validaciones de §14.4 siguen el reparto de §3.3:
+- **lo que vive en el log** se decide **dentro** de la sección, contra el estado plegado;
+- **lo que vive en D1** (agentes y bindings) se lee **antes**, sin el lock.
+
+| `ev` | Campos | Identidad |
+| --- | --- | --- |
+| `task` | `task_id` (UUID v4 del servidor), `client_task_id`, `request_sha256`, `event: created`, `title` (1–200 code points, NFC), `from_msg_id?`, `assignees[]` (agent_ids, 0–4), `depends_on[]` (task_ids, 0–16), `by` | `client_task_id` |
+| `task_update` | `task_id`, `client_op_id`, `request_sha256`, una de estas formas: `state{from, to, note?}`, `assignees{set[]}`, `depends_on{set[]}` o `title{set}`. Además `by` | `client_op_id` |
+| `decision` | `decision_id`, `client_op_id`, `request_sha256`, `text` (validado como §8.1.2, ≤ 8 KiB), `task_id?`, `supersedes?` (decision_id), `by` | `client_op_id` |
+| `claim` | `claim_id`, `client_op_id`, `request_sha256`, `agent_id`, `repo` (§14.6), `paths[]` (1–32, §14.6), `task_id?`, `expires_at` (≤ 7 días), `by` | `client_op_id` |
+| `claim_released` | `claim_id`, `client_op_id?`, `reason: owner|expired`, `by?` | `claim_id` |
+
+- **Idempotencia.** La regla es la de §3.4 regla 2: el conjunto **completo** de ids en el fold, sin
+  ventana, y `request_sha256` del cuerpo canónico. Un mismo id con otro cuerpo da 409
+  `idempotency-conflict`.
+  - `client_task_id` y `client_op_id` comparten **un solo espacio de ids por proyecto**, distinto
+    del de `client_message_id`.
+  - **El replay va antes que la validación**, como en S1 1': un replay exacto de `todo→in_progress`
+    devuelve lo guardado, nunca 409 `invalid-transition`.
+- **«New task» (mensaje + tarea) es atómico.** En **un solo append**, con un batch `bn`, van:
+  - el `message`;
+  - sus `delivery{planned|not-sent}`;
+  - `task{created, from_msg_id: <ese msg_id>}`.
+
+  Un crash pierde todo o nada, y el replay devuelve los dos ids. El resto del envío sigue §3.3 sin
+  cambios.
+- **El cuerpo canónico de «New task»** se define así:
+  - **Enmienda a §3.4 regla 2:** la clave `task` va en el cuerpo canónico **solo cuando el cuerpo
+    trae una tarea**. Sin tarea, el cuerpo y su `request_sha256` quedan **idénticos a hoy**, y los
+    replays de los ids ya escritos en producción no cambian.
+  - En S1 se comprueban los dos ids: `clientMessageId` y `clientTaskId`.
+    - Si los dos son conocidos y del mismo cuerpo, es un replay.
+    - Si uno solo es conocido, o alguno pertenece a otro cuerpo, es 409 `idempotency-conflict` y no
+      se escribe nada.
+- **Un `message` sin `task`** es un mensaje normal, sea cual sea su texto.
+
+### 14.3 Estados de una tarea
+
+**Persistidos** (los escribe la persona, siempre con un evento explícito):
+
+| De \ a | `todo` | `in_progress` | `in_review` | `blocked` | `done` | `cancelled` |
+| --- | --- | --- | --- | --- | --- | --- |
+| `todo` | — | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `in_progress` | ✓ | — | ✓ | ✓ | ✓ | ✓ |
+| `in_review` | ✓ | ✓ | — | ✓ | ✓ | ✓ |
+| `blocked` | ✓ | ✓ | ✓ | — | ✗ | ✓ |
+| `done` | ✓ (reabrir) | ✗ | ✗ | ✗ | — | ✗ |
+| `cancelled` | ✓ (reabrir) | ✗ | ✗ | ✗ | ✗ | — |
+
+- Una tarea nace en `todo`.
+- `state{from, to}` es una comparación: si `from` no es el estado actual, la respuesta es 409
+  `state-conflict`.
+- Cualquier transición fuera de la tabla da 409 `invalid-transition`. Reabrir siempre pasa por
+  `todo`.
+- `blocked` lleva una `note` obligatoria con el motivo, porque lo **declara** la persona.
+
+**Derivados** (se calculan al leer y **nunca se persisten** ni cambian el estado guardado, R1):
+Solo se calculan para tareas `in_progress` o `in_review`, salvo `waiting-on-deps`, que aplica a
+cualquier tarea no terminal.
+- `waiting-on-deps`: alguna dependencia no terminal. Una dependencia **`cancelled`** no espera: se
+  muestra aparte, como «dependencia cancelada».
+- `interrupted`: un asignado sin binding vivo, o con la sesión no `running`, según D1 y la
+  presencia. También después de un `recovery{source: restore}` posterior al último `task_update`.
+  **Un `recovery` de arranque no basta**, porque solo se escribe si algo necesitó recuperarse
+  (§3.4).
+- `stale`: un asignado sin evidencia de actividad (presencia de P3a) en N horas. N es configurable.
+- `unknown`: no se puede decidir, por ejemplo con la captura no efectiva o con una lectura fallida.
+
+Salen de la presencia honesta (`projects/presence.ts`) y de la captura. Ninguno se infiere del texto
+de una respuesta.
+
+### 14.4 Validación
+
+- **Referencias del log**, decididas dentro de la sección crítica:
+  - `from_msg_id` debe existir;
+  - `depends_on[]` deben ser tareas del proyecto;
+  - `supersedes` debe ser una decisión del proyecto, no reemplazada ya;
+  - `task_id` en un `claim` o una `decision` debe existir.
+
+  Una referencia desconocida da 400 `unknown-<ref>`.
+- **Agentes** (`assignees[]`, `claim.agent_id`): se leen en D1 **antes** de la sección (con un tope
+  de 5 s; si falla, 503 `binding-unverified`) y deben ser agentes vivos del proyecto.
+  - Como en §3.3, **no hay atomicidad entre D1 y el log**. Se garantiza que el agente estaba vivo
+    al leerlo; una retirada posterior no invalida la tarea.
+  - Esa retirada se muestra como `interrupted` derivado.
+- **Ciclos.** Se recorre en profundidad (DFS) el grafo de dependencias del fold **con la arista
+  nueva**. Un ciclo, incluida la autodependencia, da 409 `dependency-cycle` y no se escribe nada.
+  Como se decide dentro del lock, **dos escrituras concurrentes que juntas cerrarían un ciclo nunca
+  pasan las dos**.
+- **Topes.** 16 dependencias por tarea y 2000 tareas no terminales por proyecto. 32 claims vigentes
+  por agente. Pasado un tope, 409 `board-limit`.
+- **Un `claim` vencido** se ve `expired` al leer. La próxima escritura D4 de ese proyecto escribe su
+  `claim_released{reason: expired}` en la misma sección crítica.
+
+### 14.5 Proyección: `GET /api/projects/:pid/board`
+
+- **Las tareas, decisiones y claims** salen del fold ya en memoria (§2: el store recalcula desde el
+  archivo completo al abrir, ≤ 64 MiB, sin rotación en v1). No hay snapshot ni índice nuevos.
+- **Costo real por request** de los derivados y los solapamientos:
+  - lecturas de D1 (bindings, sesiones, presencia);
+  - lecturas de la captura por agente;
+  - la identidad de repo, que sale solo de la caché o de una sesión corriendo.
+
+  Por eso `GET …/board` tiene su `InFlightLimiter` y su límite por IP. **Toda lectura fallida da
+  `unknown` para ese elemento**, como `presence.ts`.
+- **La respuesta** (camelCase, como §5):
+  - `tasks[]`: id, título, estado persistido, estados derivados, asignados, dependencias,
+    `fromMsgId`, el último `task_update` y la evidencia resumida (§14.6);
+  - `decisions[]`: las vigentes y la cadena de reemplazos;
+  - `claims[]`: los vigentes, con `overlaps` (§14.6);
+  - `generatedAt`.
+- **Invariante de retención (R4).** Cuando #567 introduzca rotación, **ningún segmento del log podrá
+  retirarse** si el segmento vivo no empieza con un `board_checkpoint`. Ese checkpoint lleva:
+  - cada tarea no terminal, con su historia mínima (creación, último estado, asignados,
+    dependencias);
+  - las tareas terminales que alguna tarea abierta referencia, con su id y su estado final;
+  - cada claim vigente;
+  - la cadena vigente de decisiones;
+  - **el conjunto completo de ids de cliente**: §3.4 promete idempotencia sin ventana;
+  - un puntero al segmento archivado, para resolver los `from_msg_id`.
+
+  En el MVP no hay rotación; esta regla queda escrita para que #567 la cumpla.
+- **Log lleno.** Con 409 `project-log-full`, el tablero queda en solo lectura, como el chat. D4 no
+  usa el margen de 1 MiB, que es para terminar entregas en curso.
+- **Backup/restore.** Va con el mismo log (§8) y no necesita nada nuevo. Tras un restore, las tareas
+  quedan idénticas; los derivados reflejan el `recovery{source: restore}`.
+
+### 14.6 Claims, evidencia e identidad de archivo (R2, R3)
+
+- **Evidencia observada.** Son los `file_path` de Edit, Write y MultiEdit que la captura ya guarda
+  (`redact.ts`), con el agente y el `seq` de captura. Se leen al proyectar y **no se copian al log**.
+- **Identidad de repo:**
+  - es el remote observado y normalizado: sin esquema ni credenciales, host en minúsculas, sin
+    `.git` final, en la forma `host/owner/repo`;
+  - se obtiene por el camino de solo lectura de la vista Git (`git` dentro del contenedor, con la
+    sesión corriendo) y se cachea por `(sid, raíz, arranque del contenedor)`;
+  - no se usa `session_configs.repo.url`, porque un clone o un `set-url` posteriores lo invalidan;
+  - una sesión sin repo usa `workspace:<sid>`, que nunca se solapa con otra sesión.
+- **Rutas.** Son relativas a la raíz del repo, en POSIX y NFC. Se rechazan `..` y las rutas
+  absolutas.
+  - **Son léxicas** (`path_basis: lexical`): la captura da strings y no se resuelven los symlinks de
+    un agente.
+  - Se comparan distinguiendo mayúsculas (Linux). Una colisión que solo difiere en mayúsculas es una
+    advertencia débil aparte.
+- **Evidencia válida.** Solo cuenta un Edit, Write o MultiEdit **completado con éxito**.
+  - Su `file_path` es una ruta del contenedor. Se asocia a la raíz de repo conocida **más larga**
+    que la contiene.
+  - Una ruta recortada (`FILE_PATH_BYTES`) o que no cae bajo ninguna raíz conocida da `unknown`.
+- **`overlaps` de un claim:** para cada otro agente, puede ser:
+  - `observed`: hay evidencia válida en esas rutas desde la creación del claim, y el resultado lista
+    agente, ruta y `seq`;
+  - `claimed`: otro claim vigente cubre esas rutas;
+  - `none-observed{coverage: edit-tools-only}`: la captura es efectiva y no hay evidencia. **No es
+    «libre»**, porque los cambios hechos por Bash (`sed -i`, `git checkout`, generadores) no se ven.
+    La UI lo muestra con esa salvedad. Es un **subtipo de `unknown`** a efectos de la decisión 3
+    de #605, con la cobertura explicada (§14.11, punto 8);
+  - `unknown`: sin captura efectiva, sin identidad de repo o con una lectura fallida.
+
+  **Nunca** el resultado es «libre».
+
+### 14.7 API (dueño solamente; un id ajeno es el mismo 404)
+
+| Método | Ruta | Escribe |
+| --- | --- | --- |
+| `POST` | `…/conversation/messages` con `task{clientTaskId, title, assignees?, dependsOn?}` | `message` + entregas + `task` (§14.2) |
+| `POST` | `…/board/tasks` | `task` sin mensaje (vinculado opcionalmente a un `fromMsgId` existente) |
+| `POST` | `…/board/tasks/:taskId/updates` | `task_update` |
+| `POST` | `…/board/decisions` | `decision` |
+| `POST` | `…/board/claims` y `…/board/claims/:claimId/release` | `claim`, `claim_released` |
+| `GET` | `…/board` | la proyección (§14.5) |
+
+- Sus códigos son los de §14.4, más los de §5. Al aprobarse, §5 incorpora `board-off`, `state-conflict`, `invalid-transition`, `dependency-cycle`, `board-limit` y `unknown-<ref>`. Un `blocked` sin `note` es 400 `invalid-body`.
+- Las rutas van detrás de su propia bandera, `PROJECT_BOARD_ENABLED`, que exige
+  `PROJECT_CONVERSATION_ENABLED`.
+  - **Encendida:** `/api/auth/status` anuncia `features.projectBoard: true`.
+  - **Apagada:**
+    - las rutas no existen (404);
+    - un `POST …/messages` con `task` recibe 409 `board-off`, como `artifacts-off` en D2;
+    - no se escribe ningún evento D4;
+    - `/api/auth/status` queda byte-idéntico.
+
+### 14.8 En el chat
+
+Los eventos D4 se muestran como **filas de sistema** en el hilo de su `from_msg_id`, por ejemplo
+«Tarea creada · @dev» o «in_review (por la persona)». No son mensajes, no tienen entregas y no
+cuentan como respuestas.
+
+### 14.9 Fase 2: escritura del agente (R6), diseño fuera del MVP
+
+- **Canal.** Una herramienta dentro del contenedor que postea por el **relay loopback** con el token
+  de ingesta. Se acepta solo con `INGEST_REQUIRE_SESSION_ORIGIN=true`. La identidad es **la del
+  binding vivo de esa sesión** (`agent_id`, `epoch`), nunca un nombre declarado por el agente.
+- **Alcance:**
+  - `task_update{state}` de tareas **asignadas a ese agente**, solo hacia `in_progress` e
+    `in_review`;
+  - **sus propios** claims (crear y liberar);
+  - `decision_proposal`, que la persona acepta o descarta. **Nunca una `decision`.**
+- **Trazabilidad.** Cada línea lleva `by: {agent_id, epoch, sid}` y `authorized_by: agent-self`. La
+  UI las distingue y la persona puede revertirlas.
+- **Límites.** Ninguna autoriza nada ni envía nada, y nunca se deriva de interpretar el texto de una
+  respuesta. Van con bandera propia, opt-in por proyecto y tope de frecuencia.
+- **Habilitarla es una decisión del responsable.** Es la misma superficie de confianza que G3-2,
+  hoy en NO-GO.
+
+### 14.10 Pruebas exigidas (se agregan a §10 al aprobarse)
+
+| # | Caso | Esperado |
+| --- | --- | --- |
+| T30 | «New task» con un crash entre sus líneas / replay | todo o nada / los mismos ids, 0 efectos |
+| T31 | ciclo directo, indirecto y autodependencia / dos escrituras concurrentes que cierran un ciclo | 409 `dependency-cycle`, nada escrito / exactamente una pasa |
+| T32 | cada transición de la tabla de §14.3 | ✓ escribe; ✗ da 409 `invalid-transition` |
+| T33 | reinicio con una tarea `in_progress` y la sesión del asignado caída | `interrupted` derivado; el estado guardado intacto |
+| T34 | claim vencido | `expired` al leer; `claim_released{expired}` en la próxima escritura |
+| T35 | sin captura efectiva / sin identidad de repo | `overlaps: unknown`, nunca libre |
+| T36 | evidencia observada frente a claim | `observed` y `claimed` distinguidos, nunca mezclados |
+| T37 | backup/restore con tareas abiertas | idénticas tras el restore |
+| T38 | log lleno | tablero en solo lectura; el chat como hoy |
+| T39 | bandera apagada | rutas 404, sin eventos D4, `/auth/status` byte-idéntico |
+| T40 | un mensaje cualquiera, aunque diga «tarea» o «LGTM» | ninguna tarea ni cambio de estado |
+| T41 | referencia desconocida / pasado un tope / `blocked` sin `note` / `supersedes` de una decisión ya reemplazada | 400 `unknown-<ref>` / 409 `board-limit` / 400 / 400, nada escrito |
+| T42 | rutas con `..`, absolutas, recortadas, fuera de toda raíz; colisión solo de mayúsculas; `workspace:<sid>` | rechazadas / `unknown` / advertencia débil / nunca se solapa con otra sesión |
+| T43 | `clientTaskId` reutilizado con otro `clientMessageId` / replay exacto de una transición / `from` que no es el actual | 409 `idempotency-conflict` / lo guardado / 409 `state-conflict` |
+| T44 | un proyecto ajeno | 404 en todas las rutas D4 |
+| T45 | `interrupted` en una tarea `todo` o `done`; un `recovery` de arranque sin relación; una dependencia `cancelled` | no se marca / no se marca / se muestra aparte, nunca «esperando» |
+
+### 14.11 Para decidir (responsable)
+
+1. Los estados persistidos y la tabla de §14.3.
+2. Los topes de §14.4.
+3. La identidad de repo de §14.6: remote observado frente a `repo.url`.
+4. Si `PROJECT_BOARD_ENABLED` es una bandera propia o va con D1.
+5. Cuándo la fase 2 (§14.9) pasa de diseño a GO, ligada a la bandera de origen y a G3-2.
+6. Los «handoffs estructurados» y la «vista de actividad» de #605. Este borrador los **difiere**: los
+   handoffs se apoyan en D3, y la actividad, en los eventos existentes.
+7. La enmienda a §2 («una sola fuente de verdad por dato»): agregar que las tareas, decisiones y
+   claims viven en el registro del proyecto.
+8. `none-observed` como subtipo de `unknown` bajo la decisión 3: distingue «captura efectiva sin
+   ediciones vistas» de «sin captura», y nunca se presenta como libre.
+
 ## Apéndice A. Integración con el frontend (D1)
 
 Formato de cable: los **cuerpos de request** y las **respuestas resumen** usan camelCase (como el
