@@ -128,6 +128,41 @@ describe("ProjectLog", () => {
 		await log.close();
 	});
 
+	it("a directory fsync that failed at creation is redone on every reopen before any append", async () => {
+		const synced: string[] = [];
+		const eio = Object.assign(new Error("EIO"), { code: "EIO" });
+		// Creation: the file is made, its directory fsync fails ⇒ open throws.
+		await expect(
+			ProjectLog.open(dir, "b", {
+				...held,
+				fsyncDir: async () => {
+					throw eio;
+				},
+			}),
+		).rejects.toBe(eio);
+		await expect(fs.stat(path.join(dir, LOG_FILE))).resolves.toBeTruthy();
+		// The file now exists. Reopening with the fsync still failing must throw
+		// again — never hand out a writer that would acknowledge appends.
+		await expect(
+			ProjectLog.open(dir, "b", {
+				...held,
+				fsyncDir: async () => {
+					throw eio;
+				},
+			}),
+		).rejects.toBe(eio);
+		// And with it working, the directory IS synced on the reopen.
+		const { log } = await ProjectLog.open(dir, "b", {
+			...held,
+			fsyncDir: async (d) => {
+				synced.push(d);
+			},
+		});
+		expect(synced).toEqual([dir]);
+		await expect(log.append([{ ev: "m" }])).resolves.toHaveLength(1);
+		await log.close();
+	});
+
 	it("refuses a symlinked log", async () => {
 		await fs.writeFile(path.join(dir, "elsewhere"), "");
 		await fs.symlink(path.join(dir, "elsewhere"), path.join(dir, LOG_FILE));

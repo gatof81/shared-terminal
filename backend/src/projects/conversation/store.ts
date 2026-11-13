@@ -282,25 +282,32 @@ async function exists(p: string): Promise<boolean> {
 }
 
 /**
- * mkdir 0700 under an existing parent, then fsync the parent (§2: a created
- * directory must survive a crash before anything in it is acknowledged).
- * Only `.projects/` (parent: the workspace root) and `.projects/<pid>/` are
- * created here.
+ * mkdir 0700 under an existing parent if absent, then fsync the parent (§2: a
+ * created directory must survive a crash before anything in it is
+ * acknowledged). Only `.projects/` (parent: the workspace root) and
+ * `.projects/<pid>/` are created here.
  */
 async function ensureDir(dir: string): Promise<void> {
+	let found = false;
 	try {
 		const st = await fs.lstat(dir);
 		if (!st.isDirectory())
 			throw new ProjectLogError("project-log-unverifiable", `${dir} is not a directory`);
-		return;
+		found = true;
 	} catch (err) {
+		if (err instanceof ProjectLogError) throw err;
 		if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
 	}
-	try {
-		await fs.mkdir(dir, { mode: 0o700 });
-	} catch (err) {
-		if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+	if (!found) {
+		try {
+			await fs.mkdir(dir, { mode: 0o700 });
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+		}
 	}
+	// Also when the directory already existed: a previous mkdir whose parent
+	// fsync failed left an entry the disk may still lose, and finding it now
+	// proves nothing about its durability (same reasoning as ProjectLog.open).
 	await fsyncDir(path.dirname(dir));
 }
 
