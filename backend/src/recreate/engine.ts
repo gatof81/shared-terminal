@@ -1829,10 +1829,14 @@ export class RecreationEngine {
 			logger.info(`[recreate] ${a.sessionId}: fence ${owed}: ${bumped}`);
 		}
 		const row = await act("d1 read", () => this.deps.d1.getRow(a.sessionId));
-		if (owed !== null) {
-			if (!row || !(row.recreate_fence > owed)) {
+		// No row at all is not a fence that is still pending: it is the
+		// operator case of the decision below (`current` null ⇒ neither O
+		// nor N ⇒ `stuck`, counted and logged there, nothing removed) — a
+		// retry would only repeat the same read.
+		if (owed !== null && row) {
+			if (!(row.recreate_fence > owed)) {
 				logger.warn(
-					`[recreate] ${a.sessionId}: attempt ${a.attemptId}: fence ${owed} not proven (D1 at ${row?.recreate_fence ?? "no row"}); nothing removed, still unresolved`,
+					`[recreate] ${a.sessionId}: attempt ${a.attemptId}: fence ${owed} not proven (D1 at ${row.recreate_fence}); nothing removed, still unresolved`,
 				);
 				return "retry";
 			}

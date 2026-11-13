@@ -618,3 +618,27 @@ describe("a moved fence alone never decides: the current container's identity do
 		await expect(attempts.assertResolved(SID)).rejects.toThrow(/uncertain/);
 	});
 });
+
+describe("a fence owed and the D1 row gone (#627 review NIT)", () => {
+	it("⇒ stuck at once (operator case, counted), nothing removed, no retry loop", async () => {
+		const { h, nId, engine, attempts } = await diedWithCasInFlight();
+		// `recover` reads the row first (it exists); the resolution's read after
+		// the fence finds it gone.
+		const realGetRow = h.d1.getRow.bind(h.d1);
+		let reads = 0;
+		h.d1.getRow = async (sid) => (++reads === 1 ? realGetRow(sid) : null);
+		const removes = h.docker.log.filter((l) => l.startsWith("remove:")).length;
+		expect(await engine.recover(SID)).toMatchObject({
+			ok: false,
+			status: 409,
+			code: "recover-stuck",
+		});
+		// One pass: one fence, one read after it — not three "retry" passes.
+		expect(h.d1.writes.filter((w) => w.startsWith("fence("))).toEqual(["fence(0)"]);
+		expect(reads).toBe(2);
+		expect(h.docker.log.filter((l) => l.startsWith("remove:")).length).toBe(removes);
+		expect(h.docker.containers.has(nId)).toBe(true);
+		expect(h.docker.containers.has(O_ID)).toBe(true);
+		await expect(attempts.assertResolved(SID)).rejects.toThrow(/uncertain/);
+	});
+});

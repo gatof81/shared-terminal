@@ -750,6 +750,7 @@ describe("carry-over recreation (§2.7.7)", () => {
 			commit: { fence: 1 },
 		});
 		expect(h.d1.writes.slice(writesBefore)).not.toContain("casBack");
+		expect(h.d1.writes.slice(writesBefore).some((w) => w.startsWith("fence("))).toBe(false);
 		expect(h.d1.row.container_id).toBe(nId);
 		expect(h.docker.containers.get(nId)?.name).toBe(CANONICAL);
 		expect(h.docker.containers.get(O_ID)?.name).toMatch(RESERVED_NAME_RE);
