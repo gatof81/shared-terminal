@@ -155,7 +155,6 @@ export class ProjectLog {
 	): Promise<{ log: ProjectLog; lines: LogLine[]; truncatedBytes: number }> {
 		const file = path.join(dir, LOG_FILE);
 		const sync = deps.fsyncDir ?? fsyncDir;
-		let created = false;
 		let fh: fs.FileHandle;
 		try {
 			fh = await fs.open(file, FS.O_RDWR | FS.O_APPEND | FS.O_NOFOLLOW);
@@ -166,15 +165,20 @@ export class ProjectLog {
 				FS.O_RDWR | FS.O_APPEND | FS.O_CREAT | FS.O_EXCL | FS.O_NOFOLLOW,
 				0o600,
 			);
-			created = true;
 		}
 		try {
 			const st = await fh.stat();
 			if (!st.isFile()) throw new ProjectLogError("project-log-unverifiable", "not a regular file");
-			if (created) {
-				await fh.sync();
-				await sync(dir);
-			}
+			// On EVERY open, not only when this call created the file: a creation
+			// whose directory fsync failed (EIO) throws, but the file is already
+			// there, so the next open would find it, skip the syncs and go on to
+			// acknowledge appends to a file whose directory entry the disk may
+			// still lose. Re-syncing here is idempotent and costs one fsync pair
+			// per project load. The parent chain (`.projects/<pid>/` in
+			// `.projects/`, `.projects/` in the workspace root) is re-synced the
+			// same way by the store's `ensureDir`.
+			await fh.sync();
+			await sync(dir);
 			const buf = st.size === 0 ? Buffer.alloc(0) : await readAll(fh, st.size);
 			const parsed = parseLog(buf);
 			if ("unverifiable" in parsed) {
