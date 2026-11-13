@@ -2127,7 +2127,16 @@ export class RecreationEngine {
 					.resolve(sessionId, attemptId, { kind: "rolled-back" }, "begin failed; no effects")
 					.catch(() => undefined);
 			}
-			return { ok: false, status: 500, code: "recreate-failed" };
+			// As `recreate()`: `unresolved` unless it is CONFIRMED that this
+			// attempt left no record or that its record is resolved — an `open`
+			// one (always the case after a shutdown) gates the session.
+			const settled = await this.deps.attempts.read(sessionId).then(
+				(r) => r.kind === "none" || (r.kind === "ok" && r.record.state === "resolved"),
+				() => false,
+			);
+			return settled
+				? { ok: false, status: 500, code: "recreate-failed" }
+				: { ok: false, status: 500, code: "recreate-failed", detail: "unresolved" };
 		}
 		const a: Attempt = {
 			sessionId,

@@ -3480,6 +3480,10 @@ export class DockerManager {
 				// been sent to N yet, so ask again before the PUT — a copy that
 				// lost its authority must not start writing N. Destroying the
 				// source releases the GET's connection to dockerd.
+				// Destroyed, not drained as `readArchive` does past its cap: that
+				// convention keeps a request running until dockerd ends it, but
+				// this GET has no effect in either container, may be gigabytes of
+				// layer, and nothing of it was sent to N — finishing it buys nothing.
 				// (dockerode types it as a bare ReadableStream; it is an IncomingMessage.)
 				if (!mayAct()) {
 					(src as NodeJS.ReadableStream & { destroy(): void }).destroy();

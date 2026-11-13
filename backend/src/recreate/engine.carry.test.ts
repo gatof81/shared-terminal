@@ -625,6 +625,29 @@ describe("carry-over recreation (§2.7.7)", () => {
 		expect(await recordOf(h)).toMatchObject({ state: "open", reverse: true });
 	});
 
+	it("the rollback's begin() fails after writing, with stop() in between: no resolve after the shutdown, the answer says unresolved, nothing issued", async () => {
+		const h = await setup();
+		dirtyLayer(h);
+		expect((await h.engine.recreate(SID, IMG_N, { preserve: true })).ok).toBe(true);
+		const nId = nIdOf(h) as string;
+		await h.docker.stop(nId);
+		// The record is written (an fsync error past the rename, say), then
+		// begin() throws — and the engine was stopped meanwhile.
+		const realBegin = h.attempts.begin.bind(h.attempts);
+		h.attempts.begin = (async (...args: Parameters<typeof realBegin>) => {
+			await realBegin(...args);
+			h.engine.stop();
+			throw new Error("EIO: fsync");
+		}) as typeof h.attempts.begin;
+		const renamesBefore = h.docker.log.filter((l) => l.startsWith("rename:")).length;
+		const writesBefore = h.d1.writes.length;
+		const r = await h.engine.rollbackToRetained(SID);
+		expect(r).toEqual({ ok: false, status: 500, code: "recreate-failed", detail: "unresolved" });
+		expect(h.docker.log.filter((l) => l.startsWith("rename:")).length).toBe(renamesBefore);
+		expect(h.d1.writes.length).toBe(writesBefore);
+		expect(await recordOf(h)).toMatchObject({ state: "open", reverse: true });
+	});
+
 	it("authority lost while a copy's source GET is pending: the PUT into N never starts", async () => {
 		const h = await setup();
 		dirtyLayer(h);
