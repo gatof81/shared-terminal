@@ -479,6 +479,9 @@ export function renderSessionList() {
 			: undefined;
 	const focusedRole = active instanceof HTMLElement ? (active.dataset.role ?? "select") : "select";
 	sessionList.replaceChildren();
+	// The compact phone rows (sidebar-sessions.css) belong to the grouped
+	// list only: with the project feature off the sidebar is exactly as before.
+	sessionList.classList.toggle("session-list-grouped", projectChatEnabled());
 	if (projectChatEnabled()) renderGroupedSessions();
 	else for (const s of sessions) sessionList.appendChild(buildSessionItem(s, null));
 	if (focusedId !== undefined) {
@@ -567,16 +570,19 @@ function renderGroupedSessions(): void {
 	// sessions and unassigned ones were hard to tell apart), in the order the
 	// list first meets each; a project whose name isn't loaded yet reads
 	// "Agent sessions" until the directory lands.
-	// Keyed by the heading text: every project whose name isn't loaded shares
-	// one "Agent sessions" group instead of several identical headings.
-	const byHeading = new Map<string, Array<(typeof groups.bound)[number]>>();
+	// Keyed by PROJECT (two projects may share a name); every project whose
+	// name isn't loaded shares one "Agent sessions" group instead of several
+	// identical headings.
+	const UNNAMED = "\u0000unnamed";
+	const byKey = new Map<string, { title: string; rows: Array<(typeof groups.bound)[number]> }>();
 	for (const b of groups.bound) {
-		const key = projectName(b.binding.projectId) ?? "Agent sessions";
-		const list = byHeading.get(key) ?? [];
-		list.push(b);
-		byHeading.set(key, list);
+		const name = projectName(b.binding.projectId);
+		const key = name === null ? UNNAMED : b.binding.projectId;
+		const group = byKey.get(key) ?? { title: name ?? "Agent sessions", rows: [] };
+		group.rows.push(b);
+		byKey.set(key, group);
 	}
-	for (const [title, rows] of byHeading) {
+	for (const { title, rows } of byKey.values()) {
 		heading(title, "session-group-bound session-group-project");
 		for (const { session, binding } of rows)
 			sessionList.appendChild(buildSessionItem(session, binding));

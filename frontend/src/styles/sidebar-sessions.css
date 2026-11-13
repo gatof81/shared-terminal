@@ -284,27 +284,28 @@
    wasted space, projects / sessions / unassigned were hard to tell apart).
    The agent shows as a word on the row's second line instead of a 44-px
    link row of its own (the group heading names the project); the "last
-   conversation" link keeps its own line. */
+   conversation" link keeps its own line. Only the grouped list (project
+   feature on): with the feature off the sidebar is unchanged. */
 @media (max-width: 768px) {
-  .session-item {
+  .session-list-grouped .session-item {
     gap: 0.25rem;
     padding: 0 0.25rem 0 0.6rem;
     margin-bottom: 0;
   }
-  .session-item > .session-agent-link {
+  .session-list-grouped .session-item > .session-agent-link {
     display: none;
   }
-  .session-meta {
+  .session-list-grouped .session-meta {
     flex-direction: row;
     gap: 0.4rem;
   }
-  .session-usage-wide {
+  .session-list-grouped .session-usage-wide {
     display: none;
   }
-  .session-usage-compact {
+  .session-list-grouped .session-usage-compact {
     display: inline;
   }
-  .session-agent-tag {
+  .session-list-grouped .session-agent-tag {
     display: inline;
   }
 }
