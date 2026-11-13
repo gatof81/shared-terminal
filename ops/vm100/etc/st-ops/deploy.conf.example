@@ -1,0 +1,16 @@
+# /etc/st-ops/deploy.conf — root:root 0644. Read by st-ops-root; never by the st-ops account's own code.
+# Public repository the server fetches by itself (no credentials): provenance never comes from the caller.
+REPO_URL=https://github.com/gatof81/shared-terminal.git
+# The compose checkout that runs the backend.
+ST_DIR=/home/diego/shared-terminal
+# The compose project of the backend (label com.docker.compose.project of the running `app`); checked at preflight.
+COMPOSE_PROJECT=shared-terminal
+# CI is read only from THIS workflow's own push run on main for the SHA (its check suite): a check-run name is not
+# identity — any workflow with `checks: write` can post one. The jobs below must be in that run and `success`.
+# (Pages and the session-image workflow are not part of a backend deploy.)
+REQUIRED_WORKFLOW=.github/workflows/ci.yml
+REQUIRED_CHECKS="Backend (tsc + vitest)|Frontend (tsc + vite build)|Frontend e2e (Playwright, desktop + mobile)"
+# A request expires this many seconds after it was created (the owner signs within this window).
+REQUEST_TTL=7200
+# Minimum free space on the Docker data-root filesystem, KiB.
+MIN_FREE_KIB=5242880
