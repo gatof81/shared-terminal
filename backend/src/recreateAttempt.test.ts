@@ -435,6 +435,35 @@ describe("RecreateAttemptStore — fail-closed on unreadable records", () => {
 			{ ...base(), state: "open", outcome: undefined, approvedAt: "t" },
 			false,
 		],
+		// v1.9.4 (#627): the commit fence and its intent.
+		[
+			"commitFence + commit intent",
+			{ ...base(), commitFence: true, commit: { fence: 4, sentAt: "t" } },
+			true,
+		],
+		["commitFence without an intent (never sent)", { ...base(), commitFence: true }, true],
+		[
+			"a commit intent without commitFence",
+			{ ...base(), commit: { fence: 4, sentAt: "t" } },
+			false,
+		],
+		["commitFence not literally true", { ...base(), commitFence: 1 }, false],
+		[
+			"a negative fence",
+			{ ...base(), commitFence: true, commit: { fence: -1, sentAt: "t" } },
+			false,
+		],
+		[
+			"a fractional fence",
+			{ ...base(), commitFence: true, commit: { fence: 1.5, sentAt: "t" } },
+			false,
+		],
+		[
+			"an intent with an extra key",
+			{ ...base(), commitFence: true, commit: { fence: 1, sentAt: "t", x: 1 } },
+			false,
+		],
+		["an intent without sentAt", { ...base(), commitFence: true, commit: { fence: 1 } }, false],
 	] as const) {
 		it(`parser: ${label} ⇒ ${ok ? "readable" : "unreadable"}`, async () => {
 			const store = new RecreateAttemptStore(root);
@@ -479,6 +508,49 @@ describe("RecreateAttemptStore — fail-closed on unreadable records", () => {
 		await store.resolve(SID, "att-1", { kind: "rolled-back" }, "x");
 		await fs.chmod(recordFile(), 0o000);
 		expect((await gateError(store))?.detail).toMatch(/EACCES/);
+	});
+});
+
+describe("RecreateAttemptStore — the commit intent (v1.9.4, #627)", () => {
+	it("begin marks the record fenced; the intent is written durably once, only while open and owned", async () => {
+		const store = new RecreateAttemptStore(root);
+		const rec = await store.begin(SID, identity());
+		expect(rec.commitFence).toBe(true);
+		expect(rec.commit).toBeUndefined();
+		await store.recordCommitIntent(SID, "att-1", 7);
+		const onDisk = JSON.parse(await fs.readFile(recordFile(), "utf8"));
+		expect(onDisk.commit).toEqual({ fence: 7, sentAt: expect.any(String) });
+		expect(onDisk.state).toBe("open");
+		// Once per attempt: a second intent would hide which generation was sent.
+		await expect(store.recordCommitIntent(SID, "att-1", 8)).rejects.toThrow(AttemptTransitionError);
+		// It survives the transitions and the orphan mark of a restart.
+		await store.markUncertain(SID, "att-1", "ambiguous commit");
+		const next = new RecreateAttemptStore(root);
+		await next.recoverOnBoot();
+		const r = await next.read(SID);
+		expect(r.kind === "ok" && r.record.commit?.fence).toBe(7);
+		expect(r.kind === "ok" && r.record.orphanedAt).toBeTruthy();
+	});
+
+	it("refused on an attempt this process does not own, on an uncertain one, and with a bad fence", async () => {
+		const store = new RecreateAttemptStore(root);
+		await store.begin(SID, identity());
+		await expect(store.recordCommitIntent(SID, "att-1", -1)).rejects.toThrow(/invalid fence/);
+		await expect(
+			new RecreateAttemptStore(root).recordCommitIntent(SID, "att-1", 0),
+		).rejects.toThrow(/not owned/);
+		await store.markUncertain(SID, "att-1", "x");
+		await expect(store.recordCommitIntent(SID, "att-1", 0)).rejects.toThrow(/uncertain/);
+	});
+
+	it("a new attempt starts without the previous attempt's intent", async () => {
+		const store = new RecreateAttemptStore(root);
+		await store.begin(SID, identity(1));
+		await store.recordCommitIntent(SID, "att-1", 0);
+		await store.resolve(SID, "att-1", { kind: "rolled-back" }, "x");
+		const rec = await store.begin(SID, identity(2));
+		expect(rec.commit).toBeUndefined();
+		expect(rec.commitFence).toBe(true);
 	});
 });
 

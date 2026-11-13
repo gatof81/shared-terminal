@@ -689,6 +689,73 @@ describe("carry-over recreation (§2.7.7)", () => {
 		expect(await recordOf(h)).toMatchObject({ state: "open", reverse: true });
 	});
 
+	/** A committed carry-over, N stopped, and a rollback whose commit-intent write is held. */
+	async function rollbackHeldAtIntent(h: H) {
+		dirtyLayer(h);
+		expect((await h.engine.recreate(SID, IMG_N, { preserve: true })).ok).toBe(true);
+		const nId = nIdOf(h) as string;
+		await h.docker.stop(nId);
+		const written = deferred();
+		const release = deferred();
+		const realIntent = h.attempts.recordCommitIntent.bind(h.attempts);
+		h.attempts.recordCommitIntent = (async (...args: Parameters<typeof realIntent>) => {
+			const r = await realIntent(...args);
+			written.resolve();
+			await release.promise;
+			return r;
+		}) as typeof h.attempts.recordCommitIntent;
+		const writesBefore = h.d1.writes.length;
+		const p = h.engine.rollbackToRetained(SID);
+		await written.promise;
+		return { nId, release, writesBefore, p };
+	}
+
+	it("#627 review: stop() during the rollback's commit-intent write ⇒ no casBack, answer says unresolved, the open record keeps its intent", async () => {
+		const h = await setup();
+		const { nId, release, writesBefore, p } = await rollbackHeldAtIntent(h);
+		h.engine.stop();
+		release.resolve();
+		const r = await p;
+		expect(h.d1.writes.slice(writesBefore)).not.toContain("casBack");
+		expect(r).toEqual({ ok: false, status: 500, code: "recreate-failed", detail: "unresolved" });
+		expect(h.d1.row.container_id).toBe(nId);
+		// Nothing written after stop(): still open (D8), with the intent a
+		// recovery will fence before deciding.
+		expect(await recordOf(h)).toMatchObject({
+			state: "open",
+			reverse: true,
+			commit: { fence: 1 },
+		});
+	});
+
+	it("#627 review: T_rec expires during the rollback's commit-intent write ⇒ no casBack, uncertain, then resolved by evidence (names restored, O retained)", async () => {
+		const h = await setup();
+		const { nId, release, writesBefore, p } = await rollbackHeldAtIntent(h);
+		await tick((FAST.tRecMs as number) + 100); // past the reverse attempt's T_rec
+		release.resolve();
+		const r = await p;
+		expect(r).toEqual({ ok: false, status: 500, code: "recreate-failed", detail: "commit" });
+		expect(h.d1.writes.slice(writesBefore)).not.toContain("casBack");
+		for (let i = 0; i < 100; i++) {
+			const rec = await recordOf(h);
+			if (rec?.state === "resolved") break;
+			await tick(20);
+		}
+		// This process knows the statement never left: no fence owed, D1
+		// still on N decides "not applied".
+		expect(await recordOf(h)).toMatchObject({
+			state: "resolved",
+			outcome: { kind: "rolled-back" },
+			retained: { containerId: O_ID, role: "O" },
+			commit: { fence: 1 },
+		});
+		expect(h.d1.writes.slice(writesBefore)).not.toContain("casBack");
+		expect(h.d1.writes.slice(writesBefore).some((w) => w.startsWith("fence("))).toBe(false);
+		expect(h.d1.row.container_id).toBe(nId);
+		expect(h.docker.containers.get(nId)?.name).toBe(CANONICAL);
+		expect(h.docker.containers.get(O_ID)?.name).toMatch(RESERVED_NAME_RE);
+	});
+
 	it("authority lost while a copy's source GET is pending: the PUT into N never starts", async () => {
 		const h = await setup();
 		dirtyLayer(h);

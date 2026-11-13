@@ -264,6 +264,8 @@ interface Row {
 	container_id: string | null;
 	container_name: string;
 	conversation_requested: number;
+	/** Absent in a state file written before v1.9.4: read as 0. */
+	recreate_fence?: number;
 	ingest_token_hash: string | null;
 	ingest_token_hash_suspended: string | null;
 	user_id: string;
@@ -326,22 +328,41 @@ function harness(M: Mods, st: SessionState) {
 	} = {};
 	const starts: string[] = [];
 	const d1: import("./d1.js").RecreateD1Port = {
-		getRow: async () => ({ ...d1Read(sid).row }),
+		getRow: async () => {
+			const row = d1Read(sid).row;
+			return { ...row, recreate_fence: row.recreate_fence ?? 0 };
+		},
 		sessionIdByContainerName: async (name) => (name === canonical ? sid : null),
-		cas: async (_s, oId, nId, h) => {
+		cas: async (_s, oId, nId, h, fence) => {
 			const s = d1Read(sid);
-			if (s.row.container_id !== oId || s.row.conversation_requested !== 1) return "not-applied";
+			if (
+				s.row.container_id !== oId ||
+				s.row.conversation_requested !== 1 ||
+				(s.row.recreate_fence ?? 0) !== fence
+			)
+				return "not-applied";
 			s.row.container_id = nId;
 			s.row.ingest_token_hash = h;
+			s.row.recreate_fence = fence + 1;
 			d1Write(sid, s);
 			await hooks.afterCas?.();
 			return "applied";
 		},
-		casBack: async (_s, fromId, toId) => {
+		casBack: async (_s, fromId, toId, fence) => {
 			const s = d1Read(sid);
-			if (s.row.container_id !== fromId) return "not-applied";
+			if (s.row.container_id !== fromId || (s.row.recreate_fence ?? 0) !== fence)
+				return "not-applied";
 			s.row.container_id = toId;
 			s.row.ingest_token_hash = null;
+			s.row.recreate_fence = fence + 1;
+			d1Write(sid, s);
+			return "applied";
+		},
+		// The recovery's fence (v1.9.4, #627).
+		fence: async (_s, fence) => {
+			const s = d1Read(sid);
+			if ((s.row.recreate_fence ?? 0) !== fence) return "not-applied";
+			s.row.recreate_fence = fence + 1;
 			d1Write(sid, s);
 			return "applied";
 		},

@@ -816,6 +816,22 @@ Fastest first:
   backend older than 3.0d knows neither the attempt record nor the
   `recreate-unresolved` gate, so `start`, `stop` and a hard delete would act
   on that session. Keep the 3.0d backend in place (next section).
+
+  **Rolling back past the commit fence (contract v1.9.4, #627) is a known
+  limitation, accepted by the owner.** From that version on, every attempt
+  record (`.st-control/<sid>/recreate-attempt.json`) carries `commitFence`,
+  resolved ones included. An older backend does not understand that key: its
+  strict parser reads the record as unreadable, and that session stays
+  `recreate-unresolved` (start, stop, recreate and hard delete refused) for
+  as long as the older backend runs.
+  - **Never delete, edit or convert those records** to get past this. The
+    record is the only durable evidence of the attempt (and of whether its
+    commit may have been sent); a record stripped of `commitFence` would
+    turn a fenced attempt into one the old backend thinks it understands.
+  - The only way to make those sessions usable again is to **reinstall a
+    backend version that reads them** (v1.9.4 or later).
+  - The `recreate_fence` column (migration v20) itself does not bother the
+    older backend: it never reads or writes it.
 - **Alias:** harmless to keep.
 
 Captured data stays under `.conversations/` until a hard delete (or manual
@@ -1093,6 +1109,53 @@ retained one, if any, is still retained and `rollback` still available) or
 happened: that container is current — verify as in step 8). 409 `running`
 until everything is stopped; 409 `not-orphaned` means a live backend owns
 the attempt (wait for it); a second `recover` answers `already-resolved`.
+
+**The commit fence (contract v1.9.4, #627; migration v20).** When the record
+says the dead backend may have sent its commit statement (`commit` in the
+record), `recover` first invalidates that statement's generation in D1
+(`sessions.recreate_fence`) and decides only after a re-read proves it — so
+a statement still in flight can never land on a container the recovery just
+removed. If D1 can't prove it (timeout, error), `recover` answers 409
+`recover-retry` and removes nothing: run it again later. A record written by
+a backend **before** this version answers 409 `commit-unknown-legacy` unless
+D1 is already on the new container: that backend's statement carries no
+fence, so nothing proves it will not land. Before deploying this version,
+check that no `<WORKSPACE_ROOT>/.st-control/*/recreate-attempt.json` has a
+`state` other than `resolved`; if `recover` answers `commit-unknown-legacy`,
+leave the containers, the record and the row as they are and take it to the
+owner (CONVERSATION.md §2.7.7). Rolling the backend back past this version
+makes every record that carries `commitFence` unreadable to the old parser —
+those sessions stay `recreate-unresolved` until the new version is back.
+
+**Release gate: migration v20 against the real data, on the host.** Before
+deploying, prove v20 on a copy of production's rows without them leaving
+the host and without touching D1:
+
+1. `docker compose exec app npm run backup` (the running backend, still at
+   v19) — a directory `<WORKSPACE_ROOT>/.backups/<timestamp>/`.
+2. Build the release image under its own tag, from the release checkout, so
+   the running `app` is not touched:
+   `docker build -t st-backend:migrate-check .`
+3. Run the check in a throwaway container with no network, the backup
+   mounted read-only and no environment file:
+
+   ```bash
+   docker run --rm --network none \
+     -v <WORKSPACE_ROOT>/.backups/<timestamp>:/backup:ro \
+     st-backend:migrate-check npm run -s db:migrate-check -- /backup
+   ```
+
+It builds an in-memory SQLite at the backup's schema (v19) through the real
+`migrateDb()` ledger path, loads every table as `restore` would, applies the
+pending migrations and prints, per table, the row count and a SHA-256 of the
+pre-existing columns before → after, then `sessions.recreate_fence` (present,
+0 on every row), the ledger (v20 recorded), `foreign_key_check` and
+`integrity_check`. The last line is `PASS` (exit 0) or `FAIL` (exit 1, with
+the reasons); a refusal (no manifest, a backup already at v20) exits 2. It
+prints counts, hashes and verdicts only — never a row or a value — needs no
+credential (it drops the D1 variables before loading anything and never
+calls `validateD1Config`), and makes no network call. Delete the image
+afterwards if you like (`docker rmi st-backend:migrate-check`).
 
 ### Emergency only — the manual procedure
 

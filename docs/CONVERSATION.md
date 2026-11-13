@@ -25,7 +25,7 @@ vinculante para los PRs
 y, para 3.0d, en [docs/design/phase3-3.0d-activation.md](./design/phase3-3.0d-activation.md) (v5,
 `ac1024d`); si los dos documentos difieren, manda este;
 este archivo define lo que el código debe cumplir y lo que cada PR debe demostrar. Cambiar un
-contrato exige un PR de docs antes o junto con el código. **v1.7.1**: §8.1.5 paso 2b, consumo del paste antes del siguiente byte, y `too-many-segments` en 48 pastes por el presupuesto T_http (hallazgos del smoke con CLI 2.1.314 y de la revisión durante la implementación 3.2, 2026-10-30). **v1.7.2** (aprobado por el responsable como P1 de backend de Chat, 2026-11-02, tras la reanudación real de Educación HZ): §5.2 el binding vale para UN arranque del contenedor —toda parada lo retira de todas las conversaciones de la sesión, residentes o no—; §5.3 el probe solo lleva a `waiting_input` con identidad verificada (entrada `interactive`, `pid` descendiente del `pane_pid` del pane ligado), nunca revive `ended`, un estado ilegible no es `idle`, y el silencio de 10 min y un probe dirigido tras `SessionStart` se despachan de verdad; §8.1.3 `binding-stale` también para una entrada del probe con `kind ≠ interactive` aunque descienda del pane **v1.7.3**: §8.1.3 identidad de foreground por proceso (identidad, sesión, tty, grupo de primer plano, `starttime` repetido en el precheck) en lugar del nombre `pane_current_command`, que el instalador nativo hace igual a la versión (falso negativo en Educación HZ, 2026-11-02). **v1.7.4** (#510, aprobado por el responsable 2026-11-02): §8.1.3 el envío exige que el probe confirme el prompt (`idle`, o `waiting` + `input needed`); `status` ausente/ilegible y `waiting` sin `waitingFor` responden `needs-terminal` antes de cualquier efecto. **v1.8** (aprobado por el responsable 2026-11-03): §6.2 metadata del dueño —renombrar y archivar— en la tabla propia `conversation_user_meta` (migración v18), fuera de la captura; §6 la lista añade `customTitle`, `archivedAt` y `meta`; §9 backup y borrado de esa tabla. **v1.8.1** (propuesta, pendiente de aprobación; incidente 2026-11-03): §2.7.5 condición 5 «capaz de relay» — la imagen propia con `="2"` mientras exista, y si Docker ya no la tiene, una **acreditación de capacidad** firmada al crear el contenedor y ligada a su id inmutable (§2.7.5.1); una acreditación contradictoria deniega siempre. **v1.8.1 aprobado por el responsable el 2026-11-04.** **v1.8.2** (propuesta, pendiente de aprobación; hallazgo de Educación HZ, 2026-11-04): §8.1.9 la versión que decide es la del **proceso** que recibirá el texto, preguntada a su propio ejecutable (`/proc/<pid>/exe --version`, sin shell, como su uid, entorno vacío, autoactualizador apagado, `starttime` y ejecutable iguales antes y después); la `claude_version` del `session_start` —que el hook toma del `PATH`— queda como metadato y nunca autoriza. **v1.8.3** (propuesta, pendiente de aprobación): §8.1.9 política de versiones del composer, siempre sobre la versión del proceso de v1.8.2 — `COMPOSER_CLI_DENY` gana siempre, `COMPOSER_CLI_VERSIONS` exacta, y `COMPOSER_CLI_MIN_VERSION` **opcional y abierta** (toda release estable ≥ una versión validada, incluidos cambios minor y major, sin techo); prereleases y versiones no verificables siempre rechazadas; el riesgo de admitir versiones futuras sin validación queda declarado. **v1.8.4** (propuesta, pendiente de aprobación; protección de imágenes, #521): §2.7.2 paso 1, los requests `pin image` (antes de `create N`, obligatorio: sin tag verificado no hay `N`) y `pin N` (después, verificación); el `spawn` de `DockerManager` crea siempre desde el ID inmutable ya protegido, nunca desde el tag **v1.8.5** (propuesta, pendiente de aprobación; hallazgo en B, 2026-11-05): §5.2 solo una conversación `interactive` toma un pane (retirando a la anterior); `headless` nunca se liga; `teammate` y `unknown` solo a un pane que ninguna conversación viva tenga, sin retirar a nadie; una sesión sin pane en sus hooks (sesión en segundo plano del CLI) nunca se liga y el pane no se infiere por ascendencia. **v1.8.5 aprobado por el responsable el 2026-11-05.** **v1.8.6** (propuesta, pendiente de aprobación; G3, PR-G3-1): §3.1.1 la ingesta puede exigir que el **origen de red** de la conexión sea el contenedor vigente de la sesión en `sessions-net` (bandera `INGEST_REQUIRE_SESSION_ORIGIN`: `false` por defecto, `observe` para la puerta de activación, `true` para exigirlo). Así un token filtrado no sirve desde el túnel, desde loopback ni desde otro contenedor. Con la bandera apagada nada cambia. **v1.9** (propuesta, revisión 2, pendiente de aprobación; B, 2026-11-05): §8.1.12 composer para sesiones en segundo plano del CLI por el op `reply` con `nextTurn` fijo, sin el pane (el cliente `attach`/`agents` sigue rechazado); v1 sin encolado intencional (doble lectura idle); identidad de job, proceso y daemon (peer pid) antes del efecto; ack con `prompt_id` nuevo más confirmación en el transcript y exclusión de hashes recientes (falso positivo residual declarado); estados `accepted`/`unconfirmed`/`duplicated`, sin reintentos; la seguridad corregida por la auditoría (la frontera es el uid, no la clave); migración por validación. **v1.9 revisión 3** (decisiones del responsable tras la auditoría de la implementación, #547): ack emparejado con NUESTRO enqueue; exclusión de textos idénticos solo por operaciones pendientes o cola ambigua (la regla de 10 min se elimina; repetir un texto está permitido) con reconocimiento durable de un `unconfirmed`; transcript inaccesible ⇒ 409 antes del efecto, `unconfirmed` después; `CLAUDE_CONFIG_DIR` propio fuera del MVP; marcas `duplicated`/`possible-duplicate` persistentes e idempotentes; respuesta desconocida del daemon ⇒ `uncertain`; alcance por sesión (`COMPOSER_BG_SESSIONS`); con la bandera apagada, sin cambios salvo dos diferencias declaradas (§8.1.12.11). **v1.9.1** (propuesta, pendiente de aprobación; #568, hallazgo de A en el resumen de presencia, 2026-11-09): §4.1 `lastEventAt` es el momento de la última **actividad** de la conversación, es decir, un evento de hook o el `prepared` de un `composer_send`. Los registros propios del backend (`probe`, `gap` y los demás estados de `composer_send`) se persisten igual pero no lo mueven. Así, un probe que no confirma nada ya no hace parecer fresca una afirmación viva vieja. Esto vale para la presencia de PROJECTS.md §5, para la regla de atención del frontend y para la semilla del silencio tras un reinicio. Sin migración: la columna `last_event_at` es la misma. **v1.9.1 aprobado conceptualmente por el responsable el 2026-11-10.** **v1.9.2** (decisión del responsable, 2026-11-10: aceptar por defecto las versiones estables nuevas del CLI, sin validar cada release ni degradar sesiones; el riesgo de compatibilidad queda asumido): §8.1.9 la mínima abierta del composer pasa a ser **la regla por defecto** (sin definir ⇒ la versión más baja de `COMPOSER_CLI_VERSIONS`; `off` ⇒ solo la lista exacta, el comportamiento anterior); §2.7.5 la compatibilidad del CLI del workspace en la recreación pasa de una allowlist exacta a **mínima estable + denegación** (`RECREATE_CLI_MIN_VERSION`, por defecto 2.1.308; `RECREATE_CLI_DENY`); una versión ilegible o una prerelease siguen bloqueando. Todas las demás precondiciones, las comprobaciones dinámicas del composer y la regla de no reintentar no cambian; los canarios de versiones pasan a ser informativos. **v1.9.3** (decisión del responsable, 2026-11-10): §2.7.1 precondición 8, un W en una ruta que la imagen de `O` no tiene ya no es `managed-skills-collision` si es un archivo regular idéntico byte a byte a I_N; todo lo demás de las skills no cambia.
+contrato exige un PR de docs antes o junto con el código. **v1.7.1**: §8.1.5 paso 2b, consumo del paste antes del siguiente byte, y `too-many-segments` en 48 pastes por el presupuesto T_http (hallazgos del smoke con CLI 2.1.314 y de la revisión durante la implementación 3.2, 2026-10-30). **v1.7.2** (aprobado por el responsable como P1 de backend de Chat, 2026-11-02, tras la reanudación real de Educación HZ): §5.2 el binding vale para UN arranque del contenedor —toda parada lo retira de todas las conversaciones de la sesión, residentes o no—; §5.3 el probe solo lleva a `waiting_input` con identidad verificada (entrada `interactive`, `pid` descendiente del `pane_pid` del pane ligado), nunca revive `ended`, un estado ilegible no es `idle`, y el silencio de 10 min y un probe dirigido tras `SessionStart` se despachan de verdad; §8.1.3 `binding-stale` también para una entrada del probe con `kind ≠ interactive` aunque descienda del pane **v1.7.3**: §8.1.3 identidad de foreground por proceso (identidad, sesión, tty, grupo de primer plano, `starttime` repetido en el precheck) en lugar del nombre `pane_current_command`, que el instalador nativo hace igual a la versión (falso negativo en Educación HZ, 2026-11-02). **v1.7.4** (#510, aprobado por el responsable 2026-11-02): §8.1.3 el envío exige que el probe confirme el prompt (`idle`, o `waiting` + `input needed`); `status` ausente/ilegible y `waiting` sin `waitingFor` responden `needs-terminal` antes de cualquier efecto. **v1.8** (aprobado por el responsable 2026-11-03): §6.2 metadata del dueño —renombrar y archivar— en la tabla propia `conversation_user_meta` (migración v18), fuera de la captura; §6 la lista añade `customTitle`, `archivedAt` y `meta`; §9 backup y borrado de esa tabla. **v1.8.1** (propuesta, pendiente de aprobación; incidente 2026-11-03): §2.7.5 condición 5 «capaz de relay» — la imagen propia con `="2"` mientras exista, y si Docker ya no la tiene, una **acreditación de capacidad** firmada al crear el contenedor y ligada a su id inmutable (§2.7.5.1); una acreditación contradictoria deniega siempre. **v1.8.1 aprobado por el responsable el 2026-11-04.** **v1.8.2** (propuesta, pendiente de aprobación; hallazgo de Educación HZ, 2026-11-04): §8.1.9 la versión que decide es la del **proceso** que recibirá el texto, preguntada a su propio ejecutable (`/proc/<pid>/exe --version`, sin shell, como su uid, entorno vacío, autoactualizador apagado, `starttime` y ejecutable iguales antes y después); la `claude_version` del `session_start` —que el hook toma del `PATH`— queda como metadato y nunca autoriza. **v1.8.3** (propuesta, pendiente de aprobación): §8.1.9 política de versiones del composer, siempre sobre la versión del proceso de v1.8.2 — `COMPOSER_CLI_DENY` gana siempre, `COMPOSER_CLI_VERSIONS` exacta, y `COMPOSER_CLI_MIN_VERSION` **opcional y abierta** (toda release estable ≥ una versión validada, incluidos cambios minor y major, sin techo); prereleases y versiones no verificables siempre rechazadas; el riesgo de admitir versiones futuras sin validación queda declarado. **v1.8.4** (propuesta, pendiente de aprobación; protección de imágenes, #521): §2.7.2 paso 1, los requests `pin image` (antes de `create N`, obligatorio: sin tag verificado no hay `N`) y `pin N` (después, verificación); el `spawn` de `DockerManager` crea siempre desde el ID inmutable ya protegido, nunca desde el tag **v1.8.5** (propuesta, pendiente de aprobación; hallazgo en B, 2026-11-05): §5.2 solo una conversación `interactive` toma un pane (retirando a la anterior); `headless` nunca se liga; `teammate` y `unknown` solo a un pane que ninguna conversación viva tenga, sin retirar a nadie; una sesión sin pane en sus hooks (sesión en segundo plano del CLI) nunca se liga y el pane no se infiere por ascendencia. **v1.8.5 aprobado por el responsable el 2026-11-05.** **v1.8.6** (propuesta, pendiente de aprobación; G3, PR-G3-1): §3.1.1 la ingesta puede exigir que el **origen de red** de la conexión sea el contenedor vigente de la sesión en `sessions-net` (bandera `INGEST_REQUIRE_SESSION_ORIGIN`: `false` por defecto, `observe` para la puerta de activación, `true` para exigirlo). Así un token filtrado no sirve desde el túnel, desde loopback ni desde otro contenedor. Con la bandera apagada nada cambia. **v1.9** (propuesta, revisión 2, pendiente de aprobación; B, 2026-11-05): §8.1.12 composer para sesiones en segundo plano del CLI por el op `reply` con `nextTurn` fijo, sin el pane (el cliente `attach`/`agents` sigue rechazado); v1 sin encolado intencional (doble lectura idle); identidad de job, proceso y daemon (peer pid) antes del efecto; ack con `prompt_id` nuevo más confirmación en el transcript y exclusión de hashes recientes (falso positivo residual declarado); estados `accepted`/`unconfirmed`/`duplicated`, sin reintentos; la seguridad corregida por la auditoría (la frontera es el uid, no la clave); migración por validación. **v1.9 revisión 3** (decisiones del responsable tras la auditoría de la implementación, #547): ack emparejado con NUESTRO enqueue; exclusión de textos idénticos solo por operaciones pendientes o cola ambigua (la regla de 10 min se elimina; repetir un texto está permitido) con reconocimiento durable de un `unconfirmed`; transcript inaccesible ⇒ 409 antes del efecto, `unconfirmed` después; `CLAUDE_CONFIG_DIR` propio fuera del MVP; marcas `duplicated`/`possible-duplicate` persistentes e idempotentes; respuesta desconocida del daemon ⇒ `uncertain`; alcance por sesión (`COMPOSER_BG_SESSIONS`); con la bandera apagada, sin cambios salvo dos diferencias declaradas (§8.1.12.11). **v1.9.1** (propuesta, pendiente de aprobación; #568, hallazgo de A en el resumen de presencia, 2026-11-09): §4.1 `lastEventAt` es el momento de la última **actividad** de la conversación, es decir, un evento de hook o el `prepared` de un `composer_send`. Los registros propios del backend (`probe`, `gap` y los demás estados de `composer_send`) se persisten igual pero no lo mueven. Así, un probe que no confirma nada ya no hace parecer fresca una afirmación viva vieja. Esto vale para la presencia de PROJECTS.md §5, para la regla de atención del frontend y para la semilla del silencio tras un reinicio. Sin migración: la columna `last_event_at` es la misma. **v1.9.1 aprobado conceptualmente por el responsable el 2026-11-10.** **v1.9.2** (decisión del responsable, 2026-11-10: aceptar por defecto las versiones estables nuevas del CLI, sin validar cada release ni degradar sesiones; el riesgo de compatibilidad queda asumido): §8.1.9 la mínima abierta del composer pasa a ser **la regla por defecto** (sin definir ⇒ la versión más baja de `COMPOSER_CLI_VERSIONS`; `off` ⇒ solo la lista exacta, el comportamiento anterior); §2.7.5 la compatibilidad del CLI del workspace en la recreación pasa de una allowlist exacta a **mínima estable + denegación** (`RECREATE_CLI_MIN_VERSION`, por defecto 2.1.308; `RECREATE_CLI_DENY`); una versión ilegible o una prerelease siguen bloqueando. Todas las demás precondiciones, las comprobaciones dinámicas del composer y la regla de no reintentar no cambian; los canarios de versiones pasan a ser informativos. **v1.9.3** (decisión del responsable, 2026-11-10): §2.7.1 precondición 8, un W en una ruta que la imagen de `O` no tiene ya no es `managed-skills-collision` si es un archivo regular idéntico byte a byte a I_N; todo lo demás de las skills no cambia. **v1.9.4** (propuesta, pendiente de aprobación; #627, hallazgo F1 de la revisión transversal del responsable, 2026-11-13): §2.7.2 paso 4, §2.7.4 y §2.7.7, una **valla durable en D1** para la confirmación de la recreación. Una recuperación D8 podía ver D1 todavía en `O`, borrar `N` y resolver mientras el CAS del proceso muerto seguía en vuelo; al llegar, D1 apuntaba a un contenedor borrado. Columna aditiva `sessions.recreate_fence` (migración v20). El CAS del paso 4 y el `casBack` del rollback al retenido exigen `recreate_fence = :fence` y lo incrementan al aplicarse. La generación y la **intención de confirmar** (`commit: {fence, sentAt}`) se escriben en el registro durable **antes** de enviar la sentencia. Una resolución que puede actuar tras una sentencia quizá enviada (respuesta ambigua, o registro recuperado con intención) invalida antes esa generación con su propia sentencia, y solo actúa con la invalidación **probada** por relectura (`recreate_fence > :fence`). Si la confirmación ganó, la relectura lo muestra y se converge sobre ese contenedor, sin borrarlo. Sin prueba (rechazo, timeout, ambigüedad) no se borra nada ni se resuelve. Un registro anterior a la valla (sin `commitFence`) solo se recupera con D1 ya en el destino del intento; si no, 409 `commit-unknown-legacy`, con el procedimiento del operador en §2.7.7.
 
 Convenciones: *MUST*/*MUST NOT* son requisitos verificados por test; *SHOULD* son requisitos
 verificados en revisión. "Bytes" significa siempre bytes UTF-8 del contenido, salvo donde se dice
@@ -697,18 +697,28 @@ Si las marcas fueran incompatibles con el CLI (§2.7.5), responde `control-marke
    - Sin `relay.enabled`, el supervisor no lanza el relay.
 4. **Confirmar (punto de no retorno), en una sola sentencia:**
 
+   - **(v1.9.4) Intención antes del envío.** El registro durable recibe
+     `commit: {fence, sentAt}` **antes** de enviar la sentencia (escritura atómica con `fsync`,
+     §2.7.4). `fence` es el `recreate_fence` leído con las precondiciones, bajo el lock: solo una
+     recreación o una recuperación lo mueven, y ambas necesitan el lock. Si esa escritura falla, la
+     sentencia no se envía y hay rollback: este proceso sabe que no salió.
+
    ```sql
    UPDATE sessions
-   SET container_id = :N, ingest_token_hash = :H, ingest_token_hash_suspended = NULL
+   SET container_id = :N, ingest_token_hash = :H, ingest_token_hash_suspended = NULL,
+       recreate_fence = recreate_fence + 1
    WHERE session_id = :sid AND container_id = :O AND conversation_requested = 1
+     AND recreate_fence = :fence
    ```
 
    - 0 filas o error ⇒ rollback.
    - **Timeout ambiguo** (la petición pudo aplicarse): no hay rollback que borre `N`. La sesión
      pasa a **sin resolver** (§2.7.4), y la decisión se toma releyendo la fila solo cuando la
-     sentencia ya no puede aplicarse.
-   - Con `T_rec` vencido no se ejecuta.
-   - **`container_id` y el hash autorizado cambian juntos.**
+     sentencia ya no puede aplicarse: pasado `T_d1` y **con su generación invalidada y probada**
+     (valla de §2.7.4).
+   - Con `T_rec` vencido no se ejecuta; se comprueba otra vez después de escribir la intención.
+   - **`container_id` y el hash autorizado cambian juntos**, y la sentencia consume su generación:
+     después de aplicarse, ninguna otra sentencia con el mismo `:fence` puede aplicarse.
 5. **Autorizar:** el procedimiento de §2.7.5 sobre `N`. Si el relay no se identifica, se queda en
    `relay-unavailable`, sin archivo.
 6. **Completar**, convergencia sobre `N`:
@@ -733,8 +743,11 @@ Si las marcas fueran incompatibles con el CLI (§2.7.5), responde `control-marke
 **D1 apunta siempre a un contenedor que existe:**
 
 - antes del paso 4, a `O` (renombrado o no); después, a `N`;
-- con un CAS ambiguo, `N` no se borra hasta que la relectura posterior a `T_d1` decide, así que
-  D1 apunta a un contenedor existente aunque la sentencia se aplique tarde;
+- con un CAS ambiguo, `N` no se borra hasta que la valla de §2.7.4 está probada y la relectura
+  posterior decide, así que D1 apunta a un contenedor existente aunque la sentencia se aplique
+  tarde: o ya se aplicó (y la relectura lo ve), o ya no puede aplicarse;
+- lo mismo tras un reinicio: una recuperación (§2.7.7) con la intención `commit` en el registro
+  no borra `N` sin la valla probada (v1.9.4);
 - `O` se borra solo después del paso 4;
 - las lecturas concurrentes (attach, exec, git, files) resuelven por `container_id` y ven una
   sesión detenida hasta el paso 6;
@@ -824,12 +837,73 @@ petición después de que el cliente dejó de esperarla. Reglas:
   de cómo terminaron sus peticiones a Docker. Ninguna observación posterior lo prueba: ni un plazo,
   ni una ventana sin eventos, ni escaneos repetidos.
 
+**Valla de confirmación (v1.9.4, #627).** Si murió el proceso que envió una sentencia de
+confirmación a D1, ningún plazo prueba que ya no pueda aplicarse (D8). Detener los contenedores
+tampoco termina una petición ya enviada a D1. Por eso:
+
+- `sessions.recreate_fence` (entero, 0 por defecto, migración v20) es la **generación** de la
+  confirmación. Solo lo mueven el CAS del paso 4 y el `casBack` de §2.7.7 (lo exigen igual al
+  registrado y lo incrementan al aplicarse) y la valla.
+- **Intención antes del envío.** El registro guarda `commit: {fence, sentAt}` antes de enviar la
+  sentencia. Un registro con `commitFence: true` (todos los que escribe el inicio de un intento
+  desde v1.9.4) y **sin** `commit` prueba que la sentencia no salió: no hay nada que vallar.
+- **La valla.** Antes de decidir nada con D1, cuando una sentencia de confirmación pudo enviarse
+  y no se conoce su resultado (respuesta ambigua en el proceso vivo, o un registro recuperado con
+  `commit`, §2.7.7), la resolución envía
+
+  ```sql
+  UPDATE sessions SET recreate_fence = recreate_fence + 1
+  WHERE session_id = :sid AND recreate_fence = :fence
+  ```
+
+  y **relee la fila**. Solo prueba la invalidación `recreate_fence > :fence` en esa relectura. La
+  respuesta de la valla ni basta ni hace falta: 0 filas significa que la generación ya se había
+  movido, quizá por la propia confirmación; una respuesta ambigua puede haberse aplicado o no.
+  Probada la invalidación, ninguna sentencia con `:fence` puede aplicarse ya, en cualquier orden
+  en que D1 las ejecute.
+- **Después de la prueba**, la misma relectura decide con la tabla de resolución:
+  - si la confirmación ganó (`container_id` ya en el destino), se converge sobre ese contenedor,
+    que **no se borra**;
+  - si no, la sentencia en vuelo ya no puede aplicarse, y el rollback borra `N` sin riesgo.
+- **La generación sola no prueba nada sobre la confirmación** (decisión del responsable,
+  2026-11-13). `recreate_fence > :fence` dice solo que la generación quedó invalidada, y la puede
+  haber movido la propia confirmación o una valla, de este proceso o de una recuperación anterior.
+  Toda decisión de «aplicada» o «no aplicada» se toma **con la generación probada y la identidad
+  del contenedor vigente juntas**, tanto para el CAS como para el `casBack`:
+  - generación probada y `container_id` = destino del intento (`N`; en uno inverso, el retenido
+    que vuelve) ⇒ aplicada;
+  - generación probada y `container_id` = el contenedor reemplazado (`O`; en uno inverso, `N`) ⇒
+    no aplicada, aunque la generación se haya movido;
+  - generación probada y `container_id` distinto de ambos (o la fila ausente) ⇒ ni lo uno ni lo
+    otro: no se borra nada, el intento sigue sin resolver y queda para el operador;
+  - generación sin probar ⇒ nada se decide.
+
+  El id de `N` es nuevo e irrepetible por intento, y solo la sentencia de confirmación lo escribe
+  en `container_id`. El id del retenido solo lo escribe el `casBack`. Por eso esa identidad basta.
+  El hash (`ingest_token_hash`) no es evidencia en una recuperación: el registro no lo guarda
+  (nunca guarda el token ni su hash), y una deshabilitación o revocación posterior lo mueve a
+  `…_suspended` sin deshacer la confirmación. En el proceso vivo, «aplicada» es la respuesta de
+  la propia sentencia (1 fila). Esa sentencia mueve `container_id`, el hash y la generación
+  juntos, en el CAS y en el `casBack`.
+- La valla no toca `revocation_seq` ni las condiciones de revocación: el CAS de la habilitación
+  (§2.7.5) y el `conversation_requested = 1` del CAS del paso 4 siguen igual.
+- **Sin prueba**, no se borra nada ni se resuelve, y el intento sigue `uncertain`. Es el caso de
+  una valla rechazada (un error de D1 prueba que no se aplicó), con timeout o ambigua sin la
+  generación movida en la relectura, o de una lectura fallida. La siguiente pasada repite la
+  valla; repetirla es inocuo, porque solo se aplica con la generación aún vigente.
+- `T_d1` sigue valiendo para el proceso vivo. La valla es lo que permite decidir sin plazo tras un
+  reinicio.
+- La revocación nunca toca la valla y sigue sin bloquearse.
+
 **Estados del intento**, en el registro durable
 `<WORKSPACE_ROOT>/.st-control/<sid>/recreate-attempt.json`:
 
 - Se escribe a temporal, con `fsync` y `rename`, **antes del primer efecto**.
 - Contiene `attemptId`, el id y los nombres de `O`, el nombre `-new-<ts>` de `N`, `startedAt`, el
-  estado y `outcome`.
+  estado y `outcome`. **(v1.9.4)** También `commitFence: true`, escrito al empezar el intento, y,
+  antes de enviar la sentencia de confirmación, `commit: {fence, sentAt}`. El parser es estricto:
+  un `commit` sin `commitFence`, o con una generación que no es un entero ≥ 0, hace el registro
+  ilegible (fail-closed).
 - **Nunca** contiene el token ni su hash.
 - `N` lleva la etiqueta `io.shared-terminal.recreate-attempt=<attemptId>`.
 
@@ -952,7 +1026,8 @@ Reglas:
 
   Los sufijos `-new-<ts>` y `-old-<ts>` están **reservados**, y un nombre que no encaja no se toca.
   Elimina los sobrantes. La tabla siguiente es la **resolución**: la aplica la resolución de un
-  intento `uncertain` con evidencia (proceso vivo), o la vía que decida D8. Con D1 decide:
+  intento `uncertain` con evidencia (proceso vivo), o la vía que decida D8. Con D1 decide,
+  **leído después de la valla probada** si se debe una (v1.9.4, arriba):
 
 | D1 `container_id` | Encontrado | Acción |
 | --- | --- | --- |
@@ -1344,7 +1419,9 @@ y `/tmp` se transmite a `N` antes de su primer arranque.
   (`reverse: true`, con `retainedContainerId` = el id inmutable de `O`: la tentativa renombra `O`,
   así que ningún nombre del registro puede identificarla) sobre el mismo registro y el mismo
   lock: `N` → `-old-<ts>`, `O` → canónico; **una** sentencia D1 devuelve `container_id` a `O` y
-  pone `ingest_token_hash` e `…_suspended` a NULL (el token de `O`, si lo tiene, deja de
+  pone `ingest_token_hash` e `…_suspended` a NULL (**v1.9.4**: con `AND recreate_fence = :fence`
+  y el incremento, como el paso 4, y la intención `commit` escrita en el registro antes de
+  enviarla; si esa escritura falla, la sentencia no sale y los nombres se restauran) (el token de `O`, si lo tiene, deja de
   corresponder ⇒ §2.7.5 retira marca y archivo: nada autorizado — para una `O` creada con 3.0c/3.0d
   eso es definitivo: su captura solo vuelve con otra recreación); mapeos de puertos vaciados;
   `status=stopped`. `N` queda retenida (`role:"N"`) hasta `approve`; la recreación anterior pasa a
@@ -1363,7 +1440,13 @@ y `/tmp` se transmite a `N` antes de su primer arranque.
   `running`); el operador adopta la tentativa (`recoveredAt`, duradero antes de cualquier efecto) y
   este proceso la resuelve con la tabla de §2.7.4 a partir de la evidencia (D1 decide; hasta 3
   pasadas): D1 en `O` ⇒ `N` (etiquetada, nunca arrancada) eliminada, `O` canónica, `rolled-back`;
-  D1 en `N` ⇒ `committed`, convergencia de §2.7.5, `O` retenida. Para una tentativa **inversa**
+  D1 en `N` ⇒ `committed`, convergencia de §2.7.5, `O` retenida. **(v1.9.4)** Con `commit` en el
+  registro, la sentencia del proceso muerto puede seguir en vuelo, y cada pasada empieza por la
+  valla de §2.7.4. D1 decide solo con la invalidación probada: si el CAS llegó antes, D1 ya está
+  en `N` y se converge sobre `N`; si llega después, cambia 0 filas. Sin prueba, ninguna pasada
+  borra ni resuelve, y `recover` responde `recover-retry` sin más efectos que la valla y la
+  adopción. Repetirlo (o reiniciar entre la valla y la resolución) es seguro: la siguiente valla
+  encuentra la generación ya movida y la relectura lo prueba. Para una tentativa **inversa**
   huérfana, el retenido se identifica por `retainedContainerId` (y, en un registro anterior sin
   él, por D1 si ya se movió, o por el poseedor del nombre canónico que no es el contenedor
   reemplazado), nunca por un nombre: muerta tras aplicarse `casBack` ⇒ `committed` sobre `O` (los
@@ -1373,9 +1456,48 @@ y `/tmp` se transmite a `N` antes de su primer arranque.
   (`running`; `retained-missing` si desapareció). Rechaza `no-attempt`, `already-resolved`,
   `not-orphaned` (la tentativa pertenece a un proceso vivo), `record-unreadable`, `ambiguous-n`
   (más de un contenedor etiquetado), `recover-retry`/`recover-stuck` (la evidencia no confirma;
-  nada cambia). Repetir `recover` tras resolver responde `already-resolved`. Sigue sin existir
+  nada cambia), `commit-unknown-legacy` (abajo). Repetir `recover` tras resolver responde `already-resolved`. Sigue sin existir
   resolución automática: `orphanedAt` queda en el registro resuelto como historia (y el parser lo
   admite solo junto a `recoveredAt`).
+- **Registros anteriores a la valla (v1.9.4, `commit-unknown-legacy`).** Un registro sin
+  `commitFence` lo escribió un backend anterior. Su CAS y su `casBack` no llevan la valla, y no
+  dejó constancia de haberlos enviado. Por eso la ausencia de `commit` no prueba nada, y una valla
+  tampoco detendría esa sentencia.
+  - **Evidencia suficiente**, la única: D1 ya en el destino del intento, es decir, el `N`
+    etiquetado o, en uno inverso, el retenido que vuelve. La sentencia ya se aplicó, y no puede
+    aplicarse dos veces. Con esa evidencia, `recover` procede como siempre (`committed`).
+  - D1 en el contenedor reemplazado **no** es evidencia de que la sentencia no llegará. Ocurre
+    también si `N` nunca llegó a existir o ya no está.
+  - **Tampoco lo es la captura deshabilitada** (`conversation_requested = 0`, decisión del
+    responsable, 2026-11-13). El CAS antiguo exige `= 1`, pero el lock de este proceso no gobierna
+    una petición que el proceso anterior ya envió, y una habilitación posterior volvería a abrir
+    la ventana. Con D1 todavía en `O`, el registro anterior sigue bloqueado, esté la captura como
+    esté.
+  - En cualquier otro caso responde 409 `commit-unknown-legacy` **antes** de adoptar el intento
+    o de tocar nada. La sesión sigue `recreate-unresolved`.
+  - **Procedimiento del operador:**
+    1. Antes de desplegar v1.9.4, comprobar que ningún `.st-control/*/recreate-attempt.json` está
+       sin resolver (`state` distinto de `resolved`). Si hay uno, resolverlo antes con el
+       procedimiento vigente, aceptando a sabiendas el riesgo de #627, o desplegar y aplicar el
+       paso 2. Los registros resueltos no se ven afectados.
+    2. Si `recover` responde `commit-unknown-legacy`, no hay salida automática. Los contenedores,
+       el registro y la fila se conservan tal cual: sin hard delete y sin editar nada. Deshabilitar
+       y el comando de emergencia siguen funcionando, y la lectura de archivos también. La
+       decisión es del responsable, con las líneas `[recreate]` del proceso muerto como evidencia
+       (si registran la respuesta de `d1 commit`/`d1 rollback`). Un cierre manual se documenta
+       en el issue antes de ejecutarlo.
+    3. Si D1 ya está en el destino, `recover` funciona sin pasos extra.
+  - **Volver a un backend anterior** después de v1.9.4 es una **condición del rollback de
+    código**, aceptada por el responsable como limitación explícita (2026-11-13).
+    - El backend anterior lee como ilegible todo registro que lleve `commitFence`, y desde
+      v1.9.4 eso incluye los resueltos (son claves desconocidas para su parser estricto).
+    - Esas sesiones quedan `recreate-unresolved` (fail-closed) mientras corra.
+    - **Nunca** se borran, editan ni convierten los registros para esquivarlo: son la única
+      evidencia durable del intento, y quitar `commitFence` convertiría un intento vallado en uno
+      que el código anterior cree entender.
+    - La compatibilidad exige reinstalar una versión que los lea (v1.9.4 o posterior).
+    - La columna `recreate_fence` no estorba al backend anterior: nunca la lee ni la escribe.
+    - Receta en DEPLOYMENT.md, «Rollback (from 3.0d)».
 - **Auditoría.** Con owner ajeno, cada uno de los tres verbos escribe una fila `operate` puntual
   **antes** de la llamada, fail-closed (como el `start` de #429).
 - **Shell host**: `npm run recreate:admin -- <sid> preflight [--preserve] | recreate --image
@@ -3542,6 +3664,22 @@ tener su test; si hay contradicción con el diseño, manda §2.7.
       después; `backup-stale` exige backup posterior a la detención y sin `concurrentChanges`;
       smoke real con modos 600/700, uid/gid, hardlinks, symlinks (absoluto y roto), FIFO y nombre
       Unicode idénticos en `N`; tests de parser de todos los campos nuevos.
+- [x] **Valla de confirmación (v1.9.4, #627)** (`engine.fence.test.ts`, `d1.sqlite.test.ts`,
+      `recreateAttempt.test.ts`):
+      - la reproducción del issue (recuperación resuelta y luego el CAS en vuelo) ⇒ 0 filas;
+      - CAS que llega antes de la valla ⇒ la recuperación converge en `N` y no lo borra;
+      - CAS que llega después de la valla (justo antes de borrar `N`) ⇒ 0 filas, y D1 nunca
+        apunta a un contenedor borrado;
+      - valla rechazada o con timeout ⇒ sin resolver, nada borrado; valla ambigua aplicada ⇒
+        probada por la relectura;
+      - reinicio entre la intención y el CAS, y a mitad de la recuperación tras la valla;
+      - `casBack` en ambos órdenes;
+      - CAS ambiguo en el proceso vivo con la sentencia aplicada tarde;
+      - registro anterior a la valla ⇒ `commit-unknown-legacy` sin efectos, y recuperable con D1
+        ya en `N`;
+      - las sentencias reales en SQLite (`migrateDb()` incluida);
+      - parser estricto de `commitFence`/`commit`.
+      Los tests de recuperación y de la reproducción fallan con el motor anterior.
 
 ### 3.1 vista
 

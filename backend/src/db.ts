@@ -833,6 +833,21 @@ export const MIGRATIONS: readonly Migration[] = [
 			for (const sql of PROJECT_DIRECTORY_DDL) await d1Query(sql);
 		},
 	},
+	{
+		// CONVERSATION.md §2.7.4 (v1.9.4, #627): the recreation's commit fence.
+		// The step-4 CAS and the rollback's `casBack` apply only while the row
+		// still carries the generation the attempt recorded BEFORE sending
+		// them, and bump it when they apply. A recovery that must decide
+		// "D1 is still on O, so N can go" first bumps the generation in its
+		// own statement: from then on a statement the dead process left in
+		// flight can no longer land, so removing N can never leave D1
+		// pointing at a removed container. Additive, default 0: an older
+		// backend never reads or writes it (its CAS ignores the fence — the
+		// reason a record it wrote stays blocked, §2.7.7).
+		version: 20,
+		description: "sessions.recreate_fence — recreation commit fence (contract v1.9.4, #627)",
+		apply: () => addColumnIfMissing("sessions", "recreate_fence INTEGER NOT NULL DEFAULT 0"),
+	},
 ];
 
 /**
