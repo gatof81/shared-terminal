@@ -395,6 +395,14 @@ interface Attempt {
 	nId: string | null;
 	casSentAt: number | null;
 	cas: "applied" | "not-applied" | "ambiguous" | null;
+	/**
+	 * The fence generation (v1.9.4, #627) the resolution must prove
+	 * invalidated in D1 before it acts on the row: set when a commit
+	 * statement (`cas` / `casBack`) may have been sent and its outcome is
+	 * not known — an ambiguous answer, or a recovered record carrying a
+	 * commit intent. Null once proven, or when nothing was sent.
+	 */
+	fenceOwed: number | null;
 	state: "open" | "uncertain" | "resolved";
 	/** Record writes of this attempt run one at a time, in order. */
 	recordChain: Promise<unknown>;
@@ -746,6 +754,7 @@ export class RecreationEngine {
 			nId: null,
 			casSentAt: null,
 			cas: null,
+			fenceOwed: null,
 			state: "open",
 			recordChain: Promise.resolve(),
 			resolving: null,
@@ -791,17 +800,44 @@ export class RecreationEngine {
 			a.run.close("T_rec");
 			return this.rollback(a, new StepFailure("commit", "T_rec expired before the commit"));
 		}
+		// The commit intent, durable BEFORE the statement leaves (v1.9.4,
+		// #627): if this process dies with the CAS in flight, the next one
+		// learns from the record that it may have been sent, and with which
+		// generation, so its recovery fences that generation before deciding
+		// anything from D1. The generation is the one read with the
+		// preconditions, under this lock: only a recreation or a recovery
+		// moves it, and both need the lock.
+		const fence = facts.row.recreate_fence;
+		try {
+			await this.recordOp(a, () =>
+				this.deps.attempts.recordCommitIntent(sessionId, a.attemptId, fence),
+			);
+		} catch (err) {
+			// Not sent: this process knows it, so its own rollback owes no fence.
+			return this.rollback(
+				a,
+				new StepFailure("commit", `commit intent not recorded: ${(err as Error).message}`),
+			);
+		}
+		if (!a.run.epochOpen || a.run.remaining() <= 0) {
+			a.run.close("T_rec");
+			return this.rollback(a, new StepFailure("commit", "T_rec expired before the commit"));
+		}
 		a.casSentAt = this.now();
 		// D1's own rule (§2.7.4): the client cuts the statement at 10 s and
 		// the outcome is classified, never waited on past that. Tracked so
 		// no resolution pass runs while it is out.
-		a.cas = await a.run.untimed("d1 commit", () => this.deps.d1.cas(sessionId, a.oId, nId, hash));
+		a.cas = await a.run.untimed("d1 commit", () =>
+			this.deps.d1.cas(sessionId, a.oId, nId, hash, fence),
+		);
 		if (a.cas === "not-applied") {
 			return this.rollback(a, new StepFailure("commit", "CAS matched 0 rows"));
 		}
 		if (a.cas === "ambiguous") {
-			// The statement may still apply. No rollback may remove N: the
-			// row is re-read only once it can no longer change (T_d1).
+			// The statement may still apply. No rollback may remove N until
+			// its generation is proven invalidated (the fence) and the row is
+			// re-read; the re-read also waits until it can no longer change (T_d1).
+			a.fenceOwed = fence;
 			a.run.close("ambiguous commit");
 			await this.markUncertain(a, "ambiguous commit; D1 re-read after T_d1");
 			void this.runResolution(a);
@@ -1780,7 +1816,31 @@ export class RecreationEngine {
 			},
 			{ mayAct },
 		);
+		// The fence (v1.9.4, #627), before anything is decided from D1: a
+		// commit statement that may still be in flight could move the row
+		// after this pass removed the container it names. One statement
+		// invalidates its generation; whatever that statement answers, the
+		// proof is the read below (`recreate_fence` past the generation).
+		// Without proof — the bump refused, ambiguous, or not yet visible —
+		// the pass stops here: nothing removed, nothing resolved.
+		const owed = a.fenceOwed;
+		if (owed !== null) {
+			const bumped = await act("d1 fence", () => this.deps.d1.fence(a.sessionId, owed));
+			logger.info(`[recreate] ${a.sessionId}: fence ${owed}: ${bumped}`);
+		}
 		const row = await act("d1 read", () => this.deps.d1.getRow(a.sessionId));
+		if (owed !== null) {
+			if (!row || !(row.recreate_fence > owed)) {
+				logger.warn(
+					`[recreate] ${a.sessionId}: attempt ${a.attemptId}: fence ${owed} not proven (D1 at ${row?.recreate_fence ?? "no row"}); nothing removed, still unresolved`,
+				);
+				return "retry";
+			}
+			// Proven: no statement carrying `owed` can apply any more. This
+			// read is after the proof, so whatever it shows is final for the
+			// commit — if the commit won, `container_id` already shows it.
+			a.fenceOwed = null;
+		}
 		const current = row?.container_id ?? null;
 		if (a.reverse) return this.resolveReverse(a, lease, act, current);
 		if (current === a.oId) return this.resolveToO(a, lease, act);
@@ -2155,6 +2215,7 @@ export class RecreationEngine {
 			nId: retained.containerId, // the container coming back (O)
 			casSentAt: null,
 			cas: null,
+			fenceOwed: null,
 			state: "open",
 			recordChain: Promise.resolve(),
 			resolving: null,
@@ -2192,11 +2253,26 @@ export class RecreationEngine {
 			void this.runResolution(a);
 			return { ok: false, status: 500, code: "recreate-failed", detail: "rename" };
 		}
+		// As the forward commit: the intent is durable before the statement
+		// leaves (v1.9.4). Not recorded ⇒ not sent; the resolution sees D1
+		// still on N and restores the names.
+		const fence = row.recreate_fence;
+		try {
+			await this.recordOp(a, () =>
+				this.deps.attempts.recordCommitIntent(sessionId, attemptId, fence),
+			);
+		} catch (err) {
+			a.run.close(`rollback commit intent not recorded: ${(err as Error).message}`);
+			await this.markUncertain(a, `rollback commit intent not recorded: ${(err as Error).message}`);
+			void this.runResolution(a);
+			return { ok: false, status: 500, code: "recreate-failed", detail: "commit" };
+		}
 		a.casSentAt = this.now();
 		a.cas = await a.run.untimed("d1 rollback", () =>
-			this.deps.d1.casBack(sessionId, nId, retained.containerId),
+			this.deps.d1.casBack(sessionId, nId, retained.containerId, fence),
 		);
 		if (a.cas === "ambiguous") {
+			a.fenceOwed = fence;
 			a.run.close("ambiguous rollback commit");
 			await this.markUncertain(a, "ambiguous rollback commit; D1 re-read after T_d1");
 			void this.runResolution(a);
@@ -2411,6 +2487,28 @@ export class RecreationEngine {
 							};
 						nId = labelled[0]?.id ?? null;
 					}
+					// What the record says about the commit statement (v1.9.4, #627):
+					// - an intent ⇒ it may have been sent and still be in flight: its
+					//   generation is fenced before the resolution decides anything;
+					// - `commitFence` without an intent ⇒ never sent (the intent is
+					//   durable before the statement leaves): nothing to fence;
+					// - neither (a record from before the fence) ⇒ unknown, and that
+					//   code's statement ignores the fence. Only D1 already on the
+					//   attempt's target proves the outcome (it landed; it cannot land
+					//   twice). D1 on the replaced container is NOT evidence that it
+					//   never will: blocked, before any effect.
+					let fenceOwed: number | null = null;
+					if (r.commit) {
+						fenceOwed = r.commit.fence;
+					} else if (r.commitFence !== true && !(nId !== null && row.container_id === nId)) {
+						return {
+							ok: false,
+							status: 409,
+							code: "commit-unknown-legacy",
+							detail:
+								"record predates the commit fence and D1 is not on the attempt's target; see CONVERSATION.md §2.7.7",
+						};
+					}
 					await this.deps.attempts.adopt(sessionId, r.attemptId);
 					const lease: Lease = { held: true };
 					const a: Attempt = {
@@ -2423,6 +2521,7 @@ export class RecreationEngine {
 						nId,
 						casSentAt: null,
 						cas: null,
+						fenceOwed,
 						state: "uncertain",
 						recordChain: Promise.resolve(),
 						resolving: null,

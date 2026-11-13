@@ -242,6 +242,7 @@ async function main(): Promise<void> {
 		container_id: O as string | null,
 		container_name: CANONICAL,
 		conversation_requested: 1,
+		recreate_fence: 0,
 		ingest_token_hash: null as string | null,
 		ingest_token_hash_suspended: null as string | null,
 		user_id: "u1",
@@ -251,20 +252,34 @@ async function main(): Promise<void> {
 	const d1: RecreateD1Port = {
 		getRow: async () => ({ ...row }),
 		sessionIdByContainerName: async (name) => (name === CANONICAL ? SID : null),
-		cas: async (_s, oId, nId, h) => {
-			if (casMode === "rejected" || row.container_id !== oId || row.conversation_requested !== 1) {
+		cas: async (_s, oId, nId, h, fence) => {
+			if (
+				casMode === "rejected" ||
+				row.container_id !== oId ||
+				row.conversation_requested !== 1 ||
+				row.recreate_fence !== fence
+			) {
 				return "not-applied";
 			}
 			row.container_id = nId;
 			row.ingest_token_hash = h;
+			row.recreate_fence++;
 			return "applied";
 		},
 		// §2.7.7 rollback: one statement back to the retained container, hashes cleared.
-		casBack: async (_s, fromId, toId) => {
-			if (casMode === "rejected" || row.container_id !== fromId) return "not-applied";
+		casBack: async (_s, fromId, toId, fence) => {
+			if (casMode === "rejected" || row.container_id !== fromId || row.recreate_fence !== fence)
+				return "not-applied";
 			row.container_id = toId;
 			row.ingest_token_hash = null;
 			row.ingest_token_hash_suspended = null;
+			row.recreate_fence++;
+			return "applied";
+		},
+		// The recovery's fence (v1.9.4, #627).
+		fence: async (_s, fence) => {
+			if (row.recreate_fence !== fence) return "not-applied";
+			row.recreate_fence++;
 			return "applied";
 		},
 		getConfig: async () => ({ ports: [], gitIdentity, hasDotfiles: false, postStartCmd: null }),

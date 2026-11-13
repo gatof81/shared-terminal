@@ -71,6 +71,18 @@ export interface RetainedContainer {
 	since: string;
 }
 
+/**
+ * The commit intent (v1.9.4, #627): the D1 fence generation the attempt's
+ * commit statement (`cas`, or `casBack` on a reverse attempt) carries,
+ * recorded durably BEFORE the statement is sent. Its presence means "the
+ * statement may have been sent"; its absence on a record that carries
+ * `commitFence` means it was never sent.
+ */
+export interface CommitIntent {
+	fence: number;
+	sentAt: string;
+}
+
 export interface AttemptRecord extends AttemptIdentity {
 	version: 1;
 	sessionId: string;
@@ -87,6 +99,15 @@ export interface AttemptRecord extends AttemptIdentity {
 	/** Set with `resolved`; cleared by `approve`. */
 	retained?: RetainedContainer;
 	approvedAt?: string;
+	/**
+	 * Written by `begin()` since v1.9.4: this attempt's commit statements
+	 * are fenced and their intent is recorded before they are sent. A
+	 * record without it (legacy) proves nothing about its commit — the
+	 * code that wrote it sent an unfenced statement without recording it.
+	 */
+	commitFence?: true;
+	/** Set by `recordCommitIntent`, before the commit statement is sent. */
+	commit?: CommitIntent;
 	/** Set by `adopt`: an orphaned attempt an operator took over to resolve by evidence. */
 	recoveredAt?: string;
 	/** Present only when `state === "resolved"`. */
@@ -196,7 +217,22 @@ const RECORD_KEYS = new Set([
 	"retained",
 	"approvedAt",
 	"recoveredAt",
+	"commitFence",
+	"commit",
 ]);
+
+function isCommitIntent(v: unknown): v is CommitIntent {
+	if (!v || typeof v !== "object") return false;
+	const o = v as Record<string, unknown>;
+	return (
+		Object.keys(o).length === 2 &&
+		typeof o.fence === "number" &&
+		Number.isSafeInteger(o.fence) &&
+		o.fence >= 0 &&
+		typeof o.sentAt === "string" &&
+		o.sentAt.length > 0
+	);
+}
 
 function isCarrySummary(v: unknown): v is CarrySummary {
 	if (!v || typeof v !== "object") return false;
@@ -282,6 +318,11 @@ function parseRecord(raw: string, sessionId: string): AttemptRecord {
 		throw new Error("bad approvedAt");
 	if (v.recoveredAt !== undefined && typeof v.recoveredAt !== "string")
 		throw new Error("bad recoveredAt");
+	if (v.commitFence !== undefined && v.commitFence !== true) throw new Error("bad commitFence");
+	// An intent without `commitFence` would be a record no writer produces:
+	// half-understood, so unreadable (the gate keeps the session closed).
+	if (v.commit !== undefined && (!isCommitIntent(v.commit) || v.commitFence !== true))
+		throw new Error("bad commit");
 	if (!Array.isArray(v.history)) throw new Error("bad history");
 	for (const h of v.history as unknown[]) {
 		const e = h as Record<string, unknown>;
@@ -412,6 +453,7 @@ export class RecreateAttemptStore {
 			startedAt: at,
 			state: "open",
 			stateAt: at,
+			commitFence: true,
 			history,
 		};
 		if (extra.preserve) record.preserve = extra.preserve;
@@ -426,6 +468,40 @@ export class RecreateAttemptStore {
 		this.active.add(identity.attemptId);
 		await this.write(sessionId, record);
 		return record;
+	}
+
+	/**
+	 * The commit intent (§2.7.4, v1.9.4): written durably — temp, fsync,
+	 * rename, directory fsyncs — BEFORE the commit statement is sent, with
+	 * the fence generation that statement carries. Only the owner of an
+	 * `open` attempt, once per attempt. A throw means "do not send": if the
+	 * write failed past its rename the intent may be on disk anyway, which
+	 * only makes a later recovery fence a statement that was never sent —
+	 * harmless.
+	 */
+	async recordCommitIntent(
+		sessionId: string,
+		attemptId: string,
+		fence: number,
+	): Promise<AttemptRecord> {
+		if (!Number.isSafeInteger(fence) || fence < 0)
+			throw new AttemptTransitionError(`invalid fence ${fence}`);
+		const record = await this.current(sessionId, attemptId);
+		this.assertOwned(attemptId);
+		if (record.state !== "open") {
+			throw new AttemptTransitionError(
+				`cannot record a commit for ${record.state} attempt ${attemptId}`,
+			);
+		}
+		if (record.commitFence !== true) {
+			throw new AttemptTransitionError(`attempt ${attemptId} predates the commit fence`);
+		}
+		if (record.commit) {
+			throw new AttemptTransitionError(`attempt ${attemptId} already recorded its commit`);
+		}
+		const next: AttemptRecord = { ...record, commit: { fence, sentAt: nowIso() } };
+		await this.write(sessionId, next);
+		return next;
 	}
 
 	/** `open → uncertain`: the epoch closed with Docker requests unanswered. */
