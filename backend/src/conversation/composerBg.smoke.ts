@@ -1069,7 +1069,11 @@ async function runCases(): Promise<void> {
 	phase("4. AskUserQuestion pending ⇒ needs-terminal, the dialog unanswered");
 	{
 		job = await waitIdle(job);
-		await jobFree(job.short);
+		const free0 = await jobFree(job.short);
+		// What the job looked like right before the send: the 2026-11-13 flake
+		// (#614's CI, CLI 2.1.316) refused the first send with no log line, and
+		// without the answer and this state it could not be attributed.
+		const before = probeNow()?.find((x) => x.id === job.short);
 		const a = await sendVia(service, job.cid, "smoke ASKQ four");
 		await jobFree(job.short);
 		const w = await waitJob(job.short, (e) => e.status === "waiting", 30_000).catch(() => null);
@@ -1085,7 +1089,10 @@ async function runCases(): Promise<void> {
 			4,
 			"AskUserQuestion",
 			ok ? "PASS" : "FAIL",
-			`first ${JSON.stringify(a.body.result)}; probe ${w ? "waiting" : "?"}/${still?.waitingFor}; second ${b.status} ${JSON.stringify(b.body)}`,
+			`first ${JSON.stringify(a.body.result)}; probe ${w ? "waiting" : "?"}/${still?.waitingFor}; second ${b.status} ${JSON.stringify(b.body)}` +
+				(ok
+					? ""
+					: `; diag: first ${a.status} ${JSON.stringify(a.body).slice(0, 400)}; free before ${free0}; before ${before ? `${before.status}/${before.waitingFor}` : "absent"}`),
 		);
 		// Answer it from the Terminal (the person), so the job is usable again.
 		const target = attach(job);
