@@ -1068,7 +1068,8 @@
 }
 
 /* "Reply…" under every reply was a 44-px pill: the loudest thing in a
-   thread. With a mouse it is a compact ghost button; touch keeps 44 px. */
+   thread. With a mouse it is a compact ghost button; touch keeps 44 px on wide
+   layouts, 36 px on phones (density pass 2026-11-13). */
 @media (pointer: fine) {
 	.tw-actions .tw-btn {
 		min-height: 30px;
@@ -1134,6 +1135,102 @@
 	box-sizing: border-box;
 	min-height: 52px;
 	box-shadow: none;
+}
+
+/* ── Phones: less room around each thing (owner 2026-11-13: "letters are
+   right, but too much wasted space") ─────────────────────────────────────
+   Type sizes stay; padding, gaps and box sizes shrink. The agents become
+   one scrollable row of compact chips (avatar · name over state) instead
+   of a grid of tall cards. Touch targets stay ≥ 44 px where the e2e
+   asks for them (agents, thread rows, New task); Reply is 36 px on touch.
+   Placed BEFORE the short-height block: both apply on a phone with the
+   keyboard up, and that block's tighter head/composer must win there. */
+@container (max-width: 719px) {
+	.tw-now {
+		gap: 10px;
+	}
+	/* The footer's fade reaches ~12 px up: keep the old 14 px above it so it
+	   only ever covers empty space (the denser gap is 10). */
+	.tw-new-bar {
+		margin-top: 4px;
+	}
+	.tw-h3 {
+		margin: 2px 0 4px;
+	}
+	.tw-agents {
+		/* A scroll container in the Now flex column would otherwise shrink to
+		   nothing (its min-height becomes 0) when Now overflows. */
+		flex: none;
+		display: flex;
+		gap: 6px;
+		overflow-x: auto;
+		scrollbar-width: none;
+		margin: 0 -16px;
+		padding: 2px 16px;
+	}
+	.tw-agent {
+		flex: none;
+		display: grid;
+		grid-template-columns: auto auto;
+		align-items: center;
+		justify-items: start;
+		column-gap: 8px;
+		row-gap: 0;
+		min-height: 44px;
+		padding: 5px 12px 5px 5px;
+		border-radius: 24px;
+		text-align: left;
+	}
+	.tw-agent .tw-av {
+		grid-row: span 2;
+		width: 32px;
+		height: 32px;
+		border-radius: 50%;
+	}
+	.tw-agent-name {
+		max-width: 9.5rem;
+		line-height: 1.2;
+	}
+	.tw-agent-state {
+		line-height: 1.2;
+	}
+	.tw-card-link {
+		padding: 9px 10px 9px 14px;
+	}
+	.tw-card-permission {
+		padding: 9px 12px 9px 14px;
+	}
+	.tw-card > .tw-card-actions {
+		padding: 6px 10px 6px 0;
+	}
+	.tw-thread-row {
+		min-height: 48px;
+		padding: 4px 6px;
+	}
+	.tw-main-head {
+		padding: 6px 0 8px;
+	}
+	.tw-main-title {
+		font-size: 1rem;
+	}
+	.tw-timeline {
+		gap: 12px;
+		padding: 10px 0;
+	}
+	.tw-bubble {
+		padding: 8px 12px;
+	}
+	/* Touch only: with a mouse the compact ghost Reply (pointer: fine) stays. */
+	@media (pointer: coarse) {
+		.tw .tw-actions .tw-btn {
+			min-height: 36px;
+			padding: 0 14px;
+			font-size: 0.8rem;
+		}
+	}
+	.tw-composer {
+		padding: 8px 0 10px;
+	}
 }
 
 /* ── Short heights: the phone keyboard (owner report 2026-11-13) ─────────────
