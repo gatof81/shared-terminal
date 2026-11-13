@@ -291,26 +291,26 @@ describe("the commit fence: a CAS left in flight by a dead process (#627)", () =
 
 // ── Reverse commit (`casBack`, §2.7.7) ──────────────────────────────────────
 
-describe("the commit fence: a rollback's casBack left in flight (#627)", () => {
-	/** A committed carry-over (O retained), then a rollback whose casBack never answers. */
-	async function diedWithCasBackInFlight() {
-		const h = await setup();
-		dirtyLayer(h);
-		expect((await h.engine.recreate(SID, IMG_N, { preserve: true })).ok).toBe(true);
-		const nId = nIdOf(h) as string;
-		expect(h.d1.row).toMatchObject({ container_id: nId, recreate_fence: 1 });
-		await h.docker.stop(nId);
-		const back = hold(h, "casBack");
-		void h.engine.rollbackToRetained(SID);
-		await back.sent;
-		expect(h.docker.containers.get(O_ID)?.name).toBe(CANONICAL); // both renames done
-		h.engine.stop();
-		const next = await restart(h);
-		const rec = await next.attempts.read(SID);
-		expect(rec.kind === "ok" && rec.record.commit?.fence).toBe(1);
-		return { h, back, nId, ...next };
-	}
+/** A committed carry-over (O retained), then a rollback whose casBack never answers. */
+async function diedWithCasBackInFlight() {
+	const h = await setup();
+	dirtyLayer(h);
+	expect((await h.engine.recreate(SID, IMG_N, { preserve: true })).ok).toBe(true);
+	const nId = nIdOf(h) as string;
+	expect(h.d1.row).toMatchObject({ container_id: nId, recreate_fence: 1 });
+	await h.docker.stop(nId);
+	const back = hold(h, "casBack");
+	void h.engine.rollbackToRetained(SID);
+	await back.sent;
+	expect(h.docker.containers.get(O_ID)?.name).toBe(CANONICAL); // both renames done
+	h.engine.stop();
+	const next = await restart(h);
+	const rec = await next.attempts.read(SID);
+	expect(rec.kind === "ok" && rec.record.commit?.fence).toBe(1);
+	return { h, back, nId, ...next };
+}
 
+describe("the commit fence: a rollback's casBack left in flight (#627)", () => {
 	it("casBack lands BEFORE the fence ⇒ recovery resolves committed on the retained O, N retained", async () => {
 		const { h, back, nId, engine } = await diedWithCasBackInFlight();
 		h.d1.beforeFence = async () => {
@@ -406,5 +406,106 @@ describe("a record written before the fence (#627)", () => {
 		});
 		expect(h.d1.row.container_id).toBe(nId);
 		expect(h.docker.containers.has(O_ID)).toBe(true);
+	});
+});
+
+// ── Generation AND identity, jointly (owner decision on #634, 2026-11-13) ──
+
+describe("a moved fence alone never decides: the current container's identity does (#627)", () => {
+	const FOREIGN = "f".repeat(64);
+	const removes = (h: H) => h.docker.log.filter((l) => l.startsWith("remove:")).length;
+
+	it("(i) CAS: an earlier recovery's fence moved the generation, D1 still on O ⇒ not applied: O current, N removed per the table", async () => {
+		const { h, cas, nId, engine } = await diedWithCasInFlight();
+		h.d1.row.recreate_fence = 1; // an earlier recovery's fence landed; its process died
+		expect(await engine.recover(SID)).toMatchObject({
+			ok: true,
+			body: { outcome: { kind: "rolled-back" } },
+		});
+		expect(h.d1.row).toMatchObject({ container_id: O_ID, ingest_token_hash: "H-old" });
+		expect(h.docker.containers.get(O_ID)?.name).toBe(CANONICAL);
+		expect(h.docker.containers.has(nId)).toBe(false);
+		expect(await cas.land()).toBe("not-applied");
+		d1PointsAtAnExistingContainer(h);
+	});
+
+	it("(ii) CAS: applied (the fence moved by the CAS itself, D1 on N with N's hash) ⇒ applied: committed on N", async () => {
+		const { h, cas, nId, engine } = await diedWithCasInFlight();
+		expect(await cas.land()).toBe("applied");
+		expect(h.d1.row).toMatchObject({
+			container_id: nId,
+			ingest_token_hash: "H-new",
+			recreate_fence: 1,
+		});
+		expect(await engine.recover(SID)).toMatchObject({
+			ok: true,
+			body: { outcome: { kind: "committed", nContainerId: nId } },
+		});
+		expect(h.docker.containers.has(nId)).toBe(true);
+		expect(h.docker.containers.has(O_ID)).toBe(false);
+		d1PointsAtAnExistingContainer(h);
+	});
+
+	it("(iii-a) casBack: an earlier recovery's fence moved the generation, D1 still on N ⇒ not applied: names restored, O retained", async () => {
+		const { h, back, nId, engine } = await diedWithCasBackInFlight();
+		h.d1.row.recreate_fence = 2; // an earlier recovery's fence, from the recorded 1
+		expect(await engine.recover(SID)).toMatchObject({
+			ok: true,
+			body: { outcome: { kind: "rolled-back" }, retained: { containerId: O_ID, role: "O" } },
+		});
+		expect(h.d1.row.container_id).toBe(nId);
+		expect(h.docker.containers.get(nId)?.name).toBe(CANONICAL);
+		expect(await back.land()).toBe("not-applied");
+		d1PointsAtAnExistingContainer(h);
+	});
+
+	it("(iii-b) casBack: applied (fence moved by casBack, D1 on the retained O, hashes cleared) ⇒ applied: committed on O", async () => {
+		const { h, back, nId, engine } = await diedWithCasBackInFlight();
+		expect(await back.land()).toBe("applied");
+		expect(h.d1.row).toMatchObject({
+			container_id: O_ID,
+			ingest_token_hash: null,
+			recreate_fence: 2,
+		});
+		expect(await engine.recover(SID)).toMatchObject({
+			ok: true,
+			body: {
+				outcome: { kind: "committed", nContainerId: O_ID },
+				retained: { containerId: nId, role: "N" },
+			},
+		});
+		d1PointsAtAnExistingContainer(h);
+	});
+
+	it("(iv) CAS: the fence moved but D1 names neither O nor N ⇒ unresolved, nothing removed", async () => {
+		const { h, nId, engine, attempts } = await diedWithCasInFlight();
+		h.d1.row.container_id = FOREIGN;
+		h.d1.row.recreate_fence = 1;
+		const before = removes(h);
+		expect(await engine.recover(SID)).toMatchObject({
+			ok: false,
+			status: 409,
+			code: "recover-stuck",
+		});
+		expect(removes(h)).toBe(before);
+		expect(h.docker.containers.has(nId)).toBe(true);
+		expect(h.docker.containers.has(O_ID)).toBe(true);
+		await expect(attempts.assertResolved(SID)).rejects.toThrow(/uncertain/);
+	});
+
+	it("(iv) casBack: the fence moved but D1 names neither container ⇒ unresolved, nothing removed", async () => {
+		const { h, nId, engine, attempts } = await diedWithCasBackInFlight();
+		h.d1.row.container_id = FOREIGN;
+		h.d1.row.recreate_fence = 2;
+		const before = removes(h);
+		expect(await engine.recover(SID)).toMatchObject({
+			ok: false,
+			status: 409,
+			code: "recover-stuck",
+		});
+		expect(removes(h)).toBe(before);
+		expect(h.docker.containers.has(nId)).toBe(true);
+		expect(h.docker.containers.has(O_ID)).toBe(true);
+		await expect(attempts.assertResolved(SID)).rejects.toThrow(/uncertain/);
 	});
 });

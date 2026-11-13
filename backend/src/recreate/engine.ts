@@ -1841,6 +1841,16 @@ export class RecreationEngine {
 			// commit — if the commit won, `container_id` already shows it.
 			a.fenceOwed = null;
 		}
+		// "Applied" / "not applied" is decided HERE, by the identity of the
+		// current container — never by the generation: a moved fence only
+		// says the generation is dead, and this process's fence, an earlier
+		// recovery's or the commit itself may have moved it. N's id is new
+		// per attempt and only the commit statement writes it (the retained
+		// id only `casBack`), so `container_id` = target ⇒ applied, = the
+		// replaced container ⇒ not applied, anything else ⇒ `stuck`, with
+		// nothing removed. The hash is no evidence here: the record never
+		// holds it, and a later disable moves it to `…_suspended` without
+		// undoing the commit (CONVERSATION.md §2.7.4, v1.9.4).
 		const current = row?.container_id ?? null;
 		if (a.reverse) return this.resolveReverse(a, lease, act, current);
 		if (current === a.oId) return this.resolveToO(a, lease, act);
