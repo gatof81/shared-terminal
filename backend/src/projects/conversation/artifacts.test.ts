@@ -703,6 +703,101 @@ describe("a log that cannot take the event (§6.2)", () => {
 		expect((await store.view(PID)).state.artifactBytes).toBe(50);
 	});
 
+	it("repair with BOTH the content and its .json absent reserves both, exactly", async () => {
+		await restart(64 * 1024);
+		const body = "a".repeat(50);
+		await put("a.txt", body);
+		const sha = sha256Hex(body);
+		expect((await reg("a.txt")).status).toBe(201);
+		await fs.unlink(path.join(dir(), sha));
+		await fs.unlink(path.join(dir(), `${sha}.json`));
+		const need = needOf("a.txt", body); // content + this request's metadata
+		unreferencedMax = need - 1;
+		expect(await reg("a.txt")).toMatchObject({
+			status: 409,
+			body: { error: "artifacts-full", detail: "unreferenced" },
+		});
+		expect(await fs.readdir(dir())).toEqual([]);
+		// While the repair is in flight (held before its first temp exists),
+		// its reservation must be the WHOLE need (content + .json): a new
+		// registration that fits only if the repair reserved less is refused.
+		await put("c.txt", "c".repeat(30));
+		const needC = needOf("c.txt", "c".repeat(30));
+		unreferencedMax = need + needC - 1;
+		const realOpen = fs.open.bind(fs);
+		let release: () => void = () => {};
+		const gate = new Promise<void>((r) => {
+			release = r;
+		});
+		let held = false;
+		let reached: () => void = () => {};
+		const atGate = new Promise<void>((r) => {
+			reached = r;
+		});
+		const spy = vi.spyOn(fs, "open").mockImplementation((async (
+			...args: Parameters<typeof fs.open>
+		) => {
+			if (!held && String(args[0]).endsWith(".tmp")) {
+				held = true;
+				reached();
+				await gate;
+			}
+			return realOpen(...args);
+		}) as typeof fs.open);
+		let repair: Promise<unknown>;
+		try {
+			repair = reg("a.txt");
+			await atGate;
+			expect(await reg("c.txt")).toMatchObject({
+				status: 409,
+				body: { error: "artifacts-full", detail: "unreferenced" },
+			});
+		} finally {
+			release();
+			spy.mockRestore();
+		}
+		expect(await repair).toMatchObject({ status: 200, body: { replayed: true } });
+		expect((await fs.readdir(dir())).sort()).toEqual([sha, `${sha}.json`].sort());
+		expect(await fs.readFile(path.join(dir(), sha), "utf8")).toBe(body);
+		// Repaired ⇒ referenced ⇒ no longer counts: c now fits.
+		expect((await reg("c.txt")).status).toBe(201);
+	});
+
+	it("repair with both files absent, +0: goes through within exactly content + .json", async () => {
+		await restart(64 * 1024);
+		const body = "a".repeat(50);
+		await put("a.txt", body);
+		const sha = sha256Hex(body);
+		expect((await reg("a.txt")).status).toBe(201);
+		await fs.unlink(path.join(dir(), sha));
+		await fs.unlink(path.join(dir(), `${sha}.json`));
+		unreferencedMax = needOf("a.txt", body);
+		expect(await reg("a.txt")).toMatchObject({ status: 200, body: { replayed: true } });
+		expect((await fs.readdir(dir())).sort()).toEqual([sha, `${sha}.json`].sort());
+		expect(await fs.readFile(path.join(dir(), sha), "utf8")).toBe(body);
+		expect(await diskBytes()).toBe(needOf("a.txt", body));
+	});
+
+	it("a content name that is not a regular file (directory, symlink) is 409 artifact-corrupt, untouched", async () => {
+		await restart(64 * 1024);
+		await put("a.txt", "a".repeat(50));
+		await put("a2.txt", "a".repeat(50));
+		const sha = sha256Hex("a".repeat(50));
+		expect((await reg("a.txt")).status).toBe(201);
+		const p = path.join(dir(), sha);
+		await fs.unlink(p);
+		await fs.mkdir(p);
+		expect(await reg("a2.txt")).toMatchObject({ status: 409, body: { error: "artifact-corrupt" } });
+		expect(await art.content(PID, sha)).toMatchObject({ status: 409 });
+		expect((await fs.lstat(p)).isDirectory()).toBe(true);
+		await fs.rmdir(p);
+		await fs.symlink(path.join(WS, "a.txt"), p);
+		expect(await reg("a2.txt")).toMatchObject({ status: 409, body: { error: "artifact-corrupt" } });
+		expect(await art.content(PID, sha)).toMatchObject({ status: 409 });
+		expect((await fs.lstat(p)).isSymbolicLink()).toBe(true);
+		expect(await artifactEvents()).toHaveLength(1);
+	});
+
 	it("a referenced sha whose file is PRESENT but does not match its name is 409 artifact-corrupt, untouched", async () => {
 		await restart(64 * 1024);
 		await put("a.txt", "a".repeat(50));

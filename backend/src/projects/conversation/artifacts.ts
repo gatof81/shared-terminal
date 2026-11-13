@@ -145,11 +145,15 @@ async function readCapped(p: string, max: number): Promise<Buffer | null> {
 		fh = await fs.open(p, FS.O_RDONLY | FS.O_NOFOLLOW | FS.O_NONBLOCK);
 	} catch (err) {
 		if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+		// O_NOFOLLOW on a symlink: a name of ours that is not what we wrote.
+		if ((err as NodeJS.ErrnoException).code === "ELOOP")
+			throw new ArtifactStoreCorrupt(`${p}: is a symlink`);
 		throw err;
 	}
 	try {
 		const st = await fh.stat();
-		if (!st.isFile() || st.size > max) throw new Error(`${p}: not a regular file ≤ ${max} B`);
+		if (!st.isFile() || st.size > max)
+			throw new ArtifactStoreCorrupt(`${p}: not a regular file ≤ ${max} B`);
 		const buf = Buffer.alloc(st.size + 1);
 		const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
 		if (bytesRead > st.size) throw new Error(`${p}: grew while read`);
