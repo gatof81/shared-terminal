@@ -28,13 +28,27 @@ test.describe("project chat — short heights (phone keyboard)", () => {
 			const textarea = page.locator("#project-view .tw-composer textarea").filter({ visible: true });
 			await textarea.tap();
 			await page.setViewportSize({ width: 390, height });
+			// The app follows the new height on a resize event (main.ts --app-vh):
+			// measure only once it has, or the old layout would pass.
+			await expect
+				.poll(() => page.evaluate(() => document.body.getBoundingClientRect().height))
+				.toBeLessThanOrEqual(height + 1);
 			const timeline = page.locator("#project-view .tw-timeline");
 			await expect
 				.poll(() => timeline.evaluate((e) => e.clientHeight))
 				.toBeGreaterThanOrEqual(height >= 330 ? 90 : 60);
-			const composer = (await page.locator("#project-view .tw-composer").filter({ visible: true }).boundingBox())!;
-			expect(composer.y + composer.height).toBeLessThanOrEqual(height + 1);
+			const composer = page.locator("#project-view .tw-composer").filter({ visible: true });
+			await expect
+				.poll(async () => {
+					const b = (await composer.boundingBox())!;
+					return b.y + b.height;
+				})
+				.toBeLessThanOrEqual(height + 1);
 			await expect(textarea).toBeInViewport({ ratio: 1 });
 			await expect(textarea).toBeFocused();
+			// "@" opens the recipient picker above the field: the field stays on screen.
+			await textarea.pressSequentially("@");
+			await expect(page.locator("#project-view .tw-picker").filter({ visible: true })).toBeVisible();
+			await expect(textarea).toBeInViewport({ ratio: 1 });
 		});
 });

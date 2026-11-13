@@ -1169,9 +1169,27 @@
 	.tw-hint {
 		display: none;
 	}
+	/* A share of the page height, not a fixed 2.5 lines: ~2.5 lines with the
+	   keyboard up (330 px), ~5 in a short laptop window (independent review). */
 	.tw-text {
 		min-height: 40px;
-		max-height: 4.6em;
+		max-height: 22cqh;
 		padding: 8px 12px;
+	}
+	/* "@" opens the recipient picker above the field. In the flow (5 agents
+	   ≈ 290 px) it pushed the field and Send off the screen again, even
+	   capped; here it floats over the conversation instead, like a
+	   dropdown, and the composer keeps its height. */
+	.tw-composer {
+		position: relative;
+	}
+	.tw-picker {
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: 100%;
+		z-index: 3;
+		max-height: 60cqh;
+		overflow-y: auto;
 	}
 }
