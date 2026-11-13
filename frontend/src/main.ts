@@ -938,7 +938,9 @@ sessionList.addEventListener("click", (e) => {
 	// switch the active session, so dismissing the drawer is jarring.
 	const target = e.target as HTMLElement;
 	if (target.closest(".session-actions")) return;
-	if (target.closest(".session-item")) setSidebarOpen(false);
+	// A project's heading in the tree opens its page (its chevron only folds
+	// the group, so the drawer stays for that).
+	if (target.closest(".session-item, .project-item")) setSidebarOpen(false);
 });
 
 // Same for a project (P3a) picked from the drawer: the page is what they want to see.

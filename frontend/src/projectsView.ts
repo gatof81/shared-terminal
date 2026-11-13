@@ -46,9 +46,11 @@ import { initPilotOptIn } from "./pilotModel.js";
 import { pilotPanel, resetPilot, suspendPilot } from "./pilotPanel.js";
 import {
 	clearProjects,
+	currentProject,
 	projectName,
 	projects,
 	projectsLoaded,
+	setCurrentProject,
 	setProjects,
 } from "./projectDirectory.js";
 import {
@@ -257,11 +259,10 @@ function renderSection(): void {
 		newProjectBtn.title =
 			can && !can.allowed ? refusalText(can.reason) : "Create a project for your agents";
 	}
-	const focusedId = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>(
-		"#project-list .project-item",
-	)?.dataset.projectId;
+	// The projects themselves are the headings of the sidebar tree
+	// (sessionCore.ts renderGroupedSessions): this section keeps the title,
+	// the "+" and what the tree can't say — loading, a failed read, no project.
 	projectList.replaceChildren();
-	const list = projects();
 	if (!projectsLoaded()) {
 		const p = el(
 			"p",
@@ -269,38 +270,21 @@ function renderSection(): void {
 			projectsState.error ? "Couldn't load projects — retrying." : "Loading projects…",
 		);
 		projectList.appendChild(p);
-		return;
-	}
-	if (projectsState.error) {
+	} else if (projectsState.error) {
 		projectList.appendChild(
 			el("p", "project-list-note", "Couldn't refresh — showing the last list."),
 		);
-	}
-	if (list.length === 0) {
+	} else if (projects().length === 0) {
 		projectList.appendChild(
 			el("p", "project-list-note", "No projects yet. A project groups agents and their sessions."),
 		);
-		return;
 	}
-	for (const p of list) {
-		const a = el("a", "project-item");
-		a.dataset.projectId = p.projectId;
-		const route: ProjectRoute = { projectId: p.projectId, agentId: null };
-		a.href = projectRouteHash(route);
-		if (shown?.projectId === p.projectId) a.setAttribute("aria-current", "page");
-		a.appendChild(el("span", "project-item-name", p.name));
-		a.appendChild(el("span", "project-item-count", agentCountText(p.agentCount)));
-		a.addEventListener("click", (e) => {
-			if (!plainClick(e)) return;
-			e.preventDefault();
-			navigateProject(route);
-		});
-		projectList.appendChild(a);
-	}
-	if (focusedId !== undefined) {
-		projectList
-			.querySelector<HTMLElement>(`.project-item[data-project-id="${CSS.escape(focusedId)}"]`)
-			?.focus();
+	// The tree marks the open project's heading; it re-renders on its own
+	// poll, but a page opened or left should show at once.
+	const current = shown?.projectId ?? null;
+	if (currentProject() !== current) {
+		setCurrentProject(current);
+		if (sessionListLoaded()) renderSessionList();
 	}
 }
 
@@ -479,8 +463,8 @@ function page(...children: HTMLElement[]): HTMLElement {
  */
 function backToProjects(): void {
 	leavePage();
-	const list = document.getElementById("project-list");
-	const target = list?.querySelector<HTMLElement>(".project-item") ?? newProjectBtn;
+	const target =
+		document.querySelector<HTMLElement>("#session-list .project-item") ?? newProjectBtn;
 	if (!target) return;
 	if (target.getClientRects().length === 0) document.getElementById("sidebar-toggle")?.click();
 	target.focus();

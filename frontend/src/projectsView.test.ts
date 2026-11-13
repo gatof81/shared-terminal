@@ -79,7 +79,10 @@ function markup(): void {
 					<button id="new-project-btn" type="button">+</button>
 					<div id="project-list"></div>
 				</section>
-				<div id="session-list"><div class="session-item"><button class="session-select">s</button></div></div>
+				<div id="session-list">
+					<a class="project-item" href="#tree-heading">tree heading (sessionCore renders the real ones)</a>
+					<div class="session-item"><button class="session-select">s</button></div>
+				</div>
 			</aside>
 			<section id="terminal-area">
 				<div id="terminal-toolbar"><button id="view-files-btn">Files</button></div>
@@ -171,12 +174,17 @@ describe("sidebar and pages", () => {
 		await load();
 		view.startProjects();
 		await flush();
-		const item = document.querySelector<HTMLAnchorElement>("#project-list .project-item")!;
-		expect(item.textContent).toContain("Educación HZ");
-		expect(item.textContent).toContain("1 agent");
+		// The projects are the headings of the sidebar tree, which sessionCore
+		// renders (mocked here) from the shared directory: this module fills
+		// the directory and leaves its own section without a note.
+		const directory = await import("./projectDirectory.js");
+		expect(directory.projects().map((p) => `${p.name} · ${p.agentCount}`)).toEqual([
+			"Educación HZ · 1",
+		]);
+		expect(document.getElementById("project-list")!.childElementCount).toBe(0);
 		const input = document.getElementById("xterm-input") as HTMLTextAreaElement;
 		input.focus();
-		item.click();
+		router.navigateProject({ projectId: PID, agentId: null });
 		await flush();
 		expect(window.location.hash).toBe(`#/projects/${PID}`);
 		expect(pageEl().hidden).toBe(false);
@@ -187,9 +195,9 @@ describe("sidebar and pages", () => {
 		expect(pageEl().querySelector(".pv-presence")!.textContent).toBe("Ready (unverified)");
 		expect(pageEl().querySelector(".pv-session-link")!.textContent).toContain("my-project");
 		expect(document.title).toBe("Educación HZ — Shared Terminal");
-		expect(
-			document.querySelector("#project-list .project-item")!.getAttribute("aria-current"),
-		).toBe("page");
+		// What the tree marks as the current page, re-rendered at once.
+		expect(directory.currentProject()).toBe(PID);
+		expect(core.renderSessionList).toHaveBeenCalled();
 	});
 
 	it("a session row clicked while a page is up leaves it for the session (Back returns)", async () => {
@@ -463,7 +471,7 @@ describe("dead ends", () => {
 			.click();
 		await flush();
 		expect(pageEl().hidden).toBe(true);
-		expect(document.activeElement).toBe(document.querySelector("#project-list .project-item"));
+		expect(document.activeElement).toBe(document.querySelector("#session-list .project-item"));
 		history.back();
 		await new Promise((r) => setTimeout(r, 30));
 		expect(pageEl().hidden).toBe(false);
@@ -770,6 +778,6 @@ describe("polling (rule 9)", () => {
 		view.resetProjects();
 		release();
 		await flush();
-		expect(document.querySelector("#project-list .project-item")).toBeNull();
+		expect((await import("./projectDirectory.js")).projects()).toEqual([]);
 	});
 });
