@@ -46,6 +46,10 @@ test.describe("project chat — short heights (phone keyboard)", () => {
 				.toBeLessThanOrEqual(height + 1);
 			await expect(textarea).toBeInViewport({ ratio: 1 });
 			await expect(textarea).toBeFocused();
+			// The folded head stays one short line (the phone density rules once
+			// came later in the CSS and undid it).
+			const head = (await page.locator("#project-view .tw-main-head").boundingBox())!;
+			expect(head.height).toBeLessThanOrEqual(42);
 			// "@" opens the recipient picker above the field: the field stays on screen.
 			await textarea.pressSequentially("@");
 			await expect(page.locator("#project-view .tw-picker").filter({ visible: true })).toBeVisible();

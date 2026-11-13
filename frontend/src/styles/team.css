@@ -1068,7 +1068,8 @@
 }
 
 /* "Reply…" under every reply was a 44-px pill: the loudest thing in a
-   thread. With a mouse it is a compact ghost button; touch keeps 44 px. */
+   thread. With a mouse it is a compact ghost button; touch keeps 44 px on wide
+   layouts, 36 px on phones (density pass 2026-11-13). */
 @media (pointer: fine) {
 	.tw-actions .tw-btn {
 		min-height: 30px;
@@ -1136,72 +1137,14 @@
 	box-shadow: none;
 }
 
-/* ── Short heights: the phone keyboard (owner report 2026-11-13) ─────────────
-   With the keyboard up an iPhone shows ~300–380 px of the app (it follows
-   the visual viewport, main.ts --app-vh). The thread's title (two lines +
-   participants) and the composer (To row, two-line field, two-line hint)
-   then took everything: the conversation shrank to 28 px and, at 290 px,
-   the composer no longer fit — "the input jumps to the top". Below 560 px
-   of page height the chrome folds: one-line title, no participants line,
-   no hint (the To chips say who receives it), a tighter field. */
-@container (max-height: 560px) {
-	.tw-main-head {
-		flex-wrap: nowrap;
-		gap: 0 8px;
-		padding: 2px 0;
-	}
-	.tw-main-title {
-		font-size: 0.95rem;
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-	.tw-main-sub {
-		display: none;
-	}
-	.tw .tw-back {
-		min-height: 36px;
-	}
-	.tw-composer {
-		gap: 6px;
-		padding: 6px 0 8px;
-	}
-	.tw-hint {
-		display: none;
-	}
-	/* A share of the page height, not a fixed 2.5 lines: ~2.5 lines with the
-	   keyboard up (330 px), ~5 in a short laptop window (independent review). */
-	.tw-text {
-		min-height: 40px;
-		max-height: 22cqh;
-		padding: 8px 12px;
-	}
-	/* "@" opens the recipient picker above the field. In the flow (5 agents
-	   ≈ 290 px) it pushed the field and Send off the screen again, even
-	   capped; here it floats over the conversation instead, like a
-	   dropdown, and the composer keeps its height. */
-	.tw-composer {
-		position: relative;
-	}
-	.tw-picker {
-		position: absolute;
-		left: 0;
-		right: 0;
-		bottom: 100%;
-		z-index: 3;
-		/* 40 %, not more: the composer can be taller than the field (a reply
-		   quote, a refusal), and the picker hangs from its top. */
-		max-height: 40cqh;
-		overflow-y: auto;
-	}
-}
-
 /* ── Phones: less room around each thing (owner 2026-11-13: "letters are
    right, but too much wasted space") ─────────────────────────────────────
    Type sizes stay; padding, gaps and box sizes shrink. The agents become
    one scrollable row of compact chips (avatar · name over state) instead
    of a grid of tall cards. Touch targets stay ≥ 44 px where the e2e
-   asks for them (agents, thread rows, New task); Reply is 36 px. */
+   asks for them (agents, thread rows, New task); Reply is 36 px on touch.
+   Placed BEFORE the short-height block: both apply on a phone with the
+   keyboard up, and that block's tighter head/composer must win there. */
 @container (max-width: 719px) {
 	.tw-now {
 		gap: 10px;
@@ -1277,12 +1220,75 @@
 	.tw-bubble {
 		padding: 8px 12px;
 	}
-	.tw .tw-actions .tw-btn {
-		min-height: 36px;
-		padding: 0 14px;
-		font-size: 0.8rem;
+	/* Touch only: with a mouse the compact ghost Reply (pointer: fine) stays. */
+	@media (pointer: coarse) {
+		.tw .tw-actions .tw-btn {
+			min-height: 36px;
+			padding: 0 14px;
+			font-size: 0.8rem;
+		}
 	}
 	.tw-composer {
 		padding: 8px 0 10px;
+	}
+}
+
+/* ── Short heights: the phone keyboard (owner report 2026-11-13) ─────────────
+   With the keyboard up an iPhone shows ~300–380 px of the app (it follows
+   the visual viewport, main.ts --app-vh). The thread's title (two lines +
+   participants) and the composer (To row, two-line field, two-line hint)
+   then took everything: the conversation shrank to 28 px and, at 290 px,
+   the composer no longer fit — "the input jumps to the top". Below 560 px
+   of page height the chrome folds: one-line title, no participants line,
+   no hint (the To chips say who receives it), a tighter field. */
+@container (max-height: 560px) {
+	.tw-main-head {
+		flex-wrap: nowrap;
+		gap: 0 8px;
+		padding: 2px 0;
+	}
+	.tw-main-title {
+		font-size: 0.95rem;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.tw-main-sub {
+		display: none;
+	}
+	.tw .tw-back {
+		min-height: 36px;
+	}
+	.tw-composer {
+		gap: 6px;
+		padding: 6px 0 8px;
+	}
+	.tw-hint {
+		display: none;
+	}
+	/* A share of the page height, not a fixed 2.5 lines: ~2.5 lines with the
+	   keyboard up (330 px), ~5 in a short laptop window (independent review). */
+	.tw-text {
+		min-height: 40px;
+		max-height: 22cqh;
+		padding: 8px 12px;
+	}
+	/* "@" opens the recipient picker above the field. In the flow (5 agents
+	   ≈ 290 px) it pushed the field and Send off the screen again, even
+	   capped; here it floats over the conversation instead, like a
+	   dropdown, and the composer keeps its height. */
+	.tw-composer {
+		position: relative;
+	}
+	.tw-picker {
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: 100%;
+		z-index: 3;
+		/* 40 %, not more: the composer can be taller than the field (a reply
+		   quote, a refusal), and the picker hangs from its top. */
+		max-height: 40cqh;
+		overflow-y: auto;
 	}
 }
