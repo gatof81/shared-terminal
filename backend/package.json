@@ -15,6 +15,7 @@
     "lint:fix": "biome check src/ --write",
     "format": "biome format src/ --write",
     "db:migrate": "node -e \"require('./dist/db.js').migrateDb().then(() => console.log('done'))\"",
+    "db:migrate-check": "node --disable-warning=ExperimentalWarning dist/migrateCheck.js",
     "backup": "node dist/backup.js backup",
     "images:pins": "node dist/imagePinsCli.js",
     "conversation:disable": "node dist/conversation/cli.js disable",

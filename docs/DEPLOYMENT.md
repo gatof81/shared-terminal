@@ -1127,6 +1127,36 @@ owner (CONVERSATION.md §2.7.7). Rolling the backend back past this version
 makes every record that carries `commitFence` unreadable to the old parser —
 those sessions stay `recreate-unresolved` until the new version is back.
 
+**Release gate: migration v20 against the real data, on the host.** Before
+deploying, prove v20 on a copy of production's rows without them leaving
+the host and without touching D1:
+
+1. `docker compose exec app npm run backup` (the running backend, still at
+   v19) — a directory `<WORKSPACE_ROOT>/.backups/<timestamp>/`.
+2. Build the release image under its own tag, from the release checkout, so
+   the running `app` is not touched:
+   `docker build -t st-backend:migrate-check .`
+3. Run the check in a throwaway container with no network, the backup
+   mounted read-only and no environment file:
+
+   ```bash
+   docker run --rm --network none \
+     -v <WORKSPACE_ROOT>/.backups/<timestamp>:/backup:ro \
+     st-backend:migrate-check npm run -s db:migrate-check -- /backup
+   ```
+
+It builds an in-memory SQLite at the backup's schema (v19) through the real
+`migrateDb()` ledger path, loads every table as `restore` would, applies the
+pending migrations and prints, per table, the row count and a SHA-256 of the
+pre-existing columns before → after, then `sessions.recreate_fence` (present,
+0 on every row), the ledger (v20 recorded), `foreign_key_check` and
+`integrity_check`. The last line is `PASS` (exit 0) or `FAIL` (exit 1, with
+the reasons); a refusal (no manifest, a backup already at v20) exits 2. It
+prints counts, hashes and verdicts only — never a row or a value — needs no
+credential (it drops the D1 variables before loading anything and never
+calls `validateD1Config`), and makes no network call. Delete the image
+afterwards if you like (`docker rmi st-backend:migrate-check`).
+
 ### Emergency only — the manual procedure
 
 It bypasses every check of the endpoint: layer, skills, image, CLI version
