@@ -9,20 +9,18 @@ import { SESSION_IDS } from "./mockBackend.js";
 const LONG = "shared-terminal-backend-recreate-engine-hotfix-and-then-some-more";
 
 test.describe("session bar", () => {
-	test.beforeEach(({ app }) => {
-		test.skip(app.mobile, "the phone bar has its own layout (drawer / merged header)");
-	});
-
 	test("a long session name never makes the bar taller, at any desktop width", async ({
 		app,
 		backend,
 		page,
 	}) => {
+		test.skip(app.mobile, "the phone bar has its own layout (drawer / merged header)");
 		// Bound to an agent: the bar also carries "@handle · project".
 		backend.enableProjects();
 		await app.login("alice");
 		await app.openSession("my-project");
 		const bar = page.locator("#terminal-toolbar");
+		await expect(page.locator("#terminal-session-agent")).toBeVisible();
 		const short = (await bar.boundingBox())!.height;
 
 		backend.session(SESSION_IDS.running)!.name = LONG;
@@ -32,10 +30,11 @@ test.describe("session bar", () => {
 			const name = page.locator("#terminal-session-name");
 			await expect(name).toHaveText(LONG);
 			expect((await bar.boundingBox())!.height, `bar height at ${width}px`).toBe(short);
-			const page_overflow = await page.evaluate(
-				() => document.documentElement.scrollWidth - window.innerWidth,
-			);
-			expect(page_overflow, `page overflow at ${width}px`).toBeLessThanOrEqual(0);
+			await expect(page.locator("#terminal-session-agent")).toBeVisible();
+			// #terminal-area clips, so a too-wide bar never widens the page:
+			// measure the bar itself — no control may be pushed out of it.
+			const overflow = await bar.evaluate((el) => el.scrollWidth - el.clientWidth);
+			expect(overflow, `bar overflow at ${width}px`).toBeLessThanOrEqual(0);
 		}
 		// The full name stays reachable when it is cut.
 		await expect(page.locator("#terminal-session-name")).toHaveAttribute("title", LONG);

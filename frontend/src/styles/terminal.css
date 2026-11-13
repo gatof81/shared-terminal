@@ -38,8 +38,10 @@
    renderToolbarAgent). One line, ellipsis, never taller than the name
    beside it: the bar's height is part of the terminal's box. */
 #terminal-session-agent {
-  flex: 0 1 auto;
-  min-width: 0;
+  /* Gives way long before the session name does: the name is the primary text. */
+  flex: 0 8 auto;
+  /* …but never to nothing: "@han…" still says the session has an agent. */
+  min-width: 5ch;
   max-width: 24rem;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -55,6 +57,12 @@
      line): left out rather than wrapped or squeezing the session name. */
   #terminal-session-agent {
     display: none;
+  }
+  /* The v1 phone bar scrolls sideways (mobile.css): squeezing the name
+     there buys nothing and left "my-p…" for a ten-letter name. */
+  html:not([data-shell="v2"]) #terminal-session-name {
+    flex-shrink: 0;
+    max-width: 60vw;
   }
 }
 #terminal-status-badge {
