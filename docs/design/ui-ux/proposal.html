@@ -290,8 +290,22 @@ details summary { cursor: pointer; font-weight: 500; }
     <div><b>El teléfono hereda el desktop</b><span>En 320 px se ven 5 de 16 sesiones; el composer de Project Chat ocupa el 45 % de la pantalla.</span></div>
   </div>
 
+  <h2 id="avance" style="margin-top:28px">Avance: lo que ya está hecho</h2>
+  <p>Capturas reales de la app (no del prototipo) con el escenario de carga: 3 proyectos, 16 sesiones, nombres largos.</p>
+  <figure><div class="shot"><img src="screenshots/after-desktop-sidebar-tree.jpg" width="1100" alt="Sidebar en árbol implementado, desktop"></div>
+  <figcaption><b>Sidebar en árbol, desktop (PR #640).</b> Cada proyecto es un encabezado con flecha de colapso, nombre (abre el proyecto) y cantidad de sesiones. La fila muestra sesión y agente; CPU y memoria pasaron al tooltip. Estado por forma: ● en ejecución, ○ detenida, ▲ falló, × terminada. Entran 13 sesiones donde antes entraban 7. La barra de sesión ya no se parte con nombres largos (PR #639).</figcaption></figure>
+  <figure><div class="shot"><img src="screenshots/after-mobile-sidebar-tree.jpg" width="990" alt="Sidebar del teléfono: antes, después y con proyectos colapsados"></div>
+  <figcaption><b>Teléfono a 320 px.</b> Izquierda: antes. Centro: después, la lista empieza 230 px más arriba y se ven 9 sesiones en lugar de 5. Derecha: con «Educación HZ» y «Home Automation» colapsados; el estado se recuerda en ese navegador.</figcaption></figure>
+  <div class="tscroll"><table>
+    <tr><th>PR</th><th>Qué</th><th>Estado</th></tr>
+    <tr><td class="id">#638</td><td>Esta auditoría, el prototipo y las capturas en <code>docs/design/ui-ux/</code></td><td>Abierto, solo documentación</td></tr>
+    <tr><td class="id">#639</td><td>Barra de sesión en una línea (B1), ARIA válido en Git (A1), contraste en fila seleccionada (A3)</td><td>Revisión independiente hecha y aplicada; CI en curso</td></tr>
+    <tr><td class="id">#640</td><td>Sidebar en árbol (N1–N3), alternativa A</td><td>Implementado con pruebas; falta revisión independiente y CI</td></tr>
+  </table></div>
+  <p>Todavía no está en esta etapa: el estado de Claude por fila (necesita la lectura de presencia, decisión 2 más abajo), los tokens nuevos de superficie y tipografía, y el navegador a pantalla completa del teléfono.</p>
+
   <nav class="toc" aria-label="Secciones">
-    <a href="#prototipo">Prototipo</a><a href="#hallazgos">Hallazgos</a><a href="#sistema">Sistema visual</a><a href="#sidebar">Sidebar: alternativas</a><a href="#plan">Plan</a><a href="#d3">D3 y Claude B</a><a href="#decisiones">Decisiones</a>
+    <a href="#avance">Avance</a><a href="#prototipo">Prototipo</a><a href="#hallazgos">Hallazgos</a><a href="#sistema">Sistema visual</a><a href="#sidebar">Sidebar: alternativas</a><a href="#plan">Plan</a><a href="#d3">D3 y Claude B</a><a href="#decisiones">Decisiones</a>
   </nav>
 
   <h2 id="prototipo">Prototipo navegable</h2>
