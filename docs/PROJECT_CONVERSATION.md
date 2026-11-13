@@ -642,10 +642,16 @@ Las dos rutas tienen además ranuras en vuelo (2 por usuario, 8 por proceso, com
     - **Solo se escribe lo reservado.** Un alta escribe (por temporal + `link`) únicamente las partes
       que reservó: el contenido y/o su `.json` cuyo nombre final no existía al medir. Una parte que ya
       existía solo se verifica (hash del contenido, `sha256` del `.json`); nunca se republica ni abre
-      un temporal. Si un contenido no reservado falta o no coincide con su nombre: 409
-      `artifact-corrupt`, nada escrito. Un `.json` ausente no reservado se acepta (es informativo).
-      Reutilizar un contenido existente (repetición, otro origen, en paralelo, o un huérfano) no
-      escribe ningún byte.
+      un temporal. Un `.json` ausente no reservado se acepta (es informativo). Reutilizar un contenido
+      existente (repetición, otro origen, en paralelo, o un huérfano) no escribe ningún byte.
+    - **Reparación.** Un sha256 que el registro referencia pero cuyo archivo de contenido **falta**
+      (apartado por un restore a `.restore-evidence/`, daño de disco) se repara con los mismos bytes.
+      El alta, también una repetición, reserva `bytes` (y su `.json` si falta) como un contenido nuevo
+      y lo escribe con `link` sin pisar al nombre libre. Una vez enlazado está referenciado y deja de
+      contar. Si no cabe en el presupuesto: 409 `artifacts-full` `{detail: "unreferenced"}`. Un archivo
+      **presente** que no coincide con su nombre nunca se reemplaza: 409 `artifact-corrupt`, nada
+      escrito. Una repetición de un archivo presente no lee nada y sigue en 200; el `GET` se niega a
+      servir esos bytes.
     - **La cota, exacta.** En todo momento, los bytes de archivo sin referencia bajo `artifacts/` son
       ≤ `PROJECT_ARTIFACTS_UNREFERENCED_MAX_BYTES` (16 MiB), **escrituras en curso incluidas**. Cada
       escritura en curso es de un alta admitida y no supera su reserva, y cada admisión cumple

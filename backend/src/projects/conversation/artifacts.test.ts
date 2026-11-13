@@ -666,15 +666,59 @@ describe("a log that cannot take the event (§6.2)", () => {
 		expect(names.filter((n) => n.endsWith(".tmp"))).toEqual([".c0ffeec0ffeec0ff.tmp"]);
 	});
 
-	it("known content whose file was lost is 409 artifact-corrupt, never silently re-written", async () => {
+	it("a referenced sha whose file is ABSENT is repaired by the same bytes, reserved within the budget", async () => {
+		await restart(64 * 1024);
+		const body = "a".repeat(50);
+		await put("a.txt", body);
+		await put("a2.txt", body);
+		const sha = sha256Hex(body);
+		expect((await reg("a.txt")).status).toBe(201);
+		const served = async () => {
+			const r = await art.content(PID, sha);
+			return "ok" in r ? r.content.toString() : r;
+		};
+		// The file is moved aside (a restore's evidence, disk damage): GET fails.
+		await fs.rename(path.join(dir(), sha), path.join(ROOT, "moved-aside"));
+		expect(await served()).toMatchObject({ status: 409, body: { error: "artifact-corrupt" } });
+		// The repair is reserved like new content: one byte short of its
+		// content (the .json is still there) ⇒ refused, nothing written.
+		unreferencedMax = body.length - 1;
+		expect(await reg("a.txt")).toMatchObject({
+			status: 409,
+			body: { error: "artifacts-full", detail: "unreferenced" },
+		});
+		expect(await fs.readdir(dir())).not.toContain(sha);
+		// Within budget: a replay repairs it (200, no new event) and GET serves it.
+		unreferencedMax = body.length;
+		expect(await reg("a.txt")).toMatchObject({ status: 200, body: { replayed: true } });
+		expect(await served()).toBe(body);
+		expect(await artifactEvents()).toHaveLength(1);
+		// Once linked it is referenced and no longer counts, so the same budget
+		// admits another repair of the same size (another source: 201).
+		await fs.unlink(path.join(dir(), sha));
+		expect(await reg("a2.txt")).toMatchObject({ status: 201 });
+		expect(await served()).toBe(body);
+		expect(await artifactEvents()).toHaveLength(2);
+		expect((await fs.readdir(dir())).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+		expect((await store.view(PID)).state.artifactBytes).toBe(50);
+	});
+
+	it("a referenced sha whose file is PRESENT but does not match its name is 409 artifact-corrupt, untouched", async () => {
 		await restart(64 * 1024);
 		await put("a.txt", "a".repeat(50));
 		await put("a2.txt", "a".repeat(50));
 		const sha = sha256Hex("a".repeat(50));
 		expect((await reg("a.txt")).status).toBe(201);
-		await fs.unlink(path.join(dir(), sha));
+		await fs.writeFile(path.join(dir(), sha), "tampered");
 		expect(await reg("a2.txt")).toMatchObject({ status: 409, body: { error: "artifact-corrupt" } });
-		expect(await fs.readdir(dir())).not.toContain(sha);
+		// A replay of a present file reads nothing (unchanged since v0.3.2):
+		// still 200, and GET refuses to serve the mismatched bytes.
+		expect(await reg("a.txt")).toMatchObject({ status: 200, body: { replayed: true } });
+		expect(await art.content(PID, sha)).toMatchObject({
+			status: 409,
+			body: { error: "artifact-corrupt" },
+		});
+		expect(await fs.readFile(path.join(dir(), sha), "utf8")).toBe("tampered");
 		expect(await artifactEvents()).toHaveLength(1);
 	});
 

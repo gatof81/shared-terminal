@@ -300,6 +300,21 @@ export async function readContent(root: string, pid: string, sha: string): Promi
 export class ArtifactUsageUnverifiable extends Error {}
 
 /**
+ * Does the content file of `sha` exist (whatever it holds — a present file
+ * that does not match its name is ArtifactStoreCorrupt later, never
+ * replaced)? Any error but ENOENT is unverifiable (fail closed).
+ */
+async function contentPresent(dir: string, sha: string): Promise<boolean> {
+	try {
+		await fs.lstat(path.join(dir, sha));
+		return true;
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+		throw new ArtifactUsageUnverifiable(`${sha}: ${(err as Error).message}`);
+	}
+}
+
+/**
  * §6.2: what `artifacts/` holds that no `artifact` event references — a
  * content file or its `.json` whose sha the log does not reference, and
  * anything else (a temp left by a dead write) — measured from the disk
@@ -476,8 +491,9 @@ export class ProjectArtifacts {
 		// Bytes this registration reserved against the unreferenced budget;
 		// returned in `finally`, after every write of this call has settled.
 		let reserved = 0;
-		// What this registration may write: only what it reserved. Known
-		// (referenced) content and content already on disk write nothing.
+		// What this registration may write: only what it reserved. Content
+		// already on disk (referenced or not) writes nothing; a referenced
+		// sha whose file is absent is repaired under a reservation.
 		let writes = { content: false, meta: false };
 
 		try {
@@ -489,15 +505,26 @@ export class ProjectArtifacts {
 			// disk spent outside every bound, once per distinct file.
 			const pre = await this.deps.store.critical(projectId, async (tx) => {
 				const known = tx.state.artifacts.get(sha);
-				if (known?.sources.has(sourceKey)) return answer(200, true, known.name);
-				if (!known && tx.state.artifactBytes + content.length > this.projectMax)
+				const replay = known?.sources.has(sourceKey) ?? false;
+				if (known) {
+					// Referenced and its file present ⇒ counted by the quota:
+					// nothing is written (only verified) and the directory is not
+					// read. One lstat, under the lock.
+					if (await contentPresent(artifactsDir(this.deps.workspaceRoot, projectId), sha)) {
+						if (replay) return answer(200, true, known.name);
+						tx.assertAppendable([event]);
+						return null;
+					}
+					// Referenced but its file is ABSENT (moved aside by a restore,
+					// lost to disk damage): the same bytes repair it — reserved and
+					// written exactly like new content, with no-clobber `link` to
+					// the free name. Once linked it is referenced and stops counting
+					// against the budget. A replay repairs too (it writes no event).
+				} else if (tx.state.artifactBytes + content.length > this.projectMax) {
 					return err(409, "artifacts-full");
+				}
 				// Throws the append's own ProjectLogError ⇒ logErrorToHttp below.
-				tx.assertAppendable([event]);
-				// Already referenced ⇒ its files are on disk and counted by the
-				// quota: nothing is written (only verified) and the directory is
-				// not read.
-				if (known) return null;
+				if (!replay) tx.assertAppendable([event]);
 
 				// What the pre-check cannot exclude still leaves unreferenced
 				// files: the log filling (or being poisoned, or the quota taken
