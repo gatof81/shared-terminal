@@ -1094,6 +1094,23 @@ happened: that container is current — verify as in step 8). 409 `running`
 until everything is stopped; 409 `not-orphaned` means a live backend owns
 the attempt (wait for it); a second `recover` answers `already-resolved`.
 
+**The commit fence (contract v1.9.4, #627; migration v20).** When the record
+says the dead backend may have sent its commit statement (`commit` in the
+record), `recover` first invalidates that statement's generation in D1
+(`sessions.recreate_fence`) and decides only after a re-read proves it — so
+a statement still in flight can never land on a container the recovery just
+removed. If D1 can't prove it (timeout, error), `recover` answers 409
+`recover-retry` and removes nothing: run it again later. A record written by
+a backend **before** this version answers 409 `commit-unknown-legacy` unless
+D1 is already on the new container: that backend's statement carries no
+fence, so nothing proves it will not land. Before deploying this version,
+check that no `<WORKSPACE_ROOT>/.st-control/*/recreate-attempt.json` has a
+`state` other than `resolved`; if `recover` answers `commit-unknown-legacy`,
+leave the containers, the record and the row as they are and take it to the
+owner (CONVERSATION.md §2.7.7). Rolling the backend back past this version
+makes every record that carries `commitFence` unreadable to the old parser —
+those sessions stay `recreate-unresolved` until the new version is back.
+
 ### Emergency only — the manual procedure
 
 It bypasses every check of the endpoint: layer, skills, image, CLI version
