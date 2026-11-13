@@ -72,3 +72,17 @@
     animation: none;
   }
 }
+
+/* Phones: the bottom edge belongs to what the thumb is using — the key
+   bar, a composer, the view nav — and a toast there covered them for
+   seconds (UX audit M6). Under the header instead, full width. */
+@media (max-width: 768px) {
+  #toast {
+    top: calc(3.5rem + env(safe-area-inset-top, 0px));
+    bottom: auto;
+    left: calc(0.75rem + env(safe-area-inset-left, 0px));
+    right: calc(0.75rem + env(safe-area-inset-right, 0px));
+    max-width: none;
+    align-items: stretch;
+  }
+}
