@@ -2507,6 +2507,11 @@ export class RecreationEngine {
 					//   attempt's target proves the outcome (it landed; it cannot land
 					//   twice). D1 on the replaced container is NOT evidence that it
 					//   never will: blocked, before any effect.
+					//   For a legacy REVERSE record without `retainedContainerId`, `nId`
+					//   above is taken from D1 itself, so the check below passes by
+					//   construction: there the evidence is "D1 is off the replaced
+					//   container", which is enough because the legacy `casBack` is
+					//   guarded on `container_id = <replaced>` and so can no longer apply.
 					let fenceOwed: number | null = null;
 					if (r.commit) {
 						fenceOwed = r.commit.fence;

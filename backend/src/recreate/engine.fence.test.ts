@@ -345,6 +345,57 @@ describe("the commit fence: a rollback's casBack left in flight (#627)", () => {
 		expect((await engine.rollbackToRetained(SID)).ok).toBe(true);
 		expect(h.d1.row).toMatchObject({ container_id: O_ID, recreate_fence: 3 });
 	});
+
+	it("live process, ambiguous casBack whose statement lands late: the resolution fences before restoring the names", async () => {
+		const h = await setup();
+		dirtyLayer(h);
+		expect((await h.engine.recreate(SID, IMG_N, { preserve: true })).ok).toBe(true);
+		const nId = nIdOf(h) as string;
+		expect(h.d1.row.recreate_fence).toBe(1);
+		await h.docker.stop(nId);
+		// One timeline across D1 and Docker, from the casBack on.
+		const order: string[] = [];
+		const real = h.d1.casBack.bind(h.d1);
+		let args: Parameters<typeof real> | null = null;
+		h.d1.casBack = async (...a) => {
+			args = a;
+			order.push("casBack sent");
+			return "ambiguous"; // the answer is lost; the statement has not run yet
+		};
+		h.d1.beforeFence = () => {
+			order.push("fence");
+		};
+		h.docker.hooks.set("rename", (a) => {
+			if (order.length > 0) order.push(`rename ${String(a[0]).slice(0, 4)}`);
+		});
+		const r = await h.engine.rollbackToRetained(SID);
+		expect(r).toMatchObject({ ok: false, status: 500, detail: "commit" });
+		for (let i = 0; i < 100; i++) {
+			const rec = await h.attempts.read(SID);
+			if (rec.kind === "ok" && rec.record.state === "resolved") break;
+			await tick(20);
+		}
+		await expect(h.attempts.assertResolved(SID)).resolves.toBeUndefined();
+		expect(h.d1.writes).toContain("fence(1)");
+		// The fence comes before any rename back.
+		const renames = order.filter((o) => o.startsWith("rename"));
+		expect(renames.length).toBeGreaterThan(0);
+		expect(order.indexOf("fence")).toBeGreaterThan(order.indexOf("casBack sent"));
+		expect(order.indexOf("fence")).toBeLessThan(order.indexOf(renames[0] as string));
+		const rec = await h.attempts.read(SID);
+		expect(rec.kind === "ok" && rec.record.outcome).toEqual({ kind: "rolled-back" });
+		expect(rec.kind === "ok" && rec.record.retained).toMatchObject({
+			containerId: O_ID,
+			role: "O",
+		});
+		// The late statement: 0 rows; D1, names and the retained O stay consistent.
+		expect(await real(...(args as unknown as Parameters<typeof real>))).toBe("not-applied");
+		expect(h.d1.row.container_id).toBe(nId);
+		expect(h.docker.containers.get(nId)?.name).toBe(CANONICAL);
+		expect(h.docker.containers.get(O_ID)?.name).toMatch(RESERVED_NAME_RE);
+		expect(h.docker.containers.get(O_ID)?.running).toBe(false);
+		d1PointsAtAnExistingContainer(h);
+	});
 });
 
 // ── Records from before the fence (§2.7.7, `commit-unknown-legacy`) ─────────
