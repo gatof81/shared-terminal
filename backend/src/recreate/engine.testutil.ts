@@ -46,7 +46,9 @@ export type Op =
 	| "exec"
 	| "execState"
 	| "sizeRw"
-	| "copyPath";
+	| "copyPath"
+	/** The source GET of a copy: hook-only (not logged), before the second `mayAct`. */
+	| "copyPathSource";
 
 /** Runs before the op applies; may await (late answer), throw (refused, nothing applied). */
 export type Hook = (args: unknown[]) => Promise<void> | void;
@@ -224,15 +226,27 @@ export class FakeDocker implements RecreateDockerPort {
 	readonly sizeRwOf = new Map<string, number | null>();
 	/** Copies issued: `from:path→to:dest`, in order; the fake moves the stats/files over. */
 	readonly copies: string[] = [];
+	/** Source GETs sent, and those dropped (stream destroyed) before any PUT. */
+	sourcesRequested = 0;
+	sourcesDestroyed = 0;
 	async sizeRw(id: string) {
 		await this.gate("sizeRw", [id]);
 		return this.sizeRwOf.has(id) ? (this.sizeRwOf.get(id) as number | null) : 0;
 	}
 	async copyPath(fromId: string, p: string, toId: string, destDir: string, mayAct: () => boolean) {
-		// As the real port: `mayAct` decides whether the request goes out at
-		// all; once out, Docker's answer (the hook's wait) lands whatever
-		// happened to the epoch meanwhile — a late putArchive still writes N.
+		// As the real port: `mayAct` decides whether the source GET goes out at
+		// all, and is asked again once it answered (the `copyPathSource` hook's
+		// wait) before the PUT into N; once the PUT is out, Docker's answer (the
+		// `copyPath` hook's wait) lands whatever happened to the epoch
+		// meanwhile — a late putArchive still writes N.
 		if (!mayAct()) throw new Error("copy not started: the caller may no longer act");
+		this.sourcesRequested++;
+		const src = this.hooks.get("copyPathSource");
+		if (src) await src([fromId, p]);
+		if (!mayAct()) {
+			this.sourcesDestroyed++;
+			throw new Error("copy not started: the caller may no longer act");
+		}
 		await this.gate("copyPath", [fromId, p, toId, destDir]);
 		if (!this.byRef(fromId) || !this.byRef(toId)) throw httpError(404);
 		this.copies.push(`${fromId.slice(0, 4)}:${p}→${toId.slice(0, 4)}:${destDir}`);

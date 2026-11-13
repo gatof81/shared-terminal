@@ -3475,6 +3475,20 @@ export class DockerManager {
 				// upload resolves when dockerd has extracted everything.
 				if (!mayAct()) throw new Error(`copy of ${p} not started: the attempt may no longer act`);
 				const src = await d.getContainer(fromId).getArchive({ path: p });
+				// The GET is a wait: authorization may have been lost while it
+				// was pending (epoch closed, lease gone, shutdown). Nothing has
+				// been sent to N yet, so ask again before the PUT — a copy that
+				// lost its authority must not start writing N. Destroying the
+				// source releases the GET's connection to dockerd.
+				// Destroyed, not drained as `readArchive` does past its cap: that
+				// convention keeps a request running until dockerd ends it, but
+				// this GET has no effect in either container, may be gigabytes of
+				// layer, and nothing of it was sent to N — finishing it buys nothing.
+				// (dockerode types it as a bare ReadableStream; it is an IncomingMessage.)
+				if (!mayAct()) {
+					(src as NodeJS.ReadableStream & { destroy(): void }).destroy();
+					throw new Error(`copy of ${p} not started: the attempt may no longer act`);
+				}
 				let bytes = 0;
 				src.on("data", (c: Buffer) => {
 					bytes += c.length;

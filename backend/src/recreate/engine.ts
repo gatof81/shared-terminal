@@ -2120,10 +2120,23 @@ export class RecreationEngine {
 			if (err instanceof RecreateUnresolvedError)
 				return { ok: false, status: 409, code: "recreate-unresolved" };
 			logger.error(`[recreate] ${sessionId}: rollback begin refused: ${(err as Error).message}`);
-			await this.deps.attempts
-				.resolve(sessionId, attemptId, { kind: "rolled-back" }, "begin failed; no effects")
-				.catch(() => undefined);
-			return { ok: false, status: 500, code: "recreate-failed" };
+			// As `recreate()`: no durable transition starts after `stop()` (E5);
+			// an `open` record left by a late-failing write stays for D8.
+			if (!this.stopped) {
+				await this.deps.attempts
+					.resolve(sessionId, attemptId, { kind: "rolled-back" }, "begin failed; no effects")
+					.catch(() => undefined);
+			}
+			// As `recreate()`: `unresolved` unless it is CONFIRMED that this
+			// attempt left no record or that its record is resolved — an `open`
+			// one (always the case after a shutdown) gates the session.
+			const settled = await this.deps.attempts.read(sessionId).then(
+				(r) => r.kind === "none" || (r.kind === "ok" && r.record.state === "resolved"),
+				() => false,
+			);
+			return settled
+				? { ok: false, status: 500, code: "recreate-failed" }
+				: { ok: false, status: 500, code: "recreate-failed", detail: "unresolved" };
 		}
 		const a: Attempt = {
 			sessionId,
@@ -2150,6 +2163,19 @@ export class RecreationEngine {
 		logger.info(
 			`[recreate] ${sessionId}: rollback attempt ${attemptId} open (N ${nId.slice(0, 12)} → O ${retained.containerId.slice(0, 12)})`,
 		);
+		if (this.stopped) {
+			// `stop()` ran while the record was being written: the attempt was
+			// not registered yet, so `stop()` could not close its epoch, and the
+			// `this.stopped` check above ran before the wait. Same discipline as
+			// `recreate()`: nothing is issued — no rename, no casBack, and no
+			// further record write. The `open` record stays as the durable truth
+			// and the next process treats it as D8 says (fail-closed).
+			a.run.close("shutdown");
+			logger.warn(
+				`[recreate] ${sessionId}: shut down while opening the rollback attempt; nothing done`,
+			);
+			return { ok: false, status: 500, code: "recreate-failed", detail: "unresolved" };
+		}
 		try {
 			await a.run.call("rename N", () => this.deps.docker.rename(nId, identity.oOldName));
 			await a.run.call("rename O", () => this.deps.docker.rename(retained.containerId, canonical));

@@ -86,8 +86,9 @@ export interface RecreateDockerPort {
 	 * as a tar archive into `destDir` of `toId` (a created, not started
 	 * container). Ownership, modes, symlinks and hard links travel in the
 	 * archive; nothing is written through the host filesystem. `mayAct` is
-	 * asked before the request goes out — a copy never starts after the
-	 * attempt lost its authorization. Resolves with the bytes streamed.
+	 * asked before the source request goes out AND again once it answered,
+	 * before anything is sent to `toId` — a copy never starts writing N after
+	 * the attempt lost its authorization. Resolves with the bytes streamed.
 	 */
 	copyPath(
 		fromId: string,
