@@ -567,17 +567,17 @@ function renderGroupedSessions(): void {
 	// sessions and unassigned ones were hard to tell apart), in the order the
 	// list first meets each; a project whose name isn't loaded yet reads
 	// "Agent sessions" until the directory lands.
-	const byProject = new Map<string, Array<(typeof groups.bound)[number]>>();
+	// Keyed by the heading text: every project whose name isn't loaded shares
+	// one "Agent sessions" group instead of several identical headings.
+	const byHeading = new Map<string, Array<(typeof groups.bound)[number]>>();
 	for (const b of groups.bound) {
-		const list = byProject.get(b.binding.projectId) ?? [];
+		const key = projectName(b.binding.projectId) ?? "Agent sessions";
+		const list = byHeading.get(key) ?? [];
 		list.push(b);
-		byProject.set(b.binding.projectId, list);
+		byHeading.set(key, list);
 	}
-	for (const [projectId, rows] of byProject) {
-		heading(
-			projectName(projectId) ?? "Agent sessions",
-			"session-group-bound session-group-project",
-		);
+	for (const [title, rows] of byHeading) {
+		heading(title, "session-group-bound session-group-project");
 		for (const { session, binding } of rows)
 			sessionList.appendChild(buildSessionItem(session, binding));
 	}
@@ -615,9 +615,12 @@ function buildSessionItem(s: SessionInfo, binding: SessionBinding | null): HTMLE
 	select.className = "session-select";
 	select.dataset.role = "select";
 	select.setAttribute("aria-current", String(s.sessionId === activeSessionId));
+	// The agent is part of the name: on phones the separate agent link is
+	// hidden and the visible tag inside this button is overridden by the label.
+	const agentPart = binding ? `, agent @${binding.handle}` : "";
 	select.setAttribute(
 		"aria-label",
-		`${s.name}, ${s.status}${s.status === "failed" ? " — view the bootstrap log" : ""}`,
+		`${s.name}, ${s.status}${agentPart}${s.status === "failed" ? " — view the bootstrap log" : ""}`,
 	);
 
 	const dot = document.createElement("span");
@@ -635,14 +638,21 @@ function buildSessionItem(s: SessionInfo, binding: SessionBinding | null): HTMLE
 	meta.className = "session-meta";
 	// Live usage lines (#272). Only running sessions with a stats sample.
 	if (s.status === "running" && s.usage) {
-		// One line (owner review 2026-11-13: the sidebar wasted room); the
-		// percentages are in the tooltip.
 		const cpuCores = s.usage.cpuPercent / 100;
-		const usage = document.createElement("span");
-		usage.className = "session-usage";
-		usage.textContent = `${formatCpuCores(cpuCores)} cores · ${formatBytes(s.usage.memBytes)}`;
-		usage.title = `CPU ${formatCpuCores(cpuCores)} cores (${formatCpuPercent(s.usage.cpuPercent)}) · Mem ${formatBytes(s.usage.memBytes)} (${s.usage.memPercent.toFixed(0)}%)`;
-		meta.appendChild(usage);
+		const cpuLine = document.createElement("span");
+		cpuLine.className = "session-usage session-usage-wide";
+		cpuLine.textContent = `CPU ${formatCpuCores(cpuCores)} cores (${formatCpuPercent(s.usage.cpuPercent)})`;
+		meta.appendChild(cpuLine);
+		const memLine = document.createElement("span");
+		memLine.className = "session-usage session-usage-wide";
+		memLine.textContent = `Mem ${formatBytes(s.usage.memBytes)} (${s.usage.memPercent.toFixed(0)}%)`;
+		meta.appendChild(memLine);
+		// Phones: the same on one line (owner review 2026-11-13: the sidebar
+		// wasted room); wide layouts keep the two lines above.
+		const compact = document.createElement("span");
+		compact.className = "session-usage session-usage-compact";
+		compact.textContent = `${formatCpuCores(cpuCores)} cores · ${formatBytes(s.usage.memBytes)} (${s.usage.memPercent.toFixed(0)}%)`;
+		meta.appendChild(compact);
 	} else if (s.status !== "running") {
 		// The dot's colour alone told stopped / terminated / failed apart.
 		// The row's aria-label already says it: this line is for the eye.

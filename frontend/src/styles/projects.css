@@ -118,6 +118,11 @@
   border-top: 1px solid var(--c-border-soft);
   margin-top: 0.4rem;
 }
+/* No rule above the list's first heading (it sits under "+ New session"). */
+.session-group-title:first-child {
+  border-top: 0;
+  margin-top: 0;
+}
 .session-group-title:first-child {
   padding-top: 0.2rem;
 }

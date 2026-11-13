@@ -648,7 +648,14 @@ test.describe("projects — feature on", () => {
 		await expect(row.locator(".session-agent-link")).toBeHidden();
 		const r = (await row.boundingBox())!;
 		expect(r.height).toBeLessThanOrEqual(56);
-		await expect(row.locator(".session-usage")).toHaveCount(1);
+		// Usage on one line (the two desktop lines are hidden), with the agent.
+		await expect(row.locator(".session-usage-compact")).toBeVisible();
+		await expect(row.locator(".session-usage-wide").first()).toBeHidden();
+		// Screen readers get the agent in the row's name (the link is hidden here).
+		await expect(row.locator(".session-select")).toHaveAttribute(
+			"aria-label",
+			/^my-project, running, agent @developer-hz/,
+		);
 		// The row opens the session (the tag is part of its button).
 		await expect(row.locator(".session-select .session-agent-tag")).toHaveCount(1);
 	});

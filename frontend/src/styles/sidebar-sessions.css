@@ -255,12 +255,18 @@
   }
 }
 
-/* The usage / state line, and (phones) the session's agent beside it. */
+/* The usage / state lines, and (phones) the session's agent beside them.
+   Wide layouts: a column with nameCol's own gap — the two usage lines look
+   exactly as before. Phones: one line (compact usage · @agent). */
 .session-meta {
   display: flex;
-  gap: 0.4rem;
+  flex-direction: column;
+  gap: 0.1rem;
   min-width: 0;
   white-space: nowrap;
+}
+.session-usage-compact {
+  display: none;
 }
 .session-meta > * {
   overflow: hidden;
@@ -287,6 +293,16 @@
   }
   .session-item > .session-agent-link {
     display: none;
+  }
+  .session-meta {
+    flex-direction: row;
+    gap: 0.4rem;
+  }
+  .session-usage-wide {
+    display: none;
+  }
+  .session-usage-compact {
+    display: inline;
   }
   .session-agent-tag {
     display: inline;
