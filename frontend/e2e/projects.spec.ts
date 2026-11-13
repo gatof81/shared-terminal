@@ -98,7 +98,7 @@ test.describe("projects — feature on", () => {
 		backend.enableProjects();
 	});
 
-	test("sidebar: projects with agent counts; sessions grouped by binding with their agent", async ({
+	test("sidebar: projects with agent counts; sessions grouped by PROJECT with their agent", async ({
 		app,
 		page,
 	}) => {
@@ -109,14 +109,22 @@ test.describe("projects — feature on", () => {
 		await expect
 			.poll(() => sidebarGroups(page))
 			.toEqual({
-				"Agent sessions": ["my-project", "docs", "hz-architect", "hz-dev-2", "hz-design"],
+				"Educación HZ": ["my-project", "docs", "hz-architect", "hz-dev-2", "hz-design"],
 				"Unassigned sessions": ["scratch"],
 			});
+		// The project is the group's heading; the row names its agent.
 		await expect(app.sessionRow("my-project").locator(".session-agent-link")).toHaveText(
-			"@developer-hz · Educación HZ",
+			"@developer-hz",
 		);
 		await expect(app.sessionRow("scratch").locator(".session-agent-link")).toHaveCount(0);
-		// The agent link goes to the agent's page — by id, not by @handle.
+		// Phones show the agent as a word in the row (no room for a link there);
+		// the link — to the agent's page, by id, not by @handle — is desktop's.
+		if (app.mobile) {
+			await expect(app.sessionRow("my-project").locator(".session-agent-tag")).toHaveText(
+				"@developer-hz",
+			);
+			return;
+		}
 		await app.sessionRow("my-project").locator(".session-agent-link").click();
 		await expect(pageTitle(page)).toHaveText("@developer-hz");
 		expect(new URL(page.url()).hash).toBe(agentHash(AGENT_IDS.developer));
@@ -296,17 +304,22 @@ test.describe("projects — feature on", () => {
 		await expect(qa.locator(".pv-session-actions a")).toHaveText(["Chat", "Terminal"]);
 	});
 
-	test("sidebar agent links name their project as soon as the project list arrives", async ({
+	test("sidebar groups take their project's name as soon as the project list arrives", async ({
 		app,
 		backend,
+		page,
 	}) => {
 		backend.delays.projects = 1_000;
 		await app.login("alice");
 		await app.openSidebar();
 		const link = app.sessionRow("my-project").locator(".session-agent-link");
 		await expect(link).toHaveText("@developer-hz");
-		// Not on the session list's next poll (5 s): when the list lands.
-		await expect(link).toHaveText("@developer-hz · Educación HZ", { timeout: 3_000 });
+		// The group heading reads "Agent sessions" until the project list lands —
+		// then the project's name (not on the session list's next poll, 5 s).
+		await expect.poll(async () => Object.keys(await sidebarGroups(page))[0]).toBe("Agent sessions");
+		await expect
+			.poll(async () => Object.keys(await sidebarGroups(page))[0], { timeout: 3_000 })
+			.toBe("Educación HZ");
 	});
 
 	test("empty project: + New agent in the empty state and how many sessions are unassigned", async ({
@@ -425,7 +438,7 @@ test.describe("projects — feature on", () => {
 		await expect
 			.poll(() => sidebarGroups(page))
 			.toEqual({
-				"Agent sessions": [
+				"Educación HZ": [
 					"my-project",
 					"docs",
 					"hz-architect",
@@ -434,9 +447,7 @@ test.describe("projects — feature on", () => {
 					"scratch",
 				],
 			});
-		await expect(app.sessionRow("scratch").locator(".session-agent-link")).toHaveText(
-			"@tester · Educación HZ",
-		);
+		await expect(app.sessionRow("scratch").locator(".session-agent-link")).toHaveText("@tester");
 	});
 
 	test("create agent: 409 session-taken is explained and the form stays editable", async ({
@@ -623,15 +634,31 @@ test.describe("projects — feature on", () => {
 		await expect(page.locator("#terminal-session-name")).toHaveText("my-project");
 	});
 
+	test("phones: a session is one row, the agent named on it (owner review 2026-11-13)", async ({
+		app,
+	}) => {
+		test.skip(!app.mobile, "the narrow-screen layout");
+		await app.login("alice");
+		await app.openSidebar();
+		const row = app.sessionRow("my-project");
+		await expect(row.locator(".session-agent-tag")).toBeVisible();
+		await expect(row.locator(".session-agent-tag")).toHaveText("@developer-hz");
+		// No separate agent row: each session used to take ~115 px (name, CPU,
+		// Mem, then a 44-px agent link row below a gap).
+		await expect(row.locator(".session-agent-link")).toBeHidden();
+		const r = (await row.boundingBox())!;
+		expect(r.height).toBeLessThanOrEqual(56);
+		await expect(row.locator(".session-usage")).toHaveCount(1);
+		// The row opens the session (the tag is part of its button).
+		await expect(row.locator(".session-select .session-agent-tag")).toHaveCount(1);
+	});
+
 	test("phones: every Projects control is a 44-px touch target", async ({ app, page }) => {
 		test.skip(!app.mobile, "the narrow-screen rule");
 		await app.login("alice");
 		await app.openSidebar();
-		await expectTouchTargets(page, [
-			"#new-project-btn",
-			"#project-list .project-item",
-			"#session-list .session-agent-link",
-		]);
+		// (Phones name a session's agent inside its row: no separate link there.)
+		await expectTouchTargets(page, ["#new-project-btn", "#project-list .project-item"]);
 		await page.locator("#project-list .project-item", { hasText: "Educación HZ" }).click();
 		await expect(pageTitle(page)).toHaveText("Educación HZ");
 		await expect(page.locator("#project-view .pv-agent")).toHaveCount(5);

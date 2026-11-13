@@ -563,9 +563,22 @@ function renderGroupedSessions(): void {
 		if (title) h.title = title;
 		sessionList.appendChild(h);
 	};
-	if (groups.bound.length > 0) {
-		heading("Agent sessions", "session-group-bound");
-		for (const { session, binding } of groups.bound)
+	// One heading per PROJECT (owner review 2026-11-13: projects, agent
+	// sessions and unassigned ones were hard to tell apart), in the order the
+	// list first meets each; a project whose name isn't loaded yet reads
+	// "Agent sessions" until the directory lands.
+	const byProject = new Map<string, Array<(typeof groups.bound)[number]>>();
+	for (const b of groups.bound) {
+		const list = byProject.get(b.binding.projectId) ?? [];
+		list.push(b);
+		byProject.set(b.binding.projectId, list);
+	}
+	for (const [projectId, rows] of byProject) {
+		heading(
+			projectName(projectId) ?? "Agent sessions",
+			"session-group-bound session-group-project",
+		);
+		for (const { session, binding } of rows)
 			sessionList.appendChild(buildSessionItem(session, binding));
 	}
 	if (groups.unassigned.length > 0) {
@@ -618,17 +631,18 @@ function buildSessionItem(s: SessionInfo, binding: SessionBinding | null): HTMLE
 	name.className = "session-name";
 	name.textContent = s.name;
 	nameCol.appendChild(name);
+	const meta = document.createElement("span");
+	meta.className = "session-meta";
 	// Live usage lines (#272). Only running sessions with a stats sample.
 	if (s.status === "running" && s.usage) {
+		// One line (owner review 2026-11-13: the sidebar wasted room); the
+		// percentages are in the tooltip.
 		const cpuCores = s.usage.cpuPercent / 100;
-		const cpuLine = document.createElement("span");
-		cpuLine.className = "session-usage";
-		cpuLine.textContent = `CPU ${formatCpuCores(cpuCores)} cores (${formatCpuPercent(s.usage.cpuPercent)})`;
-		nameCol.appendChild(cpuLine);
-		const memLine = document.createElement("span");
-		memLine.className = "session-usage";
-		memLine.textContent = `Mem ${formatBytes(s.usage.memBytes)} (${s.usage.memPercent.toFixed(0)}%)`;
-		nameCol.appendChild(memLine);
+		const usage = document.createElement("span");
+		usage.className = "session-usage";
+		usage.textContent = `${formatCpuCores(cpuCores)} cores · ${formatBytes(s.usage.memBytes)}`;
+		usage.title = `CPU ${formatCpuCores(cpuCores)} cores (${formatCpuPercent(s.usage.cpuPercent)}) · Mem ${formatBytes(s.usage.memBytes)} (${s.usage.memPercent.toFixed(0)}%)`;
+		meta.appendChild(usage);
 	} else if (s.status !== "running") {
 		// The dot's colour alone told stopped / terminated / failed apart.
 		// The row's aria-label already says it: this line is for the eye.
@@ -643,8 +657,19 @@ function buildSessionItem(s: SessionInfo, binding: SessionBinding | null): HTMLE
 					: s.status === "failed"
 						? "Failed · open the log"
 						: s.status;
-		nameCol.appendChild(state);
+		meta.appendChild(state);
 	}
+	// Phones: the agent as a word in this line (the separate agent link is
+	// desktop-only there — the row is too narrow for both). Not a link: the
+	// whole row opens the session; the agent page is one tap away from its
+	// project, which is this group's heading.
+	if (binding !== null) {
+		const tag = document.createElement("span");
+		tag.className = "session-agent-tag";
+		tag.textContent = `@${binding.handle}`;
+		meta.appendChild(tag);
+	}
+	if (meta.childElementCount > 0) nameCol.appendChild(meta);
 	select.appendChild(nameCol);
 	select.addEventListener("click", () => {
 		// A failed session has no workspace: the row opens its log.
@@ -721,9 +746,12 @@ function buildSessionItem(s: SessionInfo, binding: SessionBinding | null): HTMLE
 		agent.dataset.role = "agent";
 		const route = { projectId: binding.projectId, agentId: binding.agentId };
 		agent.href = projectRouteHash(route);
+		// The project is the group's heading now: the row names the agent only.
 		const project = projectName(binding.projectId);
-		agent.textContent = project ? `@${binding.handle} · ${project}` : `@${binding.handle}`;
-		agent.title = `Open the agent @${binding.handle}`;
+		agent.textContent = `@${binding.handle}`;
+		agent.title = project
+			? `Open the agent @${binding.handle} · ${project}`
+			: `Open the agent @${binding.handle}`;
 		agent.addEventListener("click", (e) => {
 			if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
 			e.preventDefault();

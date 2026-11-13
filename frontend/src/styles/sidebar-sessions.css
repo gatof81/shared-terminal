@@ -254,3 +254,41 @@
     font-size: 0.8rem;
   }
 }
+
+/* The usage / state line, and (phones) the session's agent beside it. */
+.session-meta {
+  display: flex;
+  gap: 0.4rem;
+  min-width: 0;
+  white-space: nowrap;
+}
+.session-meta > * {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.session-agent-tag {
+  display: none;
+  font-size: 0.66rem;
+  color: var(--c-accent);
+  flex-shrink: 0;
+  max-width: 60%;
+}
+
+/* ── Phones: one row per session (owner review 2026-11-13: the sidebar
+   wasted space, projects / sessions / unassigned were hard to tell apart).
+   The agent shows as a word on the row's second line instead of a 44-px
+   link row of its own (the group heading names the project); the "last
+   conversation" link keeps its own line. */
+@media (max-width: 768px) {
+  .session-item {
+    gap: 0.25rem;
+    padding: 0 0.25rem 0 0.6rem;
+    margin-bottom: 0;
+  }
+  .session-item > .session-agent-link {
+    display: none;
+  }
+  .session-agent-tag {
+    display: inline;
+  }
+}
