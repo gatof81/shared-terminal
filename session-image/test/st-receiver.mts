@@ -17,7 +17,8 @@
 // parsed body) so the test can check identifiers before normalisation.
 //
 // Run from backend/: npx tsx ../session-image/test/st-receiver.mts
-// Env: WORKSPACE_ROOT, ST_TEST_TOKEN, ST_TEST_SESSION, RAW_OUT, PORT (3001).
+// Env: WORKSPACE_ROOT, ST_TEST_TOKEN, ST_TEST_SESSION, RAW_OUT, PORT (3001),
+// ST_TEST_MUTANT (test-only, see below).
 // ──────────────────────────────────────────────────────────────────────────────
 import fs from "node:fs";
 import http from "node:http";
@@ -31,6 +32,32 @@ const port = Number(process.env.PORT ?? 3001);
 if (!workspaceRoot || !token || !stSession) {
 	console.error("st-receiver: WORKSPACE_ROOT, ST_TEST_TOKEN and ST_TEST_SESSION are required");
 	process.exit(2);
+}
+// Test-only mutant (#475): ST_TEST_MUTANT=skip-revocation makes this
+// receiver blind to revocation markers, so the recreation audit smoke (S7)
+// can show its "rejected by revocation" check is load-bearing. Production
+// code is untouched: `revocation.ts` reads the markers through the shared
+// `node:fs` promises object, looking the method up at call time, so making
+// exactly those paths answer ENOENT here is the same as the check being
+// skipped (ENOENT is the one error it reads as "absent"; any other fails
+// closed). Installed before any backend module is loaded.
+const mutant = process.env.ST_TEST_MUTANT ?? "";
+if (mutant !== "" && mutant !== "skip-revocation") {
+	console.error(`st-receiver: unknown ST_TEST_MUTANT ${JSON.stringify(mutant)}`);
+	process.exit(2);
+}
+if (mutant === "skip-revocation") {
+	const isMarker = (p: unknown) =>
+		/\/\.conversations\/(?:[^/]+\/)?(?:REVOKED|REVOKED_ALL|LIFTED)$/.test(String(p));
+	const fsp = fs.promises as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
+	for (const name of ["readFile", "stat"]) {
+		const original = fsp[name].bind(fs.promises);
+		fsp[name] = async (p: unknown, ...rest: unknown[]) => {
+			if (isMarker(p)) throw Object.assign(new Error(`ENOENT (mutant): ${String(p)}`), { code: "ENOENT" });
+			return original(p, ...rest);
+		};
+	}
+	console.error("st-receiver: MUTANT skip-revocation (revocation markers read as absent)");
 }
 process.env.CLOUDFLARE_ACCOUNT_ID ??= "smoke";
 process.env.CLOUDFLARE_API_TOKEN ??= "smoke";

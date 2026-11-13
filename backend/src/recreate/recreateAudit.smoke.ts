@@ -1318,7 +1318,7 @@ git -c safe.directory='*' -C proj rev-parse HEAD && git -c safe.directory='*' -C
 	scenario(
 		"S7",
 		"end-to-end revocation with the real emergency CLI",
-		"`conversation:disable` in another process, revocation markers, the receiver's per-event check, the relay and CLI in N, dockerd stop/start, the engine's preflight and POST",
+		"`conversation:disable` in another process, revocation markers, the receiver's per-event check (a direct POST from N with the previously accepted token, plus a mutant receiver with that check skipped that must fail the same rule), the relay and CLI in N, dockerd stop/start, the engine's preflight and POST",
 		"D1: the emergency CLI's D1 statements go to a stub, and this process's D1 row is not changed by it — the cut is proved by the marker the receiver reads on every event",
 	);
 	const acceptedBefore = await accepted();
@@ -1371,6 +1371,188 @@ git -c safe.directory='*' -C proj rev-parse HEAD && git -c safe.directory='*' -C
 		!(await M.activation.hooksFileExists(ROOT, s1.sid)) &&
 			!(await M.cap.relayEnabledExists(ROOT, s1.sid)),
 	);
+	// #475 — the checks above prove the CLI stops SENDING; this proves the
+	// receiver itself refuses what still ARRIVES. One well-formed
+	// UserPromptSubmit, shaped and addressed as relay.py forwards it, is
+	// POSTed from N with N's own ST_INGEST_TOKEN (expanded by N's shell into
+	// the stdin of curl through the `printf` builtin — never in this process,
+	// nor in any argv readable from /proc/<pid>/cmdline), for a fresh Claude
+	// session id so the only effect a revocation may leave is the `gap
+	// revoked` it writes into the conversations already open.
+	const probeToken = (await tokenOf(n1)) ?? "";
+	check(
+		"direct POST: N's token is the one the receiver accepted before (by hash)",
+		probeToken !== "" && sha(probeToken) === sha(n1Token),
+	);
+	const eventsSizes = async (sid: string) =>
+		new Map(
+			(
+				await asRoot(
+					`cd /wr/.conversations/${sid} 2>/dev/null && for f in *.events.jsonl; do [ -f "$f" ] && printf '%s %s\\n' "$f" "$(stat -c %s "$f")"; done`,
+				)
+			).out
+				.split("\n")
+				.filter(Boolean)
+				.map((l) => {
+					const [f, n] = l.split(" ");
+					return [f, Number(n)] as const;
+				}),
+		);
+	const directProbe = async (host: string, rawFile: string, label: string) => {
+		const cid = randomUUID();
+		const prompt = `revoke probe: direct POST (${label})`;
+		const outcomesFile = rawFile.replace(/\.jsonl$/, ".outcomes.jsonl");
+		const outBefore = (await receiverLines(outcomesFile)).length;
+		const evBefore = await eventsSizes(s1.sid);
+		const body = JSON.stringify({
+			hook_event_name: "UserPromptSubmit",
+			session_id: cid,
+			transcript_path: `/home/developer/.claude/projects/-home-developer-workspace/${cid}.jsonl`,
+			cwd: "/home/developer/workspace",
+			permission_mode: "bypassPermissions",
+			prompt,
+			prompt_id: randomUUID(),
+		});
+		// `-H @-` (curl ≥ 7.55; the image's Ubuntu 24.04 ships 8.5) reads the
+		// header from stdin: the token is in no process's argv.
+		const post = await sh(
+			n1,
+			`printf 'Authorization: Bearer %s\\n' "$ST_INGEST_TOKEN" | curl -s -o /dev/null -w '%{http_code}' -X POST http://${host}:3001/ingest/claude/hook -H @- -H 'Content-Type: application/json' -H 'X-ST-Session: ${s1.sid}' -H 'X-ST-Tmux-Pane: %0' --data-binary '${body}'`,
+		);
+		// The 204 goes out before `ingest` runs: wait for its outcome, then
+		// for the store's worker, which writes after the outcome.
+		await waitFor(
+			`${label} probe outcome`,
+			async () =>
+				(await receiverLines(outcomesFile)).slice(outBefore).some((l) => l.step === "ingest"),
+			10_000,
+			100,
+		);
+		await sleep(1_500);
+		// Raw lines carry the Authorization header: compared by hash, never returned.
+		const raw = (await receiverLines(rawFile)).filter(
+			(l) => l.event === "UserPromptSubmit" && (l.body as { prompt?: string })?.prompt === prompt,
+		);
+		const evAfter = await eventsSizes(s1.sid);
+		const newEvents: Array<{ ev: unknown; reason: unknown }> = [];
+		for (const [f, n] of evAfter) {
+			const from = evBefore.get(f) ?? 0;
+			if (n <= from) continue;
+			const out = (await asRoot(`tail -c +${from + 1} /wr/.conversations/${s1.sid}/${f}`)).out;
+			const lines = out.split("\n");
+			// The store may be mid-append: only newline-terminated lines are
+			// events; the trailing piece (empty, or a partial line) is not.
+			lines.pop();
+			for (const l of lines.filter(Boolean)) {
+				try {
+					const e = JSON.parse(l) as { ev?: unknown; data?: { reason?: unknown } };
+					newEvents.push({ ev: e.ev, reason: e.data?.reason });
+				} catch {
+					// Recorded, never thrown: it fails the rule below as a check.
+					newEvents.push({ ev: "(unparseable line)", reason: f });
+				}
+			}
+		}
+		return {
+			cid,
+			prompt,
+			http: post.out.trim(),
+			reached: raw.length,
+			sameToken:
+				raw.length > 0 &&
+				raw.every(
+					(l) => sha(String(l.authorization)) === sha(`Bearer ${n1Token}`) && l.session === s1.sid,
+				),
+			outcomes: (await receiverLines(outcomesFile))
+				.slice(outBefore)
+				.map((l) => ({ step: l.step, outcome: l.outcome })),
+			newFiles: [...evAfter.keys()].filter((f) => !evBefore.has(f)),
+			newEvents,
+		};
+	};
+	type Probe = Awaited<ReturnType<typeof directProbe>>;
+	const outcomeOf = (o: Probe["outcomes"][number]) =>
+		o.outcome as { accepted?: boolean; reason?: string; ok?: boolean };
+	const anyAccepted = (p: Probe) => p.outcomes.some((o) => outcomeOf(o).accepted === true);
+	// Tied to the probe: exactly ONE ingest outcome landed after it was sent.
+	const ingestOutcomes = (p: Probe) => p.outcomes.filter((o) => o.step === "ingest");
+	const onlyIngest = (p: Probe) => {
+		const i = ingestOutcomes(p);
+		return i.length === 1 ? outcomeOf(i[0]) : null;
+	};
+	// The assertion S7 makes, as one predicate so the mutant below is judged
+	// by exactly the same rule.
+	const rejectedByRevocation = (p: Probe) =>
+		p.reached === 1 &&
+		p.sameToken &&
+		!p.outcomes.some((o) => o.step === "authorize") &&
+		onlyIngest(p)?.reason === "revoked" &&
+		!anyAccepted(p) &&
+		p.newFiles.length === 0 &&
+		p.newEvents.every((e) => e.ev === "gap" && e.reason === "revoked");
+	const real = await directProbe("st-backend", "receiver.jsonl", "real receiver");
+	check("direct POST answered 204 (a hook never sees the refusal)", real.http === "204", real.http);
+	check(
+		"direct POST reached the receiver once, with the previously accepted token",
+		real.reached === 1 && real.sameToken,
+		{ reached: real.reached, sameToken: real.sameToken },
+	);
+	check(
+		"direct POST: authorized, then exactly one ingest outcome — refused by the revocation (`revoked`), nothing accepted",
+		onlyIngest(real)?.reason === "revoked" &&
+			!anyAccepted(real) &&
+			!real.outcomes.some((o) => o.step === "authorize"),
+		real.outcomes,
+	);
+	check(
+		"direct POST: nothing persisted under .conversations/<sid>/ (no new conversation; at most `gap revoked`)",
+		real.newFiles.length === 0 &&
+			real.newEvents.every((e) => e.ev === "gap" && e.reason === "revoked") &&
+			!(await persistedPrompt(s1.sid, real.prompt)),
+		{ newFiles: real.newFiles, newEvents: real.newEvents },
+	);
+	check("direct POST: the S7 rule holds on the real receiver", rejectedByRevocation(real));
+	// Mutation control: a second instance of the same receiver, with the
+	// revocation check skipped (ST_TEST_MUTANT, test-only), on the same
+	// $ROOT and token. The same probe must FAIL the rule above — accepted
+	// and persisted — or the rule would not be what catches the regression.
+	const MUTANT = await repoNode(
+		"../session-image/test/st-receiver.mts",
+		[
+			"WORKSPACE_ROOT=/wr",
+			`ST_TEST_TOKEN=${n1Token}`,
+			`ST_TEST_SESSION=${s1.sid}`,
+			"RAW_OUT=/wr/.smoke-out/receiver-mutant.jsonl",
+			"ST_TEST_MUTANT=skip-revocation",
+		],
+		"receiver-mutant",
+		"st-backend-mutant",
+	);
+	if (!(await waitFor("mutant receiver", () => logsHave(MUTANT, "listening"), 60_000)))
+		throw new Error("mutant receiver did not start");
+	check(
+		"mutant: the receiver runs with the revocation check skipped",
+		await logsHave(MUTANT, "MUTANT skip-revocation"),
+	);
+	const mut = await directProbe("st-backend-mutant", "receiver-mutant.jsonl", "mutant receiver");
+	const mutPersisted = await waitFor(
+		"mutant probe persisted",
+		() => persistedPrompt(s1.sid, mut.prompt),
+		10_000,
+	);
+	check(
+		"mutant: the same probe reached it and was accepted and persisted (the check is load-bearing)",
+		mut.reached === 1 && onlyIngest(mut)?.accepted === true && mutPersisted,
+		{ reached: mut.reached, outcomes: mut.outcomes, persisted: mutPersisted },
+	);
+	check("mutant: the S7 rule fails on it", !rejectedByRevocation(mut));
+	await docker
+		.getContainer(MUTANT)
+		.remove({ force: true })
+		.catch(() => undefined);
+	// What the mutant wrote is not the real flow's: remove it before S7 goes on.
+	await asRoot(`rm -f /wr/.conversations/${s1.sid}/${mut.cid}.*`);
+	check("mutant's conversation removed", !(await persistedPrompt(s1.sid, mut.prompt)));
 	check("open tab: the next turn completes", await tabTurn(n1, "open", "revoke probe: open tab"));
 	await sleep(1_500);
 	check("nothing accepted after the CLI returned", (await accepted()) === acceptedBefore, {
