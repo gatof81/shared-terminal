@@ -510,6 +510,8 @@ export async function harness(
 		root?: string;
 		/** The lock to share with code outside the engine (route tests pass the singleton). */
 		lock?: SessionLifecycleLock;
+		/** The engine's clock (reserved `-old-<ts>` names); default Date.now. */
+		now?: () => number;
 	} = {},
 ) {
 	const root = opts.root ?? (await fs.mkdtemp(path.join(os.tmpdir(), "st-recreate-")));
@@ -542,6 +544,7 @@ export async function harness(
 		diskFree: async () => disk.free,
 		backupFresh: async () => backup.fresh,
 		config: { ...FAST, ...opts.config },
+		...(opts.now ? { now: opts.now } : {}),
 	});
 	return { root, docker, d1, capture, attempts, lock, engine, workspaceSkills, cli, disk, backup };
 }
