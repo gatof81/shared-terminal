@@ -2277,6 +2277,25 @@ export class RecreationEngine {
 			void this.runResolution(a);
 			return { ok: false, status: 500, code: "recreate-failed", detail: "commit" };
 		}
+		// The intent write is an await: a shutdown or T_rec may have arrived
+		// during it. As the forward commit, nothing is sent then. On a
+		// shutdown nothing more is written either (as after `begin()`): the
+		// `open` record with its intent is what the next process finds, and
+		// its recovery fences the never-sent statement — harmless. On T_rec
+		// this process knows the statement never left, so the resolution
+		// owes no fence: D1 is still on N and the names are restored.
+		if (this.stopped || !a.run.epochOpen || a.run.remaining() <= 0) {
+			a.run.close(this.stopped ? "shutdown" : "T_rec");
+			if (this.stopped) {
+				logger.warn(
+					`[recreate] ${sessionId}: shut down while recording the rollback commit; casBack not sent`,
+				);
+				return { ok: false, status: 500, code: "recreate-failed", detail: "unresolved" };
+			}
+			await this.markUncertain(a, "T_rec expired before the rollback commit");
+			void this.runResolution(a);
+			return { ok: false, status: 500, code: "recreate-failed", detail: "commit" };
+		}
 		a.casSentAt = this.now();
 		a.cas = await a.run.untimed("d1 rollback", () =>
 			this.deps.d1.casBack(sessionId, nId, retained.containerId, fence),
