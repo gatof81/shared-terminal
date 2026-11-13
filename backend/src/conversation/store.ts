@@ -165,6 +165,12 @@ export interface StoreFs {
 	stat(p: string): Promise<{ size: number }>;
 	readFile(p: string, enc: "utf8"): Promise<string>;
 	readdir(p: string): Promise<string[]>;
+	/**
+	 * Optional positional read (`length` bytes from `start`). Without it an
+	 * injected fs falls back to reading the whole file; the default (node)
+	 * fs always reads positionally.
+	 */
+	readRange?(p: string, start: number, length: number): Promise<Buffer>;
 }
 
 export interface StoreOptions {
@@ -181,10 +187,26 @@ export interface StoreOptions {
 		indexBytes: number;
 		flushEveryEvents: number;
 		flushIntervalMs: number;
+		evictionKeepMax: number;
+		evictionRetryBaseMs: number;
+		evictionRetryMaxMs: number;
 	}>;
 }
 
 export type EventListener = (stSessionId: string, cid: string, event: PersistedEvent) => void;
+
+interface CurrentFile {
+	size: number;
+	/** The snapshot was taken on an older L7 generation (or the file was rewritten). */
+	otherGeneration: boolean;
+	/** The lines to scan (from the valid offset, or the whole file). */
+	tail: string;
+	/** The bytes before the offset, read only for a legacy snapshot (case C). */
+	head: string | null;
+}
+
+/** Longest first line read to identify a file's generation; past it the file is rescanned whole. */
+const FIRST_LINE_MAX_BYTES = 16 * 1024 * 1024;
 
 interface Resident {
 	index: ConversationIndex;
@@ -200,6 +222,12 @@ interface Resident {
 	currentFileBytes: number;
 	/** True while `drain` runs — an append may be in flight with the queue empty (B2). */
 	busy: boolean;
+	/**
+	 * #546 — a G4-evicted entry whose snapshot write failed is kept (it holds
+	 * state that exists only in memory) and its write retried with backoff.
+	 */
+	retryTimer: NodeJS.Timeout | null;
+	retryAttempt: number;
 }
 
 /** Open (non-final) messages tracked for the L2 budget. */
@@ -207,6 +235,59 @@ export const MESSAGE_OPEN_MAX = 256;
 /** Sealed message ids remembered so a late delta can't restart a budget. */
 export const MESSAGE_SEALED_MAX = 4096;
 const AGENTS_MAX = 256;
+
+/**
+ * #546 — bounded overshoot past G4: at most this many evicted entries whose
+ * snapshot write failed are kept in memory (each ≤ G4_INDEX_BYTES, so ≤ 64
+ * MiB on top of G4's own bound). Past it the oldest kept entry is dropped and
+ * counted (`evictionWriteDropped`): what it held only in memory is lost, as
+ * before #546, but no longer silently.
+ */
+export const EVICTION_KEEP_MAX = 16;
+/** #546 — retry backoff of a kept entry's snapshot write: 1 s doubling, capped. */
+export const EVICTION_RETRY_BASE_MS = 1_000;
+export const EVICTION_RETRY_MAX_MS = 60_000;
+/**
+ * #546 — consecutive index-write failures (any conversation) after which the
+ * log escalates from warn to error, and again every this many after.
+ * Inode exhaustion or a quota (EDQUOT) fails only the temp-file creation
+ * while appends to existing events files keep working, so this log line and
+ * the admin counters are the only symptoms.
+ */
+export const INDEX_WRITE_ESCALATE_AFTER = 5;
+
+/**
+ * The kind a `session_start` declares (§5.2): the live path (service
+ * `applyMetadata`) and recovery from the file (#546) share this rule.
+ */
+export function sessionStartKind(data: EventData): ConversationKind {
+	const flags = Array.isArray(data.argv_flags)
+		? (data.argv_flags as unknown[]).filter((f): f is string => typeof f === "string")
+		: [];
+	if (flags.includes("-p") || flags.includes("--print")) return "headless";
+	if (flags.some((f) => f.startsWith("--agent-name") || f === "--agent-id")) return "teammate";
+	return "interactive";
+}
+
+/**
+ * The title evidence an event carries (§5.1), shared by the live path and
+ * recovery (#546): the CLI's `session_title` (on a session start or a prompt)
+ * always wins; otherwise the default title is the first prompt the PERSON
+ * wrote — not an injected source, not a prompt whose origin could not be
+ * verified (§4.2.1), never an `internal_prompt`.
+ */
+export function applyTitleEvidence(index: ConversationIndex, ev: EventName, data: EventData): void {
+	if (ev === "user_prompt") {
+		if (
+			index.title === null &&
+			(data.source === undefined || data.source === "user") &&
+			data.origin !== "unverified"
+		) {
+			index.title = String(data.prompt).slice(0, 80);
+		}
+	} else if (ev !== "session_start" && ev !== "internal_prompt") return;
+	if (typeof data.session_title === "string") index.title = data.session_title;
+}
 
 /**
  * B6 — end a message's L2 tally: forget its open-set entries and remember
@@ -318,8 +399,26 @@ export class ConversationStore {
 	/** High-water mark of `totalQueueBytes` since boot (admin stats, §7). */
 	private maxTotalQueueBytes = 0;
 	private readonly lim: Required<NonNullable<StoreOptions["limits"]>>;
-	/** Counters for admin stats (3.0d exposes them). */
-	readonly stats = { persisted: 0, dropped: 0, appendFailures: 0, rotations: 0, evictions: 0 };
+	/**
+	 * #546 — the `evicting` entries kept after a failed snapshot write, oldest
+	 * first (the order the K bound drops them in). A subset of `evicting`.
+	 */
+	private readonly kept = new Map<string, Resident>();
+	/** Counters for admin stats (3.0d exposes them; #546 adds the index-write ones). */
+	readonly stats = {
+		persisted: 0,
+		dropped: 0,
+		appendFailures: 0,
+		rotations: 0,
+		evictions: 0,
+		indexWriteFailures: 0,
+		evictionWriteKept: 0,
+		evictionWriteDropped: 0,
+	};
+	/** #546 — the errno code of the last failed index write (`null` until one fails). */
+	lastIndexWriteErrorCode: string | null = null;
+	/** #546 — index writes failed in a row, any conversation; reset by a success. */
+	private consecutiveIndexWriteFailures = 0;
 
 	constructor(private readonly opts: StoreOptions) {
 		this.fs = opts.fs ?? (nodeFs as unknown as StoreFs);
@@ -333,6 +432,9 @@ export class ConversationStore {
 			indexBytes: G4_INDEX_BYTES,
 			flushEveryEvents: INDEX_FLUSH_EVERY_EVENTS,
 			flushIntervalMs: INDEX_FLUSH_INTERVAL_MS,
+			evictionKeepMax: EVICTION_KEEP_MAX,
+			evictionRetryBaseMs: EVICTION_RETRY_BASE_MS,
+			evictionRetryMaxMs: EVICTION_RETRY_MAX_MS,
 			...opts.limits,
 		};
 	}
@@ -387,7 +489,11 @@ export class ConversationStore {
 		const leaving = this.evicting.get(key);
 		if (leaving) {
 			this.evicting.delete(key);
+			// #546 — a kept entry (its eviction write failed) is resident again:
+			// no retry timer of its own; the ordinary flush path writes it.
+			this.forgetKept(key, leaving);
 			this.resident.set(key, leaving);
+			if (leaving.dirty) this.scheduleFlush(leaving);
 			await this.evictIfNeeded();
 			return leaving.index;
 		}
@@ -431,6 +537,8 @@ export class ConversationStore {
 			pendingDrop: null,
 			currentFileBytes: fileBytes,
 			busy: false,
+			retryTimer: null,
+			retryAttempt: 0,
 		};
 		this.resident.set(key, r);
 		await this.evictIfNeeded();
@@ -480,6 +588,50 @@ export class ConversationStore {
 		} catch {
 			return null;
 		}
+	}
+
+	/**
+	 * §8.1.4 rules 9b/10 — the recorded answer of a RELEASED composer
+	 * operation, or null when `clientMessageId` is not in the window.
+	 *
+	 * In memory (resident or evicting) the index is complete: it was rebuilt
+	 * from the file when opened and every append since went through it. A
+	 * snapshot alone is only a cache that may be stale — its write can fail
+	 * (#546: EDQUOT, inode exhaustion) while the `released` lines still reach
+	 * the events file — so a miss there is settled by rebuilding the window
+	 * the way `open` would (snapshot + scan of the file past its offset),
+	 * without making the conversation resident and without writing anything.
+	 * A replay must never depend on a snapshot write having landed: an id
+	 * the file proves released and that is treated as new is a second
+	 * delivery. The rebuild reads the current file and, when the snapshot is
+	 * from an older L7 generation, the `.1` lines past it; an id whose file
+	 * L7 rotated away is out of the window and treated as new (§8.1.4 rule
+	 * 10). A read error other than "no file" throws: the composer answers
+	 * `send-in-progress{unverifiable}` rather than guess (fail closed).
+	 */
+	async releasedComposerSend(
+		stSessionId: string,
+		cid: string,
+		clientMessageId: string,
+	): Promise<{ status: number; body: unknown; at: string } | null> {
+		const key = `${stSessionId}/${cid}`;
+		const lookup = (index: ConversationIndex) => index.composerSends?.[clientMessageId] ?? null;
+		const inMemory = () => this.resident.get(key) ?? this.evicting.get(key);
+		let mem = inMemory();
+		if (!mem && this.opening.has(key)) {
+			await this.opening.get(key)?.catch(() => null);
+			mem = inMemory();
+		}
+		if (mem) return lookup(mem.index);
+		const { index, legacyPromptCorrelation, fromSnapshot } = await this.loadIndex(stSessionId, cid);
+		if (fromSnapshot) {
+			const hit = index.composerSends?.[clientMessageId];
+			if (hit) return hit;
+		}
+		await this.recoverFromFile(stSessionId, cid, index, legacyPromptCorrelation, fromSnapshot, {
+			readOnly: true,
+		});
+		return lookup(index);
 	}
 
 	getResidentIndex(stSessionId: string, cid: string): ConversationIndex | undefined {
@@ -577,13 +729,35 @@ export class ConversationStore {
 		index: ConversationIndex,
 		legacyPromptCorrelation: boolean,
 		fromSnapshot = true,
+		opts: { readOnly?: boolean } = {},
 	): Promise<number> {
 		if (legacyPromptCorrelation) index.persistedPromptId = null;
 		const file = this.eventsPath(stSessionId, cid);
-		let content: string;
+		// What the snapshot covers: every line with a seq above this is newer.
+		const baseSeq = fromSnapshot ? index.lastSeq : 0;
+		let current: CurrentFile | null;
 		try {
-			content = await this.fs.readFile(file, "utf8");
-		} catch {
+			current = await this.readCurrentFile(
+				file,
+				index,
+				legacyPromptCorrelation,
+				fromSnapshot,
+				opts,
+			);
+		} catch (err) {
+			// `readOnly` (a rebuild that is not registered, #546) must not take
+			// an unreadable file for an absent one: its caller decides on it.
+			if (opts.readOnly && (err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+			current = null;
+		}
+		// #546 — the snapshot does not cover the lines between its own offset
+		// and the rotation when it belongs to an OLDER L7 generation (its
+		// writes failed across a rotation), when there is no snapshot, or when
+		// the current file is gone: those lines can only be in `.1`. Only the
+		// state that is not a per-file counter is taken from them.
+		if (!fromSnapshot || current === null || current.otherGeneration)
+			await this.applyArchiveTail(file, index, baseSeq, opts.readOnly === true);
+		if (current === null) {
 			// No file: whatever the index claims about seq is unproven.
 			// Keep lastSeq (a rotated-away file can be gone) but reset offset.
 			index.offset = 0;
@@ -592,24 +766,7 @@ export class ConversationStore {
 			if (!fromSnapshot) await this.lastEventAtFromArchive(file, index, null);
 			return 0;
 		}
-		let size = Buffer.byteLength(content, "utf8");
-		if (size > 0 && !content.endsWith("\n")) {
-			// A torn last line (crash mid-append). Terminate it so the next
-			// append starts a fresh line instead of gluing onto the fragment;
-			// the fragment itself is skipped by the parse below.
-			try {
-				await this.fs.appendFile(file, "\n");
-				content += "\n";
-				size += 1;
-			} catch {
-				/* read-only or failing disk: the scan still works */
-			}
-		}
-		if (index.offset > size) index.offset = 0; // truncated/rewritten file
-		const tail =
-			index.offset === 0
-				? content
-				: Buffer.from(content, "utf8").subarray(index.offset).toString("utf8");
+		const { size, tail } = current;
 		if (index.offset === 0) {
 			index.eventsCount = 0;
 			index.eventsBytes = 0;
@@ -620,9 +777,7 @@ export class ConversationStore {
 		} else if (legacyPromptCorrelation) {
 			// Case C: the counters stay trusted up to `offset`, but the
 			// correlation is proven only by the lines before it.
-			index.persistedPromptId = lastPromptIdIn(
-				Buffer.from(content, "utf8").subarray(0, index.offset).toString("utf8"),
-			);
+			index.persistedPromptId = lastPromptIdIn(current.head ?? "");
 		}
 		index.lastPromptId = index.persistedPromptId;
 		let scannedSeq = index.offset === 0 ? 0 : index.lastSeq;
@@ -653,7 +808,7 @@ export class ConversationStore {
 				index.persistedPromptId = ev.prompt_id;
 				index.lastPromptId = ev.prompt_id;
 			}
-			trackComposerSend(index, ev);
+			this.recoverIndexState(index, ev);
 			if (ev.ev === "assistant_delta") {
 				// B6 — the L2 budget must survive a restart: lines past the
 				// snapshot's offset re-add their bytes to the message tally.
@@ -693,6 +848,157 @@ export class ConversationStore {
 		if (!fromSnapshot && !sawActivity) await this.lastEventAtFromArchive(file, index, oldestAny);
 		index.offset = size;
 		return size;
+	}
+
+	/**
+	 * The current events file as recovery needs it. With a snapshot whose
+	 * offset is valid for THIS file only the tail past the offset is read
+	 * (a positional read: a lookup on the request path must not read up to
+	 * L7 bytes); otherwise the whole file.
+	 *
+	 * A snapshot's offset is valid only for the L7 generation it was taken
+	 * on: the file's first line must be the snapshot's `firstRetainedSeq`.
+	 * A rotation starts the new file at a seq above everything the snapshot
+	 * saw, so a snapshot left behind by failing writes (#546) never matches —
+	 * and trusting its offset would start the scan in the middle of the newer
+	 * file, past `released` lines the composer's replay depends on.
+	 */
+	private async readCurrentFile(
+		file: string,
+		index: ConversationIndex,
+		legacyPromptCorrelation: boolean,
+		fromSnapshot: boolean,
+		opts: { readOnly?: boolean },
+	): Promise<CurrentFile> {
+		let size = (await this.fs.stat(file)).size;
+		if (size > 0 && !opts.readOnly) {
+			const last = await this.readRange(file, size - 1, 1);
+			if (last[0] !== 0x0a) {
+				// A torn last line (crash mid-append). Terminate it so the next
+				// append starts a fresh line instead of gluing onto the fragment;
+				// the fragment itself is skipped by the parse.
+				try {
+					await this.fs.appendFile(file, "\n");
+					size += 1;
+				} catch {
+					/* read-only or failing disk: the scan still works */
+				}
+			}
+		}
+		let otherGeneration = false;
+		if (index.offset > size) {
+			// Truncated or rewritten — or a later generation still shorter.
+			index.offset = 0;
+			otherGeneration = fromSnapshot;
+		} else if (fromSnapshot && index.offset > 0) {
+			if ((await this.firstLineSeq(file, size)) !== index.firstRetainedSeq) {
+				index.offset = 0;
+				otherGeneration = true;
+			}
+		}
+		if (index.offset === 0 || legacyPromptCorrelation) {
+			const all = await this.readRange(file, 0, size);
+			return {
+				size,
+				otherGeneration,
+				tail: all.subarray(index.offset).toString("utf8"),
+				head: legacyPromptCorrelation ? all.subarray(0, index.offset).toString("utf8") : null,
+			};
+		}
+		const tail = await this.readRange(file, index.offset, size - index.offset);
+		return { size, otherGeneration, tail: tail.toString("utf8"), head: null };
+	}
+
+	/** The `seq` of a file's first line; null when it cannot be read as one. */
+	private async firstLineSeq(file: string, size: number): Promise<number | null> {
+		let len = Math.min(size, 4 * 1024);
+		for (;;) {
+			const buf = await this.readRange(file, 0, len);
+			const nl = buf.indexOf(0x0a);
+			if (nl === -1 && len < size && len < FIRST_LINE_MAX_BYTES) {
+				len = Math.min(size, len * 4, FIRST_LINE_MAX_BYTES);
+				continue;
+			}
+			if (nl === -1 && len < size) return null;
+			try {
+				const line = buf.subarray(0, nl === -1 ? buf.length : nl).toString("utf8");
+				const seq = (JSON.parse(line) as { seq?: unknown }).seq;
+				return typeof seq === "number" ? seq : null;
+			} catch {
+				return null;
+			}
+		}
+	}
+
+	/** `length` bytes of `p` from `start`: a positional read when the fs offers one. */
+	private async readRange(p: string, start: number, length: number): Promise<Buffer> {
+		if (length <= 0) return Buffer.alloc(0);
+		if (this.fs.readRange) return this.fs.readRange(p, start, length);
+		if (!this.opts.fs) {
+			const fh = await nodeFs.open(p, "r");
+			try {
+				const buf = Buffer.alloc(length);
+				const { bytesRead } = await fh.read(buf, 0, length, start);
+				return buf.subarray(0, bytesRead);
+			} finally {
+				await fh.close();
+			}
+		}
+		// An injected fs without positional reads (tests): the whole file.
+		const all = Buffer.from(await this.fs.readFile(p, "utf8"), "utf8");
+		return all.subarray(start, start + length);
+	}
+
+	/**
+	 * #546 — lines of the `.1` archive newer than the snapshot (`seq >
+	 * baseSeq`): their seq, composer window, agents and metadata. Counters,
+	 * the prompt correlation and the L2 tallies belong to the current file
+	 * and are left alone. A history older than `.1` (two rotations since the
+	 * snapshot) is gone: ids released there are out of the composer window
+	 * and treated as new, as §8.1.4 rule 10 states for any rotation.
+	 */
+	private async applyArchiveTail(
+		file: string,
+		index: ConversationIndex,
+		baseSeq: number,
+		readOnly: boolean,
+	): Promise<void> {
+		let content: string;
+		try {
+			content = await this.fs.readFile(`${file}.1`, "utf8");
+		} catch (err) {
+			if (readOnly && (err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+			return;
+		}
+		for (const line of content.split("\n")) {
+			if (!line) continue;
+			let ev: PersistedEvent;
+			try {
+				ev = JSON.parse(line) as PersistedEvent;
+			} catch {
+				continue;
+			}
+			if (typeof ev.seq !== "number" || ev.seq <= baseSeq) continue;
+			// Seq never goes backwards, whichever file proves it.
+			index.lastSeq = Math.max(index.lastSeq, ev.seq);
+			this.recoverIndexState(index, ev);
+		}
+	}
+
+	/**
+	 * #546 — what only the in-memory index held, rebuilt from a persisted
+	 * line where the file carries it: the composer window, the agents (lost
+	 * on a crash too, before), the session-start metadata, the title and the
+	 * revocation note. Bindings (`paneId`/`tabId`) and `state` are not: they
+	 * converge through the stop/boot reconcile, the next event with a pane, a
+	 * hook or a probe (CONVERSATION.md v1.7.2).
+	 */
+	private recoverIndexState(index: ConversationIndex, ev: PersistedEvent): void {
+		trackComposerSend(index, ev);
+		if (ev.data && typeof ev.data === "object") {
+			this.trackMessageAndAgents(index, ev);
+			this.recoverMetadata(index, ev);
+		}
 	}
 
 	// ── Append ─────────────────────────────────────────────────────────────
@@ -758,6 +1064,9 @@ export class ConversationStore {
 			await r.chain;
 			await this.writeIndex(r);
 		}
+		// #546 — one more attempt for the entries kept after a failed eviction
+		// write (shutdown): a success lets them leave, a failure keeps them.
+		for (const r of Array.from(this.kept.values())) await this.writeIndex(r);
 	}
 
 	private async drain(stSessionId: string, cid: string, r: Resident): Promise<void> {
@@ -848,6 +1157,18 @@ export class ConversationStore {
 		return event;
 	}
 
+	/** #546 — the metadata a persisted line carries, applied in file order (see recoverFromFile). */
+	private recoverMetadata(index: ConversationIndex, ev: PersistedEvent): void {
+		if (ev.ev === "session_start") {
+			index.kind = sessionStartKind(ev.data);
+			// As live (§5.2 v1.8.5): a `claude -p` never holds a pane.
+			if (index.kind === "headless") index.paneId = null;
+			if (typeof ev.data.claude_version === "string") index.claudeVersion = ev.data.claude_version;
+		}
+		applyTitleEvidence(index, ev.ev, ev.data);
+		if (ev.ev === "gap" && ev.data.reason === "revoked") index.revokedNoted = true;
+	}
+
 	private trackMessageAndAgents(index: ConversationIndex, event: PersistedEvent): void {
 		if (event.ev === "agent_start") {
 			const id = String(event.data.agent_id ?? "");
@@ -904,9 +1225,18 @@ export class ConversationStore {
 		const done = () => {
 			if (this.indexWrites.get(key) !== next) return;
 			this.indexWrites.delete(key);
+			if (this.evicting.get(key) !== r) return;
+			// #546 — the last write of a leaving entry failed: the entry is the
+			// only copy of what it held in memory, so it stays (bounded, retried)
+			// instead of leaving with it. A purge never keeps anything.
+			if (r.dirty && !this.purging.has(r.index.stSessionId)) {
+				this.keepAfterFailedWrite(key, r);
+				return;
+			}
 			// The last write of a leaving entry landed, whoever queued it (an
-			// eviction, a flush timer, a flush): it no longer needs to answer.
-			if (this.evicting.get(key) === r) this.evicting.delete(key);
+			// eviction, a flush timer, a flush, a retry): it no longer needs to answer.
+			this.evicting.delete(key);
+			this.forgetKept(key, r);
 		};
 		void next.then(done, done);
 		return next;
@@ -952,10 +1282,76 @@ export class ConversationStore {
 			await this.fs.rename(tmp, file);
 		} catch (err) {
 			r.dirty = true;
-			logger.warn(
-				`[conversation] index write failed for ${r.index.cid}: ${(err as Error).message}`,
+			this.noteIndexWriteFailure(r, err);
+			return;
+		}
+		this.consecutiveIndexWriteFailures = 0;
+	}
+
+	/** #546 — count a failed index write; escalate the log after N in a row. */
+	private noteIndexWriteFailure(r: Resident, err: unknown): void {
+		this.stats.indexWriteFailures++;
+		const code = (err as NodeJS.ErrnoException | null)?.code;
+		this.lastIndexWriteErrorCode = typeof code === "string" && code ? code : "UNKNOWN";
+		const streak = ++this.consecutiveIndexWriteFailures;
+		const msg = `[conversation] index write failed for ${r.index.cid}: ${(err as Error)?.message ?? String(err)}`;
+		if (streak % INDEX_WRITE_ESCALATE_AFTER === 0) {
+			logger.error(
+				`${msg} (${streak} index writes failed in a row, last ${this.lastIndexWriteErrorCode}: the capture snapshots are not reaching ${this.opts.workspaceRoot})`,
+			);
+		} else logger.warn(msg);
+	}
+
+	/**
+	 * #546 — keep an evicted entry whose snapshot write failed: it stays in
+	 * `evicting` (so `open` adopts it and `peekIndex` answers from it) and its
+	 * write is retried with backoff. At most `evictionKeepMax` are kept; past
+	 * that the oldest is dropped, counted and logged as an error.
+	 */
+	private keepAfterFailedWrite(key: string, r: Resident): void {
+		if (!this.kept.has(key)) {
+			this.kept.set(key, r);
+			this.stats.evictionWriteKept++;
+		}
+		r.retryAttempt++;
+		const delay = Math.min(
+			this.lim.evictionRetryBaseMs * 2 ** Math.min(r.retryAttempt - 1, 30),
+			this.lim.evictionRetryMaxMs,
+		);
+		if (r.retryTimer) clearTimeout(r.retryTimer);
+		r.retryTimer = setTimeout(() => {
+			r.retryTimer = null;
+			if (this.evicting.get(key) === r) void this.writeIndex(r);
+		}, delay);
+		r.retryTimer.unref?.();
+		while (this.kept.size > this.lim.evictionKeepMax) {
+			const [oldKey, old] = this.kept.entries().next().value as [string, Resident];
+			this.forgetKept(oldKey, old);
+			if (this.evicting.get(oldKey) === old) this.evicting.delete(oldKey);
+			if (old.flushTimer) {
+				clearTimeout(old.flushTimer);
+				old.flushTimer = null;
+			}
+			this.stats.evictionWriteDropped++;
+			logger.error(
+				`[conversation] evicted index of ${old.index.cid} dropped after failed snapshot writes (more than ${this.lim.evictionKeepMax} kept): its in-memory state is lost; recovery rebuilds what the events file holds`,
 			);
 		}
+	}
+
+	/** #546 — the entry is no longer kept: drop its retry timer and its place in the bound. */
+	private forgetKept(key: string, r: Resident): void {
+		if (this.kept.get(key) === r) this.kept.delete(key);
+		if (r.retryTimer) {
+			clearTimeout(r.retryTimer);
+			r.retryTimer = null;
+		}
+		r.retryAttempt = 0;
+	}
+
+	/** #546 — evicted entries currently kept after a failed snapshot write (admin stats). */
+	keptCount(): number {
+		return this.kept.size;
 	}
 
 	private async rotate(stSessionId: string, cid: string, r: Resident): Promise<void> {
@@ -1138,6 +1534,11 @@ export class ConversationStore {
 				r.dirty = false;
 				this.resident.delete(key);
 			}
+			// #546 — kept entries (failed eviction writes) of the session: their
+			// retry timers must not fire after the rm.
+			for (const [key, r] of Array.from(this.kept)) {
+				if (key.startsWith(`${stSessionId}/`)) this.forgetKept(key, r);
+			}
 			// A write already running would recreate the directory after the
 			// rm: wait for every write of this session to settle first (new ones
 			// refuse, see writeIndexNow).
@@ -1151,8 +1552,15 @@ export class ConversationStore {
 			// Defensive: every evicting entry left with its last write above, so
 			// this normally finds nothing; nothing of the session may stay
 			// readable from memory (peekIndex/open) whatever the order was.
-			for (const key of Array.from(this.evicting.keys())) {
-				if (key.startsWith(`${stSessionId}/`)) this.evicting.delete(key);
+			for (const [key, r] of Array.from(this.evicting)) {
+				if (!key.startsWith(`${stSessionId}/`)) continue;
+				this.evicting.delete(key);
+				this.forgetKept(key, r);
+				if (r.flushTimer) {
+					clearTimeout(r.flushTimer);
+					r.flushTimer = null;
+				}
+				r.dirty = false;
 			}
 			await this.fs.rm(dir, { force: true, recursive: true });
 		} finally {

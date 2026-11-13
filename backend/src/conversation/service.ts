@@ -84,6 +84,7 @@ import {
 import { checkRevocation } from "./revocation.js";
 import { applyStateInput, type ConversationState, isLiveClaim, type StateInput } from "./state.js";
 import {
+	applyTitleEvidence,
 	type ConversationIndex,
 	type ConversationKind,
 	type ConversationStore,
@@ -92,6 +93,7 @@ import {
 	type PendingEvent,
 	type PersistedEvent,
 	sealMessage,
+	sessionStartKind,
 } from "./store.js";
 import { truncateUtf8, utf8Bytes } from "./text.js";
 
@@ -200,6 +202,16 @@ export interface ConversationAdminStats {
 	queueBytesNow: number;
 	queueBytesMax: number;
 	wsResyncsSinceBoot: number;
+	/**
+	 * #546 — index snapshot writes that failed since boot; evicted indexes
+	 * kept in memory after one (since boot / now) and dropped past the bound;
+	 * the errno code of the last failure (`null` while none failed).
+	 */
+	indexWriteFailures: number;
+	evictionWriteKept: number;
+	evictionWriteKeptNow: number;
+	evictionWriteDropped: number;
+	indexWriteLastErrorCode: string | null;
 }
 
 /** How long one walk of `.conversations` serves the stats (dashboards poll). */
@@ -897,14 +909,11 @@ export class ConversationService {
 		const nowIso = new Date(this.now()).toISOString();
 		store.update(rt.stSessionId, rt.cid, (index) => {
 			if (event.ev === "session_start") {
-				const flags = (event.data.argv_flags as string[] | undefined) ?? [];
-				if (flags.includes("-p") || flags.includes("--print")) index.kind = "headless";
-				else if (flags.some((f) => f.startsWith("--agent-name") || f === "--agent-id")) {
-					index.kind = "teammate";
-				} else index.kind = "interactive";
+				// Shared with recovery from the file (store.ts, #546).
+				index.kind = sessionStartKind(event.data);
 				if (typeof event.data.claude_version === "string")
 					index.claudeVersion = event.data.claude_version;
-				if (typeof event.data.session_title === "string") index.title = event.data.session_title;
+				applyTitleEvidence(index, event.ev, event.data);
 				const tmuxSession = event.data.tmux_session;
 				if (typeof tmuxSession === "string") index.tabId = tmuxSession;
 				// Bound earlier as `unknown`, now known to be a `claude -p`: it never
@@ -933,21 +942,13 @@ export class ConversationService {
 					index.endReason = null;
 				}
 			} else if (event.ev === "user_prompt") {
-				// §5.1 — the default title is the first prompt the PERSON wrote:
-				// not an injected source, not a prompt whose origin could not be
-				// verified (§4.2.1), and never an `internal_prompt` (below).
-				if (
-					index.title === null &&
-					(event.data.source === undefined || event.data.source === "user") &&
-					event.data.origin !== "unverified"
-				) {
-					index.title = String(event.data.prompt).slice(0, 80);
-				}
-				if (typeof event.data.session_title === "string") index.title = event.data.session_title;
+				// §5.1 — the default title is the first prompt the PERSON wrote;
+				// the rule lives in applyTitleEvidence (recovery applies it too).
+				applyTitleEvidence(index, event.ev, event.data);
 				if (pane && !index.paneId) this.bindPane(index, pane);
 			} else if (event.ev === "internal_prompt") {
 				// The CLI's `session_title` is its own data, not the prompt's.
-				if (typeof event.data.session_title === "string") index.title = event.data.session_title;
+				applyTitleEvidence(index, event.ev, event.data);
 				if (pane && !index.paneId) this.bindPane(index, pane);
 			} else if (event.ev === "session_end") {
 				index.endedAt = nowIso;
@@ -1625,6 +1626,11 @@ export class ConversationService {
 			queueBytesNow: this.deps.store.totalQueuedBytes(),
 			queueBytesMax: this.deps.store.maxQueuedBytes(),
 			wsResyncsSinceBoot: this.wsResyncs,
+			indexWriteFailures: this.deps.store.stats.indexWriteFailures,
+			evictionWriteKept: this.deps.store.stats.evictionWriteKept,
+			evictionWriteKeptNow: this.deps.store.keptCount(),
+			evictionWriteDropped: this.deps.store.stats.evictionWriteDropped,
+			indexWriteLastErrorCode: this.deps.store.lastIndexWriteErrorCode,
 		};
 	}
 

@@ -568,9 +568,23 @@ export class ComposerService {
 		// The same id pending anywhere in the session: its own state, no effect.
 		const pendingSame = records.find((r) => r.client_message_id === clientMessageId);
 		if (pendingSame) return this.uncertainAnswer(pendingSame);
-		// A released id in the window: the recorded answer.
-		const replay =
-			this.recentFinals.get(`${cid}/${clientMessageId}`) ?? index.composerSends?.[clientMessageId];
+		// A released id in the window: the recorded answer. The window is read
+		// from the store, never from the snapshot alone: a snapshot whose write
+		// failed (#546) misses `released` lines the events file holds, and an
+		// id treated as new there would be a second delivery.
+		let replay: { status: number; body: unknown } | null | undefined = this.recentFinals.get(
+			`${cid}/${clientMessageId}`,
+		);
+		if (!replay) {
+			try {
+				replay = await this.deps.store.releasedComposerSend(sid, cid, clientMessageId);
+			} catch (err) {
+				logger.warn(
+					`[composer] idempotency window unreadable for ${cid}: ${(err as Error).message}`,
+				);
+				return this.reject("send-in-progress", 409, { detail: "unverifiable" });
+			}
+		}
 		if (replay) return { status: replay.status, body: replay.body as Record<string, unknown> };
 
 		// v1.9 §8.1.12 (EXPERIMENTAL, flag-gated): a pane-less conversation may

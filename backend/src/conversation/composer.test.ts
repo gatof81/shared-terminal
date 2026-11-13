@@ -1609,6 +1609,48 @@ describe("Work round 1 (#488): release identity, shutdown, released-before-remov
 		expect(await composerStates()).toEqual(["prepared", "uncertain", "failed", "released"]);
 	});
 
+	it("#546: `released` on disk but the snapshot stale (its write failed); after a restart the same id replays, it is not a new paste", async () => {
+		// The snapshot as it stands before the send: no composerSends entry.
+		await store.flush(SID, CID);
+		const stale = await fs.readFile(store.indexPath(SID, CID), "utf8");
+		const service = makeService();
+		const p = send(service, "only once");
+		await until(() => docker.effectSteps().includes("enter"));
+		await promptArrives("only once");
+		const r = await p;
+		expect(r.body).toMatchObject({ result: "delivered" });
+		await until(recordGone, "released");
+		expect((await composerStates()).at(-1)).toBe("released");
+		// Every snapshot write after the release failed (EDQUOT, inode exhaustion):
+		// the file on disk is the one from before the send.
+		killProcess();
+		await fs.writeFile(store.indexPath(SID, CID), stale);
+		store = new ConversationStore({ workspaceRoot: root, now: () => now });
+		expect((await store.peekIndex(SID, CID))?.composerSends?.[ID1]).toBeUndefined();
+		docker = new FakeDocker();
+		const s2 = makeService();
+		expect(await send(s2, "only once", ID1)).toEqual(r);
+		expect(docker.effectSteps()).toEqual([]); // a replay, not a second delivery
+	});
+
+	it("#546: an unreadable events file behind a snapshot miss refuses (unverifiable), it never sends", async () => {
+		await store.flush(SID, CID);
+		await store.close(SID, CID);
+		const real = store.releasedComposerSend.bind(store);
+		store.releasedComposerSend = (async () => {
+			throw Object.assign(new Error("EIO: simulated"), { code: "EIO" });
+		}) as typeof store.releasedComposerSend;
+		const service = makeService();
+		const r = await send(service, "hello", ID2);
+		expect([r.status, r.body.error, r.body.detail]).toEqual([
+			409,
+			"send-in-progress",
+			"unverifiable",
+		]);
+		expect(docker.effectSteps()).toEqual([]);
+		store.releasedComposerSend = real;
+	});
+
 	it("P2: a `released` event that cannot be persisted keeps the record; after a restart the same id replays, it is not a new paste", async () => {
 		const service = makeService();
 		const real = store.enqueue.bind(store);
