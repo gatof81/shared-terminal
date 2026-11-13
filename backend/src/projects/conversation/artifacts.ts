@@ -11,16 +11,20 @@
  * stored content-addressed under `.projects/<pid>/artifacts/<sha256>`.
  *
  * Order, and why:
- *   1. read + hash the source (no lock: a workspace read is slow I/O);
+ *   1. read + hash the source (no lock: a workspace read is slow I/O), then,
+ *      under the project lock, refuse anything that would be refused anyway
+ *      (replay, quota, a log that cannot take the event) and, outside it,
+ *      new bytes past the unreferenced-bytes budget — all before writing;
  *   2. content to `artifacts/<sha>`: temp + fsync + re-read through the same
  *      fd + `link(2)` to the final name, so a final name never holds partial
  *      or unverified bytes and an existing one is never replaced (EEXIST ⇒
  *      verify the existing file instead);
  *   3. only then the `artifact` event, under the project lock, where the
  *      per-project quota is decided against the folded log.
- * A death between 2 and 3 leaves an unreferenced content file: harmless
- * (content-addressed, reused by the next registration of the same bytes),
- * and never deleted (§9).
+ * A death between 2 and 3, or a refusal in 3 the pre-check could not
+ * foresee, leaves an unreferenced content file: content-addressed, reused by
+ * the next registration of the same bytes, never deleted (§9), and bounded
+ * by `PROJECT_ARTIFACTS_UNREFERENCED_MAX_BYTES`.
  */
 
 import { createHash, randomBytes } from "node:crypto";
@@ -38,6 +42,13 @@ import type { ProjectConversationStore } from "./store.js";
 export const ARTIFACT_MAX_BYTES = 1024 * 1024;
 export const ARTIFACTS_PER_MESSAGE = 4;
 export const PROJECT_ARTIFACTS_MAX_BYTES = 256 * 1024 * 1024;
+/**
+ * §6.2: bytes under `artifacts/` that no `artifact` event references (an
+ * event the log refused after the copy, a death between copy and event,
+ * temps). Past it a registration that would add new bytes is refused before
+ * copying; nothing is deleted to make room.
+ */
+export const PROJECT_ARTIFACTS_UNREFERENCED_MAX_BYTES = 16 * 1024 * 1024;
 const NAME_MAX = 96;
 const SHA_RE = /^[0-9a-f]{64}$/;
 const ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -223,6 +234,45 @@ export async function readContent(root: string, pid: string, sha: string): Promi
 	return buf;
 }
 
+/** The entry names under `artifacts/`; empty if the directory does not exist yet. */
+async function listArtifactsDir(root: string, pid: string): Promise<Set<string>> {
+	try {
+		return new Set(await fs.readdir(artifactsDir(root, pid)));
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === "ENOENT") return new Set();
+		throw err;
+	}
+}
+
+/**
+ * Entries no `artifact` event accounts for: a content file or its metadata
+ * whose sha the log does not reference, and anything else (temps of a dead
+ * write). Referenced content is already counted by the project quota.
+ */
+function unreferencedEntries(names: ReadonlySet<string>, referenced: ReadonlyMap<string, unknown>) {
+	const out: string[] = [];
+	for (const n of names) {
+		const sha = n.endsWith(".json") ? n.slice(0, -5) : n;
+		if (SHA_RE.test(sha) && referenced.has(sha)) continue;
+		out.push(n);
+	}
+	return out;
+}
+
+/** Sum of the entries' sizes (lstat, a vanished entry is 0), stopping once past `stopAbove`. */
+async function sizeOf(dir: string, names: readonly string[], stopAbove: number): Promise<number> {
+	let total = 0;
+	for (const n of names) {
+		try {
+			total += (await fs.lstat(path.join(dir, n))).size;
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+		}
+		if (total > stopAbove) break;
+	}
+	return total;
+}
+
 // ── Registration (§6.1, POST …/artifacts) ───────────────────────────────────
 
 export interface ArtifactDeps {
@@ -247,6 +297,7 @@ export interface ArtifactDeps {
 	isForbidden?(err: unknown): boolean;
 	maxBytes?: number;
 	projectMaxBytes?: number;
+	unreferencedMaxBytes?: number;
 }
 
 const err = (status: number, code: string, detail?: string): HttpResult => ({
@@ -323,21 +374,65 @@ export class ProjectArtifacts {
 			body: { sha256: sha, name: n, bytes: content.length, replayed },
 		});
 
+		const event = {
+			ev: "artifact",
+			sha256: sha,
+			name,
+			bytes: content.length,
+			source: { kind: "owner", sid, path: rel, agent_id: agentId },
+			by: ownerId,
+		};
+
 		try {
-			// Cheap pre-check: a replay, or a quota already exceeded, needs no write.
+			// What is on disk now, read before the lock (directory I/O is slow);
+			// judged against the folded log inside it.
+			const onDisk = await listArtifactsDir(this.deps.workspaceRoot, projectId);
+
+			// Pre-check: a replay, a quota already exceeded, or a log that would
+			// refuse the event needs no write. The log check matters because the
+			// content copy below is durable and the quota only counts what the
+			// log references: a copy whose event the log then refuses (409
+			// project-log-full, 503 persist-failed on a poisoned log) would be
+			// disk spent outside every bound, once per distinct file.
 			const pre = await this.deps.store.critical(projectId, async (tx) => {
 				const known = tx.state.artifacts.get(sha);
 				if (known?.sources.has(sourceKey)) return answer(200, true, known.name);
 				if (!known && tx.state.artifactBytes + content.length > this.projectMax)
 					return err(409, "artifacts-full");
-				return null;
+				// Throws the append's own ProjectLogError ⇒ logErrorToHttp below.
+				tx.assertAppendable([event]);
+				if (onDisk.has(sha)) return null; // reused: the copy adds no bytes
+				return { unreferenced: unreferencedEntries(onDisk, tx.state.artifacts) };
 			});
-			if (pre) return pre;
+			if (pre && "status" in pre) return pre;
+
+			// What the pre-check cannot exclude still leaves an unreferenced
+			// content file: the log filling (or being poisoned, or the quota
+			// taken by a concurrent registration) between the pre-check and the
+			// append, or a death between the copy and the event. §6.2/§9: such
+			// files are never deleted automatically — a deletion here would race
+			// a concurrent registration of the same bytes that found the file
+			// already there (EEXIST ⇒ reuse) and is about to log an event
+			// pointing at it. So instead of deleting, new bytes are refused once
+			// the unreferenced bytes already on disk would exceed a budget.
+			// Bound: budget + what in-flight registrations copy (each ≤ the
+			// per-artifact cap, their number bounded by the route's slots). An
+			// in-flight registration's file counts as unreferenced here too —
+			// conservative, it only refuses earlier.
+			if (pre) {
+				const used = await sizeOf(
+					artifactsDir(this.deps.workspaceRoot, projectId),
+					pre.unreferenced,
+					this.unreferencedMax,
+				);
+				if (used + content.length > this.unreferencedMax)
+					return err(409, "artifacts-full", "unreferenced");
+			}
 
 			await storeContent(this.deps.workspaceRoot, projectId, content, {
 				name,
 				bytes: content.length,
-				source: { kind: "owner", sid, path: rel, agent_id: agentId },
+				source: event.source,
 			});
 
 			return await this.deps.store.critical(projectId, async (tx) => {
@@ -347,16 +442,7 @@ export class ProjectArtifacts {
 				// and only this section can see every registration in order.
 				if (!known && tx.state.artifactBytes + content.length > this.projectMax)
 					return err(409, "artifacts-full");
-				await tx.append([
-					{
-						ev: "artifact",
-						sha256: sha,
-						name,
-						bytes: content.length,
-						source: { kind: "owner", sid, path: rel, agent_id: agentId },
-						by: ownerId,
-					},
-				]);
+				await tx.append([event]);
 				return answer(201, false, known?.name ?? name);
 			});
 		} catch (e) {
@@ -369,6 +455,10 @@ export class ProjectArtifacts {
 
 	private get projectMax(): number {
 		return this.deps.projectMaxBytes ?? PROJECT_ARTIFACTS_MAX_BYTES;
+	}
+
+	private get unreferencedMax(): number {
+		return this.deps.unreferencedMaxBytes ?? PROJECT_ARTIFACTS_UNREFERENCED_MAX_BYTES;
 	}
 
 	/** GET …/artifacts/:sha256 — only an artifact this project's log registered. */

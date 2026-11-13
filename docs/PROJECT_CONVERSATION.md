@@ -32,6 +32,14 @@ D2 está en borrador, apagado; D3 no empezó.
     colocados bytes no verificados (§6.4 paso 4);
   - los hashes se verifican antes de tocar el destino;
   - `artifact_error` nombra la causa de un `artifact-failed`.
+- **v0.3.3 (enmienda propuesta en el PR del fix F4; pendiente de aprobación del responsable)** acota
+  el disco que un registro rechazado puede dejar, sin borrar nada ni tocar el tope del proyecto:
+  - antes de copiar, la misma sección crítica que decide el tope pregunta al registro si aceptaría el
+    evento. Si no, la respuesta es la que daría el `append` (409 `project-log-full`, 503
+    `persist-failed`) y no se escribe nada (§6.1.1);
+  - los bytes sin referencia bajo `artifacts/` tienen un presupuesto
+    (`PROJECT_ARTIFACTS_UNREFERENCED_MAX_BYTES`, 16 MiB). Un registro que agregaría bytes nuevos más
+    allá de él recibe 409 `artifacts-full` con `detail: "unreferenced"`, antes de copiar (§6.2).
 
 Decisión que lo origina (responsable, 2026-11-11, sobre la evaluación de B en #512 a las 16:57Z):
 
@@ -563,6 +571,11 @@ asunto de la UI.
   - 403 `artifact-restricted`;
   - 404 `artifact-not-found` (ausente, link o fuera del workspace: la misma respuesta, como en Files);
   - 409 `agent-not-bound`, `artifacts-full`, `artifact-corrupt`;
+  - **v0.3.3:** 409 `project-log-full` (también 409 `project-log-unverifiable`), cuando el registro no
+    aceptaría el evento. Se decide **antes de copiar**, en la misma sección crítica que el tope;
+  - **v0.3.3:** 409 `artifacts-full` con `detail: "unreferenced"`, cuando los bytes sin referencia ya
+    en disco más este contenido pasarían el presupuesto de §6.2. Un contenido que ya está en disco no
+    agrega bytes y no se rechaza por esto;
   - 413 `artifact-too-large`;
   - 415 `artifact-not-text` (también un archivo vacío);
   - 429 `busy`;
@@ -593,6 +606,21 @@ Las dos rutas tienen además ranuras en vuelo (2 por usuario, 8 por proceso, com
   - Un archivo de contenido sin evento, por una muerte entre los dos pasos o por un rechazo en el
     tope, queda sin referencia. No es visible por el API, lo reutiliza el próximo registro de los
     mismos bytes y no se borra (§9).
+  - **v0.3.3: presupuesto de bytes sin referencia.** Lo que el registro ya rechazaría se rechaza
+    antes de copiar (§6.1.1). Aun así puede quedar contenido sin referencia: el registro se llena (o
+    se envenena, o otra alta toma el tope) entre la comprobación previa y el `append`, o el proceso
+    muere entre los dos pasos. Ese contenido tampoco se borra: un borrado competiría con un alta
+    concurrente de los mismos bytes que encontró el archivo ya publicado y está por escribir su
+    evento. En su lugar, antes de copiar, se suman los bytes de las entradas de `artifacts/` que
+    ningún evento `artifact` referencia (contenido, su `.json`, temporales). Si con este contenido
+    pasarían `PROJECT_ARTIFACTS_UNREFERENCED_MAX_BYTES` (16 MiB), se responde 409 `artifacts-full`
+    `{detail: "unreferenced"}`.
+    - Cota: el presupuesto más lo que copian las altas en vuelo (≤ 1 MiB cada una, limitadas por las
+      ranuras de la ruta).
+    - Un contenido que ya está en disco no agrega bytes. Registrarlo lo vuelve referenciado y libera
+      su parte del presupuesto.
+    - Nada se libera solo. Pasado el presupuesto, quitar archivos sin referencia es una decisión del
+      operador (§9).
 
 ### 6.3 Lo que lleva el mensaje
 
@@ -1228,8 +1256,10 @@ type RegisterArtifactBody = { agentId: string; path: string /* relativo al works
 ```
 
 Errores: 400 `invalid-body`; 403 `artifact-restricted`; 404 `artifact-not-found`; 409 `agent-not-bound`,
-`artifacts-full`, `artifact-corrupt`, `foreign-session`; 413 `artifact-too-large`; 415
-`artifact-not-text`; 429 `busy`; 503 `binding-unverified`, `persist-failed`. Ninguno escribe nada.
+`artifacts-full` (v0.3.3: `detail: "unreferenced"` por el presupuesto de §6.2), `artifact-corrupt`,
+`foreign-session`, `project-log-full` (v0.3.3, antes de copiar); 413 `artifact-too-large`; 415
+`artifact-not-text`; 429 `busy`; 503 `binding-unverified`, `persist-failed`. Ninguno escribe nada,
+salvo lo que §6.2 acota como contenido sin referencia.
 
 **`POST …/messages` con adjuntos**: 400 `too-many-artifacts` / `artifact-unknown` (`detail` = el sha256)
 antes de escribir nada.

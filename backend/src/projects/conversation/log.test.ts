@@ -163,6 +163,27 @@ describe("ProjectLog", () => {
 		await log.close();
 	});
 
+	it("assertAppendable predicts the append's refusal without writing or poisoning", async () => {
+		let ok = true;
+		const { log } = await ProjectLog.open(dir, "b", { lockHeld: () => ok, maxBytes: 150 });
+		const ev = { ev: "m", pad: "x".repeat(60) };
+		expect(() => log.assertAppendable([ev])).not.toThrow();
+		await log.append([ev]);
+		expect(() => log.assertAppendable([ev])).toThrow(
+			expect.objectContaining({ code: "project-log-full" }),
+		);
+		await expect(log.append([ev])).rejects.toMatchObject({ code: "project-log-full" });
+		expect(() => log.assertAppendable([{ ev: "d" }], { allowMargin: true })).not.toThrow();
+		ok = false;
+		expect(() => log.assertAppendable([{ ev: "d" }])).toThrow(
+			expect.objectContaining({ code: "persist-failed" }),
+		);
+		expect(log.isPoisoned).toBe(false);
+		const size = (await fs.stat(path.join(dir, LOG_FILE))).size;
+		expect(size).toBe(log.bytes);
+		await log.close();
+	});
+
 	it("refuses a symlinked log", async () => {
 		await fs.writeFile(path.join(dir, "elsewhere"), "");
 		await fs.symlink(path.join(dir, "elsewhere"), path.join(dir, LOG_FILE));

@@ -224,24 +224,8 @@ export class ProjectLog {
 			this.poison("writer lock lost");
 			throw new ProjectLogError("persist-failed", "writer lock lost");
 		}
-		const at = (this.deps.now?.() ?? new Date()).toISOString();
-		const lines: LogLine[] = events.map((e, i) => {
-			const { seq: _s, at: _a, w: _w, bn: _b, ...rest } = e as Record<string, unknown>;
-			return {
-				seq: this.lastSeq + 1 + i,
-				ev: e.ev,
-				at,
-				w: this.writerId,
-				bn: events.length - 1 - i,
-				...rest,
-			} as LogLine;
-		});
-		const buf = Buffer.from(lines.map((l) => `${JSON.stringify(l)}\n`).join(""), "utf8");
-		const max = this.deps.maxBytes ?? PROJECT_LOG_MAX_BYTES_DEFAULT;
-		const limit = opts.allowMargin ? max + PROJECT_LOG_MARGIN_BYTES : max;
-		if (this.size + buf.length > limit) {
-			throw new ProjectLogError("project-log-full", `${this.size + buf.length} > ${limit} bytes`);
-		}
+		const { lines, buf } = this.serialize(events);
+		this.assertRoom(buf.length, opts);
 		try {
 			const st = await this.fh.stat();
 			if (st.size !== this.size) {
@@ -263,6 +247,49 @@ export class ProjectLog {
 		this.size += buf.length;
 		this.lastSeq += lines.length;
 		return lines;
+	}
+
+	/**
+	 * Throws exactly what `append(events, opts)` would refuse with BEFORE
+	 * writing a byte (poisoned / lock lost ⇒ persist-failed, no room ⇒
+	 * project-log-full), and returns otherwise. Read-only: it never poisons.
+	 * A caller about to do slow, durable work whose only purpose is the event
+	 * (D2's content copy) asks this first, so a refusal the log would give
+	 * anyway costs nothing on disk. It is a prediction, not a reservation:
+	 * other appends under the same lock may still fill the log before the
+	 * real `append`, which decides again.
+	 */
+	assertAppendable(events: NewEvent[], opts: { allowMargin?: boolean } = {}): void {
+		if (events.length === 0) return;
+		if (this.poisoned)
+			throw new ProjectLogError("persist-failed", `log poisoned: ${this.poisoned}`);
+		if (!this.deps.lockHeld()) throw new ProjectLogError("persist-failed", "writer lock lost");
+		this.assertRoom(this.serialize(events).buf.length, opts);
+	}
+
+	private serialize(events: NewEvent[]): { lines: LogLine[]; buf: Buffer } {
+		const at = (this.deps.now?.() ?? new Date()).toISOString();
+		const lines: LogLine[] = events.map((e, i) => {
+			const { seq: _s, at: _a, w: _w, bn: _b, ...rest } = e as Record<string, unknown>;
+			return {
+				seq: this.lastSeq + 1 + i,
+				ev: e.ev,
+				at,
+				w: this.writerId,
+				bn: events.length - 1 - i,
+				...rest,
+			} as LogLine;
+		});
+		const buf = Buffer.from(lines.map((l) => `${JSON.stringify(l)}\n`).join(""), "utf8");
+		return { lines, buf };
+	}
+
+	private assertRoom(bytes: number, opts: { allowMargin?: boolean }): void {
+		const max = this.deps.maxBytes ?? PROJECT_LOG_MAX_BYTES_DEFAULT;
+		const limit = opts.allowMargin ? max + PROJECT_LOG_MARGIN_BYTES : max;
+		if (this.size + bytes > limit) {
+			throw new ProjectLogError("project-log-full", `${this.size + bytes} > ${limit} bytes`);
+		}
 	}
 
 	async close(): Promise<void> {

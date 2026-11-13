@@ -260,3 +260,171 @@ describe("content (GET …/artifacts/:sha)", () => {
 		expect(await artifactEvents()).toEqual([]);
 	});
 });
+
+// ── A registration the log cannot hold (F4) ─────────────────────────────────
+//
+// The copy is durable and the quota only counts what the log references, so a
+// copy whose event the log then refuses is disk outside every bound. The log's
+// refusal is decided before copying; what can still slip between the
+// pre-check and the append is never deleted (§9) but bounded by the
+// unreferenced-bytes budget.
+describe("a log that cannot take the event (§6.2)", () => {
+	const dir = () => path.join(projectDir(ROOT, PID), "artifacts");
+	let unreferencedMax: number | undefined;
+
+	/** Re-opens the project with a log cap of `logMax` bytes (taken at open). */
+	const restart = async (logMax: number) => {
+		await store.close();
+		store = await ProjectConversationStore.start({
+			workspaceRoot: ROOT,
+			bootId: "b",
+			maxBytes: logMax,
+			acquire: async () => ({ ok: true, lock: lock() }),
+		});
+		art = new ProjectArtifacts({
+			store,
+			workspaceRoot: ROOT,
+			bindings: async (o, p) => (o === OWNER && p === PID ? bindings() : null),
+			openSource: (sid, rel, o) => openWorkspaceFile(sid, rel, o),
+			assertOwner: async () => {},
+			get projectMaxBytes() {
+				return projectMax;
+			},
+			get unreferencedMaxBytes() {
+				return unreferencedMax;
+			},
+		});
+	};
+	const diskBytes = async (): Promise<number> => {
+		let names: string[];
+		try {
+			names = await fs.readdir(dir());
+		} catch {
+			return 0;
+		}
+		let n = 0;
+		for (const f of names) n += (await fs.lstat(path.join(dir(), f))).size;
+		return n;
+	};
+	/**
+	 * Barrier: the NEXT critical section after the pre-check (the one that
+	 * appends the event) first lets another writer append `filler` — the log
+	 * fills between the pre-check and the append.
+	 */
+	const fillBeforeAppend = (filler: string) => {
+		const orig = store.critical.bind(store);
+		let calls = 0;
+		store.critical = (async (pid: string, fn: Parameters<typeof orig>[1]) => {
+			calls += 1;
+			if (calls === 2) await orig(pid, (tx) => tx.append([{ ev: "filler", pad: filler }]));
+			return orig(pid, fn);
+		}) as typeof store.critical;
+	};
+
+	beforeEach(() => {
+		unreferencedMax = undefined;
+	});
+
+	it("4 distinct 96-B files on a full log: each 409 project-log-full, nothing copied", async () => {
+		await restart(128);
+		for (const n of [1, 2, 3, 4]) await put(`f${n}.txt`, String(n).repeat(96));
+		for (const n of [1, 2, 3, 4]) {
+			expect(await reg(`f${n}.txt`)).toMatchObject({
+				status: 409,
+				body: { error: "project-log-full" },
+			});
+		}
+		expect(await diskBytes()).toBe(0);
+		expect(await artifactEvents()).toEqual([]);
+		expect((await store.view(PID)).state.artifactBytes).toBe(0);
+	});
+
+	it("replay and quota answers are unchanged on a full log; existing identical content is kept", async () => {
+		await restart(450);
+		await put("a.txt", "a".repeat(96));
+		await put("a2.txt", "a".repeat(96));
+		await put("b.txt", "b".repeat(96));
+		expect((await reg("a.txt")).status).toBe(201);
+		const sha = sha256Hex("a".repeat(96));
+		const before = await fs.readFile(path.join(dir(), sha), "utf8");
+		// Replay needs no write: still 200, whatever room the log has.
+		expect(await reg("a.txt")).toMatchObject({ status: 200, body: { replayed: true } });
+		// Same bytes from another source: the event does not fit ⇒ refused,
+		// and the content file (referenced) is untouched.
+		expect(await reg("a2.txt")).toMatchObject({
+			status: 409,
+			body: { error: "project-log-full" },
+		});
+		expect(await fs.readFile(path.join(dir(), sha), "utf8")).toBe(before);
+		const served = await art.content(PID, sha);
+		expect("ok" in served && served.content.toString()).toBe(before);
+		// The quota still answers first when it is the binding limit.
+		projectMax = 100;
+		expect(await reg("b.txt")).toMatchObject({ status: 409, body: { error: "artifacts-full" } });
+		expect(await fs.readdir(dir())).not.toContain(sha256Hex("b".repeat(96)));
+		expect(await artifactEvents()).toHaveLength(1);
+	});
+
+	it("race: the log fills between pre-check and append — the orphan stays, is reused, and bounds new copies", async () => {
+		await restart(450);
+		await put("a.txt", "a".repeat(96));
+		const shaA = sha256Hex("a".repeat(96));
+		fillBeforeAppend("x".repeat(200));
+		expect(await reg("a.txt")).toMatchObject({ status: 409, body: { error: "project-log-full" } });
+		// Kept (never deleted, §9) and unreferenced: no event, not in the quota.
+		expect(await fs.readFile(path.join(dir(), shaA), "utf8")).toBe("a".repeat(96));
+		expect(await artifactEvents()).toEqual([]);
+		expect((await store.view(PID)).state.artifactBytes).toBe(0);
+		const orphan = await diskBytes();
+		expect(orphan).toBeGreaterThan(96);
+
+		// A bigger log, a budget that holds exactly that orphan.
+		await restart(64 * 1024);
+		unreferencedMax = orphan + 50;
+		await put("b.txt", "b".repeat(96));
+		expect(await reg("b.txt")).toMatchObject({
+			status: 409,
+			body: { error: "artifacts-full", detail: "unreferenced" },
+		});
+		expect(await fs.readdir(dir())).not.toContain(sha256Hex("b".repeat(96)));
+		expect(await diskBytes()).toBe(orphan);
+		// The orphan's own bytes add nothing: reused, and now referenced…
+		expect((await reg("a.txt")).status).toBe(201);
+		expect(await fs.readFile(path.join(dir(), shaA), "utf8")).toBe("a".repeat(96));
+		// …so it no longer counts against the budget.
+		expect((await reg("b.txt")).status).toBe(201);
+		expect((await store.view(PID)).state.artifactBytes).toBe(192);
+	});
+
+	it("race on content that is already registered: the referenced file is never removed", async () => {
+		await restart(800);
+		await put("a.txt", "a".repeat(96));
+		await put("a2.txt", "a".repeat(96));
+		const sha = sha256Hex("a".repeat(96));
+		expect((await reg("a.txt")).status).toBe(201);
+		fillBeforeAppend("x".repeat(250));
+		expect(await reg("a2.txt")).toMatchObject({
+			status: 409,
+			body: { error: "project-log-full" },
+		});
+		const served = await art.content(PID, sha);
+		expect("ok" in served && served.content.toString()).toBe("a".repeat(96));
+		expect(await artifactEvents()).toHaveLength(1);
+	});
+
+	it("leftovers of dead writes count toward the budget; referenced content does not", async () => {
+		unreferencedMax = 200;
+		await restart(64 * 1024);
+		await put("a.txt", "a".repeat(150));
+		await put("b.txt", "b".repeat(60));
+		expect((await reg("a.txt")).status).toBe(201); // referenced: 150 B + metadata, not counted
+		await fs.writeFile(path.join(dir(), ".deadbeefdeadbeef.tmp"), "t".repeat(150));
+		expect(await reg("b.txt")).toMatchObject({
+			status: 409,
+			body: { error: "artifacts-full", detail: "unreferenced" },
+		});
+		expect(await fs.readdir(dir())).toContain(".deadbeefdeadbeef.tmp");
+		unreferencedMax = 300;
+		expect((await reg("b.txt")).status).toBe(201);
+	});
+});
