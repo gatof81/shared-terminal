@@ -438,6 +438,28 @@ describe("a record written before the fence (#627)", () => {
 		d1PointsAtAnExistingContainer(h);
 	});
 
+	it("a disabled capture (conversation_requested = 0) is NOT evidence: still 409, no Docker effect; the old CAS lands once it is re-enabled", async () => {
+		const { h, cas, nId, engine } = await diedWithCasInFlight();
+		const file = await makeLegacy(h);
+		const before = await fs.readFile(file, "utf8");
+		h.d1.row.conversation_requested = 0;
+		const docker0 = h.docker.mutations().length;
+		expect(await engine.recover(SID)).toMatchObject({
+			ok: false,
+			status: 409,
+			code: "commit-unknown-legacy",
+		});
+		expect(h.docker.mutations().length).toBe(docker0);
+		expect(await fs.readFile(file, "utf8")).toBe(before);
+		expect(h.docker.containers.has(nId)).toBe(true);
+		// Why it can't count: nothing here governs a statement already sent;
+		// a later enable reopens its guard and it lands.
+		h.d1.row.conversation_requested = 1;
+		expect(await cas.landLegacy()).toBe("applied");
+		expect(h.d1.row.container_id).toBe(nId);
+		d1PointsAtAnExistingContainer(h);
+	});
+
 	it("a legacy rollback attempt with D1 still on the replaced container ⇒ blocked the same way", async () => {
 		const h = await setup();
 		dirtyLayer(h);
@@ -462,6 +484,18 @@ describe("a record written before the fence (#627)", () => {
 
 // ── Generation AND identity, jointly (owner decision on #634, 2026-11-13) ──
 
+/** Every answer of the fence statement, in order. */
+function recordFenceAnswers(h: H): string[] {
+	const answers: string[] = [];
+	const real = h.d1.fence.bind(h.d1);
+	h.d1.fence = async (...a) => {
+		const r = await real(...a);
+		answers.push(r);
+		return r;
+	};
+	return answers;
+}
+
 describe("a moved fence alone never decides: the current container's identity does (#627)", () => {
 	const FOREIGN = "f".repeat(64);
 	const removes = (h: H) => h.docker.log.filter((l) => l.startsWith("remove:")).length;
@@ -469,10 +503,15 @@ describe("a moved fence alone never decides: the current container's identity do
 	it("(i) CAS: an earlier recovery's fence moved the generation, D1 still on O ⇒ not applied: O current, N removed per the table", async () => {
 		const { h, cas, nId, engine } = await diedWithCasInFlight();
 		h.d1.row.recreate_fence = 1; // an earlier recovery's fence landed; its process died
+		const fenceAnswers = recordFenceAnswers(h);
 		expect(await engine.recover(SID)).toMatchObject({
 			ok: true,
 			body: { outcome: { kind: "rolled-back" } },
 		});
+		// Someone else moved the generation: this fence matched 0 rows, and that
+		// must not read as "applied" — no pass ever tried to remove O (D1's).
+		expect(fenceAnswers).toEqual(["not-applied"]);
+		expect(h.docker.log).not.toContain(`remove:${O_ID.slice(0, 16)}`);
 		expect(h.d1.row).toMatchObject({ container_id: O_ID, ingest_token_hash: "H-old" });
 		expect(h.docker.containers.get(O_ID)?.name).toBe(CANONICAL);
 		expect(h.docker.containers.has(nId)).toBe(false);
@@ -500,10 +539,29 @@ describe("a moved fence alone never decides: the current container's identity do
 	it("(iii-a) casBack: an earlier recovery's fence moved the generation, D1 still on N ⇒ not applied: names restored, O retained", async () => {
 		const { h, back, nId, engine } = await diedWithCasBackInFlight();
 		h.d1.row.recreate_fence = 2; // an earlier recovery's fence, from the recorded 1
+		const fenceAnswers = recordFenceAnswers(h);
+		const logBefore = h.docker.log.length;
+		const writesBefore = h.d1.writes.length;
 		expect(await engine.recover(SID)).toMatchObject({
 			ok: true,
 			body: { outcome: { kind: "rolled-back" }, retained: { containerId: O_ID, role: "O" } },
 		});
+		expect(fenceAnswers).toEqual(["not-applied"]);
+		// The "applied" branch converges D1 on the retained O (status, ports);
+		// the "not applied" one writes neither.
+		expect(
+			h.d1.writes
+				.slice(writesBefore)
+				.filter((w) => w.startsWith("status") || w.startsWith("ports")),
+		).toEqual([]);
+		// Never treated as applied: N (D1's) is never removed, and the only
+		// rename it gets is back onto the canonical name (an "applied" pass
+		// would move it off, to its `-old-` name).
+		expect(h.docker.log).not.toContain(`remove:${nId.slice(0, 16)}`);
+		const nRenames = h.docker.log
+			.slice(logBefore)
+			.filter((l) => l.startsWith(`rename:${nId.slice(0, 16)},`));
+		expect(nRenames.every((l) => l === `rename:${nId.slice(0, 16)},${CANONICAL}`)).toBe(true);
 		expect(h.d1.row.container_id).toBe(nId);
 		expect(h.docker.containers.get(nId)?.name).toBe(CANONICAL);
 		expect(await back.land()).toBe("not-applied");
