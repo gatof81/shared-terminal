@@ -125,6 +125,20 @@ async function diedWithCasInFlight() {
 // ── Forward commit (step 4) ────────────────────────────────────────────────
 
 describe("the commit fence: a CAS left in flight by a dead process (#627)", () => {
+	it("the issue's reproduction: recovery removes N and resolves, THEN the in-flight CAS lands ⇒ 0 rows, D1 still on O", async () => {
+		const { h, cas, nId, engine, attempts } = await diedWithCasInFlight();
+		expect(await engine.recover(SID)).toMatchObject({
+			ok: true,
+			body: { outcome: { kind: "rolled-back" } },
+		});
+		expect(h.docker.containers.has(nId)).toBe(false);
+		await expect(attempts.assertResolved(SID)).resolves.toBeUndefined();
+		// The statement the dead process sent arrives now.
+		expect(await cas.land()).toBe("not-applied");
+		expect(h.d1.row.container_id).toBe(O_ID);
+		d1PointsAtAnExistingContainer(h);
+	});
+
 	it("the CAS lands BEFORE the fence ⇒ recovery keeps N (D1's container) and resolves committed on it", async () => {
 		const { h, cas, nId, engine } = await diedWithCasInFlight();
 		h.d1.beforeFence = async () => {
