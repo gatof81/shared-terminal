@@ -93,6 +93,36 @@
   color: var(--c-muted);
   padding: 0.6rem 0.6rem 0.25rem;
 }
+/* A project's sessions: the heading is the project's own name (not
+   uppercased) with a rule above it, so groups read apart at a glance. */
+.session-group-title.session-group-project {
+  font-size: 0.8rem;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--c-text);
+  border-top: 1px solid var(--c-border-soft);
+  margin-top: 0.4rem;
+}
+.session-group-title.session-group-project::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--c-accent);
+  vertical-align: middle;
+}
+.session-group-unassigned,
+.session-group-unknown {
+  border-top: 1px solid var(--c-border-soft);
+  margin-top: 0.4rem;
+}
+/* No rule above the list's first heading (it sits under "+ New session"). */
+.session-group-title:first-child {
+  border-top: 0;
+  margin-top: 0;
+}
 .session-group-title:first-child {
   padding-top: 0.2rem;
 }

@@ -254,3 +254,58 @@
     font-size: 0.8rem;
   }
 }
+
+/* The usage / state lines, and (phones) the session's agent beside them.
+   Wide layouts: a column with nameCol's own gap — the two usage lines look
+   exactly as before. Phones: one line (compact usage · @agent). */
+.session-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+  white-space: nowrap;
+}
+.session-usage-compact {
+  display: none;
+}
+.session-meta > * {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.session-agent-tag {
+  display: none;
+  font-size: 0.66rem;
+  color: var(--c-accent);
+  flex-shrink: 0;
+  max-width: 60%;
+}
+
+/* ── Phones: one row per session (owner review 2026-11-13: the sidebar
+   wasted space, projects / sessions / unassigned were hard to tell apart).
+   The agent shows as a word on the row's second line instead of a 44-px
+   link row of its own (the group heading names the project); the "last
+   conversation" link keeps its own line. Only the grouped list (project
+   feature on): with the feature off the sidebar is unchanged. */
+@media (max-width: 768px) {
+  .session-list-grouped .session-item {
+    gap: 0.25rem;
+    padding: 0 0.25rem 0 0.6rem;
+    margin-bottom: 0;
+  }
+  .session-list-grouped .session-item > .session-agent-link {
+    display: none;
+  }
+  .session-list-grouped .session-meta {
+    flex-direction: row;
+    gap: 0.4rem;
+  }
+  .session-list-grouped .session-usage-wide {
+    display: none;
+  }
+  .session-list-grouped .session-usage-compact {
+    display: inline;
+  }
+  .session-list-grouped .session-agent-tag {
+    display: inline;
+  }
+}

@@ -479,6 +479,9 @@ export function renderSessionList() {
 			: undefined;
 	const focusedRole = active instanceof HTMLElement ? (active.dataset.role ?? "select") : "select";
 	sessionList.replaceChildren();
+	// The compact phone rows (sidebar-sessions.css) belong to the grouped
+	// list only: with the project feature off the sidebar is exactly as before.
+	sessionList.classList.toggle("session-list-grouped", projectChatEnabled());
 	if (projectChatEnabled()) renderGroupedSessions();
 	else for (const s of sessions) sessionList.appendChild(buildSessionItem(s, null));
 	if (focusedId !== undefined) {
@@ -563,9 +566,25 @@ function renderGroupedSessions(): void {
 		if (title) h.title = title;
 		sessionList.appendChild(h);
 	};
-	if (groups.bound.length > 0) {
-		heading("Agent sessions", "session-group-bound");
-		for (const { session, binding } of groups.bound)
+	// One heading per PROJECT (owner review 2026-11-13: projects, agent
+	// sessions and unassigned ones were hard to tell apart), in the order the
+	// list first meets each; a project whose name isn't loaded yet reads
+	// "Agent sessions" until the directory lands.
+	// Keyed by PROJECT (two projects may share a name); every project whose
+	// name isn't loaded shares one "Agent sessions" group instead of several
+	// identical headings.
+	const UNNAMED = "\u0000unnamed";
+	const byKey = new Map<string, { title: string; rows: Array<(typeof groups.bound)[number]> }>();
+	for (const b of groups.bound) {
+		const name = projectName(b.binding.projectId);
+		const key = name === null ? UNNAMED : b.binding.projectId;
+		const group = byKey.get(key) ?? { title: name ?? "Agent sessions", rows: [] };
+		group.rows.push(b);
+		byKey.set(key, group);
+	}
+	for (const { title, rows } of byKey.values()) {
+		heading(title, "session-group-bound session-group-project");
+		for (const { session, binding } of rows)
 			sessionList.appendChild(buildSessionItem(session, binding));
 	}
 	if (groups.unassigned.length > 0) {
@@ -602,9 +621,12 @@ function buildSessionItem(s: SessionInfo, binding: SessionBinding | null): HTMLE
 	select.className = "session-select";
 	select.dataset.role = "select";
 	select.setAttribute("aria-current", String(s.sessionId === activeSessionId));
+	// The agent is part of the name: on phones the separate agent link is
+	// hidden and the visible tag inside this button is overridden by the label.
+	const agentPart = binding ? `, agent @${binding.handle}` : "";
 	select.setAttribute(
 		"aria-label",
-		`${s.name}, ${s.status}${s.status === "failed" ? " — view the bootstrap log" : ""}`,
+		`${s.name}, ${s.status}${agentPart}${s.status === "failed" ? " — view the bootstrap log" : ""}`,
 	);
 
 	const dot = document.createElement("span");
@@ -618,17 +640,25 @@ function buildSessionItem(s: SessionInfo, binding: SessionBinding | null): HTMLE
 	name.className = "session-name";
 	name.textContent = s.name;
 	nameCol.appendChild(name);
+	const meta = document.createElement("span");
+	meta.className = "session-meta";
 	// Live usage lines (#272). Only running sessions with a stats sample.
 	if (s.status === "running" && s.usage) {
 		const cpuCores = s.usage.cpuPercent / 100;
 		const cpuLine = document.createElement("span");
-		cpuLine.className = "session-usage";
+		cpuLine.className = "session-usage session-usage-wide";
 		cpuLine.textContent = `CPU ${formatCpuCores(cpuCores)} cores (${formatCpuPercent(s.usage.cpuPercent)})`;
-		nameCol.appendChild(cpuLine);
+		meta.appendChild(cpuLine);
 		const memLine = document.createElement("span");
-		memLine.className = "session-usage";
+		memLine.className = "session-usage session-usage-wide";
 		memLine.textContent = `Mem ${formatBytes(s.usage.memBytes)} (${s.usage.memPercent.toFixed(0)}%)`;
-		nameCol.appendChild(memLine);
+		meta.appendChild(memLine);
+		// Phones: the same on one line (owner review 2026-11-13: the sidebar
+		// wasted room); wide layouts keep the two lines above.
+		const compact = document.createElement("span");
+		compact.className = "session-usage session-usage-compact";
+		compact.textContent = `${formatCpuCores(cpuCores)} cores · ${formatBytes(s.usage.memBytes)} (${s.usage.memPercent.toFixed(0)}%)`;
+		meta.appendChild(compact);
 	} else if (s.status !== "running") {
 		// The dot's colour alone told stopped / terminated / failed apart.
 		// The row's aria-label already says it: this line is for the eye.
@@ -643,8 +673,19 @@ function buildSessionItem(s: SessionInfo, binding: SessionBinding | null): HTMLE
 					: s.status === "failed"
 						? "Failed · open the log"
 						: s.status;
-		nameCol.appendChild(state);
+		meta.appendChild(state);
 	}
+	// Phones: the agent as a word in this line (the separate agent link is
+	// desktop-only there — the row is too narrow for both). Not a link: the
+	// whole row opens the session; the agent page is one tap away from its
+	// project, which is this group's heading.
+	if (binding !== null) {
+		const tag = document.createElement("span");
+		tag.className = "session-agent-tag";
+		tag.textContent = `@${binding.handle}`;
+		meta.appendChild(tag);
+	}
+	if (meta.childElementCount > 0) nameCol.appendChild(meta);
 	select.appendChild(nameCol);
 	select.addEventListener("click", () => {
 		// A failed session has no workspace: the row opens its log.
@@ -721,9 +762,12 @@ function buildSessionItem(s: SessionInfo, binding: SessionBinding | null): HTMLE
 		agent.dataset.role = "agent";
 		const route = { projectId: binding.projectId, agentId: binding.agentId };
 		agent.href = projectRouteHash(route);
+		// The project is the group's heading now: the row names the agent only.
 		const project = projectName(binding.projectId);
-		agent.textContent = project ? `@${binding.handle} · ${project}` : `@${binding.handle}`;
-		agent.title = `Open the agent @${binding.handle}`;
+		agent.textContent = `@${binding.handle}`;
+		agent.title = project
+			? `Open the agent @${binding.handle} · ${project}`
+			: `Open the agent @${binding.handle}`;
 		agent.addEventListener("click", (e) => {
 			if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
 			e.preventDefault();
