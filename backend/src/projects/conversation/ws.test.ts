@@ -7,10 +7,13 @@
  * the socket is a fake that records every frame synchronously.
  */
 
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { RawData, WebSocket } from "ws";
 import type { LogLine } from "./log.js";
-import type { ProjectConversationStore } from "./store.js";
+import { ProjectConversationStore } from "./store.js";
 import { ProjectWsHub } from "./ws.js";
 
 const PID = "6b1f0c4e-1d2a-4b3c-8d4e-5f6a7b8c9d0e";
@@ -26,10 +29,10 @@ const line = (seq: number, pad = ""): LogLine => ({
 const frameBytes = (l: LogLine) =>
 	Buffer.byteLength(JSON.stringify({ type: "event", event: l }), "utf8");
 
-function harness(queueBudget: number) {
+function harness(queueBudget: number, real?: ProjectConversationStore) {
 	let listener: ((pid: string, lines: readonly LogLine[]) => void) | null = null;
 	let release!: (lines: LogLine[]) => void;
-	const store = {
+	const fake = {
 		onAppend(cb: (pid: string, lines: readonly LogLine[]) => void) {
 			listener = cb;
 			return () => {
@@ -41,6 +44,7 @@ function harness(queueBudget: number) {
 				release = (lines) => r({ state: {}, lines });
 			}),
 	} as unknown as ProjectConversationStore;
+	const store = real ?? fake;
 	const frames: Array<{ type: string; event?: LogLine; fromSeq?: number }> = [];
 	const handlers = new Map<string, (raw: RawData) => void>();
 	const ws = {
@@ -114,5 +118,43 @@ describe("WS /ws/project — queue during the snapshot is bounded in bytes", () 
 		await h.release([line(1), line(2, pad), line(3, pad)]);
 		h.append(line(4));
 		expect(h.seqs()).toEqual([1, "resync:1", 2, 3, 4]);
+	});
+
+	it("real store: lines queued on the project lock are in the snapshot — over budget, still no resync", async () => {
+		// With the real store `view()` runs inside critical(pid), after every
+		// append already queued on the lock, so whatever the hub queued (and
+		// dropped) before the snapshot is in it. Nothing was lost ⇒ no resync.
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "st-pws-"));
+		const store = await ProjectConversationStore.start({
+			workspaceRoot: root,
+			bootId: "b",
+			acquire: async () => ({
+				ok: true,
+				lock: { held: () => true, onLost: () => {}, release: () => {} },
+			}),
+		});
+		try {
+			await store.view(PID); // open (and recover) before measuring
+			let open!: () => void;
+			const gate = new Promise<void>((r) => {
+				open = r;
+			});
+			const held = store.critical(PID, () => gate);
+			const writes: Promise<unknown>[] = [];
+			const write = () => writes.push(store.critical(PID, (tx) => tx.append([{ ev: "noise" }])));
+			const h = harness(300, store);
+			for (let i = 0; i < 5; i++) write(); // queued on the lock, before the snapshot
+			h.subscribe(0);
+			for (let i = 0; i < 5; i++) write(); // queued after it
+			open();
+			await held;
+			await Promise.all(writes);
+			await new Promise((r) => setImmediate(r));
+			expect(h.seqs()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+			expect(h.frames.some((f) => f.type === "resync")).toBe(false);
+		} finally {
+			await store.close();
+			await fs.rm(root, { recursive: true, force: true });
+		}
 	});
 });
