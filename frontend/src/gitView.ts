@@ -477,8 +477,9 @@ function renderList(): void {
 		heading.appendChild(el("span", undefined, AREA_LABEL[area]));
 		heading.appendChild(el("span", "git-section-count", String(items.length)));
 		section.appendChild(heading);
+		// A group of buttons, not a list: a button can't also be a listitem
+		// (axe aria-allowed-role), and the heading above carries the count.
 		const list = el("div", "git-rows");
-		list.setAttribute("role", "list");
 		for (const c of items) list.appendChild(changeRow(c));
 		section.appendChild(list);
 		frag.appendChild(section);
@@ -498,9 +499,9 @@ function changeRow(c: GitChange): HTMLElement {
 	const row = el("button", "git-row");
 	row.type = "button";
 	row.dataset.key = `${c.area}:${c.path}`;
-	row.setAttribute("role", "listitem");
 	const isSel = selected?.path === c.path && selected.area === c.area;
-	row.setAttribute("aria-pressed", String(isSel));
+	// The open file among its siblings: aria-current, not a toggle state.
+	if (isSel) row.setAttribute("aria-current", "true");
 	if (isSel) row.classList.add("selected");
 	if (c.restricted) row.classList.add("restricted");
 	const badge = el("span", `git-row-status s-${statusLetter(c)}`, statusLetter(c));

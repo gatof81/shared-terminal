@@ -16,17 +16,38 @@
   gap: 0.75rem;
   flex-shrink: 0;
 }
+/* The bar is ONE line, whatever it holds: its height is part of the
+   terminal's box, so a wrap refits xterm and resizes tmux for every viewer
+   (a 46-character session name did exactly that at 1440 px). Nothing in it
+   wraps or shrinks; the two texts of unbounded length — the session name
+   and the agent link below — give way with an ellipsis instead. */
+#terminal-toolbar > * {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
 #terminal-session-name {
   color: var(--c-text);
   font-weight: 500;
+  flex: 0 1 auto;
+  /* 0, not a floor in ch: a floor also WIDENS a name shorter than it
+     ("docs" moved everything after it). The agent link below gives way first
+     (shrink 1000 : 1), so the name is the last text to be cut. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 /* P3a: "@handle · project" of a session bound to an agent (sessionCore.ts
    renderToolbarAgent). One line, ellipsis, never taller than the name
    beside it: the bar's height is part of the terminal's box. */
 #terminal-session-agent {
-  flex: 0 1 auto;
-  min-width: 0;
-  max-width: 24rem;
+  /* Gives way long before the session name does: the name is the primary text. */
+  flex: 0 1000 auto;
+  /* …but never to nothing: "@han…" still says the session has an agent. */
+  min-width: 5ch;
+  /* No max-width: a clamped item is frozen by the flex algorithm and the
+     rest of the deficit then lands on the name alone ("st-fronte…" beside
+     a 24rem agent link). Unclamped, the link takes all of it down to its floor before the
+     name loses a pixel. */
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -41,6 +62,12 @@
      line): left out rather than wrapped or squeezing the session name. */
   #terminal-session-agent {
     display: none;
+  }
+  /* The v1 phone bar scrolls sideways (mobile.css): squeezing the name
+     there buys nothing and left "my-p…" for a ten-letter name. */
+  html:not([data-shell="v2"]) #terminal-session-name {
+    flex-shrink: 0;
+    max-width: 60vw;
   }
 }
 #terminal-status-badge {

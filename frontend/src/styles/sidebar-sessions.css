@@ -83,6 +83,11 @@
 .session-item.active {
   background: #1f3348;
 }
+/* --c-muted is 4.1:1 on the selected row's fill at these sizes; one step
+   brighter keeps the usage lines AA there (axe color-contrast). */
+.session-item.active .session-usage {
+  color: var(--c-text-2);
+}
 .session-item.terminated .session-name {
   color: var(--c-muted);
   font-style: italic;
