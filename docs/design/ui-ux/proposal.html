@@ -1,0 +1,645 @@
+<!doctype html>
+<html lang="es">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shared Terminal UX Audit</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one reading column (max 1080px); the prototype and the before-shots break out into
+   their own horizontally scrollable stages. The page follows the viewer's theme; the mockups
+   inside .mk are the app itself and keep its single dark theme. */
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --fg: #171c24; --fg-2: #4a5462; --line: #d9dee5;
+  --accent: #1f6feb; --accent-soft: #e4eefd; --ok: #1a7f37; --warn: #8a5a00; --err: #c62f26;
+  --stage: #dfe3e9;
+  --font: "IBM Plex Sans", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "Cascadia Code", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1116; --panel: #151a21; --fg: #e6edf3; --fg-2: #9aa5b1; --line: #262d37;
+    --accent: #58a6ff; --accent-soft: #14253d; --ok: #3fb950; --warn: #e3b341; --err: #ff7b72;
+    --stage: #07090c; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1116; --panel: #151a21; --fg: #e6edf3; --fg-2: #9aa5b1; --line: #262d37;
+  --accent: #58a6ff; --accent-soft: #14253d; --ok: #3fb950; --warn: #e3b341; --err: #ff7b72;
+  --stage: #07090c; color-scheme: dark;
+}
+body { background: var(--bg); color: var(--fg); font-family: var(--font); font-size: 15px; line-height: 1.55; }
+.wrap { max-width: 1080px; margin: 0 auto; padding-block: 28px 64px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+h1 { font-size: 1.7rem; line-height: 1.2; font-weight: 600; letter-spacing: -0.01em; text-wrap: balance; margin: 0 0 6px; }
+h2 { font-size: 1.2rem; font-weight: 600; margin: 44px 0 10px; text-wrap: balance; }
+h3 { font-size: 0.98rem; font-weight: 600; margin: 22px 0 6px; }
+p { margin: 0 0 10px; max-width: 72ch; }
+ul { margin: 0 0 10px; padding-left: 1.2em; max-width: 72ch; }
+li { margin-bottom: 4px; }
+code, .mono { font-family: var(--mono); font-size: 0.86em; }
+.lede { color: var(--fg-2); max-width: 70ch; }
+.meta { font-family: var(--mono); font-size: 12px; color: var(--fg-2); margin-bottom: 14px; }
+nav.toc { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 10px 0; border-block: 1px solid var(--line); margin: 18px 0 8px; font-size: 13.5px; }
+nav.toc a, a { color: var(--accent); }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.keylist { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; margin: 14px 0; }
+.keylist div { border-left: 2px solid var(--accent); padding: 2px 0 2px 12px; font-size: 14px; }
+.keylist b { display: block; font-weight: 600; }
+.keylist span { color: var(--fg-2); }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+th, td { text-align: left; vertical-align: top; padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line); }
+th { font-weight: 600; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--fg-2); }
+.tscroll { overflow-x: auto; }
+.tscroll table { min-width: 720px; }
+.pri { font-family: var(--mono); font-size: 11.5px; padding: 1px 6px; border-radius: 4px; border: 1px solid currentColor; white-space: nowrap; }
+.p1 { color: var(--err); } .p2 { color: var(--warn); } .p3 { color: var(--fg-2); }
+.id { font-family: var(--mono); font-size: 12px; color: var(--fg-2); white-space: nowrap; }
+figure { margin: 14px 0 20px; }
+figure .shot { background: var(--stage); border-radius: 8px; overflow-x: auto; padding: 0; }
+figure img { display: block; max-width: none; height: auto; }
+figure img.fit { max-width: 100%; }
+figcaption { font-size: 13px; color: var(--fg-2); margin-top: 6px; max-width: 80ch; }
+.callout { background: var(--accent-soft); border-radius: 8px; padding: 12px 14px; margin: 14px 0; font-size: 14px; }
+.callout p:last-child, .callout ul:last-child { margin-bottom: 0; }
+details { border-top: 1px solid var(--line); padding: 8px 0; }
+details summary { cursor: pointer; font-weight: 500; }
+
+/* ── Prototype stage ─────────────────────────────────────────── */
+.proto-ctl { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; margin: 12px 0; font-size: 13px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: var(--panel); }
+.seg button { font: inherit; color: var(--fg-2); background: none; border: 0; padding: 5px 11px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 500; }
+.proto-ctl label { color: var(--fg-2); margin-right: 6px; }
+.stage { background: var(--stage); border-radius: 10px; padding: 18px; overflow-x: auto; }
+.stage-note { font-size: 13px; color: var(--fg-2); margin-top: 8px; max-width: 80ch; }
+
+/* ── The app mockup: proposed tokens (single dark theme, as the app) ── */
+.mk {
+  --sf-0: #0a0d12;   /* canvas: terminal, thread, file content */
+  --sf-1: #10141a;   /* chrome: sidebar, bars */
+  --sf-2: #171c24;   /* raised: cards, inputs, hover */
+  --sf-3: #1e242e;   /* overlay: menus, dialogs */
+  --ln: #222933; --ln-2: #323b47;
+  --tx: #e6edf3; --tx-2: #b4bfca; --tx-3: #8b949e; --tx-4: #5d6773;
+  --ac: #58a6ff; --ac-bg: rgba(88,166,255,.13);
+  --ok: #3fb950; --wn: #e3b341; --er: #f85149; --or: #db6d28;
+  --f-ui: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "Cascadia Code", Menlo, monospace;
+  font-family: var(--f-ui); font-size: 13px; line-height: 1.35; color: var(--tx);
+  background: var(--sf-0); border: 1px solid var(--ln-2); border-radius: 10px; overflow: hidden;
+  display: flex; flex-direction: column; text-align: left; flex-shrink: 0;
+}
+.mk * { box-sizing: border-box; }
+.mk button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; text-align: left; }
+.mk button:focus-visible { outline: 2px solid var(--ac); outline-offset: -2px; }
+.mk.desktop { width: 1120px; height: 640px; }
+.mk.mobile { width: 360px; height: 720px; border-radius: 22px; }
+.mk svg { width: 14px; height: 14px; flex-shrink: 0; stroke: currentColor; fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.mk-top { height: 40px; background: var(--sf-1); border-bottom: 1px solid var(--ln); display: flex; align-items: center; gap: 10px; padding: 0 12px; flex-shrink: 0; }
+.mk-brand { font-weight: 600; font-size: 13px; letter-spacing: .01em; display: flex; gap: 7px; align-items: center; }
+.mk-brand i { width: 16px; height: 16px; border-radius: 4px; background: var(--ac); display: grid; place-items: center; color: #06101d; font: 600 10px var(--f-mono); font-style: normal; }
+.mk-search { margin-left: 8px; height: 26px; min-width: 220px; border: 1px solid var(--ln); background: var(--sf-0); border-radius: 6px; display: flex; align-items: center; gap: 7px; padding: 0 8px; color: var(--tx-3); font-size: 12px; }
+.mk-search kbd { margin-left: auto; font: 10.5px var(--f-mono); border: 1px solid var(--ln-2); border-radius: 4px; padding: 0 4px; }
+.mk-sp { flex: 1; }
+.mk-ib { width: 28px; height: 28px; border-radius: 6px; display: grid !important; place-items: center; color: var(--tx-3); }
+.mk-ib:hover { background: var(--sf-2); color: var(--tx); }
+.mk-av { width: 24px; height: 24px; border-radius: 50%; background: var(--sf-3); border: 1px solid var(--ln-2); display: grid; place-items: center; font-size: 10.5px; font-weight: 600; color: var(--tx-2); }
+.mk-body { flex: 1; display: flex; min-height: 0; position: relative; }
+
+/* Sidebar */
+.mk-side { width: 264px; background: var(--sf-1); border-right: 1px solid var(--ln); display: flex; flex-direction: column; flex-shrink: 0; min-height: 0; }
+.mk-side-h { display: flex; align-items: center; gap: 6px; padding: 8px 8px 6px 12px; }
+.mk-side-h .lbl { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--tx-3); }
+.mk-new { height: 26px; padding: 0 9px !important; border: 1px solid var(--ln-2) !important; border-radius: 6px; font-size: 12px; font-weight: 500; display: inline-flex !important; align-items: center; gap: 5px; background: var(--sf-2) !important; }
+.mk-new:hover { border-color: var(--ac) !important; }
+.mk-tree { flex: 1; overflow-y: auto; padding: 2px 6px 10px; }
+.mk-proj { margin-top: 6px; }
+.mk-proj-h { display: flex; align-items: center; height: 30px; border-radius: 6px; padding: 0 4px 0 2px; gap: 2px; }
+.mk-proj-h:hover { background: var(--sf-2); }
+.mk-chev { width: 22px; height: 28px; display: grid !important; place-items: center; color: var(--tx-3); border-radius: 4px; }
+.mk-chev svg { transition: transform .12s; }
+.mk-proj.open > .mk-proj-h .mk-chev svg { transform: rotate(90deg); }
+.mk-proj-name { flex: 1; min-width: 0; font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; height: 28px; display: flex !important; align-items: center; }
+.mk-proj-name span { overflow: hidden; text-overflow: ellipsis; }
+.mk-proj.cur > .mk-proj-h .mk-proj-name { color: var(--ac); }
+.mk-count { font: 11px var(--f-mono); color: var(--tx-3); padding: 0 6px; }
+.mk-attn { font-size: 10.5px; font-weight: 600; color: #1a1300; background: var(--wn); border-radius: 8px; padding: 0 6px; height: 16px; display: inline-flex; align-items: center; margin-right: 2px; }
+.mk-kids { margin-left: 13px; border-left: 1px solid var(--ln); padding-left: 5px; }
+.mk-proj:not(.open) .mk-kids { display: none; }
+.mk-unassigned > .mk-proj-h .mk-proj-name { font-weight: 500; color: var(--tx-2); font-style: italic; }
+.mk-row { display: flex !important; align-items: center; gap: 8px; width: 100%; min-height: 40px; padding: 4px 6px 4px 7px; border-radius: 6px; position: relative; }
+.mk-row:hover { background: var(--sf-2); }
+.mk-row.sel { background: var(--ac-bg); }
+.mk-row.sel::before { content: ""; position: absolute; left: -6px; top: 6px; bottom: 6px; width: 2px; background: var(--ac); border-radius: 1px; }
+.mk-row .col { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 1px; }
+.mk-sname { font: 500 12.5px var(--f-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mk-row.off .mk-sname { color: var(--tx-3); }
+.mk-sub { font-size: 11px; color: var(--tx-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mk-sub .ag { color: var(--tx-2); }
+.st { width: 9px; height: 9px; flex-shrink: 0; display: inline-block; }
+.st.running { border-radius: 50%; background: var(--ok); }
+.st.stopped { border-radius: 50%; border: 1.5px solid var(--tx-3); }
+.st.failed { width: 0; height: 0; border-left: 5px solid transparent; border-right: 5px solid transparent; border-bottom: 9px solid var(--or); }
+.st.terminated { position: relative; }
+.st.terminated::before, .st.terminated::after { content: ""; position: absolute; left: 4px; top: 0; width: 1.5px; height: 9px; background: var(--tx-4); transform: rotate(45deg); }
+.st.terminated::after { transform: rotate(-45deg); }
+.cl { font-size: 11px; white-space: nowrap; display: inline-flex; align-items: center; gap: 4px; }
+.cl.needs { color: #1a1300; background: var(--wn); font-weight: 600; border-radius: 8px; padding: 0 6px; height: 16px; font-size: 10.5px; }
+.cl.working { color: var(--ac); }
+.cl.working::before { content: ""; width: 6px; height: 6px; border-radius: 50%; border: 1.5px solid var(--ac); border-right-color: transparent; animation: mkspin 1s linear infinite; }
+.cl.ready { color: var(--tx-3); }
+@keyframes mkspin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .cl.working::before { animation: none; } }
+.mk-side-f { border-top: 1px solid var(--ln); padding: 6px 12px; font-size: 11px; color: var(--tx-3); display: flex; align-items: center; gap: 6px; }
+
+/* Alt B: project rail */
+.mk-rail { width: 48px; background: var(--sf-0); border-right: 1px solid var(--ln); display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 8px 0; flex-shrink: 0; }
+.mk-rail button { width: 32px; height: 32px; border-radius: 8px; background: var(--sf-2); display: grid !important; place-items: center; font: 600 11px var(--f-ui); color: var(--tx-2); position: relative; }
+.mk-rail button.cur { background: var(--ac-bg); color: var(--ac); outline: 1px solid var(--ac); }
+.mk-rail button b { position: absolute; right: -3px; top: -3px; width: 9px; height: 9px; border-radius: 50%; background: var(--wn); border: 2px solid var(--sf-0); }
+/* Alt C: flat + chip */
+.mk-chip { font-size: 10.5px; color: var(--tx-2); border: 1px solid var(--ln-2); border-radius: 4px; padding: 0 5px; max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; }
+
+/* Main */
+.mk-main { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--sf-0); }
+.mk-bar { height: 38px; background: var(--sf-1); border-bottom: 1px solid var(--ln); display: flex; align-items: center; gap: 10px; padding: 0 10px 0 12px; flex-shrink: 0; min-width: 0; }
+.mk-crumb { display: flex; align-items: center; gap: 6px; min-width: 0; flex-shrink: 1; overflow: hidden; }
+.mk-crumb .p { color: var(--tx-3); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 160px; }
+.mk-crumb .sep { color: var(--tx-4); }
+.mk-crumb .s { font: 600 12.5px var(--f-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mk-crumb .a { color: var(--tx-2); font-size: 12px; white-space: nowrap; }
+.mk-tabs { display: flex; height: 100%; margin-left: 6px; flex-shrink: 0; }
+.mk-tabs button { height: 100%; padding: 0 10px; font-size: 12.5px; color: var(--tx-3); display: inline-flex !important; align-items: center; gap: 6px; border-bottom: 2px solid transparent; border-top: 2px solid transparent; }
+.mk-tabs button:hover { color: var(--tx); }
+.mk-tabs button.cur { color: var(--tx); border-bottom-color: var(--ac); }
+.mk-term { flex: 1; font: 12.5px/1.5 var(--f-mono); color: #c9d1d9; padding: 10px 12px; white-space: pre-wrap; overflow: hidden; }
+.mk-term .g { color: var(--ok); } .mk-term .d { color: var(--tx-3); } .mk-term .b { color: var(--ac); }
+.mk-ttabs { height: 30px; display: flex; align-items: flex-end; gap: 2px; padding: 0 8px; border-bottom: 1px solid var(--ln); background: var(--sf-0); flex-shrink: 0; }
+.mk-ttabs span { font-size: 12px; color: var(--tx-3); padding: 5px 10px; border: 1px solid transparent; border-bottom: 0; border-radius: 6px 6px 0 0; }
+.mk-ttabs span.cur { color: var(--tx); background: var(--sf-1); border-color: var(--ln); }
+/* Chat */
+.mk-chat { flex: 1; display: flex; min-height: 0; }
+.mk-clist { width: 230px; border-right: 1px solid var(--ln); padding: 8px 6px; flex-shrink: 0; }
+.mk-clist h6, .mk-pcol h6 { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--tx-3); margin: 6px 6px 4px; }
+.mk-conv { padding: 6px 8px; border-radius: 6px; display: flex; flex-direction: column; gap: 1px; }
+.mk-conv.sel { background: var(--ac-bg); }
+.mk-conv b { font-weight: 500; font-size: 12.5px; }
+.mk-conv span { font-size: 11px; color: var(--tx-3); }
+.mk-thread { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.mk-msgs { flex: 1; overflow: hidden; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+.mk-msgs > * { max-width: 640px; }
+.mk-me { align-self: flex-end; background: #16233a; border: 1px solid #1f3a61; border-radius: 10px 10px 2px 10px; padding: 7px 10px; font-size: 13.5px; }
+.mk-who { font-size: 11px; color: var(--tx-3); display: flex; gap: 6px; align-items: center; margin-bottom: 3px; }
+.mk-who b { color: var(--tx-2); font-weight: 600; }
+.mk-agent-msg { font-size: 13.5px; line-height: 1.5; }
+.mk-agent-msg code { font: 12px var(--f-mono); background: var(--sf-2); border-radius: 4px; padding: 0 4px; }
+.mk-agent-msg ul { margin: 4px 0 4px 16px; padding: 0; }
+.mk-tool { font-size: 12px; color: var(--tx-3); border: 1px solid var(--ln); border-radius: 6px; padding: 5px 9px; display: flex; gap: 8px; align-items: center; }
+.mk-tool b { color: var(--tx-2); font-weight: 500; }
+.mk-sys { align-self: center; font-size: 11px; color: var(--tx-3); }
+.mk-comp { border-top: 1px solid var(--ln); padding: 8px 12px 10px; background: var(--sf-0); flex-shrink: 0; }
+.mk-box { border: 1px solid var(--ln-2); background: var(--sf-1); border-radius: 8px; padding: 6px 6px 6px 10px; display: flex; flex-direction: column; gap: 6px; }
+.mk-box .to { display: flex; gap: 5px; align-items: center; font-size: 11.5px; color: var(--tx-3); flex-wrap: wrap; }
+.mk-to { font-size: 11.5px; background: var(--sf-3); border-radius: 4px; padding: 1px 6px; color: var(--tx); }
+.mk-box .in { display: flex; align-items: center; gap: 6px; }
+.mk-box .ph { flex: 1; color: var(--tx-4); font-size: 13.5px; }
+.mk-send { height: 28px; padding: 0 12px !important; background: var(--ac) !important; color: #06101d !important; font-weight: 600; font-size: 12.5px; border-radius: 6px; }
+/* Project chat */
+.mk-pcol { width: 290px; border-right: 1px solid var(--ln); padding: 8px 8px; flex-shrink: 0; overflow: hidden; }
+.mk-agents { display: flex; flex-wrap: wrap; gap: 4px; margin: 2px 4px 8px; }
+.mk-ag { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--ln); border-radius: 6px; padding: 2px 7px 2px 3px; font-size: 11.5px; }
+.mk-ag i { width: 18px; height: 18px; border-radius: 5px; display: grid; place-items: center; font: 600 9px var(--f-ui); font-style: normal; color: #fff; }
+.mk-card { border: 1px solid var(--ln); background: var(--sf-1); border-radius: 8px; padding: 7px 8px 7px 10px; margin: 0 2px 6px; display: flex; gap: 8px; align-items: flex-start; }
+.mk-card.needs { border-color: rgba(227,179,65,.55); }
+.mk-card .t { flex: 1; min-width: 0; }
+.mk-card b { display: block; font-size: 12.5px; font-weight: 600; }
+.mk-card span { display: block; font-size: 11.5px; color: var(--tx-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mk-card .k { font-size: 10.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+.mk-card.needs .k { color: var(--wn); } .mk-card.reply .k { color: var(--ac); } .mk-card.fail .k { color: var(--er); }
+.mk-th { display: flex; gap: 8px; padding: 6px 8px; border-radius: 6px; align-items: baseline; }
+.mk-th.sel { background: var(--ac-bg); }
+.mk-th b { flex: 1; min-width: 0; font-weight: 500; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mk-th span { font-size: 11px; color: var(--tx-3); white-space: nowrap; }
+.mk-thead { padding: 9px 16px; border-bottom: 1px solid var(--ln); display: flex; align-items: center; gap: 10px; }
+.mk-thead b { font-size: 14px; font-weight: 600; flex: 1 0 auto; max-width: 60%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mk-thead span { font-size: 11.5px; color: var(--tx-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.mk-slot { font-size: 11px; color: var(--tx-4); border: 1px dashed var(--ln-2); border-radius: 6px; padding: 2px 8px; white-space: nowrap; }
+.mk-file { display: inline-flex; gap: 6px; align-items: center; border: 1px solid var(--ln-2); border-radius: 6px; padding: 3px 8px; font: 12px var(--f-mono); color: var(--tx-2); align-self: flex-end; }
+.mk-deliv { align-self: flex-end; font-size: 11px; color: var(--tx-3); }
+.mk-deliv b { color: var(--ok); font-weight: 500; }
+
+/* Mobile */
+.mk.mobile .mk-top { height: 48px; padding: 0 6px; gap: 2px; }
+.mk.mobile .mk-ib { width: 44px; height: 44px; }
+.mk.mobile .mk-ib svg { width: 18px; height: 18px; }
+.mk-mtitle { flex: 1; min-width: 0; display: flex; flex-direction: column; padding: 0 4px; }
+.mk-mtitle small { font-size: 10.5px; color: var(--tx-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mk-mtitle b { font: 600 13.5px var(--f-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mk.mobile .mk-vtabs { display: flex; height: 40px; border-bottom: 1px solid var(--ln); background: var(--sf-1); flex-shrink: 0; }
+.mk.mobile .mk-vtabs button { flex: 1; display: flex !important; align-items: center; justify-content: center; gap: 6px; font-size: 12.5px; color: var(--tx-3); border-bottom: 2px solid transparent; }
+.mk.mobile .mk-vtabs button.cur { color: var(--tx); border-bottom-color: var(--ac); }
+.mk-sheet { position: absolute; inset: 0; background: var(--sf-1); display: flex; flex-direction: column; z-index: 3; }
+.mk-sheet .mk-tree { padding: 2px 8px 12px; }
+.mk.mobile .mk-row { min-height: 48px; }
+.mk.mobile .mk-proj-h { height: 44px; }
+.mk.mobile .mk-chev { width: 32px; height: 44px; }
+.mk.mobile .mk-sname { font-size: 13.5px; }
+.mk.mobile .mk-sub { font-size: 12px; }
+.mk.mobile .mk-proj-name { font-size: 14.5px; height: 44px; }
+.mk-msearch { margin: 8px 10px 4px; height: 40px; border: 1px solid var(--ln); background: var(--sf-0); border-radius: 8px; display: flex; align-items: center; gap: 8px; padding: 0 10px; color: var(--tx-3); font-size: 14px; flex-shrink: 0; }
+.mk.mobile .mk-msgs { padding: 12px; }
+.mk.mobile .mk-me, .mk.mobile .mk-agent-msg { font-size: 15px; }
+.mk.mobile .mk-comp { padding: 6px 8px 8px; }
+.mk.mobile .mk-box .ph { font-size: 16px; }
+.mk.mobile .mk-send { height: 36px; }
+.mk-keys { display: flex; gap: 4px; padding: 5px 6px; border-top: 1px solid var(--ln); background: var(--sf-1); flex-shrink: 0; }
+.mk-keys span { flex: 1; height: 34px; border: 1px solid var(--ln-2); border-radius: 6px; display: grid; place-items: center; font: 11.5px var(--f-mono); color: var(--tx-2); }
+.mk-mcol { flex: 1; overflow: hidden; padding: 8px; }
+
+/* System section */
+.sw-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 10px 0 16px; }
+.sw { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--panel); font-size: 12.5px; }
+.sw i { display: block; height: 44px; }
+.sw div { padding: 6px 8px; }
+.sw b { display: block; font-weight: 600; }
+.sw span { font-family: var(--mono); font-size: 11.5px; color: var(--fg-2); }
+.spec { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px 28px; }
+.typerow { display: flex; align-items: baseline; gap: 12px; border-bottom: 1px solid var(--line); padding: 5px 0; }
+.typerow span { font-family: var(--mono); font-size: 11.5px; color: var(--fg-2); width: 112px; flex-shrink: 0; }
+.demo { background: #10141a; border-radius: 8px; padding: 14px; display: flex; flex-wrap: wrap; gap: 12px 18px; align-items: center; }
+.demo .mk { border: 0; background: none; overflow: visible; flex-direction: row; flex: 1 1 100%; min-width: 0; flex-wrap: wrap; gap: 12px 18px; align-items: center; }
+.demo .lab { font-size: 11.5px; color: #8b949e; display: inline-flex; gap: 6px; align-items: center; }
+.btn { height: 28px; padding: 0 10px !important; border: 1px solid var(--ln-2) !important; border-radius: 6px; font-size: 12.5px; display: inline-flex !important; align-items: center; background: var(--sf-2) !important; }
+.btn.pri { background: var(--ac) !important; border-color: var(--ac) !important; color: #06101d !important; font-weight: 600; }
+.btn.dng { color: var(--er) !important; }
+.btn.sm { height: 24px; font-size: 12px; padding: 0 8px !important; }
+.plan td:first-child { white-space: nowrap; font-family: var(--mono); font-size: 12.5px; }
+</style>
+
+<div class="wrap">
+  <h1>Shared Terminal: auditoría UX y propuesta de rediseño</h1>
+  <div class="meta">2026-11-13 · frontend en <code>main</code> @ 1595497 · 134 capturas reales (Playwright contra el mock) · desktop y mobile, shell v1 y v2</div>
+  <p class="lede">Recorrí todas las pantallas con datos de prueba, incluido un escenario de carga con 3 proyectos, 16 sesiones y nombres largos, entre 320 y 1920 px. La app funciona, pero se lee como cinco productos pegados: cada vista trajo su propia escala y su propio estilo. La propuesta ordena la navegación en un árbol Proyecto → sesión → agente y pone toda la interfaz sobre un único sistema de tokens, más compacto en desktop y pensado para el pulgar en el teléfono.</p>
+
+  <div class="keylist">
+    <div><b>La navegación no muestra la jerarquía</b><span>Los proyectos aparecen dos veces, no se colapsan y cada fila prioriza CPU y memoria sobre el agente y su estado.</span></div>
+    <div><b>Dos lenguajes visuales</b><span>Las vistas de sesión son compactas; Project Chat usa botones y textos casi el doble de grandes.</span></div>
+    <div><b>Sin escala común</b><span>30 tamaños de fuente, 24 radios y 34 colores fuera de los tokens en 7.700 líneas de CSS.</span></div>
+    <div><b>El teléfono hereda el desktop</b><span>En 320 px se ven 5 de 16 sesiones; el composer de Project Chat ocupa el 45 % de la pantalla.</span></div>
+  </div>
+
+  <nav class="toc" aria-label="Secciones">
+    <a href="#prototipo">Prototipo</a><a href="#hallazgos">Hallazgos</a><a href="#sistema">Sistema visual</a><a href="#sidebar">Sidebar: alternativas</a><a href="#plan">Plan</a><a href="#d3">D3 y Claude B</a><a href="#decisiones">Decisiones</a>
+  </nav>
+
+  <h2 id="prototipo">Prototipo navegable</h2>
+  <p>Es la propuesta dibujada con los tokens nuevos. Se puede colapsar cada proyecto, elegir una sesión, cambiar de vista y abrir un proyecto. Los datos son de ejemplo y respetan el modelo real: una sesión pertenece a un proyecto solo a través de su agente, y el resto queda en «Sin proyecto».</p>
+  <div class="proto-ctl">
+    <span><label>Dispositivo</label><span class="seg" id="ctl-dev"><button data-v="desktop" aria-pressed="true">Desktop</button><button data-v="mobile" aria-pressed="false">Mobile</button></span></span>
+    <span id="ctl-alt-wrap"><label>Sidebar</label><span class="seg" id="ctl-alt"><button data-v="A" aria-pressed="true">A · Árbol</button><button data-v="B" aria-pressed="false">B · Riel</button><button data-v="C" aria-pressed="false">C · Lista plana</button></span></span>
+  </div>
+  <div class="stage"><div id="proto"></div></div>
+  <p class="stage-note" id="proto-note"></p>
+
+  <h2 id="hallazgos">Hallazgos</h2>
+  <p>Prioridad 1 afecta el uso diario o rompe algo; 2 es fricción clara; 3 es pulido. Cada uno tiene captura en <code>docs/design/ui-ux/screenshots/</code>.</p>
+
+  <h3>Navegación y sidebar</h3>
+  <figure><div class="shot"><img src="screenshots/before-desktop-longname-1440.jpg" width="1100" alt="Sidebar actual en desktop con tres proyectos y la barra de sesión partida en dos líneas"></div>
+  <figcaption>Hoy, 1440 px. Los proyectos están arriba como lista y otra vez abajo como títulos de grupo. Cada sesión ocupa tres líneas (nombre, CPU, memoria) más el agente. Arriba a la derecha, el nombre largo parte la barra de sesión en dos líneas.</figcaption></figure>
+  <div class="tscroll"><table>
+    <tr><th>Id</th><th>Prioridad</th><th>Problema</th><th>Evidencia</th></tr>
+    <tr><td class="id">N1</td><td><span class="pri p1">P1</span></td><td>Los proyectos se listan dos veces (sección «Projects» y títulos de grupo) y no se pueden colapsar. El título del grupo es texto en negrita con un punto azul, casi igual a una sesión.</td><td>Con 3 proyectos, la primera sesión empieza a 250 px del borde superior.</td></tr>
+    <tr><td class="id">N2</td><td><span class="pri p1">P1</span></td><td>La fila de sesión muestra CPU y memoria como dato principal. El agente va debajo y el estado de Claude no aparece.</td><td>Fila de 78 px en desktop: 7 sesiones visibles en 800 px de alto.</td></tr>
+    <tr><td class="id">N3</td><td><span class="pri p1">P1</span></td><td>En el teléfono hay 330 px de controles antes de la primera sesión. El uso se trunca («0.13 cores · 256 Mi…») y pisa al agente.</td><td>320×740: se ven 5 de 16 sesiones.</td></tr>
+    <tr><td class="id">B1</td><td><span class="pri p1">P1</span></td><td>Bug: un nombre largo parte la barra de sesión en dos líneas. La altura de esa barra es parte de la caja de la terminal, así que redimensiona tmux para todos los que miran.</td><td>Reproducido a 1440 px con un nombre de 46 caracteres.</td></tr>
+    <tr><td class="id">N4</td><td><span class="pri p2">P2</span></td><td>La pantalla inicial dice «Select or create a session →» con una flecha que no apunta a nada. No hay un lugar que resuma qué necesita atención.</td><td>Landing en desktop y mobile.</td></tr>
+    <tr><td class="id">N5</td><td><span class="pri p2">P2</span></td><td>La página de proyecto se abre «encima» y se cierra con ×, como un diálogo, aunque es un destino de navegación con su propia URL.</td><td>× junto al título y «‹ Now» en los hilos.</td></tr>
+    <tr><td class="id">N6</td><td><span class="pri p2">P2</span></td><td>«Templates» y «Logout» son botones de primer nivel en el header de desktop. El shell v2 ya los agrupa en un menú de usuario.</td><td>Header v1.</td></tr>
+  </table></div>
+
+  <h3>Jerarquía visual y consistencia</h3>
+  <figure><div class="shot"><img src="screenshots/before-desktop-project-thread.jpg" width="1100" alt="Project Chat actual en desktop"></div>
+  <figcaption>Project Chat hoy, 1280 px. Botón «New task» de 34 px de alto en píldora azul, tarjetas con «Done» de 44 px, títulos de 16 px en negrita, junto a un sidebar y un header de 11–13 px. La respuesta del agente muestra los backticks sin renderizar.</figcaption></figure>
+  <div class="tscroll"><table>
+    <tr><th>Id</th><th>Prioridad</th><th>Problema</th><th>Evidencia</th></tr>
+    <tr><td class="id">V1</td><td><span class="pri p1">P1</span></td><td>Project Chat y el directorio de agentes usan otra escala (píldoras, 15–16 px, botones de 44 px también en desktop) que las vistas de sesión.</td><td><code>team.css</code> y <code>projects.css</code> frente a <code>chat.css</code>.</td></tr>
+    <tr><td class="id">V2</td><td><span class="pri p1">P1</span></td><td>No hay escala tipográfica ni de espaciado en uso. Existe <code>--s-1…6</code> pero casi nadie lo usa.</td><td>30 tamaños de fuente (0.62–1.6 rem), 24 radios, 30+ valores de padding.</td></tr>
+    <tr><td class="id">V3</td><td><span class="pri p1">P1</span></td><td>Solo dos fondos (<code>#0d1117</code> y <code>#161b22</code>) para todo: sidebar, barras, listas, tarjetas y contenido. Nada indica qué es navegación y qué es contenido.</td><td>Todas las capturas de desktop.</td></tr>
+    <tr><td class="id">V4</td><td><span class="pri p2">P2</span></td><td>Iconos mezclados: emoji y símbolos Unicode (⏸ ▶ ⋯ ↻ 📁) en v1, SVG en v2. Los primeros dependen de la fuente del sistema.</td><td>En Linux sin fuente de emoji se ven como cuadros vacíos.</td></tr>
+    <tr><td class="id">V5</td><td><span class="pri p2">P2</span></td><td>Estados solo por color: el punto verde, ámbar o rojo distingue running, stopped y terminated.</td><td>Sidebar; el texto «Stopped» ayuda, el punto no.</td></tr>
+    <tr><td class="id">C1</td><td><span class="pri p2">P2</span></td><td>Project Chat muestra el markdown de los agentes como texto crudo. El chat de sesión sí lo renderiza.</td><td>Backticks y guiones literales en la respuesta.</td></tr>
+    <tr><td class="id">C2</td><td><span class="pri p2">P2</span></td><td>En un hilo, el mensaje propio, el del agente y el estado de entrega tienen casi el mismo peso. «Reply…» aparece dos veces.</td><td>Hilo en desktop.</td></tr>
+    <tr><td class="id">S1</td><td><span class="pri p2">P2</span></td><td>Conviven dos shells. Producción sirve v1 por defecto; v2 resuelve varios problemas de mobile pero duplica diseño y pruebas.</td><td><code>/api/auth/status</code> responde <code>uiShell: v1</code>.</td></tr>
+  </table></div>
+
+  <h3>Mobile y tablet</h3>
+  <figure><div class="shot"><img src="screenshots/before-mobile-sidebar.jpg" width="990" alt="Sidebar actual en el teléfono"></div>
+  <figcaption>Sidebar hoy a 320 y 375 px, y el menú de una sesión. El drawer deja una franja muerta a la derecha y la lista empieza a mitad de pantalla.</figcaption></figure>
+  <figure><div class="shot"><img src="screenshots/before-mobile-project-chat.jpg" width="1190" alt="Project Chat actual en el teléfono"></div>
+  <figcaption>Project Chat hoy a 390 px. En el hilo, «To», «Attach file», una barra vacía, el campo, «Send» y la nota fija ocupan casi la mitad inferior.</figcaption></figure>
+  <div class="tscroll"><table>
+    <tr><th>Id</th><th>Prioridad</th><th>Problema</th><th>Evidencia</th></tr>
+    <tr><td class="id">M1</td><td><span class="pri p1">P1</span></td><td>El composer de Project Chat ocupa cerca del 45 % de la pantalla en un hilo, con el teclado cerrado.</td><td>390×844: quedan ~330 px para leer.</td></tr>
+    <tr><td class="id">M2</td><td><span class="pri p1">P1</span></td><td>iOS: al abrir el teclado la conversación salta (#616). Sigue abierto; Chromium no lo reproduce.</td><td>Falta el log de <code>?vvdebug=1</code> desde el iPhone.</td></tr>
+    <tr><td class="id">M3</td><td><span class="pri p2">P2</span></td><td>A 768 px (tablet vertical) se usa el layout de teléfono: drawer de 300 px y el resto vacío.</td><td>Captura a 768 px.</td></tr>
+    <tr><td class="id">M4</td><td><span class="pri p2">P2</span></td><td>Tarjetas «For you» de ~100 px con un botón «Done» de 68×44. Entran 5 por pantalla.</td><td>390×844.</td></tr>
+    <tr><td class="id">M5</td><td><span class="pri p2">P2</span></td><td>Directorio de agentes: 2,5 tarjetas por pantalla; «Remove agent» (destructivo) al lado del título.</td><td>390×844.</td></tr>
+    <tr><td class="id">M6</td><td><span class="pri p2">P2</span></td><td>Los toasts aparecen sobre la barra de teclas y el composer.</td><td>Terminal y chat en mobile.</td></tr>
+    <tr><td class="id">M7</td><td><span class="pri p3">P3</span></td><td>El footer del drawer repite Templates, Invites, Admin y Logout como botones sueltos que se cortan a 320 px.</td><td>Admin a 390 px.</td></tr>
+  </table></div>
+
+  <h3>Accesibilidad (axe-core sobre 7 pantallas × 4 layouts)</h3>
+  <div class="tscroll"><table>
+    <tr><th>Id</th><th>Prioridad</th><th>Problema</th><th>Dónde</th></tr>
+    <tr><td class="id">A1</td><td><span class="pri p1">P1</span></td><td><code>aria-allowed-attr</code> (crítico): atributo ARIA no permitido en las filas de archivos.</td><td>Git, todos los layouts.</td></tr>
+    <tr><td class="id">A2</td><td><span class="pri p1">P1</span></td><td><code>aria-required-children</code> (crítico): la tira de pestañas declara un rol sin los hijos que exige.</td><td>Terminal, <code>#tab-strip</code>.</td></tr>
+    <tr><td class="id">A3</td><td><span class="pri p2">P2</span></td><td>Contraste insuficiente: uso de CPU y memoria sobre la fila seleccionada, contador de agentes, iniciales de avatares.</td><td>Sidebar, Project Chat.</td></tr>
+    <tr><td class="id">A4</td><td><span class="pri p2">P2</span></td><td>El nombre accesible no contiene el texto visible en 7–12 controles (control por voz).</td><td>Filas de sesión, buscador, tamaño de fuente.</td></tr>
+  </table></div>
+
+  <details><summary>Inventario de pantallas y componentes revisados</summary>
+    <ul>
+      <li><b>Shell:</b> login y registro, header (v1) y menú de usuario (v2), sidebar y drawer, barra de sesión, navegación inferior (v1 mobile), toasts.</li>
+      <li><b>Sesión:</b> terminal con pestañas y barra de teclas, estados detenido, fallido y desconectado, Files (árbol, vista previa, fuente), Git (estado, diff, commits), Chat (lista, hilo, composer, agentes).</li>
+      <li><b>Proyectos:</b> directorio de agentes, página de agente, Project Chat (Now, For you, Threads, New task), adjuntos D2 (selector de archivo, chip, vista del artifact, entrega).</li>
+      <li><b>Diálogos:</b> nueva sesión (5 pestañas), menú de sesión, buscador de conversaciones (Ctrl+K), templates, admin, observers, puertos, confirmaciones.</li>
+      <li><b>Componentes repetidos con estilos distintos:</b> 6 variantes de botón, 4 de chip o badge, 3 de fila de lista, 3 de encabezado de panel, 2 de composer, 2 de estado vacío.</li>
+    </ul>
+  </details>
+
+  <h2 id="sistema">Sistema visual propuesto</h2>
+  <p>Se mantiene la paleta actual: no hace falta un color nuevo. Lo que cambia es que cada valor tiene un rol y hay pocos. Todo vive en <code>tokens.css</code>; los estilos locales pasan a referenciarlo.</p>
+
+  <h3>Superficies: cuatro niveles con un rol cada uno</h3>
+  <div class="sw-row">
+    <div class="sw"><i style="background:#0a0d12"></i><div><b>0 · Lienzo</b><span>#0a0d12</span><br>Terminal, hilo, contenido de archivo</div></div>
+    <div class="sw"><i style="background:#10141a"></i><div><b>1 · Navegación</b><span>#10141a</span><br>Sidebar y barras</div></div>
+    <div class="sw"><i style="background:#171c24"></i><div><b>2 · Elevado</b><span>#171c24</span><br>Tarjetas, campos, hover</div></div>
+    <div class="sw"><i style="background:#1e242e"></i><div><b>3 · Flotante</b><span>#1e242e</span><br>Menús y diálogos, con sombra</div></div>
+  </div>
+  <p>El contenido queda en el nivel más oscuro y la navegación un paso arriba, así el ojo separa «dónde estoy» de «qué estoy leyendo» sin bordes extra. La selección es un tinte del acento con una marca lateral, no un fondo distinto por componente.</p>
+
+  <div class="spec">
+    <div>
+      <h3>Tipografía: seis tamaños</h3>
+      <div class="typerow"><span>11 · etiqueta</span><b style="font-size:11px;letter-spacing:.06em;text-transform:uppercase">Sin proyecto</b></div>
+      <div class="typerow"><span>12 · secundario</span><i style="font-size:12px;font-style:normal">@frontend-lead · hace 3 min</i></div>
+      <div class="typerow"><span>13 · interfaz</span><i style="font-size:13px;font-style:normal">Terminal · Files · Git · Chat</i></div>
+      <div class="typerow"><span>14 · lectura</span><i style="font-size:14px;font-style:normal">Listo: moví la verificación a login().</i></div>
+      <div class="typerow"><span>16 · título</span><b style="font-size:16px">Educación HZ</b></div>
+      <div class="typerow"><span>20 · página</span><b style="font-size:20px">Admin</b></div>
+      <p style="margin-top:8px;font-size:13.5px">Los nombres de sesión, ramas, rutas y hashes van en monoespaciada. Es la marca técnica del producto y diferencia una sesión de un proyecto sin usar color. En el teléfono la lectura sube a 15 px y los campos a 16 px para que iOS no haga zoom.</p>
+    </div>
+    <div>
+      <h3>Espaciado, radios y alturas</h3>
+      <ul style="font-size:14px">
+        <li><b>Espaciado:</b> 2 · 4 · 6 · 8 · 12 · 16 · 24 · 32 px. Nada fuera de la escala.</li>
+        <li><b>Radios:</b> 4 px en chips, 6 px en controles, 10 px en tarjetas y diálogos. Las píldoras quedan solo para estados.</li>
+        <li><b>Controles:</b> 24, 28 y 36 px de alto. Con puntero táctil, el área de toque es siempre de 44 px aunque el dibujo sea menor.</li>
+        <li><b>Barras:</b> 40 px el header, 38 px la barra de sesión, fija en una línea.</li>
+        <li><b>Foco:</b> anillo de 2 px del acento en todo control, solo con teclado.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>Estados: forma y color</h3>
+  <div class="demo"><div class="mk">
+    <span class="lab"><i class="st running"></i> En ejecución</span>
+    <span class="lab"><i class="st stopped"></i> Detenida</span>
+    <span class="lab"><i class="st failed"></i> Falló</span>
+    <span class="lab"><i class="st terminated"></i> Terminada</span>
+    <span class="cl needs">Te necesita</span>
+    <span class="cl working">Trabajando</span>
+    <span class="cl ready">Lista</span>
+    <span class="lab">sin evidencia reciente: no se muestra nada</span>
+  </div></div>
+  <p style="margin-top:8px">La sesión (contenedor) y Claude (agente) son dos señales separadas: la forma de la izquierda es la sesión, el texto de la derecha es Claude. «Te necesita» es la única que usa un relleno fuerte. Sigue la regla ya acordada: solo con evidencia fresca del hook; si no la hay, no se inventa un estado.</p>
+
+  <h3>Botones y chips</h3>
+  <div class="demo"><div class="mk">
+    <button class="btn pri">Enviar</button><button class="btn">Adjuntar</button><button class="btn sm">Copiar</button><button class="btn dng">Eliminar…</button>
+    <span class="mk-to">@architect-hz ×</span><span class="mk-chip">Educación HZ</span><span class="mk-count">5</span>
+  </div></div>
+  <p style="margin-top:8px">Un solo botón primario por pantalla. Los destructivos son texto rojo dentro de un menú o con confirmación, nunca un botón lleno junto a un título. Tema claro: los tokens lo dejan listo (xterm ya lee sus colores de ahí), pero lo dejo para después de consolidar el oscuro.</p>
+
+  <h2 id="sidebar">Sidebar: tres alternativas</h2>
+  <p>Las tres están en el prototipo (control «Sidebar»). Recomiendo la A.</p>
+  <div class="tscroll"><table>
+    <tr><th>Alternativa</th><th>A favor</th><th>En contra</th></tr>
+    <tr><td><b>A · Árbol</b> (recomendada)</td><td>Muestra la jerarquía real en una sola lista. Cada proyecto se colapsa por separado y recuerda su estado en ese navegador. Colapsado, un proyecto ocupa 30 px y conserva su contador y su aviso. Sirve igual en el teléfono.</td><td>Con muchos proyectos abiertos la lista es larga; lo resuelven el colapso y el buscador.</td></tr>
+    <tr><td><b>B · Riel de proyectos</b></td><td>Cambio de proyecto en un clic, estilo Slack.</td><td>Gasta 48 px fijos, obliga a inventar un avatar por proyecto y esconde las sesiones de los demás. En el teléfono no entra.</td></tr>
+    <tr><td><b>C · Lista plana con chip</b></td><td>La más densa; ordena por actividad.</td><td>Pierde la agrupación que pediste. Con 16 sesiones el chip es ruido repetido.</td></tr>
+  </table></div>
+  <h3>Qué muestra cada fila en A</h3>
+  <ul>
+    <li><b>Proyecto:</b> flecha de colapso, nombre (abre el proyecto), cantidad de sesiones y, si algún agente espera un permiso, el aviso «N te necesitan».</li>
+    <li><b>Sesión:</b> forma de estado, nombre en monoespaciada, y debajo <code>@agente</code> y el estado de Claude. CPU y memoria pasan al tooltip y al menú de la sesión; solo aparecen en la fila cuando el uso supera el 80 %.</li>
+    <li><b>Sin proyecto:</b> un grupo más, al final, colapsable. «Asignación desconocida» se mantiene aparte cuando el directorio no se pudo leer.</li>
+    <li><b>Teléfono:</b> el drawer pasa a pantalla completa con buscador arriba y «+» en la barra. Filas de 48 px con dos líneas legibles. De 5 sesiones visibles se pasa a 11–13.</li>
+  </ul>
+  <div class="callout"><p><b>Dato real, no inventado.</b> El estado de Claude por sesión sale de la presencia del agente, que hoy solo se pide al abrir la página del proyecto. Para verlo en el sidebar hay que pedirla también para los proyectos expandidos (una lectura por proyecto cada 15–30 s, sin cambios de backend). Hasta que llega la respuesta, la fila no muestra estado. Las sesiones sin proyecto no tienen esa señal y no la muestran.</p></div>
+
+  <h2 id="plan">Plan de implementación</h2>
+  <div class="tscroll"><table class="plan">
+    <tr><th>PR</th><th>Alcance</th><th>Riesgo</th><th>Cómo avanza</th></tr>
+    <tr><td>1 · Correcciones</td><td>B1 (barra en una línea), A1–A4, M6 (toasts). Cada una con su prueba que falla antes.</td><td>Bajo</td><td>Autónomo: CI, revisión independiente, merge.</td></tr>
+    <tr><td>2 · Tokens e iconos</td><td>Superficies, escala tipográfica y de espaciado, alturas de control; set de iconos SVG propio que reemplaza emoji y Unicode. Sin cambio de estructura.</td><td>Bajo; regenera las capturas base.</td><td>Autónomo.</td></tr>
+    <tr><td>3 · Sidebar en árbol</td><td>Alternativa A en desktop y mobile, colapso persistente, grupo «Sin proyecto», buscador. Con el proyecto apagado el sidebar queda como hoy.</td><td>Medio: cambia la navegación.</td><td><b>Borrador hasta tu visto bueno</b> sobre este prototipo.</td></tr>
+    <tr><td>4 · Vistas de sesión</td><td>Barra de sesión con migas Proyecto › sesión, Terminal, Files, Git y Chat sobre los tokens; tablet con sidebar fijo desde 768 px.</td><td>Medio; el invariante de «cero resize» se prueba en cada PR.</td><td>Autónomo salvo la barra, que va con el PR 3.</td></tr>
+    <tr><td>5 · Project Chat</td><td>Densidad, composer en una caja, tarjetas compactas, markdown en respuestas, directorio de agentes. Solo CSS y presentación.</td><td>Medio: archivos que D3 va a tocar.</td><td>Coordinado con B (ventana acordada).</td></tr>
+    <tr><td>6 · Mobile</td><td>Navegador a pantalla completa, composer compacto, safe areas, #616 con tu log del iPhone.</td><td>Medio</td><td>#616 no se cierra sin tu prueba en el iPhone.</td></tr>
+    <tr><td>7 · Inicio y tema claro</td><td>Pantalla inicial con «qué te necesita»; tema claro.</td><td>Bajo</td><td>Después, con propuesta propia.</td></tr>
+  </table></div>
+  <p>Validación en cada PR: 320, 375, 390, 430, 768, 1024, 1280, 1440 y 1920 px; nombres largos y 16+ sesiones; axe sin violaciones críticas; la suite e2e actual (terminal, composer, los dos chats, scroll, artifacts, navegación) y capturas base regeneradas y revisadas.</p>
+
+  <h2 id="d3">Riesgos con D3 y límites con Claude B</h2>
+  <ul>
+    <li><b>Archivos de B:</b> <code>teamView.ts</code>, <code>teamModel.ts</code>, <code>teamLog.ts</code>, la parte de proyectos de <code>api.ts</code> y del mock. No cambio su lógica ni su DOM sin acordarlo.</li>
+    <li><b>Archivos míos:</b> shell, sidebar, vistas de sesión, <code>tokens.css</code>, iconos y el resto de <code>styles/</code>.</li>
+    <li><b>Zona compartida:</b> <code>team.css</code>. El PR 5 es un cambio mecánico a tokens que hago en una ventana acordada con B, para no chocar con ramas de D3.</li>
+    <li><b>Lugares reservados para D3</b> (dibujados en el prototipo como recuadros punteados): acciones del hilo («Detener relevos»), tarjetas nuevas en «For you» y la pantalla de aprobación con el alcance textual. El rediseño les deja sitio; no invento su API ni los implemento.</li>
+    <li><b>Riesgo:</b> si D3 agrega controles con el estilo viejo, vuelve la mezcla. Mitigación: los tokens y las clases de botón y tarjeta del PR 2 quedan documentados para que D3 nazca sobre ellos.</li>
+  </ul>
+
+  <h2 id="decisiones">Lo que necesito de vos</h2>
+  <ol style="max-width:72ch;padding-left:1.3em">
+    <li><b>Sidebar A (árbol):</b> ¿avanzo con esa dirección? Es el único cambio estructural de navegación.</li>
+    <li><b>Estado de Claude en el sidebar:</b> ¿acepto una lectura periódica de presencia por proyecto expandido? Sin eso la fila muestra solo sesión y agente.</li>
+    <li><b>Shell:</b> producción sirve v1. Propongo que el rediseño tome v2 como base y que v1 se retire al terminar. Cambiar <code>UI_SHELL</code> es configuración de backend, así que es tu decisión y tu momento.</li>
+    <li><b>#616:</b> necesito el log de <code>?vvdebug=1</code> desde el iPhone para validar la hipótesis antes de integrar el arreglo.</li>
+  </ol>
+  <p class="meta" style="margin-top:28px">Fuente: docs/design/ui-ux/ en el repositorio · capturas generadas con frontend/e2e contra el mock, sin datos reales.</p>
+</div>
+
+<script>
+(() => {
+  const I = {
+    chev: '<svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg>',
+    plus: '<svg viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg>',
+    search: '<svg viewBox="0 0 16 16"><circle cx="7" cy="7" r="4"/><path d="M10 10l3.5 3.5"/></svg>',
+    term: '<svg viewBox="0 0 16 16"><path d="M3 5l3 3-3 3M8 11h5"/></svg>',
+    files: '<svg viewBox="0 0 16 16"><path d="M2 4.5h4l1.5 1.5H14v6.5H2z"/></svg>',
+    git: '<svg viewBox="0 0 16 16"><circle cx="4.5" cy="4" r="1.5"/><circle cx="4.5" cy="12" r="1.5"/><circle cx="11.5" cy="6" r="1.5"/><path d="M4.5 5.5v5M11.5 7.5c0 2-3 2-7 3"/></svg>',
+    chat: '<svg viewBox="0 0 16 16"><path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z"/></svg>',
+    more: '<svg viewBox="0 0 16 16"><circle cx="3.5" cy="8" r=".8"/><circle cx="8" cy="8" r=".8"/><circle cx="12.5" cy="8" r=".8"/></svg>',
+    menu: '<svg viewBox="0 0 16 16"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/></svg>',
+    clip: '<svg viewBox="0 0 16 16"><path d="M11 7.5l-4 4a2 2 0 01-3-3l5-5a1.4 1.4 0 012 2l-5 5"/></svg>',
+    check: '<svg viewBox="0 0 16 16"><path d="M3.5 8.5l3 3 6-7"/></svg>',
+    x: '<svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg>',
+    file: '<svg viewBox="0 0 16 16"><path d="M4 2h5l3 3v9H4zM9 2v3h3"/></svg>',
+  };
+  const PROJECTS = [
+    { id: "hz", name: "Educación HZ", short: "HZ", sessions: [
+      { id: "s1", name: "hz-dev", st: "running", agent: "developer-hz", cl: "working" },
+      { id: "s2", name: "hz-architect", st: "running", agent: "architect-hz", cl: "ready" },
+      { id: "s3", name: "hz-design", st: "running", agent: "designer-hz", cl: "needs" },
+      { id: "s4", name: "hz-dev-2", st: "running", agent: "developer-hz-2", cl: null },
+      { id: "s5", name: "hz-docs", st: "stopped", agent: "qa-hz", cl: null },
+    ]},
+    { id: "st", name: "Shared Terminal — plataforma de agentes (producción)", short: "ST", sessions: [
+      { id: "s6", name: "shared-terminal-backend-recreate-engine-hotfix", st: "running", agent: "backend-developer-senior", cl: "working" },
+      { id: "s7", name: "st-frontend", st: "running", agent: "frontend-lead", cl: "needs" },
+      { id: "s8", name: "st-planning", st: "running", agent: "architect", cl: "ready" },
+      { id: "s9", name: "st-qa-release", st: "stopped", agent: "qa-release", cl: null },
+    ]},
+    { id: "ha", name: "Home Automation", short: "HA", sessions: [
+      { id: "s10", name: "ha-main", st: "running", agent: "ha-dev", cl: "ready" },
+      { id: "s11", name: "ha-bootstrap", st: "failed", agent: "ha-ops", cl: null },
+    ]},
+    { id: "_un", name: "Sin proyecto", short: "—", un: true, sessions: [
+      { id: "s12", name: "experiments-llm-evals", st: "running", agent: null, cl: null },
+      { id: "s13", name: "scratch", st: "running", agent: null, cl: null },
+      { id: "s14", name: "tmp", st: "stopped", agent: null, cl: null },
+    ]},
+  ];
+  const CL = { needs: "Te necesita", working: "Trabajando", ready: "Lista" };
+  const ST = { stopped: "Detenida", failed: "Falló · ver el log" };
+  let collapsed = new Set(["ha"]);
+  try { const raw = localStorage.getItem("ux-proto-collapsed"); if (raw) collapsed = new Set(JSON.parse(raw)); } catch {}
+  const S = { dev: "desktop", alt: "A", sel: "s1", proj: null, view: "term", sheet: false, railProj: "hz" };
+  const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+  const find = (sid) => { for (const p of PROJECTS) for (const s of p.sessions) if (s.id === sid) return { p, s }; return null; };
+
+  const row = (s, p, chip) => {
+    const sub = s.st !== "running" ? ST[s.st] ?? s.st : s.agent ? `<span class="ag">@${esc(s.agent)}</span>` : "";
+    const stsub = s.st !== "running" && s.agent ? `<span class="ag">@${esc(s.agent)}</span> · ${sub}` : sub;
+    const cl = s.cl ? `<span class="cl ${s.cl}">${CL[s.cl]}</span>` : "";
+    return `<button class="mk-row${s.id === S.sel && !S.proj ? " sel" : ""}${s.st !== "running" ? " off" : ""}" data-s="${s.id}">
+      <i class="st ${s.st}"></i><span class="col"><span class="mk-sname">${esc(s.name)}</span>${stsub ? `<span class="mk-sub">${stsub}</span>` : ""}</span>
+      ${chip && !p.un ? `<span class="mk-chip">${esc(p.name)}</span>` : ""}${cl}</button>`;
+  };
+  const tree = () => PROJECTS.map((p) => {
+    const needs = p.sessions.filter((s) => s.cl === "needs").length;
+    const open = !collapsed.has(p.id);
+    return `<div class="mk-proj${open ? " open" : ""}${p.un ? " mk-unassigned" : ""}${S.proj === p.id ? " cur" : ""}">
+      <div class="mk-proj-h"><button class="mk-chev" data-c="${p.id}" aria-expanded="${open}" aria-label="${open ? "Colapsar" : "Expandir"} ${esc(p.name)}">${I.chev}</button>
+      <button class="mk-proj-name" ${p.un ? `data-c="${p.id}"` : `data-p="${p.id}"`} title="${esc(p.name)}"><span>${esc(p.name)}</span></button>
+      ${needs && !open ? `<span class="mk-attn">${needs}</span>` : ""}<span class="mk-count">${p.sessions.length}</span></div>
+      <div class="mk-kids">${p.sessions.map((s) => row(s, p)).join("")}</div></div>`;
+  }).join("");
+  const sideA = () => `<div class="mk-side"><div class="mk-side-h"><span class="lbl">Proyectos</span><span class="mk-sp"></span><button class="mk-new">${I.plus} Sesión</button></div><div class="mk-tree">${tree()}</div><div class="mk-side-f"><i class="st running"></i> Conectado · 14 sesiones, 11 activas</div></div>`;
+  const sideB = () => {
+    const p = PROJECTS.find((x) => x.id === S.railProj);
+    return `<div class="mk-rail">${PROJECTS.map((x) => `<button class="${x.id === S.railProj ? "cur" : ""}" data-r="${x.id}" title="${esc(x.name)}">${x.short}${x.sessions.some((s) => s.cl === "needs") ? "<b></b>" : ""}</button>`).join("")}</div>
+    <div class="mk-side" style="width:226px"><div class="mk-side-h"><span class="lbl" style="text-transform:none;letter-spacing:0;font-size:13px;color:var(--tx);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.name)}</span><span class="mk-sp"></span><button class="mk-ib" aria-label="Nueva sesión">${I.plus}</button></div><div class="mk-tree">${p.sessions.map((s) => row(s, p)).join("")}</div></div>`;
+  };
+  const sideC = () => `<div class="mk-side"><div class="mk-side-h"><span class="lbl">Sesiones</span><span class="mk-sp"></span><button class="mk-new">${I.plus} Sesión</button></div><div class="mk-tree">${PROJECTS.flatMap((p) => p.sessions.map((s) => ({ p, s }))).sort((a, b) => (b.s.cl === "needs") - (a.s.cl === "needs") || (a.s.st !== "running") - (b.s.st !== "running")).map(({ p, s }) => row(s, p, true)).join("")}</div></div>`;
+
+  const TABS = [["term", "Terminal", I.term], ["files", "Files", I.files], ["git", "Git", I.git], ["chat", "Chat", I.chat]];
+  const term = (s) => `<div class="mk-ttabs"><span class="cur">Tab 1</span><span>Tab 2</span><span>+</span></div><div class="mk-term"><span class="d">developer@${esc(s.name)}</span>:<span class="b">~/workspace</span>$ claude
+<span class="g">●</span> Leyendo src/auth.ts…
+<span class="g">●</span> Edit src/auth.ts <span class="d">(+4 −2)</span>
+<span class="g">●</span> npm test <span class="d">— 628 passed</span>
+
+  Listo: moví la verificación de la cookie a login().
+
+<span class="d">&gt;</span> █</div>`;
+  const placeholder = (t) => `<div class="mk-term"><span class="d">${t}: misma estructura que hoy (lista a la izquierda, contenido a la derecha), sobre los tokens nuevos.</span></div>`;
+  const msgs = () => `<div class="mk-msgs">
+    <div class="mk-me">Pasá el flujo de auth a la cookie de sesión nueva.</div>
+    <div class="mk-tool">${I.file}<b>Edit</b> src/auth.ts<span class="mk-sp"></span>1,8 s</div>
+    <div><div class="mk-who"><b>Claude</b> informe final · 10:00</div><div class="mk-agent-msg">Listo. Moví la verificación de la cookie a <code>login()</code> y agregué una prueba.</div></div>
+    <div class="mk-sys">— esperando tu mensaje —</div></div>`;
+  const composer = (ph, to) => `<div class="mk-comp"><div class="mk-box">${to ? `<div class="to">Para <span class="mk-to">@developer-hz ×</span><span class="mk-to">@architect-hz ×</span><button class="mk-ib" style="width:22px;height:22px" aria-label="Agregar destinatario">${I.plus}</button></div>` : ""}<div class="in">${to ? `<button class="mk-ib" aria-label="Adjuntar archivo">${I.clip}</button>` : ""}<span class="ph">${ph}</span><button class="mk-send">Enviar</button></div></div></div>`;
+  const chat = () => `<div class="mk-chat">${S.dev === "desktop" ? `<div class="mk-clist"><h6>En vivo</h6><div class="mk-conv sel"><b>Refactor auth flow</b><span>Lista · hace 1 min</span></div><h6>Anteriores</h6><div class="mk-conv"><b>Fix tests</b><span>Terminó · hace 1 h</span></div></div>` : ""}<div class="mk-thread">${msgs()}${composer("Mensaje para Claude…")}</div></div>`;
+  const pthread = () => `<div class="mk-thread"><div class="mk-thead"><b>Revisar el script de deploy</b><span>vos → @developer-hz, @architect-hz</span><span class="mk-slot">D3 · Detener relevos</span></div><div class="mk-msgs">
+    <div class="mk-me">¿Pueden revisar el script de deploy antes de la ventana de esta noche?</div>
+    <div class="mk-file">${I.file} deploy.sh · 2,1 KB</div>
+    <div class="mk-deliv">@developer-hz <b>entregado</b> · @architect-hz <b>entregado</b></div>
+    <div><div class="mk-who"><i class="st running"></i><b>@architect-hz</b> 10:29</div><div class="mk-agent-msg">Revisado: al paso de rollback le falta esperar el health check.<ul><li><code>deploy.sh</code> línea 42 reinicia antes de que termine la migración</li><li>agregar <code>wait_healthy 60</code> antes del swap</li></ul></div></div>
+    <div class="mk-sys"><span class="cl working">@developer-hz trabajando</span></div></div>${composer("Responder en este hilo…", true)}</div>`;
+  const pcol = () => `<h6>Agentes</h6><div class="mk-agents"><span class="mk-ag"><i style="background:#5a8f29">AH</i>architect <span class="cl ready">Lista</span></span><span class="mk-ag"><i style="background:#9a7b1f">DH</i>developer <span class="cl working">Trabajando</span></span><span class="mk-ag"><i style="background:#8a4fa3">DS</i>designer <span class="cl needs">Te necesita</span></span><span class="mk-ag"><i style="background:#3d5fb8">QH</i>qa</span></div>
+    <h6>Para vos · 3</h6>
+    <div class="mk-card needs"><div class="t"><span class="k">Permiso</span><b>@designer-hz espera tu respuesta</b><span>En su Terminal · hace un momento</span></div><button class="btn sm">Abrir</button></div>
+    <div class="mk-card reply"><div class="t"><span class="k">Respuesta</span><b>@architect-hz</b><span>Revisado: al paso de rollback le falta…</span></div><button class="mk-ib" aria-label="Marcar como hecho">${I.check}</button></div>
+    <div class="mk-card fail"><div class="t"><span class="k">No entregado</span><b>@architect-hz estaba ocupado</b><span>Escribir las notas de la versión</span></div><button class="mk-ib" aria-label="Marcar como hecho">${I.check}</button></div>
+    <h6>Hilos</h6>
+    <div class="mk-th sel"><b>Revisar el script de deploy</b><span>ahora</span></div><div class="mk-th"><b>Verificar los backups de la VM</b><span>12 min</span></div><div class="mk-th"><b>Escribir las notas de la versión</b><span>1 h</span></div>`;
+
+  function desktop() {
+    const cur = find(S.sel);
+    const side = S.alt === "A" ? sideA() : S.alt === "B" ? sideB() : sideC();
+    let main;
+    if (S.proj) {
+      const p = PROJECTS.find((x) => x.id === S.proj);
+      main = `<div class="mk-bar"><div class="mk-crumb"><span class="s" style="font-family:var(--f-ui);font-size:13.5px">${esc(p.name)}</span></div><div class="mk-tabs"><button class="cur">Ahora</button><button>Agentes</button></div><span class="mk-sp"></span><button class="btn pri sm">${I.plus}&nbsp;Nueva tarea</button></div><div class="mk-chat"><div class="mk-pcol">${pcol()}</div>${pthread()}</div>`;
+    } else {
+      const { p, s } = cur;
+      const body = S.view === "term" ? term(s) : S.view === "chat" ? chat() : placeholder(S.view === "files" ? "Files" : "Git");
+      main = `<div class="mk-bar"><div class="mk-crumb">${p.un ? "" : `<span class="p">${esc(p.name)}</span><span class="sep">›</span>`}<i class="st ${s.st}"></i><span class="s">${esc(s.name)}</span>${s.agent ? `<span class="a">@${esc(s.agent)}</span>` : ""}</div><div class="mk-tabs">${TABS.map(([k, l, ic]) => `<button class="${S.view === k ? "cur" : ""}" data-v="${k}">${ic}${l}</button>`).join("")}</div><span class="mk-sp"></span><button class="mk-ib" aria-label="Más acciones">${I.more}</button></div>${body}`;
+    }
+    return `<div class="mk desktop"><div class="mk-top"><span class="mk-brand"><i>&gt;_</i>Shared Terminal</span><span class="mk-search">${I.search} Ir a una sesión o conversación<kbd>Ctrl K</kbd></span><span class="mk-sp"></span><i class="st running" title="Servidor conectado"></i><span class="mk-av">DF</span></div><div class="mk-body">${side}<div class="mk-main">${main}</div></div></div>`;
+  }
+  function mobile() {
+    const { p, s } = find(S.sel);
+    let top, body;
+    if (S.sheet) {
+      top = `<button class="mk-ib" data-sheet="0" aria-label="Cerrar">${I.x}</button><div class="mk-mtitle"><b style="font-family:var(--f-ui)">Proyectos y sesiones</b></div><button class="mk-ib" aria-label="Nueva sesión">${I.plus}</button><span class="mk-av" style="margin:0 8px">DF</span>`;
+      body = `<div class="mk-sheet"><div class="mk-msearch">${I.search} Buscar sesión o conversación</div><div class="mk-tree">${tree()}</div></div>`;
+    } else if (S.proj) {
+      const pr = PROJECTS.find((x) => x.id === S.proj);
+      top = `<button class="mk-ib" data-sheet="1" aria-label="Proyectos y sesiones">${I.menu}</button><div class="mk-mtitle"><small>Proyecto</small><b style="font-family:var(--f-ui)">${esc(pr.name)}</b></div><button class="mk-ib" aria-label="Nueva tarea">${I.plus}</button>`;
+      body = `<div class="mk-main"><div class="mk-vtabs"><button class="cur">Ahora</button><button>Hilos</button><button>Agentes</button></div><div class="mk-mcol">${pcol()}</div></div>`;
+    } else {
+      top = `<button class="mk-ib" data-sheet="1" aria-label="Proyectos y sesiones">${I.menu}</button><div class="mk-mtitle"><small>${p.un ? "Sin proyecto" : esc(p.name)}${s.agent ? " · @" + esc(s.agent) : ""}</small><b>${esc(s.name)}</b></div><button class="mk-ib" aria-label="Más acciones">${I.more}</button>`;
+      const b = S.view === "term" ? term(s) + `<div class="mk-keys"><span>esc</span><span>tab</span><span>ctrl</span><span>↑</span><span>↓</span><span>←</span><span>→</span></div>` : S.view === "chat" ? chat() : placeholder(S.view === "files" ? "Files" : "Git");
+      body = `<div class="mk-main"><div class="mk-vtabs">${TABS.map(([k, l, ic]) => `<button class="${S.view === k ? "cur" : ""}" data-v="${k}" aria-label="${l}">${ic}${l}</button>`).join("")}</div>${b}</div>`;
+    }
+    return `<div class="mk mobile"><div class="mk-top">${top}</div><div class="mk-body">${body}</div></div>`;
+  }
+  const NOTES = {
+    desktopA: "A · Árbol. Clic en la flecha colapsa el proyecto (se recuerda). Clic en el nombre abre el proyecto. Colapsado, «Home Automation» conserva su contador; si un agente espera permiso, el aviso sube al encabezado.",
+    desktopB: "B · Riel. Cada proyecto es un botón en la columna izquierda; la lista muestra solo sus sesiones.",
+    desktopC: "C · Lista plana. Todas las sesiones juntas, las que te necesitan primero, con el proyecto como chip.",
+    mobile: "Teléfono. El botón ☰ abre el navegador a pantalla completa. Las vistas van en una tira bajo la barra, que no cambia de alto al cambiar de vista. Los recuadros punteados son lugares reservados para D3.",
+  };
+  const host = document.getElementById("proto");
+  function render() {
+    const y = host.querySelector(".mk-tree")?.scrollTop ?? 0;
+    host.innerHTML = S.dev === "desktop" ? desktop() : mobile();
+    const t = host.querySelector(".mk-tree"); if (t) t.scrollTop = y;
+    document.getElementById("proto-note").textContent = S.dev === "mobile" ? NOTES.mobile : NOTES["desktop" + S.alt];
+    document.getElementById("ctl-alt-wrap").hidden = S.dev === "mobile";
+    for (const b of document.querySelectorAll("#ctl-dev button")) b.setAttribute("aria-pressed", String(b.dataset.v === S.dev));
+    for (const b of document.querySelectorAll("#ctl-alt button")) b.setAttribute("aria-pressed", String(b.dataset.v === S.alt));
+  }
+  host.addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    const d = b.dataset;
+    if (d.c) { collapsed.has(d.c) ? collapsed.delete(d.c) : collapsed.add(d.c); try { localStorage.setItem("ux-proto-collapsed", JSON.stringify([...collapsed])); } catch {} }
+    else if (d.s) { S.sel = d.s; S.proj = null; S.sheet = false; }
+    else if (d.p) { S.proj = d.p; S.sheet = false; }
+    else if (d.v) S.view = d.v;
+    else if (d.r) S.railProj = d.r;
+    else if (d.sheet) S.sheet = d.sheet === "1";
+    else return;
+    render();
+  });
+  document.getElementById("ctl-dev").addEventListener("click", (e) => { const v = e.target.closest("button")?.dataset.v; if (v) { S.dev = v; S.sheet = v === "mobile"; render(); } });
+  document.getElementById("ctl-alt").addEventListener("click", (e) => { const v = e.target.closest("button")?.dataset.v; if (v) { S.alt = v; render(); } });
+  render();
+})();
+</script>
