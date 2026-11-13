@@ -13,8 +13,9 @@
  * Order, and why:
  *   1. read + hash the source (no lock: a workspace read is slow I/O), then,
  *      under the project lock, refuse anything that would be refused anyway
- *      (replay, quota, a log that cannot take the event) and, outside it,
- *      new bytes past the unreferenced-bytes budget — all before writing;
+ *      (replay, quota, a log that cannot take the event) and new bytes past
+ *      the unreferenced-bytes budget (measured from disk + reserved, in that
+ *      same section) — all before writing;
  *   2. content to `artifacts/<sha>`: temp + fsync + re-read through the same
  *      fd + `link(2)` to the final name, so a final name never holds partial
  *      or unverified bytes and an existing one is never replaced (EEXIST ⇒
@@ -24,7 +25,7 @@
  * A death between 2 and 3, or a refusal in 3 the pre-check could not
  * foresee, leaves an unreferenced content file: content-addressed, reused by
  * the next registration of the same bytes, never deleted (§9), and bounded
- * by `PROJECT_ARTIFACTS_UNREFERENCED_MAX_BYTES`.
+ * by `PROJECT_ARTIFACTS_UNREFERENCED_MAX_BYTES` + in-flight writes.
  */
 
 import { createHash, randomBytes } from "node:crypto";
@@ -45,8 +46,11 @@ export const PROJECT_ARTIFACTS_MAX_BYTES = 256 * 1024 * 1024;
 /**
  * §6.2: bytes under `artifacts/` that no `artifact` event references (an
  * event the log refused after the copy, a death between copy and event,
- * temps). Past it a registration that would add new bytes is refused before
- * copying; nothing is deleted to make room.
+ * temps — measured on disk, so a restart's leftovers count). A registration
+ * that would add new bytes is admitted only while measured + reserved + its
+ * own ≤ this; otherwise refused before copying. Nothing is deleted to make
+ * room. The bound is this + in-flight writes: the transient temps of
+ * registrations that reuse existing content (route slots bound how many).
  */
 export const PROJECT_ARTIFACTS_UNREFERENCED_MAX_BYTES = 16 * 1024 * 1024;
 const NAME_MAX = 96;
@@ -166,22 +170,37 @@ async function publishNoClobber(
 ): Promise<"written" | "existed"> {
 	const tmp = path.join(dir, `.${randomBytes(8).toString("hex")}.tmp`);
 	const fh = await fs.open(tmp, FS.O_CREAT | FS.O_EXCL | FS.O_NOFOLLOW | FS.O_RDWR, 0o600);
+	// Until the link succeeds, the temp is this call's alone: a random name
+	// created O_EXCL and never linked, so nothing can reference it. On any
+	// failure up to there it is removed — left behind it would count against
+	// the unreferenced-bytes budget (§6.2), which nothing ever frees, so a
+	// short ENOSPC/EIO episode would block the project's registrations for
+	// good. A death (no `catch` runs) can still leave one; that is what the
+	// budget bounds.
+	const dropTemp = async (cause: unknown): Promise<never> => {
+		await fs.unlink(tmp).catch(() => {});
+		throw cause;
+	};
 	try {
-		await fh.writeFile(content);
-		await fh.sync();
-		const back = Buffer.alloc(content.length + 1);
-		const { bytesRead } = await fh.read(back, 0, back.length, 0);
-		if (bytesRead !== content.length || !back.subarray(0, bytesRead).equals(content)) {
-			throw new Error(`${name}: read-back differs from what was written`);
+		try {
+			await fh.writeFile(content);
+			await fh.sync();
+			const back = Buffer.alloc(content.length + 1);
+			const { bytesRead } = await fh.read(back, 0, back.length, 0);
+			if (bytesRead !== content.length || !back.subarray(0, bytesRead).equals(content)) {
+				throw new Error(`${name}: read-back differs from what was written`);
+			}
+		} finally {
+			await fh.close();
 		}
-	} finally {
-		await fh.close();
+	} catch (err) {
+		await dropTemp(err);
 	}
 	let outcome: "written" | "existed" = "written";
 	try {
 		await fs.link(tmp, path.join(dir, name));
 	} catch (err) {
-		if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+		if ((err as NodeJS.ErrnoException).code !== "EEXIST") await dropTemp(err);
 		outcome = "existed";
 	}
 	await fs.unlink(tmp);
@@ -196,6 +215,11 @@ async function publishNoClobber(
 }
 
 export class ArtifactStoreCorrupt extends Error {}
+
+/** The metadata file's exact bytes (what the reservation counts, §6.2). */
+export function metaBuffer(sha: string, meta: Record<string, unknown>): Buffer {
+	return Buffer.from(`${JSON.stringify({ sha256: sha, ...meta })}\n`, "utf8");
+}
 
 /** Writes the content file (and its metadata, first registration only). */
 export async function storeContent(
@@ -212,7 +236,7 @@ export async function storeContent(
 	await publishNoClobber(
 		dir,
 		`${sha}.json`,
-		Buffer.from(`${JSON.stringify({ sha256: sha, ...meta })}\n`, "utf8"),
+		metaBuffer(sha, meta),
 		(b) => {
 			try {
 				return (JSON.parse(b.toString("utf8")) as { sha256?: unknown }).sha256 === sha;
@@ -234,43 +258,58 @@ export async function readContent(root: string, pid: string, sha: string): Promi
 	return buf;
 }
 
-/** The entry names under `artifacts/`; empty if the directory does not exist yet. */
-async function listArtifactsDir(root: string, pid: string): Promise<Set<string>> {
-	try {
-		return new Set(await fs.readdir(artifactsDir(root, pid)));
-	} catch (err) {
-		if ((err as NodeJS.ErrnoException).code === "ENOENT") return new Set();
-		throw err;
-	}
-}
+/** The unreferenced bytes could not be measured: new bytes are refused (fail closed). */
+export class ArtifactUsageUnverifiable extends Error {}
 
 /**
- * Entries no `artifact` event accounts for: a content file or its metadata
- * whose sha the log does not reference, and anything else (temps of a dead
- * write). Referenced content is already counted by the project quota.
+ * §6.2: what `artifacts/` holds that no `artifact` event references — a
+ * content file or its `.json` whose sha the log does not reference, and
+ * anything else (a temp left by a dead write) — measured from the disk
+ * itself, so a restart's leftovers count exactly like this process's.
+ * `need`: what this registration would add — the content and the metadata
+ * file, each only if its final name does not exist yet (an existing one is
+ * reused, never rewritten); 0 ⇒ nothing is measured. Stops summing once
+ * past `stopAbove`.
+ *
+ * Fail closed: an entry that is not a regular file (its size would say
+ * nothing about what it holds) or any error other than "vanished" makes the
+ * measurement unverifiable, never 0.
  */
-function unreferencedEntries(names: ReadonlySet<string>, referenced: ReadonlyMap<string, unknown>) {
-	const out: string[] = [];
-	for (const n of names) {
-		const sha = n.endsWith(".json") ? n.slice(0, -5) : n;
-		if (SHA_RE.test(sha) && referenced.has(sha)) continue;
-		out.push(n);
+async function unreferencedUsage(
+	dir: string,
+	sha: string,
+	sizes: { content: number; meta: number },
+	referenced: ReadonlyMap<string, unknown>,
+	stopAbove: number,
+): Promise<{ need: number; used: number }> {
+	let names: string[];
+	try {
+		names = await fs.readdir(dir);
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === "ENOENT")
+			return { need: sizes.content + sizes.meta, used: 0 };
+		throw new ArtifactUsageUnverifiable(`readdir: ${(err as Error).message}`);
 	}
-	return out;
-}
-
-/** Sum of the entries' sizes (lstat, a vanished entry is 0), stopping once past `stopAbove`. */
-async function sizeOf(dir: string, names: readonly string[], stopAbove: number): Promise<number> {
-	let total = 0;
+	const need =
+		(names.includes(sha) ? 0 : sizes.content) + (names.includes(`${sha}.json`) ? 0 : sizes.meta);
+	if (need === 0) return { need, used: 0 };
+	let used = 0;
 	for (const n of names) {
+		const base = n.endsWith(".json") ? n.slice(0, -5) : n;
+		if (SHA_RE.test(base) && referenced.has(base)) continue;
+		let st: Awaited<ReturnType<typeof fs.lstat>>;
 		try {
-			total += (await fs.lstat(path.join(dir, n))).size;
+			st = await fs.lstat(path.join(dir, n));
 		} catch (err) {
-			if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+			// A temp unlinked by its own write between the listing and here.
+			if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+			throw new ArtifactUsageUnverifiable(`${n}: ${(err as Error).message}`);
 		}
-		if (total > stopAbove) break;
+		if (!st.isFile()) throw new ArtifactUsageUnverifiable(`${n}: not a regular file`);
+		used += st.size;
+		if (used > stopAbove) break;
 	}
-	return total;
+	return { need, used };
 }
 
 // ── Registration (§6.1, POST …/artifacts) ───────────────────────────────────
@@ -306,6 +345,9 @@ const err = (status: number, code: string, detail?: string): HttpResult => ({
 });
 
 export class ProjectArtifacts {
+	/** Per project: bytes admitted against the unreferenced budget and not yet settled (§6.2). */
+	private readonly reservations = new Map<string, number>();
+
 	constructor(private readonly deps: ArtifactDeps) {}
 
 	private get max(): number {
@@ -383,11 +425,13 @@ export class ProjectArtifacts {
 			by: ownerId,
 		};
 
-		try {
-			// What is on disk now, read before the lock (directory I/O is slow);
-			// judged against the folded log inside it.
-			const onDisk = await listArtifactsDir(this.deps.workspaceRoot, projectId);
+		const meta = { name, bytes: content.length, source: event.source };
+		const sizes = { content: content.length, meta: metaBuffer(sha, meta).length };
+		// Bytes this registration reserved against the unreferenced budget;
+		// returned in `finally`, after every write of this call has settled.
+		let reserved = 0;
 
+		try {
 			// Pre-check: a replay, a quota already exceeded, or a log that would
 			// refuse the event needs no write. The log check matters because the
 			// content copy below is durable and the quota only counts what the
@@ -401,39 +445,46 @@ export class ProjectArtifacts {
 					return err(409, "artifacts-full");
 				// Throws the append's own ProjectLogError ⇒ logErrorToHttp below.
 				tx.assertAppendable([event]);
-				if (onDisk.has(sha)) return null; // reused: the copy adds no bytes
-				return { unreferenced: unreferencedEntries(onDisk, tx.state.artifacts) };
-			});
-			if (pre && "status" in pre) return pre;
+				// Already referenced ⇒ its files are on disk and counted by the
+				// quota: the copy adds nothing durable and the directory is not
+				// read (its only writes are this call's own temps, removed
+				// before it returns — the "+ in-flight writes" of §6.2).
+				if (known) return null;
 
-			// What the pre-check cannot exclude still leaves an unreferenced
-			// content file: the log filling (or being poisoned, or the quota
-			// taken by a concurrent registration) between the pre-check and the
-			// append, or a death between the copy and the event. §6.2/§9: such
-			// files are never deleted automatically — a deletion here would race
-			// a concurrent registration of the same bytes that found the file
-			// already there (EEXIST ⇒ reuse) and is about to log an event
-			// pointing at it. So instead of deleting, new bytes are refused once
-			// the unreferenced bytes already on disk would exceed a budget.
-			// Bound: budget + what in-flight registrations copy (each ≤ the
-			// per-artifact cap, their number bounded by the route's slots). An
-			// in-flight registration's file counts as unreferenced here too —
-			// conservative, it only refuses earlier.
-			if (pre) {
-				const used = await sizeOf(
+				// What the pre-check cannot exclude still leaves unreferenced
+				// files: the log filling (or being poisoned, or the quota taken
+				// by a concurrent registration) between here and the append, or
+				// a death between the copy and the event. §6.2/§9: never deleted
+				// automatically — a deletion would race a concurrent
+				// registration of the same bytes that found the file already
+				// there (EEXIST ⇒ reuse) and is about to log an event pointing
+				// at it. Instead new bytes are admitted only while
+				//   measured unreferenced bytes + reservations + this ≤ budget.
+				// Measured and reserved in THIS critical section, so two
+				// admissions never both decide on the same measurement: each one
+				// sees the disk after every earlier admission either reserved
+				// its bytes (counted here) or finished writing them and released
+				// (now on disk, measured). The reservation total is read BEFORE
+				// the measurement: a release landing during it was then counted
+				// twice, never zero times.
+				const pending = this.reservations.get(projectId) ?? 0;
+				const usage = await unreferencedUsage(
 					artifactsDir(this.deps.workspaceRoot, projectId),
-					pre.unreferenced,
+					sha,
+					sizes,
+					tx.state.artifacts,
 					this.unreferencedMax,
 				);
-				if (used + content.length > this.unreferencedMax)
+				if (usage.need === 0) return null;
+				if (usage.used + pending + usage.need > this.unreferencedMax)
 					return err(409, "artifacts-full", "unreferenced");
-			}
-
-			await storeContent(this.deps.workspaceRoot, projectId, content, {
-				name,
-				bytes: content.length,
-				source: event.source,
+				reserved = usage.need;
+				this.reservations.set(projectId, (this.reservations.get(projectId) ?? 0) + reserved);
+				return null;
 			});
+			if (pre) return pre;
+
+			await storeContent(this.deps.workspaceRoot, projectId, content, meta);
 
 			return await this.deps.store.critical(projectId, async (tx) => {
 				const known = tx.state.artifacts.get(sha);
@@ -449,7 +500,17 @@ export class ProjectArtifacts {
 			const h = logErrorToHttp(e);
 			if (h) return h;
 			if (e instanceof ArtifactStoreCorrupt) return err(409, "artifact-corrupt");
+			if (e instanceof ArtifactUsageUnverifiable)
+				return err(503, "artifact-store-unverifiable", "unreferenced");
 			throw e;
+		} finally {
+			// After storeContent has settled (its files linked or its temps
+			// removed): from here the bytes are measured on disk instead.
+			if (reserved > 0) {
+				const left = (this.reservations.get(projectId) ?? 0) - reserved;
+				if (left > 0) this.reservations.set(projectId, left);
+				else this.reservations.delete(projectId);
+			}
 		}
 	}
 

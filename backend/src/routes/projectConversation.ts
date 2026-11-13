@@ -19,6 +19,7 @@ import { logErrorToHttp } from "../projects/conversation/api.js";
 import type { ProjectArtifacts } from "../projects/conversation/artifacts.js";
 import { contentDispositionFilename } from "../workspaceFiles.js";
 import { holdSlotUntilResponseEnds } from "./files.js";
+import { holdSlotUntilWorkAndResponseEnd } from "./git.js";
 import type { RouteContext } from "./shared.js";
 
 // Artifact reads and registrations each hold ≤ 1 MiB in memory (§6.1); the
@@ -108,19 +109,35 @@ export function registerProjectConversationRoutes(router: Router, ctx: RouteCont
 	// ── D2 artifacts (§6), mounted only with PROJECT_ARTIFACTS_ENABLED effective ──
 	if (!("artifacts" in holder)) return;
 	const slots = new InFlightLimiter(ARTIFACT_IN_FLIGHT_PER_USER, ARTIFACT_IN_FLIGHT_TOTAL);
-	const withSlot = (req: Request, res: Response): boolean => {
-		const outcome = holdSlotUntilResponseEnds(slots, (req as AuthedRequest).userId, res);
+	/**
+	 * A slot, else the answer has been sent. `"response"`: held until the
+	 * response ends — right for a read, whose only cost is the bytes the
+	 * client drains. `"work"`: held until the returned `done()` is called AND
+	 * the response has ended. A registration keeps reading, copying and
+	 * appending after its client disconnects (nothing cancels it), and §6.2's
+	 * bound on unreferenced bytes is "budget + what in-flight registrations
+	 * copy", so the slots must count those registrations until they settle,
+	 * not until their client goes away.
+	 */
+	const withSlot = (req: Request, res: Response, hold: "response" | "work") => {
+		const userId = (req as AuthedRequest).userId;
+		const outcome =
+			hold === "work"
+				? holdSlotUntilWorkAndResponseEnd(slots, userId, res)
+				: holdSlotUntilResponseEnds(slots, userId, res);
 		if (outcome === "busy") {
 			res.setHeader("Retry-After", "1");
 			res.status(429).json({ error: "busy" });
 		}
-		return outcome === "held";
+		if (outcome === "busy" || outcome === "gone") return null;
+		return typeof outcome === "function" ? outcome : () => {};
 	};
 	/** Owner + started artifacts + an in-flight slot, else the answer has been sent. */
 	const artifactGate = async (
 		req: Request,
 		res: Response,
-	): Promise<{ art: ProjectArtifacts; userId: string } | null> => {
+		hold: "response" | "work",
+	): Promise<{ art: ProjectArtifacts; userId: string; done: () => void } | null> => {
 		const g = await gate(req, res);
 		if (!g) return null;
 		const art = holder.artifacts;
@@ -128,7 +145,8 @@ export function registerProjectConversationRoutes(router: Router, ctx: RouteCont
 			res.status(503).json({ error: "project-writer-unavailable" });
 			return null;
 		}
-		return withSlot(req, res) ? { art, userId: g.userId } : null;
+		const done = withSlot(req, res, hold);
+		return done ? { art, userId: g.userId, done } : null;
 	};
 	const failed = (what: string, res: Response, err: unknown) => {
 		const h = logErrorToHttp(err);
@@ -145,9 +163,14 @@ export function registerProjectConversationRoutes(router: Router, ctx: RouteCont
 		projectIp,
 		async (req: Request, res: Response) => {
 			try {
-				const g = await artifactGate(req, res);
+				const g = await artifactGate(req, res, "work");
 				if (!g) return;
-				const r = await g.art.register(g.userId, req.params.pid as string, req.body);
+				let r: Awaited<ReturnType<ProjectArtifacts["register"]>>;
+				try {
+					r = await g.art.register(g.userId, req.params.pid as string, req.body);
+				} finally {
+					g.done();
+				}
 				res.status(r.status).json(r.body);
 			} catch (err) {
 				failed("register", res, err);
@@ -160,7 +183,7 @@ export function registerProjectConversationRoutes(router: Router, ctx: RouteCont
 		projectIp,
 		async (req: Request, res: Response) => {
 			try {
-				const g = await artifactGate(req, res);
+				const g = await artifactGate(req, res, "response");
 				if (!g) return;
 				const r = await g.art.content(req.params.pid as string, req.params.sha as string);
 				if (!("ok" in r)) {

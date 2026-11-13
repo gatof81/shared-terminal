@@ -22,12 +22,13 @@ import {
 	artifactLine,
 	composeText,
 	isText,
+	metaBuffer,
 	ProjectArtifacts,
 	sanitizeName,
 	sha256Hex,
 } from "./artifacts.js";
 import type { ProjectBindings } from "./fanout.js";
-import type { LogLine } from "./log.js";
+import { type LogLine, ProjectLogError } from "./log.js";
 import { projectDir } from "./paths.js";
 import { ProjectConversationStore } from "./store.js";
 import type { WriterLock } from "./writerLock.js";
@@ -412,19 +413,202 @@ describe("a log that cannot take the event (§6.2)", () => {
 		expect(await artifactEvents()).toHaveLength(1);
 	});
 
-	it("leftovers of dead writes count toward the budget; referenced content does not", async () => {
-		unreferencedMax = 200;
+	it("a failed write (EIO on fsync) removes its own temp: nothing left to eat the budget", async () => {
+		unreferencedMax = 400;
 		await restart(64 * 1024);
 		await put("a.txt", "a".repeat(150));
+		const realOpen = fs.open.bind(fs);
+		const spy = vi.spyOn(fs, "open").mockImplementation((async (
+			...args: Parameters<typeof fs.open>
+		) => {
+			const fh = await realOpen(...args);
+			if (String(args[0]).endsWith(".tmp")) {
+				fh.sync = async () => {
+					throw Object.assign(new Error("EIO: injected"), { code: "EIO" });
+				};
+			}
+			return fh;
+		}) as typeof fs.open);
+		try {
+			await expect(reg("a.txt")).rejects.toThrow(/EIO/);
+		} finally {
+			spy.mockRestore();
+		}
+		expect(await diskBytes()).toBe(0);
+		expect(await artifactEvents()).toEqual([]);
+		// The episode over, the same registration goes through (nothing blocks it).
+		for (let i = 0; i < 3; i++) {
+			await put(`n${i}.txt`, String(i).repeat(100));
+			expect((await reg(`n${i}.txt`)).status).toBe(201);
+		}
+		expect((await reg("a.txt")).status).toBe(201);
+	});
+
+	it("the artifacts directory is listed only when the content would be new bytes", async () => {
+		await restart(64 * 1024);
+		await put("a.txt", "a".repeat(50));
+		await put("a2.txt", "a".repeat(50));
+		expect((await reg("a.txt")).status).toBe(201);
+		const spy = vi.spyOn(fs, "readdir");
+		try {
+			expect(await reg("a.txt")).toMatchObject({ status: 200, body: { replayed: true } });
+			expect((await reg("a2.txt")).status).toBe(201); // known bytes, another source
+			expect(spy.mock.calls.filter((c) => String(c[0]) === dir())).toEqual([]);
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
+	/** What a registration of `rel` with `body` adds: content + its exact metadata file. */
+	const needOf = (rel: string, body: string) =>
+		body.length +
+		metaBuffer(sha256Hex(body), {
+			name: sanitizeName(rel),
+			bytes: body.length,
+			source: { kind: "owner", sid: SID, path: rel, agent_id: DEV },
+		}).length;
+	/** Every append of an `artifact` event is refused: each admitted copy becomes an orphan. */
+	const refuseArtifactAppends = () => {
+		const orig = store.critical.bind(store);
+		store.critical = (async (pid: string, fn: Parameters<typeof orig>[1]) =>
+			orig(pid, (tx) =>
+				fn({
+					state: tx.state,
+					assertAppendable: (e, o) => tx.assertAppendable(e, o),
+					append: async (e, o) => {
+						if (e.some((x) => x.ev === "artifact"))
+							throw new ProjectLogError("project-log-full", "injected");
+						return tx.append(e, o);
+					},
+				}),
+			)) as typeof store.critical;
+	};
+
+	it("(a) crash leftovers on disk after a restart — content, .json and temp — all count, exactly", async () => {
+		await restart(64 * 1024);
+		await store.view(PID);
+		await fs.mkdir(dir(), { recursive: true });
+		const orphan = "o".repeat(100);
+		const osha = sha256Hex(orphan);
+		await fs.writeFile(path.join(dir(), osha), orphan);
+		await fs.writeFile(path.join(dir(), `${osha}.json`), `${JSON.stringify({ sha256: osha })}\n`);
+		await fs.writeFile(path.join(dir(), ".0123456789abcdef.tmp"), "t".repeat(70));
+		// A referenced artifact next to them is not counted (the quota counts it).
+		await put("r.txt", "r".repeat(300));
+		expect((await reg("r.txt")).status).toBe(201);
+		const leftovers = 100 + (await fs.stat(path.join(dir(), `${osha}.json`))).size + 70;
+		// A new process: no reservation survives, only the disk.
+		await restart(64 * 1024);
 		await put("b.txt", "b".repeat(60));
-		expect((await reg("a.txt")).status).toBe(201); // referenced: 150 B + metadata, not counted
-		await fs.writeFile(path.join(dir(), ".deadbeefdeadbeef.tmp"), "t".repeat(150));
+		const need = needOf("b.txt", "b".repeat(60));
+		unreferencedMax = leftovers + need - 1; // one byte short: any part uncounted would pass
 		expect(await reg("b.txt")).toMatchObject({
 			status: 409,
 			body: { error: "artifacts-full", detail: "unreferenced" },
 		});
-		expect(await fs.readdir(dir())).toContain(".deadbeefdeadbeef.tmp");
-		unreferencedMax = 300;
+		expect(await fs.readdir(dir())).not.toContain(sha256Hex("b".repeat(60)));
+		unreferencedMax = leftovers + need;
 		expect((await reg("b.txt")).status).toBe(201);
+		// Nothing was cleaned up.
+		expect(await fs.readdir(dir())).toEqual(
+			expect.arrayContaining([osha, `${osha}.json`, ".0123456789abcdef.tmp"]),
+		);
+	});
+
+	it("(b) N parallel distinct registrations near the budget: the overshoot is bounded by the budget, not by N", async () => {
+		await restart(64 * 1024);
+		refuseArtifactAppends();
+		const N = 8;
+		const bodies = Array.from({ length: N }, (_, i) => String.fromCharCode(97 + i).repeat(100));
+		for (let i = 0; i < N; i++) await put(`p${i}.txt`, bodies[i] as string);
+		const need = needOf("p0.txt", bodies[0] as string);
+		unreferencedMax = 3 * need + need / 2; // room for 3, not 4
+		const rs = await Promise.all(bodies.map((_, i) => reg(`p${i}.txt`)));
+		const codes = rs.map(
+			(r) =>
+				(r.body as { error?: string; detail?: string }).detail ??
+				(r.body as { error?: string }).error,
+		);
+		expect(codes.filter((c) => c === "project-log-full")).toHaveLength(3);
+		expect(codes.filter((c) => c === "unreferenced")).toHaveLength(N - 3);
+		expect(await diskBytes()).toBe(3 * need);
+		expect(await diskBytes()).toBeLessThanOrEqual(unreferencedMax);
+		expect((await fs.readdir(dir())).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+		// A second wave measures the disk those left: nothing more is admitted.
+		const again = await Promise.all(bodies.slice(3).map((_, i) => reg(`p${i + 3}.txt`)));
+		expect(again.every((r) => (r.body as { detail?: string }).detail === "unreferenced")).toBe(
+			true,
+		);
+		expect(await diskBytes()).toBe(3 * need);
+	});
+
+	it("(d) reusing existing content — replays, other sources, in parallel — writes no metadata or temp", async () => {
+		await restart(64 * 1024);
+		await put("a.txt", "a".repeat(80));
+		expect((await reg("a.txt")).status).toBe(201);
+		const sha = sha256Hex("a".repeat(80));
+		const before = await diskBytes();
+		for (let i = 0; i < 6; i++) await put(`c${i}.txt`, "a".repeat(80));
+		const rs = await Promise.all([
+			reg("a.txt"),
+			reg("a.txt"),
+			...Array.from({ length: 6 }, (_, i) => reg(`c${i}.txt`)),
+		]);
+		expect(rs.map((r) => r.status).sort()).toEqual([200, 200, 201, 201, 201, 201, 201, 201]);
+		expect((await fs.readdir(dir())).sort()).toEqual([sha, `${sha}.json`].sort());
+		expect(await diskBytes()).toBe(before);
+		// An orphan of the same bytes is reused the same way: its existing
+		// .json is never rewritten, no second file appears.
+		await restart(64 * 1024);
+		refuseArtifactAppends();
+		await put("o.txt", "o".repeat(80));
+		expect(await reg("o.txt")).toMatchObject({ status: 409 });
+		const withOrphan = await diskBytes();
+		const n = (await fs.readdir(dir())).length;
+		for (let i = 0; i < 4; i++) expect(await reg("o.txt")).toMatchObject({ status: 409 });
+		expect(await diskBytes()).toBe(withOrphan);
+		expect((await fs.readdir(dir())).length).toBe(n);
+	});
+
+	it("(e) usage that cannot be measured refuses new bytes (503), copying nothing", async () => {
+		await restart(64 * 1024);
+		await put("a.txt", "a".repeat(40));
+		expect((await reg("a.txt")).status).toBe(201);
+		await put("a2.txt", "a".repeat(40));
+		await put("b.txt", "b".repeat(40));
+		const shaB = sha256Hex("b".repeat(40));
+		const unverifiable = { status: 503, body: { error: "artifact-store-unverifiable" } };
+
+		// readdir fails.
+		const rd = vi
+			.spyOn(fs, "readdir")
+			.mockRejectedValue(Object.assign(new Error("EACCES: injected"), { code: "EACCES" }));
+		try {
+			expect(await reg("b.txt")).toMatchObject(unverifiable);
+			// Known bytes need no measurement: unaffected.
+			expect((await reg("a2.txt")).status).toBe(201);
+		} finally {
+			rd.mockRestore();
+		}
+		// An entry that cannot be stat'ed.
+		await fs.writeFile(path.join(dir(), ".feedfacefeedface.tmp"), "x");
+		const realLstat = fs.lstat.bind(fs);
+		const ls = vi.spyOn(fs, "lstat").mockImplementation((async (
+			p: Parameters<typeof fs.lstat>[0],
+		) => {
+			if (String(p).endsWith(".feedfacefeedface.tmp"))
+				throw Object.assign(new Error("EIO: injected"), { code: "EIO" });
+			return realLstat(p);
+		}) as typeof fs.lstat);
+		try {
+			expect(await reg("b.txt")).toMatchObject(unverifiable);
+		} finally {
+			ls.mockRestore();
+		}
+		// An entry that is not a regular file: its size says nothing.
+		await fs.mkdir(path.join(dir(), "stray"));
+		expect(await reg("b.txt")).toMatchObject(unverifiable);
+		expect(await fs.readdir(dir())).not.toContain(shaB);
+		expect(await artifactEvents()).toHaveLength(2);
 	});
 });
