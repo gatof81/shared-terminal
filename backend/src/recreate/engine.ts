@@ -2123,8 +2123,15 @@ export class RecreationEngine {
 			// As `recreate()`: no durable transition starts after `stop()` (E5);
 			// an `open` record left by a late-failing write stays for D8.
 			if (!this.stopped) {
+				// A begin() that wrote before failing (an fsync error past its
+				// rename) already moved the previous record — the one holding
+				// `retained` — into history. Nothing was done, so O is still the
+				// retained container: carry it over, or the record forgets it and
+				// the retained-pending / retained-present gates stop applying.
 				await this.deps.attempts
-					.resolve(sessionId, attemptId, { kind: "rolled-back" }, "begin failed; no effects")
+					.resolve(sessionId, attemptId, { kind: "rolled-back" }, "begin failed; no effects", {
+						retained,
+					})
 					.catch(() => undefined);
 			}
 			// As `recreate()`: `unresolved` unless it is CONFIRMED that this
