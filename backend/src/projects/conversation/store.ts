@@ -45,6 +45,8 @@ export function projectConversationFlagEnabled(raw: string | undefined): boolean
 export interface CriticalTx {
 	readonly state: Folded;
 	append(events: NewEvent[], opts?: { allowMargin?: boolean }): Promise<LogLine[]>;
+	/** Throws what `append` would refuse with before writing; writes nothing (log.ts). */
+	assertAppendable(events: NewEvent[], opts?: { allowMargin?: boolean }): void;
 }
 
 interface OpenProject {
@@ -155,6 +157,7 @@ export class ProjectConversationStore {
 				this.emit(pid, lines);
 				return lines;
 			},
+			assertAppendable: (events, o) => p.log.assertAppendable(events, o),
 		};
 		return fn(tx);
 	}

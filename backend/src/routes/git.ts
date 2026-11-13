@@ -79,7 +79,7 @@ function sendGitError(res: Response, err: GitError): void {
  * returned function is what the handler calls when its work is done
  * (success or failure); release happens once the response has ended too.
  */
-function holdSlotUntilWorkAndResponseEnd(
+export function holdSlotUntilWorkAndResponseEnd(
 	slots: InFlightLimiter,
 	userId: string,
 	res: Response,

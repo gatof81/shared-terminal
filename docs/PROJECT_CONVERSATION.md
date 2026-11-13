@@ -1,8 +1,9 @@
 # Conversación de proyecto por el Composer (D1–D3)
 
 Estado: **contrato vinculante, v0.3** (aprobado por el responsable el 2026-11-12), con las
-precisiones de v0.3.1 (D1-b) y v0.3.2 (D2, propuestas en su PR). D1 está en main y activo en VM100;
-D2 está en borrador, apagado; D3 no empezó.
+precisiones de v0.3.1 (D1-b) y v0.3.2 (D2, propuestas en su PR), y la enmienda **v0.3.3** (D2, fix F4)
+**propuesta y pendiente de aprobación del responsable**. D1 está en main y activo en VM100; D2 está
+en borrador, apagado; D3 no empezó.
 
 - **v0.1** pasó una revisión adversarial independiente: 2 BLOCKER, 9 SHOULD-FIX y 1 NIT, todos
   incorporados.
@@ -32,6 +33,25 @@ D2 está en borrador, apagado; D3 no empezó.
     colocados bytes no verificados (§6.4 paso 4);
   - los hashes se verifican antes de tocar el destino;
   - `artifact_error` nombra la causa de un `artifact-failed`.
+- **v0.3.3 (enmienda propuesta en el PR del fix F4; pendiente de aprobación del responsable)** acota
+  el disco que un registro rechazado puede dejar, sin borrar nada ni tocar el tope del proyecto:
+  - antes de copiar, la misma sección crítica que decide el tope pregunta al registro si aceptaría el
+    evento. Si no, la respuesta es la que daría el `append` (409 `project-log-full`, 503
+    `persist-failed`) y no se escribe nada (§6.1.1);
+  - los bytes sin referencia bajo `artifacts/` (contenido, `.json` y temporales, medidos en disco, así
+    que cuentan también los restos de una muerte anterior) tienen un presupuesto de 16 MiB. Toda
+    escritura bajo `artifacts/`, temporales incluidos, está reservada contra él antes de empezar, así
+    que la cota es **a lo sumo 16 MiB de contenido sin referencia, contando cada inodo una vez,
+    también con escrituras en curso**. La medición de admisión puede contar de más los enlaces duros,
+    lo que solo adelanta un rechazo (§6.2). Un
+    registro que agregaría bytes nuevos más allá de él recibe 409 `artifacts-full` con
+    `detail: "unreferenced"`, antes de copiar (§6.2);
+  - reutilizar un contenido que ya está en disco (registrado o no) no escribe nada, ni temporal: solo
+    verifica el existente;
+  - medición y reserva en la misma sección crítica; si el consumo no se puede medir, 503
+    `artifact-store-unverifiable` (falla cerrada);
+  - un temporal propio de una escritura fallida se borra (nunca fue publicado), y la ranura en vuelo
+    de un alta se libera cuando el alta terminó **y** la respuesta terminó, no cuando el cliente se va.
 
 Decisión que lo origina (responsable, 2026-11-11, sobre la evaluación de B en #512 a las 16:57Z):
 
@@ -563,9 +583,19 @@ asunto de la UI.
   - 403 `artifact-restricted`;
   - 404 `artifact-not-found` (ausente, link o fuera del workspace: la misma respuesta, como en Files);
   - 409 `agent-not-bound`, `artifacts-full`, `artifact-corrupt`;
+  - **v0.3.3:** 409 `project-log-full` (también 409 `project-log-unverifiable`), cuando el registro no
+    aceptaría el evento. Se decide **antes de copiar**, en la misma sección crítica que el tope;
+  - **v0.3.3:** 409 `artifacts-full` con `detail: "unreferenced"`, cuando los bytes sin referencia ya
+    en disco, más los reservados por altas en curso, más lo que esta agregaría, pasarían el
+    presupuesto de §6.2. Un contenido que ya está en disco no agrega bytes y no se rechaza por esto;
+  - **v0.3.3:** 503 `artifact-store-unverifiable` (`detail: "unreferenced"`), cuando ese consumo no se
+    puede medir (error de `readdir`/`lstat`, una entrada que no es archivo regular). Falla cerrada: no
+    se copia nada; un contenido ya registrado no necesita medición y no se afecta;
   - 413 `artifact-too-large`;
   - 415 `artifact-not-text` (también un archivo vacío);
-  - 429 `busy`;
+  - 429 `busy`. **v0.3.3:** la ranura de un alta se devuelve cuando el alta terminó (archivos
+    publicados o temporales borrados) **y** la respuesta terminó. Un cliente que se desconecta o un
+    timeout HTTP no la libera antes, porque el alta sigue copiando;
   - 503 `binding-unverified` o `persist-failed`.
 
 `GET /api/projects/:pid/conversation/artifacts/:sha256`
@@ -593,6 +623,62 @@ Las dos rutas tienen además ranuras en vuelo (2 por usuario, 8 por proceso, com
   - Un archivo de contenido sin evento, por una muerte entre los dos pasos o por un rechazo en el
     tope, queda sin referencia. No es visible por el API, lo reutiliza el próximo registro de los
     mismos bytes y no se borra (§9).
+  - **v0.3.3: presupuesto de bytes sin referencia.** Lo que el registro ya rechazaría se rechaza
+    antes de copiar (§6.1.1). Aun así puede quedar contenido sin referencia: el registro se llena (o
+    se envenena, o otra alta toma el tope) entre la comprobación previa y el `append`, o el proceso
+    muere entre los dos pasos. Ese contenido tampoco se borra: un borrado competiría con un alta
+    concurrente de los mismos bytes que encontró el archivo ya publicado y está por escribir su
+    evento. En su lugar:
+    - **Qué cuenta.** Toda entrada de `artifacts/` que ningún evento `artifact` referencia: un
+      contenido, su `.json` y cualquier otra cosa (temporales de una escritura muerta). Se mide **en
+      disco**, así que los restos de un proceso anterior cuentan igual que los de este.
+    - **Cómo se admite.** En la sección crítica de la comprobación previa se lee primero el total
+      reservado por las altas en curso del proyecto, después se mide el disco, y se admite solo si
+      `medido + reservado + lo que esta agrega ≤ PROJECT_ARTIFACTS_UNREFERENCED_MAX_BYTES` (16 MiB).
+      Lo que agrega es el contenido y su `.json`, cada uno solo si su nombre final no existe. Al
+      admitir, esos bytes se reservan; la reserva se devuelve cuando el alta terminó de escribir
+      (publicado o temporal borrado), y desde ahí esos bytes se miden en disco. Dos altas nunca
+      deciden sobre la misma medición.
+    - **Si no se puede medir** (error de `readdir`/`lstat`, entrada que no es archivo regular): 503
+      `artifact-store-unverifiable`, sin copiar nada.
+    - **Solo se escribe lo reservado.** Un alta escribe (por temporal + `link`) únicamente las partes
+      que reservó: el contenido y/o su `.json` cuyo nombre final no existía al medir. Una parte que ya
+      existía solo se verifica (hash del contenido, `sha256` del `.json`); nunca se republica ni abre
+      un temporal. Un `.json` ausente no reservado se acepta (es informativo). Reutilizar un contenido
+      existente (repetición, otro origen, en paralelo, o un huérfano) no escribe ningún byte.
+    - **Reparación.** Un sha256 que el registro referencia pero cuyo archivo de contenido **falta**
+      (apartado por un restore a `.restore-evidence/`, daño de disco) se repara con los mismos bytes.
+      El alta, también una repetición, reserva `bytes` (y su `.json` si falta) como un contenido nuevo
+      y lo escribe con `link` sin pisar al nombre libre. Una vez enlazado está referenciado y deja de
+      contar. Si no cabe en el presupuesto: 409 `artifacts-full` `{detail: "unreferenced"}`. Un archivo
+      **presente** que no coincide con su nombre nunca se reemplaza: 409 `artifact-corrupt`, nada
+      escrito. Una repetición de un archivo presente no lee nada y sigue en 200; el `GET` se niega a
+      servir esos bytes.
+    - **La cota, exacta.** En todo momento, el contenido sin referencia bajo `artifacts/` es **a lo sumo
+      `PROJECT_ARTIFACTS_UNREFERENCED_MAX_BYTES` (16 MiB), contando cada inodo una vez**, escrituras en
+      curso incluidas. Cada escritura en curso es de un alta admitida y no supera su reserva, y cada
+      admisión cumple `medido + reservado + lo suyo ≤ 16 MiB`. No hay término aparte de "escrituras
+      en vuelo": las ranuras de la ruta, sostenidas hasta que el alta termina, limitan la memoria y el
+      trabajo, no este presupuesto. Precisiones:
+      - la unidad es el tamaño de archivo (`st_size`) de cada inodo, no los bloques del sistema de
+        archivos ni la entrada del directorio;
+      - la **medición de admisión** suma `st_size` por **entrada**, así que puede contar de más los
+        enlaces duros. Entre el `link` de un temporal a su nombre final y el `unlink` del temporal,
+        los dos nombres comparten inodo y la medición los cuenta dos veces. Una suma por entrada no es
+        literalmente ≤ 16 MiB en ese intervalo; el contenido por inodo sí. El exceso es solo de la
+        medición: conservador, solo puede rechazar antes, nunca admitir de más;
+      - lo que un operador ponga a mano en el directorio también cuenta. Algo que no sea archivo
+        regular deja la medición en 503.
+    - **Tras una muerte o un reinicio.** Solo una escritura reservada puede dejar un temporal: la
+      reutilización no abre ninguno. Ese temporal se mide en disco desde el arranque siguiente, así
+      que reinicios repetidos no lo hacen crecer fuera del presupuesto. Un temporal de una escritura
+      propia que falla (`write`/`fsync`/relectura/`link`) se borra. Tiene nombre aleatorio `O_EXCL` y
+      nunca se publicó, así que nada puede referenciarlo, y no es una eliminación de artefactos. Si
+      ese borrado falla, se registra en el log y el temporal queda contado.
+    - Un contenido que ya está en disco no agrega bytes. Registrarlo lo vuelve referenciado y libera
+      su parte del presupuesto.
+    - Nada se libera solo y no hay política de retención nueva. Pasado el presupuesto, quitar archivos
+      sin referencia es una decisión del operador (§9).
 
 ### 6.3 Lo que lleva el mensaje
 
@@ -1228,8 +1314,11 @@ type RegisterArtifactBody = { agentId: string; path: string /* relativo al works
 ```
 
 Errores: 400 `invalid-body`; 403 `artifact-restricted`; 404 `artifact-not-found`; 409 `agent-not-bound`,
-`artifacts-full`, `artifact-corrupt`, `foreign-session`; 413 `artifact-too-large`; 415
-`artifact-not-text`; 429 `busy`; 503 `binding-unverified`, `persist-failed`. Ninguno escribe nada.
+`artifacts-full` (v0.3.3: `detail: "unreferenced"` por el presupuesto de §6.2), `artifact-corrupt`,
+`foreign-session`, `project-log-full` y `project-log-unverifiable` (v0.3.3, antes de copiar); 413
+`artifact-too-large`; 415 `artifact-not-text`; 429 `busy`; 503 `binding-unverified`, `persist-failed`,
+`artifact-store-unverifiable` (v0.3.3). Ninguno escribe nada, salvo lo que §6.2 acota como contenido
+sin referencia (a lo sumo 16 MiB contando cada inodo una vez, escrituras en curso incluidas).
 
 **`POST …/messages` con adjuntos**: 400 `too-many-artifacts` / `artifact-unknown` (`detail` = el sha256)
 antes de escribir nada.
