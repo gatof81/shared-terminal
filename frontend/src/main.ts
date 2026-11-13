@@ -81,6 +81,7 @@ import {
 } from "./uiShell.js";
 import { forgetAllLastConversationTitles } from "./viewPolicy.js";
 import { getView, isOverlayActive, onViewChange, overlayLabel } from "./viewSwitch.js";
+import { initVvDebug } from "./vvDebug.js";
 
 // ── DOM refs ────────────────────────────────────────────────────────────────
 
@@ -190,6 +191,8 @@ function syncViewportHeight() {
 	else delete root.dataset.kb;
 }
 syncViewportHeight();
+// `?vvdebug=1`: on-device measurements of the keyboard viewport (#616).
+initVvDebug();
 // `scroll` matters on its own: Safari can pan (offsetTop) without a
 // height change, e.g. moving focus between fields with the keyboard up.
 window.visualViewport?.addEventListener("resize", syncViewportHeight);
