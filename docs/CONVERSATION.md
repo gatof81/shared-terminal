@@ -1394,8 +1394,9 @@ y `/tmp` se transmite a `N` antes de su primer arranque.
   mínima** (`RECREATE_CLI_MIN_VERSION`, por defecto 2.1.308, la más baja validada; debe ser una versión
   validada) o que está **denegado** (`RECREATE_CLI_DENY`); el bloqueo lleva `detail` (`unreadable`,
   `below-min:X`, `denied:X`, `not-a-stable-release:X`). Una versión futura desconocida **no** bloquea.
-  `off` vuelve a la regla anterior: solo las validadas, {2.1.308, 2.1.314, 2.1.316}, que el job
-  `cli-variants` del workflow Session Image sigue verificando (el mismo Dockerfile con cada versión: el
+  `off` vuelve a la regla anterior: solo las validadas, {2.1.308, 2.1.314, 2.1.316, 2.1.322} (2.1.322,
+  el CLI de la sesión A, #577), que el job `cli-variants` del workflow Session Image sigue verificando
+  como cobertura informativa, no como puerta (el mismo Dockerfile con cada versión: el
   smoke de conversación completo —su fase 11d es la validación de §2.7.5—, el de recreación con un
   traslado cuya `N` ejecuta ese CLI desde el workspace, y el del composer). Lo que la regla abierta no
   prueba: que un CLI futuro lea `/etc/st-control` igual; el job y el canario diario lo informan, y una

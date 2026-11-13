@@ -21,6 +21,8 @@
  * recreation smoke (a carry-over whose N runs that CLI from the
  * workspace) and the composer smoke against it, on every change to this
  * directory. A version leaves this set when that job stops passing for it.
+ * 2.1.322 (owner, 2026-11-10/11, #577): session A's CLI, kept under the
+ * same job so its coverage does not depend on the open floor below.
  *
  * **Policy since 2026-11-10 (owner): minimum + deny list, not an exact set.**
  * Requiring every new CLI release to be validated before a session can be
@@ -46,6 +48,7 @@ export const CONTROL_MARKER_VALIDATED_CLI: ReadonlySet<string> = new Set([
 	"2.1.308",
 	"2.1.314",
 	"2.1.316",
+	"2.1.322",
 ]);
 
 export interface RecreateCliPolicy {
