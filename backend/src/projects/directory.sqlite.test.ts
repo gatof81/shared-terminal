@@ -342,8 +342,8 @@ describe("migration v19", () => {
 			]),
 		);
 		expect(names("trigger")).toEqual(["trg_project_agent_creation", "trg_project_agent_removed"]);
-		const v = db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get() as { v: number };
-		expect(v.v).toBe(19);
+		// Recorded (not necessarily the latest: later migrations append after it).
+		expect(count("SELECT COUNT(*) AS n FROM schema_migrations WHERE version = 19")).toBe(1);
 		const { dbm } = await load();
 		await dbm.migrateDb();
 		// Every statement re-applied directly (a crash before the ledger INSERT).
@@ -382,7 +382,8 @@ describe("migration v19", () => {
 		db.exec("PRAGMA foreign_keys = ON");
 		const { dbm } = await load();
 		const all = dbm.MIGRATIONS;
-		for (const m of all) if (m.version < 19) await m.apply();
+		// Every migration but v19 (later ones may add columns of their own).
+		for (const m of all) if (m.version !== 19) await m.apply();
 		expect({
 			sessions: cols("sessions"),
 			users: cols("users"),

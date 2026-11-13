@@ -348,6 +348,7 @@ export class FakeD1 implements RecreateD1Port {
 		container_id: O_ID,
 		container_name: CANONICAL,
 		conversation_requested: 1,
+		recreate_fence: 0,
 		ingest_token_hash: "H-old",
 	};
 	config: RecreateSessionConfig = {
@@ -357,7 +358,14 @@ export class FakeD1 implements RecreateD1Port {
 		postStartCmd: null,
 	};
 	casMode: "normal" | "ambiguous-applied" | "ambiguous-not" | "rejected" = "normal";
+	/** How the fence bump answers: `ambiguous-not` = a timeout whose statement never ran. */
+	fenceMode: "normal" | "ambiguous-applied" | "ambiguous-not" | "rejected" = "normal";
 	readonly writes: string[] = [];
+	/**
+	 * A barrier in the adapter (#627): runs before the fence bump is applied
+	 * to the row — a test lands a held commit statement there.
+	 */
+	beforeFence: (() => Promise<void> | void) | null = null;
 	async getRow() {
 		const { ingest_token_hash: _h, ...r } = this.row;
 		return { ...r };
@@ -365,28 +373,48 @@ export class FakeD1 implements RecreateD1Port {
 	async sessionIdByContainerName(name: string) {
 		return name === this.row.container_name ? SID : null;
 	}
-	async cas(_sid: string, o: string, n: string, hash: string): Promise<CasResult> {
+	/**
+	 * `fence` undefined models the statement of a backend before v1.9.4:
+	 * no fence in its guard, no bump (the legacy cases of #627).
+	 */
+	async cas(_sid: string, o: string, n: string, hash: string, fence?: number): Promise<CasResult> {
 		this.writes.push("cas");
 		if (this.casMode === "rejected") return "not-applied";
-		const applies = this.row.container_id === o && this.row.conversation_requested === 1;
+		const applies =
+			this.row.container_id === o &&
+			this.row.conversation_requested === 1 &&
+			(fence === undefined || this.row.recreate_fence === fence);
 		if (this.casMode === "ambiguous-not") return "ambiguous";
 		if (applies) {
 			this.row.container_id = n;
 			this.row.ingest_token_hash = hash;
+			if (fence !== undefined) this.row.recreate_fence++;
 		}
 		if (this.casMode === "ambiguous-applied") return "ambiguous";
 		return applies ? "applied" : "not-applied";
 	}
-	async casBack(_sid: string, from: string, to: string): Promise<CasResult> {
+	async casBack(_sid: string, from: string, to: string, fence?: number): Promise<CasResult> {
 		this.writes.push("casBack");
 		if (this.casMode === "rejected") return "not-applied";
-		const applies = this.row.container_id === from;
+		const applies =
+			this.row.container_id === from && (fence === undefined || this.row.recreate_fence === fence);
 		if (this.casMode === "ambiguous-not") return "ambiguous";
 		if (applies) {
 			this.row.container_id = to;
 			this.row.ingest_token_hash = null;
+			if (fence !== undefined) this.row.recreate_fence++;
 		}
 		if (this.casMode === "ambiguous-applied") return "ambiguous";
+		return applies ? "applied" : "not-applied";
+	}
+	async fence(_sid: string, fence: number): Promise<CasResult> {
+		this.writes.push(`fence(${fence})`);
+		if (this.beforeFence) await this.beforeFence();
+		if (this.fenceMode === "rejected") return "not-applied";
+		if (this.fenceMode === "ambiguous-not") return "ambiguous";
+		const applies = this.row.recreate_fence === fence;
+		if (applies) this.row.recreate_fence++;
+		if (this.fenceMode === "ambiguous-applied") return "ambiguous";
 		return applies ? "applied" : "not-applied";
 	}
 	async getConfig() {
