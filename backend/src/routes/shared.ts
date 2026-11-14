@@ -17,6 +17,7 @@ import type { IdleSweeperStats } from "../idleSweeper.js";
 import { logger } from "../logger.js";
 import type { ProjectConversationApi } from "../projects/conversation/api.js";
 import type { ProjectArtifacts } from "../projects/conversation/artifacts.js";
+import type { ProjectCollab } from "../projects/conversation/collab.js";
 import type { ProjectDirectory } from "../projects/directory.js";
 import { AgentActiveError } from "../projects/directory.js";
 import type { createAuthRateLimiters, RateLimitConfig, UsernameRateLimiter } from "../rateLimit.js";
@@ -77,9 +78,13 @@ export interface RouteContext {
 	// D2 adds `artifacts`, and the KEY is present only when
 	// PROJECT_ARTIFACTS_ENABLED is effective (§1): absent ⇒ no artifact route
 	// is mounted and `features` does not announce it.
+	// The `collab` key exists only when PROJECT_RELAY_ENABLED is effective
+	// (§7.1): absent ⇒ no grant route is mounted and `features` does not
+	// announce it.
 	projectConversation?: {
 		api: ProjectConversationApi | null;
 		artifacts?: ProjectArtifacts | null;
+		collab?: ProjectCollab | null;
 	};
 }
 

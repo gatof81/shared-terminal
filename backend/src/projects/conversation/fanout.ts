@@ -21,7 +21,7 @@
  * that send, and the text still goes only to the fixed session.
  */
 
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { HttpResult } from "../../conversation/composer.js";
 import { normalizeText, validateText } from "../../conversation/composerText.js";
 import { logErrorToHttp } from "./api.js";
@@ -31,7 +31,8 @@ import {
 	ArtifactStoreCorrupt,
 	composeText,
 } from "./artifacts.js";
-import { type DeliveryState, deliveryKey } from "./fold.js";
+import { taskFooter } from "./collabText.js";
+import { type DeliveryState, deliveryKey, type Folded, grantAlive } from "./fold.js";
 import type { LogLine } from "./log.js";
 import type { PlacementResult } from "./placement.js";
 import type { ProjectConversationStore } from "./store.js";
@@ -121,8 +122,27 @@ export interface FanoutDeps {
 			artifacts: ReadonlyArray<ArtifactRef & { content: Buffer }>,
 		): Promise<PlacementResult>;
 	};
+	/**
+	 * D3 (§7), true only with PROJECT_RELAY_ENABLED effective. False/absent ⇒
+	 * a `collab` in the body is 409 `relay-off` and no grant is ever written.
+	 */
+	relay?: boolean;
 	now?: () => number;
 	tHttpMs?: number;
+}
+
+/** §7.2 limits of a consult grant. */
+export const COLLAB_LIMITS = {
+	maxMessages: { min: 2, max: 6, def: 2 },
+	expiresInMin: { min: 5, max: 1440, def: 120 },
+	maxWaitMin: { min: 1, max: 240, def: 60 },
+} as const;
+
+export interface CollabRequest {
+	with: string;
+	maxMessages: number;
+	expiresInMin: number;
+	maxWaitMin: number;
 }
 
 export interface DeliveredRef {
@@ -144,6 +164,8 @@ interface Body {
 	inReplyTo: string | null;
 	/** sha256s, lowercase, in the order sent (§3.4 rule 2). */
 	artifacts: string[];
+	/** D3: the consult this task authorizes (§7.2), or null. */
+	collab: CollabRequest | null;
 }
 
 export interface DeliveryAnswer {
@@ -160,7 +182,31 @@ const err = (status: number, code: string, detail?: string): HttpResult => ({
 	body: detail ? { error: code, detail } : { error: code },
 });
 
-export function parseBody(raw: unknown, artifactsOn = false): Body | HttpResult {
+function parseCollab(raw: unknown, to: readonly string[]): CollabRequest | HttpResult {
+	const bad = (d: string) => err(400, "invalid-body", `collab.${d}`);
+	if (!raw || typeof raw !== "object" || Array.isArray(raw))
+		return err(400, "invalid-body", "collab");
+	const c = raw as Record<string, unknown>;
+	if (c.mode !== "ask") return bad("mode");
+	if (typeof c.with !== "string" || !ID_RE.test(c.with)) return bad("with");
+	const withAgent = c.with.toLowerCase();
+	// §7.2: the task goes to exactly one agent, the initiator, and never to `with`.
+	if (to.length !== 1 || to[0] === withAgent) return bad("with");
+	const num = (k: keyof typeof COLLAB_LIMITS): number | null => {
+		const lim = COLLAB_LIMITS[k];
+		const v = c[k] === undefined ? lim.def : c[k];
+		return typeof v === "number" && Number.isInteger(v) && v >= lim.min && v <= lim.max ? v : null;
+	};
+	const maxMessages = num("maxMessages");
+	const expiresInMin = num("expiresInMin");
+	const maxWaitMin = num("maxWaitMin");
+	if (maxMessages === null) return bad("maxMessages");
+	if (expiresInMin === null) return bad("expiresInMin");
+	if (maxWaitMin === null) return bad("maxWaitMin");
+	return { with: withAgent, maxMessages, expiresInMin, maxWaitMin };
+}
+
+export function parseBody(raw: unknown, artifactsOn = false, relayOn = false): Body | HttpResult {
 	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return err(400, "invalid-body");
 	const b = raw as Record<string, unknown>;
 	if (typeof b.clientMessageId !== "string" || !UUID_V4_RE.test(b.clientMessageId)) {
@@ -213,9 +259,18 @@ export function parseBody(raw: unknown, artifactsOn = false): Body | HttpResult 
 			return err(400, "invalid-body", "inReplyTo");
 		inReplyTo = b.inReplyTo.toLowerCase();
 	}
+	let collab: CollabRequest | null = null;
+	if (b.collab !== undefined && b.collab !== null) {
+		// D3 off: a consult request is refused, never sent as a plain task.
+		if (!relayOn) return err(409, "relay-off");
+		const c = parseCollab(b.collab, to);
+		if ("status" in c) return c;
+		collab = c;
+	}
 	const v = validateText(b.text);
 	if (!v.ok) return err(400, v.code);
 	return {
+		collab,
 		clientMessageId: b.clientMessageId.toLowerCase(),
 		text: b.text,
 		normalized: normalizeText(b.text),
@@ -234,6 +289,18 @@ export function parseBody(raw: unknown, artifactsOn = false): Body | HttpResult 
 export function requestSha256(b: Body): string {
 	const canon = {
 		artifacts: b.artifacts,
+		// Only when present (§7.2): a body without `collab` keeps its v0.3 hash.
+		...(b.collab
+			? {
+					collab: {
+						expires_in_min: b.collab.expiresInMin,
+						max_messages: b.collab.maxMessages,
+						max_wait_min: b.collab.maxWaitMin,
+						mode: "ask",
+						with: b.collab.with,
+					},
+				}
+			: {}),
 		in_reply_to: b.inReplyTo,
 		quote_ref: b.quoteRef
 			? {
@@ -308,7 +375,7 @@ export class ProjectFanout {
 
 	async send(ownerId: string, projectId: string, raw: unknown): Promise<HttpResult> {
 		const started = (this.deps.now ?? Date.now)();
-		const parsed = parseBody(raw, this.deps.artifacts !== undefined);
+		const parsed = parseBody(raw, this.deps.artifacts !== undefined, this.deps.relay === true);
 		if ("status" in parsed) return parsed;
 		const body = parsed;
 		const reqSha = requestSha256(body);
@@ -334,7 +401,24 @@ export class ProjectFanout {
 			const v = validateText(composeText(body.normalized, refs));
 			if (!v.ok) return err(400, v.code);
 		}
-		const sent = composeText(body.normalized, refs);
+		// §7.2: the grant's id and deadline exist before S1 because the protocol
+		// footer names them, and the footer is part of what must pass the text
+		// rules. Nothing is authorized until `grant{created}` is on disk.
+		const grantId = `c-${randomBytes(6).toString("hex")}`;
+		const expiresAt = body.collab
+			? new Date(started + body.collab.expiresInMin * 60_000).toISOString()
+			: "";
+		let sent = composeText(body.normalized, refs);
+		if (body.collab) {
+			sent += taskFooter({
+				grantId,
+				withAgentId: body.collab.with,
+				maxMessages: body.collab.maxMessages,
+				expiresAt,
+			});
+			const v = validateText(sent);
+			if (!v.ok) return err(400, v.code);
+		}
 
 		// ── resolve (§3.2), no lock ──
 		const bindings = await this.deps.bindings(ownerId, projectId).catch(() => undefined);
@@ -385,6 +469,50 @@ export class ProjectFanout {
 			});
 		}
 
+		// §7.2: both participants live, in two different sessions of the owner,
+		// read from the same D1 answer the task's own plan came from.
+		let participants: Array<{
+			agent_id: string;
+			binding_id: string;
+			epoch: number;
+			sid: string;
+		}> | null = null;
+		const bindingsReadAt = new Date((this.deps.now ?? Date.now)()).toISOString();
+		if (body.collab) {
+			const w = bindings.get(body.collab.with);
+			if (!w) return err(400, "invalid-body", "collab.with: not an agent of this project");
+			if (w.removed) return err(409, "collab-unavailable", "agent-removed");
+			if (!w.binding) return err(409, "collab-unavailable", "no-binding");
+			try {
+				const meta = await this.deps.sessionMeta(w.binding.sessionId, ownerId);
+				if (meta.userId !== ownerId) return err(409, "foreign-session");
+			} catch (e) {
+				if (this.deps.isForbidden?.(e)) return err(409, "foreign-session");
+				return err(503, "binding-unverified");
+			}
+			const first = plans[0];
+			// A task that cannot even be planned creates no grant: the answer is the send's.
+			if (first && "binding" in first) {
+				if (first.binding.sid === w.binding.sessionId)
+					return err(409, "collab-unavailable", "same-session");
+				participants = [
+					{
+						agent_id: first.agentId,
+						binding_id: first.binding.binding_id,
+						epoch: first.binding.epoch,
+						sid: first.binding.sid,
+					},
+					{
+						agent_id: body.collab.with,
+						binding_id: w.binding.bindingId,
+						epoch: w.binding.epoch,
+						sid: w.binding.sessionId,
+					},
+				];
+			}
+		}
+		const collab = body.collab && participants ? { ...body.collab, participants } : null;
+
 		// ── S1 ──
 		const msgId = randomUUID();
 		let s1: { replay: HttpResult } | { planned: Array<{ agentId: string; line: LogLine }> };
@@ -397,9 +525,24 @@ export class ProjectFanout {
 					return {
 						replay: {
 							status: 202,
-							body: { msgId: known, replayed: true, deliveries: answerFor(tx.state, m) },
+							body: {
+								msgId: known,
+								replayed: true,
+								deliveries: answerFor(tx.state, m),
+								...(m.grantId ? { grantId: m.grantId } : {}),
+							},
 						},
 					};
+				}
+				if (collab) {
+					// §7.2: one live grant per agent, decided under the same lock
+					// that writes this one — two simultaneous creations make one.
+					const now = (this.deps.now ?? Date.now)();
+					const ids = new Set(collab.participants.map((p) => p.agent_id));
+					for (const g of tx.state.grants.values()) {
+						if (grantAlive(g, now) && g.participants.some((p) => ids.has(p.agent_id)))
+							return { replay: err(409, "agent-in-collab", g.grantId) };
+					}
 				}
 				for (const ref of [body.inReplyTo, body.quoteRef?.msg_id]) {
 					if (ref && !tx.state.messages.has(ref))
@@ -420,6 +563,7 @@ export class ProjectFanout {
 						in_reply_to: body.inReplyTo,
 						artifacts: refs,
 						relay: null,
+						...(collab ? { collab: { grant_id: grantId } } : {}),
 					},
 					...plans.map((p) =>
 						"notSent" in p
@@ -441,6 +585,25 @@ export class ProjectFanout {
 									authorized_by: "owner",
 								},
 					),
+					...(collab
+						? [
+								{
+									ev: "grant",
+									grant_id: grantId,
+									event: "created",
+									mode: "ask",
+									task_msg_id: msgId,
+									initiator: body.to[0] as string,
+									with: collab.with,
+									participants: collab.participants,
+									bindings_read_at: bindingsReadAt,
+									max_messages: collab.maxMessages,
+									max_wait_min: collab.maxWaitMin,
+									expires_at: expiresAt,
+									by: ownerId,
+								},
+							]
+						: []),
 				]);
 				return {
 					planned: lines
@@ -462,12 +625,12 @@ export class ProjectFanout {
 				answers.set(p.agentId, { agentId: p.agentId, state: "not-sent", reason: p.notSent });
 		const runs = s1.planned.map(({ agentId, line }) => {
 			answers.set(agentId, { agentId, state: "planned" });
-			return this.deliver(ownerId, projectId, msgId, agentId, line, sent, refs, answers).catch(
-				() => {
-					// deliver() records its own outcome; an escape here is a log error
-					// already reported in `answers`.
-				},
-			);
+			return this.deliver(ownerId, projectId, msgId, agentId, line, sent, refs, answers, {
+				authorizedBy: "owner",
+			}).catch(() => {
+				// deliver() records its own outcome; an escape here is a log error
+				// already reported in `answers`.
+			});
 		});
 		const budget = Math.max(
 			0,
@@ -487,6 +650,7 @@ export class ProjectFanout {
 				msgId,
 				replayed: false,
 				deliveries: body.to.map((a) => answers.get(a) ?? { agentId: a, state: "planned" }),
+				...(collab ? { grantId } : {}),
 			},
 		};
 	}
@@ -504,7 +668,12 @@ export class ProjectFanout {
 				if (!m || m.requestSha256 !== reqSha) return err(409, "idempotency-conflict");
 				return {
 					status: 202,
-					body: { msgId: known, replayed: true, deliveries: answerFor(tx.state, m) },
+					body: {
+						msgId: known,
+						replayed: true,
+						deliveries: answerFor(tx.state, m),
+						...(m.grantId ? { grantId: m.grantId } : {}),
+					},
 				};
 			});
 		} catch (e) {
@@ -514,7 +683,13 @@ export class ProjectFanout {
 		}
 	}
 
-	private async deliver(
+	/**
+	 * One planned delivery from S2 to S4 (§3.3). Also the path of a D3 relay
+	 * (collab.ts), which passes its own `authorizedBy` and a `gate` that is
+	 * evaluated INSIDE the critical section that writes `sending`: a pause or
+	 * a revocation written before S3 wins and the Composer is never called.
+	 */
+	async deliver(
 		ownerId: string,
 		projectId: string,
 		msgId: string,
@@ -523,6 +698,7 @@ export class ProjectFanout {
 		text: string,
 		refs: readonly ArtifactRef[],
 		answers: Map<string, DeliveryAnswer>,
+		opts: { authorizedBy: string; gate?: (state: Folded) => string | null },
 	): Promise<void> {
 		const fixed = planned.binding as {
 			binding_id: string;
@@ -565,7 +741,7 @@ export class ProjectFanout {
 								reason,
 								...extra,
 								...(placing ? { files_possibly_placed: true } : {}),
-								authorized_by: "owner",
+								authorized_by: opts.authorizedBy,
 							},
 						],
 						{
@@ -606,7 +782,7 @@ export class ProjectFanout {
 								agent_id: agentId,
 								state: "placing",
 								artifacts: refs,
-								authorized_by: "owner",
+								authorized_by: opts.authorizedBy,
 							},
 						],
 						{ allowMargin: true },
@@ -656,23 +832,35 @@ export class ProjectFanout {
 		const c = await matches();
 		const tC = new Date((this.deps.now ?? Date.now)()).toISOString();
 		if (c !== "ok") return notSent(c);
+		let gated: string | null = null;
 		try {
-			await this.deps.store.critical(projectId, (tx) =>
-				tx.append(
+			await this.deps.store.critical(projectId, async (tx) => {
+				gated = opts.gate?.(tx.state) ?? null;
+				await tx.append(
 					[
-						{
-							ev: "delivery",
-							msg_id: msgId,
-							agent_id: agentId,
-							state: "sending",
-							binding_verified_at: tC,
-							...(placed ? { artifacts_placed: placed } : {}),
-							authorized_by: "owner",
-						},
+						gated
+							? {
+									ev: "delivery",
+									msg_id: msgId,
+									agent_id: agentId,
+									state: "not-sent",
+									reason: gated,
+									...(placing ? { files_possibly_placed: true } : {}),
+									authorized_by: opts.authorizedBy,
+								}
+							: {
+									ev: "delivery",
+									msg_id: msgId,
+									agent_id: agentId,
+									state: "sending",
+									binding_verified_at: tC,
+									...(placed ? { artifacts_placed: placed } : {}),
+									authorized_by: opts.authorizedBy,
+								},
 					],
 					{ allowMargin: true },
-				),
-			);
+				);
+			});
 		} catch {
 			// No intent on disk ⇒ never sent (§3.3 3c).
 			set({
@@ -680,6 +868,10 @@ export class ProjectFanout {
 				reason: "persist-failed",
 				...(placing ? { filesPossiblyPlaced: true } : {}),
 			});
+			return;
+		}
+		if (gated) {
+			set({ state: "not-sent", reason: gated });
 			return;
 		}
 		set({ state: "sending" });
@@ -723,7 +915,7 @@ export class ProjectFanout {
 							state: m.state,
 							...(m.reason ? { reason: m.reason } : {}),
 							http: m.http,
-							authorized_by: "owner",
+							authorized_by: opts.authorizedBy,
 						},
 					],
 					{ allowMargin: true },

@@ -104,6 +104,11 @@ services:
       # routes, `artifacts[]` refused with 409, no workspace file read or
       # written. Effective only with PROJECT_CONVERSATION_ENABLED effective.
       - PROJECT_ARTIFACTS_ENABLED=${PROJECT_ARTIFACTS_ENABLED:-}
+      # D3 agent consult (docs/PROJECT_CONVERSATION.md §7). Empty ⇒ off: no grant
+      # routes, `collab` refused with 409, no outbox file read. Effective only
+      # with PROJECT_CONVERSATION_ENABLED effective and the ingest origin check
+      # in `observe` or `true`.
+      - PROJECT_RELAY_ENABLED=${PROJECT_RELAY_ENABLED:-}
       # #562 — who may read `npm run backup` output: unset ⇒ 0700/0600 root only;
       # a numeric GID ⇒ 0750/0640 in that group (the off-host mirror's user).
       - BACKUP_GROUP_GID=${BACKUP_GROUP_GID:-}
