@@ -1079,11 +1079,21 @@ function nextFontSize(current: number): number {
 // triggers an xterm re-layout + refit per tab) defers to the next
 // animation frame and reads the latest value once. A burst of N clicks
 // inside one frame collapses to exactly one apply per terminal.
+// The accessible name starts with the visible text (WCAG 2.5.3: a voice
+// user says what they see — "Aa 14").
+function labelFontSizeBtn(): void {
+	fontSizeBtn.textContent = `Aa ${currentFontSize}`;
+	fontSizeBtn.setAttribute(
+		"aria-label",
+		`Aa ${currentFontSize} — terminal font size, press to change`,
+	);
+}
+
 let fontSizeRafScheduled = false;
 fontSizeBtn.addEventListener("click", () => {
 	currentFontSize = nextFontSize(currentFontSize);
 	localStorage.setItem(FONT_SIZE_KEY, String(currentFontSize));
-	fontSizeBtn.textContent = `Aa ${currentFontSize}`;
+	labelFontSizeBtn();
 	if (fontSizeRafScheduled) return;
 	fontSizeRafScheduled = true;
 	requestAnimationFrame(() => {
@@ -1095,7 +1105,7 @@ fontSizeBtn.addEventListener("click", () => {
 });
 // Reflect the persisted size in the label on load so users see e.g. "Aa 16"
 // rather than a generic "Aa" after they've picked their size once.
-fontSizeBtn.textContent = `Aa ${currentFontSize}`;
+labelFontSizeBtn();
 
 // ── Paste modal ─────────────────────────────────────────────────────────────
 // Mobile soft-keyboards don't surface a usable Cmd-V into xterm's helper
