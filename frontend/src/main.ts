@@ -64,6 +64,7 @@ import {
 	openSession,
 	refreshSessions,
 	renderSessionList,
+	sessionListLoaded,
 	updateToolbar,
 } from "./sessionCore.js";
 import { initShellV2 } from "./shellV2.js";
@@ -890,6 +891,9 @@ function setSidebarOpen(open: boolean) {
 	// (only when focus was inside the drawer; otherwise the user has
 	// already moved on and we'd be stealing their focus).
 	if (!isMobile()) return;
+	// The drawer's rows read Claude's state only while it is open
+	// (sidebarPresence.ts): opening it is when they are due.
+	if (open && !wasOpen && sessionListLoaded()) renderSessionList();
 	if (open && !wasOpen) {
 		const firstFocusable = sidebarEl.querySelector<HTMLElement>(
 			'input, button, a, [tabindex]:not([tabindex="-1"])',

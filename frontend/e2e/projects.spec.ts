@@ -210,12 +210,104 @@ test.describe("projects — feature on", () => {
 		await expect(row.locator(".session-usage-wide, .session-usage-compact")).toHaveCount(0);
 		await expect(row.locator(".session-select")).toHaveAttribute(
 			"title",
-			/^my-project\nCPU 0\.13 cores \(12\.5%\) · Mem 256 MiB \(13%\)$/,
+			/^my-project\nCPU 0\.13 cores \(12\.5%\) · Mem 256 MiB \(13%\)\nClaude: Working · via hook · /,
 		);
 		await expect(row.locator(".session-usage-hot")).toHaveCount(0);
 		// Memory running hot is the one usage fact worth a place on the row.
 		backend.session(SESSION_IDS.running)!.memPercent = 91;
 		await expect(row.locator(".session-usage-hot")).toHaveText("Mem 91%", { timeout: 8_000 });
+	});
+
+	test("tree rows: Claude's state as a word and a shape, only where evidence carries it", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		await app.login("alice");
+		await app.openSidebar();
+		const chip = (name: string) => app.sessionRow(name).locator(".session-presence");
+		await expect(chip("my-project")).toHaveText("Working");
+		await expect(chip("hz-architect")).toHaveText("Ready");
+		await expect(chip("hz-design")).toHaveText("Needs you");
+		// Evidence 31 min old is not a live state.
+		await expect(chip("hz-dev-2")).toHaveText("Quiet");
+		await expect(chip("hz-dev-2")).toHaveAttribute("data-presence", "unknown");
+		// A stopped session says "Stopped"; a session with no agent says nothing.
+		await expect(chip("docs")).toHaveCount(0);
+		await expect(chip("scratch")).toHaveCount(0);
+		// Never colour alone: each state's mark has its own geometry.
+		const shape = (name: string) =>
+			chip(name)
+				.locator(".session-presence-mark")
+				.evaluate((el) => {
+					const c = getComputedStyle(el);
+					return [
+						c.width,
+						c.height,
+						c.borderTopStyle,
+						c.borderTopLeftRadius,
+						c.transform !== "none",
+					].join("|");
+				});
+		const shapes = await Promise.all(
+			["my-project", "hz-architect", "hz-design", "hz-dev-2"].map(shape),
+		);
+		expect(new Set(shapes).size).toBe(4);
+		// What it rests on: in the tooltip and the accessible name.
+		const select = app.sessionRow("hz-design").locator(".session-select");
+		await expect(select).toHaveAttribute(
+			"title",
+			/Claude: Needs you · waiting for a permission answer · via hook · /,
+		);
+		await expect(select).toHaveAttribute("aria-label", /agent @designer-hz, Claude: Needs you$/);
+		// A phone row stays one line of secondary text: state · agent.
+		await expect(app.sessionRow("hz-design").locator(".session-meta > *")).toHaveCount(2);
+
+		// The next read, 30 s later, moves the row; in between nothing is asked.
+		const agentReads = () =>
+			backend.requests.filter((r) => r.path === `/projects/${PID}/agents`).length;
+		expect(agentReads()).toBe(1);
+		backend.agent(AGENT_IDS.designer)!.presence = {
+			value: "working",
+			source: "hook",
+			at: new Date(Date.parse(FIXED_NOW) + 20_000).toISOString(),
+		};
+		await page.waitForTimeout(6_000); // one session poll: a re-render, not a read
+		expect(agentReads()).toBe(1);
+		await expect(chip("hz-design")).toHaveText("Needs you");
+		await page.clock.setFixedTime(new Date(Date.parse(FIXED_NOW) + 31_000));
+		await expect(chip("hz-design")).toHaveText("Working", { timeout: 8_000 });
+		expect(agentReads()).toBe(2);
+	});
+
+	test("tree: a folded project's state is not read; an answer that can't be refreshed is not shown as live", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		await page.addInitScript((pid) => {
+			localStorage.setItem("st.sidebarCollapsed", JSON.stringify([pid]));
+		}, PID);
+		await app.login("alice");
+		await app.openSidebar();
+		const agentReads = () =>
+			backend.requests.filter((r) => r.path === `/projects/${PID}/agents`).length;
+		await page.waitForTimeout(6_000);
+		expect(agentReads()).toBe(0);
+		const group = page.locator("#session-list .sgroup", { hasText: "Educación HZ" });
+		await group.locator(".sgroup-toggle").click();
+		const chip = app.sessionRow("my-project").locator(".session-presence");
+		await expect(chip).toHaveText("Working");
+		expect(agentReads()).toBe(1);
+		// The reads start failing: after two missed polls the row stops
+		// repeating what was true then.
+		backend.agentsReadFails = 503;
+		await page.clock.setFixedTime(new Date(Date.parse(FIXED_NOW) + 80_000));
+		await expect(chip).toHaveText("Unknown", { timeout: 8_000 });
+		await expect(app.sessionRow("my-project").locator(".session-select")).toHaveAttribute(
+			"title",
+			/Claude: State unknown · not refreshed for over a minute/,
+		);
 	});
 
 	test("binding unknown (key absent) is never shown as unassigned, nor offered", async ({
