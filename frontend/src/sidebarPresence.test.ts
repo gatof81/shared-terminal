@@ -5,6 +5,7 @@ import {
 	ANSWER_MAX_AGE_MS,
 	clearSidebarPresence,
 	noteProjectAgents,
+	pollIntervalMs,
 	SIDEBAR_PRESENCE_POLL_MS,
 	sidebarPresenceOf,
 	sidebarPresenceVisible,
@@ -200,6 +201,90 @@ describe("sidebarPresence", () => {
 		watchSidebarPresence(["p1"], true);
 		await settle();
 		expect(l.asked).toEqual(["p1", "p1"]);
+	});
+
+	it("a row's answer expires on time with no render and no network (review #642)", async () => {
+		vi.useFakeTimers();
+		try {
+			const changed = vi.fn();
+			const l = fakeLoader();
+			startSidebarPresence(l.load, changed);
+			watchSidebarPresence(["p1"], true);
+			await settle();
+			expect(changed).toHaveBeenCalledTimes(1);
+			// The backend goes away: no session poll, so no render and no read.
+			now += ANSWER_MAX_AGE_MS + 100;
+			vi.advanceTimersByTime(ANSWER_MAX_AGE_MS + 100);
+			expect(changed).toHaveBeenCalledTimes(2);
+			expect(sidebarPresenceOf("p1", "a-p1", "s-p1")?.tone).toBe("unknown");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("coming back to the tab re-judges the rows before any answer", async () => {
+		const changed = vi.fn();
+		let answer = true;
+		const l = fakeLoader(() => (answer ? working() : null));
+		startSidebarPresence(l.load, changed);
+		watchSidebarPresence(["p1"], true);
+		await settle();
+		visible = false;
+		answer = false;
+		now += 60 * 60_000;
+		visible = true;
+		changed.mockClear();
+		sidebarPresenceVisible();
+		// Synchronously: the hour-old "Working" is not what the render draws.
+		expect(changed).toHaveBeenCalledTimes(1);
+		expect(sidebarPresenceOf("p1", "a-p1", "s-p1")?.tone).toBe("unknown");
+		await settle();
+	});
+
+	it("the render asked for after a failed read already draws Unknown", async () => {
+		const seen: Array<string | null> = [];
+		const l = fakeLoader(() => null);
+		startSidebarPresence(l.load, () => {
+			seen.push(sidebarPresenceOf("p1", "a-p1", "s-p1")?.tone ?? null);
+		});
+		watchSidebarPresence(["p1"], true);
+		// While its read is on its way the row waits (no flash of "Unknown").
+		expect(sidebarPresenceOf("p1", "a-p1", "s-p1")).toBeNull();
+		await settle();
+		expect(seen).toEqual(["unknown"]);
+	});
+
+	it("many expanded projects stretch the pace instead of exhausting the rate limit", () => {
+		expect(pollIntervalMs(1)).toBe(30_000);
+		expect(pollIntervalMs(20)).toBe(30_000);
+		expect(pollIntervalMs(40)).toBe(60_000);
+		// Reads per minute never pass 40, whatever is expanded.
+		for (const n of [1, 10, 20, 40, 80, 200])
+			expect((n * 60_000) / pollIntervalMs(n)).toBeLessThanOrEqual(40);
+	});
+
+	it("logout mid-read: the old round ends without effect and the next account's round runs", async () => {
+		let release: () => void = () => {};
+		const load = (pid: string) =>
+			new Promise<void>((resolve) => {
+				// projectsView's own generation guard keeps the late answer
+				// out (it feeds nothing after a logout); here it just ends.
+				void pid;
+				release = resolve;
+			});
+		startSidebarPresence(load, () => {});
+		watchSidebarPresence(["p1"], true);
+		await settle();
+		clearSidebarPresence();
+		release();
+		await settle();
+		expect(sidebarPresenceOf("p1", "a-p1", "s-p1")).toBeNull();
+		// The next account's first round is not blocked by the old one.
+		const l = fakeLoader();
+		startSidebarPresence(l.load, () => {});
+		watchSidebarPresence(["p9"], true);
+		await settle();
+		expect(l.asked).toEqual(["p9"]);
 	});
 
 	it("logout: nothing is kept and nothing more is asked", async () => {

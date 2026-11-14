@@ -214,9 +214,12 @@ async function loadProjects(fresh = false): Promise<void> {
 
 async function loadAgents(pid: string, fresh = false): Promise<void> {
 	const state = entry(agentLists, pid);
+	const myGen = gen;
 	await load(state, () => fetchProjectAgents(pid), fresh).catch(() => {});
-	// The sidebar's rows read Claude's state from the same answers.
-	if (state.data && state.receivedAt !== null) noteProjectAgents(pid, state.data, state.receivedAt);
+	// The sidebar's rows read Claude's state from the same answers — never
+	// one that outlived a logout (`state` is the previous account's then).
+	if (myGen === gen && active && state.data && state.receivedAt !== null)
+		noteProjectAgents(pid, state.data, state.receivedAt);
 	const clock = listClock(state);
 	if (clock && (lastClock === null || clock.receivedAt >= lastClock.receivedAt)) lastClock = clock;
 	// The agent page reads its server clock from this list too.

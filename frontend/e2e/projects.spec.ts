@@ -304,6 +304,22 @@ test.describe("projects — feature on", () => {
 		backend.agentsReadFails = 503;
 		await page.clock.setFixedTime(new Date(Date.parse(FIXED_NOW) + 80_000));
 		await expect(chip).toHaveText("Unknown", { timeout: 8_000 });
+		// The same with NOTHING answering (review #642: the session poll is
+		// what re-renders the tree, and it renders nothing while it fails):
+		// a fresh answer, then the whole backend goes away for an hour.
+		backend.agentsReadFails = null;
+		await page.clock.setFixedTime(new Date(Date.parse(FIXED_NOW) + 120_000));
+		await expect(chip).toHaveText("Working", { timeout: 8_000 });
+		backend.override = async (method, _path, route) => {
+			if (method !== "GET") return false;
+			await route.fulfill({ status: 502, body: JSON.stringify({ error: "Bad gateway" }) });
+			return true;
+		};
+		await page.clock.setFixedTime(new Date(Date.parse(FIXED_NOW) + 3_720_000));
+		// Coming back to the tab re-judges the rows before any answer.
+		await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+		await expect(chip).toHaveText("Unknown");
+		backend.override = null;
 		await expect(app.sessionRow("my-project").locator(".session-select")).toHaveAttribute(
 			"title",
 			/Claude: State unknown · not refreshed for over a minute/,

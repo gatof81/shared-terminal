@@ -17,9 +17,12 @@
  *    ages the evidence on the server's clock, and an ANSWER this module
  *    could not refresh (`ANSWER_MAX_AGE_MS`) proves nothing either.
  *
- * There is no timer here: the tree calls `watchSidebarPresence` on every
+ * No polling timer here: the tree calls `watchSidebarPresence` on every
  * render (the 5 s session poll re-renders it), which is the heartbeat; the
- * 30 s is enforced per project by `due`.
+ * pace is enforced per project by `due`. The one timer is the EXPIRY of
+ * what is on screen (`armExpiry`): a row must stop saying "Working" when its
+ * answer gets too old even if nothing renders — with the backend
+ * unreachable the session poll renders nothing.
  */
 
 import type { AgentsResponse } from "./api.js";
@@ -52,6 +55,9 @@ let loader: ((projectId: string) => Promise<void>) | null = null;
 let onChange: (() => void) | null = null;
 let running = false;
 let again = false;
+/** The project being read right now: its rows wait for the answer. */
+let pending: string | null = null;
+let expiryTimer: ReturnType<typeof setTimeout> | null = null;
 // Bumped by every clear (logout): a round started before it stops.
 let gen = 0;
 
@@ -74,11 +80,45 @@ function signatureOf(data: AgentsResponse): string {
 		.join("\u0002");
 }
 
+/**
+ * The pace per project: 30 s, stretched when many projects are expanded so
+ * this module never spends more than ~40 reads a minute of `projectIp`
+ * (120/min, shared with the project page's own poll and every write).
+ * Stays under `ANSWER_MAX_AGE_MS` up to 40 projects; past that the rows
+ * alternate with "Unknown" rather than starve the page.
+ */
+export function pollIntervalMs(watched: number): number {
+	return Math.max(SIDEBAR_PRESENCE_POLL_MS, watched * 1_500);
+}
+
 function due(projectId: string, now: number): boolean {
 	const last = Math.max(answers.get(projectId)?.receivedAt ?? 0, askedAt.get(projectId) ?? 0);
 	const elapsed = now - last;
 	// A clock that went backwards counts as due (never a frozen row).
-	return !(elapsed >= 0) || elapsed >= SIDEBAR_PRESENCE_POLL_MS - DUE_SLACK_MS;
+	return !(elapsed >= 0) || elapsed >= pollIntervalMs(wanted.length) - DUE_SLACK_MS;
+}
+
+/**
+ * Re-render when the oldest watched answer crosses `ANSWER_MAX_AGE_MS`, so
+ * its rows turn "Unknown" on time whatever the network does.
+ */
+function armExpiry(): void {
+	if (expiryTimer !== null) clearTimeout(expiryTimer);
+	expiryTimer = null;
+	const now = clock();
+	let next = Number.POSITIVE_INFINITY;
+	for (const pid of wanted) {
+		const e = answers.get(pid);
+		if (!e) continue;
+		const left = e.receivedAt + ANSWER_MAX_AGE_MS - now;
+		if (left > 0 && left < next) next = left;
+	}
+	if (next === Number.POSITIVE_INFINITY) return;
+	expiryTimer = setTimeout(() => {
+		expiryTimer = null;
+		onChange?.();
+		armExpiry();
+	}, next + 50);
 }
 
 async function round(): Promise<void> {
@@ -95,15 +135,19 @@ async function round(): Promise<void> {
 				if (myGen !== gen || loader === null || !pageVisible()) return;
 				if (!wanted.includes(pid) || !due(pid, clock())) continue;
 				askedAt.set(pid, clock());
+				pending = pid;
 				// One at a time: a round over many expanded projects is a
 				// trickle on `projectIp` (120/min), not a burst.
 				await loader(pid).catch(() => {});
+				if (myGen !== gen) return;
+				pending = null;
 				// A read that failed leaves no answer: the rows say so now.
-				if (myGen === gen && !answers.has(pid)) onChange?.();
+				if (!answers.has(pid)) onChange?.();
 			}
 		} while (again && myGen === gen);
 	} finally {
 		running = false;
+		if (myGen === gen) pending = null;
 	}
 }
 
@@ -122,6 +166,7 @@ function kick(): void {
  */
 export function watchSidebarPresence(projectIds: readonly string[], onScreen: boolean): void {
 	wanted = onScreen ? [...new Set(projectIds)] : [];
+	armExpiry();
 	kick();
 }
 
@@ -140,6 +185,7 @@ export function noteProjectAgents(
 	// Also when a too-old answer is replaced by an identical one: the rows
 	// were showing "unknown" for its age.
 	const wasShown = prev !== undefined && clock() - prev.receivedAt < ANSWER_MAX_AGE_MS;
+	armExpiry();
 	if (wanted.includes(projectId) && (!wasShown || prev.signature !== signature)) onChange?.();
 }
 
@@ -157,7 +203,7 @@ export function sidebarPresenceOf(
 ): PresenceView | null {
 	const entry = answers.get(projectId);
 	if (!entry) {
-		if (!askedAt.has(projectId) || running) return null;
+		if (!askedAt.has(projectId) || pending === projectId) return null;
 		return {
 			label: "State unknown",
 			tone: "unknown",
@@ -204,6 +250,8 @@ export function startSidebarPresence(
 
 /** The tab came back: what went stale while it was hidden is re-read now. */
 export function sidebarPresenceVisible(): void {
+	// What is on screen is re-judged before any answer (it may never come).
+	if (wanted.length > 0) onChange?.();
 	kick();
 }
 
@@ -216,6 +264,9 @@ export function clearSidebarPresence(): void {
 	loader = null;
 	onChange = null;
 	again = false;
+	pending = null;
+	if (expiryTimer !== null) clearTimeout(expiryTimer);
+	expiryTimer = null;
 }
 
 /** Tests only: the clock and the visibility this module reads. */

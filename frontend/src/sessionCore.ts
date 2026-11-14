@@ -63,6 +63,8 @@ import {
 	agentActiveDeleteText,
 	agentCountText,
 	groupSessionsByBinding,
+	LABEL_NO_RECENT,
+	LABEL_READY,
 	type PresenceView,
 } from "./projectModel.js";
 import {
@@ -594,7 +596,8 @@ function renderGroupedSessions(): void {
 	}
 	// Claude's state is read only for the projects whose rows can be seen:
 	// expanded, with a running session (a stopped one's state is its own
-	// word), and not behind a closed phone drawer.
+	// word), and with the sidebar open (the phone's drawer, or the desktop
+	// column, which the ☰ button folds to nothing).
 	const folded = collapsed();
 	watchSidebarPresence(
 		projects()
@@ -604,7 +607,7 @@ function renderGroupedSessions(): void {
 					(byProject.get(p.projectId) ?? []).some((r) => r.session.status === "running"),
 			)
 			.map((p) => p.projectId),
-		!isMobile() || document.querySelector("main.sidebar-open") !== null,
+		document.querySelector("main.sidebar-open") !== null,
 	);
 	for (const p of projects()) {
 		const rows = byProject.get(p.projectId) ?? [];
@@ -842,13 +845,13 @@ function shortPresence(v: PresenceView): { word: string; cls: string } {
 		case "attention":
 			return { word: "Needs you", cls: "" };
 		case "ready":
-			return v.label === "Ready"
+			return v.label === LABEL_READY
 				? { word: "Ready", cls: "" }
 				: { word: "Ready?", cls: " unverified" };
 		case "off":
 			return { word: "Claude off", cls: "" };
 		default:
-			return v.label === "No recent activity"
+			return v.label === LABEL_NO_RECENT
 				? { word: "Quiet", cls: " stale" }
 				: { word: "Unknown", cls: "" };
 	}
