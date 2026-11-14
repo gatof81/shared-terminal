@@ -46,8 +46,9 @@ import {
 	ProjectArtifacts,
 	projectArtifactsFlagEnabled,
 } from "./projects/conversation/artifacts.js";
-import { ProjectCollab } from "./projects/conversation/collab.js";
+import { ProjectCollab, type RecipientState } from "./projects/conversation/collab.js";
 import { ProjectFanout, pickTarget } from "./projects/conversation/fanout.js";
+import { OutboxWatcher } from "./projects/conversation/outbox.js";
 import { placeArtifacts } from "./projects/conversation/placement.js";
 import { ReplyWatcher } from "./projects/conversation/replies.js";
 import {
@@ -67,7 +68,7 @@ import { sessionLifecycleLock } from "./sessionLifecycleLock.js";
 import { ForbiddenError, NotFoundError, SessionManager } from "./sessionManager.js";
 import { parseTrustProxy, TrustProxyError, warnIfProductionMisconfigured } from "./trustProxy.js";
 import { configureWebPush, isPushEnabled, sendToUser } from "./webPush.js";
-import { openWorkspaceFile } from "./workspaceFiles.js";
+import { listWorkspaceDir, openWorkspaceFile } from "./workspaceFiles.js";
 import { handleWsConnection, startWsHeartbeat } from "./wsHandler.js";
 import { createWsUpgradeHandler, PROJECT_WS_PREFIX } from "./wsUpgrade.js";
 import { createWsUpgradeRateLimiter } from "./wsUpgradeRateLimit.js";
@@ -331,6 +332,7 @@ if (PROJECT_RELAY_FLAG && !PROJECT_RELAY_ENABLED) {
 let projectConversation: ProjectConversationStore | undefined;
 let projectReplies: ReplyWatcher | undefined;
 let projectCollab: ProjectCollab | undefined;
+let projectOutbox: OutboxWatcher | undefined;
 // Built before the store exists (the router is built at load, the store
 // takes its lock in start()); the routes answer 503 until `api` is set.
 // The `artifacts` key exists only with D2 effective (routes and features
@@ -731,22 +733,31 @@ async function start() {
 					);
 			}
 			if (PROJECT_RELAY_ENABLED) {
+				// §7.1: a participant session has ONE interactive conversation with
+				// a pane. The same reading decides who may send (outbox.ts rule 3)
+				// and where a relay is delivered (collab.ts gate); more than one is
+				// ambiguous for both, never a guess.
+				const soleConversation = async (sid: string): Promise<RecipientState> => {
+					const { conversations, meta } = await conversation.summariesWithMeta(sid);
+					// The list could not be read whole: "the only one" would be a
+					// guess over the resident conversations alone. Fail closed.
+					if (meta !== "ok") return { kind: "none" };
+					const live = conversations.filter(
+						(c) => c.kind === "interactive" && c.paneId !== null && !c.endedAt,
+					);
+					if (live.length === 0) return { kind: "none" };
+					if (live.length > 1) return { kind: "ambiguous" };
+					const only = live[0] as (typeof live)[number];
+					return {
+						kind: only.status === "waiting_input" ? "ready" : "busy",
+						cid: only.sessionId,
+					};
+				};
 				const collab = new ProjectCollab({
 					store,
 					fanout,
 					bindings: (ownerId, pid) => directory.projectBindings(ownerId, pid),
-					recipient: async (sid) => {
-						const { conversations } = await conversation.summariesWithMeta(sid);
-						const live = conversations.filter(
-							(c) => c.kind === "interactive" && c.paneId !== null && !c.endedAt,
-						);
-						if (live.length === 0) return { kind: "none" };
-						if (live.length > 1) return { kind: "ambiguous" };
-						const only = live[0] as (typeof live)[number];
-						return only.status === "waiting_input"
-							? { kind: "ready", cid: only.sessionId }
-							: { kind: "busy" };
-					},
+					recipient: soleConversation,
 					onCaptureEvent: (l) => conversation.onPersistedEvent((sid) => l(sid)),
 					log: logger,
 				});
@@ -755,6 +766,17 @@ async function start() {
 				// After the recovery batches: queued relays of the previous process
 				// are still queued, and nothing else is resumed (§7.5).
 				await collab.start(opened);
+				const outbox = new OutboxWatcher({
+					collab,
+					onCaptureEvent: (l) => conversation.onPersistedEvent(l),
+					bindings: (ownerId, pid) => directory.projectBindings(ownerId, pid),
+					conversation: soleConversation,
+					openFile: (sid, rel, o) => openWorkspaceFile(sid, rel, o),
+					listDir: (sid, rel, o) => listWorkspaceDir(sid, rel, o),
+					log: logger,
+				});
+				projectOutbox = outbox;
+				outbox.start();
 			}
 		}
 		logger.info("[server] project conversation ENABLED (D1)");
@@ -911,6 +933,7 @@ function shutdown() {
 	// settle an exec as evidence, but nothing further starts (§8.1.4).
 	// D1 — lets the writer-lock helper go (the kernel releases the lock when it exits).
 	projectReplies?.stop();
+	projectOutbox?.stop();
 	projectCollab?.stop();
 	void projectConversation?.close();
 	const composerDrained = composer.shutdown().catch((err) => {

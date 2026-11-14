@@ -366,8 +366,8 @@ describe("admission, rules 6–8 (§7.3, M4, M14)", () => {
 	beforeEach(async () => {
 		grantId = (await createTask({}, { maxMessages: 3 })).body.grantId as string;
 		// Nobody is free: admissions stay queued and the Composer is not involved.
-		sys.recipient.set(SA, { kind: "busy" });
-		sys.recipient.set(SB, { kind: "busy" });
+		sys.recipient.set(SA, { kind: "busy", cid: "cid-x" });
+		sys.recipient.set(SB, { kind: "busy", cid: "cid-x" });
 	});
 
 	it("an ask is admitted: outbox + message + queued delivery in one append", async () => {
@@ -624,7 +624,7 @@ describe("queue, gate and outcomes (§7.5, M3, M7–M13, M16)", () => {
 	});
 
 	it("M7: a busy recipient costs 0 Composer calls; one when it becomes free", async () => {
-		sys.recipient.set(SB, { kind: "busy" });
+		sys.recipient.set(SB, { kind: "busy", cid: "cid-x" });
 		const q = await ask();
 		if (q.outcome !== "accepted") throw new Error("ask");
 		await settle();
@@ -684,7 +684,7 @@ describe("queue, gate and outcomes (§7.5, M3, M7–M13, M16)", () => {
 	});
 
 	it("M9: a message that waited longer than maxWaitMin ends the consult", async () => {
-		sys.recipient.set(SB, { kind: "busy" });
+		sys.recipient.set(SB, { kind: "busy", cid: "cid-x" });
 		const q = await ask();
 		if (q.outcome !== "accepted") throw new Error("ask");
 		await settle();
@@ -701,7 +701,7 @@ describe("queue, gate and outcomes (§7.5, M3, M7–M13, M16)", () => {
 	});
 
 	it("M10: nothing leaves the queue while paused; it leaves once on resume", async () => {
-		sys.recipient.set(SB, { kind: "busy" });
+		sys.recipient.set(SB, { kind: "busy", cid: "cid-x" });
 		const q = await ask();
 		if (q.outcome !== "accepted") throw new Error("ask");
 		expect((await sys.collab.action(OWNER, PID, grantId, "pause")).body).toMatchObject({
@@ -748,7 +748,7 @@ describe("queue, gate and outcomes (§7.5, M3, M7–M13, M16)", () => {
 	});
 
 	it("M11: revoke closes what is queued; during a Composer call it does not wait", async () => {
-		sys.recipient.set(SB, { kind: "busy" });
+		sys.recipient.set(SB, { kind: "busy", cid: "cid-x" });
 		const q = await ask();
 		if (q.outcome !== "accepted") throw new Error("ask");
 		const r = await sys.collab.action(OWNER, PID, grantId, "revoke");
@@ -829,7 +829,7 @@ describe("queue, gate and outcomes (§7.5, M3, M7–M13, M16)", () => {
 	it("M16: the recipient's binding changed while queued ⇒ ended{binding-changed}, 0 calls", async () => {
 		let g = grantId;
 		for (const over of [{ epoch: 2 }, { sid: SC }, { removed: true }]) {
-			sys.recipient.set(SB, { kind: "busy" });
+			sys.recipient.set(SB, { kind: "busy", cid: "cid-x" });
 			sys.bindings = () => bindingsOf();
 			const q = await sys.collab.admit(outbox(g, A, { to: B, kind: "ask" }));
 			if (q.outcome !== "accepted") throw new Error("ask");
@@ -888,7 +888,7 @@ describe("queue, gate and outcomes (§7.5, M3, M7–M13, M16)", () => {
 	});
 
 	it("expiry: the timer's check ends the grant and closes the queue; later checks see it ended", async () => {
-		sys.recipient.set(SB, { kind: "busy" });
+		sys.recipient.set(SB, { kind: "busy", cid: "cid-x" });
 		const q = await ask();
 		if (q.outcome !== "accepted") throw new Error("ask");
 		now += 121 * 60_000;
@@ -1106,7 +1106,7 @@ describe("restart and restore (§7.5, M12, M18)", () => {
 
 	it("M12: a queued relay survives a restart and is delivered once", async () => {
 		const grantId = (await createTask()).body.grantId as string;
-		sys.recipient.set(SB, { kind: "busy" });
+		sys.recipient.set(SB, { kind: "busy", cid: "cid-x" });
 		const q = await sys.collab.admit(outbox(grantId, A, { to: B, kind: "ask" }));
 		if (q.outcome !== "accepted") throw new Error("ask");
 		await settle();
@@ -1125,7 +1125,7 @@ describe("restart and restore (§7.5, M12, M18)", () => {
 			["sending", { state: "uncertain", reason: "orphaned" }],
 		] as const) {
 			const grantId = (await createTask()).body.grantId as string;
-			sys.recipient.set(SB, { kind: "busy" });
+			sys.recipient.set(SB, { kind: "busy", cid: "cid-x" });
 			const q = await sys.collab.admit(outbox(grantId, A, { to: B, kind: "ask" }));
 			if (q.outcome !== "accepted") throw new Error("ask");
 			await settle();
@@ -1178,7 +1178,7 @@ describe("restart and restore (§7.5, M12, M18)", () => {
 
 	it("a grant whose time passed while the backend was down is ended{expired} at boot, its queue closed", async () => {
 		const grantId = (await createTask()).body.grantId as string;
-		sys.recipient.set(SB, { kind: "busy" });
+		sys.recipient.set(SB, { kind: "busy", cid: "cid-x" });
 		const q = await sys.collab.admit(outbox(grantId, A, { to: B, kind: "ask" }));
 		if (q.outcome !== "accepted") throw new Error("ask");
 		now += 3 * 3_600_000;
@@ -1199,7 +1199,7 @@ describe("restart and restore (§7.5, M12, M18)", () => {
 
 	it("M18: a restore ends every grant as interrupted and sends nothing", async () => {
 		const grantId = (await createTask()).body.grantId as string;
-		sys.recipient.set(SB, { kind: "busy" });
+		sys.recipient.set(SB, { kind: "busy", cid: "cid-x" });
 		const q = await sys.collab.admit(outbox(grantId, A, { to: B, kind: "ask" }));
 		if (q.outcome !== "accepted") throw new Error("ask");
 		const f = fold(emptyFold(), await lines());

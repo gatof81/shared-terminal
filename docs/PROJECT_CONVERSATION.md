@@ -885,7 +885,7 @@ Se admite solo si se cumple **todo**, en este orden. La primera regla que falla 
 | 1 | **Evento** | un `tool_start` y un `tool_end{ok: true}` de la captura, **recibidos en vivo por este proceso**, con el mismo `tool_use_id`, la misma sesión y la misma conversación, `tool_name: Write`, `agent_id` nulo, y `file_path` literalmente `/home/developer/workspace/.st-outbox/<[A-Za-z0-9._-]{1,96}>.md` (el nombre no empieza con `.`) | no es un mensaje |
 | 2 | **Origen** | los **dos** eventos traen veredicto `match` de la comprobación de origen de red (§7.3.1) | no es un mensaje |
 | 3 | **Identidad** | la sesión del evento es la `sid` de un participante de un permiso vivo; una lectura de D1 (tope 5 s) dice que su binding es el mismo `binding_id` y `epoch`; la conversación del evento es la única conversación interactiva con pane de esa sesión | no es un mensaje |
-| 4 | **Archivo** | se abre por el abridor de Files (`openWorkspaceFile`: contención probada por `/proc/self/fd`, sin links en la ruta, no restringido) con `O_NOFOLLOW`; `fstat` dice regular; ≤ 64 KiB; se lee **una vez** por ese descriptor; UTF-8 válido sin NUL | `rejected{file-…}` |
+| 4 | **Archivo** | se abre por el abridor de Files (`openWorkspaceFile`: contención probada por `/proc/self/fd`, el archivo no es un link, y un link en un directorio de la ruta solo se sigue dentro del workspace y fuera de lo restringido) con `O_NOFOLLOW`; `fstat` dice regular; ≤ 64 KiB; se lee **una vez** por ese descriptor; UTF-8 válido sin NUL | `rejected{file-…}` |
 | 5 | **Sustitución** | los bytes leídos **son** el mensaje: se hashean, se guardan en el registro y son los que se entregan y se muestran. Lo que el archivo diga después no importa; el archivo no se vuelve a abrir | — |
 | 6 | **Autorización** | cabecera estricta (solo esas claves, una vez cada una, `st: 1`); `collab` = ese permiso; no pausado; `to` = el otro participante (salvo `owner`/`done`, que no llevan `to`); `re` nombra un mensaje de ese permiso cuya entrega a este agente tiene `sending` | `rejected{header-invalid\|grant-paused\|not-authorized\|bad-re}` |
 | 7 | **Límites** | quedan mensajes; el cuerpo no está vacío; el texto compuesto de §7.4 pasa `validateText`; no hay otra entrega de este permiso en cola o en curso para ese destinatario. El mensaje se cuenta aquí, bajo el lock | `rejected{budget\|empty\|text-…\|queue-full}` |
@@ -1001,7 +1001,8 @@ queda pausado, nunca corriendo.
     termina y se muestra; nada más se admite ni se entrega.
 - **Detección de escritura.** Mientras el permiso está vivo, un `tool_start` de `Write`, `Edit`,
   `MultiEdit` o `NotebookEdit` de la sesión del agente **consultado** (`with`) con una ruta fuera de
-  `.st-outbox/` ⇒ `paused{write-observed}`. Es detección, no restricción: lo que haga por Bash no se
+  `.st-outbox/` ⇒ `paused{write-observed, detail{tool, cid}}`, también desde un subagente y sin
+  exigir veredicto de origen (solo puede detener). Es detección, no restricción: lo que haga por Bash no se
   ve, y las sesiones conservan sus credenciales (§7.8).
 - **Fin:** `revoked`, `done`, `budget`, `expired` (temporizador y toda comprobación de «vivo»),
   `wait-expired`, `binding-changed`, `task-not-delivered`, `interrupted` (restore). Un permiso terminado no se reabre.
@@ -1015,8 +1016,8 @@ queda pausado, nunca corriendo.
 - **Restore:** todo permiso vivo ⇒ `ended{interrupted}`; sus entregas sin terminar, como en §8.
 - **No verificado.** Al arrancar y cada 10 min, un archivo de `.st-outbox/` de un participante de un
   permiso vivo, sin cambios hace ≥ 2 min, con una cabecera que nombra ese permiso y sin `outbox`
-  registrado con su identidad, se anota `outbox{unverified}` (una vez). **No se envía ni se ofrece
-  enviarlo:** si hace falta, el agente lo escribe de nuevo.
+  registrado con su identidad, se anota `outbox{unverified}` (una vez; como mucho 8 por permiso).
+  **No se envía ni se ofrece enviarlo:** si hace falta, el agente lo escribe de nuevo.
 
 ### 7.6 API y eventos
 
@@ -1050,12 +1051,18 @@ con su causa y su autor.
 - **Dominio de confianza de la sesión.** Cualquier proceso del contenedor de un participante puede
   producir un mensaje de ese participante. La comprobación de origen excluye a otros contenedores, al
   túnel y a loopback del backend.
+- **Reenviadores dentro del contenedor.** Un servidor o proxy que corra en el contenedor de un
+  participante y reenvíe peticiones a su loopback deja que otro contenedor produzca eventos con
+  origen `match` a través de él. Es el mismo dominio de confianza: lo que corre en la sesión habla por
+  la sesión.
 - **Canal lateral del CLI.** Dos instancias de Claude en un mismo contenedor pueden hablarse por la
   mensajería nativa del CLI, fuera de este contrato. Entre contenedores distintos no hay canal local.
   Cerrarlo (configuración administrada) tiene su propio GO.
 - **`observe`.** Con la bandera de origen en `observe`, la captura sigue aceptando eventos sin
   `match`. Pueden ensuciar el estado que mira la puerta (una conversación falsa ⇒ ambigüedad ⇒ nada
-  se admite ni se entrega) pero no producir una admisión.
+  se admite ni se entrega, o mover cuál es la única conversación) pero no producir una admisión: los
+  dos eventos del Write tienen que ser `match`. La comprobación de conversación de la regla 3 es de
+  coherencia, no una frontera de seguridad.
 
 ## 8. Backup y restore de `.projects`
 

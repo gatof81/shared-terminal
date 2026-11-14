@@ -15,6 +15,7 @@ export const OUTBOX_DIR = ".st-outbox";
 /** §7.3 rule 1: the literal path a Write must name. The name never starts with a dot. */
 export const OUTBOX_ABS_RE =
 	/^\/home\/developer\/workspace\/\.st-outbox\/([A-Za-z0-9_-][A-Za-z0-9._-]{0,95}\.md)$/;
+export const OUTBOX_ABS_PREFIX = "/home/developer/workspace/.st-outbox/";
 export const OUTBOX_MAX_BYTES = 64 * 1024;
 export const GRANT_ID_RE = /^c-[0-9a-f]{12}$/;
 export const SHORT_MSG_RE = /^m-[0-9a-f]{8}$/;

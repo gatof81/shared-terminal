@@ -90,6 +90,8 @@ export interface GrantFold {
 	maxMessages: number;
 	maxWaitMin: number;
 	expiresAt: string;
+	/** `at` of its `created` line. */
+	createdAt: string;
 	state: "live" | "paused" | "ended";
 	/** Why it is paused or ended. */
 	reason?: string;
@@ -100,6 +102,8 @@ export interface GrantFold {
 	/** `outbox{rejected}` lines written, in total and per agent (§7.3). */
 	rejected: number;
 	rejectedBy: Map<string, number>;
+	/** `outbox{unverified}` lines written (§7.5). */
+	unverified: number;
 }
 
 /** §7.2: alive ⇔ not revoked/ended and before `expires_at`. Paused is alive. */
@@ -133,8 +137,11 @@ export interface Folded {
 	grants: Map<string, GrantFold>;
 	/** `outboxKey` of every ADMITTED outbox file (§7.3 rule 8). */
 	outboxAccepted: Set<string>;
-	/** `outboxKey` (sha256 = "" when unread) of every `outbox{unverified}` (§7.5): written once. */
-	outboxUnverified: Set<string>;
+	/**
+	 * `outboxKey` of every outbox line, whatever its event: a file the log
+	 * already says something about is never reported `unverified` (§7.5).
+	 */
+	outboxSeen: Set<string>;
 	writers: Set<string>;
 }
 
@@ -155,7 +162,7 @@ export function emptyFold(): Folded {
 		artifactBytes: 0,
 		grants: new Map(),
 		outboxAccepted: new Set(),
-		outboxUnverified: new Set(),
+		outboxSeen: new Set(),
 		writers: new Set(),
 	};
 }
@@ -268,10 +275,12 @@ export function fold(f: Folded, lines: readonly LogLine[]): Folded {
 						maxMessages: l.max_messages as number,
 						maxWaitMin: l.max_wait_min as number,
 						expiresAt: l.expires_at as string,
+						createdAt: l.at,
 						state: "live",
 						used: 0,
 						rejected: 0,
 						rejectedBy: new Map(),
+						unverified: 0,
 					});
 					break;
 				}
@@ -301,10 +310,12 @@ export function fold(f: Folded, lines: readonly LogLine[]): Folded {
 					l.path as string,
 					(l.sha256 as string | undefined) ?? "",
 				);
+				f.outboxSeen.add(key);
+				const g = f.grants.get(l.grant_id as string);
 				if (l.event === "accepted") f.outboxAccepted.add(key);
-				else if (l.event === "unverified") f.outboxUnverified.add(key);
-				else if (l.event === "rejected") {
-					const g = f.grants.get(l.grant_id as string);
+				else if (l.event === "unverified") {
+					if (g) g.unverified++;
+				} else if (l.event === "rejected") {
 					if (g) {
 						g.rejected++;
 						const a = String(from?.agent_id);

@@ -1329,6 +1329,7 @@ describe("authorize — §3.1.1 network origin (v1.8.6)", () => {
 			expect(await svc.authorize(H({ remoteAddress: `::ffff:${IP}` }))).toEqual({
 				ok: true,
 				stSessionId: "s1",
+				origin: "match",
 			});
 			expect(await svc.authorize(H({ remoteAddress: "172.18.0.6" }))).toEqual({
 				accepted: false,
@@ -1371,6 +1372,7 @@ describe("authorize — §3.1.1 network origin (v1.8.6)", () => {
 			expect((await svc.authorize(H({ remoteAddress: IP }))) as unknown).toEqual({
 				ok: true,
 				stSessionId: "s1",
+				origin: "match",
 			});
 			// recreation: D1 moves container_id, O is gone; teardown invalidated the token cache
 			session("s1", { container_id: N.id });
@@ -1384,6 +1386,7 @@ describe("authorize — §3.1.1 network origin (v1.8.6)", () => {
 			expect(await svc.authorize(H({ remoteAddress: N.ip }))).toEqual({
 				ok: true,
 				stSessionId: "s1",
+				origin: "match",
 			});
 		} finally {
 			await svc.shutdown();
@@ -1398,6 +1401,7 @@ describe("authorize — §3.1.1 network origin (v1.8.6)", () => {
 			expect(await svc.authorize(H({ remoteAddress: IP }))).toEqual({
 				ok: true,
 				stSessionId: "s1",
+				origin: "match",
 			});
 			views["cid-s1"] = { exists: true, id: "cid-s1", running: false, addresses: [] };
 			await svc.onSessionDown("s1");
@@ -1451,10 +1455,12 @@ describe("authorize — §3.1.1 observe mode (activation gate)", () => {
 			expect(await svc.authorize(H({ remoteAddress: IP }))).toEqual({
 				ok: true,
 				stSessionId: "s1",
+				origin: "match",
 			});
 			expect(await svc.authorize(H({ stSession: "s2", remoteAddress: "172.18.0.77" }))).toEqual({
 				ok: true,
 				stSessionId: "s2",
+				origin: "mismatch",
 			});
 			expect(svc.stats.rejected.wrong_origin).toBeUndefined();
 			expect(svc.stats.originObserved).toEqual({ match: 1, mismatch: 1 });
@@ -1470,6 +1476,39 @@ describe("authorize — §3.1.1 observe mode (activation gate)", () => {
 			for (const secret of ["s1", "s2", IP, "172.18.0.77", TOKEN])
 				expect(exposed).not.toContain(secret);
 		} finally {
+			await svc.shutdown();
+		}
+	});
+
+	it("the verdict of each request reaches in-process observers with its event; the file never carries it", async () => {
+		session("s1");
+		const svc = svcWith("observe", up);
+		const seen: Array<[string, string | undefined]> = [];
+		const off = svc.onPersistedEvent((_st, _cid, ev, meta) => seen.push([ev.ev, meta?.origin]));
+		try {
+			const from = async (remoteAddress: string | undefined, body: unknown) => {
+				const auth = await svc.authorize(H({ remoteAddress }));
+				if (!("ok" in auth)) throw new Error("observe never refuses");
+				await svc.ingest("s1", "%0", body, undefined, auth.origin);
+			};
+			await from(IP, hook("SessionStart", { source: "startup" }));
+			await from("172.18.0.77", hook("UserPromptSubmit", { prompt: "a", prompt_id: "p1" }));
+			await from("127.0.0.1", hook("Stop", { prompt_id: "p1" }));
+			// An event that did not come through a request of this process (a
+			// caller without a verdict) has none — never a default "match".
+			await svc.ingest("s1", "%0", hook("UserPromptSubmit", { prompt: "b", prompt_id: "p2" }));
+			await store.flush("s1", "c1");
+			expect(seen.filter(([ev]) => ev !== "gap")).toEqual([
+				["session_start", "match"],
+				["user_prompt", "mismatch"],
+				["turn_end", "loopback"],
+				["user_prompt", undefined],
+			]);
+			const persisted = await store.readEvents("s1", "c1", 0, 100);
+			expect(JSON.stringify(persisted)).not.toMatch(/"origin":"(match|mismatch|loopback)"/);
+			for (const e of persisted) expect(Object.keys(e)).not.toContain("meta");
+		} finally {
+			off();
 			await svc.shutdown();
 		}
 	});
