@@ -3,6 +3,7 @@ import type { AgentsResponse, Presence } from "./api.js";
 import {
 	__setSidebarPresenceEnv,
 	ANSWER_MAX_AGE_MS,
+	answerMaxAgeMs,
 	clearSidebarPresence,
 	noteProjectAgents,
 	pollIntervalMs,
@@ -261,6 +262,11 @@ describe("sidebarPresence", () => {
 		// Reads per minute never pass 40, whatever is expanded.
 		for (const n of [1, 10, 20, 40, 80, 200])
 			expect((n * 60_000) / pollIntervalMs(n)).toBeLessThanOrEqual(40);
+		// …and an answer stays shown across two reads at that pace: rows
+		// don't flip to "Unknown" between reads that both succeeded.
+		expect(answerMaxAgeMs(1)).toBe(ANSWER_MAX_AGE_MS);
+		for (const n of [1, 40, 80, 200])
+			expect(answerMaxAgeMs(n)).toBeGreaterThanOrEqual(2 * pollIntervalMs(n) + 10_000);
 	});
 
 	it("logout mid-read: the old round ends without effect and the next account's round runs", async () => {

@@ -84,11 +84,18 @@ function signatureOf(data: AgentsResponse): string {
  * The pace per project: 30 s, stretched when many projects are expanded so
  * this module never spends more than ~40 reads a minute of `projectIp`
  * (120/min, shared with the project page's own poll and every write).
- * Stays under `ANSWER_MAX_AGE_MS` up to 40 projects; past that the rows
- * alternate with "Unknown" rather than starve the page.
  */
 export function pollIntervalMs(watched: number): number {
 	return Math.max(SIDEBAR_PRESENCE_POLL_MS, watched * 1_500);
+}
+
+/**
+ * How old an answer may be and still be shown: two missed polls at the
+ * current pace (75 s at 30 s) — a stretched pace must not make rows flip to
+ * "Unknown" between two reads that both succeeded.
+ */
+export function answerMaxAgeMs(watched: number): number {
+	return Math.max(ANSWER_MAX_AGE_MS, 2.5 * pollIntervalMs(watched));
 }
 
 function due(projectId: string, now: number): boolean {
@@ -110,7 +117,7 @@ function armExpiry(): void {
 	for (const pid of wanted) {
 		const e = answers.get(pid);
 		if (!e) continue;
-		const left = e.receivedAt + ANSWER_MAX_AGE_MS - now;
+		const left = e.receivedAt + answerMaxAgeMs(wanted.length) - now;
 		if (left > 0 && left < next) next = left;
 	}
 	if (next === Number.POSITIVE_INFINITY) return;
@@ -184,7 +191,7 @@ export function noteProjectAgents(
 	answers.set(projectId, { data, receivedAt, signature });
 	// Also when a too-old answer is replaced by an identical one: the rows
 	// were showing "unknown" for its age.
-	const wasShown = prev !== undefined && clock() - prev.receivedAt < ANSWER_MAX_AGE_MS;
+	const wasShown = prev !== undefined && clock() - prev.receivedAt < answerMaxAgeMs(wanted.length);
 	armExpiry();
 	if (wanted.includes(projectId) && (!wasShown || prev.signature !== signature)) onChange?.();
 }
@@ -212,7 +219,7 @@ export function sidebarPresenceOf(
 		};
 	}
 	const age = now - entry.receivedAt;
-	if (!(age >= 0) || age >= ANSWER_MAX_AGE_MS) {
+	if (!(age >= 0) || age >= answerMaxAgeMs(wanted.length)) {
 		return {
 			label: "State unknown",
 			tone: "unknown",
