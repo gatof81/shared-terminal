@@ -1455,7 +1455,12 @@ export function renderTabBar() {
 	// — a brand-new session starts with no tabs and the user opens the
 	// first one from here.
 	terminalTabs.style.display = "flex";
-	tabStrip.setAttribute("role", "tablist");
+	// A toolbar, not a tablist: a tablist may own only tabs (axe
+	// `aria-required-children`, critical — UX audit A2), and each chip's ×
+	// and the + live in this row too. Hiding them from assistive tech would
+	// leave a phone's screen reader no way to close a tab; a toolbar of
+	// buttons says what is here, with the same ← / → roving focus.
+	tabStrip.setAttribute("role", "toolbar");
 	tabStrip.setAttribute("aria-label", "Terminal tabs");
 
 	for (const tab of currentTabs) {
@@ -1470,8 +1475,8 @@ export function renderTabBar() {
 		const select = document.createElement("button");
 		select.type = "button";
 		select.className = "tab-chip-btn";
-		select.setAttribute("role", "tab");
-		select.setAttribute("aria-selected", String(isActive));
+		select.setAttribute("aria-pressed", String(isActive));
+		select.setAttribute("aria-keyshortcuts", "Delete");
 		select.tabIndex = isActive || (currentActiveTabId === null && tab === currentTabs[0]) ? 0 : -1;
 		select.title = tab.label;
 		const label = document.createElement("span");
@@ -1526,9 +1531,15 @@ export function renderTabBar() {
 	renderTerminalState();
 }
 
-// ← / → / Home / End move between tabs (WAI-ARIA tabs, manual activation:
+// ← / → / Home / End move between tabs (WAI-ARIA toolbar, manual activation:
 // Enter / Space on the focused tab opens it).
 terminalTabs.addEventListener("keydown", (e) => {
+	// Delete on a tab closes it: the same path as its ×.
+	if (e.key === "Delete" && e.target instanceof HTMLElement && e.target.matches(".tab-chip-btn")) {
+		e.target.closest(".tab-chip")?.querySelector<HTMLButtonElement>(".tab-close")?.click();
+		e.preventDefault();
+		return;
+	}
 	if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
 	const tabs = [...terminalTabs.querySelectorAll<HTMLButtonElement>(".tab-chip-btn")];
 	if (tabs.length === 0) return;

@@ -182,7 +182,7 @@
 }
 
 /* ── Tabs as controls (UI unification, PR 4) ───────────────────
-   The chip keeps its look; its tab is a real button (role="tab") with
+   The chip keeps its look; its tab is a real button (aria-pressed) with
    the close button beside it. */
 .tab-chip-btn {
   display: inline-flex;

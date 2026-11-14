@@ -22,7 +22,7 @@ test.describe("session actions", () => {
 		await expect(rows.nth(1)).toHaveAttribute("aria-current", "true");
 	});
 
-	test("tabs are a tablist: arrows move between tabs, Enter opens, × closes", async ({
+	test("tabs are a toolbar of buttons: arrows move between tabs, Enter opens, × and Delete close", async ({
 		app,
 		backend,
 		page,
@@ -31,14 +31,14 @@ test.describe("session actions", () => {
 		await app.openSession("my-project");
 		await app.expectTerminalReady();
 		await app.openChrome();
-		const tabs = page.locator('#terminal-tabs [role="tab"]');
+		const tabs = page.locator("#terminal-tabs .tab-chip-btn");
 		await expect(tabs).toHaveCount(2);
-		await expect(tabs.first()).toHaveAttribute("aria-selected", "true");
+		await expect(tabs.first()).toHaveAttribute("aria-pressed", "true");
 		await tabs.first().focus();
 		await page.keyboard.press("ArrowRight");
 		await expect(tabs.nth(1)).toBeFocused();
 		await page.keyboard.press("Enter");
-		await expect(tabs.nth(1)).toHaveAttribute("aria-selected", "true");
+		await expect(tabs.nth(1)).toHaveAttribute("aria-pressed", "true");
 		await expect
 			.poll(() => backend.terminalSockets.map((s) => s.tabId))
 			.toEqual(["tab-1", "tab-2"]);
@@ -48,6 +48,15 @@ test.describe("session actions", () => {
 		await page.locator('#terminal-tabs .tab-chip[data-tab-id="tab-2"] .tab-close').click();
 		await page.locator('[role="alertdialog"] .modal-danger-action').click();
 		await expect(tabs).toHaveCount(1);
+		// Delete on a tab is its ×: the same confirmation, nothing closed without it.
+		await app.openChrome();
+		await tabs.first().focus();
+		await page.keyboard.press("Delete");
+		await expect(page.locator('[role="alertdialog"]')).toBeVisible();
+		await page.keyboard.press("Escape");
+		await expect(page.locator('[role="alertdialog"]')).toHaveCount(0);
+		await expect(tabs).toHaveCount(1);
+
 		await expect
 			.poll(() =>
 				backend.requests.some((r) => r.method === "DELETE" && r.path.endsWith("/tabs/tab-2")),
