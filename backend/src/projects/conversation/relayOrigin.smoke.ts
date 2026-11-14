@@ -487,7 +487,19 @@ async function main(): Promise<void> {
 		return { kind: only.status === "waiting_input" ? "ready" : "busy", cid: only.sessionId };
 	};
 	const composed: Array<{ sid: string; cid: string; text: string }> = [];
-	const store = await ProjectConversationStore.start({ workspaceRoot: ROOT, bootId: randomUUID() });
+	// WORKSPACE_ROOT exists before the store starts, as in a deployment: the
+	// store creates `.projects/` under it, not the root itself.
+	await fs.mkdir(ROOT, { recursive: true });
+	const store = await ProjectConversationStore.start({
+		workspaceRoot: ROOT,
+		bootId: randomUUID(),
+		log: {
+			info: () => {},
+			warn: (m: string) => console.log(`    [log] ${m}`),
+			error: (m: string) => console.error(`    [log] ${m}`),
+		},
+	});
+	if (store.unavailable) throw new Error(`project store unavailable: ${store.unavailable}`);
 	const fanout = new ProjectFanout({
 		store,
 		relay: true,

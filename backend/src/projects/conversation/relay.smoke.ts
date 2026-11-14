@@ -349,7 +349,19 @@ async function main(): Promise<void> {
 	}
 
 	const composed: Array<{ sid: string; cid: string; text: string }> = [];
-	const store = await ProjectConversationStore.start({ workspaceRoot: ROOT, bootId: randomUUID() });
+	// WORKSPACE_ROOT exists before the store starts, as in a deployment: the
+	// store creates `.projects/` under it, not the root itself.
+	await fs.mkdir(ROOT, { recursive: true });
+	const store = await ProjectConversationStore.start({
+		workspaceRoot: ROOT,
+		bootId: randomUUID(),
+		log: {
+			info: () => {},
+			warn: (m: string) => console.log(`    [log] ${m}`),
+			error: (m: string) => console.error(`    [log] ${m}`),
+		},
+	});
+	if (store.unavailable) throw new Error(`project store unavailable: ${store.unavailable}`);
 	const fanout = new ProjectFanout({
 		store,
 		relay: true,
@@ -748,7 +760,9 @@ printf '{"skipDangerousModePermissionPrompt": true}\\n' > ~/.claude/settings.jso
 				parsed,
 			);
 			const cid = (o?.from as { cid?: string } | undefined)?.cid ?? "";
-			const persisted = (await captureStore.readEvents(sid, cid, 0, 100_000)).filter(
+			// No accepted line ⇒ no conversation id to read: the check below says so.
+			const read = cid ? await captureStore.readEvents(sid, cid, 0, 100_000) : [];
+			const persisted = read.filter(
 				(e) =>
 					(e.ev === "tool_start" || e.ev === "tool_end") && e.data?.tool_use_id === o?.tool_use_id,
 			);
