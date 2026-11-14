@@ -40,7 +40,9 @@ The host is the one `22-d2-validation-runbook.md` §2 describes, requirements E1
 no route to VM100 or the NAS, backend on loopback only, no session egress, root on the host). Roles
 as in that runbook §1: A operates, B diagnoses and reports, the owner decides.
 
-Flags, in the pilot's `.env` only:
+The `.env` is the one of doc 22 §2 (including `CONVERSATION_ALLOW_USERS` and
+`COMPOSER_CLI_VERSIONS=<the image's CLI version>`: without it the Composer refuses the image's CLI
+as `cli-unvalidated`), with these flags:
 
     CONVERSATION_ENABLED=true
     CONVERSATION_COMPOSER_ENABLED=true
@@ -58,7 +60,9 @@ Preflight, abort on any miss:
   (`GET /api/sessions/:id/conversations` → `capture.effective: true`), **one** interactive Claude in
   each, both `waiting_input`.
 - P3 One project, agent A bound to SA and agent B bound to SB.
-- P4 In each session: `curl -m 5 https://example.com` fails (stage 1).
+- P4 One plain message (no `collab`) to A and one to B, both `delivered`: the real Composer accepts
+  the image's CLI.
+- P5 In each session: `curl -m 5 https://example.com` fails (stage 1).
 
 ## 4. Steps
 
@@ -73,8 +77,8 @@ Each step records the request, the answer, and `GET /api/projects/:pid/conversat
 | S5 | New task and grant with `maxMessages: 4`. `POST …/grants/:id/pause` before A writes, then A writes | `outbox{rejected, grant-paused}`; B's pane unchanged. After `resume`, A writes again ⇒ delivered once. The mock writes at once: if its write lands before the pause, repeat the step |
 | S6 | New grant. With a relay `queued` (B kept busy with a long turn), `docker compose restart app` | After boot the relay is still `queued` and the `recovery` line lists the grant under `grants_kept`; **zero** Composer calls during boot. When B is free ⇒ delivered once |
 | S7 | New grant. `kill -9` the backend process while a relay is in flight (best effort: repeat until the log ends at `planned` or `sending`) | After boot: `not-sent{persist-failed}` or `uncertain{orphaned}`, `grant{paused, reason: recovered}`, zero Composer calls. B's pane shows the message at most once |
-| S8 | New grant. `revoke` with a relay queued | `grant{ended, reason: revoked}`, the relay `not-sent{grant-inactive}`, B's pane unchanged |
-| S9 | New grant. From a **third** container on the sessions network, POST the two Write events of a valid ask to `st-backend` with SA's ingest token (taken from SA's container env by the operator; only its hash goes in the evidence) | Both events captured in SA's file with `origin: mismatch`; no `outbox` line; nothing delivered |
+| S8 | New grant. `revoke` with a relay queued | `grant{revoked, by: <owner>}`, the relay `not-sent{grant-inactive}`, B's pane unchanged |
+| S9 | New grant. From a **third** container on the sessions network, POST the two Write events of a valid ask to `st-backend` with SA's ingest token (taken from SA's container env by the operator; only its hash goes in the evidence) | Both events in SA's capture file (the verdict is not persisted); `GET /api/admin/stats` shows the origin counter's `mismatch` cause up by 2; no `outbox` line; nothing delivered |
 | S10 | New grant. With a relay queued, remove agent B from the project | `not-sent{binding-changed}` and `grant{ended, reason: binding-changed}`; nothing delivered |
 | S11 | `npm run projects:check-log` over the project log | 0 violations |
 
