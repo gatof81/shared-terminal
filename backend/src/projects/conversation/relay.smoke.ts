@@ -781,10 +781,16 @@ printf '{"skipDangerousModePermissionPrompt": true}\\n' > ~/.claude/settings.jso
 			for (const e of persisted) console.log(`    ${JSON.stringify(e)}`);
 			console.log(`    capture of ${WHO[sid]}: ${trace(sid)}`);
 		}
+		// A `gap` is written by the backend about a loss (a late streaming
+		// fragment the relay reported, …), not received from a container: it
+		// has no origin (run 43620023255 had one after B's Write).
+		const hooks = events.filter((e) => e.ev.ev !== "gap");
+		for (const g of events.filter((e) => e.ev.ev === "gap"))
+			console.log(`    gap in ${WHO[g.sid]}'s capture: ${JSON.stringify(g.ev.data)}`);
 		check(
-			"every event of both sessions carried origin match",
-			events.length > 0 && events.every((e) => e.origin === "match"),
-			[...new Set(events.map((e) => e.origin))],
+			"every hook event of both sessions carried origin match",
+			hooks.length > 0 && hooks.every((e) => e.origin === "match"),
+			[...new Set(hooks.map((e) => e.origin))],
 		);
 		check(
 			`the watcher refused nothing on origin: ${JSON.stringify(outbox.stats)}`,
