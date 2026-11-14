@@ -1,9 +1,10 @@
 # D3 consult: isolated pilot runbook
 
-Status: **draft for the owner's gate. Not executed.** Nothing here runs on VM100, and none of it is
-a GO to deploy, to turn a flag on or to touch a production session. The contract is
-`docs/PROJECT_CONVERSATION.md` §7 (v0.4). The code is the stack #643 → #645 → #646 → #647; the
-pilot runs the exact SHA the owner approves, not "whatever the branch is now".
+Status: **stage 1 approved by the owner (2026-11-14), with the conditions of §2.1. Not executed
+yet.** Stages 2 and 3 are not approved. Nothing here runs on VM100 or VM120, and none of it is a GO
+to deploy, to turn a flag on or to touch a production session. The contract is
+`docs/PROJECT_CONVERSATION.md` §7 (v0.4). The code under test is the main that contains #643, #645,
+#646 and #647; the run checks out one exact SHA, recorded in the evidence.
 
 ## 1. What is already proven, and where
 
@@ -32,6 +33,18 @@ What it does **not** cover, and this pilot adds:
 | 1 | Two disposable sessions on a disposable host | The mock (`session-image/test/mock-anthropic.mjs`; it answers a consult's header block with the matching Write) | The owner's GO for the host and the run |
 | 2 | The same two sessions | A real model | A separate decision: it puts a model credential on the disposable host |
 | 3 | Claude A ↔ Claude B on VM100 | Real | Its own gate (§7). Out of scope here |
+
+### 2.1 The owner's conditions for stage 1
+
+- A new disposable host. Not VM100, not VM120. No credentials for, and no route to, production or
+  the NAS. Earlier evidence (D2, PASS-B, VM120) stays untouched.
+- Real backend and real Composer. The session image's CLI is the version production runs, or the
+  difference is written in the report.
+- The mock model only. No model credential on the host; no production credential of any kind.
+- Participants are disposable sessions. No current Claude B instance is touched or closed.
+- Both permission modes are compared here and only here (§6).
+- Every capture `gap` is kept with its cause (§6.1).
+- A operates the host; B reads the evidence and diagnoses.
 
 ## 3. Environment
 
@@ -93,20 +106,55 @@ PASS needs all of:
 - S11 clean.
 
 Stop the run and keep everything as it is (no cleanup, no retry) on: a message shown twice, a
-message shown in a pane with no `sending` line, an admission in S9, or any write outside the
-pilot host.
+message shown in a pane with no `sending` line, an admission in S9 or any `outbox{accepted}` whose
+origin is not `match`, a `projects:check-log` violation, or any effect outside the pilot host.
 
-Evidence to keep: the project log, both sessions' capture files, the backend log, the mock's request
+A capture `gap` that is not explained (§6.1) blocks PASS until it is.
+
+Evidence to keep (redacted: no token, cookie or key; hashes where identity matters): the project log, both sessions' capture files, the backend log, the mock's request
 log, the two panes (`tmux capture-pane -p`), with `sha256sum` of each.
 
-## 6. Known gap: the permission dialog
+## 6. The permission dialog: three runs
 
 In default permission mode the Write under `~/workspace/.st-outbox/` asks for confirmation, the
 session goes to `needs-terminal`, and a person has to accept it in the Terminal. The consult still
-works; it is not unattended. Removing the dialog means either sessions in bypass or a managed
-permission rule that allows exactly that path. Neither is changed by this runbook: stage 1 runs
-once in each mode and records what happens. A managed rule is a production-configuration decision
-for the owner.
+works; it is not unattended.
+
+Stage 1 runs S1–S3 three times, on fresh sessions each time:
+
+| Run | Sessions' CLI | Expect |
+| --- | --- | --- |
+| M1 | bypass (`--dangerously-skip-permissions`) | As §4 |
+| M2 | default mode, nothing added | A's Write stops at the dialog; nothing is admitted until the operator accepts in the Terminal; then as §4. Record how the session, the grant and the queue read meanwhile |
+| M3 | default mode plus the candidate rule of §6.2, in the **pilot's** sessions only | As M1 for the outbox Write. Then the negative checks of §6.2 |
+
+No managed rule, permission or setting of a production session is changed by any of this.
+
+### 6.1 Capture gaps
+
+A CI run of the consult smoke (43620023255) showed one `gap` in B's capture right after its Write's
+`tool_end`; the consult completed and the next run had none. The cause was not recorded. It is an
+open finding.
+
+For every session, after every step:
+
+    grep -n '"ev":"gap"' <WORKSPACE_ROOT>/.conversations/<sid>/*.events.jsonl
+
+and for each hit keep: the line itself (its `data.reason` and fields), the five events before and
+after it, the `seq` distance to the nearest Write `tool_start`/`tool_end` and that Write's
+`tool_use_id`, the relay's generation (`curl -si http://127.0.0.1:47613/st-relay/status` inside the
+session; a changed `X-ST-Relay-Generation` is a relay restart) and `GET /api/admin/stats →
+conversation`.
+
+Reading it: `missing_delta` is a lost or reordered streaming fragment and touches no tool event.
+`relay_dropped`, `backpressure` and `rate_limited` mean events were lost; if a Write's start or end
+is among them that message is **not admitted** (the agent has to write it again, and the sweep notes
+the file as `outbox{unverified}`) — a lost message, never a wrong or duplicated one. Anything else,
+or a gap next to a Write that was admitted anyway, is investigated before PASS.
+
+### 6.2 A rule for exactly this Write (candidate for M3)
+
+PENDING-RULE
 
 ## 7. Before stage 3 (A ↔ B on VM100)
 

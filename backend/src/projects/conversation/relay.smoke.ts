@@ -781,12 +781,19 @@ printf '{"skipDangerousModePermissionPrompt": true}\\n' > ~/.claude/settings.jso
 			for (const e of persisted) console.log(`    ${JSON.stringify(e)}`);
 			console.log(`    capture of ${WHO[sid]}: ${trace(sid)}`);
 		}
-		// A `gap` is written by the backend about a loss (a late streaming
-		// fragment the relay reported, …), not received from a container: it
-		// has no origin (run 43620023255 had one after B's Write).
+		// A `gap` is the backend's own line about a loss, not something received
+		// from a container: it has no origin (run 43620023255 had one after B's
+		// Write).
 		const hooks = events.filter((e) => e.ev.ev !== "gap");
-		for (const g of events.filter((e) => e.ev.ev === "gap"))
-			console.log(`    gap in ${WHO[g.sid]}'s capture: ${JSON.stringify(g.ev.data)}`);
+		// Open finding (owner, 2026-11-14): its cause was not recorded then, so a
+		// gap is printed with its neighbours in that session, Writes included.
+		for (const g of events.filter((e) => e.ev.ev === "gap")) {
+			const own = events.filter((e) => e.sid === g.sid);
+			const at = own.indexOf(g);
+			console.log(`    gap in ${WHO[g.sid]}'s capture: ${JSON.stringify(g.ev)}`);
+			for (const n of own.slice(Math.max(0, at - 5), at + 6))
+				if (n !== g) console.log(`      near: ${JSON.stringify(n.ev)} origin=${n.origin}`);
+		}
 		check(
 			"every hook event of both sessions carried origin match",
 			hooks.length > 0 && hooks.every((e) => e.origin === "match"),
