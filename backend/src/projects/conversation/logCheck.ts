@@ -1,7 +1,8 @@
 /**
  * projects/conversation/logCheck.ts — a read-only check of a project
  * conversation log against the rules of docs/PROJECT_CONVERSATION.md §2.2,
- * §3.1, §3.4, §4.1 and §4.3, and a per-message summary of what happened.
+ * §3.1, §3.4, §4.1, §4.3 and §7 (D3 grants, outbox admissions and queued
+ * relays), and a per-message summary of what happened.
  *
  * It exists to read the pilot's evidence without touching the host: the
  * operator pastes a page of `GET …/conversation/events` (message `text`
@@ -116,6 +117,22 @@ export function checkLog(input: unknown): CheckReport {
 	const settlingBy = new Map<string, CheckedLine>();
 	const acked = new Map<string, Set<string>>();
 	const key = (m: string, a: string) => `${m}/${a}`;
+	// D3 (§7): each grant's state as the lines go by, its budget and its admitted files.
+	const grants = new Map<
+		string,
+		{
+			state: "live" | "paused" | "ended";
+			max: number;
+			n: number;
+			reason?: string;
+			expiresAt: number;
+		}
+	>();
+	const admitted = new Set<string>();
+	const grantOf = (l: CheckedLine): string | null => {
+		const by = l.authorized_by;
+		return typeof by === "string" && by.startsWith("collab:") ? by.slice(7) : null;
+	};
 
 	for (const l of lines) {
 		const at = `seq ${l.seq} (${l.ev})`;
@@ -125,6 +142,20 @@ export function checkLog(input: unknown): CheckReport {
 				if (messages.has(msgId)) violations.push(`${at}: message ${msgId} written twice`);
 				const to = Array.isArray(l.to) ? (l.to as string[]) : [];
 				messages.set(msgId, { msgId, seq: l.seq, to, deliveries: [], pending: [] });
+				if (l.kind === "relay") {
+					const r = (l.relay ?? {}) as { grant_id?: string; n?: number; kind?: string };
+					const g = grants.get(String(r.grant_id));
+					if (!g) notes.push(`${at}: relay of a grant created before this page`);
+					else if (r.kind === "ask" || r.kind === "reply") {
+						if (g.state !== "live") violations.push(`${at}: relay admitted on a ${g.state} grant`);
+						g.n++;
+						if (r.n !== g.n) violations.push(`${at}: relay n ${String(r.n)}, expected ${g.n}`);
+						if (g.n > g.max) violations.push(`${at}: relay ${g.n} over max_messages ${g.max}`);
+						if (to.length !== 1) violations.push(`${at}: relay ${r.kind} without one recipient`);
+					} else if (to.length !== 0) {
+						violations.push(`${at}: relay ${String(r.kind)} addressed to an agent`);
+					}
+				}
 				break;
 			}
 			case "delivery": {
@@ -140,7 +171,7 @@ export function checkLog(input: unknown): CheckReport {
 					} else if (!m.to.includes(agentId)) {
 						violations.push(`${at}: ${agentId} is not a recipient of ${msgId}`);
 					}
-					if (state !== "planned" && state !== "not-sent" && m) {
+					if (state !== "planned" && state !== "not-sent" && state !== "queued" && m) {
 						violations.push(`${at}: first state of ${k} is ${state}, not planned/not-sent`);
 					}
 					d = { agentId, states: [], final: state, acked: false, sending: 0, lastState: "" };
@@ -148,7 +179,12 @@ export function checkLog(input: unknown): CheckReport {
 					m?.deliveries.push(d);
 				}
 				const last = d.lastState;
-				if (state === "planned") {
+				const gid = grantOf(l);
+				if (state === "queued") {
+					// §3.1: only a D3 relay waits, and only as its first state.
+					if (!gid) violations.push(`${at}: queued without a collab authorization`);
+					if (last !== "") violations.push(`${at}: queued after ${last}`);
+				} else if (state === "planned") {
 					const b = l.binding as { sid?: string; cid?: string } | undefined;
 					const ccmid = l.composer_client_message_id;
 					if (!b || typeof b.sid !== "string" || typeof b.cid !== "string")
@@ -163,7 +199,8 @@ export function checkLog(input: unknown): CheckReport {
 					}
 					d.sid = b?.sid;
 					d.cid = b?.cid;
-					if (last !== "") violations.push(`${at}: planned after ${last}`);
+					if (last !== "" && !(last === "queued" && gid))
+						violations.push(`${at}: planned after ${last}`);
 				} else if (state === "placing") {
 					if (last !== "planned") violations.push(`${at}: placing after ${last || "nothing"}`);
 				} else if (state === "sending") {
@@ -171,9 +208,18 @@ export function checkLog(input: unknown): CheckReport {
 					if (d.sending > 1) violations.push(`${at}: second sending for ${k} (§3.4 rule 1)`);
 					if (last !== "planned" && last !== "placing")
 						violations.push(`${at}: sending after ${last || "nothing"}`);
+					// §7.5: a pause or an end written before S3 wins.
+					const g = gid ? grants.get(gid) : undefined;
+					if (gid && !g)
+						notes.push(`${at}: sending under a grant created before this page (${gid})`);
+					else if (g && g.state !== "live")
+						violations.push(`${at}: sending under a ${g.state} grant (§7.5)`);
+					// The one rule that depends on the clock: alive ⇔ before expires_at (§7.2).
+					else if (g && typeof l.at === "string" && Date.parse(l.at) >= g.expiresAt)
+						violations.push(`${at}: sending at or after the grant's expires_at (§7.2)`);
 				} else if (state === "not-sent") {
 					if (d.sending > 0) violations.push(`${at}: not-sent after sending for ${k}`);
-					if (last !== "" && last !== "planned" && last !== "placing")
+					if (last !== "" && last !== "planned" && last !== "placing" && last !== "queued")
 						violations.push(`${at}: not-sent after ${last}`);
 				} else if (RESULTS.has(state)) {
 					if (
@@ -232,6 +278,68 @@ export function checkLog(input: unknown): CheckReport {
 						sid: typeof l.sid === "string" ? l.sid : undefined,
 						settledFirst: settling !== undefined,
 					};
+				}
+				break;
+			}
+			case "grant": {
+				const id = String(l.grant_id);
+				const g = grants.get(id);
+				if (l.event === "created") {
+					if (g) violations.push(`${at}: grant ${id} created twice`);
+					const ps = Array.isArray(l.participants)
+						? (l.participants as Array<{ sid?: string }>)
+						: [];
+					if (ps.length !== 2 || ps[0]?.sid === ps[1]?.sid)
+						violations.push(`${at}: grant without two participants in two sessions`);
+					if (!messages.has(String(l.task_msg_id)))
+						violations.push(`${at}: grant created without its task in this page`);
+					grants.set(id, {
+						state: "live",
+						max: Number(l.max_messages),
+						n: 0,
+						expiresAt: Date.parse(String(l.expires_at)),
+					});
+				} else if (!g) {
+					notes.push(`${at}: event of a grant created before this page (${id})`);
+				} else if (g.state === "ended") {
+					violations.push(`${at}: ${String(l.event)} after the grant ended`);
+				} else if (l.event === "paused") {
+					// A second pause is legitimate only when it changes who can lift it
+					// (grantRules.ts `mayPause`): the person's over any other, or any cause
+					// over `delivery-uncertain`.
+					if (
+						g.state === "paused" &&
+						!(l.reason === "owner" ? g.reason !== "owner" : g.reason === "delivery-uncertain")
+					)
+						violations.push(`${at}: paused twice (${String(g.reason)} → ${String(l.reason)})`);
+					g.state = "paused";
+					g.reason = String(l.reason);
+				} else if (l.event === "resumed") {
+					if (g.state !== "paused") violations.push(`${at}: resumed while ${g.state}`);
+					// §7.1: an agent never resumes; only the person or the Composer's evidence.
+					if (l.by === "system") violations.push(`${at}: resumed by the system`);
+					g.state = "live";
+				} else if (l.event === "revoked" || l.event === "ended") {
+					g.state = "ended";
+				} else violations.push(`${at}: unknown grant event ${String(l.event)}`);
+				break;
+			}
+			case "outbox": {
+				const g = grants.get(String(l.grant_id));
+				if (!g) {
+					notes.push(`${at}: outbox of a grant created before this page`);
+					break;
+				}
+				if (g.state === "ended") violations.push(`${at}: outbox written after the grant ended`);
+				if (l.event === "accepted") {
+					if (l.origin !== "match")
+						violations.push(`${at}: admitted without origin match (§7.3.1)`);
+					if (g.state !== "live") violations.push(`${at}: admitted on a ${g.state} grant`);
+					const f = (l.from ?? {}) as { sid?: string };
+					const id = `${String(l.grant_id)}/${String(f.sid)}/${String(l.path)}/${String(l.sha256)}`;
+					if (admitted.has(id))
+						violations.push(`${at}: the same file admitted twice (§7.3 rule 8)`);
+					admitted.add(id);
 				}
 				break;
 			}

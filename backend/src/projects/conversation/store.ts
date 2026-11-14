@@ -188,6 +188,7 @@ export class ProjectConversationStore {
 				bootId: this.opts.bootId,
 				truncatedBytes,
 				interleavedWriters: interleavedWriters(lines),
+				nowMs: (this.opts.now?.() ?? new Date()).getTime(),
 			});
 			const all = [...lines];
 			if (events.length > 0) {

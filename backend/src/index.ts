@@ -46,6 +46,7 @@ import {
 	ProjectArtifacts,
 	projectArtifactsFlagEnabled,
 } from "./projects/conversation/artifacts.js";
+import { ProjectCollab } from "./projects/conversation/collab.js";
 import { ProjectFanout, pickTarget } from "./projects/conversation/fanout.js";
 import { placeArtifacts } from "./projects/conversation/placement.js";
 import { ReplyWatcher } from "./projects/conversation/replies.js";
@@ -314,8 +315,22 @@ if (PROJECT_ARTIFACTS_FLAG && !PROJECT_ARTIFACTS_ENABLED) {
 			"effective — project artifacts stay OFF",
 	);
 }
+// D3 — a consult between two agents (§7). Needs D1 effective AND the ingest
+// origin check running (`observe` or `true`): an agent message is admitted
+// only on events whose network origin was verified (§7.3.1), so with the
+// check off there is nothing to admit on. Set without them, logged and OFF.
+const PROJECT_RELAY_FLAG = projectConversationFlagEnabled(process.env.PROJECT_RELAY_ENABLED);
+const PROJECT_RELAY_ENABLED =
+	PROJECT_RELAY_FLAG && PROJECT_CONVERSATION_ENABLED && INGEST_ORIGIN_MODE !== null;
+if (PROJECT_RELAY_FLAG && !PROJECT_RELAY_ENABLED) {
+	logger.warn(
+		"[server] PROJECT_RELAY_ENABLED is set but needs PROJECT_CONVERSATION_ENABLED effective and " +
+			"INGEST_REQUIRE_SESSION_ORIGIN=observe|true — agent collaboration stays OFF",
+	);
+}
 let projectConversation: ProjectConversationStore | undefined;
 let projectReplies: ReplyWatcher | undefined;
+let projectCollab: ProjectCollab | undefined;
 // Built before the store exists (the router is built at load, the store
 // takes its lock in start()); the routes answer 503 until `api` is set.
 // The `artifacts` key exists only with D2 effective (routes and features
@@ -325,9 +340,15 @@ const projectConversationHolder:
 			api: ProjectConversationApi | null;
 			hub: ProjectWsHub | null;
 			artifacts?: ProjectArtifacts | null;
+			collab?: ProjectCollab | null;
 	  }
 	| undefined = PROJECT_CONVERSATION_ENABLED
-	? { api: null, hub: null, ...(PROJECT_ARTIFACTS_ENABLED ? { artifacts: null } : {}) }
+	? {
+			api: null,
+			hub: null,
+			...(PROJECT_ARTIFACTS_ENABLED ? { artifacts: null } : {}),
+			...(PROJECT_RELAY_ENABLED ? { collab: null } : {}),
+		}
 	: undefined;
 // Single shared bootstrap broadcaster (PR 185b2b). Owned at the server
 // scope so the route's runAsyncBootstrap and the WS handler's
@@ -674,6 +695,7 @@ async function start() {
 				onDelivered: (d) => replies.watch(d),
 				onUncertain: (d) => replies.watchUncertain(d),
 				isForbidden: (e) => e instanceof NotFoundError || e instanceof ForbiddenError,
+				relay: PROJECT_RELAY_ENABLED,
 				...(artifacts
 					? {
 							artifacts: {
@@ -700,16 +722,44 @@ async function start() {
 			if (artifacts) projectConversationHolder.artifacts = artifacts;
 			projectConversationHolder.hub = new ProjectWsHub(store);
 			// Recovery of every project now, then resume the replies being decided.
-			for (const pid of await store.openAll()) {
+			const opened = await store.openAll();
+			for (const pid of opened) {
 				await replies
 					.resume(pid)
 					.catch((err) =>
 						logger.warn(`[projects] ${pid}: replies not resumed (${(err as Error).message})`),
 					);
 			}
+			if (PROJECT_RELAY_ENABLED) {
+				const collab = new ProjectCollab({
+					store,
+					fanout,
+					bindings: (ownerId, pid) => directory.projectBindings(ownerId, pid),
+					recipient: async (sid) => {
+						const { conversations } = await conversation.summariesWithMeta(sid);
+						const live = conversations.filter(
+							(c) => c.kind === "interactive" && c.paneId !== null && !c.endedAt,
+						);
+						if (live.length === 0) return { kind: "none" };
+						if (live.length > 1) return { kind: "ambiguous" };
+						const only = live[0] as (typeof live)[number];
+						return only.status === "waiting_input"
+							? { kind: "ready", cid: only.sessionId }
+							: { kind: "busy" };
+					},
+					onCaptureEvent: (l) => conversation.onPersistedEvent((sid) => l(sid)),
+					log: logger,
+				});
+				projectCollab = collab;
+				projectConversationHolder.collab = collab;
+				// After the recovery batches: queued relays of the previous process
+				// are still queued, and nothing else is resumed (§7.5).
+				await collab.start(opened);
+			}
 		}
 		logger.info("[server] project conversation ENABLED (D1)");
 		if (PROJECT_ARTIFACTS_ENABLED) logger.info("[server] project artifacts ENABLED (D2)");
+		if (PROJECT_RELAY_ENABLED) logger.info("[server] agent collaboration ENABLED (D3)");
 	}
 	// #355 — configure Web Push from VAPID env (or warn + disable). Must run
 	// AFTER migrateDb so the push_subscriptions table exists before any
@@ -861,6 +911,7 @@ function shutdown() {
 	// settle an exec as evidence, but nothing further starts (§8.1.4).
 	// D1 — lets the writer-lock helper go (the kernel releases the lock when it exits).
 	projectReplies?.stop();
+	projectCollab?.stop();
 	void projectConversation?.close();
 	const composerDrained = composer.shutdown().catch((err) => {
 		logger.warn(`[server] composer shutdown failed: ${(err as Error).message}`);

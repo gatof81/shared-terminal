@@ -106,6 +106,36 @@ export function registerProjectConversationRoutes(router: Router, ctx: RouteCont
 		handle("ack", (api, userId, req) => api.ack(userId, req.params.pid as string, req.body)),
 	);
 
+	// ── D3 grants (§7.6), mounted only with PROJECT_RELAY_ENABLED effective ──
+	if ("collab" in holder) {
+		const collabOr503 = () => {
+			const c = holder.collab;
+			return c ?? { status: 503, body: { error: "project-writer-unavailable" } };
+		};
+		router.get(
+			"/projects/:pid/conversation/grants/:grantId",
+			requireAuth,
+			projectIp,
+			handle("grant", async (_api, _u, req) => {
+				const c = collabOr503();
+				return "status" in c ? c : c.get(req.params.pid as string, req.params.grantId as string);
+			}),
+		);
+		for (const verb of ["pause", "resume", "revoke"] as const) {
+			router.post(
+				`/projects/:pid/conversation/grants/:grantId/${verb}`,
+				requireAuth,
+				projectIp,
+				handle(`grant ${verb}`, async (_api, userId, req) => {
+					const c = collabOr503();
+					return "status" in c
+						? c
+						: c.action(userId, req.params.pid as string, req.params.grantId as string, verb);
+				}),
+			);
+		}
+	}
+
 	// ── D2 artifacts (§6), mounted only with PROJECT_ARTIFACTS_ENABLED effective ──
 	if (!("artifacts" in holder)) return;
 	const slots = new InFlightLimiter(ARTIFACT_IN_FLIGHT_PER_USER, ARTIFACT_IN_FLIGHT_TOTAL);

@@ -119,6 +119,10 @@ export function registerAuthRoutes(router: Router, ctx: RouteContext): void {
 							...(ctx.projectConversation && "artifacts" in ctx.projectConversation
 								? { projectArtifacts: true }
 								: {}),
+							// D3: only with PROJECT_RELAY_ENABLED effective (the key's presence).
+							...(ctx.projectConversation && "collab" in ctx.projectConversation
+								? { projectRelay: true }
+								: {}),
 						},
 					}
 				: {}),
