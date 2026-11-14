@@ -169,8 +169,24 @@ afterEach(async () => {
 });
 
 /** Lets deferred work (setImmediate + critical sections + fake I/O) run dry. */
+// A fixed sleep is not "the relay finished": every append is an fsync, and a
+// slow disk made a 60 ms wait end before the delivery's result line (CI,
+// 2026-11-14). After the minimum, wait until the relay has nothing running
+// and the log stopped growing — bounded at about a second, which is what a
+// test that parks a Composer call on purpose pays per call.
 async function settle(rounds = 30): Promise<void> {
-	for (let i = 0; i < rounds; i++) await new Promise((r) => setTimeout(r, 2));
+	const tick = () => new Promise((r) => setTimeout(r, 2));
+	for (let i = 0; i < rounds; i++) await tick();
+	const work = sys.collab as unknown as { draining: Map<string, unknown>; inFlight: Set<string> };
+	// No log yet (a refused create) is a log of zero lines.
+	const size = async () => (await lines().catch(() => [])).length;
+	let seen = await size();
+	for (let quiet = 0, i = 0; quiet < 3 && i < 400; i++) {
+		await tick();
+		const now = await size();
+		quiet = work.draining.size === 0 && work.inFlight.size === 0 && now === seen ? quiet + 1 : 0;
+		seen = now;
+	}
 }
 
 async function createTask(
