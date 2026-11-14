@@ -476,7 +476,8 @@ async function main(): Promise<void> {
 	// boots the server): a participant session has ONE interactive
 	// conversation with a pane, read from the REAL capture.
 	const soleConversation = async (sid: string): Promise<RecipientState> => {
-		const { conversations } = await service.summariesWithMeta(sid);
+		const { conversations, meta } = await service.summariesWithMeta(sid);
+		if (meta !== "ok") return { kind: "none" };
 		const live = conversations.filter(
 			(c) => c.kind === "interactive" && c.paneId !== null && !c.endedAt,
 		);
@@ -509,13 +510,9 @@ async function main(): Promise<void> {
 		onDelivered: () => {},
 		onUncertain: () => {},
 	});
-	const watcherLog: string[] = [];
 	const log = {
 		info: (m: string) => console.log(`    [log] ${m}`),
-		warn: (m: string) => {
-			watcherLog.push(m);
-			console.log(`    [log] ${m}`);
-		},
+		warn: (m: string) => console.log(`    [log] ${m}`),
 	};
 	const collab = new ProjectCollab({
 		store,
@@ -638,8 +635,14 @@ async function main(): Promise<void> {
 			tag: string,
 			cid: string,
 			send: (body: unknown) => Promise<string>,
-		): Promise<{ name: string; body: string; toolUseId: string; codes: string; logFrom: number }> {
-			const logFrom = watcherLog.length;
+		): Promise<{
+			name: string;
+			body: string;
+			toolUseId: string;
+			codes: string;
+			notMatchedFrom: number;
+		}> {
+			const notMatchedFrom = outbox.stats.originNotMatched;
 			const name = `${tag}-${RUN}.md`;
 			const body = `Consulta del caso ${tag} (${RUN}).`;
 			const toolUseId = `toolu_${tag}${randomBytes(9).toString("hex")}`;
@@ -647,7 +650,7 @@ async function main(): Promise<void> {
 			const codes = `${await send(pre)}${await send(post)}`;
 			await waitFor(`both events of ${tag}`, () => bothSeen(toolUseId));
 			await quiet();
-			return { name, body, toolUseId, codes, logFrom };
+			return { name, body, toolUseId, codes, notMatchedFrom };
 		}
 		/** The checks every refused case shares: captured, not a message, nothing sent. */
 		async function refused(
@@ -680,11 +683,11 @@ async function main(): Promise<void> {
 					(await outboxLine(w.name)) === undefined,
 				),
 				check(`(${id}) nothing was delivered to B`, relaysTo(SB, w.body).length === 0),
+				// outbox.ts drops a Write whose START is not `match` right there
+				// (counted, nothing kept): exactly one more refusal, by origin.
 				check(
-					`(${id}) the watcher logged it as not a message (${got})`,
-					watcherLog
-						.slice(w.logFrom)
-						.some((m) => m.includes(`(${got})`) && m.includes("not a message")),
+					`(${id}) the watcher refused it on origin: originNotMatched ${w.notMatchedFrom} → ${outbox.stats.originNotMatched}`,
+					outbox.stats.originNotMatched === w.notMatchedFrom + 1,
 				),
 			].every(Boolean);
 			table.push({ id, what, origins: got, admitted: false, pass: ok });
@@ -839,8 +842,8 @@ async function main(): Promise<void> {
 				(await outboxLine(f.name)) === undefined && relaysTo(SB, f.body).length === 0,
 			),
 			check(
-				"(f) the watcher logged it as not a message (none/none)",
-				watcherLog.slice(f.logFrom).some((m) => m.includes("(none/none)")),
+				`(f) the watcher refused it on origin: originNotMatched ${f.notMatchedFrom} → ${outbox.stats.originNotMatched}`,
+				outbox.stats.originNotMatched === f.notMatchedFrom + 1,
 			),
 		].every(Boolean);
 		table.push({
