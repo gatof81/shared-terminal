@@ -19,8 +19,10 @@ name: Session Image
 # backend/src/dockerManager.ts, the conversation receiver and hooks-file
 # builder under backend/src/conversation/, the recreation engine under
 # backend/src/recreate/ (with the attempt record and lifecycle lock), and
-# the `st-backend` alias in docker-compose.yml — which is why those are in
-# the filter. The cost side is also different: a docker build is ~5 min of
+# the `st-backend` alias in docker-compose.yml, and the D3 admission path
+# under backend/src/projects/conversation/ (its origin smoke runs the real
+# outbox watcher, collab and fan-out) — which is why those are in the
+# filter. The cost side is also different: a docker build is ~5 min of
 # critical path, not the <1 min ci.yml accepts as noise.
 #
 # Consequence: this can NOT be a required check in branch protection — it
@@ -36,6 +38,7 @@ on:
       - "backend/src/recreate/**"
       - "backend/src/recreateAttempt.ts"
       - "backend/src/sessionLifecycleLock.ts"
+      - "backend/src/projects/conversation/**"
       - "docker-compose.yml"
       - ".github/workflows/session-image.yml"
   push:
@@ -47,6 +50,7 @@ on:
       - "backend/src/recreate/**"
       - "backend/src/recreateAttempt.ts"
       - "backend/src/sessionLifecycleLock.ts"
+      - "backend/src/projects/conversation/**"
       - "docker-compose.yml"
       - ".github/workflows/session-image.yml"
 
@@ -180,6 +184,17 @@ jobs:
       - name: Recreation audit smoke test (real Docker)
         working-directory: backend
         run: npx tsx src/recreate/recreateAudit.smoke.ts shared-terminal-session
+
+      # D3 (PROJECT_CONVERSATION.md §7.3.1, M6): an agent message is admitted
+      # only when both hook events left from the session's CURRENT container.
+      # Only a real bridge network shows what the ingest's TCP peer is, so the
+      # six acceptance cases run here: the real ingest handler and origin
+      # verifier (a real `docker inspect` per decision), the real outbox
+      # watcher, collab and fan-out; D1 and the Composer are the only fakes.
+      # Disposable containers and network; no CLI is started.
+      - name: D3 origin smoke test (§7.3.1 a–f, real Docker)
+        working-directory: backend
+        run: npx tsx src/projects/conversation/relayOrigin.smoke.ts shared-terminal-session
 
       # The composer smoke (CONVERSATION.md §8.2.6) runs in the `cli-variants`
       # job below, against the versions in COMPOSER_CLI_VERSIONS, not the
