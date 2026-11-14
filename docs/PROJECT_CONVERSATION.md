@@ -240,7 +240,7 @@ de este contrato tiene **su propia exclusión, aplicada por el kernel:**
 
 | `ev` | Campos | Identidad |
 | --- | --- | --- |
-| `message` | `msg_id` (UUID v4 del servidor), `client_message_id`, `by` (user_id), `kind: owner\|relay`, `to[]` (agent_ids; vacío en un relay `owner`/`done`), `text` (normalizado, §8.1.2), `text_sha256`, `request_sha256` (§3.4 regla 2), `quote_ref?` (§4.2), `in_reply_to?` (`msg_id`), `artifacts[]` (§6: `{sha256, name, bytes}`), `collab?` (en la tarea que crea un permiso: `{grant_id}`), `from?` (agent_id, en `kind: relay`), `relay?` (`{grant_id, n, kind, outbox_seq, body_sha256}` en `kind: relay`) | `client_message_id` (owner) o la identidad de su `outbox` (relay: **un archivo se admite como mucho una vez**) |
+| `message` | `msg_id` (UUID v4 del servidor), `client_message_id`, `by` (user_id), `kind: owner\|relay`, `to[]` (agent_ids; vacío en un relay `owner`/`done`), `text` (normalizado, §8.1.2), `text_sha256`, `request_sha256` (§3.4 regla 2), `quote_ref?` (§4.2), `in_reply_to?` (`msg_id`), `artifacts[]` (§6: `{sha256, name, bytes}`), `collab?` (en la tarea que crea un permiso: `{grant_id}`), `from?` (agent_id, en `kind: relay`), `relay?` (`{grant_id, n, kind, file_sha256}` en `kind: relay`; `n` es 0 en `owner`/`done`) | `client_message_id` (owner) o la identidad de su `outbox` (relay: **un archivo se admite como mucho una vez**) |
 | `delivery` | `msg_id`, `agent_id`, `state` (§3.1), `binding{binding_id, epoch, sid, cid}` (desde `planned`, fijo; en `queued`, sin `cid`), `composer_client_message_id` (UUID v4, fijo desde `planned`), `reason?`, `http?` (`{status, result, promptId?, seq?}` de la respuesta del Composer), `artifacts[]?` (en `placing`: lo que se va a colocar), `artifacts_placed?` (§6.4), `files_possibly_placed?`, `binding_verified_at?` (en `sending`, §3.3 c0), `authorized_by` (`owner` \| `collab:<grant_id>`) | `msg_id` + `agent_id` + `state` |
 | `reply_settling` | los mismos campos que `reply_ref` salvo `attribution`, más `settle_until` (ISO) — informativo: empezó el asentamiento de §4.1; **no** es una respuesta ni da elegibilidad. Si el asentamiento no se observa entero, la recuperación escribe con esos campos el `reply_ref{ambiguous{settle-unobserved}}` | `msg_id` + `agent_id` + `turn_end_seq` |
 | `reply_ref` | `msg_id`, `agent_id`, `sid`, `cid`, `prompt_id`, `seq_from`, `seq_to`, `turn_end_seq`, `report_sha256`, `report_bytes`, `truncated`, `attribution: exact\|ambiguous` | `msg_id` + `agent_id` + `prompt_id` |
@@ -855,7 +855,8 @@ Sin migración de D1, sin cambios en el Composer, en la imagen de sesión ni en 
   resolución (§3.2): son las sesiones que la persona vio al autorizar. Toda aceptación y toda entrega
   vuelve a comparar contra ellas.
 - Si la tarea no pudo planificarse para el iniciador (`not-sent` en S1), el permiso no se crea y la
-  respuesta es la del envío.
+  respuesta es la del envío. Si se planificó pero su entrega termina `not-sent`, `refused` o `failed`,
+  el permiso termina con `ended{task-not-delivered}`: nadie recibió el protocolo.
 - El texto que recibe el iniciador es el de la persona más el pie de protocolo de §7.4. El pie cuenta
   en `validateText`.
 - **Un permiso está vivo** si no tiene `revoked` ni `ended` y el reloj es anterior a `expires_at`.
@@ -888,7 +889,7 @@ Se admite solo si se cumple **todo**, en este orden. La primera regla que falla 
 | 5 | **Sustitución** | los bytes leídos **son** el mensaje: se hashean, se guardan en el registro y son los que se entregan y se muestran. Lo que el archivo diga después no importa; el archivo no se vuelve a abrir | — |
 | 6 | **Autorización** | cabecera estricta (solo esas claves, una vez cada una, `st: 1`); `collab` = ese permiso; no pausado; `to` = el otro participante (salvo `owner`/`done`, que no llevan `to`); `re` nombra un mensaje de ese permiso cuya entrega a este agente tiene `sending` | `rejected{header-invalid\|grant-paused\|not-authorized\|bad-re}` |
 | 7 | **Límites** | quedan mensajes; el cuerpo no está vacío; el texto compuesto de §7.4 pasa `validateText`; no hay otra entrega de este permiso en cola o en curso para ese destinatario. El mensaje se cuenta aquí, bajo el lock | `rejected{budget\|empty\|text-…\|queue-full}` |
-| 8 | **Idempotencia** | no existe ya un `outbox` de ese permiso con la misma identidad (`sid`, `path`, `sha256`) | no se escribe nada |
+| 8 | **Idempotencia** | no existe ya un `outbox{accepted}` de ese permiso con la misma identidad (`sid`, `path`, `sha256`). Un archivo rechazado por una causa pasajera (`grant-paused`, `queue-full`) puede admitirse más tarde si el agente lo vuelve a escribir | no se escribe nada |
 
 - **Qué se afirma y qué no.** Un mensaje admitido vino de un proceso del contenedor vigente de la
   sesión autorizada (el hook pasa por un relay local que acepta cualquier POST de loopback, así que
@@ -923,7 +924,7 @@ Se admite solo si se cumple **todo**, en este orden. La primera regla que falla 
 ### 7.4 Lo que recibe el destinatario
 
 `message{kind: relay}` guarda el cuerpo en `text` (normalizado), con `from`, `to[]`, `in_reply_to` y
-`relay{grant_id, n, kind, outbox_seq, body_sha256}`. Lo lee el dueño del proyecto por las rutas de
+`relay{grant_id, n, kind, file_sha256}` (el sha256 es el de los bytes leídos del archivo). Lo lee el dueño del proyecto por las rutas de
 §5, como cualquier mensaje. Ningún agente lo lee por API. No se coloca ningún archivo en el workspace
 del destinatario.
 
@@ -952,8 +953,12 @@ ST-MSG 7f3a9c1e>>>
 
 - **La puerta** (de `queued` a `planned`) abre cuando: el permiso está vivo y no pausado; el binding
   del destinatario en D1 es el fijado; su sesión tiene una sola conversación interactiva con pane, y
-  la captura la tiene en `waiting_input`. Se evalúa al encolar, con cada evento de captura de esa
-  sesión, al reanudar, al arrancar y cada 30 s.
+  la captura la tiene en `waiting_input`. Se evalúa al encolar, con cada evento de captura de una
+  sesión participante, al reanudar, al arrancar y cada 30 s.
+  - Binding distinto del fijado, o agente retirado ⇒ `not-sent{binding-changed}` y
+    `ended{binding-changed}`. D1 sin respuesta en 5 s ⇒ sigue en cola.
+  - Más de una conversación interactiva ⇒ `not-sent{ambiguous-target}` y pausa: nunca se adivina.
+  - Ocupado, o sin conversación ⇒ sigue en cola.
 - En la sección crítica que escribe `sending` (S3) se vuelve a comprobar que el permiso está vivo y
   no pausado. Si no ⇒ `not-sent{grant-paused|grant-inactive}` y el Composer no se llama.
 - **Espera:** una entrega en cola más de `maxWaitMin` ⇒ `not-sent{wait-expired}` y
@@ -966,6 +971,7 @@ ST-MSG 7f3a9c1e>>>
 | `uncertain` | `paused{delivery-uncertain}`; si la evidencia del Composer la asienta `settled{delivered}` (§3.1), `resumed{by: evidence}` |
 | `not-sent{binding-changed}` | `ended{binding-changed}` |
 | `not-sent{wait-expired}` | `ended{wait-expired}` |
+| `not-sent{grant-paused\|grant-inactive}` | sin cambio (lo escribió quien ya decidió el permiso) |
 
 - **Pausar / Reanudar / Detener** (§7.6): bajo el lock, idempotentes, nunca esperan al Composer.
   - Pausar: nada se admite ni sale de la cola.
@@ -978,7 +984,7 @@ ST-MSG 7f3a9c1e>>>
   `.st-outbox/` ⇒ `paused{write-observed}`. Es detección, no restricción: lo que haga por Bash no se
   ve, y las sesiones conservan sus credenciales (§7.8).
 - **Fin:** `revoked`, `done`, `budget`, `expired` (temporizador y toda comprobación de «vivo»),
-  `wait-expired`, `binding-changed`, `interrupted` (restore). Un permiso terminado no se reabre.
+  `wait-expired`, `binding-changed`, `task-not-delivered`, `interrupted` (restore). Un permiso terminado no se reabre.
 - **Reinicio del backend** (reemplaza la regla de v0.3 «no queda ningún permiso vivo»):
   - un permiso vencido ⇒ `ended{expired}`;
   - `queued` sigue en cola;
