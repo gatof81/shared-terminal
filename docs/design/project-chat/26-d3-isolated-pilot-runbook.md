@@ -154,7 +154,35 @@ or a gap next to a Write that was admitted anyway, is investigated before PASS.
 
 ### 6.2 A rule for exactly this Write (candidate for M3)
 
-PENDING-RULE
+From the CLI's documentation (permissions, managed settings, hooks; read 2026-11-14, not yet tried):
+
+**R-a, a managed allow rule.** A second fragment beside the capture's, in the pilot's sessions only:
+
+    /etc/claude-code/managed-settings.d/st-outbox.json
+    { "permissions": { "allow": ["Edit(//home/developer/workspace/.st-outbox/**)"] } }
+
+- The Write tool is governed by `Edit(...)` rules; a `Write(path)` rule is accepted and ignored.
+  `//` is the filesystem root. Fragments merge in alphabetical order and allow lists combine.
+- An allow rule applies only when the requested path **and** what it resolves to both match, and
+  Write refuses a path that is itself a symlink: a link inside the outbox does not widen it.
+- What it adds beyond the Write: Edit and NotebookEdit on files in that directory. No Bash, no other
+  path. It cannot be narrowed to Write alone.
+- A fragment that is not a JSON object makes the CLI refuse to start. It is fixed at container
+  creation like the capture's, so it never reaches a session that was not created with it.
+
+**R-b, a managed PreToolUse hook** (only if R-a's Edit side matters). Matcher `Write`; the script
+answers `permissionDecision: "allow"` only when `tool_input.file_path` matches the outbox pattern of
+§7.3 rule 1 and its `realpath` parent is the outbox directory, and says nothing otherwise (the
+normal dialog follows). A hook that times out approves nothing. It is Write-only, at the cost of a
+script in the image.
+
+Neither grants anything the backend trusts: admission is still rules 1–8, on the backend's own read
+of the file.
+
+Negative checks in M3, each must still show the dialog: a Write to `~/workspace/x.md`; a Write to
+`~/workspace/.st-outbox-2/x.md`; a Write to `~/workspace/.st-outbox/l.md` where `l.md` is a symlink
+to `~/workspace/y.md`; with `.st-outbox` itself replaced by a symlink to another directory, a Write
+under it; any Bash command. Record `/status` in the session (which managed source applied).
 
 ## 7. Before stage 3 (A ↔ B on VM100)
 
