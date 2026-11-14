@@ -738,7 +738,10 @@ async function start() {
 				// and where a relay is delivered (collab.ts gate); more than one is
 				// ambiguous for both, never a guess.
 				const soleConversation = async (sid: string): Promise<RecipientState> => {
-					const { conversations } = await conversation.summariesWithMeta(sid);
+					const { conversations, meta } = await conversation.summariesWithMeta(sid);
+					// The list could not be read whole: "the only one" would be a
+					// guess over the resident conversations alone. Fail closed.
+					if (meta !== "ok") return { kind: "none" };
 					const live = conversations.filter(
 						(c) => c.kind === "interactive" && c.paneId !== null && !c.endedAt,
 					);

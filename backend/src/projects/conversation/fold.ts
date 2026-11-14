@@ -90,6 +90,8 @@ export interface GrantFold {
 	maxMessages: number;
 	maxWaitMin: number;
 	expiresAt: string;
+	/** `at` of its `created` line. */
+	createdAt: string;
 	state: "live" | "paused" | "ended";
 	/** Why it is paused or ended. */
 	reason?: string;
@@ -273,6 +275,7 @@ export function fold(f: Folded, lines: readonly LogLine[]): Folded {
 						maxMessages: l.max_messages as number,
 						maxWaitMin: l.max_wait_min as number,
 						expiresAt: l.expires_at as string,
+						createdAt: l.at,
 						state: "live",
 						used: 0,
 						rejected: 0,

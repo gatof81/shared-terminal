@@ -733,3 +733,72 @@ describe("§7.5 — files the log knows nothing about (M17)", () => {
 		expect(await outboxLines()).toHaveLength(8);
 	});
 });
+
+describe("bounded work per session (security review of D3-b)", () => {
+	it("a burst of verified pairs queues at most 4 admissions; the rest are dropped before any D1 read", async () => {
+		let reads = 0;
+		let release: () => void = () => {};
+		const gate = new Promise<void>((r) => (release = r));
+		bindings = (() => {
+			reads++;
+			return gate.then(() => bindingsOf());
+		}) as unknown as typeof bindings;
+		for (let i = 0; i < 40; i++) wrote(SA, `b${i}.md`);
+		await new Promise((r) => setTimeout(r, 20));
+		expect(outbox.stats.notAMessage.backlog).toBe(36);
+		release();
+		bindings = () => bindingsOf();
+		await settle();
+		expect(reads).toBeLessThanOrEqual(4);
+	});
+
+	it("a grant that can neither admit nor record more costs no D1 read", async () => {
+		await collab.action(OWNER, PID, grantId, "pause");
+		for (let i = 0; i < 8; i++) {
+			wrote(SA, `gone${i}.md`);
+			await settle(3);
+		}
+		expect(await outboxLines()).toHaveLength(8);
+		let reads = 0;
+		bindings = () => {
+			reads++;
+			return bindingsOf();
+		};
+		for (let i = 0; i < 6; i++) {
+			wrote(SA, `more${i}.md`);
+			await settle(3);
+		}
+		expect(reads).toBe(0);
+		expect(outbox.stats.notAMessage.saturated).toBe(6);
+		expect(await outboxLines()).toHaveLength(8);
+	});
+
+	it("unverified starts are not kept, and one session's burst never evicts another's pending start", async () => {
+		await put(SB, "r.md", fileText({ to: A, kind: "ask" }, "de B"));
+		conversation.set(SA, { kind: "ready", cid: "cid-a" });
+		const id = wrote(SB, "r.md", { end: "absent" });
+		for (let i = 0; i < 300; i++)
+			wrote(SA, `x${i}.md`, { end: "absent", start: { origin: "mismatch" } });
+		for (let i = 0; i < 300; i++) wrote(SA, `y${i}.md`, { end: "absent" });
+		emit(SB, "tool_end", { tool_name: "Write", tool_use_id: id, ok: true }, MATCH);
+		await settle();
+		expect((await outboxLines()).map((l) => [l.event, l.path])).toEqual([
+			["accepted", ".st-outbox/r.md"],
+		]);
+	});
+
+	it("a misnamed file inside the outbox directory is ignored, not reported as a write", async () => {
+		for (const name of ["my reply.md", "notes.txt", `${"a".repeat(120)}.md`]) {
+			emit(
+				SB,
+				"tool_start",
+				{ tool_name: "Write", tool_use_id: `t-${name.length}`, summary: { file_path: ABS + name } },
+				MATCH,
+			);
+		}
+		await settle();
+		expect((await lines()).filter((l) => l.ev === "grant").pop()).toMatchObject({
+			event: "created",
+		});
+	});
+});

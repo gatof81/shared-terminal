@@ -197,8 +197,8 @@ export interface StoreOptions {
  * What this process knows about an event beyond what it persists. Only for
  * events it received itself: an event read back from the file has none.
  * `origin` is the §3.1.1 network-origin verdict of the request that carried
- * it — `match`, the cause it did not match (observe mode), or `unchecked`
- * when the check is off. It lives in memory only: the persisted format does
+ * it — `match`, or the cause it did not match (observe mode). With the check
+ * off there is no meta at all. It lives in memory only: the persisted format does
  * not change, and D3 (PROJECT_CONVERSATION.md §7.3.1) admits an agent
  * message only on `match`.
  */

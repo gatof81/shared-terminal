@@ -114,7 +114,7 @@ export class ProjectCollab {
 	/** Participant session → its live grant. A cache of the log (outbox.ts reads it). */
 	private readonly bySession = new Map<
 		string,
-		{ projectId: string; grantId: string; agentId: string; consulted: boolean }
+		{ projectId: string; grantId: string; agentId: string; consulted: boolean; createdAt: string }
 	>();
 	private readonly expiry = new Map<string, NodeJS.Timeout>();
 	/** Projects with at least one queued relay, and the keys queued. */
@@ -183,10 +183,16 @@ export class ProjectCollab {
 
 	private index(
 		pid: string,
-		g: Pick<GrantFold, "grantId" | "participants" | "expiresAt" | "with">,
+		g: Pick<GrantFold, "grantId" | "participants" | "expiresAt" | "with" | "createdAt">,
 	): void {
 		for (const p of g.participants) {
+			// A session re-bound to an agent of another project may appear in two
+			// grants that are still alive; projects open in no particular order
+			// at boot, so the NEWER grant keeps the entry, whichever came first.
+			const cur = this.bySession.get(p.sid);
+			if (cur && cur.grantId !== g.grantId && cur.createdAt > g.createdAt) continue;
 			this.bySession.set(p.sid, {
+				createdAt: g.createdAt,
 				projectId: pid,
 				grantId: g.grantId,
 				agentId: p.agent_id,
@@ -239,6 +245,7 @@ export class ProjectCollab {
 						participants: l.participants as GrantParticipant[],
 						expiresAt: l.expires_at as string,
 						with: l.with as string,
+						createdAt: l.at,
 					});
 				} else if (l.event === "revoked" || l.event === "ended") {
 					this.unindex(l.grant_id as string);
@@ -432,11 +439,23 @@ export class ProjectCollab {
 	async describe(
 		projectId: string,
 		grantId: string,
-	): Promise<{ by: string; with: string; participants: GrantParticipant[] } | null> {
+	): Promise<{
+		by: string;
+		with: string;
+		participants: GrantParticipant[];
+		/** Nothing this grant receives now could be admitted OR recorded (see outbox.ts). */
+		saturated: boolean;
+	} | null> {
 		return this.deps.store.critical(projectId, async (tx) => {
 			const g = tx.state.grants.get(grantId);
 			if (!g || !grantAlive(g, this.now())) return null;
-			return { by: g.by, with: g.with, participants: g.participants.map((p) => ({ ...p })) };
+			return {
+				by: g.by,
+				with: g.with,
+				participants: g.participants.map((p) => ({ ...p })),
+				saturated:
+					g.rejected >= REJECTED_MAX_PER_GRANT && (g.state === "paused" || g.used >= g.maxMessages),
+			};
 		});
 	}
 

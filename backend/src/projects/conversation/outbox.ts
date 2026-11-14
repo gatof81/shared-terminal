@@ -39,11 +39,25 @@ import { createHash } from "node:crypto";
 import type { EventMeta, PersistedEvent } from "../../conversation/store.js";
 import type { OpenedWorkspaceFile, WorkspaceListing } from "../../workspaceFiles.js";
 import type { AdmitInput, AdmitResult, ProjectCollab, RecipientState } from "./collab.js";
-import { OUTBOX_ABS_RE, OUTBOX_DIR, OUTBOX_MAX_BYTES, parseOutbox } from "./collabText.js";
+import {
+	OUTBOX_ABS_PREFIX,
+	OUTBOX_ABS_RE,
+	OUTBOX_DIR,
+	OUTBOX_MAX_BYTES,
+	parseOutbox,
+} from "./collabText.js";
 import { BINDING_READ_MS, type ProjectBindings } from "./fanout.js";
 
-/** `tool_start`s waiting for their `tool_end`, per process. */
+/** `tool_start`s waiting for their `tool_end`: per process, and per session. */
 export const PENDING_MAX = 256;
+export const PENDING_MAX_PER_SESSION = 8;
+/**
+ * Admissions of one session waiting their turn. Each costs D1 reads, and any
+ * process of the container can post event pairs far faster than D1 answers,
+ * so past this the pair is dropped (counted): an agent sends a handful of
+ * messages in a grant's life, never a backlog.
+ */
+export const BACKLOG_MAX_PER_SESSION = 4;
 export const PENDING_TTL_MS = 10 * 60_000;
 /** §7.5: the sweep's period and how long a file must have been quiet. */
 export const SWEEP_INTERVAL_MS = 10 * 60_000;
@@ -122,6 +136,7 @@ export class OutboxWatcher {
 	private readonly pending = new Map<string, { name: string; origin: string; at: number }>();
 	/** Per session: admissions run one after another, in the order their events arrived. */
 	private readonly chains = new Map<string, Promise<void>>();
+	private readonly backlog = new Map<string, number>();
 	private unlisten: (() => void) | undefined;
 	private interval: NodeJS.Timeout | undefined;
 	private stopped = false;
@@ -176,15 +191,25 @@ export class OutboxWatcher {
 			const fp = (d.summary as { file_path?: unknown } | undefined)?.file_path;
 			const m = typeof fp === "string" ? OUTBOX_ABS_RE.exec(fp) : null;
 			// A subagent's Write, another tool, or any other path is never a
-			// message — and, for the consulted agent, is a write to report.
+			// message. Outside the outbox DIRECTORY it is, for the consulted
+			// agent, a write to report (§7.5); a misnamed file inside it is
+			// simply ignored.
 			if (!m || tool !== "Write" || ev.agent_id !== null || !toolUseId) {
-				if (!m) void this.deps.collab.writeObserved(sid, { tool, cid });
+				if (typeof fp !== "string" || !fp.startsWith(OUTBOX_ABS_PREFIX)) {
+					void this.deps.collab.writeObserved(sid, { tool, cid });
+				}
 				return;
 			}
-			this.prune();
+			// A start that could never be half of an admission is not kept: it
+			// would only let an unverified sender push verified starts out.
+			if (meta?.origin !== "match") {
+				this.stats.originNotMatched++;
+				return;
+			}
+			this.prune(sid);
 			this.pending.set(key, {
 				name: m[1] as string,
-				origin: meta?.origin ?? "none",
+				origin: meta.origin,
 				at: this.now(),
 			});
 			return;
@@ -203,21 +228,33 @@ export class OutboxWatcher {
 			);
 			return;
 		}
+		const depth = this.backlog.get(sid) ?? 0;
+		if (depth >= BACKLOG_MAX_PER_SESSION) return void this.drop("backlog");
+		this.backlog.set(sid, depth + 1);
 		const prev = this.chains.get(sid) ?? Promise.resolve();
 		const run = prev
 			.then(() => this.process(sid, cid, toolUseId, p.name))
-			.catch((err) => this.deps.log?.warn(`[outbox] ${sid}: ${(err as Error).message}`));
+			.catch((err) => this.deps.log?.warn(`[outbox] ${sid}: ${(err as Error).message}`))
+			.finally(() => {
+				const d = (this.backlog.get(sid) ?? 1) - 1;
+				if (d <= 0) this.backlog.delete(sid);
+				else this.backlog.set(sid, d);
+			});
 		this.chains.set(sid, run);
 		void run.then(() => {
 			if (this.chains.get(sid) === run) this.chains.delete(sid);
 		});
 	}
 
-	private prune(): void {
+	private prune(sid: string): void {
 		const now = this.now();
+		const mine: string[] = [];
 		for (const [k, v] of this.pending) {
 			if (now - v.at > PENDING_TTL_MS) this.pending.delete(k);
+			else if (k.startsWith(`${sid}\u0000`)) mine.push(k);
 		}
+		// Per session first: one session's burst never evicts another's start.
+		while (mine.length >= PENDING_MAX_PER_SESSION) this.pending.delete(mine.shift() as string);
 		// Insertion order: the oldest goes first. A start whose end never
 		// comes is simply forgotten — it was never a message.
 		while (this.pending.size >= PENDING_MAX) {
@@ -276,6 +313,8 @@ export class OutboxWatcher {
 		const g = await this.deps.collab.describe(e.projectId, e.grantId);
 		const me = g?.participants.find((p) => p.sid === sid && p.agent_id === e.agentId);
 		if (!g || !me) return this.none("no-grant");
+		// Before any D1 read: a grant that can neither admit nor record more.
+		if (g.saturated) return this.none("saturated");
 		// D1 now, not the grant's memory of it: the agent may have been
 		// removed or re-bound since the person authorized.
 		let timer: NodeJS.Timeout | undefined;
