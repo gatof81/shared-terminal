@@ -59,7 +59,14 @@ import { openBootstrapLogModal } from "./newSession.js";
 import { openObserveModalFor } from "./observeModal.js";
 import { openPortsModalFor } from "./ports.js";
 import { currentProject, projectName, projects } from "./projectDirectory.js";
-import { agentActiveDeleteText, agentCountText, groupSessionsByBinding } from "./projectModel.js";
+import {
+	agentActiveDeleteText,
+	agentCountText,
+	groupSessionsByBinding,
+	LABEL_NO_RECENT,
+	LABEL_READY,
+	type PresenceView,
+} from "./projectModel.js";
 import {
 	clear as clearRoute,
 	navigateProject,
@@ -74,6 +81,7 @@ import {
 	sessionActions,
 	terminalState,
 } from "./sessionActions.js";
+import { sidebarPresenceOf, watchSidebarPresence } from "./sidebarPresence.js";
 import { badgeFor, clearBadge, recordOutput } from "./tabActivity.js";
 import { openTerminalSession, type SessionStatus } from "./terminal.js";
 import { currentShell } from "./uiShell.js";
@@ -586,6 +594,21 @@ function renderGroupedSessions(): void {
 		if (rows) rows.push(b);
 		else unnamed.push(b);
 	}
+	// Claude's state is read only for the projects whose rows can be seen:
+	// expanded, with a running session (a stopped one's state is its own
+	// word), and with the sidebar open (the phone's drawer, or the desktop
+	// column, which the ☰ button folds to nothing).
+	const folded = collapsed();
+	watchSidebarPresence(
+		projects()
+			.filter(
+				(p) =>
+					!folded.has(p.projectId) &&
+					(byProject.get(p.projectId) ?? []).some((r) => r.session.status === "running"),
+			)
+			.map((p) => p.projectId),
+		document.querySelector("main.sidebar-open") !== null,
+	);
 	for (const p of projects()) {
 		const rows = byProject.get(p.projectId) ?? [];
 		sessionList.appendChild(
@@ -810,6 +833,30 @@ function buildGroup(g: {
 	return section;
 }
 
+/**
+ * The row's one-word form of a presence. The full wording (`label`, owner
+ * rules of 2026-11-09) stays in the tooltip and the accessible name; a
+ * shorter word never claims more than the label does.
+ */
+function shortPresence(v: PresenceView): { word: string; cls: string } {
+	switch (v.tone) {
+		case "working":
+			return { word: "Working", cls: "" };
+		case "attention":
+			return { word: "Needs you", cls: "" };
+		case "ready":
+			return v.label === LABEL_READY
+				? { word: "Ready", cls: "" }
+				: { word: "Ready?", cls: " unverified" };
+		case "off":
+			return { word: "Claude off", cls: "" };
+		default:
+			return v.label === LABEL_NO_RECENT
+				? { word: "Quiet", cls: " stale" }
+				: { word: "Unknown", cls: "" };
+	}
+}
+
 function buildSessionItem(s: SessionInfo, binding: SessionBinding | null): HTMLElement {
 	const item = document.createElement("div");
 	// Status class on the wrapper mirrors the session-dot rules so CSS
@@ -892,6 +939,32 @@ function buildSessionItem(s: SessionInfo, binding: SessionBinding | null): HTMLE
 						? "Failed · open the log"
 						: s.status;
 		meta.appendChild(state);
+	}
+	// Claude's state in a running session bound to an agent: one short word
+	// and a mark whose SHAPE differs per state; what it rests on is in the
+	// tooltip and the row's accessible name. Nothing while it isn't known
+	// whether anything was read (a collapsed or not-yet-read project).
+	const presence =
+		tree && binding !== null && s.status === "running"
+			? sidebarPresenceOf(binding.projectId, binding.agentId, s.sessionId)
+			: null;
+	if (presence !== null) {
+		const short = shortPresence(presence);
+		const chip = document.createElement("span");
+		chip.className = `session-presence tone-${presence.tone}${short.cls}`;
+		chip.dataset.presence = presence.tone;
+		chip.setAttribute("aria-hidden", "true");
+		const mark = document.createElement("span");
+		mark.className = "session-presence-mark";
+		chip.appendChild(mark);
+		chip.appendChild(document.createTextNode(short.word));
+		meta.appendChild(chip);
+		const why = [presence.label, presence.reason, presence.evidence].filter(Boolean).join(" · ");
+		select.title = `${select.title || s.name}\nClaude: ${why}`;
+		select.setAttribute(
+			"aria-label",
+			`${s.name}, ${s.status}${agentPart}, Claude: ${presence.label}`,
+		);
 	}
 	// Phones: the agent as a word in this line (the separate agent link is
 	// desktop-only there — the row is too narrow for both). Not a link: the

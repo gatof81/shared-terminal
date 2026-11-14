@@ -305,6 +305,31 @@ describe("one tap to the agent's session", () => {
 		expect(startBtn(c)).toBeUndefined();
 	});
 
+	it("sidebar presence: fed by the page's list; a read that outlives a logout feeds nothing", async () => {
+		await load();
+		const presence = await import("./sidebarPresence.js");
+		history.replaceState(null, "", `/#/projects/${PID}`);
+		view.startProjects();
+		await flush();
+		// The page's own read is the sidebar's answer (no second request).
+		expect(presence.sidebarPresenceOf(PID, AID, SID)).not.toBeNull();
+		expect(api.fetchProjectAgents).toHaveBeenCalledTimes(1);
+		// A second read is in flight when the person logs out…
+		let answer: (v: ReturnType<typeof agentsBody>) => void = () => {};
+		api.fetchProjectAgents.mockImplementation(
+			() => new Promise<ReturnType<typeof agentsBody>>((r) => (answer = r)),
+		);
+		document.dispatchEvent(new Event("visibilitychange"));
+		await flush();
+		expect(api.fetchProjectAgents).toHaveBeenCalledTimes(2);
+		view.resetProjects();
+		expect(presence.sidebarPresenceOf(PID, AID, SID)).toBeNull();
+		// …and its answer lands afterwards: nothing of that account comes back.
+		answer(agentsBody());
+		await flush();
+		expect(presence.sidebarPresenceOf(PID, AID, SID)).toBeNull();
+	});
+
 	it("no last-conversation link without a remembered title; none for an unbound agent", async () => {
 		api.fetchProjectAgents.mockImplementation(async () => {
 			const b = agentsBody();
