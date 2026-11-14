@@ -196,6 +196,15 @@ jobs:
         working-directory: backend
         run: npx tsx src/projects/conversation/relayOrigin.smoke.ts shared-terminal-session
 
+      # D3 end to end (§7.2–§7.5): two real CLIs in two session containers,
+      # the image's own hooks and relay, the scripted model. A's CLI writes
+      # the ask, the backend admits it on origin `match` and types it into
+      # B's pane, B's CLI writes the reply, the budget ends the grant. Prints
+      # the two real Write capture events verbatim.
+      - name: D3 consult smoke test (two real CLIs, real hooks and relay)
+        working-directory: backend
+        run: npx tsx src/projects/conversation/relay.smoke.ts shared-terminal-session
+
       # The composer smoke (CONVERSATION.md §8.2.6) runs in the `cli-variants`
       # job below, against the versions in COMPOSER_CLI_VERSIONS, not the
       # image's pin.

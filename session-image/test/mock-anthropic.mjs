@@ -21,6 +21,18 @@
 //     (D2 validation runbook, P3.5). <path> must be exactly an inbox artifact
 //     name, `.st-inbox/<12 hex>-<name>` (the shape placement.ts publishes);
 //     anything else is refused with a text and no tool call;
+//   - the current turn carries the header block of a D3 consult (the lines
+//     `---` / `st: 1` / `collab: c-…` / `to: <uuid>` / `kind: ask|reply` /
+//     optional `re: m-…` / `---` that the backend prints in a task's protocol
+//     footer and in a relayed message, PROJECT_CONVERSATION.md §7.4) → one
+//     Write tool_use creating `/home/developer/workspace/.st-outbox/mock-<kind>.md`
+//     whose content is exactly that block plus a one-line body; after the
+//     tool_result, the closing text. The block must be the only one in the
+//     turn and must sit under the backend line it belongs to (the task
+//     footer for `ask`, the relay head naming the same consult, sender and
+//     message id for `reply`); anything else is refused with a text and no
+//     tool call. A relay head that says `mensaje N de N` (nothing left to
+//     spend) gets a text and no file: a reply there could not be sent;
 //   - anything else                         → two lines of text.
 // Anything that is not /v1/messages gets an empty 200 JSON object, so side
 // calls the CLI makes on startup never fail the run.
@@ -57,6 +69,54 @@ function toolResultText(block) {
 	if (typeof c === "string") return c;
 	if (Array.isArray(c)) return c.map((b) => (b?.type === "text" ? b.text : "")).join("\n");
 	return "";
+}
+
+// The D3 consult scenario. Everything is anchored to whole lines: the block
+// is echoed into a file the backend parses strictly (collabText.ts
+// `parseOutbox`), so a near-miss must be refused here, not "repaired".
+const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+const OUTBOX_BLOCK_RE = new RegExp(
+	`^---\\nst: 1\\ncollab: (c-[0-9a-f]{12})\\nto: (${UUID})\\nkind: (ask|reply)\\n(?:re: (m-[0-9a-f]{8})\\n)?---$`,
+	"gm",
+);
+const OUTBOX_TASK_RE = /^\[Shared Terminal · consulta (c-[0-9a-f]{12}) autorizada para esta tarea\]$/gm;
+const OUTBOX_RELAY_RE = new RegExp(
+	`^\\[Shared Terminal · consulta (c-[0-9a-f]{12}) · mensaje ([1-9]) de ([1-9]) · de (${UUID}) para (${UUID}) · id (m-[0-9a-f]{8})\\]$`,
+	"gm",
+);
+const OUTBOX_DIR = "/home/developer/workspace/.st-outbox";
+
+/** null ⇔ the turn is not a consult turn at all (no `st: 1` line). */
+function outboxPlan(prompt, tools) {
+	const marks = prompt.match(/^st: 1$/gm) ?? [];
+	if (marks.length === 0) return null;
+	const refuse = (why) => ({ text: `outbox scenario refused: ${why}\n` });
+	const blocks = [...prompt.matchAll(OUTBOX_BLOCK_RE)];
+	if (marks.length !== 1 || blocks.length !== 1) return refuse("not exactly one valid header block");
+	const [block, collab, to, kind, re] = blocks[0];
+	const tasks = [...prompt.matchAll(OUTBOX_TASK_RE)];
+	const relays = [...prompt.matchAll(OUTBOX_RELAY_RE)];
+	if (kind === "ask") {
+		if (re !== undefined) return refuse("an ask carries no re");
+		if (tasks.length !== 1 || relays.length !== 0 || tasks[0][1] !== collab) {
+			return refuse("ask block without its task footer");
+		}
+	} else {
+		if (re === undefined) return refuse("a reply needs re");
+		if (relays.length !== 1 || tasks.length !== 0) return refuse("reply block without its relayed message");
+		const [, relayCollab, n, max, from, , id] = relays[0];
+		if (relayCollab !== collab || from !== to || id !== re) {
+			return refuse("reply block does not answer the relayed message");
+		}
+		if (Number(n) >= Number(max)) return { text: "outbox scenario: no messages left in this consult, not replying\n" };
+	}
+	if (!tools.has("Write")) return refuse("no Write tool");
+	return {
+		tool: {
+			name: "Write",
+			input: { file_path: `${OUTBOX_DIR}/mock-${kind}.md`, content: `${block}\nMock ${kind} for ${collab}.\n` },
+		},
+	};
 }
 
 function plan(body) {
@@ -101,6 +161,8 @@ function plan(body) {
 		.join("\n");
 	const tools = new Set((body.tools ?? []).map((t) => t.name));
 	if (userTurns.some((t) => t.includes("ST_SUBAGENT"))) return { text: "Subagent reporting.\nAll good.\n" };
+	const outbox = outboxPlan(prompt, tools);
+	if (outbox) return outbox;
 	const tokens = [...prompt.matchAll(SHA256_TOKEN_RE)];
 	if (tokens.length > 1) return { text: "sha256 scenario refused: more than one token\n" };
 	if (tokens.length === 1) {
