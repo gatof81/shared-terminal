@@ -65,6 +65,11 @@ export function recoveryEvents(
 			}
 			continue;
 		}
+		// §7.2: a task that never reached `sending` never carried the protocol
+		// to the initiator — the grant ends; anything else pauses it.
+		if (gid && !relayGid && !d.sent && src.source === "boot" && !closing.has(gid)) {
+			closing.set(gid, "task-not-delivered");
+		}
 		if (gid && !closing.has(gid)) pausing.add(gid);
 		let ev: NewEvent;
 		if (src.source === "restore") {

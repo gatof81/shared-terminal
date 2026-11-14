@@ -118,7 +118,16 @@ export function checkLog(input: unknown): CheckReport {
 	const acked = new Map<string, Set<string>>();
 	const key = (m: string, a: string) => `${m}/${a}`;
 	// D3 (§7): each grant's state as the lines go by, its budget and its admitted files.
-	const grants = new Map<string, { state: "live" | "paused" | "ended"; max: number; n: number }>();
+	const grants = new Map<
+		string,
+		{
+			state: "live" | "paused" | "ended";
+			max: number;
+			n: number;
+			reason?: string;
+			expiresAt: number;
+		}
+	>();
 	const admitted = new Set<string>();
 	const grantOf = (l: CheckedLine): string | null => {
 		const by = l.authorized_by;
@@ -136,7 +145,7 @@ export function checkLog(input: unknown): CheckReport {
 				if (l.kind === "relay") {
 					const r = (l.relay ?? {}) as { grant_id?: string; n?: number; kind?: string };
 					const g = grants.get(String(r.grant_id));
-					if (!g) violations.push(`${at}: relay of a grant not created in this page`);
+					if (!g) notes.push(`${at}: relay of a grant created before this page`);
 					else if (r.kind === "ask" || r.kind === "reply") {
 						if (g.state !== "live") violations.push(`${at}: relay admitted on a ${g.state} grant`);
 						g.n++;
@@ -201,9 +210,13 @@ export function checkLog(input: unknown): CheckReport {
 						violations.push(`${at}: sending after ${last || "nothing"}`);
 					// §7.5: a pause or an end written before S3 wins.
 					const g = gid ? grants.get(gid) : undefined;
-					if (gid && !g) violations.push(`${at}: sending under an unknown grant ${gid}`);
+					if (gid && !g)
+						notes.push(`${at}: sending under a grant created before this page (${gid})`);
 					else if (g && g.state !== "live")
 						violations.push(`${at}: sending under a ${g.state} grant (§7.5)`);
+					// The one rule that depends on the clock: alive ⇔ before expires_at (§7.2).
+					else if (g && typeof l.at === "string" && Date.parse(l.at) >= g.expiresAt)
+						violations.push(`${at}: sending at or after the grant's expires_at (§7.2)`);
 				} else if (state === "not-sent") {
 					if (d.sending > 0) violations.push(`${at}: not-sent after sending for ${k}`);
 					if (last !== "" && last !== "planned" && last !== "placing" && last !== "queued")
@@ -280,14 +293,27 @@ export function checkLog(input: unknown): CheckReport {
 						violations.push(`${at}: grant without two participants in two sessions`);
 					if (!messages.has(String(l.task_msg_id)))
 						violations.push(`${at}: grant created without its task in this page`);
-					grants.set(id, { state: "live", max: Number(l.max_messages), n: 0 });
+					grants.set(id, {
+						state: "live",
+						max: Number(l.max_messages),
+						n: 0,
+						expiresAt: Date.parse(String(l.expires_at)),
+					});
 				} else if (!g) {
 					notes.push(`${at}: event of a grant created before this page (${id})`);
 				} else if (g.state === "ended") {
 					violations.push(`${at}: ${String(l.event)} after the grant ended`);
 				} else if (l.event === "paused") {
-					if (g.state === "paused") violations.push(`${at}: paused twice`);
+					// A second pause is legitimate only when it changes who can lift it
+					// (grantRules.ts `mayPause`): the person's over any other, or any cause
+					// over `delivery-uncertain`.
+					if (
+						g.state === "paused" &&
+						!(l.reason === "owner" ? g.reason !== "owner" : g.reason === "delivery-uncertain")
+					)
+						violations.push(`${at}: paused twice (${String(g.reason)} → ${String(l.reason)})`);
 					g.state = "paused";
+					g.reason = String(l.reason);
 				} else if (l.event === "resumed") {
 					if (g.state !== "paused") violations.push(`${at}: resumed while ${g.state}`);
 					// §7.1: an agent never resumes; only the person or the Composer's evidence.

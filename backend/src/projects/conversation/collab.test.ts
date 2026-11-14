@@ -908,6 +908,178 @@ describe("queue, gate and outcomes (§7.5, M3, M7–M13, M16)", () => {
 	});
 });
 
+describe("a result and its consequence are one append; the person's pause holds (review of D3-a)", () => {
+	let grantId: string;
+	beforeEach(async () => {
+		grantId = (await createTask()).body.grantId as string;
+	});
+	const ask = () => sys.collab.admit(outbox(grantId, A, { to: B, kind: "ask" }));
+	const batchOf = async (pred: (l: LogLine) => boolean) => {
+		const ls = await lines();
+		const i = ls.findIndex(pred);
+		const out = [ls[i] as LogLine];
+		for (let j = i; (ls[j] as LogLine).bn > 0; j++) out.push(ls[j + 1] as LogLine);
+		return out.map((l) => [l.ev, l.state ?? l.event, l.reason]);
+	};
+
+	it("a failed relay and the pause are the same batch — also with the collab reactor dead", async () => {
+		sys.composer = async () => {
+			// The process "dies" for everything but the append in progress.
+			sys.collab.stop();
+			return { status: 502, body: { error: "delivery-failed" } };
+		};
+		const q = await ask();
+		if (q.outcome !== "accepted") throw new Error("ask");
+		await settle();
+		expect(await batchOf((l) => l.msg_id === q.msgId && l.state === "failed")).toEqual([
+			["delivery", "failed", "delivery-failed"],
+			["grant", "paused", "delivery-failed"],
+		]);
+		// A new process finds the grant paused: nothing is admitted.
+		await sys.store.close();
+		sys = await boot("boot-2");
+		expect(await sys.collab.admit(outbox(grantId, A, { to: B, kind: "ask" }))).toMatchObject({
+			outcome: "rejected",
+			reason: "grant-paused",
+		});
+		expect(relayCalls()).toHaveLength(0);
+	});
+
+	it("the last delivery and ended{budget} are the same batch", async () => {
+		const q = await ask();
+		if (q.outcome !== "accepted") throw new Error("ask");
+		await settle();
+		const r = await sys.collab.admit(
+			outbox(grantId, B, { to: A, kind: "reply", re: shortMsgId(q.msgId) }, "ok"),
+		);
+		if (r.outcome !== "accepted") throw new Error("reply");
+		await settle();
+		expect(await batchOf((l) => l.msg_id === r.msgId && l.state === "delivered")).toEqual([
+			["delivery", "delivered", undefined],
+			["grant", "ended", "budget"],
+		]);
+	});
+
+	it("a refused task and ended{task-not-delivered} are the same batch", async () => {
+		await sys.collab.action(OWNER, PID, grantId, "revoke");
+		sys.composer = async () => ({ status: 409, body: { error: "busy" } });
+		const r = await createTask();
+		expect(await batchOf((l) => l.msg_id === r.body.msgId && l.state === "refused")).toEqual([
+			["delivery", "refused", "busy"],
+			["grant", "ended", "task-not-delivered"],
+		]);
+	});
+
+	it("the person's Pause over a delivery-uncertain pause is recorded, and evidence does not resume it", async () => {
+		sys.composer = async () => ({ status: 202, body: { result: "uncertain" } });
+		const q = await ask();
+		if (q.outcome !== "accepted") throw new Error("ask");
+		await settle();
+		expect((await sys.collab.action(OWNER, PID, grantId, "pause")).body).toMatchObject({
+			state: "paused",
+			reason: "owner",
+		});
+		// Idempotent from here on.
+		await sys.collab.action(OWNER, PID, grantId, "pause");
+		await sys.store.critical(PID, (tx) =>
+			tx.append([
+				{ ev: "delivery", msg_id: q.msgId, agent_id: B, state: "settled", result: "delivered" },
+			]),
+		);
+		await settle();
+		expect((await grantLines()).map((l) => [l.event, l.reason, l.by])).toEqual([
+			["created", undefined, OWNER],
+			["paused", "delivery-uncertain", "system"],
+			["paused", "owner", OWNER],
+		]);
+		expect(await sys.collab.admit(outbox(grantId, B, { to: A, kind: "ask" }))).toMatchObject({
+			reason: "grant-paused",
+		});
+		expect(relayCalls()).toHaveLength(1);
+	});
+
+	it("a settled{delivered} whose follow-up the previous process never wrote resumes at boot", async () => {
+		sys.composer = async () => ({ status: 202, body: { result: "uncertain" } });
+		const q = await ask();
+		if (q.outcome !== "accepted") throw new Error("ask");
+		await settle();
+		sys.collab.stop();
+		await sys.store.critical(PID, (tx) =>
+			tx.append([
+				{ ev: "delivery", msg_id: q.msgId, agent_id: B, state: "settled", result: "delivered" },
+			]),
+		);
+		await settle();
+		expect((await grantLines()).pop()).toMatchObject({ event: "paused" });
+		await sys.store.close();
+		sys = await boot("boot-2");
+		await settle();
+		expect((await grantLines()).pop()).toMatchObject({ event: "resumed", by: "evidence" });
+	});
+
+	it("resuming a grant with nothing left to exchange ends it (budget)", async () => {
+		const q = await ask();
+		if (q.outcome !== "accepted") throw new Error("ask");
+		await settle();
+		sys.composer = async () => ({ status: 202, body: { result: "unconfirmed" } });
+		const r = await sys.collab.admit(
+			outbox(grantId, B, { to: A, kind: "reply", re: shortMsgId(q.msgId) }, "ok"),
+		);
+		if (r.outcome !== "accepted") throw new Error("reply");
+		await settle();
+		expect((await grantLines()).pop()).toMatchObject({
+			event: "paused",
+			reason: "delivery-unconfirmed",
+		});
+		expect((await sys.collab.action(OWNER, PID, grantId, "resume")).body).toMatchObject({
+			state: "ended",
+			reason: "budget",
+		});
+		expect((await grantLines()).slice(-2).map((l) => l.event)).toEqual(["resumed", "ended"]);
+		expect(sys.collab.grantOfSession(SA)).toBeNull();
+	});
+
+	it("checkLog: a page that starts mid-grant is notes, not violations; a sending after expires_at is a violation", async () => {
+		const q = await ask();
+		if (q.outcome !== "accepted") throw new Error("ask");
+		await settle();
+		const ls = await lines();
+		const mid = checkLog(ls.filter((l) => l.seq > 3));
+		expect(mid.violations.filter((v) => /grant/.test(v))).toEqual([]);
+		expect(mid.notes.some((n) => /grant created before this page/.test(n))).toBe(true);
+		const late = ls.map((l) =>
+			l.ev === "delivery" && l.state === "sending" && l.msg_id === q.msgId
+				? { ...l, at: "2026-11-14T14:00:00.000Z" }
+				: l,
+		);
+		expect(checkLog(late).violations).toEqual([
+			expect.stringContaining("sending at or after the grant's expires_at"),
+		]);
+		const twice = [
+			...ls,
+			{
+				seq: ls.length + 1,
+				ev: "grant",
+				grant_id: grantId,
+				event: "paused",
+				reason: "owner",
+				by: OWNER,
+			},
+			{
+				seq: ls.length + 2,
+				ev: "grant",
+				grant_id: grantId,
+				event: "paused",
+				reason: "write-observed",
+				by: "system",
+			},
+		];
+		expect(checkLog(twice).violations).toEqual([
+			expect.stringContaining("paused twice (owner → write-observed)"),
+		]);
+	});
+});
+
 describe("restart and restore (§7.5, M12, M18)", () => {
 	async function restart(): Promise<void> {
 		sys.collab.stop();
@@ -1031,6 +1203,65 @@ describe("restart and restore (§7.5, M12, M18)", () => {
 				grants_paused: [],
 			},
 		]);
+	});
+
+	it("a task that never reached `sending` when the process died ends its grant: nobody got the protocol", async () => {
+		const f = fold(emptyFold(), [
+			{
+				seq: 1,
+				ev: "message",
+				at: "t",
+				w: "w",
+				bn: 2,
+				msg_id: "m",
+				to: [A],
+				kind: "owner",
+				collab: { grant_id: "c-000000000001" },
+			},
+			{
+				seq: 2,
+				ev: "delivery",
+				at: "t",
+				w: "w",
+				bn: 1,
+				msg_id: "m",
+				agent_id: A,
+				state: "planned",
+				authorized_by: "owner",
+			},
+			{
+				seq: 3,
+				ev: "grant",
+				at: "t",
+				w: "w",
+				bn: 0,
+				grant_id: "c-000000000001",
+				event: "created",
+				task_msg_id: "m",
+				initiator: A,
+				with: B,
+				by: OWNER,
+				max_messages: 2,
+				max_wait_min: 60,
+				expires_at: "2099-01-01T00:00:00.000Z",
+				participants: [
+					{ agent_id: A, binding_id: "bind-a", epoch: 1, sid: SA },
+					{ agent_id: B, binding_id: "bind-b", epoch: 1, sid: SB },
+				],
+			},
+		] as LogLine[]);
+		const ev = recoveryEvents(
+			f,
+			{ source: "boot" },
+			{ bootId: "b", truncatedBytes: 0, interleavedWriters: [], nowMs: now },
+		);
+		expect(ev).toMatchObject([
+			{ ev: "delivery", msg_id: "m", state: "not-sent", reason: "persist-failed" },
+			{ ev: "grant", event: "ended", reason: "task-not-delivered" },
+			{ ev: "recovery", grants_closed: ["c-000000000001"], grants_paused: [], grants_kept: [] },
+		]);
+		// The task's own line keeps its D1 shape.
+		expect(ev[0]).not.toHaveProperty("authorized_by");
 	});
 
 	it("a log without grants keeps its exact D1 recovery record", () => {

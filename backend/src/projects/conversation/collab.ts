@@ -14,7 +14,12 @@
  *            (fanout.deliver): intent on disk before the effect, one
  *            Composer call at most, nothing retried.
  *   outcome  what a delivery's final state does to the grant (continue,
- *            pause, end), decided by reading the log under the lock.
+ *            pause, end) is written IN THE SAME APPEND as that final state
+ *            (grantRules.ts `deliveryConsequence`, called by every writer
+ *            of a result line). Only a `settled` — written by the reply
+ *            watcher from the Composer's evidence — is followed up here,
+ *            and at boot, because a lost follow-up of that one leaves the
+ *            grant paused, never running.
  *   control  pause / resume / revoke / expiry.
  *
  * Nothing here trusts an agent's text. The body is carried, never
@@ -31,15 +36,23 @@ import { logErrorToHttp } from "./api.js";
 import { type OutboxKind, type ParsedOutbox, relayText, shortMsgId } from "./collabText.js";
 import { BINDING_READ_MS, type ProjectBindings, type ProjectFanout } from "./fanout.js";
 import {
-	type DeliveryFold,
 	deliveryKey,
 	type Folded,
 	type GrantFold,
 	type GrantParticipant,
 	grantAlive,
-	isResultState,
 	outboxKey,
 } from "./fold.js";
+import {
+	budgetSpent,
+	collabOf,
+	deliveryConsequence,
+	endEvents,
+	grantIdOf,
+	mayPause,
+	pauseEvent,
+	pendingRelays,
+} from "./grantRules.js";
 import type { LogLine, NewEvent } from "./log.js";
 import type { CriticalTx, ProjectConversationStore } from "./store.js";
 
@@ -50,9 +63,6 @@ export const REJECTED_PAUSE_PER_AGENT = 3;
 export const GATE_INTERVAL_MS = 30_000;
 
 const GRANT_RE = /^c-[0-9a-f]{12}$/;
-const collabOf = (grantId: string): string => `collab:${grantId}`;
-const grantIdOf = (authorizedBy: string | undefined): string | null =>
-	authorizedBy?.startsWith("collab:") ? authorizedBy.slice("collab:".length) : null;
 
 export type RecipientState =
 	| { kind: "ready"; cid: string }
@@ -97,56 +107,6 @@ export type AdmitResult =
 	| { outcome: "duplicate" }
 	| { outcome: "ignored"; why: string };
 
-/** Relay deliveries of a grant that have not reached a result. */
-function pendingRelays(state: Folded, grantId: string): DeliveryFold[] {
-	const by = collabOf(grantId);
-	return [...state.deliveries.values()].filter(
-		(d) => d.authorizedBy === by && !isResultState(d.state),
-	);
-}
-
-/**
- * The events that end a grant: every relay still QUEUED becomes not-sent in
- * the same append (it never had an effect), then the end itself. A delivery
- * already planned or sending is not touched — its own path finishes it, and
- * its S3 gate reads the grant as ended.
- */
-function endEvents(
-	state: Folded,
-	g: GrantFold,
-	end: { event: "ended"; reason: string; by: string } | { event: "revoked"; by: string },
-	reasons: Map<string, string> = new Map(),
-): NewEvent[] {
-	const out: NewEvent[] = [];
-	for (const d of pendingRelays(state, g.grantId)) {
-		if (d.state !== "queued") continue;
-		out.push({
-			ev: "delivery",
-			msg_id: d.msgId,
-			agent_id: d.agentId,
-			state: "not-sent",
-			reason: reasons.get(deliveryKey(d.msgId, d.agentId)) ?? "grant-inactive",
-			authorized_by: collabOf(g.grantId),
-		});
-	}
-	out.push({ ev: "grant", grant_id: g.grantId, ...end });
-	return out;
-}
-
-const pauseEvent = (
-	g: GrantFold,
-	reason: string,
-	by: string,
-	ref?: { msg_id: string; agent_id: string },
-): NewEvent => ({
-	ev: "grant",
-	grant_id: g.grantId,
-	event: "paused",
-	reason,
-	by,
-	...(ref ? { ref } : {}),
-});
-
 export class ProjectCollab {
 	/** Participant session → its live grant. A cache of the log (outbox.ts reads it). */
 	private readonly bySession = new Map<
@@ -186,6 +146,10 @@ export class ProjectCollab {
 				for (const g of state.grants.values()) if (g.state !== "ended") this.index(pid, g);
 				for (const d of state.deliveries.values()) {
 					if (d.state === "queued" && grantIdOf(d.authorizedBy)) this.noteQueued(pid, d, true);
+					// A `settled` whose follow-up the previous process did not write.
+					if (d.state === "settled" && grantIdOf(d.authorizedBy)) {
+						await this.outcome(pid, d.msgId, d.agentId);
+					}
 				}
 				this.kick(pid);
 			} catch (err) {
@@ -280,12 +244,10 @@ export class ProjectCollab {
 				this.noteQueued(pid, { msgId, agentId }, state === "queued");
 				if (state === "queued") this.later(() => this.kick(pid));
 			}
-			// `settled` is written by the reply watcher without `authorized_by`,
-			// and a task's delivery is the person's: both are resolved from the
-			// folded state, under the lock.
-			if (state !== "queued" && state !== "planned" && state !== "placing" && state !== "sending") {
-				this.later(() => this.outcome(pid, msgId, agentId));
-			}
+			// Every other result line carries its consequence in its own append
+			// (grantRules.ts). `settled` is the reply watcher's, written without
+			// knowing about grants: followed up here.
+			if (state === "settled") this.later(() => this.outcome(pid, msgId, agentId));
 		}
 	}
 
@@ -353,8 +315,8 @@ export class ProjectCollab {
 					return { outcome: "rejected", reason, written: false };
 				const events = [outbox("rejected", { reason, ...(kind ? { kind } : {}) })];
 				if (
-					g.state === "live" &&
-					(g.rejectedBy.get(from.agent_id) ?? 0) + 1 >= REJECTED_PAUSE_PER_AGENT
+					(g.rejectedBy.get(from.agent_id) ?? 0) + 1 >= REJECTED_PAUSE_PER_AGENT &&
+					mayPause(g, "too-many-rejections")
 				) {
 					events.push(pauseEvent(g, "too-many-rejections", "system"));
 				}
@@ -576,15 +538,16 @@ export class ProjectCollab {
 				const d = state.deliveries.get(key);
 				const g = state.grants.get(snap.grantId);
 				if (!d || d.state !== "queued" || !g || g.state === "ended") return [];
+				const r = { state: "not-sent", reason: "ambiguous-target" };
 				return [
 					{
 						ev: "delivery",
 						msg_id: msgId,
 						agent_id: agentId,
-						state: "not-sent",
-						reason: "ambiguous-target",
+						...r,
 						authorized_by: collabOf(snap.grantId),
 					},
+					...deliveryConsequence(state, msgId, agentId, r),
 				];
 			});
 		}
@@ -643,58 +606,17 @@ export class ProjectCollab {
 				},
 			},
 		);
-		// The result line reaches `outcome` through onAppend.
+		// The result line and its consequence for the grant were one append.
 	}
 
 	// ── What a delivery's end does to its grant (§7.5) ────────────────────
 
+	/** Follow-up of a `settled` line (see the header): idempotent, decided from the log. */
 	private async outcome(projectId: string, msgId: string, agentId: string): Promise<void> {
 		await this.write(projectId, (state) => {
 			const d = state.deliveries.get(deliveryKey(msgId, agentId));
-			const m = state.messages.get(msgId);
-			if (!d || !m?.grantId) return [];
-			const g = state.grants.get(m.grantId);
-			if (!g || g.state === "ended") return [];
-			const ref = { msg_id: msgId, agent_id: agentId };
-			const delivered =
-				d.state === "delivered" || (d.state === "settled" && d.result === "delivered");
-
-			if (m.kind !== "relay") {
-				// The task itself. If it clearly never reached the initiator there
-				// is nobody to consult on its behalf.
-				const never = d.state === "not-sent" || d.state === "refused" || d.state === "failed";
-				return never && agentId === g.initiator
-					? endEvents(state, g, { event: "ended", reason: "task-not-delivered", by: "system" })
-					: [];
-			}
-
-			const out: NewEvent[] = [];
-			let paused = g.state === "paused";
-			if (delivered) {
-				// The Composer's own evidence settled the delivery that paused it.
-				if (
-					paused &&
-					g.reason === "delivery-uncertain" &&
-					g.pauseRef?.msg_id === msgId &&
-					g.pauseRef?.agent_id === agentId
-				) {
-					out.push({ ev: "grant", grant_id: g.grantId, event: "resumed", by: "evidence" });
-					paused = false;
-				}
-				if (!paused && g.used >= g.maxMessages && pendingRelays(state, g.grantId).length === 0) {
-					out.push(...endEvents(state, g, { event: "ended", reason: "budget", by: "system" }));
-				}
-				return out;
-			}
-			if (d.state === "not-sent") {
-				if (d.reason === "binding-changed") {
-					return endEvents(state, g, { event: "ended", reason: "binding-changed", by: "system" });
-				}
-				// Written by the path that already decided the grant's fate.
-				if (["grant-paused", "grant-inactive", "wait-expired"].includes(d.reason ?? "")) return [];
-			}
-			if (paused) return [];
-			return [pauseEvent(g, `delivery-${d.state}`, "system", ref)];
+			if (!d || d.state !== "settled") return [];
+			return deliveryConsequence(state, msgId, agentId, { state: d.state, result: d.result });
 		});
 	}
 
@@ -755,12 +677,21 @@ export class ProjectCollab {
 				if (g.state === "ended") {
 					return { status: 409, body: { error: "grant-ended", detail: g.reason } };
 				}
-				if (verb === "pause" && g.state === "live") {
+				if (verb === "pause" && mayPause(g, "owner")) {
+					// Also over a standing system pause: the person's Pause must not
+					// be liftable by the Composer's evidence (grantRules.ts).
 					await tx.append([pauseEvent(g, "owner", ownerId)], { allowMargin: true });
 				} else if (verb === "resume" && g.state === "paused") {
-					await tx.append([{ ev: "grant", grant_id: grantId, event: "resumed", by: ownerId }], {
-						allowMargin: true,
-					});
+					await tx.append(
+						[
+							{ ev: "grant", grant_id: grantId, event: "resumed", by: ownerId },
+							// Nothing left to exchange: resuming is the end (§7.2).
+							...(budgetSpent(tx.state, g)
+								? endEvents(tx.state, g, { event: "ended", reason: "budget", by: "system" })
+								: []),
+						],
+						{ allowMargin: true },
+					);
 				}
 				return answer();
 			});

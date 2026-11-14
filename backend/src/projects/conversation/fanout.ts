@@ -33,6 +33,7 @@ import {
 } from "./artifacts.js";
 import { taskFooter } from "./collabText.js";
 import { type DeliveryState, deliveryKey, type Folded, grantAlive } from "./fold.js";
+import { deliveryConsequence } from "./grantRules.js";
 import type { LogLine } from "./log.js";
 import type { PlacementResult } from "./placement.js";
 import type { ProjectConversationStore } from "./store.js";
@@ -743,6 +744,9 @@ export class ProjectFanout {
 								...(placing ? { files_possibly_placed: true } : {}),
 								authorized_by: opts.authorizedBy,
 							},
+							// D3: what this end does to the delivery's grant, in the SAME
+							// append (grantRules.ts). Nothing for a delivery without one.
+							...deliveryConsequence(tx.state, msgId, agentId, { state: "not-sent", reason }),
 						],
 						{
 							allowMargin: true,
@@ -917,6 +921,8 @@ export class ProjectFanout {
 							http: m.http,
 							authorized_by: opts.authorizedBy,
 						},
+						// D3: result and grant consequence are one append (grantRules.ts).
+						...deliveryConsequence(tx.state, msgId, agentId, m),
 					],
 					{ allowMargin: true },
 				),
