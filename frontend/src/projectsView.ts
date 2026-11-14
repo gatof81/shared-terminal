@@ -93,6 +93,12 @@ import {
 	runSessionAction,
 	sessionListLoaded,
 } from "./sessionCore.js";
+import {
+	clearSidebarPresence,
+	noteProjectAgents,
+	sidebarPresenceVisible,
+	startSidebarPresence,
+} from "./sidebarPresence.js";
 import { setTitlePage } from "./tabTitle.js";
 import { resetWorkspaces, suspendWorkspaces, teamWorkspace } from "./teamView.js";
 import { button, el, stateBox } from "./ui.js";
@@ -208,7 +214,12 @@ async function loadProjects(fresh = false): Promise<void> {
 
 async function loadAgents(pid: string, fresh = false): Promise<void> {
 	const state = entry(agentLists, pid);
+	const myGen = gen;
 	await load(state, () => fetchProjectAgents(pid), fresh).catch(() => {});
+	// The sidebar's rows read Claude's state from the same answers — never
+	// one that outlived a logout (`state` is the previous account's then).
+	if (myGen === gen && active && state.data && state.receivedAt !== null)
+		noteProjectAgents(pid, state.data, state.receivedAt);
 	const clock = listClock(state);
 	if (clock && (lastClock === null || clock.receivedAt >= lastClock.receivedAt)) lastClock = clock;
 	// The agent page reads its server clock from this list too.
@@ -1294,6 +1305,7 @@ function wire(): void {
 		if (document.visibilityState === "visible") {
 			tick();
 			schedulePoll();
+			sidebarPresenceVisible();
 		}
 	});
 	newProjectBtn?.addEventListener("click", () => openCreateProjectDialog());
@@ -1338,6 +1350,12 @@ export function startProjects(): void {
 	void loadProjects();
 	sync();
 	schedulePoll();
+	startSidebarPresence(
+		(pid) => loadAgents(pid),
+		() => {
+			if (sessionListLoaded()) renderSessionList();
+		},
+	);
 }
 
 /** Logout / expiry: nothing of this account stays on screen or in memory. */
@@ -1349,6 +1367,7 @@ export function resetProjects(): void {
 	for (const d of [...openDialogs]) d.close();
 	openDialogs.clear();
 	clearProjects();
+	clearSidebarPresence();
 	resetPilot();
 	resetWorkspaces();
 	projectsState = blank();

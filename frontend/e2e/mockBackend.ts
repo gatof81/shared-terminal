@@ -468,6 +468,8 @@ export class MockBackend {
 	// ── Projects & Agents (P3a) ──
 	/** PROJECT_CHAT_ENABLED: `features.projectChat` + `binding` on rows + the routes. */
 	projectChat = false;
+	/** `GET /projects/:id/agents` answers this status (the presence read fails). */
+	agentsReadFails: number | null = null;
 	/** The directory read failed: `/sessions` rows carry NO `binding` key (unknown). */
 	bindingReadFails = false;
 	/**
@@ -830,7 +832,11 @@ export class MockBackend {
 		const dev = AGENT_IDS.developer;
 		const arch = AGENT_IDS.architect;
 		const dev2 = AGENT_IDS.developer2;
-		this.projectTask(PROJECT_MSG_IDS.polling, [dev], "Make the project page poll adaptively\n5 s while an agent works, 15 s at rest.");
+		this.projectTask(
+			PROJECT_MSG_IDS.polling,
+			[dev],
+			"Make the project page poll adaptively\n5 s while an agent works, 15 s at rest.",
+		);
 		this.projectTask(PROJECT_MSG_IDS.notes, [arch], "Write the release notes", {}, () => ({
 			state: "refused",
 			reason: "busy",
@@ -838,8 +844,16 @@ export class MockBackend {
 		this.projectTask(PROJECT_MSG_IDS.backup, [arch, dev2], "Check the VM backups", {}, (a) =>
 			a === dev2 ? { state: "unconfirmed" } : { state: "delivered" },
 		);
-		await this.projectReply(PROJECT_MSG_IDS.polling, dev, "Done: adaptive cadence, timer stopped on logout. 628 tests pass.");
-		await this.projectReply(PROJECT_MSG_IDS.backup, arch, "Backups verified: 3 of 3 manifests are fresh.");
+		await this.projectReply(
+			PROJECT_MSG_IDS.polling,
+			dev,
+			"Done: adaptive cadence, timer stopped on logout. 628 tests pass.",
+		);
+		await this.projectReply(
+			PROJECT_MSG_IDS.backup,
+			arch,
+			"Backups verified: 3 of 3 manifests are fresh.",
+		);
 	}
 
 	private async projectConversationRoute(
@@ -939,7 +953,11 @@ export class MockBackend {
 				});
 			if (prev) {
 				if (prev.hash !== hash) return json(409, { error: "idempotency-conflict" });
-				return json(202, { msgId: prev.msgId, replayed: true, deliveries: deliveriesOf(prev.msgId) });
+				return json(202, {
+					msgId: prev.msgId,
+					replayed: true,
+					deliveries: deliveriesOf(prev.msgId),
+				});
 			}
 			const msgId = `c0000000-0000-4000-8000-${String(this.projectLog.length).padStart(12, "0")}`;
 			const q = body?.quoteRef as Record<string, unknown> | undefined;
@@ -1269,7 +1287,10 @@ export class MockBackend {
 			await answer(201, { ...this.projectSummary(p), replayed: false });
 			return true;
 		}
-		const cv = /^\/projects\/([^/]+)\/conversation\/(events|messages|acks|artifacts)(?:\/([^/]+))?$/.exec(path);
+		const cv =
+			/^\/projects\/([^/]+)\/conversation\/(events|messages|acks|artifacts)(?:\/([^/]+))?$/.exec(
+				path,
+			);
 		if (cv) {
 			const project = own(decodeURIComponent(cv[1]!));
 			if (!project || !this.projectConversation) {
@@ -1288,6 +1309,10 @@ export class MockBackend {
 		const aid = m[2] === undefined ? null : decodeURIComponent(m[2]);
 		const project = own(pid);
 		if (aid === null && method === "GET") {
+			if (this.agentsReadFails !== null) {
+				await json(this.agentsReadFails, { error: "unavailable", message: "unavailable" });
+				return true;
+			}
 			if (!project) {
 				await json(404, { error: "project-not-found", message: "project-not-found" });
 				return true;
@@ -1482,7 +1507,9 @@ export class MockBackend {
 		if (kind === "project") {
 			// D1 — WS /ws/project/<pid> (Appendix A): every event > after, once, in order, then live.
 			const pid = sessionId;
-			const own = this.projects.some((p) => p.projectId === pid && p.ownerUserId === this.current?.userId);
+			const own = this.projects.some(
+				(p) => p.projectId === pid && p.ownerUserId === this.current?.userId,
+			);
 			if (!this.projectConversation || !own || this.projectSocketsRefused) {
 				ws.close({ code: 1008, reason: "Forbidden" });
 				return;

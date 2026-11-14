@@ -63,6 +63,10 @@ const DISCONNECTED_REASON: ReadonlyMap<string, string> = new Map([
 	["disconnected", "Claude disconnected"],
 ]);
 
+/** Labels other modules tell states apart by (the sidebar's one-word form). */
+export const LABEL_READY = "Ready";
+export const LABEL_NO_RECENT = "No recent activity";
+
 const STALE_REASON = "the last evidence is more than 10 min old";
 
 const UNKNOWN_REASON: ReadonlyMap<string, string> = new Map([
@@ -121,7 +125,7 @@ function freshness(p: Pick<Presence, "at">, srvNow: number): Freshness {
 function notLive(f: Freshness, evidence: string): PresenceView {
 	if (f === "none") return { label: "No evidence", tone: "unknown", reason: null, evidence };
 	if (f === "stale")
-		return { label: "No recent activity", tone: "unknown", reason: STALE_REASON, evidence };
+		return { label: LABEL_NO_RECENT, tone: "unknown", reason: STALE_REASON, evidence };
 	return {
 		label: "State unknown",
 		tone: "unknown",
@@ -163,7 +167,7 @@ export function presentPresence(p: Presence, clock: ServerClock | null, now: num
 		case "waiting_input":
 			if (f !== "fresh") return notLive(f, evidence);
 			return p.verified === true
-				? { label: "Ready", tone: "ready", reason: null, evidence }
+				? { label: LABEL_READY, tone: "ready", reason: null, evidence }
 				: {
 						label: "Ready (unverified)",
 						tone: "ready",
@@ -204,7 +208,7 @@ export function presentPresence(p: Presence, clock: ServerClock | null, now: num
 				return { label: "No evidence", tone: "unknown", reason: null, evidence };
 			}
 			if (p.detail === "stale")
-				return { label: "No recent activity", tone: "unknown", reason: STALE_REASON, evidence };
+				return { label: LABEL_NO_RECENT, tone: "unknown", reason: STALE_REASON, evidence };
 			return {
 				label: "State unknown",
 				tone: "unknown",
