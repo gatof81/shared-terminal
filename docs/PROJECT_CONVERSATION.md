@@ -1001,7 +1001,8 @@ queda pausado, nunca corriendo.
     termina y se muestra; nada más se admite ni se entrega.
 - **Detección de escritura.** Mientras el permiso está vivo, un `tool_start` de `Write`, `Edit`,
   `MultiEdit` o `NotebookEdit` de la sesión del agente **consultado** (`with`) con una ruta fuera de
-  `.st-outbox/` ⇒ `paused{write-observed}`. Es detección, no restricción: lo que haga por Bash no se
+  `.st-outbox/` ⇒ `paused{write-observed, detail{tool, cid}}`, también desde un subagente y sin
+  exigir veredicto de origen (solo puede detener). Es detección, no restricción: lo que haga por Bash no se
   ve, y las sesiones conservan sus credenciales (§7.8).
 - **Fin:** `revoked`, `done`, `budget`, `expired` (temporizador y toda comprobación de «vivo»),
   `wait-expired`, `binding-changed`, `task-not-delivered`, `interrupted` (restore). Un permiso terminado no se reabre.
@@ -1015,8 +1016,8 @@ queda pausado, nunca corriendo.
 - **Restore:** todo permiso vivo ⇒ `ended{interrupted}`; sus entregas sin terminar, como en §8.
 - **No verificado.** Al arrancar y cada 10 min, un archivo de `.st-outbox/` de un participante de un
   permiso vivo, sin cambios hace ≥ 2 min, con una cabecera que nombra ese permiso y sin `outbox`
-  registrado con su identidad, se anota `outbox{unverified}` (una vez). **No se envía ni se ofrece
-  enviarlo:** si hace falta, el agente lo escribe de nuevo.
+  registrado con su identidad, se anota `outbox{unverified}` (una vez; como mucho 8 por permiso).
+  **No se envía ni se ofrece enviarlo:** si hace falta, el agente lo escribe de nuevo.
 
 ### 7.6 API y eventos
 

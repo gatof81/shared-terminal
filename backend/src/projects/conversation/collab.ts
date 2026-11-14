@@ -59,6 +59,8 @@ import type { CriticalTx, ProjectConversationStore } from "./store.js";
 /** §7.3: `outbox{rejected}` lines a grant may accumulate, and how many of one agent pause it. */
 export const REJECTED_MAX_PER_GRANT = 8;
 export const REJECTED_PAUSE_PER_AGENT = 3;
+/** §7.5: `outbox{unverified}` lines a grant may accumulate. */
+export const UNVERIFIED_MAX_PER_GRANT = 8;
 /** §7.5: the gate is re-evaluated at least this often while something is queued. */
 export const GATE_INTERVAL_MS = 30_000;
 
@@ -66,7 +68,7 @@ const GRANT_RE = /^c-[0-9a-f]{12}$/;
 
 export type RecipientState =
 	| { kind: "ready"; cid: string }
-	| { kind: "busy" }
+	| { kind: "busy"; cid: string }
 	| { kind: "none" }
 	| { kind: "ambiguous" };
 
@@ -95,10 +97,11 @@ export interface AdmitInput {
 	toolUseId: string | null;
 	/** Workspace-relative, e.g. `.st-outbox/q1.md`. */
 	path: string;
-	/** Of the bytes read once (§7.3 rule 5). */
+	/** Of the bytes read once (§7.3 rule 5); "" when the file could not be read (rule 4). */
 	sha256: string;
 	bytes: number;
-	parsed: ParsedOutbox;
+	/** The header and body, or the reason rule 4 or the parser refused the file. */
+	parsed: ParsedOutbox | { ok: false; reason: `file-${string}` };
 }
 
 export type AdmitResult =
@@ -111,7 +114,7 @@ export class ProjectCollab {
 	/** Participant session → its live grant. A cache of the log (outbox.ts reads it). */
 	private readonly bySession = new Map<
 		string,
-		{ projectId: string; grantId: string; agentId: string }
+		{ projectId: string; grantId: string; agentId: string; consulted: boolean }
 	>();
 	private readonly expiry = new Map<string, NodeJS.Timeout>();
 	/** Projects with at least one queued relay, and the keys queued. */
@@ -178,9 +181,17 @@ export class ProjectCollab {
 
 	// ── Indexes (caches of the log) ───────────────────────────────────────
 
-	private index(pid: string, g: Pick<GrantFold, "grantId" | "participants" | "expiresAt">): void {
+	private index(
+		pid: string,
+		g: Pick<GrantFold, "grantId" | "participants" | "expiresAt" | "with">,
+	): void {
 		for (const p of g.participants) {
-			this.bySession.set(p.sid, { projectId: pid, grantId: g.grantId, agentId: p.agent_id });
+			this.bySession.set(p.sid, {
+				projectId: pid,
+				grantId: g.grantId,
+				agentId: p.agent_id,
+				consulted: p.agent_id === g.with,
+			});
 		}
 		clearTimeout(this.expiry.get(g.grantId));
 		const t = setTimeout(
@@ -227,6 +238,7 @@ export class ProjectCollab {
 						grantId: l.grant_id as string,
 						participants: l.participants as GrantParticipant[],
 						expiresAt: l.expires_at as string,
+						with: l.with as string,
 					});
 				} else if (l.event === "revoked" || l.event === "ended") {
 					this.unindex(l.grant_id as string);
@@ -304,8 +316,7 @@ export class ProjectCollab {
 				},
 				...(input.toolUseId ? { tool_use_id: input.toolUseId } : {}),
 				path: input.path,
-				sha256: input.sha256,
-				bytes: input.bytes,
+				...(input.sha256 ? { sha256: input.sha256, bytes: input.bytes } : {}),
 				origin: "match",
 				...extra,
 			});
@@ -415,6 +426,84 @@ export class ProjectCollab {
 			]);
 			return { outcome: "accepted", msgId, kind: h.kind };
 		});
+	}
+
+	/** What outbox.ts needs to prove a sender against D1 (§7.3 rule 3): the grant as the log has it. */
+	async describe(
+		projectId: string,
+		grantId: string,
+	): Promise<{ by: string; with: string; participants: GrantParticipant[] } | null> {
+		return this.deps.store.critical(projectId, async (tx) => {
+			const g = tx.state.grants.get(grantId);
+			if (!g || !grantAlive(g, this.now())) return null;
+			return { by: g.by, with: g.with, participants: g.participants.map((p) => ({ ...p })) };
+		});
+	}
+
+	/**
+	 * §7.5 write detection: the consulted agent (`with`) started a file-writing
+	 * tool outside its outbox while the grant is live. Detection, not
+	 * prevention — it pauses and shows; it needs no origin verdict because it
+	 * can only make the system stop.
+	 */
+	async writeObserved(sid: string, detail: { tool: string; cid: string }): Promise<void> {
+		const e = this.bySession.get(sid);
+		// The initiator works on the person's task: its writes are not watched.
+		if (!e?.consulted) return;
+		await this.write(e.projectId, (state) => {
+			const g = state.grants.get(e.grantId);
+			if (!g || !grantAlive(g, this.now()) || !mayPause(g, "write-observed")) return [];
+			const p = g.participants.find((x) => x.sid === sid);
+			if (!p || p.agent_id !== g.with) return [];
+			return [pauseEvent(g, "write-observed", "system", undefined, detail)];
+		});
+	}
+
+	/**
+	 * §7.5: a file in a participant's outbox that names this grant and that
+	 * the log says nothing about (written while the backend was down, or on
+	 * events whose origin was not verified). Recorded once, shown, never sent.
+	 */
+	async noteUnverified(input: {
+		projectId: string;
+		grantId: string;
+		from: GrantParticipant;
+		path: string;
+		sha256: string;
+		bytes: number;
+		kind: OutboxKind;
+	}): Promise<boolean> {
+		let written = false;
+		await this.write(input.projectId, (state) => {
+			const g = state.grants.get(input.grantId);
+			if (!g || !grantAlive(g, this.now()) || g.unverified >= UNVERIFIED_MAX_PER_GRANT) return [];
+			if (
+				!g.participants.some((p) => p.sid === input.from.sid && p.agent_id === input.from.agent_id)
+			)
+				return [];
+			if (state.outboxSeen.has(outboxKey(input.grantId, input.from.sid, input.path, input.sha256)))
+				return [];
+			written = true;
+			return [
+				{
+					ev: "outbox",
+					grant_id: input.grantId,
+					event: "unverified",
+					from: input.from,
+					path: input.path,
+					sha256: input.sha256,
+					bytes: input.bytes,
+					kind: input.kind,
+					origin: "none",
+				},
+			];
+		});
+		return written;
+	}
+
+	/** Sessions that take part in a live grant (the unverified sweep's list). */
+	liveSessions(): Array<{ sid: string; projectId: string; grantId: string; agentId: string }> {
+		return [...this.bySession].map(([sid, e]) => ({ sid, ...e }));
 	}
 
 	// ── Queue and gate (§7.5) ─────────────────────────────────────────────

@@ -477,7 +477,7 @@ export class ConversationService {
 	 */
 	async authorize(
 		headers: IngestHeaders,
-	): Promise<{ ok: true; stSessionId: string } | IngestOutcome> {
+	): Promise<{ ok: true; stSessionId: string; origin?: string } | IngestOutcome> {
 		const token = parseBearer(headers.authorization);
 		const stSessionId = headers.stSession?.trim();
 		// B1 — the ST session id is a path component too (`.conversations/<sid>/`).
@@ -493,8 +493,13 @@ export class ConversationService {
 		// §3.1.1 — after the cheap rows: the TCP peer must be the session's
 		// CURRENT container on sessions-net. Off ⇒ never reached.
 		const origin = this.deps.ingestOrigin;
+		// The verdict travels with the event to in-process observers (store.ts
+		// `EventMeta`). In enforce mode only a match gets this far; with the
+		// check off there is no verdict and the answer keeps its old shape.
+		let originTag: string | undefined;
 		if (origin) {
 			const verdict = await origin.verify(stSessionId, entry.containerId, headers.remoteAddress);
+			originTag = verdict.ok ? "match" : verdict.cause;
 			if (this.deps.ingestOriginMode === "observe") {
 				// Activation gate: the evidence is exactly "requests that
 				// authenticated as S came from S's container". Never refuses.
@@ -510,7 +515,9 @@ export class ConversationService {
 			}
 			if (this.isDead(stSessionId)) return this.reject("not_running");
 		}
-		return { ok: true, stSessionId };
+		return originTag === undefined
+			? { ok: true, stSessionId }
+			: { ok: true, stSessionId, origin: originTag };
 	}
 
 	private async lookupToken(stSessionId: string): Promise<TokenCacheEntry | null> {
@@ -603,12 +610,13 @@ export class ConversationService {
 		pane: string | undefined,
 		raw: unknown,
 		relay?: RelayReport,
+		origin?: string,
 	): Promise<IngestOutcome> {
 		// B4 — a body that arrives during or after the purge is refused
 		// before anything else; otherwise the ingest registers itself so a
 		// purge that starts now waits for it to settle.
 		if (this.isDead(stSessionId)) return this.reject("not_running");
-		const work = this.ingestInner(stSessionId, pane, raw, relay);
+		const work = this.ingestInner(stSessionId, pane, raw, relay, origin);
 		let set = this.inFlight.get(stSessionId);
 		if (!set) {
 			set = new Set();
@@ -630,6 +638,7 @@ export class ConversationService {
 		pane: string | undefined,
 		raw: unknown,
 		relay: RelayReport | undefined,
+		origin: string | undefined,
 	): Promise<IngestOutcome> {
 		// Captured before the first await: the container start this hook came from.
 		const startGen = this.startGenOf(stSessionId);
@@ -729,7 +738,8 @@ export class ConversationService {
 			pane: pane ?? null,
 			data: event.data,
 		};
-		let outcome = this.deps.store.enqueue(stSessionId, cid, pending);
+		const meta = origin === undefined ? undefined : { origin };
+		let outcome = this.deps.store.enqueue(stSessionId, cid, pending, meta);
 		if (outcome === "not_open") {
 			// Evicted during the await above (another conversation opened);
 			// reopen inline — ingest is async, so this is cheap and ordered.
@@ -745,7 +755,7 @@ export class ConversationService {
 				this.startGenOf(stSessionId) !== startGen
 			)
 				return this.reject("not_running");
-			outcome = this.deps.store.enqueue(stSessionId, cid, pending);
+			outcome = this.deps.store.enqueue(stSessionId, cid, pending, meta);
 		}
 		if (outcome === "dropped" || outcome === "not_open") {
 			this.stats.rejected.backpressure = (this.stats.rejected.backpressure ?? 0) + 1;

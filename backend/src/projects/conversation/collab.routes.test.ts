@@ -63,7 +63,7 @@ async function listen(relay: boolean): Promise<void> {
 		store,
 		fanout,
 		bindings,
-		recipient: async () => ({ kind: "busy" }),
+		recipient: async () => ({ kind: "busy", cid: "cid-x" }),
 		onCaptureEvent: () => () => {},
 	});
 	await collab.start([]);

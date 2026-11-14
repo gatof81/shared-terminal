@@ -193,7 +193,25 @@ export interface StoreOptions {
 	}>;
 }
 
-export type EventListener = (stSessionId: string, cid: string, event: PersistedEvent) => void;
+/**
+ * What this process knows about an event beyond what it persists. Only for
+ * events it received itself: an event read back from the file has none.
+ * `origin` is the §3.1.1 network-origin verdict of the request that carried
+ * it — `match`, the cause it did not match (observe mode), or `unchecked`
+ * when the check is off. It lives in memory only: the persisted format does
+ * not change, and D3 (PROJECT_CONVERSATION.md §7.3.1) admits an agent
+ * message only on `match`.
+ */
+export interface EventMeta {
+	origin: string;
+}
+
+export type EventListener = (
+	stSessionId: string,
+	cid: string,
+	event: PersistedEvent,
+	meta?: EventMeta,
+) => void;
 
 interface CurrentFile {
 	size: number;
@@ -395,6 +413,8 @@ export class ConversationStore {
 	/** B4 — sessions being purged: opens/appends for them are refused. */
 	private readonly purging = new Set<string>();
 	private readonly listeners = new Set<EventListener>();
+	/** Keyed by the queued object itself, so it goes away with it. */
+	private readonly liveMeta = new WeakMap<PendingEvent, EventMeta>();
 	private totalQueueBytes = 0;
 	/** High-water mark of `totalQueueBytes` since boot (admin stats, §7). */
 	private maxTotalQueueBytes = 0;
@@ -1012,6 +1032,7 @@ export class ConversationStore {
 		stSessionId: string,
 		cid: string,
 		pending: PendingEvent,
+		meta?: EventMeta,
 	): "queued" | "dropped" | "not_open" {
 		if (this.purging.has(stSessionId)) return "not_open";
 		const r = this.resident.get(`${stSessionId}/${cid}`);
@@ -1030,6 +1051,7 @@ export class ConversationStore {
 				return "dropped";
 			}
 		}
+		if (meta) this.liveMeta.set(pending, meta);
 		r.queue.push(pending);
 		r.queueBytes += bytes;
 		this.totalQueueBytes += bytes;
@@ -1144,9 +1166,10 @@ export class ConversationStore {
 		this.stats.persisted++;
 		this.trackMessageAndAgents(r.index, event);
 		trackComposerSend(r.index, event);
+		const meta = this.liveMeta.get(pending);
 		for (const l of this.listeners) {
 			try {
-				l(stSessionId, cid, event);
+				l(stSessionId, cid, event, meta);
 			} catch {
 				/* listener error never breaks persistence */
 			}

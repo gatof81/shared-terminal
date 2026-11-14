@@ -19,7 +19,8 @@ import type { ConversationService } from "./service.js";
 function fakeService() {
 	const svc = {
 		largeBodies: new LargeBodyGate(1),
-		authorize: vi.fn(async () => ({ ok: true as const, stSessionId: "s1" })),
+		// `origin`: the §3.1.1 verdict of the request, forwarded with the event.
+		authorize: vi.fn(async () => ({ ok: true as const, stSessionId: "s1", origin: "match" })),
 		takeRate: vi.fn(() => ({ ok: true as const })),
 		noteUnparseable: vi.fn(async () => undefined),
 		noteBackpressure: vi.fn(),
@@ -89,6 +90,7 @@ describe("ingest route", () => {
 			"%3",
 			{ hook_event_name: "Stop", session_id: "c1" },
 			undefined,
+			"match",
 		);
 		expect(svc.takeRate).toHaveBeenCalledWith(
 			"s1",
@@ -178,7 +180,9 @@ describe("ingest route", () => {
 			"x-st-session": "s1",
 			"x-st-tmux-pane": "evil; rm -rf",
 		});
-		await vi.waitFor(() => expect(svc.ingest).toHaveBeenCalledWith("s1", undefined, {}, undefined));
+		await vi.waitFor(() =>
+			expect(svc.ingest).toHaveBeenCalledWith("s1", undefined, {}, undefined, "match"),
+		);
 	});
 });
 
@@ -225,6 +229,7 @@ describe("ingest route — pathname without the query string", () => {
 			"%2",
 			{ hook_event_name: "Stop", session_id: "c1" },
 			undefined,
+			"match",
 		);
 	});
 	it("the query-string route applies the same validations: auth, L5 cap, JSON", async () => {

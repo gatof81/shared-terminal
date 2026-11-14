@@ -173,7 +173,7 @@ export function createIngestHandler(opts: IngestRouteOptions) {
 			await service.noteUnparseable(stSessionId, pane, "invalid_json");
 			return;
 		}
-		await service.ingest(stSessionId, pane, parsed, relayReport(req));
+		await service.ingest(stSessionId, pane, parsed, relayReport(req), auth.origin);
 	}
 }
 
