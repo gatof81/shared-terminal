@@ -86,10 +86,22 @@ const outboxLines = async () => (await lines()).filter((l) => l.ev === "outbox")
 const relays = async () => (await lines()).filter((l) => l.ev === "message" && l.kind === "relay");
 const relayTexts = () => composerTexts.filter((c) => c.text.includes("<<<ST-MSG"));
 
+// As in collab.test.ts: after the minimum, wait (bounded) until the relay has
+// nothing running and the log stopped growing — an append is an fsync.
 async function settle(rounds = 30): Promise<void> {
-	for (let i = 0; i < rounds; i++) {
+	const tick = async () => {
 		await outbox.idle();
 		await new Promise((r) => setTimeout(r, 2));
+	};
+	for (let i = 0; i < rounds; i++) await tick();
+	const work = collab as unknown as { draining: Map<string, unknown>; inFlight: Set<string> };
+	const size = async () => (await lines().catch(() => [])).length;
+	let seen = await size();
+	for (let quiet = 0, i = 0; quiet < 3 && i < 400; i++) {
+		await tick();
+		const now = await size();
+		quiet = work.draining.size === 0 && work.inFlight.size === 0 && now === seen ? quiet + 1 : 0;
+		seen = now;
 	}
 }
 
