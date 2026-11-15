@@ -240,9 +240,48 @@ async function main(): Promise<void> {
 	});
 	const handler = createIngestHandler({ service });
 	const peers = new Map<string, Set<string>>();
+	// #648 — every hook request as it REACHES the backend, numbered on arrival.
+	// A relay forwards on one socket and sends the next request only after the
+	// previous answer, so per session this is the order the relay queued them
+	// in; comparing it with the persisted order says which side of this line
+	// a pair lost its order on.
+	interface Arrival {
+		n: number;
+		sid: string;
+		hook: string;
+		messageId: string | null;
+		index: number | null;
+		toolUseId: string | null;
+	}
+	const arrivals: Arrival[] = [];
+	let arrived = 0;
 	const server = http.createServer((req, res) => {
 		const sid = String(req.headers["x-st-session"] ?? "?");
 		peers.set(sid, (peers.get(sid) ?? new Set()).add(String(req.socket.remoteAddress)));
+		const at = ++arrived;
+		const chunks: Buffer[] = [];
+		// Observed through `emit`, never a listener of its own: a `data`
+		// listener here would start the stream before the handler reads it.
+		const emit = req.emit.bind(req);
+		req.emit = (name: string | symbol, ...args: unknown[]) => {
+			if (name === "data") chunks.push(args[0] as Buffer);
+			if (name === "end") {
+				try {
+					const b = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+					arrivals.push({
+						n: at,
+						sid,
+						hook: String(b.hook_event_name),
+						messageId: typeof b.message_id === "string" ? b.message_id : null,
+						index: typeof b.index === "number" ? b.index : null,
+						toolUseId: typeof b.tool_use_id === "string" ? b.tool_use_id : null,
+					});
+				} catch {
+					arrivals.push({ n: at, sid, hook: "?", messageId: null, index: null, toolUseId: null });
+				}
+			}
+			return emit(name, ...args);
+		};
 		void handler(req, res, () => {
 			res.statusCode = 404;
 			res.end();
@@ -802,6 +841,70 @@ printf '{"skipDangerousModePermissionPrompt": true}\\n' > ~/.claude/settings.jso
 		check(
 			`the watcher refused nothing on origin: ${JSON.stringify(outbox.stats)}`,
 			outbox.stats.originNotMatched === 0 && outbox.stats.admitted.accepted === 2,
+		);
+
+		// ── #648: where a pair of hooks loses its order ─────────────────────
+		// Diagnostic, never a verdict: plain turns whose answer is two
+		// fragments (the scripted model's default), then both orders compared.
+		phase("#648 (diagnostic): hook order on arrival at the backend vs as persisted");
+		const turnEnds = (sid: string) =>
+			events.filter((e) => e.sid === sid && e.ev.ev === "turn_end").length;
+		const ROUNDS = 20;
+		let turns = 0;
+		for (let i = 0; i < ROUNDS; i++) {
+			await Promise.all(
+				[SA, SB].map(async (sid) => {
+					if (!(await atPrompt(sid, 30_000))) return;
+					const before = turnEnds(sid);
+					if (!(await typeInto(sid, `orden ${i}`)).ok) return;
+					if (await waitFor(`${WHO[sid]} turn ${i}`, () => turnEnds(sid) > before, 30_000)) turns++;
+				}),
+			);
+		}
+		await sleep(1500);
+		const ascending = (xs: number[]) => xs.every((x, i) => i === 0 || x > (xs[i - 1] as number));
+		const tally = { messages: 0, upstream: 0, backend: 0, tools: 0, toolUp: 0, toolBack: 0 };
+		for (const sid of [SA, SB]) {
+			const own = events.filter((e) => e.sid === sid);
+			const mine = arrivals.filter((a) => a.sid === sid).sort((a, b) => a.n - b.n);
+			const ids = [...new Set(mine.flatMap((a) => (a.messageId ? [a.messageId] : [])))];
+			for (const id of ids) {
+				const reached = mine.filter((a) => a.messageId === id);
+				if (reached.length < 2) continue;
+				tally.messages++;
+				const onArrival = reached.map((a) => a.index as number);
+				const persisted = own
+					.filter((e) => e.ev.ev === "assistant_delta" && e.ev.data?.message_id === id)
+					.map((e) => e.ev.data?.index as number);
+				const up = !ascending(onArrival);
+				const back = !up && JSON.stringify(persisted) !== JSON.stringify(onArrival);
+				if (up) tally.upstream++;
+				if (back) tally.backend++;
+				if (up || persisted.length !== onArrival.length)
+					console.log(
+						`    ${WHO[sid]} ${id}: indices on arrival ${JSON.stringify(onArrival)} (requests ${reached.map((a) => a.n)}), persisted ${JSON.stringify(persisted)}, gaps ${JSON.stringify(own.filter((e) => e.ev.ev === "gap" && e.ev.data?.message_id === id).map((e) => e.ev.data))}`,
+					);
+			}
+			const tools = [...new Set(mine.flatMap((a) => (a.toolUseId ? [a.toolUseId] : [])))];
+			for (const id of tools) {
+				const pre = mine.find((a) => a.toolUseId === id && a.hook === "PreToolUse");
+				const post = mine.find((a) => a.toolUseId === id && a.hook === "PostToolUse");
+				if (!pre || !post) continue;
+				tally.tools++;
+				const at = (ev: string) =>
+					own.findIndex((e) => e.ev.ev === ev && e.ev.data?.tool_use_id === id);
+				const up = post.n < pre.n;
+				const back = !up && (at("tool_start") < 0 || at("tool_end") < at("tool_start"));
+				if (up) tally.toolUp++;
+				if (back) tally.toolBack++;
+				if (up || back)
+					console.log(
+						`    ${WHO[sid]} ${id}: PreToolUse request ${pre.n}, PostToolUse request ${post.n}; persisted at ${at("tool_start")} / ${at("tool_end")}`,
+					);
+			}
+		}
+		console.log(
+			`    #648: ${turns}/${ROUNDS * 2} extra turns; ${tally.messages} messages of ≥2 fragments — out of order on arrival (before the backend: CLI or relay) ${tally.upstream}, in order on arrival but not as persisted (backend) ${tally.backend}; ${tally.tools} tool pairs — end before start on arrival ${tally.toolUp}, only as persisted ${tally.toolBack}; gaps ${JSON.stringify(events.filter((e) => e.ev.ev === "gap").map((e) => e.ev.data?.reason))}; refused by the service ${JSON.stringify(service.stats.rejected)}`,
 		);
 	} finally {
 		outbox.stop();

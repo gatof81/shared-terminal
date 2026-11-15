@@ -79,6 +79,22 @@ describe("B6 (round 4) — refused sealed deltas have no side effects", () => {
 		expect(index?.sealedMessages).toEqual(["m"]);
 	});
 
+	// #648 — what the CI capture showed after a tool result: the two fragments
+	// of one message reaching the service in inverted order. The final one
+	// seals the message, so the first fragment's text is not persisted; the
+	// loss is declared, never silent.
+	it("1b. fragments inverted (final index=1, then index=0): one missing_delta [0,0], the late fragment refused", async () => {
+		expect((await service.ingest("s1", "%0", delta("m", 1, true, "Done."))).accepted).toBe(true);
+		expect(await service.ingest("s1", "%0", delta("m", 0, false, "Tool finished.\n"))).toEqual({
+			accepted: false,
+			reason: "truncated",
+		});
+		expect(await gaps()).toEqual([{ reason: "missing_delta", message_id: "m", range: [0, 0] }]);
+		expect(
+			(await lines()).filter((e) => e.ev === "assistant_delta").map((e) => e.data.delta),
+		).toEqual(["Done."]);
+	});
+
 	it("2. thousands of finalised messages plus late deltas keep messageIndex bounded", async () => {
 		for (let i = 0; i < 3000; i++) {
 			await service.ingest("s1", "%0", delta(`m${i}`, 0, true));

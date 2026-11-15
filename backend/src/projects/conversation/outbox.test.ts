@@ -354,6 +354,27 @@ describe("rule 1 — the event (M4)", () => {
 		expect(await outboxLines()).toEqual([]);
 	});
 
+	// #648 — hooks can reach the capture out of order. A Write whose end is
+	// persisted before its start is not a message (fail closed: nothing sent,
+	// nothing sent twice), and it is not lost without a trace either: the
+	// sweep records the file as unverified.
+	it("#648: a pair persisted end-first admits nothing; the sweep records the file as unverified, never sent", async () => {
+		const text = ask();
+		const file = await put(SA, "q1.md", text);
+		wrote(SA, "q1.md", { start: "absent", id: "toolu_inv" });
+		wrote(SA, "q1.md", { end: "absent", id: "toolu_inv" });
+		await settle();
+		expect(await outboxLines()).toEqual([]);
+		const t = new Date(now - 5 * 60_000);
+		await fs.utimes(file, t, t);
+		await outbox.sweep();
+		await settle();
+		expect(await outboxLines()).toMatchObject([
+			{ event: "unverified", path: ".st-outbox/q1.md", sha256: sha(text) },
+		]);
+		expect(relayTexts()).toHaveLength(0);
+	});
+
 	it("an event replayed after its admission does nothing; the same file under a new tool use is a duplicate", async () => {
 		await put(SA, "q1.md", ask());
 		const id = wrote(SA, "q1.md");
