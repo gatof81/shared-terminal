@@ -433,6 +433,258 @@ test.describe("workspace — attachments (D2)", () => {
 	});
 });
 
+test.describe("workspace — consults between two agents (D3)", () => {
+	test.beforeEach(async ({ backend }) => {
+		await backend.enableProjectConversation();
+	});
+
+	const DEV = AGENT_IDS.developer;
+	const ARCH = AGENT_IDS.architect;
+	const grantRequests = (backend: MockBackend) =>
+		backend.requests.filter((r) => r.path.includes("/conversation/grants"));
+	const grant = (page: Page) => page.locator("#project-view .tw-grant").filter({ visible: true });
+	const relays = (page: Page) => page.locator("#project-view .tw-row-relay-text");
+	const notes = (page: Page) => page.locator("#project-view .tw-row-event");
+
+	/** New task → one recipient (@developer-hz) → allow it to consult @architect-hz → Send. */
+	async function sendTaskWithConsult(page: Page, messages = "2"): Promise<void> {
+		const c = composer(page);
+		await c.getByRole("button", { name: "Add a recipient" }).click();
+		await c
+			.locator(".tw-option")
+			.filter({ hasText: /@developer-hz(?!-)/ })
+			.click();
+		await c.getByLabel("Let @developer-hz consult another agent").check();
+		await c.getByLabel("Agent to consult").selectOption({ label: "@architect-hz" });
+		await c.getByLabel("Messages between them, at most").selectOption(messages);
+		await c.locator("textarea").fill("Agree on a naming convention with the architect");
+		await c.getByRole("button", { name: "Send" }).click();
+		await expect(page).toHaveURL(/\/threads\/c0000000-/);
+	}
+
+	test("projectRelay absent: no consult control, a send carries no collab, no grant request", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		await app.login("alice", `${projectHash}/new`);
+		const c = composer(page);
+		await c.getByRole("button", { name: "Add a recipient" }).click();
+		await c
+			.locator(".tw-option")
+			.filter({ hasText: /@developer-hz(?!-)/ })
+			.click();
+		await expect(c.locator(".tw-chip").first()).toContainText("@developer-hz");
+		await expect(c.locator(".tw-consult")).toHaveCount(0);
+		await c.locator("textarea").fill("A plain task");
+		await c.getByRole("button", { name: "Send" }).click();
+		await expect(page).toHaveURL(/\/threads\/c0000000-/);
+		expect(backend.projectMessagePosts.at(-1)).not.toHaveProperty("collab");
+		await expect(page.locator("#project-view .tw-grant")).toHaveCount(0);
+		expect(grantRequests(backend)).toEqual([]);
+	});
+
+	test("a task with a consult: both agents' messages as their own text, queued, then the budget ends it", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.projectRelay = true;
+		await app.login("alice", `${projectHash}/new`);
+		const c = composer(page);
+		// Offered only once there is exactly one recipient.
+		await expect(c.locator(".tw-consult")).toBeHidden();
+		await sendTaskWithConsult(page);
+		expect(backend.projectMessagePosts.at(-1)!.collab).toEqual({
+			mode: "ask",
+			with: ARCH,
+			maxMessages: 2,
+		});
+		await expect(grant(page)).toHaveAccessibleName("@developer-hz may consult @architect-hz");
+		await expect(grant(page).locator(".tw-grant-state")).toHaveText("Active");
+		await expect(grant(page).locator(".tw-grant-facts")).toContainText("0 of 2 messages used");
+
+		const g = backend.lastGrantId();
+		const ask = backend.projectRelayMessage(g, DEV, "<i>Which</i> naming do you recommend?", {
+			state: "queued",
+		});
+		await expect(relays(page)).toHaveCount(1);
+		await expect(relays(page).first().locator(".tw-meta")).toContainText(
+			"@developer-hz to @architect-hz",
+		);
+		await expect(relays(page).first()).toContainText("Written by the agent, not by you.");
+		// The agent's text is shown as text: its markup is not interpreted.
+		await expect(relays(page).first().locator(".tw-bubble-relay")).toHaveText(
+			"<i>Which</i> naming do you recommend?",
+		);
+		await expect(relays(page).first().locator(".tw-bubble-relay i")).toHaveCount(0);
+		await expect(relays(page).first().locator(".tw-del")).toHaveText(
+			"@architect-hz · Queued: waiting for it to be free",
+		);
+		await expect(grant(page).locator(".tw-grant-facts")).toContainText("1 of 2 messages used");
+
+		backend.projectRelayDeliver(g, ask);
+		await expect(relays(page).first().locator(".tw-del")).toHaveText("@architect-hz · Delivered ✓");
+		backend.projectRelayMessage(g, ARCH, "Module name plus .test, next to the module.");
+		backend.grantEvent(g, "ended", { reason: "budget", by: "system" });
+		await expect(relays(page)).toHaveCount(2);
+		await expect(relays(page).nth(1).locator(".tw-meta")).toContainText(
+			"@architect-hz to @developer-hz",
+		);
+		await expect(relays(page).nth(1).locator(".tw-bubble-relay")).toHaveText(
+			"Module name plus .test, next to the module.",
+		);
+		await expect(grant(page).locator(".tw-grant-state")).toHaveText(
+			"Ended: all its messages were used",
+		);
+		await expect(grant(page).locator(".tw-grant-facts")).toHaveText("2 of 2 messages used");
+		await expect(grant(page).getByRole("button")).toHaveCount(0);
+		await expect(notes(page).last()).toContainText("Consult ended: all its messages were used");
+		expect(grantRequests(backend)).toEqual([]);
+		await noHorizontalScroll(page);
+	});
+
+	test("Pause holds a refused file out, Resume lifts it, Stop asks first and ends it for good", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.projectRelay = true;
+		await app.login("alice", `${projectHash}/new`);
+		await sendTaskWithConsult(page, "4");
+		const g = backend.lastGrantId();
+		const posts = () => backend.projectGrantPosts.map((p) => p.verb);
+
+		await grant(page).getByRole("button", { name: "Pause" }).click();
+		await expect(grant(page).locator(".tw-grant-state")).toHaveText("Paused: you paused it");
+		expect(posts()).toEqual(["pause"]);
+		// What the agent writes while it is paused is not passed on — and that is visible.
+		backend.projectOutbox(g, DEV, "rejected", "grant-paused");
+		await expect(notes(page).filter({ hasText: "was not passed on" })).toHaveText(
+			/A message from @developer-hz was not passed on: the consult was paused\./,
+		);
+		await expect(relays(page)).toHaveCount(0);
+		await expect(grant(page).getByRole("button")).toHaveText(["Resume", "Stop"]);
+
+		await grant(page).getByRole("button", { name: "Resume" }).click();
+		await expect(grant(page).locator(".tw-grant-state")).toHaveText("Active");
+		expect(posts()).toEqual(["pause", "resume"]);
+
+		// A message is waiting when the person stops the consult.
+		backend.projectRelayMessage(g, DEV, "Still there?", { state: "queued" });
+		await expect(relays(page)).toHaveCount(1);
+		await grant(page).getByRole("button", { name: "Stop" }).click();
+		await expect(grant(page).locator(".tw-grant-ask")).toContainText("Stop this consult for good?");
+		expect(posts()).toEqual(["pause", "resume"]);
+		await grant(page).getByRole("button", { name: "Keep it" }).click();
+		await expect(grant(page).getByRole("button")).toHaveText(["Pause", "Stop"]);
+		await grant(page).getByRole("button", { name: "Stop" }).click();
+		await grant(page).getByRole("button", { name: "Stop it" }).click();
+		await expect(grant(page).locator(".tw-grant-state")).toHaveText("Ended: you stopped it");
+		expect(posts()).toEqual(["pause", "resume", "revoke"]);
+		await expect(grant(page).getByRole("button")).toHaveCount(0);
+		await expect(relays(page).first().locator(".tw-del")).toHaveText(
+			"@architect-hz · Not delivered: the handoffs had stopped",
+		);
+		// The history says each step, in order, and survives a reload (it is the log).
+		const history = [
+			"Consult paused: you paused it",
+			"was not passed on: the consult was paused",
+			"You resumed the consult",
+			"You stopped the consult",
+		];
+		for (const [i, text] of history.entries()) await expect(notes(page).nth(i)).toContainText(text);
+		await page.reload();
+		await expect(grant(page).locator(".tw-grant-state")).toHaveText("Ended: you stopped it");
+		await expect(notes(page)).toHaveCount(history.length);
+	});
+
+	test("a pause the server decided says why; an unverified file is shown as not passed on", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.projectRelay = true;
+		await app.login("alice", `${projectHash}/new`);
+		await sendTaskWithConsult(page);
+		const g = backend.lastGrantId();
+		backend.projectOutbox(g, ARCH, "unverified");
+		backend.grantEvent(g, "paused", {
+			reason: "write-observed",
+			by: "system",
+			detail: { tool: "Edit", cid: "cid" },
+		});
+		await expect(grant(page).locator(".tw-grant-state")).toHaveText(
+			"Paused: the consulted agent started changing files (Edit)",
+		);
+		await expect(notes(page).first()).toContainText(
+			"A message file from @architect-hz couldn't be verified as written by its own session.",
+		);
+		await expect(notes(page).nth(1)).toContainText(
+			"Consult paused: the consulted agent started changing files (Edit)",
+		);
+	});
+
+	test("a refused consult is explained and the draft, the recipient and the choice stay", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.projectRelay = true;
+		backend.projectCollabRefusal = {
+			status: 409,
+			body: { error: "collab-unavailable", detail: "same-session" },
+		};
+		await app.login("alice", `${projectHash}/new`);
+		const c = composer(page);
+		await c.getByRole("button", { name: "Add a recipient" }).click();
+		await c
+			.locator(".tw-option")
+			.filter({ hasText: /@developer-hz(?!-)/ })
+			.click();
+		await c.getByLabel("Let @developer-hz consult another agent").check();
+		await c.getByLabel("Agent to consult").selectOption({ label: "@architect-hz" });
+		await c.locator("textarea").fill("Ask the architect");
+		await c.getByRole("button", { name: "Send" }).click();
+		await expect(c.locator(".tw-send-status")).toHaveText(
+			"The consult can't be set up: both agents run in the same session. Nothing was sent.",
+		);
+		await expect(c.locator("textarea")).toHaveValue("Ask the architect");
+		await expect(c.locator(".tw-chip").first()).toContainText("@developer-hz");
+		await expect(c.getByLabel("Let @developer-hz consult another agent")).toBeChecked();
+		await expect(page).toHaveURL(/\/new$/);
+		expect(backend.projectGrants.size).toBe(0);
+	});
+
+	test("keyboard and touch: the consult's controls are reachable, labelled and big enough", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.projectRelay = true;
+		await app.login("alice", `${projectHash}/new`);
+		await sendTaskWithConsult(page);
+		const pause = grant(page).getByRole("button", { name: "Pause" });
+		const stop = grant(page).getByRole("button", { name: "Stop" });
+		await pause.focus();
+		await page.keyboard.press("Tab");
+		await expect(stop).toBeFocused();
+		await page.keyboard.press("Enter");
+		// The confirmation takes the keyboard user with it, never back to the page.
+		await expect(grant(page).getByRole("button", { name: "Stop it" })).toBeVisible();
+		await expect(grant(page).getByRole("button", { name: "Keep it" })).toBeFocused();
+		await page.keyboard.press("Enter");
+		await expect(stop).toBeFocused();
+		await page.keyboard.press("Enter");
+		const coarse = await page.evaluate(() => matchMedia("(pointer: coarse)").matches);
+		for (const b of await grant(page).getByRole("button").all()) {
+			const box = (await b.boundingBox())!;
+			expect(box.height).toBeGreaterThanOrEqual(coarse ? 44 : 30);
+		}
+		await noHorizontalScroll(page);
+	});
+});
+
 test.describe("workspace — layout", () => {
 	test.beforeEach(async ({ backend }) => {
 		await backend.enableProjectConversation();
