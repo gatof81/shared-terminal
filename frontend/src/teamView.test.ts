@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { clock } from "./conversationModel.js";
 
 // teamView.ts against a fake api: the workspace renders the log and the
 // directory, and the composer sends exactly what the person chose.
@@ -14,6 +15,9 @@ const api = vi.hoisted(() => ({
 		close: vi.fn(),
 	})),
 	readConversationEvent: vi.fn(),
+	// D3
+	projectRelayEnabled: vi.fn(() => false),
+	postGrantAction: vi.fn(),
 	// D2
 	projectArtifactsEnabled: vi.fn(() => false),
 	registerProjectArtifact: vi.fn(),
@@ -968,6 +972,447 @@ describe("attachments (D2)", () => {
 			expect(root.querySelector(".tw-results")?.textContent).toBe(
 				"@qa-pilor · Not delivered: a file couldn't be placed: a different file already has that name in its inbox. Some files may already be in its inbox.",
 			);
+		});
+	});
+});
+
+describe("consults between two agents (D3)", () => {
+	const G = "c-0123456789ab";
+	const at = (m: number) => `2026-11-11T12:${String(m).padStart(2, "0")}:00.000Z`;
+	const from = (agent: string) => ({
+		agent_id: agent,
+		binding_id: `b-${agent}`,
+		epoch: 1,
+		sid: `s-${agent}`,
+		cid: `c-${agent}`,
+	});
+	const consult = [
+		{
+			seq: 20,
+			at: at(31),
+			ev: "message",
+			msg_id: "k1",
+			kind: "owner",
+			to: [DEV],
+			text: "Ask QA about naming",
+			collab: { grant_id: G },
+		},
+		{ seq: 21, at: at(31), ev: "delivery", msg_id: "k1", agent_id: DEV, state: "delivered" },
+		{
+			seq: 22,
+			at: at(31),
+			ev: "grant",
+			grant_id: G,
+			event: "created",
+			mode: "ask",
+			task_msg_id: "k1",
+			initiator: DEV,
+			with: QA,
+			max_messages: 2,
+			max_wait_min: 60,
+			expires_at: "2026-11-11T14:31:00.000Z",
+			by: "u1",
+		},
+		{
+			seq: 23,
+			at: at(32),
+			ev: "outbox",
+			grant_id: G,
+			event: "rejected",
+			from: from(DEV),
+			path: ".st-outbox/bad.md",
+			origin: "match",
+			reason: "header-invalid",
+		},
+		{
+			seq: 24,
+			at: at(33),
+			ev: "outbox",
+			grant_id: G,
+			event: "accepted",
+			from: from(DEV),
+			path: ".st-outbox/ask.md",
+			origin: "match",
+			kind: "ask",
+			msg_id: "r1",
+		},
+		{
+			seq: 25,
+			at: at(33),
+			ev: "message",
+			msg_id: "r1",
+			kind: "relay",
+			from: DEV,
+			to: [QA],
+			text: "<b>Which naming?</b>",
+			relay: { grant_id: G, n: 1, kind: "ask", file_sha256: "a".repeat(64) },
+		},
+		{
+			seq: 26,
+			at: at(33),
+			ev: "delivery",
+			msg_id: "r1",
+			agent_id: QA,
+			state: "queued",
+			authorized_by: `collab:${G}`,
+		},
+	];
+	const withLog = (extra: unknown[] = []) =>
+		api.fetchProjectEvents.mockResolvedValue({
+			ok: true,
+			status: 200,
+			body: { events: [...log, ...consult, ...extra], hasMore: false },
+		});
+	/** The view's own clock format (locale-dependent), for a minute of the fixture's hour. */
+	const hhmm = (m: number) => clock(at(m));
+	const texts = (root: Element, sel: string) =>
+		[...root.querySelectorAll(sel)].map((n) => n.textContent);
+
+	afterEach(() => {
+		api.projectRelayEnabled.mockReturnValue(false);
+		api.postGrantAction.mockReset();
+	});
+
+	it("flag off: nothing of D3 is rendered or requested — the thread and New task are as before", async () => {
+		withLog();
+		const root = mount({ kind: "thread", msgId: "k1" });
+		await flush();
+		// The relay is the one-line DATA row it always was; its text is not shown.
+		const relay = root.querySelector(".tw-row-relay")!;
+		expect(relay.className).toBe("tw-row tw-row-relay");
+		expect(relay.textContent).toBe("DATAPassed to @qa-pilor as information");
+		for (const sel of [".tw-grant", ".tw-row-event", ".tw-row-relay-text", ".tw-consult"])
+			expect(root.querySelector(sel)).toBeNull();
+		expect(root.textContent).not.toContain("Which naming?");
+		mount({ kind: "new" });
+		await flush();
+		expect(root.querySelector(".tw-consult")).toBeNull();
+		root.querySelector<HTMLButtonElement>(".tw-chip-add")!.click();
+		root.querySelector<HTMLButtonElement>(".tw-option:not(:disabled)")!.click();
+		root.querySelector<HTMLTextAreaElement>(".tw-composer textarea")!.value = "plain task";
+		root.querySelector<HTMLFormElement>(".tw-composer")!.requestSubmit();
+		await flush();
+		expect(api.postProjectMessage.mock.calls[0]![1]).not.toHaveProperty("collab");
+		expect(api.postGrantAction).not.toHaveBeenCalled();
+	});
+
+	describe("flag on", () => {
+		beforeEach(() => api.projectRelayEnabled.mockReturnValue(true));
+
+		it("New task: the consult is offered with exactly one recipient and sends `collab`", async () => {
+			const root = mount({ kind: "new" });
+			await flush();
+			const box = root.querySelector<HTMLElement>(".tw-consult")!;
+			expect(box.hidden).toBe(true);
+			const pickFirst = () => {
+				root.querySelector<HTMLButtonElement>(".tw-chip-add")!.click();
+				root.querySelector<HTMLButtonElement>(".tw-option:not(:disabled)")!.click();
+			};
+			pickFirst(); // @dev-pilot
+			expect(box.hidden).toBe(false);
+			const check = box.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+			expect(box.querySelector(`label[for="${check.id}"]`)?.textContent).toBe(
+				"Let @dev-pilot consult another agent",
+			);
+			expect(box.querySelector<HTMLElement>(".tw-consult-opts")!.hidden).toBe(true);
+			check.click();
+			expect(box.querySelector<HTMLElement>(".tw-consult-opts")!.hidden).toBe(false);
+			const [withSel, count] = [...box.querySelectorAll<HTMLSelectElement>("select")];
+			// Every select has its label; the recipient itself is never offered.
+			for (const sel of [withSel!, count!])
+				expect(box.querySelector(`label[for="${sel.id}"]`)?.textContent).toBeTruthy();
+			expect([...withSel!.options].map((o) => o.textContent)).toEqual([
+				"Choose an agent…",
+				"@qa-pilor",
+				"@infra-pilot",
+			]);
+			expect([...count!.options].map((o) => o.value)).toEqual(["2", "3", "4", "5", "6"]);
+			expect(count!.value).toBe("2");
+			const text = root.querySelector<HTMLTextAreaElement>(".tw-composer textarea")!;
+			text.value = "Ask QA";
+			// Checked but nobody chosen to consult: explained, nothing sent, draft kept.
+			root.querySelector<HTMLFormElement>(".tw-composer")!.requestSubmit();
+			await flush();
+			expect(api.postProjectMessage).not.toHaveBeenCalled();
+			expect(root.querySelector(".tw-send-status")?.textContent).toBe(
+				"Choose which agent it may consult.",
+			);
+			expect(text.value).toBe("Ask QA");
+			withSel!.value = QA;
+			count!.value = "4";
+			root.querySelector<HTMLFormElement>(".tw-composer")!.requestSubmit();
+			await flush();
+			const body = api.postProjectMessage.mock.calls[0]![1];
+			expect(body.to).toEqual([DEV]);
+			expect(body.collab).toEqual({ mode: "ask", with: QA, maxMessages: 4 });
+		});
+
+		it("New task: a second recipient hides the control and switches it off; an unchecked one sends no collab", async () => {
+			const root = mount({ kind: "new" });
+			await flush();
+			const add = () => {
+				root.querySelector<HTMLButtonElement>(".tw-chip-add")!.click();
+				root.querySelector<HTMLButtonElement>(".tw-option:not(:disabled)")!.click();
+			};
+			add();
+			const box = root.querySelector<HTMLElement>(".tw-consult")!;
+			const check = box.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+			check.click();
+			add(); // two recipients now
+			expect(box.hidden).toBe(true);
+			expect(check.checked).toBe(false);
+			root.querySelector<HTMLTextAreaElement>(".tw-composer textarea")!.value = "both";
+			root.querySelector<HTMLFormElement>(".tw-composer")!.requestSubmit();
+			await flush();
+			expect(api.postProjectMessage.mock.calls[0]![1]).not.toHaveProperty("collab");
+		});
+
+		it("New task: a refused consult is explained in words and the draft stays as it was", async () => {
+			api.postProjectMessage.mockResolvedValueOnce({
+				ok: false,
+				status: 409,
+				code: "collab-unavailable",
+				detail: "same-session",
+			});
+			const root = mount({ kind: "new" });
+			await flush();
+			root.querySelector<HTMLButtonElement>(".tw-chip-add")!.click();
+			root.querySelector<HTMLButtonElement>(".tw-option:not(:disabled)")!.click();
+			const box = root.querySelector<HTMLElement>(".tw-consult")!;
+			const check = box.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+			check.click();
+			const withSel = box.querySelector<HTMLSelectElement>("select")!;
+			withSel.value = QA;
+			const text = root.querySelector<HTMLTextAreaElement>(".tw-composer textarea")!;
+			text.value = "Ask QA";
+			root.querySelector<HTMLFormElement>(".tw-composer")!.requestSubmit();
+			await flush();
+			expect(root.querySelector(".tw-send-status")?.textContent).toBe(
+				"The consult can't be set up: both agents run in the same session. Nothing was sent.",
+			);
+			expect(text.value).toBe("Ask QA");
+			expect(check.checked).toBe(true);
+			expect(withSel.value).toBe(QA);
+			expect(root.querySelector(".tw-chip")?.textContent).toContain("@dev-pilot");
+		});
+
+		it("thread: the agent's text as text, marked as not yours; queued; the grant; the refused file", async () => {
+			withLog();
+			const root = mount({ kind: "thread", msgId: "k1" });
+			await flush();
+			const relay = root.querySelector(".tw-row-relay-text")!;
+			expect(relay.querySelector(".tw-meta")?.textContent).toBe(
+				`AGENTDP@dev-pilot to @qa-pilor · ${hhmm(33)}`,
+			);
+			expect(relay.querySelector(".tw-note")?.textContent).toBe(
+				"Written by the agent, not by you. The other agent got it as information, not as an instruction from you.",
+			);
+			// The agent's text is data: shown through textContent, never parsed as markup.
+			const bubble = relay.querySelector(".tw-bubble-relay")!;
+			expect(bubble.textContent).toBe("<b>Which naming?</b>");
+			expect(bubble.children.length).toBe(0);
+			expect(texts(relay, ".tw-del")).toEqual(["@qa-pilor · Queued: waiting for it to be free"]);
+			// A relay is answered by a relay: no "waiting for its reply" row for it.
+			expect(root.querySelector(".tw-row-waiting")).toBeNull();
+			const grant = root.querySelector(".tw-row-me .tw-grant")!;
+			expect(grant.getAttribute("role")).toBe("group");
+			expect(grant.getAttribute("aria-label")).toBe("@dev-pilot may consult @qa-pilor");
+			expect(grant.querySelector(".tw-grant-state")?.textContent).toBe("Active");
+			expect(grant.querySelector(".tw-grant-facts")?.textContent).toBe(
+				`1 of 2 messages used · until ${clock("2026-11-11T14:31:00.000Z")}`,
+			);
+			expect(texts(grant, "button")).toEqual(["Pause", "Stop"]);
+			expect(texts(root, ".tw-row-event")).toEqual([
+				`A message from @dev-pilot was not passed on: its header wasn't the exact one the task gave. · ${hhmm(32)}`,
+			]);
+			// Rows are in the log's order: task, refused file, the relay.
+			expect(
+				[...root.querySelectorAll<HTMLElement>(".tw-timeline > li")].map((li) => li.dataset.anchor),
+			).toEqual(["msg:k1", `outbox:${G}:23`, "msg:r1"]);
+		});
+
+		it("thread: each pause with its cause, an unverified file, an owner request, the end", async () => {
+			withLog([
+				{
+					seq: 27,
+					at: at(34),
+					ev: "outbox",
+					grant_id: G,
+					event: "unverified",
+					from: from(QA),
+					path: ".st-outbox/x.md",
+					origin: "none",
+				},
+				{
+					seq: 28,
+					at: at(35),
+					ev: "grant",
+					grant_id: G,
+					event: "paused",
+					reason: "write-observed",
+					by: "system",
+					detail: { tool: "Edit", cid: "c" },
+				},
+				{ seq: 29, at: at(36), ev: "grant", grant_id: G, event: "resumed", by: "u1" },
+				{
+					seq: 30,
+					at: at(37),
+					ev: "message",
+					msg_id: "r2",
+					kind: "relay",
+					from: QA,
+					to: [],
+					text: "I need a decision",
+					relay: { grant_id: G, n: 0, kind: "owner", file_sha256: "b".repeat(64) },
+				},
+				{
+					seq: 31,
+					at: at(37),
+					ev: "grant",
+					grant_id: G,
+					event: "paused",
+					reason: "needs-owner",
+					by: "system",
+				},
+			]);
+			const root = mount({ kind: "thread", msgId: "k1" });
+			await flush();
+			expect(texts(root, ".tw-row-event")).toEqual([
+				`A message from @dev-pilot was not passed on: its header wasn't the exact one the task gave. · ${hhmm(32)}`,
+				`A message file from @qa-pilor couldn't be verified as written by its own session. It was not passed on. · ${hhmm(34)}`,
+				`Consult paused: the consulted agent started changing files (Edit) · ${hhmm(35)}`,
+				`You resumed the consult · ${hhmm(36)}`,
+				`Consult paused: an agent asked for you · ${hhmm(37)}`,
+			]);
+			const ask = [...root.querySelectorAll(".tw-row-relay-text")].at(-1)!;
+			expect(ask.querySelector(".tw-meta")?.textContent).toBe(
+				`AGENTQP@qa-pilor asks for you · ${hhmm(37)}`,
+			);
+			expect(ask.querySelector(".tw-note")?.textContent).toBe("Written by the agent, not by you.");
+			expect(ask.querySelector(".tw-deliveries")).toBeNull();
+			const grant = root.querySelector(".tw-grant")!;
+			expect(grant.className).toBe("tw-grant tw-grant-paused");
+			expect(grant.querySelector(".tw-grant-state")?.textContent).toBe(
+				"Paused: an agent asked for you",
+			);
+			expect(texts(grant, "button")).toEqual(["Resume", "Stop"]);
+		});
+
+		it("Pause: one request, its buttons off while it is in flight, and the state shown is the log's", async () => {
+			withLog();
+			let answer!: (v: unknown) => void;
+			api.postGrantAction.mockReturnValueOnce(new Promise((r) => (answer = r)));
+			const root = mount({ kind: "thread", msgId: "k1" });
+			await flush();
+			const btn = (label: string) =>
+				[...root.querySelectorAll<HTMLButtonElement>(".tw-grant button")].find(
+					(b) => b.textContent === label,
+				)!;
+			btn("Pause").click();
+			await flush();
+			expect(api.postGrantAction).toHaveBeenCalledWith(PID, G, "pause");
+			expect(texts(root, ".tw-grant button:disabled")).toEqual(["Pause", "Stop"]);
+			// A second press while in flight sends nothing.
+			btn("Pause").click();
+			btn("Stop").click();
+			expect(api.postGrantAction).toHaveBeenCalledTimes(1);
+			// Still "Active": the answer alone never paints a state.
+			expect(root.querySelector(".tw-grant-state")?.textContent).toBe("Active");
+			withLog([
+				{
+					seq: 27,
+					at: at(34),
+					ev: "grant",
+					grant_id: G,
+					event: "paused",
+					reason: "owner",
+					by: "u1",
+				},
+			]);
+			answer({ ok: true, status: 200, body: { grantId: G, state: "paused", reason: "owner" } });
+			await flush();
+			expect(root.querySelector(".tw-grant-state")?.textContent).toBe("Paused: you paused it");
+			expect(texts(root, ".tw-grant button")).toEqual(["Resume", "Stop"]);
+			expect(texts(root, ".tw-grant button:disabled")).toEqual([]);
+			// Focus stays on the consult (the pressed button no longer exists).
+			expect((document.activeElement as HTMLElement | null)?.dataset.key).toMatch(
+				new RegExp(`^grant:${G}:`),
+			);
+			api.postGrantAction.mockResolvedValueOnce({
+				ok: true,
+				status: 200,
+				body: { grantId: G, state: "live" },
+			});
+			btn("Resume").click();
+			await flush();
+			expect(api.postGrantAction).toHaveBeenLastCalledWith(PID, G, "resume");
+		});
+
+		it("Stop asks first; Keep it sends nothing; Stop it revokes and the ended grant has no controls", async () => {
+			withLog();
+			const root = mount({ kind: "thread", msgId: "k1" });
+			await flush();
+			const btn = (label: string) =>
+				[...root.querySelectorAll<HTMLButtonElement>(".tw-grant button")].find(
+					(b) => b.textContent === label,
+				)!;
+			btn("Stop").click();
+			expect(root.querySelector(".tw-grant-ask")?.textContent).toBe(
+				"Stop this consult for good? What is waiting won't be sent, and it can't be resumed.",
+			);
+			expect(texts(root, ".tw-grant button")).toEqual(["Stop it", "Keep it"]);
+			// The question replaced the pressed button: focus is on the answer that changes nothing.
+			expect(document.activeElement?.textContent).toBe("Keep it");
+			btn("Keep it").click();
+			expect(texts(root, ".tw-grant button")).toEqual(["Pause", "Stop"]);
+			expect(document.activeElement?.textContent).toBe("Stop");
+			expect(api.postGrantAction).not.toHaveBeenCalled();
+			btn("Stop").click();
+			api.postGrantAction.mockResolvedValueOnce({
+				ok: true,
+				status: 200,
+				body: { grantId: G, state: "ended", reason: "revoked" },
+			});
+			withLog([
+				{
+					seq: 27,
+					at: at(34),
+					ev: "delivery",
+					msg_id: "r1",
+					agent_id: QA,
+					state: "not-sent",
+					reason: "grant-inactive",
+					authorized_by: `collab:${G}`,
+				},
+				{ seq: 28, at: at(34), ev: "grant", grant_id: G, event: "revoked", by: "u1" },
+			]);
+			btn("Stop it").click();
+			await flush();
+			expect(api.postGrantAction).toHaveBeenCalledWith(PID, G, "revoke");
+			const grant = root.querySelector(".tw-grant")!;
+			expect(grant.querySelector(".tw-grant-state")?.textContent).toBe("Ended: you stopped it");
+			expect(grant.querySelector(".tw-grant-facts")?.textContent).toBe("1 of 2 messages used");
+			expect(grant.querySelector("button")).toBeNull();
+			expect(texts(root, ".tw-row-relay-text .tw-del")).toEqual([
+				"@qa-pilor · Not delivered: the handoffs had stopped",
+			]);
+			expect(texts(root, ".tw-row-event").at(-1)).toBe(`You stopped the consult · ${hhmm(34)}`);
+		});
+
+		it("a refused action says so and changes nothing; the controls come back", async () => {
+			withLog();
+			api.postGrantAction.mockResolvedValueOnce({ ok: false, status: 0, code: "network" });
+			const root = mount({ kind: "thread", msgId: "k1" });
+			await flush();
+			root.querySelector<HTMLButtonElement>(".tw-grant button")!.click();
+			await flush();
+			const msg = root.querySelector(".tw-grant-msg")!;
+			expect(msg.getAttribute("role")).toBe("status");
+			expect(msg.textContent).toBe(
+				"No answer from the server. Look at the consult's state before trying again.",
+			);
+			expect(root.querySelector(".tw-grant-state")?.textContent).toBe("Active");
+			expect(texts(root, ".tw-grant button:disabled")).toEqual([]);
 		});
 	});
 });

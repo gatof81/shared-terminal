@@ -39,6 +39,14 @@ export interface LogMessage {
 	inReplyTo: string | null;
 	/** kind relay only (D3): the grant it ran under. */
 	grantId: string | null;
+	/** kind relay only: the agent that wrote it (never the person). */
+	from: string | null;
+	/** kind relay only: `ask` / `reply` go to the other agent; `owner` / `done` are addressed to the person. */
+	relayKind: "ask" | "reply" | "owner" | "done" | null;
+	/** kind relay only: its number within the grant's budget (0 for `owner` / `done`). */
+	relayN: number | null;
+	/** A task that opened a consult (§7.2): the grant created with it. */
+	collabGrantId: string | null;
 	/** D2 (§6.3): the files it carries, name/bytes from the first `artifact` of each sha256. */
 	artifacts: ArtifactRef[];
 }
@@ -51,6 +59,8 @@ export interface ArtifactRef {
 }
 
 export type DeliveryState =
+	/** D3 (§7.4): a relay waiting for its recipient to be free; only under a grant. */
+	| "queued"
 	| "planned"
 	| "placing"
 	| "sending"
@@ -119,13 +129,42 @@ export interface LogLateClose {
 	promptId: string;
 }
 
+export type GrantEventKind = "created" | "paused" | "resumed" | "revoked" | "ended";
+
+/** D3 (§7.2, §7.5): one line of a consult permission's life. */
 export interface LogGrant {
 	ev: "grant";
 	seq: number;
 	ts: string;
 	grantId: string;
-	event: "created" | "revoked" | "ended";
+	event: GrantEventKind;
+	/** `created` only. */
 	taskMsgId: string | null;
+	initiator: string | null;
+	with: string | null;
+	maxMessages: number | null;
+	expiresAt: string | null;
+	/** Why it paused or ended (§7.5); absent on `created` / `resumed` / `revoked`. */
+	reason: string | null;
+	/** A user id, `system` or `evidence`. */
+	by: string | null;
+	/** `paused{write-observed}`: the tool that was seen writing. */
+	detailTool: string | null;
+}
+
+/** D3 (§7.3): what the server decided about a file an agent wrote in its outbox. */
+export interface LogOutbox {
+	ev: "outbox";
+	seq: number;
+	ts: string;
+	grantId: string;
+	event: "accepted" | "rejected" | "unverified";
+	fromAgentId: string | null;
+	path: string;
+	kind: string | null;
+	reason: string | null;
+	/** `accepted`: the relay message it became. */
+	msgId: string | null;
 }
 
 /** §4.1: the settle window of a reply opened — informative, not a reply, eligible for nothing. */
@@ -161,10 +200,12 @@ export type LogEvent =
 	| LogReplySettling
 	| LogLateClose
 	| LogGrant
+	| LogOutbox
 	| LogOwnerAck
 	| LogArtifact;
 
 const DELIVERY_STATES: ReadonlySet<string> = new Set([
+	"queued",
 	"planned",
 	"placing",
 	"sending",
@@ -228,6 +269,8 @@ export function parseLogEvent(raw: unknown): LogEvent | null {
 			if (!msgId || !kind || !Array.isArray(raw.to)) return null;
 			const to = raw.to.filter((a): a is string => typeof a === "string" && a !== "");
 			const relay = isObj(raw.relay) ? raw.relay : null;
+			const rk = relay ? relay.kind : null;
+			const collab = isObj(raw.collab) ? raw.collab : null;
 			return {
 				ev,
 				seq,
@@ -240,6 +283,13 @@ export function parseLogEvent(raw: unknown): LogEvent | null {
 				quoteRef: quoteRefOf(raw.quote_ref),
 				inReplyTo: nonEmpty(raw.in_reply_to),
 				grantId: relay ? nonEmpty(relay.grant_id) : null,
+				from: kind === "relay" ? nonEmpty(raw.from) : null,
+				relayKind:
+					kind === "relay" && (rk === "ask" || rk === "reply" || rk === "owner" || rk === "done")
+						? rk
+						: null,
+				relayN: kind === "relay" && relay ? int(relay.n) : null,
+				collabGrantId: collab ? nonEmpty(collab.grant_id) : null,
 				artifacts: artifactsOf(raw.artifacts),
 			};
 		}
@@ -358,8 +408,45 @@ export function parseLogEvent(raw: unknown): LogEvent | null {
 		case "grant": {
 			const grantId = nonEmpty(raw.grant_id);
 			const e = raw.event;
-			if (!grantId || (e !== "created" && e !== "revoked" && e !== "ended")) return null;
-			return { ev, seq, ts, grantId, event: e, taskMsgId: nonEmpty(raw.task_msg_id) };
+			if (
+				!grantId ||
+				(e !== "created" && e !== "paused" && e !== "resumed" && e !== "revoked" && e !== "ended")
+			)
+				return null;
+			const detail = isObj(raw.detail) ? raw.detail : null;
+			return {
+				ev,
+				seq,
+				ts,
+				grantId,
+				event: e,
+				taskMsgId: nonEmpty(raw.task_msg_id),
+				initiator: nonEmpty(raw.initiator),
+				with: nonEmpty(raw.with),
+				maxMessages: int(raw.max_messages),
+				expiresAt: nonEmpty(raw.expires_at),
+				reason: nonEmpty(raw.reason),
+				by: nonEmpty(raw.by),
+				detailTool: detail ? nonEmpty(detail.tool) : null,
+			};
+		}
+		case "outbox": {
+			const grantId = nonEmpty(raw.grant_id);
+			const e = raw.event;
+			if (!grantId || (e !== "accepted" && e !== "rejected" && e !== "unverified")) return null;
+			const from = isObj(raw.from) ? raw.from : null;
+			return {
+				ev,
+				seq,
+				ts,
+				grantId,
+				event: e,
+				fromAgentId: from ? nonEmpty(from.agent_id) : null,
+				path: str(raw.path) ?? "",
+				kind: nonEmpty(raw.kind),
+				reason: nonEmpty(raw.reason),
+				msgId: nonEmpty(raw.msg_id),
+			};
 		}
 		default:
 			return null;
@@ -413,6 +500,10 @@ export class ProjectLog {
 	private seen = new Set<number>();
 	/** grant_id → task_msg_id, so a relay message finds its thread. */
 	readonly grantTask = new Map<string, string>();
+	/** D3: every grant line loaded, per grant, in seq order (its state is recomputed from them). */
+	readonly grantEvents = new Map<string, LogGrant[]>();
+	/** D3: every outbox line loaded, per grant, in seq order. */
+	readonly outbox = new Map<string, LogOutbox[]>();
 	/** Every owner_ack loaded (window or fetched). */
 	readonly acks: LogOwnerAck[] = [];
 	/** D2: sha256 → its FIRST `artifact` event loaded (the one whose name/bytes a message uses). */
@@ -500,9 +591,23 @@ export class ProjectLog {
 			case "owner_ack":
 				this.acks.push(e);
 				return;
-			case "grant":
+			case "grant": {
 				if (e.taskMsgId) this.grantTask.set(e.grantId, e.taskMsgId);
+				// `seen` already dropped a repeated seq; kept sorted because pages
+				// arrive newest first and then backward.
+				const list = this.grantEvents.get(e.grantId) ?? [];
+				list.push(e);
+				list.sort((a, b) => a.seq - b.seq);
+				this.grantEvents.set(e.grantId, list);
 				return;
+			}
+			case "outbox": {
+				const list = this.outbox.get(e.grantId) ?? [];
+				list.push(e);
+				list.sort((a, b) => a.seq - b.seq);
+				this.outbox.set(e.grantId, list);
+				return;
+			}
 			case "artifact":
 				// Folded in seq order, so the first one kept is the lowest seq loaded.
 				if (!this.artifacts.has(e.sha256)) this.artifacts.set(e.sha256, e);
@@ -605,6 +710,7 @@ export type DeliveryTone = "pending" | "ok" | "unsure" | "not-delivered";
  */
 export function deliveryTone(state: DeliveryState): DeliveryTone {
 	switch (state) {
+		case "queued":
 		case "planned":
 		case "placing":
 		case "sending":
@@ -626,6 +732,8 @@ const NOT_SENT_REASON: ReadonlyMap<string, string> = new Map([
 	["binding-unverified", "its session couldn't be checked"],
 	["agent-removed", "it was removed from the project"],
 	["grant-inactive", "the handoffs had stopped"],
+	["grant-paused", "the consult was paused"],
+	["wait-expired", "it stayed busy for too long"],
 	["artifact-failed", "a file couldn't be placed"],
 	["persist-failed", "the server couldn't record it"],
 ]);
@@ -659,6 +767,8 @@ export function deliveryText(
 ): string {
 	const files = (t: string) => (d.filesPossiblyPlaced ? `${t}. ${FILES_MAYBE_PLACED}` : t);
 	switch (d.state) {
+		case "queued":
+			return "Queued: waiting for it to be free";
 		case "planned":
 		case "sending":
 			return "Sending…";
@@ -1036,8 +1146,25 @@ const POST_ERROR: ReadonlyMap<string, string> = new Map([
 	["artifacts-off", "Attaching files is turned off on this server. Nothing was sent."],
 ]);
 
-/** The words for a refused POST (the server sent nothing to any agent). */
-export function postErrorText(code: string, status: number): string {
+const COLLAB_UNAVAILABLE: ReadonlyMap<string, string> = new Map([
+	["no-binding", "the agent to consult has no session bound"],
+	["same-session", "both agents run in the same session"],
+	["agent-removed", "the agent to consult was removed from the project"],
+]);
+
+/**
+ * The words for a refused POST (the server sent nothing to any agent).
+ * `detail` is the answer's own `detail`, read only for the D3 codes (§7.2).
+ */
+export function postErrorText(code: string, status: number, detail?: string): string {
+	if (code === "relay-off")
+		return "Consults between agents are turned off on this server. Nothing was sent.";
+	if (code === "agent-in-collab")
+		return "One of these agents is already in a consult that hasn't ended. Stop that one first, or send the task without a consult. Nothing was sent.";
+	if (code === "collab-unavailable")
+		return `The consult can't be set up: ${(detail && COLLAB_UNAVAILABLE.get(detail)) ?? "the two agents can't consult each other right now"}. Nothing was sent.`;
+	if (code === "invalid-body" && detail?.startsWith("collab"))
+		return `The server rejected the consult settings (${detail}). Nothing was sent.`;
 	return (
 		POST_ERROR.get(code) ??
 		(status === 404
@@ -1091,4 +1218,223 @@ export function sizeText(bytes: number): string {
 /** Whether a file reads as a unified diff by its name (shown with the diff renderer). */
 export function looksLikeDiff(name: string): boolean {
 	return /\.(diff|patch)$/i.test(name);
+}
+
+// ── Consults between two agents (D3, §7) ────────────────────────────────────
+
+export type GrantState = "live" | "paused" | "ended";
+
+/** A consult permission as the log says it is. */
+export interface GrantView {
+	grantId: string;
+	/** Null while its `created` line is outside the loaded window. */
+	created: LogGrant | null;
+	state: GrantState;
+	/** Why it is paused or ended (`revoked` when the person stopped it). */
+	reason: string | null;
+	/** Who wrote the line that set `state`: a user id, `system` or `evidence`. */
+	by: string | null;
+	/** `paused{write-observed}`: the tool seen writing. */
+	detailTool: string | null;
+	/** Seq / time of the line that set `state`. */
+	seq: number;
+	ts: string;
+	/** Messages spent of `created.maxMessages` (ask / reply only, as the server counts them). */
+	used: number;
+}
+
+/**
+ * A grant's state, recomputed from ALL its loaded lines in seq order, as the
+ * server folds it (fold.ts): `paused` sets the pause and its cause,
+ * `resumed` lifts it, `revoked` / `ended` end it — and an ended grant never
+ * changes again, whatever a later line says (§7.5). Recomputed, never
+ * incremental, so the order pages arrive in can't leave it stale.
+ */
+export function grantView(log: ProjectLog, grantId: string): GrantView | null {
+	const events = log.grantEvents.get(grantId);
+	if (!events || events.length === 0) return null;
+	const created = events.find((e) => e.event === "created") ?? null;
+	const first = events[0]!;
+	const v: GrantView = {
+		grantId,
+		created,
+		state: "live",
+		reason: null,
+		by: created?.by ?? null,
+		detailTool: null,
+		seq: (created ?? first).seq,
+		ts: (created ?? first).ts,
+		used: 0,
+	};
+	for (const e of events) {
+		if (e.event === "created" || v.state === "ended") continue;
+		if (e.event === "paused") {
+			v.state = "paused";
+			v.reason = e.reason;
+			v.detailTool = e.detailTool;
+		} else if (e.event === "resumed") {
+			v.state = "live";
+			v.reason = null;
+			v.detailTool = null;
+		} else {
+			v.state = "ended";
+			v.reason = e.event === "revoked" ? "revoked" : e.reason;
+			v.detailTool = null;
+		}
+		v.by = e.by;
+		v.seq = e.seq;
+		v.ts = e.ts;
+	}
+	for (const m of log.messages.values()) {
+		const msg = m.message;
+		if (
+			msg.kind === "relay" &&
+			msg.grantId === grantId &&
+			(msg.relayKind === "ask" || msg.relayKind === "reply")
+		)
+			v.used++;
+	}
+	return v;
+}
+
+/** The grants a task opened (normally one), oldest first. */
+export function grantsOfTask(log: ProjectLog, taskMsgId: string): GrantView[] {
+	const out: GrantView[] = [];
+	for (const [grantId, task] of log.grantTask) {
+		if (task !== taskMsgId) continue;
+		const v = grantView(log, grantId);
+		if (v) out.push(v);
+	}
+	return out.sort((a, b) => (a.created?.seq ?? 0) - (b.created?.seq ?? 0));
+}
+
+const PAUSE_REASON: ReadonlyMap<string, string> = new Map([
+	["owner", "you paused it"],
+	["needs-owner", "an agent asked for you"],
+	["write-observed", "the consulted agent started changing files"],
+	["too-many-rejections", "an agent wrote three messages the server couldn't accept"],
+	["recovered", "the server restarted during a delivery"],
+	["delivery-uncertain", "a message may or may not have arrived"],
+	["delivery-unconfirmed", "the agent didn't confirm a message"],
+	["delivery-misdelivered", "a message may have gone to another conversation"],
+	["delivery-failed", "a message failed part-way"],
+	["delivery-refused", "the agent couldn't take a message"],
+	["delivery-not-sent", "a message couldn't be sent"],
+]);
+
+const END_REASON: ReadonlyMap<string, string> = new Map([
+	["revoked", "you stopped it"],
+	["budget", "all its messages were used"],
+	["done", "an agent said it was done"],
+	["expired", "its time ran out"],
+	["wait-expired", "an agent stayed busy for too long"],
+	["binding-changed", "an agent's session changed"],
+	["task-not-delivered", "the task never reached the agent"],
+	["interrupted", "the server was restored from a backup"],
+]);
+
+/** "Paused: an agent asked for you" — the cause in words, the code when it is a new one. */
+export function grantStateText(g: Pick<GrantView, "state" | "reason" | "detailTool">): string {
+	if (g.state === "live") return "Active";
+	if (g.state === "paused") {
+		const why = (g.reason && PAUSE_REASON.get(g.reason)) ?? g.reason ?? "no cause recorded";
+		const tool = g.reason === "write-observed" && g.detailTool ? ` (${g.detailTool})` : "";
+		return `Paused: ${why}${tool}`;
+	}
+	const why = (g.reason && END_REASON.get(g.reason)) ?? g.reason ?? "no cause recorded";
+	return `Ended: ${why}`;
+}
+
+/** One line of a consult's history, for the thread: each pause with its cause, each resume, the end. */
+export function grantEventText(
+	e: Pick<LogGrant, "event" | "reason" | "by" | "detailTool">,
+): string {
+	if (e.event === "paused")
+		return `Consult paused: ${grantStateText({ state: "paused", reason: e.reason, detailTool: e.detailTool }).slice("Paused: ".length)}`;
+	if (e.event === "resumed")
+		return e.by === "evidence"
+			? "Consult resumed: the message was confirmed as delivered"
+			: "You resumed the consult";
+	if (e.event === "revoked") return "You stopped the consult";
+	if (e.event === "ended")
+		return `Consult ended: ${grantStateText({ state: "ended", reason: e.reason, detailTool: null }).slice("Ended: ".length)}`;
+	return "Consult allowed";
+}
+
+/** What each control would do, by state: nothing is offered on an ended grant (§7.5). */
+export function grantActions(state: GrantState): Array<"pause" | "resume" | "revoke"> {
+	if (state === "live") return ["pause", "revoke"];
+	if (state === "paused") return ["resume", "revoke"];
+	return [];
+}
+
+const OUTBOX_REJECT: ReadonlyMap<string, string> = new Map([
+	["header-invalid", "its header wasn't the exact one the task gave"],
+	["not-authorized", "it wasn't addressed to the agent this consult allows"],
+	["grant-paused", "the consult was paused"],
+	["bad-re", "it answered a message that isn't in this consult"],
+	["budget", "the consult had no messages left"],
+	["empty", "it had no text"],
+	["queue-full", "another message to that agent was still waiting"],
+	["file-too-large", "the file was too large"],
+	["file-not-utf8", "the file wasn't text"],
+	["file-nul", "the file wasn't text"],
+]);
+
+/** One line for an `outbox{rejected|unverified}` (accepted ones are the relay message itself). */
+export function outboxText(o: Pick<LogOutbox, "event" | "reason">, who: string): string {
+	if (o.event === "unverified")
+		return `A message file from ${who} couldn't be verified as written by its own session. It was not passed on.`;
+	const why =
+		(o.reason && OUTBOX_REJECT.get(o.reason)) ??
+		(o.reason?.startsWith("text-") ? "its text can't be typed into a Claude session" : null) ??
+		o.reason ??
+		"no cause recorded";
+	return `A message from ${who} was not passed on: ${why}.`;
+}
+
+/** The server's bounds for a consult's message budget (§7.2). */
+export const COLLAB_MIN_MESSAGES = 2;
+export const COLLAB_MAX_MESSAGES = 6;
+
+export interface CollabChoice {
+	with: string;
+	maxMessages: number;
+}
+
+/**
+ * The `collab` to send, or why not. A consult needs exactly ONE recipient
+ * (the agent that may ask) and another agent to ask (§7.2); the server
+ * decides again every time — this only explains it before the request.
+ */
+export function collabToSend(
+	to: readonly string[],
+	choice: CollabChoice | null,
+): { collab: { mode: "ask"; with: string; maxMessages: number } | null } | { error: string } {
+	if (choice === null) return { collab: null };
+	if (to.length !== 1) return { error: "A consult needs exactly one recipient." };
+	if (choice.with === "") return { error: "Choose which agent it may consult." };
+	if (choice.with === to[0]) return { error: "An agent can't consult itself." };
+	const n = choice.maxMessages;
+	if (!Number.isInteger(n) || n < COLLAB_MIN_MESSAGES || n > COLLAB_MAX_MESSAGES)
+		return {
+			error: `A consult allows ${COLLAB_MIN_MESSAGES} to ${COLLAB_MAX_MESSAGES} messages.`,
+		};
+	return { collab: { mode: "ask", with: choice.with, maxMessages: n } };
+}
+
+const GRANT_ACTION_ERROR: ReadonlyMap<string, string> = new Map([
+	["grant-not-found", "This consult no longer exists."],
+	["grant-ended", "This consult has already ended."],
+	["relay-off", "Consults between agents are turned off on this server."],
+]);
+
+/** Words for a refused pause / resume / stop. Nothing changed unless the log says so. */
+export function grantActionErrorText(code: string, status: number): string {
+	return (
+		GRANT_ACTION_ERROR.get(code) ??
+		(status === 0
+			? "No answer from the server. Look at the consult's state before trying again."
+			: `The server couldn't do that (${code || status}).`)
+	);
 }

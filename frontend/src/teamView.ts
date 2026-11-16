@@ -25,9 +25,11 @@ import {
 	fetchProjectArtifactText,
 	listWorkspaceDir,
 	type ProjectMessageBody,
+	postGrantAction,
 	postProjectAck,
 	postProjectMessage,
 	projectArtifactsEnabled,
+	projectRelayEnabled,
 	registerProjectArtifact,
 	type WorkspaceEntry,
 	WorkspaceFsError,
@@ -51,12 +53,23 @@ import {
 	ackTargetOf,
 	answerStates,
 	buildThreads,
+	COLLAB_MAX_MESSAGES,
+	COLLAB_MIN_MESSAGES,
+	collabToSend,
 	type DeliveryState,
 	type DeliveryView,
 	deliveryText,
 	deliveryTone,
 	type ForYouItem,
 	forYou,
+	type GrantView,
+	grantActionErrorText,
+	grantActions,
+	grantEventText,
+	grantStateText,
+	grantsOfTask,
+	type LogGrant,
+	type LogOutbox,
 	type LogReplyRef,
 	type LogReplySettling,
 	looksLikeDiff,
@@ -64,6 +77,7 @@ import {
 	MAX_RECIPIENTS,
 	type MessageView,
 	mentionAt,
+	outboxText,
 	type ProjectLog,
 	partialDeliveryText,
 	postErrorText,
@@ -243,6 +257,21 @@ class Composer {
 	private replyTarget: ReplyTarget | null = null;
 	private pickerOpen = false;
 	private pickerIndex = 0;
+	/**
+	 * D3 (§7.2): "let this agent consult another one", on a new task with
+	 * exactly one recipient. Null without features.projectRelay — then no
+	 * control exists and no `collab` is ever sent.
+	 */
+	private consult: {
+		box: HTMLElement;
+		check: HTMLInputElement;
+		label: HTMLElement;
+		opts: HTMLElement;
+		withSel: HTMLSelectElement;
+		count: HTMLSelectElement;
+		/** The option list last built, so a poll that changes nothing rebuilds nothing. */
+		key: string;
+	} | null = null;
 
 	constructor(
 		private projectId: string,
@@ -280,6 +309,7 @@ class Composer {
 			this.root.append(this.filesRow, this.attach.root);
 			this.renderFiles();
 		}
+		if (mode === "task" && projectRelayEnabled()) this.root.append(this.buildConsult());
 		this.root.append(row, this.hint, this.status);
 		this.text.addEventListener("input", () => this.onInput());
 		this.text.addEventListener("keydown", (e) => this.onKey(e));
@@ -339,6 +369,105 @@ class Composer {
 		this.text.focus();
 	}
 
+	private buildConsult(): HTMLElement {
+		const box = el("div", "tw-consult");
+		box.hidden = true;
+		const id = `tw-consult-${crypto.randomUUID()}`;
+		const check = el("input");
+		check.type = "checkbox";
+		check.id = `${id}-on`;
+		const label = el("label", "tw-consult-on");
+		label.htmlFor = check.id;
+		const head = el("div", "tw-consult-head");
+		head.append(check, label);
+		const opts = el("div", "tw-consult-opts");
+		opts.hidden = true;
+		const withSel = el("select", "tw-select");
+		withSel.id = `${id}-with`;
+		const withLabel = el("label", undefined, "Agent to consult");
+		withLabel.htmlFor = withSel.id;
+		const count = el("select", "tw-select");
+		count.id = `${id}-count`;
+		for (let n = COLLAB_MIN_MESSAGES; n <= COLLAB_MAX_MESSAGES; n++) {
+			const o = el("option", undefined, String(n));
+			o.value = String(n);
+			count.append(o);
+		}
+		count.value = String(COLLAB_MIN_MESSAGES);
+		const countLabel = el("label", undefined, "Messages between them, at most");
+		countLabel.htmlFor = count.id;
+		const f1 = el("div", "tw-consult-field");
+		f1.append(withLabel, withSel);
+		const f2 = el("div", "tw-consult-field");
+		f2.append(countLabel, count);
+		opts.append(
+			f1,
+			f2,
+			el(
+				"p",
+				"tw-muted tw-consult-note",
+				"The two agents write to each other without you in between, only about this task. It ends when the messages are used or after 2 hours. You can pause or stop it from the thread.",
+			),
+		);
+		box.append(head, opts);
+		check.addEventListener("change", () => this.renderConsult());
+		this.consult = { box, check, label, opts, withSel, count, key: "" };
+		return box;
+	}
+
+	/**
+	 * The consult control follows the recipients: offered only with exactly
+	 * one (the agent that may ask), listing the OTHER agents that have a
+	 * session bound. With any other number of recipients it is hidden and
+	 * switched off, so a `collab` is never sent by a control nobody sees.
+	 */
+	private renderConsult(): void {
+		const c = this.consult;
+		if (!c) return;
+		const one = this.chosen.length === 1 ? this.chosen[0]! : null;
+		c.box.hidden = one === null;
+		if (one === null) {
+			c.check.checked = false;
+			c.opts.hidden = true;
+			return;
+		}
+		c.label.textContent = `Let ${handleOf(this.agents, one)} consult another agent`;
+		const others = this.agents.list.filter(
+			(a) => a.agentId !== one && a.binding !== null && a.binding.state === "active",
+		);
+		const key = `${one}\n${others.map((a) => `${a.agentId} ${a.handle}`).join("\n")}`;
+		if (key !== c.key) {
+			c.key = key;
+			const keep = c.withSel.value;
+			const nodes: HTMLOptionElement[] = [];
+			if (others.length !== 1) {
+				const o = el(
+					"option",
+					undefined,
+					others.length === 0 ? "No other agent has a session bound" : "Choose an agent…",
+				);
+				o.value = "";
+				nodes.push(o);
+			}
+			for (const a of others) {
+				const o = el("option", undefined, `@${a.handle}`);
+				o.value = a.agentId;
+				nodes.push(o);
+			}
+			c.withSel.replaceChildren(...nodes);
+			c.withSel.value = others.some((a) => a.agentId === keep)
+				? keep
+				: others.length === 1
+					? others[0]!.agentId
+					: "";
+		}
+		const locked = this.phase.kind === "sending" || this.phase.kind === "unknown";
+		c.check.disabled = locked;
+		c.withSel.disabled = locked || others.length === 0;
+		c.count.disabled = locked;
+		c.opts.hidden = !c.check.checked;
+	}
+
 	private clearReply(): void {
 		this.replyTarget = null;
 		this.quote.hidden = true;
@@ -377,6 +506,7 @@ class Composer {
 			this.chosen.length === 0
 				? "Nobody receives it until you choose agents. An @name in the text is just text."
 				: `Only ${this.chosen.map((id) => handleOf(this.agents, id)).join(", ")} will receive this.`;
+		this.renderConsult();
 	}
 
 	private remove(id: string): void {
@@ -538,6 +668,7 @@ class Composer {
 		this.send.disabled = busy;
 		this.text.readOnly = busy || p.kind === "unknown";
 		if (this.attach) this.renderFiles();
+		this.renderConsult();
 		this.status.replaceChildren();
 		this.status.className = `tw-send-status tw-send-${p.kind}`;
 		if (p.kind === "sending") {
@@ -602,6 +733,17 @@ class Composer {
 			text: this.text.value,
 			to: r.to,
 		};
+		if (this.consult?.check.checked) {
+			const c = collabToSend(r.to, {
+				with: this.consult.withSel.value,
+				maxMessages: Number(this.consult.count.value),
+			});
+			if ("error" in c) {
+				this.setPhase({ kind: "refused", message: c.error });
+				return;
+			}
+			if (c.collab) body.collab = c.collab;
+		}
 		if (this.files.length > 0) body.artifacts = this.files.map((f) => f.sha256);
 		const inReplyTo = this.replyTarget?.inReplyTo ?? this.rootId;
 		if (inReplyTo) body.inReplyTo = inReplyTo;
@@ -627,6 +769,10 @@ class Composer {
 			this.clearReply();
 			if (this.mode === "task") this.chosen = [];
 			this.files = [];
+			if (this.consult) {
+				this.consult.check.checked = false;
+				this.consult.count.value = String(COLLAB_MIN_MESSAGES);
+			}
 			this.renderChips();
 			const results: SendResult[] = answerStates(body.to, a.body.deliveries).map((r) => {
 				const d = a.body.deliveries.find((x) => x.agentId === r.agentId);
@@ -650,7 +796,7 @@ class Composer {
 			return;
 		}
 		// The server refused before any effect: nothing was sent; the draft stays.
-		this.setPhase({ kind: "refused", message: postErrorText(a.code, a.status) });
+		this.setPhase({ kind: "refused", message: postErrorText(a.code, a.status, a.detail) });
 	}
 }
 
@@ -1611,10 +1757,32 @@ class Workspace {
 		type Row = { seq: number; anchor: string; node: HTMLElement };
 		const rows: Row[] = [];
 		const composer = this.composer(`t:${rootId}`, "thread", rootId);
+		const relay = projectRelayEnabled();
 		for (const id of ids) {
 			const m = log.messages.get(id);
 			if (!m) continue;
 			rows.push({ seq: m.message.seq, anchor: `msg:${id}`, node: this.messageRow(m) });
+			// D3: what happened to the consult this task opened — each pause with
+			// its cause, the end, and the files the server would not pass on.
+			if (relay && m.message.kind === "owner")
+				for (const g of grantsOfTask(log, id)) {
+					for (const e of log.grantEvents.get(g.grantId) ?? [])
+						if (e.event !== "created")
+							rows.push({
+								seq: e.seq,
+								anchor: `grant:${g.grantId}:${e.seq}`,
+								node: this.grantEventRow(e),
+							});
+					for (const o of log.outbox.get(g.grantId) ?? [])
+						if (o.event !== "accepted")
+							rows.push({
+								seq: o.seq,
+								anchor: `outbox:${g.grantId}:${o.seq}`,
+								node: this.outboxRow(o),
+							});
+				}
+			// A relay is answered by another relay, never by a captured reply.
+			if (relay && m.message.kind === "relay") continue;
 			for (const [agentId, list] of m.replies)
 				for (const r of list)
 					rows.push({
@@ -1663,6 +1831,7 @@ class Workspace {
 	private messageRow(m: MessageView): HTMLElement {
 		const li = el("li", "tw-row tw-row-me");
 		const meta = el("div", "tw-meta");
+		if (m.message.kind === "relay" && projectRelayEnabled()) return this.relayRow(m);
 		if (m.message.kind === "relay") {
 			li.className = "tw-row tw-row-relay";
 			meta.append(
@@ -1694,7 +1863,185 @@ class Workspace {
 		for (const id of m.message.to)
 			chips.append(this.deliveryChip(id, m.deliveries.get(id) ?? null));
 		li.append(chips);
+		if (projectRelayEnabled())
+			for (const g of grantsOfTask(this.store.log, m.message.msgId)) li.append(this.grantPanel(g));
 		return li;
+	}
+
+	// ── Consults between two agents (D3, §7) ──
+
+	/**
+	 * What one agent wrote to the other under a consult. It is the agent's
+	 * text — shown through textContent, marked as not the person's, never
+	 * read for meaning — with where it went and what happened to its delivery.
+	 */
+	private relayRow(m: MessageView): HTMLElement {
+		const msg = m.message;
+		const li = el("li", "tw-row tw-row-relay tw-row-relay-text");
+		const from = msg.from;
+		if (from) li.style.setProperty("--tw-hue", String(hueOf(from)));
+		const who = from ? handleOf(this.agents, from) : "An agent";
+		const to = msg.to.map((id) => handleOf(this.agents, id)).join(", ");
+		const what =
+			msg.relayKind === "owner"
+				? "asks for you"
+				: msg.relayKind === "done"
+					? "says the consult is done"
+					: to
+						? `to ${to}`
+						: "";
+		const meta = el("div", "tw-meta");
+		meta.append(el("span", "tw-data-tag", "AGENT"));
+		if (from) meta.append(avatar(this.agents, from, true, false));
+		meta.append(
+			el("b", undefined, who),
+			el("span", undefined, what ? ` ${what}` : ""),
+			el("span", "tw-muted", ` · ${clockText(msg.ts)}`),
+		);
+		li.append(meta);
+		li.append(
+			el(
+				"p",
+				"tw-note",
+				msg.relayKind === "owner" || msg.relayKind === "done"
+					? "Written by the agent, not by you."
+					: "Written by the agent, not by you. The other agent got it as information, not as an instruction from you.",
+			),
+		);
+		if (msg.text !== "")
+			li.append(el("div", "tw-bubble tw-bubble-agent tw-bubble-relay", msg.text));
+		if (msg.to.length > 0) {
+			const chips = el("div", "tw-deliveries");
+			for (const id of msg.to) chips.append(this.deliveryChip(id, m.deliveries.get(id) ?? null));
+			li.append(chips);
+		}
+		return li;
+	}
+
+	/** grant ids with a pause / resume / stop in flight (its buttons are off meanwhile). */
+	private grantBusy = new Set<string>();
+	/** grant ids whose Stop is waiting for the person's confirmation. */
+	private grantStopAsk = new Set<string>();
+	/** The last refused action per grant, in words; cleared by the next action. */
+	private grantError = new Map<string, string>();
+
+	/**
+	 * The consult a task opened: who may ask whom, its state as the log has
+	 * it, what is left of its budget, and the three controls of §7.6. The
+	 * state shown is ALWAYS the log's — an action's answer only triggers a
+	 * re-read, it is never painted as the new state.
+	 */
+	private grantPanel(g: GrantView): HTMLElement {
+		const box = el("div", `tw-grant tw-grant-${g.state}`);
+		box.setAttribute("role", "group");
+		const c = g.created;
+		const pair =
+			c?.initiator && c.with
+				? `${handleOf(this.agents, c.initiator)} may consult ${handleOf(this.agents, c.with)}`
+				: "Consult between two agents";
+		box.setAttribute("aria-label", pair);
+		box.append(el("b", "tw-grant-title", pair));
+		box.append(el("span", `tw-grant-state tw-grant-state-${g.state}`, grantStateText(g)));
+		const facts: string[] = [];
+		if (c?.maxMessages != null) facts.push(`${g.used} of ${c.maxMessages} messages used`);
+		if (g.state !== "ended" && c?.expiresAt) facts.push(`until ${clockText(c.expiresAt)}`);
+		if (facts.length > 0) box.append(el("span", "tw-muted tw-grant-facts", facts.join(" · ")));
+		const acts = grantActions(g.state);
+		if (acts.length > 0) {
+			const busy = this.grantBusy.has(g.grantId);
+			const row = el("div", "tw-actions tw-grant-actions");
+			const asking = this.grantStopAsk.has(g.grantId);
+			const add = (label: string, cls: string, key: string, on: () => void): void => {
+				const b = button(label, cls, on);
+				b.disabled = busy;
+				b.dataset.key = `grant:${g.grantId}:${key}`;
+				row.append(b);
+			};
+			if (asking) {
+				row.append(
+					el(
+						"span",
+						"tw-grant-ask",
+						"Stop this consult for good? What is waiting won't be sent, and it can't be resumed.",
+					),
+				);
+				add("Stop it", "tw-btn tw-btn-danger", "revoke-yes", () => {
+					this.grantStopAsk.delete(g.grantId);
+					void this.grantAct(g.grantId, "revoke");
+				});
+				add("Keep it", "tw-btn tw-btn-ghost", "revoke-no", () => {
+					this.grantStopAsk.delete(g.grantId);
+					this.render();
+					this.focusGrant(g.grantId, "revoke");
+				});
+			} else {
+				if (acts.includes("pause"))
+					add("Pause", "tw-btn", "pause", () => void this.grantAct(g.grantId, "pause"));
+				if (acts.includes("resume"))
+					add("Resume", "tw-btn", "resume", () => void this.grantAct(g.grantId, "resume"));
+				add("Stop", "tw-btn tw-btn-ghost", "revoke", () => {
+					this.grantStopAsk.add(g.grantId);
+					this.render();
+					// The question replaces the button that was pressed: the keyboard
+					// lands on the answer that changes nothing.
+					this.focusGrant(g.grantId, "revoke-no");
+				});
+			}
+			box.append(row);
+		}
+		const status = el("p", "tw-grant-msg", this.grantError.get(g.grantId) ?? "");
+		status.setAttribute("role", "status");
+		box.append(status);
+		return box;
+	}
+
+	private async grantAct(grantId: string, verb: "pause" | "resume" | "revoke"): Promise<void> {
+		if (this.grantBusy.has(grantId)) return;
+		this.grantBusy.add(grantId);
+		this.grantError.delete(grantId);
+		this.render();
+		const a = await postGrantAction(this.projectId, grantId, verb);
+		this.grantBusy.delete(grantId);
+		if (!a.ok && a.code === "stale") return;
+		if (!a.ok) this.grantError.set(grantId, grantActionErrorText(a.code, a.status));
+		// Whatever was answered (or not), the log decides what the state is now.
+		await this.store.refreshAfterWrite();
+		this.render();
+		// The button that was pressed is gone once the state changed: keep the
+		// keyboard user on the consult's remaining control instead of the page.
+		if (!this.root.contains(document.activeElement) || document.activeElement === document.body)
+			this.focusGrant(grantId, null);
+	}
+
+	/** Focus a control of this consult's panel: the one with `key`, else its first. */
+	private focusGrant(grantId: string, key: string | null): void {
+		const mine = [...this.root.querySelectorAll<HTMLElement>("[data-key]")].filter(
+			(n) => n.dataset.key?.startsWith(`grant:${grantId}:`) && n.getClientRects().length > 0,
+		);
+		// jsdom lays nothing out: fall back to any match when none reports a box.
+		const all =
+			mine.length > 0
+				? mine
+				: [...this.root.querySelectorAll<HTMLElement>("[data-key]")].filter((n) =>
+						n.dataset.key?.startsWith(`grant:${grantId}:`),
+					);
+		const target = (key && all.find((n) => n.dataset.key === `grant:${grantId}:${key}`)) || all[0];
+		target?.focus({ preventScroll: true });
+	}
+
+	private noteRow(tone: "info" | "warn", text: string, ts: string): HTMLElement {
+		const li = el("li", `tw-row tw-row-event tw-row-event-${tone}`);
+		li.append(el("span", undefined, text), el("span", "tw-muted", ` · ${clockText(ts)}`));
+		return li;
+	}
+
+	private grantEventRow(e: LogGrant): HTMLElement {
+		return this.noteRow(e.event === "paused" ? "warn" : "info", grantEventText(e), e.ts);
+	}
+
+	private outboxRow(o: LogOutbox): HTMLElement {
+		const who = o.fromAgentId ? handleOf(this.agents, o.fromAgentId) : "an agent";
+		return this.noteRow("warn", outboxText(o, who), o.ts);
 	}
 
 	/** sha256 → the file's text as last fetched (shared by every message naming it). */

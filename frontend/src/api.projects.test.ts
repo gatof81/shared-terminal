@@ -202,3 +202,87 @@ describe("D2: features.projectArtifacts and the artifact reads", () => {
 		});
 	});
 });
+
+describe("D3: features.projectRelay, the collab body and the grant actions", () => {
+	const all = { projectChat: true, projectConversation: true, projectRelay: true };
+
+	it("needs projectRelay AND the conversation on; anything else is off", async () => {
+		const api = await loadApi();
+		expect(api.projectRelayEnabled()).toBe(false);
+		fetchSpy.mockResolvedValueOnce(res(200, { ...STATUS, features: all }));
+		await api.checkAuthStatus();
+		expect(api.projectRelayEnabled()).toBe(true);
+		for (const features of [
+			{ ...all, projectConversation: undefined },
+			{ ...all, projectRelay: "true" },
+			{ projectChat: true, projectConversation: true },
+			null,
+		]) {
+			fetchSpy.mockResolvedValueOnce(res(200, { ...STATUS, features }));
+			await api.checkAuthStatus();
+			expect(api.projectRelayEnabled()).toBe(false);
+		}
+	});
+
+	it("a refusal carries the answer's `detail` only when it is a string", async () => {
+		const api = await loadApi();
+		const body = {
+			clientMessageId: "c1",
+			text: "t",
+			to: ["a"],
+			collab: { mode: "ask" as const, with: "b", maxMessages: 2 },
+		};
+		fetchSpy.mockResolvedValueOnce(
+			res(409, { error: "collab-unavailable", detail: "same-session" }),
+		);
+		expect(await api.postProjectMessage("p1", body)).toEqual({
+			ok: false,
+			status: 409,
+			code: "collab-unavailable",
+			detail: "same-session",
+		});
+		expect(JSON.parse(fetchSpy.mock.calls[0]![1].body)).toEqual(body);
+		fetchSpy.mockResolvedValueOnce(
+			res(409, { error: "agent-in-collab", detail: { grantId: "c" } }),
+		);
+		expect(await api.postProjectMessage("p1", body)).toEqual({
+			ok: false,
+			status: 409,
+			code: "agent-in-collab",
+		});
+		fetchSpy.mockResolvedValueOnce(res(409, { error: "project-log-full" }));
+		expect(await api.postProjectMessage("p1", body)).toEqual({
+			ok: false,
+			status: 409,
+			code: "project-log-full",
+		});
+	});
+
+	it("pause / resume / revoke are one POST each, with no body, to the grant's own path", async () => {
+		const api = await loadApi();
+		for (const verb of ["pause", "resume", "revoke"] as const) {
+			fetchSpy.mockResolvedValueOnce(res(200, { grantId: "c-0123456789ab", state: "paused" }));
+			expect(await api.postGrantAction("p 1", "c-0123456789ab", verb)).toMatchObject({
+				ok: true,
+				body: { state: "paused" },
+			});
+			const [url, init] = fetchSpy.mock.calls.at(-1)!;
+			expect(String(url)).toMatch(
+				new RegExp(`/projects/p%201/conversation/grants/c-0123456789ab/${verb}$`),
+			);
+			expect(init.method).toBe("POST");
+			expect(init.body).toBeUndefined();
+		}
+		fetchSpy.mockResolvedValueOnce(res(200, { grantId: "c-0123456789ab", state: "revoked" }));
+		expect(await api.postGrantAction("p1", "c-0123456789ab", "revoke")).toMatchObject({
+			ok: false,
+			code: "bad-answer",
+		});
+		fetchSpy.mockResolvedValueOnce(res(409, { error: "grant-ended", detail: "budget" }));
+		expect(await api.postGrantAction("p1", "c-0123456789ab", "resume")).toMatchObject({
+			ok: false,
+			status: 409,
+			code: "grant-ended",
+		});
+	});
+});
