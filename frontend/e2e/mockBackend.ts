@@ -838,6 +838,19 @@ export class MockBackend {
 		this.appendProjectEvent({ ...q, state, ...(reason ? { reason } : {}) });
 	}
 
+	/**
+	 * The recipient of a delivered relay ends its turn: its report lands in its
+	 * capture and the log gets `reply_settling` + `reply_ref` for THAT relay's
+	 * delivery, exactly as for an owner message (the stage-2 log has one per
+	 * message: task, ask and reply).
+	 */
+	async projectRelayReport(msgId: string, text: string): Promise<void> {
+		const m = this.projectLog.find((l) => l.ev === "message" && l.msg_id === msgId);
+		const to = (m?.to as string[] | undefined)?.[0];
+		if (!m || m.kind !== "relay" || !to) throw new Error(`no relay ${msgId} with a recipient`);
+		await this.projectReply(msgId, to, text);
+	}
+
 	/** A file the server would not pass on (`rejected`) or could not attribute (`unverified`). */
 	projectOutbox(
 		grantId: string,

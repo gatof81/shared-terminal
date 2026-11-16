@@ -275,6 +275,24 @@ describe("the grant's state is the log's, in whatever order the pages arrive", (
 		expect(grantView(log, G)).toMatchObject({ state: "live", reason: null });
 	});
 
+	it("`used` is the highest relay number loaded: a partial window doesn't undercount", () => {
+		// Only the newest page is loaded: relay 3 of 4, without relays 1 and 2.
+		const log = fold([
+			relay(40, "r3", A, [B], 3, "ask"),
+			delivery(41, "r3", B, "queued"),
+			grant(42, "paused", { reason: "owner", by: "u1" }),
+		]);
+		expect(grantView(log, G)).toMatchObject({ created: null, state: "paused", used: 3 });
+		// The older page arrives: still 3, never 3 + what was added.
+		log.add(
+			[task, created, relay(5, "r1", A, [B], 1, "ask"), relay(13, "r2", B, [A], 2, "reply")].map(
+				(l) => parseLogEvent(l)!,
+			),
+		);
+		expect(grantView(log, G)).toMatchObject({ used: 3 });
+		expect(grantView(log, G)?.created?.maxMessages).toBe(2);
+	});
+
 	it("owner / done relays are not counted against the budget", () => {
 		const log = fold([task, created, relay(5, "o1", A, [], 0, "owner")]);
 		expect(grantView(log, G)?.used).toBe(0);

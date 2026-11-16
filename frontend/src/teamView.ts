@@ -1781,8 +1781,9 @@ class Workspace {
 								node: this.outboxRow(o),
 							});
 				}
-			// A relay is answered by another relay, never by a captured reply.
-			if (relay && m.message.kind === "relay") continue;
+			// A relay's delivery ends in a turn like any other: the agent's report
+			// after reading it (`reply_ref`) is shown under it — the initiator's
+			// report under the last reply is the result of the task itself.
 			for (const [agentId, list] of m.replies)
 				for (const r of list)
 					rows.push({

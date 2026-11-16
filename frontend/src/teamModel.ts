@@ -1239,7 +1239,7 @@ export interface GrantView {
 	/** Seq / time of the line that set `state`. */
 	seq: number;
 	ts: string;
-	/** Messages spent of `created.maxMessages` (ask / reply only, as the server counts them). */
+	/** Messages spent of `created.maxMessages`: the highest `relay.n` loaded (ask / reply only). */
 	used: number;
 }
 
@@ -1292,7 +1292,9 @@ export function grantView(log: ProjectLog, grantId: string): GrantView | null {
 			msg.grantId === grantId &&
 			(msg.relayKind === "ask" || msg.relayKind === "reply")
 		)
-			v.used++;
+			// The server numbers them 1…n: the highest number loaded is how many
+			// were spent, even when older ones are outside the loaded window.
+			v.used = Math.max(v.used, msg.relayN ?? 0);
 	}
 	return v;
 }

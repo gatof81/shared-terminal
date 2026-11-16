@@ -1212,8 +1212,6 @@ describe("consults between two agents (D3)", () => {
 			expect(bubble.textContent).toBe("<b>Which naming?</b>");
 			expect(bubble.children.length).toBe(0);
 			expect(texts(relay, ".tw-del")).toEqual(["@qa-pilor · Queued: waiting for it to be free"]);
-			// A relay is answered by a relay: no "waiting for its reply" row for it.
-			expect(root.querySelector(".tw-row-waiting")).toBeNull();
 			const grant = root.querySelector(".tw-row-me .tw-grant")!;
 			expect(grant.getAttribute("role")).toBe("group");
 			expect(grant.getAttribute("aria-label")).toBe("@dev-pilot may consult @qa-pilor");
@@ -1229,6 +1227,122 @@ describe("consults between two agents (D3)", () => {
 			expect(
 				[...root.querySelectorAll<HTMLElement>(".tw-timeline > li")].map((li) => li.dataset.anchor),
 			).toEqual(["msg:k1", `outbox:${G}:23`, "msg:r1"]);
+		});
+
+		it("the real shape: task → ask → reply, each with its captured report; the final report is in the thread and For you points at it", async () => {
+			const REPORTS: Record<number, string> = {
+				201: "I sent the question to QA; waiting for the answer.",
+				202: "listo",
+				203: "QA recommends naming each test file after its module plus .test.",
+			};
+			api.readConversationEvent.mockImplementation(async (...args: unknown[]) => {
+				const seq = args.find((a): a is number => typeof a === "number" && a in REPORTS)!;
+				return {
+					ok: true,
+					event: { seq, ts: NOW, ev: "turn_end", data: { last_assistant_message: REPORTS[seq] } },
+				};
+			});
+			const ref = (seq: number, msgId: string, agent: string, turn: number) => ({
+				seq,
+				at: at(40),
+				ev: "reply_ref",
+				msg_id: msgId,
+				agent_id: agent,
+				sid: `s-${agent}`,
+				cid: `c-${agent}`,
+				prompt_id: `p-${seq}`,
+				turn_end_seq: turn,
+				report_sha256: sha(REPORTS[turn]!),
+				report_bytes: REPORTS[turn]!.length,
+				truncated: false,
+				attribution: "exact",
+			});
+			const del = (seq: number, msgId: string, agent: string, state: string) => ({
+				seq,
+				at: at(34),
+				ev: "delivery",
+				msg_id: msgId,
+				agent_id: agent,
+				state,
+				authorized_by: `collab:${G}`,
+			});
+			withLog([
+				del(27, "r1", QA, "delivered"),
+				ref(28, "k1", DEV, 201), // the initiator's turn after the task: it asked
+				ref(29, "r1", QA, 202), // the consulted agent's turn after reading the ask
+				{
+					seq: 30,
+					at: at(35),
+					ev: "message",
+					msg_id: "r2",
+					kind: "relay",
+					from: QA,
+					to: [DEV],
+					text: "Module name plus .test",
+					in_reply_to: "r1",
+					relay: { grant_id: G, n: 2, kind: "reply", file_sha256: "c".repeat(64) },
+				},
+				del(31, "r2", DEV, "queued"),
+				del(32, "r2", DEV, "delivered"),
+				{
+					seq: 33,
+					at: at(36),
+					ev: "grant",
+					grant_id: G,
+					event: "ended",
+					reason: "budget",
+					by: "system",
+				},
+				ref(34, "r2", DEV, 203), // the initiator's turn after the reply: the task's result
+			]);
+			const root = mount({ kind: "thread", msgId: "k1" });
+			await flush();
+			const anchors = [...root.querySelectorAll<HTMLElement>(".tw-timeline > li")].map(
+				(li) => li.dataset.anchor,
+			);
+			// Every delivery's report sits under its own message, the final one last.
+			expect(anchors.filter((a) => a?.startsWith("reply:"))).toEqual([
+				`reply:k1:${DEV}:p-28`,
+				`reply:r1:${QA}:p-29`,
+				`reply:r2:${DEV}:p-34`,
+			]);
+			expect(anchors.at(-1)).toBe(`reply:r2:${DEV}:p-34`);
+			expect(texts(root, ".tw-row-agent .tw-bubble-agent")).toEqual([
+				REPORTS[201],
+				REPORTS[202],
+				REPORTS[203],
+			]);
+			expect(root.querySelector(".tw-grant-facts")?.textContent).toBe("2 of 2 messages used");
+			// For you's "replied" items each name a row the thread really renders.
+			const { forYou, ProjectLog, parseLogEvent } = await import("./teamModel.js");
+			const page = (await api.fetchProjectEvents.mock.results.at(-1)!.value) as {
+				body: { events: unknown[] };
+			};
+			const model = new ProjectLog();
+			model.add(page.body.events.map(parseLogEvent).filter((e) => e !== null));
+			const replied = forYou(model).filter((i) => i.kind === "replied" && i.rootId === "k1");
+			expect(replied.map((i) => i.msgId).sort()).toEqual(["k1", "r1", "r2"]);
+			for (const i of replied)
+				expect(anchors).toContain(`reply:${i.msgId}:${i.agentId}:${i.reply!.promptId}`);
+			// And the cards are on the page, with the final report's text.
+			expect(texts(root, ".tw-card").join("\n")).toContain(REPORTS[203]);
+		});
+
+		it("a relay that was delivered and not yet reported on shows the usual waiting row", async () => {
+			withLog([
+				{
+					seq: 27,
+					at: at(34),
+					ev: "delivery",
+					msg_id: "r1",
+					agent_id: QA,
+					state: "delivered",
+					authorized_by: `collab:${G}`,
+				},
+			]);
+			const root = mount({ kind: "thread", msgId: "k1" });
+			await flush();
+			expect(texts(root, ".tw-row-waiting")).toEqual(["QPWaiting for @qa-pilor's reply"]);
 		});
 
 		it("thread: each pause with its cause, an unverified file, an owner request, the end", async () => {

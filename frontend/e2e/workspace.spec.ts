@@ -544,6 +544,45 @@ test.describe("workspace — consults between two agents (D3)", () => {
 		await noHorizontalScroll(page);
 	});
 
+	test("each delivery's captured report is in the thread: the initiator's last one is the task's result", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.projectRelay = true;
+		await app.login("alice", `${projectHash}/new`);
+		await sendTaskWithConsult(page);
+		const task = backend.projectMessagePosts.length;
+		expect(task).toBe(1);
+		const taskId = (backend.projectLog.find((l) => l.ev === "grant" && l.event === "created") as {
+			task_msg_id: string;
+		}).task_msg_id;
+		const g = backend.lastGrantId();
+		// The shape of the real stage-2 log: three messages, each answered by a turn.
+		await backend.projectReply(taskId, DEV, "I asked the architect; waiting for the answer.");
+		const ask = backend.projectRelayMessage(g, DEV, "Which naming do you recommend?");
+		await backend.projectRelayReport(ask, "listo");
+		const reply = backend.projectRelayMessage(g, ARCH, "Module name plus .test.");
+		backend.grantEvent(g, "ended", { reason: "budget", by: "system" });
+		const RESULT = "The architect recommends the module name plus .test, next to the module.";
+		await backend.projectRelayReport(reply, RESULT);
+
+		const reports = page.locator("#project-view .tw-timeline .tw-row-agent .tw-bubble-agent");
+		await expect(reports).toHaveText([
+			"I asked the architect; waiting for the answer.",
+			"listo",
+			RESULT,
+		]);
+		// The result is the last thing in the thread, under the relayed reply.
+		await expect(page.locator("#project-view .tw-timeline > li").last()).toContainText(RESULT);
+		await expect(relays(page)).toHaveCount(2);
+		// For you names that same report, and its card leads to this thread.
+		await page.goto(`/${projectHash}`);
+		const card = cards(page).filter({ hasText: RESULT });
+		await expect(card).toBeVisible();
+		await expect(card).toContainText("@developer-hz replied to you");
+	});
+
 	test("Pause holds a refused file out, Resume lifts it, Stop asks first and ends it for good", async ({
 		app,
 		backend,
