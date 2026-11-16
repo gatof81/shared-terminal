@@ -91,6 +91,11 @@ production runs between **two additional sessions created for it**, in their own
 - a separate project with the two agents bound to those sessions; one innocuous question,
   `maxMessages: 2`.
 
+One step only the owner can do: the Claude CLI in each new session has to be signed in. Production
+sessions use the owner's subscription and VM100 has no model gateway, so A creates the sessions and
+the owner signs in once in each (in its Terminal) before GO 3. That sign-in is the "model credential
+the session needs" above; A does not handle it.
+
 Consequences:
 
 1. **Permission mode.** With default mode and R-a, the only tool that runs without a dialog is a
