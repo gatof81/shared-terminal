@@ -1292,3 +1292,173 @@
 		overflow-y: auto;
 	}
 }
+
+/* ── Consults between two agents (D3, §7) ────────────────────────────────────
+   Everything below exists only with features.projectRelay. */
+
+/* New task: "let this agent consult another one". */
+.tw-consult {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	padding: 10px 12px;
+	border: 1px solid var(--c-border-soft);
+	border-radius: 12px;
+}
+
+.tw-consult[hidden],
+.tw-consult-opts[hidden] {
+	display: none;
+}
+
+.tw-consult-head {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	min-height: 44px;
+}
+
+.tw-consult-head input {
+	width: 20px;
+	height: 20px;
+	flex: none;
+	accent-color: var(--c-accent);
+}
+
+.tw-consult-on {
+	flex: 1;
+	min-height: 44px;
+	display: flex;
+	align-items: center;
+	cursor: pointer;
+}
+
+.tw-consult-opts {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 10px 16px;
+}
+
+.tw-consult-field {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	font-size: 0.82rem;
+	color: var(--c-text-2);
+	min-width: 0;
+}
+
+.tw-select {
+	min-height: 44px;
+	max-width: 100%;
+	padding: 0 12px;
+	border-radius: 12px;
+	border: 1px solid var(--c-border);
+	background: var(--c-surface);
+	color: var(--c-text);
+	font: inherit;
+	font-size: 16px; /* ≥16px: iOS doesn't zoom the page on focus */
+}
+
+.tw-consult-note {
+	flex-basis: 100%;
+	margin: 0;
+	font-size: 0.8rem;
+}
+
+/* The consult a task opened: state, budget and its three controls. */
+.tw-grant {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 4px;
+	align-self: stretch;
+	padding: 10px 12px;
+	border: 1px solid var(--c-border);
+	border-left: 3px solid var(--c-accent);
+	border-radius: 10px;
+	background: var(--c-surface);
+	text-align: left;
+	font-size: 0.88rem;
+}
+
+.tw-grant-paused {
+	border-left-color: var(--c-warn);
+}
+
+.tw-grant-ended {
+	border-left-color: var(--c-faint);
+}
+
+.tw-grant-state-paused {
+	color: var(--c-warn);
+}
+
+.tw-grant-state-ended {
+	color: var(--c-muted);
+}
+
+.tw-grant-actions {
+	flex-wrap: wrap;
+	align-items: center;
+	margin-top: 4px;
+}
+
+.tw-grant-ask {
+	flex-basis: 100%;
+}
+
+.tw-grant-msg {
+	margin: 0;
+	color: var(--c-err-soft);
+	font-size: 0.82rem;
+}
+
+.tw-grant-msg:empty {
+	display: none;
+}
+
+.tw-btn-danger {
+	border-color: var(--c-err-soft);
+	color: var(--c-err-soft);
+}
+
+/* What one agent wrote to the other: its text, marked as not the person's. */
+.tw-row-relay-text {
+	--tw-hue: 220;
+	padding: 8px 12px;
+	border: 1.5px dashed var(--c-border);
+	border-radius: 12px;
+}
+
+.tw-row-relay-text .tw-meta {
+	border: 0;
+	padding: 0;
+	flex-wrap: wrap;
+}
+
+/* A line of the consult's history: a pause, a resume, the end, a refused file. */
+.tw-row-event {
+	display: block;
+	max-width: 760px;
+	font-size: 0.82rem;
+	color: var(--c-text-2);
+	padding: 2px 0 2px 10px;
+	border-left: 2px solid var(--c-border);
+}
+
+.tw-row-event-warn {
+	border-left-color: var(--c-warn);
+}
+
+/* On a phone the confirm and the three controls keep a 44 px target. */
+@media (pointer: fine) {
+	.tw-grant-actions .tw-btn {
+		min-height: 32px;
+	}
+}
+@media (pointer: coarse) {
+	.tw .tw-grant-actions .tw-btn {
+		min-height: 44px;
+	}
+}

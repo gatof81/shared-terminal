@@ -498,6 +498,18 @@ export class MockBackend {
 	projectPlacementError = new Map<string, string>();
 	/** Every POST …/artifacts body received. */
 	projectArtifactPosts: Array<Record<string, unknown>> = [];
+	// ── D3 consults (PROJECT_CONVERSATION.md §7) ──
+	/** PROJECT_RELAY_ENABLED: `features.projectRelay`, `collab` on a send, the …/grants routes. */
+	projectRelay = false;
+	/** grant_id → its folded state, as the server keeps it. */
+	projectGrants = new Map<
+		string,
+		{ state: "live" | "paused" | "ended"; reason?: string; initiator: string; with: string }
+	>();
+	/** Every POST …/grants/:id/<verb> received, in order. */
+	projectGrantPosts: Array<{ grantId: string; verb: string }> = [];
+	/** The next send with `collab` is refused with this answer (e.g. 409 agent-in-collab). */
+	projectCollabRefusal: { status: number; body: Record<string, unknown> } | null = null;
 	/** clientMessageId → msg_id (idempotency, §3.4 rule 2). */
 	private projectSends = new Map<string, { msgId: string; hash: string }>();
 	/** Agent text in the captures, by `${sid}\n${cid}\n${seq}` (what a reply_ref points at). */
@@ -722,6 +734,142 @@ export class MockBackend {
 		return e;
 	}
 
+	// ── D3: what the agents and the server write under a consult ──
+
+	/** The id of the newest consult (the one a test just created through the UI). */
+	lastGrantId(): string {
+		const id = [...this.projectGrants.keys()].at(-1);
+		if (!id) throw new Error("no grant yet");
+		return id;
+	}
+
+	/** A `grant` line, folded like the server folds it (an ended grant never changes). */
+	grantEvent(grantId: string, event: string, extra: Record<string, unknown> = {}): void {
+		const g = this.projectGrants.get(grantId);
+		if (!g) throw new Error(`no grant ${grantId}`);
+		this.appendProjectEvent({ ev: "grant", grant_id: grantId, event, ...extra });
+		if (g.state === "ended") return;
+		if (event === "paused") Object.assign(g, { state: "paused", reason: extra.reason });
+		else if (event === "resumed") Object.assign(g, { state: "live", reason: undefined });
+		else if (event === "revoked" || event === "ended")
+			Object.assign(g, { state: "ended", reason: event === "revoked" ? "revoked" : extra.reason });
+	}
+
+	private queuedRelays(grantId: string): Array<Record<string, unknown>> {
+		const last = new Map<string, Record<string, unknown>>();
+		for (const l of this.projectLog)
+			if (l.ev === "delivery" && l.authorized_by === `collab:${grantId}`)
+				last.set(`${l.msg_id}\n${l.agent_id}`, l);
+		return [...last.values()]
+			.filter((l) => l.state === "queued")
+			.map((l) => ({
+				ev: "delivery",
+				msg_id: l.msg_id,
+				agent_id: l.agent_id,
+				authorized_by: l.authorized_by,
+			}));
+	}
+
+	/**
+	 * An agent wrote a valid file in its outbox: `outbox{accepted}` + the relay
+	 * message + its delivery (§7.3–§7.4). `state: "queued"` leaves it waiting;
+	 * anything else walks planned → sending → that state. Returns the msg id.
+	 */
+	projectRelayMessage(
+		grantId: string,
+		from: string,
+		text: string,
+		opts: { kind?: "ask" | "reply"; state?: string; reason?: string } = {},
+	): string {
+		const g = this.projectGrants.get(grantId);
+		if (!g) throw new Error(`no grant ${grantId}`);
+		const to = from === g.initiator ? g.with : g.initiator;
+		const n =
+			this.projectLog.filter(
+				(l) =>
+					l.ev === "message" && (l.relay as { grant_id?: string } | null)?.grant_id === grantId,
+			).length + 1;
+		const msgId = `d0000000-0000-4000-8000-${String(this.projectLog.length).padStart(12, "0")}`;
+		const kind = opts.kind ?? (n === 1 ? "ask" : "reply");
+		const sid = this.agent(from).bindings[0]!.sessionId;
+		this.appendProjectEvent({
+			ev: "outbox",
+			grant_id: grantId,
+			event: "accepted",
+			from: { agent_id: from, binding_id: `b-${from}`, epoch: 1, sid, cid: "cid" },
+			path: `.st-outbox/${kind}-${n}.md`,
+			origin: "match",
+			kind,
+			msg_id: msgId,
+		});
+		this.appendProjectEvent({
+			ev: "message",
+			msg_id: msgId,
+			client_message_id: null,
+			by: "u-alice",
+			kind: "relay",
+			from,
+			to: [to],
+			text,
+			in_reply_to: null,
+			artifacts: [],
+			relay: { grant_id: grantId, n, kind, file_sha256: "f".repeat(64) },
+		});
+		const base = {
+			ev: "delivery",
+			msg_id: msgId,
+			agent_id: to,
+			authorized_by: `collab:${grantId}`,
+		};
+		this.appendProjectEvent({ ...base, state: "queued" });
+		const state = opts.state ?? "delivered";
+		if (state !== "queued") this.projectRelayDeliver(grantId, msgId, state, opts.reason);
+		return msgId;
+	}
+
+	/** A queued relay leaves the queue and ends as `state`. */
+	projectRelayDeliver(grantId: string, msgId: string, state = "delivered", reason?: string): void {
+		const q = this.queuedRelays(grantId).find((d) => d.msg_id === msgId);
+		if (!q) throw new Error(`relay ${msgId} is not queued`);
+		if (state !== "not-sent") {
+			this.appendProjectEvent({ ...q, state: "planned" });
+			this.appendProjectEvent({ ...q, state: "sending" });
+		}
+		this.appendProjectEvent({ ...q, state, ...(reason ? { reason } : {}) });
+	}
+
+	/**
+	 * The recipient of a delivered relay ends its turn: its report lands in its
+	 * capture and the log gets `reply_settling` + `reply_ref` for THAT relay's
+	 * delivery, exactly as for an owner message (the stage-2 log has one per
+	 * message: task, ask and reply).
+	 */
+	async projectRelayReport(msgId: string, text: string): Promise<void> {
+		const m = this.projectLog.find((l) => l.ev === "message" && l.msg_id === msgId);
+		const to = (m?.to as string[] | undefined)?.[0];
+		if (!m || m.kind !== "relay" || !to) throw new Error(`no relay ${msgId} with a recipient`);
+		await this.projectReply(msgId, to, text);
+	}
+
+	/** A file the server would not pass on (`rejected`) or could not attribute (`unverified`). */
+	projectOutbox(
+		grantId: string,
+		from: string,
+		event: "rejected" | "unverified",
+		reason?: string,
+	): void {
+		const sid = this.agent(from).bindings[0]!.sessionId;
+		this.appendProjectEvent({
+			ev: "outbox",
+			grant_id: grantId,
+			event,
+			from: { agent_id: from, binding_id: `b-${from}`, epoch: 1, sid, cid: "cid" },
+			path: ".st-outbox/x.md",
+			origin: event === "unverified" ? "none" : "match",
+			...(reason ? { reason } : {}),
+		});
+	}
+
 	/** An owner message plus its deliveries, as the server would write them. */
 	projectTask(
 		msgId: string,
@@ -920,6 +1068,23 @@ export class MockBackend {
 			const text = typeof body?.text === "string" ? body.text : "";
 			if (typeof cmid !== "string" || to.length < 1 || to.length > 8 || text.trim() === "")
 				return json(400, { error: "invalid-body" });
+			const collab = (body?.collab ?? null) as {
+				mode?: string;
+				with?: string;
+				maxMessages?: number;
+			} | null;
+			if (collab) {
+				if (!this.projectRelay) return json(409, { error: "relay-off" });
+				if (to.length !== 1 || collab.mode !== "ask" || typeof collab.with !== "string")
+					return json(400, { error: "invalid-body", detail: "collab" });
+				if (collab.with === to[0])
+					return json(400, { error: "invalid-body", detail: "collab.with" });
+				if (this.projectCollabRefusal) {
+					const r = this.projectCollabRefusal;
+					this.projectCollabRefusal = null;
+					return json(r.status, r.body);
+				}
+			}
 			const shas = Array.isArray(body?.artifacts) ? (body.artifacts as string[]) : [];
 			if (shas.length > 0 && !this.projectArtifacts) return json(409, { error: "artifacts-off" });
 			if (shas.length > 4) return json(400, { error: "too-many-artifacts" });
@@ -961,9 +1126,11 @@ export class MockBackend {
 			}
 			const msgId = `c0000000-0000-4000-8000-${String(this.projectLog.length).padStart(12, "0")}`;
 			const q = body?.quoteRef as Record<string, unknown> | undefined;
+			const grantId = collab ? `c-${String(this.projectLog.length).padStart(12, "0")}` : null;
 			this.projectTask(msgId, to, text, {
 				client_message_id: cmid,
 				artifacts: refs,
+				...(grantId ? { collab: { grant_id: grantId } } : {}),
 				...(typeof body?.inReplyTo === "string" ? { in_reply_to: body.inReplyTo } : {}),
 				...(q
 					? {
@@ -977,12 +1144,34 @@ export class MockBackend {
 					: {}),
 			});
 			this.projectSends.set(cmid, { msgId, hash });
+			if (grantId && collab) {
+				this.projectGrants.set(grantId, { state: "live", initiator: to[0]!, with: collab.with! });
+				this.appendProjectEvent({
+					ev: "grant",
+					grant_id: grantId,
+					event: "created",
+					mode: "ask",
+					task_msg_id: msgId,
+					initiator: to[0],
+					with: collab.with,
+					participants: [],
+					max_messages: collab.maxMessages ?? 2,
+					max_wait_min: 60,
+					expires_at: iso(2 * 60 * 60),
+					by: "u-alice",
+				});
+			}
 			if (this.loseNextMessageAnswer) {
 				// Written, but the client never hears back.
 				this.loseNextMessageAnswer = false;
 				return route.abort("connectionreset");
 			}
-			return json(202, { msgId, replayed: false, deliveries: deliveriesOf(msgId) });
+			return json(202, {
+				msgId,
+				replayed: false,
+				deliveries: deliveriesOf(msgId),
+				...(grantId ? { grantId } : {}),
+			});
 		}
 		if (kind === "acks" && method === "POST" && id === undefined) {
 			this.projectAckPosts.push(body ?? {});
@@ -1291,6 +1480,44 @@ export class MockBackend {
 			/^\/projects\/([^/]+)\/conversation\/(events|messages|acks|artifacts)(?:\/([^/]+))?$/.exec(
 				path,
 			);
+		// §7.6: mounted only with the relay flag effective — otherwise the unknown-path 404.
+		const gr = /^\/projects\/([^/]+)\/conversation\/grants\/([^/]+)\/(pause|resume|revoke)$/.exec(
+			path,
+		);
+		if (gr) {
+			const project = own(decodeURIComponent(gr[1]!));
+			if (!project || !this.projectConversation || !this.projectRelay || method !== "POST") {
+				await json(404, { error: "not-found" });
+				return true;
+			}
+			const grantId = decodeURIComponent(gr[2]!);
+			const verb = gr[3]!;
+			this.projectGrantPosts.push({ grantId, verb });
+			const g = this.projectGrants.get(grantId);
+			if (!g) {
+				await json(404, { error: "grant-not-found" });
+				return true;
+			}
+			if (g.state === "ended") {
+				// Idempotent, except that an ended consult can't be resumed.
+				if (verb === "resume") await json(409, { error: "grant-ended", detail: g.reason });
+				else await json(200, { grantId, state: g.state, reason: g.reason });
+				return true;
+			}
+			if (verb === "pause" && !(g.state === "paused" && g.reason === "owner"))
+				this.grantEvent(grantId, "paused", { reason: "owner", by: "u-alice" });
+			else if (verb === "resume" && g.state === "paused")
+				this.grantEvent(grantId, "resumed", { by: "u-alice" });
+			else if (verb === "revoke") {
+				// What was waiting is never sent (§7.5), in the same batch as the end.
+				for (const d of this.queuedRelays(grantId))
+					this.appendProjectEvent({ ...d, state: "not-sent", reason: "grant-inactive" });
+				this.grantEvent(grantId, "revoked", { by: "u-alice" });
+			}
+			const now = this.projectGrants.get(grantId)!;
+			await json(200, { grantId, state: now.state, ...(now.reason ? { reason: now.reason } : {}) });
+			return true;
+		}
 		if (cv) {
 			const project = own(decodeURIComponent(cv[1]!));
 			if (!project || !this.projectConversation) {
@@ -1646,6 +1873,7 @@ export class MockBackend {
 										projectChat: true,
 										projectConversation: true,
 										...(this.projectArtifacts ? { projectArtifacts: true } : {}),
+										...(this.projectRelay ? { projectRelay: true } : {}),
 									}
 								: { projectChat: true },
 						}

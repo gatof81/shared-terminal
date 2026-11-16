@@ -96,6 +96,16 @@ export function projectArtifactsEnabled(): boolean {
 	return projectConversationEnabled() && _projectArtifacts;
 }
 
+// D3 (§7): `features.projectRelay`, present only with PROJECT_RELAY_ENABLED
+// effective. Absent ⇒ no consult control, no grant request, and the thread
+// renders exactly as before it existed.
+let _projectRelay = false;
+
+/** True only with the conversation on AND `features.projectRelay === true`. */
+export function projectRelayEnabled(): boolean {
+	return projectConversationEnabled() && _projectRelay;
+}
+
 /** True iff `users.is_admin = 1` for the current session (#50). Gates
  *  invite-mint UI in main.ts. Refreshes on every /auth/status call so a
  *  promotion / demotion takes effect on the next reload. */
@@ -151,7 +161,12 @@ export interface AuthStatus {
 	/** Which frontend shell to mount (UI unification §8.4); older backends omit it. */
 	uiShell?: "v1" | "v2";
 	/** P3a: present only with PROJECT_CHAT_ENABLED on. Absent ⇒ no project surface. */
-	features?: { projectChat?: boolean; projectConversation?: boolean; projectArtifacts?: boolean };
+	features?: {
+		projectChat?: boolean;
+		projectConversation?: boolean;
+		projectArtifacts?: boolean;
+		projectRelay?: boolean;
+	};
 }
 
 export async function checkAuthStatus(): Promise<AuthStatus> {
@@ -189,6 +204,10 @@ async function fetchAuthStatus(): Promise<AuthStatus> {
 		typeof data.features === "object" &&
 		data.features !== null &&
 		data.features.projectArtifacts === true;
+	_projectRelay =
+		typeof data.features === "object" &&
+		data.features !== null &&
+		data.features.projectRelay === true;
 	// #200: mirror caps if present. A pre-#200 backend omits the field
 	// and leaves the v1 defaults in place — same hardcoded ceilings the
 	// form would have used before this PR.
@@ -456,7 +475,8 @@ export interface CreatedAgent {
  */
 export type ProjectAnswer<T> =
 	| { ok: true; status: number; body: T }
-	| { ok: false; status: number; code: string };
+	/** `detail`: the answer's own `detail` when it is a string (the D3 codes carry one, §7.2). */
+	| { ok: false; status: number; code: string; detail?: string };
 
 async function projectRequest<T>(
 	path: string,
@@ -483,7 +503,11 @@ async function projectRequest<T>(
 		typeof (body as { error?: unknown }).error === "string"
 			? (body as { error: string }).error
 			: "";
-	return { ok: false, status: res.status, code };
+	const detail =
+		typeof body === "object" && body !== null ? (body as { detail?: unknown }).detail : undefined;
+	return typeof detail === "string"
+		? { ok: false, status: res.status, code, detail }
+		: { ok: false, status: res.status, code };
 }
 
 const isObj = (b: unknown): b is Record<string, unknown> => typeof b === "object" && b !== null;
@@ -729,11 +753,19 @@ export interface ProjectMessageBody {
 	quoteRef?: { msgId: string; agentId: string; promptId: string; reportSha256: string };
 	/** D2: sha256s registered in the project, ≤ 4, distinct; part of the idempotent body. */
 	artifacts?: string[];
+	/**
+	 * D3 (§7.2): let the ONE recipient consult `with`, up to `maxMessages`
+	 * between the two. Sent only with projectRelayEnabled(); the time limits
+	 * are left to the server's defaults.
+	 */
+	collab?: { mode: "ask"; with: string; maxMessages?: number };
 }
 
 export interface ProjectMessageAnswer {
 	msgId: string;
 	replayed?: boolean;
+	/** D3: the consult permission created with the task (`c-` + 12 hex). */
+	grantId?: string;
 	deliveries: Array<{
 		agentId: string;
 		state: string;
@@ -832,6 +864,32 @@ export function postProjectMessage(
 		{ method: "POST", body: JSON.stringify(body) },
 		(b): b is ProjectMessageAnswer =>
 			isObj(b) && typeof b.msgId === "string" && Array.isArray(b.deliveries),
+	);
+}
+
+export interface GrantActionAnswer {
+	grantId: string;
+	state: "live" | "paused" | "ended";
+	reason?: string;
+}
+
+/**
+ * §7.6: pause / resume / stop a consult. Idempotent server-side (repeating
+ * one answers the state it left), so a lost answer is settled by reading
+ * the log, never by guessing. Only called with projectRelayEnabled().
+ */
+export function postGrantAction(
+	projectId: string,
+	grantId: string,
+	verb: "pause" | "resume" | "revoke",
+): Promise<ProjectAnswer<GrantActionAnswer>> {
+	return projectRequest(
+		`/projects/${encodeURIComponent(projectId)}/conversation/grants/${encodeURIComponent(grantId)}/${verb}`,
+		{ method: "POST" },
+		(b): b is GrantActionAnswer =>
+			isObj(b) &&
+			typeof b.grantId === "string" &&
+			(b.state === "live" || b.state === "paused" || b.state === "ended"),
 	);
 }
 
