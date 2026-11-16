@@ -851,13 +851,20 @@ printf '{"skipDangerousModePermissionPrompt": true}\\n' > ~/.claude/settings.jso
 			events.filter((e) => e.sid === sid && e.ev.ev === "turn_end").length;
 		const ROUNDS = 20;
 		let turns = 0;
+		// A session that fails one round is left alone: this phase must never
+		// cost the job its time limit.
+		const dead = new Set<string>();
 		for (let i = 0; i < ROUNDS; i++) {
 			await Promise.all(
 				[SA, SB].map(async (sid) => {
-					if (!(await atPrompt(sid, 30_000))) return;
+					if (dead.has(sid)) return;
 					const before = turnEnds(sid);
-					if (!(await typeInto(sid, `orden ${i}`)).ok) return;
-					if (await waitFor(`${WHO[sid]} turn ${i}`, () => turnEnds(sid) > before, 30_000)) turns++;
+					const done =
+						(await atPrompt(sid, 30_000)) &&
+						(await typeInto(sid, `orden ${i}`)).ok &&
+						(await waitFor(`${WHO[sid]} turn ${i}`, () => turnEnds(sid) > before, 30_000));
+					if (done) turns++;
+					else dead.add(sid);
 				}),
 			);
 		}
@@ -869,7 +876,9 @@ printf '{"skipDangerousModePermissionPrompt": true}\\n' > ~/.claude/settings.jso
 			const mine = arrivals.filter((a) => a.sid === sid).sort((a, b) => a.n - b.n);
 			const ids = [...new Set(mine.flatMap((a) => (a.messageId ? [a.messageId] : [])))];
 			for (const id of ids) {
-				const reached = mine.filter((a) => a.messageId === id);
+				const reached = mine.filter(
+					(a) => a.messageId === id && a.hook === "MessageDisplay" && a.index !== null,
+				);
 				if (reached.length < 2) continue;
 				tally.messages++;
 				const onArrival = reached.map((a) => a.index as number);
@@ -880,7 +889,7 @@ printf '{"skipDangerousModePermissionPrompt": true}\\n' > ~/.claude/settings.jso
 				const back = !up && JSON.stringify(persisted) !== JSON.stringify(onArrival);
 				if (up) tally.upstream++;
 				if (back) tally.backend++;
-				if (up || persisted.length !== onArrival.length)
+				if (up || back || persisted.length !== onArrival.length)
 					console.log(
 						`    ${WHO[sid]} ${id}: indices on arrival ${JSON.stringify(onArrival)} (requests ${reached.map((a) => a.n)}), persisted ${JSON.stringify(persisted)}, gaps ${JSON.stringify(own.filter((e) => e.ev.ev === "gap" && e.ev.data?.message_id === id).map((e) => e.ev.data))}`,
 					);
