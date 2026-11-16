@@ -14,7 +14,7 @@ test.describe("session actions", () => {
 		const rows = page.locator("#session-list .session-select");
 		await expect(rows).toHaveCount(2);
 		await rows.first().focus();
-		await expect(rows.first()).toHaveAttribute("aria-label", /my-project, running/);
+		await expect(rows.first()).toHaveAttribute("aria-label", /^my-project.*, session running/);
 		await page.keyboard.press("ArrowDown");
 		await expect(rows.nth(1)).toBeFocused();
 		await page.keyboard.press("Enter");

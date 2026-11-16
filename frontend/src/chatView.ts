@@ -1046,17 +1046,19 @@ function filterBar(counts: ReturnType<typeof filterCounts>, effective: ChatFilte
 		b.dataset.filter = f.id;
 		b.setAttribute("aria-pressed", String(f.id === effective));
 		b.disabled = disabled;
-		b.appendChild(el("span", undefined, f.label));
+		// Real spaces between the words: the accessible name below starts
+		// with the button's text as one string (WCAG 2.5.3).
+		b.append(el("span", undefined, f.label), " ");
 		b.appendChild(el("span", "chat-filter-count", String(counts[f.id])));
 		// An archived conversation that is live again is surfaced in Active,
 		// and the Archived button says how many of its own are live.
 		if (f.id === "archived" && counts.archivedLive > 0) {
 			const badge = el("span", "chat-filter-live", `${counts.archivedLive} live`);
-			b.appendChild(badge);
+			b.append(" ", badge);
 		}
 		b.setAttribute(
 			"aria-label",
-			`${f.label}: ${counts[f.id]}${f.id === "archived" && counts.archivedLive > 0 ? `, ${counts.archivedLive} live again` : ""}`,
+			`${f.label} ${counts[f.id]}${f.id === "archived" && counts.archivedLive > 0 ? ` ${counts.archivedLive} live again` : ""} conversations`,
 		);
 		b.addEventListener("click", () => pickFilter(f.id));
 		bar.appendChild(b);

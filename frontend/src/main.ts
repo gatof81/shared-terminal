@@ -1037,6 +1037,11 @@ export function updateChromeToggle() {
 			: activeTab
 				? `${s.name} › ${activeTab.label}`
 				: s.name;
+	// The accessible name starts with what the button shows (WCAG 2.5.3).
+	chromeToggleBtn.setAttribute(
+		"aria-label",
+		`${chromeToggleLabel.textContent} — toggle session controls`,
+	);
 }
 
 chromeToggleBtn.addEventListener("click", () => {

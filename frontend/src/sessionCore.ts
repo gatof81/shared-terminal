@@ -873,13 +873,6 @@ function buildSessionItem(s: SessionInfo, binding: SessionBinding | null): HTMLE
 	select.className = "session-select";
 	select.dataset.role = "select";
 	select.setAttribute("aria-current", String(s.sessionId === activeSessionId));
-	// The agent is part of the name: on phones the separate agent link is
-	// hidden and the visible tag inside this button is overridden by the label.
-	const agentPart = binding ? `, agent @${binding.handle}` : "";
-	select.setAttribute(
-		"aria-label",
-		`${s.name}, ${s.status}${agentPart}${s.status === "failed" ? " — view the bootstrap log" : ""}`,
-	);
 
 	const dot = document.createElement("span");
 	dot.className = `session-dot ${s.status}`;
@@ -944,6 +937,7 @@ function buildSessionItem(s: SessionInfo, binding: SessionBinding | null): HTMLE
 	// and a mark whose SHAPE differs per state; what it rests on is in the
 	// tooltip and the row's accessible name. Nothing while it isn't known
 	// whether anything was read (a collapsed or not-yet-read project).
+	let claudePart = "";
 	const presence =
 		tree && binding !== null && s.status === "running"
 			? sidebarPresenceOf(binding.projectId, binding.agentId, s.sessionId)
@@ -961,10 +955,8 @@ function buildSessionItem(s: SessionInfo, binding: SessionBinding | null): HTMLE
 		meta.appendChild(chip);
 		const why = [presence.label, presence.reason, presence.evidence].filter(Boolean).join(" · ");
 		select.title = `${select.title || s.name}\nClaude: ${why}`;
-		select.setAttribute(
-			"aria-label",
-			`${s.name}, ${s.status}${agentPart}, Claude: ${presence.label}`,
-		);
+		// The row's word already says it unless it is the short form.
+		if (presence.label !== short.word) claudePart = `, Claude: ${presence.label}`;
 	}
 	// Phones: the agent as a word in this line (the separate agent link is
 	// desktop-only there — the row is too narrow for both). Not a link: the
@@ -976,8 +968,21 @@ function buildSessionItem(s: SessionInfo, binding: SessionBinding | null): HTMLE
 		tag.textContent = `@${binding.handle}`;
 		meta.appendChild(tag);
 	}
-	if (meta.childElementCount > 0) nameCol.appendChild(meta);
+	// A space between the row's words: laid out by flex they need none, but
+	// the row's text is read as one string (accessible-name checks, copy).
+	for (const c of [...meta.children].slice(1)) c.before(" ");
+	if (meta.childElementCount > 0) nameCol.append(" ", meta);
 	select.appendChild(nameCol);
+	// The accessible name STARTS with the words on the row, in their order
+	// (WCAG 2.5.3 — a voice user says what they see; axe
+	// `label-content-name-mismatch`), then says what the shapes and the
+	// tooltip say: the session's status and Claude's full state. The agent
+	// is one of those words ("@handle", also where CSS hides it).
+	const shown = [s.name, ...[...meta.children].map((c) => c.textContent ?? "")].join(" ");
+	select.setAttribute(
+		"aria-label",
+		`${shown}, session ${s.status}${claudePart}${s.status === "failed" ? " — view the bootstrap log" : ""}`,
+	);
 	select.addEventListener("click", () => {
 		// A failed session has no workspace: the row opens its log.
 		void runSessionAction(s, s.status === "failed" ? "viewLog" : "open");
