@@ -161,9 +161,10 @@ applyResolvedShell();
 //
 // The visual viewport's OFFSET is mirrored too (--app-top). To reveal a
 // focused field (the Chat composer) Safari pans the visual viewport down.
-// It cannot scroll the page instead: body is `position: fixed` (base.css),
-// so the document has nothing to scroll and the offset is relative to the
-// same layout viewport body is pinned to — `offsetTop` grows by up to the
+// It cannot scroll the page instead: with the keyboard up body is
+// `position: fixed` (base.css, `data-kb`), so the document has nothing to
+// scroll and the offset is relative to the same layout viewport body is
+// pinned to — `offsetTop` grows by up to the
 // keyboard's height. Laying the app out at y=0 with the visual height
 // then leaves it that far ABOVE the keyboard; translating body by the
 // offset puts it exactly in the visible band. Both are 0 on desktop.

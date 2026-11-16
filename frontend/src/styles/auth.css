@@ -2,7 +2,7 @@
 #auth-view {
   display: none;
   flex: 1;
-  /* Its own scroll: body is fixed (base.css), so nothing taller than the
+  /* Its own scroll: with the keyboard up body is fixed (base.css), so nothing taller than the
      visible band can be reached by scrolling the page — and with the soft
      keyboard up on a small or landscape phone the card is taller. */
   min-height: 0;

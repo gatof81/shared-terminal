@@ -29,7 +29,7 @@
      scroll region off-screen. dvh tracks the actual visible height.
      Same rationale for the other dvh caps below.
      dvh does not shrink for the iOS soft keyboard; --app-vh (main.ts)
-     does, and body is fixed, so the page cannot be scrolled to reach a
+     does, and body is then fixed, so the page cannot be scrolled to reach a
      card taller than what the keyboard leaves. */
   max-height: min(80dvh, calc(var(--app-vh, 100dvh) - 1rem));
   display: flex;
