@@ -27,9 +27,22 @@ body {
   padding-right: env(safe-area-inset-right);
   padding-bottom: env(safe-area-inset-bottom);
   padding-left: env(safe-area-inset-left);
+  /* Out of the page's flow, pinned to the layout viewport (#616): with the
+     soft keyboard up iOS Safari may SCROLL THE PAGE to reveal the focused
+     field, and an in-flow body went up with it — the conversation jumped
+     and the composer ended near the top of the screen. A fixed body leaves
+     the document with nothing to scroll, so the only movement left is the
+     visual-viewport pan, which --app-top follows. No page-scroll listener
+     is needed for either case. */
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
   /* --app-top (main.ts) follows Safari's visual-viewport pan while the
      soft keyboard is up, so the app sits in the visible band instead of
-     above it. 0 everywhere else. */
+     above it. 0 everywhere else. Kept as a transform (not `top`): it also
+     makes body the containing block of the fixed dialogs, drawer and
+     toasts, which therefore stay in the visible band too. */
   transform: translateY(var(--app-top, 0px));
 }
 /* Keyboard up: the home-indicator inset is under the keyboard. */
