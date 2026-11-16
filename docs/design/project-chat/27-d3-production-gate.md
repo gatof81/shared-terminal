@@ -1,8 +1,8 @@
 # D3 consult: production gate (VM100)
 
-Status: **GO 1 (deploy with the flag off) is authorized by the owner under the conditions of §5.
-GO 2 and GO 3 are prepared here and not authorized.** D3 is not deployed on VM100,
-`PROJECT_RELAY_ENABLED` is unset there, and no production session has been touched. The contract is
+Status: **GO 1 (deploy with the flag off) was executed on 2026-11-16 19:21Z. GO 2 and GO 3 are
+prepared here and not authorized.** VM100 runs `00c9b14` with `PROJECT_RELAY_ENABLED` empty (off);
+the sessions of A and B have not been touched. The contract is
 `docs/PROJECT_CONVERSATION.md` §7; the isolated pilot is `26-d3-isolated-pilot-runbook.md`.
 
 Roles as before: A operates VM100 and owns the frontend; B owns the backend, the contract and the
@@ -75,26 +75,33 @@ model and docs (#647, #649, #650).
   browser when its PR merges, before the backend deploy. It renders nothing without
   `features.projectRelay`.
 
-## 4. The first production consult: two new test sessions (owner, 2026-11-16)
+## 4. The first production consult: `pilot-dev` and `pilot-qa` (owner, 2026-11-16)
 
 The sessions A and B work in stay exactly as they are: nothing is closed (B keeps its second
-instance), restarted or reconfigured in them, and they do not take part. The first consult on
-production runs between **two additional sessions created for it**, in their own project:
+instance), restarted or reconfigured in them, and they do not take part.
 
-- one Claude per session, started as `command claude --permission-mode default` (the alias is
-  bypassed explicitly; the pane footer is checked);
+The owner first asked for two additional sessions in a project of their own, then replaced that
+(same day) with the two existing test sessions of the Pilot project, **`pilot-dev` and `pilot-qa`**,
+which already hold a signed-in Claude: no new session, no sign-in step, and the consult runs
+**inside the Pilot project** between the agents `dev-pilot` and `qa-pilor`. The agents of A and B
+are in that project too and are not named in the grant.
+
+Prepared on 2026-11-16 ~19:50Z (VM100 `/root/st-d3-go3-prep-20261116T194656Z` and `…T195041Z`), with
+D3 off and no backend restart:
+
+- their running Claude (bypass, from the image's alias) was closed by typing `/exit` in its pane,
+  and **one** Claude started in each as `command claude --permission-mode default`; argv and the
+  pane footer ("manual mode on") recorded; CLI 2.1.325 in both;
 - rule R-a (`Edit(//home/developer/workspace/.st-outbox/**)`, runbook 26 §6.2) as a second managed
-  fragment in those two sessions only, placed before the CLI starts, the way VM120 did it. No other
-  session's managed directory is touched;
-- nothing of VM100 or the NAS in them: no SSH key, no Docker socket, no token beyond the model
-  credential the session needs, an empty workspace;
-- a separate project with the two agents bound to those sessions; one innocuous question,
-  `maxMessages: 2`.
+  fragment `st-outbox.json` in those two sessions' managed directories only, written before the new
+  CLI started. The backend only ever writes or removes `conversation.json` there, so the fragment
+  stays until a hard delete. No other session's managed directory was touched;
+- inspected: no Docker socket, every bind source under the workspace root, no SSH key or
+  `known_hosts`, not privileged, no added capability, no env name beyond the session's own
+  (`ST_INGEST_TOKEN`, names only);
+- one innocuous question, `maxMessages: 2`, when GO 3 is given.
 
-One step only the owner can do: the Claude CLI in each new session has to be signed in. Production
-sessions use the owner's subscription and VM100 has no model gateway, so A creates the sessions and
-the owner signs in once in each (in its Terminal) before GO 3. That sign-in is the "model credential
-the session needs" above; A does not handle it.
+To undo the preparation: remove the two `st-outbox.json` files and restart Claude in those sessions.
 
 Consequences:
 
@@ -109,7 +116,8 @@ Consequences:
 4. **Origin.** Admission needs `origin: match` on both Write events and fails closed under
    `observe`. Before the flag: `GET /api/admin/stats → conversation.originObservedSinceBoot`, every
    cause that is not `match` explained. A forwarder on loopback inside a participant's container
-   *is* that participant (§7.8): the test sessions start with no listener besides the capture relay.
+   *is* that participant (§7.8): listening sockets in the two sessions are read before GO 3 (the
+   image has no `ss`; read from `/proc/net` on the host side).
 5. **Capture fidelity (#648).** A hook pair can arrive inverted; it touched no admission event in
    either stage. If it ever hits a Write pair the message is not admitted (the sweep notes the file
    `unverified`). Open in #648, not a blocker.
@@ -156,7 +164,7 @@ step leads automatically into the next.
   control only in a project with two bound agents.
 - Rollback: remove the line, same `up`. With no grant created there is nothing to unwind.
 
-### GO 3: one controlled consult between the two test sessions (not authorized)
+### GO 3: one controlled consult between `pilot-dev` and `pilot-qa` (not authorized)
 
 - Participants: the two sessions of §4, both `waiting_input`, capture effective, one interactive
   conversation each, live CLI version recorded.
@@ -204,7 +212,8 @@ Possible at any point (no migration), with these consequences in a project that 
 | Item | Owner | State |
 | --- | --- | --- |
 | Minimal UI: authorize a consult on a task, read relayed messages and states, pause / resume / revoke, rejected/unverified outbox rows; behind `features.projectRelay`, separate from the visual renewal | A | Branch `feat/d3-consult-ui`; B reviews |
-| Two test sessions and their project on VM100 (§4) | A | After GO 1; created, not used until GO 3 |
+| `pilot-dev` / `pilot-qa` prepared as the participants (§4) | A | Done 2026-11-16; not used until GO 3 |
+| GO 1 | A | **Done 2026-11-16 19:21Z**: VM100 at `00c9b14`, D3 off, verify OK (#595 comment 6926734011) |
 | Origin counters and listening-port inventory on VM100 | A | After GO 1, in its report |
 | Report after GO 1 and the verified conditions for GO 2 | A + B | After GO 1 |
 | VM120 and its D1 | A | Kept as the lab until the production gate is completed; cleaned afterwards as agreed |
