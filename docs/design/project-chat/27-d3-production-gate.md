@@ -1,8 +1,8 @@
 # D3 consult: production gate (VM100)
 
-Status: **GO 1 (deploy with the flag off) was executed on 2026-11-16 19:21Z. GO 2 and GO 3 are
-prepared here and not authorized.** VM100 runs `00c9b14` with `PROJECT_RELAY_ENABLED` empty (off);
-the sessions of A and B have not been touched. The contract is
+Status: **GO 1, GO 2 and GO 3 are done (2026-11-16). D3 is ON on VM100** (`PROJECT_RELAY_ENABLED=true`,
+backend `00c9b14`). The first production consult ran between `pilot-dev` and `pilot-qa` and passed
+(§7). A consult between the habitual sessions of A and B is **not** authorized. The contract is
 `docs/PROJECT_CONVERSATION.md` §7; the isolated pilot is `26-d3-isolated-pilot-runbook.md`.
 
 Roles as before: A operates VM100 and owns the frontend; B owns the backend, the contract and the
@@ -102,7 +102,12 @@ D3 off and no backend restart:
   (`ST_INGEST_TOKEN`, names only);
 - one innocuous question, `maxMessages: 2`, when GO 3 is given.
 
-To undo the preparation: remove the two `st-outbox.json` files and restart Claude in those sessions.
+Added later the same day at the owner's request: a second fragment, `st-deny-credentials.json`,
+denying Read/Edit of the session's Claude credential file (both of its paths) in these two sessions
+only; the CLI stayed signed in. Whether the rule actually refuses a read was not exercised.
+
+To undo the preparation: remove `st-outbox.json` and `st-deny-credentials.json` from the two managed
+directories, restart Claude in those sessions, and run `st-pilot-netiso rollback`.
 
 **Network isolation of the two participants (owner, 2026-11-16).** A session container can normally
 open connections to VM100 itself and to the LAN (the NAS included). For these two that is closed,
@@ -128,8 +133,12 @@ closed). Verified from inside both containers: every forbidden target blocked, b
 API / capture relay working, Composer delivering, capture origin still `match`; restart of one
 participant: address kept, nothing reachable.
 
-**This is not isolation "from the first instant" (B's review, 2026-11-16). Three cases stay open and
-block the gate until the owner decides on them:**
+**This is not isolation "from the first instant" (B's review, 2026-11-16). Three cases stay open.
+The owner accepted them for the first consult (2026-11-16) instead of changing how Docker starts on
+VM100, under these conditions: VM100 is not rebooted and the participants are not recreated during
+the test; the isolation is verified immediately before the consult; if an address changes, a
+participant restarts or the isolation is lost, the test stops and nothing is sent until it is back.
+The hardening below stays as later work.**
 
 - **Host boot.** Session containers have `RestartPolicy: unless-stopped`, so after a reboot of VM100
   Docker starts the two participants during its own start-up, while the unit runs
@@ -287,3 +296,31 @@ Possible at any point (no migration), with these consequences in a project that 
 | Origin counters and listening-port inventory on VM100 | A | After GO 1, in its report |
 | Report after GO 1 and the verified conditions for GO 2 | A + B | After GO 1 |
 | VM120 and its D1 | A | Kept as the lab until the production gate is completed; cleaned afterwards as agreed |
+
+## 7. What ran (2026-11-16)
+
+| Step | When (UTC) | Result |
+| --- | --- | --- |
+| GO 1: deploy `00c9b14`, flag off | 19:21 | Verify OK (107 checks); D1 + D2 + Composer exercised on the pilot sessions; no migration; rollback image `rollback-44c56b1` proven. B confirmed |
+| Participants prepared, isolated, credential read denied | 19:47–21:27 | §4 |
+| GO 2: `PROJECT_RELAY_ENABLED=true`, `up --no-build` | 21:42 | Same image; only that env key changed; boot line `agent collaboration ENABLED (D3)`, no error line; four `features` true; no grant or outbox line; sessions untouched; `check-log` clean |
+| GO 3: one consult `dev-pilot` → `qa-pilor`, `maxMessages: 2`, grant `c-97f262b85e8a` | 21:44:57–21:45:29 | Grant names exactly the two pilot agents; ask and reply each `outbox{accepted, origin: match}` from its own session and delivered once; `grant{ended, budget}` by itself 20.6 s after `created`; the initiator's final report in the thread; no tool but Write, no dialog, no capture gap, no file outside `.st-outbox/`; `check-log` 0 violations; origin counters only `match`; isolation verified before and after; no backend error line |
+
+Models: the owner's subscription (`pilot-dev` Sonnet 5.5, `pilot-qa` Haiku 5.5), CLI 2.1.325.
+Evidence on VM100: `/root/st-deploy-r3-00c9b14-20261116T182733Z` (GO 1), `/root/st-d3act-20261116`
+(GO 2), `/root/st-d3-go3-20261116T214413Z` (GO 3, `SHA256SUMS` `2c9304fe…`). B reviews the GO 2 /
+GO 3 bundle independently.
+
+What stays open with D3 on:
+
+- From the Pilot project a grant can be created between any two of its four agents, the ones of A
+  and B included. Those sessions run in bypass and B's has two Claude instances (ambiguous for D3:
+  refused). Not authorized; a decision of its own.
+- The two participants: no reboot of VM100 and no recreation while they are participants; the
+  network isolation is the two-layer one of §4 with its three open cases. The hardened design
+  (nftables tables of its own loaded before Docker, a bridge table) was rehearsed on VM120 and is
+  later work, as is a backend that creates a container with its fixed address.
+- Capture: #648 (a hook pair can arrive inverted) and #654 (a conversation born with a dialog open
+  stays `unknown` with no re-probe). Neither touched an admission.
+- To turn D3 off: revoke every live grant first, then restore `.env` and recreate `app` (§5).
+- VM120 and its test D1 are kept until this gate is accepted, then cleaned up as agreed.
