@@ -33,6 +33,11 @@
 //     message id for `reply`); anything else is refused with a text and no
 //     tool call. A relay head that says `mensaje N de N` (nothing left to
 //     spend) gets a text and no file: a reply there could not be sent;
+//   - prompt contains ST_SCENARIO=m3neg:1|2 → one Write tool_use at a FIXED
+//     path outside the outbox (1: `~/workspace/x.md`, 2:
+//     `~/workspace/.st-outbox-2/x.md`): the two negative checks of the D3
+//     pilot runbook §6.2 that a rule scoped to `.st-outbox/` must not cover.
+//     No path comes from the prompt; any other number is refused with a text;
 //   - anything else                         → two lines of text.
 // Anything that is not /v1/messages gets an empty 200 JSON object, so side
 // calls the CLI makes on startup never fail the run.
@@ -119,6 +124,13 @@ function outboxPlan(prompt, tools) {
 	};
 }
 
+// D3 pilot runbook §6.2, negative checks 1 and 2: fixed targets, a Map so a
+// name like `constructor` misses.
+const M3_NEGATIVE_PATHS = new Map([
+	["1", "/home/developer/workspace/x.md"],
+	["2", "/home/developer/workspace/.st-outbox-2/x.md"],
+]);
+
 function plan(body) {
 	// The CLI interleaves `system`-role context messages (environment, token
 	// budget) with the conversation; only user/assistant turns matter here.
@@ -170,6 +182,13 @@ function plan(body) {
 		if (!SHA256_PATH_RE.test(p)) return { text: "sha256 scenario refused: not an inbox artifact path\n" };
 		if (!tools.has("Bash")) return { text: "sha256 scenario refused: no Bash tool\n" };
 		return { tool: { name: "Bash", input: { command: `sha256sum -- ${p}`, description: "Hash the received artifact" } } };
+	}
+	const neg = /ST_SCENARIO=m3neg:(\S+)/.exec(prompt);
+	if (neg) {
+		const file_path = M3_NEGATIVE_PATHS.get(neg[1]);
+		if (!file_path) return { text: "m3neg scenario refused: unknown case\n" };
+		if (!tools.has("Write")) return { text: "m3neg scenario refused: no Write tool\n" };
+		return { tool: { name: "Write", input: { file_path, content: "m3 negative check\n" } } };
 	}
 	if (prompt.includes("ST_SCENARIO=bashwrite") && tools.has("Bash")) {
 		return { tool: { name: "Bash", input: { command: "touch smoke-permission.txt", description: "Write a file" } } };

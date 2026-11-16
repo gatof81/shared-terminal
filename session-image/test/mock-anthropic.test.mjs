@@ -287,3 +287,24 @@ describe("existing scenarios are unchanged", () => {
 		assert.equal(r.text, "Tool finished.\nDone.\n");
 	});
 });
+
+describe("ST_SCENARIO=m3neg:<n> (D3 pilot runbook §6.2, negatives 1 and 2)", () => {
+	const WRITE = [{ name: "Write" }, { name: "Bash" }];
+	it("1 and 2 ⇒ one Write at the fixed path outside the outbox", async () => {
+		const one = await ask([user("ST_SCENARIO=m3neg:1")], WRITE);
+		assert.equal(one.tool?.name, "Write");
+		assert.equal(one.tool.input.file_path, "/home/developer/workspace/x.md");
+		const two = await ask([user("ST_SCENARIO=m3neg:2")], WRITE);
+		assert.equal(two.tool.input.file_path, "/home/developer/workspace/.st-outbox-2/x.md");
+	});
+
+	it("any other case, a path, or no Write tool ⇒ a text and NO tool call", async () => {
+		for (const bad of ["3", "constructor", "/etc/passwd", "1/../../x"]) {
+			const r = await ask([user(`ST_SCENARIO=m3neg:${bad}`)], WRITE);
+			assert.equal(r.tool, undefined, bad);
+			assert.match(r.text, /refused/);
+		}
+		const r = await ask([user("ST_SCENARIO=m3neg:1")], BASH);
+		assert.equal(r.tool, undefined);
+	});
+});
