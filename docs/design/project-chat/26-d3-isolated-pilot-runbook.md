@@ -90,7 +90,7 @@ Each step records the request, the answer, and `GET /api/projects/:pid/conversat
 | S5 | New task and grant with `maxMessages: 4`. `POST …/grants/:id/pause` before A writes, then A writes | `outbox{rejected, grant-paused}`; B's pane unchanged. After `resume`, A writes again ⇒ delivered once. The mock writes at once: if its write lands before the pause, repeat the step |
 | S6 | New grant. With a relay `queued` (B kept busy with a long turn), `docker compose restart app` | After boot the relay is still `queued` and the `recovery` line lists the grant under `grants_kept`; **zero** Composer calls during boot. When B is free ⇒ delivered once |
 | S7 | New grant. `kill -9` the backend process while a relay is in flight (best effort: repeat until the log ends at `planned` or `sending`) | After boot: `not-sent{persist-failed}` or `uncertain{orphaned}`, `grant{paused, reason: recovered}`, zero Composer calls. B's pane shows the message at most once |
-| S8 | New grant. `revoke` with a relay queued | `grant{revoked, by: <owner>}`, the relay `not-sent{grant-inactive}`, B's pane unchanged |
+| S8 | New grant. `revoke` with a relay queued | 200 `{state: "ended", reason: "revoked"}` (a grant's folded state is `live`, `paused` or `ended`; `revoked` is the event and the reason), `grant{revoked, by: <owner>}`, the relay `not-sent{grant-inactive}`, B's pane unchanged |
 | S9 | New grant. From a **third** container on the sessions network, POST the two Write events of a valid ask to `st-backend` with SA's ingest token (taken from SA's container env by the operator; only its hash goes in the evidence) | Both events in SA's capture file (the verdict is not persisted); `GET /api/admin/stats` shows the origin counter's `mismatch` cause up by 2; no `outbox` line; nothing delivered |
 | S10 | New grant. With a relay queued, remove agent B from the project | `not-sent{binding-changed}` and `grant{ended, reason: binding-changed}`; nothing delivered |
 | S11 | `npm run projects:check-log` over the project log | 0 violations |
@@ -119,6 +119,12 @@ log, the two panes (`tmux capture-pane -p`), with `sha256sum` of each.
 In default permission mode the Write under `~/workspace/.st-outbox/` asks for confirmation, the
 session goes to `needs-terminal`, and a person has to accept it in the Terminal. The consult still
 works; it is not unattended.
+
+The mode is chosen on the command line, never implied (stage 1, 2026-11-16): the image's `.bashrc`
+aliases `claude` to `claude --dangerously-skip-permissions`, and a bare `command claude` on CLI
+2.1.325 started in auto mode — both let the outbox Write through without a dialog. Launch with
+`command claude --dangerously-skip-permissions` (M1) or `command claude --permission-mode default`
+(M2, M3), and record the mode the pane's footer shows.
 
 Stage 1 runs S1–S3 three times, on fresh sessions each time:
 
@@ -182,7 +188,8 @@ of the file.
 Negative checks in M3, each must still show the dialog: a Write to `~/workspace/x.md`; a Write to
 `~/workspace/.st-outbox-2/x.md`; a Write to `~/workspace/.st-outbox/l.md` where `l.md` is a symlink
 to `~/workspace/y.md`; with `.st-outbox` itself replaced by a symlink to another directory, a Write
-under it; any Bash command. Record `/status` in the session (which managed source applied).
+under it; any Bash command. The first two are the scripted model's `ST_SCENARIO=m3neg:1` and
+`ST_SCENARIO=m3neg:2` (fixed paths; stage 1 could not exercise them). Record `/status` in the session (which managed source applied).
 
 ## 7. Before stage 3 (A ↔ B on VM100)
 
