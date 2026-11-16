@@ -189,7 +189,8 @@ Negative checks in M3, each must still show the dialog: a Write to `~/workspace/
 `~/workspace/.st-outbox-2/x.md`; a Write to `~/workspace/.st-outbox/l.md` where `l.md` is a symlink
 to `~/workspace/y.md`; with `.st-outbox` itself replaced by a symlink to another directory, a Write
 under it; any Bash command. The first two are the scripted model's `ST_SCENARIO=m3neg:1` and
-`ST_SCENARIO=m3neg:2` (fixed paths; stage 1 could not exercise them). Record `/status` in the session (which managed source applied).
+`ST_SCENARIO=m3neg:2` (fixed paths; stage 1 could not exercise them) — reject the dialog, or remove the target before
+repeating one: an existing file may be refused by the tool before any permission step. Record `/status` in the session (which managed source applied).
 
 ## 7. Before stage 3 (A ↔ B on VM100)
 

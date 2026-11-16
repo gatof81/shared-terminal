@@ -1022,7 +1022,7 @@ queda pausado, nunca corriendo.
 ### 7.6 API y eventos
 
 - `POST …/conversation/grants/:grantId/pause | resume | revoke` → 200 `{grantId, state}`, con
-  `state` ∈ `live | paused | ended`; un permiso terminado lleva además `reason` (detener responde
+  `state` ∈ `live | paused | ended`; un permiso pausado o terminado lleva además `reason` (detener responde
   `{state: "ended", reason: "revoked"}`: `revoked` es el evento y la causa, no un estado). Dueño
   solamente; un permiso desconocido ⇒ 404 `grant-not-found`; reanudar uno terminado ⇒ 409
   `grant-ended`.
