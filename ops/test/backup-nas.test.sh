@@ -46,6 +46,7 @@ EOF
 	export ST_BACKUP_CONF="$E/conf"
 	: >"$T/alerts"
 }
+# shellcheck disable=SC2016 # $1 belongs to the generated script
 printf '#!/usr/bin/env bash\necho "$1" >>%q\n' "$T/alerts" >"$T/alert.sh"
 chmod +x "$T/alert.sh"
 run() { bash "$S" "$@" >"$E/out.txt" 2>&1; }
@@ -73,7 +74,7 @@ run run
 is "second run succeeds" "$?" 0
 is "two published" "$(published)" 2
 is "the older local one is gone (it is published)" "$(locals)" 1
-[ ! -d "$B/$first" ] && ok "…and it is the first that went" || bad "the first local backup is still there"
+if [ ! -d "$B/$first" ]; then ok "…and it is the first that went"; else bad "the first local backup is still there"; fi
 is "no alert on success" "$(wc -l <"$T/alerts")" 0
 
 # ── The backup command fails: nothing published, nothing removed, alert ──────
@@ -110,10 +111,10 @@ sleep 0.01
 run run
 is "the NAS is back: the run succeeds" "$?" 0
 is "published locals went; unpublished ones and the newest stay" "$(locals)" 3
-mid=$(ls "$B" | sed -n 1p)
+mid=$(find "$B" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort | head -1)
 run adopt "$mid"
 is "adopt publishes an older local backup" "$?" 0
-[ -f "$N/$mid.COMPLETE" ] && ok "…with its marker" || bad "no marker for the adopted backup"
+if [ -f "$N/$mid.COMPLETE" ]; then ok "…with its marker"; else bad "no marker for the adopted backup"; fi
 
 # ── The copy differs at the destination: not published ───────────────────────
 new_env corrupt
@@ -131,7 +132,7 @@ PATH="$E/bin:$PATH" run run
 is "a copy that differs ends non-zero" "$?" 1
 is "it is not published" "$(published)" 0
 is "the local backup stays" "$(locals)" 1
-grep -q "differs on the NAS" "$E/out.txt" && ok "the log says which backup differs" || bad "no 'differs' line: $(tail -2 "$E/out.txt")"
+if grep -q "differs on the NAS" "$E/out.txt"; then ok "the log says which backup differs"; else bad "no 'differs' line: $(tail -2 "$E/out.txt")"; fi
 
 # ── NAS retention: by name, published only ───────────────────────────────────
 new_env retention
@@ -142,12 +143,12 @@ run run
 is "the run succeeds" "$?" 0
 # Newest three: today's, 01-05, 01-04. Weekly: the newest of the newest earlier ISO week = 01-05 (kept already).
 is "published after retention" "$(find "$N" -maxdepth 1 -name '*.COMPLETE' -printf '%f\n' | grep -c .)" 3
-[ ! -e "$N/2020-01-03T08-17-01-000Z" ] && [ ! -e "$N/2020-01-03T08-17-01-000Z.INVENTORY.sha256" ] && ok "an expired backup is gone with its files" || bad "expired backup left behind"
-[ -d "$N/2020-01-04T08-17-01-000Z" ] && [ -d "$N/2020-01-05T08-17-01-000Z" ] && ok "the dailies stay" || bad "a daily was removed"
-[ -d "$N/2019-12-20T08-17-01-000Z" ] && ok "a directory without a marker is never removed" || bad "the unpublished directory was removed"
-[ -f "$N/manual/pre-abc/f" ] && ok "anything else on the NAS is untouched" || bad "manual/ was touched"
+if [ ! -e "$N/2020-01-03T08-17-01-000Z" ] && [ ! -e "$N/2020-01-03T08-17-01-000Z.INVENTORY.sha256" ]; then ok "an expired backup is gone with its files"; else bad "expired backup left behind"; fi
+if [ -d "$N/2020-01-04T08-17-01-000Z" ] && [ -d "$N/2020-01-05T08-17-01-000Z" ]; then ok "the dailies stay"; else bad "a daily was removed"; fi
+if [ -d "$N/2019-12-20T08-17-01-000Z" ]; then ok "a directory without a marker is never removed"; else bad "the unpublished directory was removed"; fi
+if [ -f "$N/manual/pre-abc/f" ]; then ok "anything else on the NAS is untouched"; else bad "manual/ was touched"; fi
 run status
-grep -q "2019-12-20T08-17-01-000Z" "$E/out.txt" && ok "status reports the unmarked directory" || bad "status does not list it"
+if grep -q "2019-12-20T08-17-01-000Z" "$E/out.txt"; then ok "status reports the unmarked directory"; else bad "status does not list it"; fi
 
 # ── Low disk: no backup is made ──────────────────────────────────────────────
 new_env lowdisk

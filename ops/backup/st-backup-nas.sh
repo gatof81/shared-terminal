@@ -140,7 +140,7 @@ retention() {
 	# Host: the newest stays whatever its state; an older one goes only if it is published.
 	newest=$(find "$BACKUPS_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | grep -E "$NAME_RE" | sort | tail -1)
 	while read -r name; do
-		[ -n "$name" ] && [ "$name" != "$newest" ] || continue
+		if [ -z "$name" ] || [ "$name" = "$newest" ]; then continue; fi
 		grep -qxF "$name" <<<"$published" || { log "kept locally (not published): $name"; continue; }
 		[ -f "$BACKUPS_DIR/$name/manifest.json" ] || continue
 		rm -rf -- "${BACKUPS_DIR:?}/$name" && log "removed locally: $name"
@@ -208,7 +208,10 @@ run)
 	;;
 adopt)
 	name=${2:-}
-	[[ $name =~ $NAME_RE ]] && [ -d "$BACKUPS_DIR/$name" ] || { echo "STOP: adopt needs the name of a local backup" >&2; exit 2; }
+	if ! [[ $name =~ $NAME_RE ]] || [ ! -d "$BACKUPS_DIR/$name" ]; then
+		echo "STOP: adopt needs the name of a local backup" >&2
+		exit 2
+	fi
 	publish "$name" || fail "$name"
 	write_status ok "$name" "adopted"
 	;;
