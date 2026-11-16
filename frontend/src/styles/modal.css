@@ -27,8 +27,11 @@
      hidden), so an 80vh modal on a fresh page-load (URL bar visible)
      can extend past the visible area and put its action buttons /
      scroll region off-screen. dvh tracks the actual visible height.
-     Same rationale for the other dvh caps below. */
-  max-height: 80dvh;
+     Same rationale for the other dvh caps below.
+     dvh does not shrink for the iOS soft keyboard; --app-vh (main.ts)
+     does, and body is fixed, so the page cannot be scrolled to reach a
+     card taller than what the keyboard leaves. */
+  max-height: min(80dvh, calc(var(--app-vh, 100dvh) - 1rem));
   display: flex;
   flex-direction: column;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
