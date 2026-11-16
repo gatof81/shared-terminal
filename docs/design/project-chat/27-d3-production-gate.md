@@ -103,6 +103,32 @@ D3 off and no backend restart:
 
 To undo the preparation: remove the two `st-outbox.json` files and restart Claude in those sessions.
 
+**Network isolation of the two participants (owner, 2026-11-16).** A session container can normally
+open connections to VM100 itself and to the LAN (the NAS included). For these two that is closed,
+with a tool on the host (`/usr/local/sbin/st-pilot-netiso`, unit `st-pilot-netiso.service`) and two
+layers, neither of which changes an existing host or Docker rule or touches another session:
+
+1. Inside each container's own network namespace (written from the host): an `OUTPUT` chain that
+   allows loopback (capture relay, Docker's DNS stub), replies, and the backend on its sessions-net
+   address, and rejects every private range (which is where the host's own addresses, the LAN, the
+   NAS, Proxmox and the other containers are); the public Internet stays open for the model. IPv6:
+   loopback only. Bound to the container, not to its address; the container has no capability to
+   undo it.
+2. On the host, for a reserved range only: each participant is attached to the sessions network
+   with a **fixed** address in `172.20.250.0/24` (kept by Docker across restarts), and two chains
+   entered only for sources in that range drop forwarded traffic to private ranges and any new
+   connection to the host. They exist whether or not the container runs, so a restart has no open
+   window (layer 1 alone had one of about a second, measured).
+
+The unit re-applies layer 1 on every start of a participant or of the backend and re-checks every
+30 s; a container it cannot isolate and verify is disconnected from the sessions network (fail
+closed). Verified from inside both containers: every forbidden target blocked, backend / DNS / model
+API / capture relay working, Composer delivering, capture origin still `match`; restart of one
+participant: address kept, nothing reachable. Known limits: a container *recreated* by the backend
+starts on a dynamic address until the unit re-attaches it (no Claude runs at that moment; not
+exercised); the host rules are restored by the unit after a host reboot, not before Docker starts.
+Rollback: `st-pilot-netiso rollback` (removes exactly its chains and jumps and stops the unit).
+
 Consequences:
 
 1. **Permission mode.** With default mode and R-a, the only tool that runs without a dialog is a
@@ -116,8 +142,9 @@ Consequences:
 4. **Origin.** Admission needs `origin: match` on both Write events and fails closed under
    `observe`. Before the flag: `GET /api/admin/stats → conversation.originObservedSinceBoot`, every
    cause that is not `match` explained. A forwarder on loopback inside a participant's container
-   *is* that participant (§7.8): listening sockets in the two sessions are read before GO 3 (the
-   image has no `ss`; read from `/proc/net` on the host side).
+   *is* that participant (§7.8). Read with the host's `ss` in each container's namespace
+   (2026-11-16): the capture relay and Docker's DNS stub in both; in `pilot-qa` also one ephemeral
+   loopback port opened by the `claude` process itself (to be classified before GO 3).
 5. **Capture fidelity (#648).** A hook pair can arrive inverted; it touched no admission event in
    either stage. If it ever hits a Write pair the message is not admitted (the sweep notes the file
    `unverified`). Open in #648, not a blocker.
