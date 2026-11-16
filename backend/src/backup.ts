@@ -438,7 +438,10 @@ async function readJsonl(dir: string, table: string): Promise<Record<string, unk
 		.map((l) => JSON.parse(l) as Record<string, unknown>);
 }
 
-export async function runRestore(inDir: string, opts: { force?: boolean } = {}): Promise<void> {
+export async function runRestore(
+	inDir: string,
+	opts: { force?: boolean; withoutProjects?: boolean } = {},
+): Promise<void> {
 	const manifestRaw = await fs.readFile(path.join(inDir, "manifest.json"), "utf-8").catch(() => {
 		throw new Error(
 			`${inDir} has no manifest.json — not a complete backup (interrupted run?); refusing`,
@@ -449,18 +452,21 @@ export async function runRestore(inDir: string, opts: { force?: boolean } = {}):
 	// `.projects` needs the flag off and the backend's writer lock free, and
 	// its tarballs pass their allowlist here — all before the first write
 	// (migrateDb below is one). The lock is held until the restore ends.
-	// A refusal is about `.projects` alone (§8: "el restore de .projects se
-	// niega y no toca nada; las tablas y los workspaces siguen su
-	// procedimiento"): loud, a non-zero exit, and the rest is still restored.
+	// A refusal stops the WHOLE restore (§8): tables without the project
+	// logs they describe is a partial restore, and that only happens when
+	// the operator asks for it by name (--without-projects), never as the
+	// outcome of a run that then prints "complete".
+	const skipped = opts.withoutProjects === true ? Object.keys(manifest.projects ?? {}).length : 0;
 	let projectsPlan: Awaited<ReturnType<typeof preflightProjectsRestore>> = null;
-	try {
-		projectsPlan = await preflightProjectsRestore(inDir, manifest.projects, WORKSPACE_ROOT);
-	} catch (err) {
-		logger.error(
-			`[restore] .projects NOT restored: ${(err as Error).message}. Tables and workspaces are restored; ` +
-				"rerun with the flag off and the backend's writer lock free to restore the project conversations",
-		);
-		process.exitCode = 1;
+	if (opts.withoutProjects !== true) {
+		try {
+			projectsPlan = await preflightProjectsRestore(inDir, manifest.projects, WORKSPACE_ROOT);
+		} catch (err) {
+			throw new Error(
+				`${(err as Error).message}. Nothing was restored. Fix that and rerun, or pass ` +
+					"--without-projects to restore the tables and workspaces alone",
+			);
+		}
 	}
 	try {
 		await restoreAll(inDir, manifest, opts);
@@ -469,6 +475,14 @@ export async function runRestore(inDir: string, opts: { force?: boolean } = {}):
 		}
 	} finally {
 		projectsPlan?.lock.release();
+	}
+	if (skipped > 0) {
+		logger.warn(
+			`[restore] PARTIAL from ${inDir} (backup of ${manifest.createdAt}): tables and workspaces restored; ` +
+				`.projects NOT restored (--without-projects, ${skipped} project(s) in the backup) — ` +
+				"the restored project rows have no conversation log until a full restore",
+		);
+		return;
 	}
 	logger.info(`[restore] complete from ${inDir} (backup of ${manifest.createdAt})`);
 }
@@ -988,8 +1002,9 @@ async function publishNoClobber(file: string, bytes: string): Promise<boolean> {
 if (typeof require !== "undefined" && require.main === module) {
 	const [mode, dir, ...rest] = process.argv.slice(2);
 	const force = rest.includes("--force");
+	const withoutProjects = rest.includes("--without-projects");
 	const usage =
-		"usage: node dist/backup.js backup [outDir] | restore <inDir> [--force] | harden [backupsDir] [--write]";
+		"usage: node dist/backup.js backup [outDir] | restore <inDir> [--force] [--without-projects] | harden [backupsDir] [--write]";
 	const run = async (): Promise<void> => {
 		if (mode === "backup") {
 			const out =
@@ -998,7 +1013,7 @@ if (typeof require !== "undefined" && require.main === module) {
 			await runBackup(out);
 		} else if (mode === "restore") {
 			if (!dir) throw new Error(usage);
-			await runRestore(dir, { force });
+			await runRestore(dir, { force, withoutProjects });
 		} else if (mode === "harden") {
 			// #562 — existing backups. Dry run unless --write; at most one dir.
 			const parsed = parseHardenArgs(process.argv.slice(3), path.join(WORKSPACE_ROOT, ".backups"));

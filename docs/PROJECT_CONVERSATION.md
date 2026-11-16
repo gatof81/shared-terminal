@@ -1090,9 +1090,13 @@ Todas las rutas de esta sección son relativas a `<WORKSPACE_ROOT>`, bajo `.proj
 **Restore** (`npm run restore`, otro proceso dentro del contenedor `app`):
 - **Exige el lock de escritor de §2.1** (`--nonblock`) y además `PROJECT_CONVERSATION_ENABLED` apagado
   en su propio entorno, que es el del backend. Así ningún backend tiene un registro de proyecto abierto
-  mientras se reemplazan sus archivos. Si falta cualquiera de las dos cosas, el restore de `.projects`
-  se niega y no toca nada. Las tablas y los workspaces
-  siguen su procedimiento de siempre.
+  mientras se reemplazan sus archivos. Si falta cualquiera de las dos cosas, o un tarball de proyecto
+  no pasa sus comprobaciones, **el restore entero se niega antes de su primera escritura** (tampoco
+  migra D1): tablas restauradas sin los registros de proyecto que describen es un restore parcial, y
+  un restore parcial solo ocurre si el operador lo pide por nombre. `--without-projects` restaura las
+  tablas y los workspaces sin tocar `.projects` (no toma el lock ni exige el flag apagado) y su última
+  línea dice `PARTIAL`, nunca `complete`. (Hasta la consolidación post-D3, AUD-05, la negativa era solo
+  de `.projects`: el resto se restauraba y la corrida terminaba en `complete` con código de salida 1.)
 - **Antes de extraer:**
   - el tarball se llama como un proyecto del manifiesto;
   - las entradas pasan una allowlist exacta: `.projects/<pid>/conversation.events.jsonl` y

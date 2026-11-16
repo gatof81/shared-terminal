@@ -1266,6 +1266,15 @@ docker compose exec app npm run restore -- <backupDir>
 docker compose exec app npm run restore -- <backupDir> --force   # non-empty target
 ```
 
+A backup that holds project conversations (`manifest.projects`) restores them
+too, and that needs `PROJECT_CONVERSATION_ENABLED` off in the restore's own
+environment and no backend holding `.projects` open. When either is missing
+the restore **refuses before writing anything** — D1 is not even migrated —
+and says what to fix. `--without-projects` is the explicit partial restore:
+tables and workspaces only, `.projects` untouched, and the last line reads
+`[restore] PARTIAL …` instead of `[restore] complete …`. Read that last line:
+a restore is whole only when it says `complete`.
+
 **Who can read a backup (#562).** A dump holds password and token hashes,
 secret ciphertext, conversation titles and every workspace, including a
 `.env` written by `writeEnvFile`. `npm run backup` therefore never creates
