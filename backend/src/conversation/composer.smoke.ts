@@ -124,7 +124,14 @@ function hookSettings(logPath: string): string {
 	// `cat` the payload, then a newline: one JSON object per line.
 	const cmd = `cat >> ${logPath}; echo >> ${logPath}`;
 	return `${JSON.stringify(
-		{ hooks: { UserPromptSubmit: [{ hooks: [{ type: "command", command: cmd, timeout: 10 }] }] } },
+		{
+			hooks: {
+				UserPromptSubmit: [{ hooks: [{ type: "command", command: cmd, timeout: 10 }] }],
+				// A turn's own end, for the one place that must wait for a turn it
+				// did not count on screen (the hazard check).
+				Stop: [{ hooks: [{ type: "command", command: cmd, timeout: 10 }] }],
+			},
+		},
 		null,
 		2,
 	)}\n`;
@@ -428,6 +435,7 @@ async function hooks(): Promise<Hook[]> {
 	});
 }
 const prompts = async () => (await hooks()).filter((h) => h.hook_event_name === "UserPromptSubmit");
+const stops = async () => (await hooks()).filter((h) => h.hook_event_name === "Stop").length;
 const replies = async () => (await plainScreen(400)).split(MOCK_REPLY_MARKER).length - 1;
 async function waitCount(f: () => Promise<number>, n: number, ms = 20_000): Promise<boolean> {
 	const until = Date.now() + ms;
@@ -696,6 +704,7 @@ async function main(): Promise<void> {
 		phase("§8.1.5 2b: the hazard — a CSI u in the same read as the paste");
 		{
 			const before = (await prompts()).length;
+			const stopsBefore = await stops();
 			// Paste + CSI u + paste with NO consumption wait and no Enter: what the
 			// executor must never do. If the CLI submits, the hazard is real for
 			// this version; either way the input is cleared afterwards.
@@ -715,7 +724,10 @@ async function main(): Promise<void> {
 				);
 				check(
 					"the hazard turn ends",
-					(await waitCount(replies, (await replies()) + 0, 1_000)) || (await waitPrompt(60_000)),
+					// A Stop hook newer than the paste: neither the reply markers
+					// already on screen nor an input that reads empty WHILE the
+					// model streams says this turn is over.
+					await waitCount(stops, stopsBefore + 1, 60_000),
 				);
 			}
 			check("input cleared after the hazard check", await clearInput());
