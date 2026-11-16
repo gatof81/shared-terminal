@@ -181,8 +181,12 @@ export function checkLog(input: unknown): CheckReport {
 				const last = d.lastState;
 				const gid = grantOf(l);
 				if (state === "queued") {
-					// §3.1: only a D3 relay waits, and only as its first state.
-					if (!gid) violations.push(`${at}: queued without a collab authorization`);
+					// §3.1: a D3 relay or a `whenFree` message of the person (§3.6)
+					// waits, and only as its first state, with the binding it waits for.
+					if (!gid && l.authorized_by !== "owner")
+						violations.push(`${at}: queued without an authorization`);
+					if (typeof (l.binding as { sid?: unknown } | undefined)?.sid !== "string")
+						violations.push(`${at}: queued without a fixed binding`);
 					if (last !== "") violations.push(`${at}: queued after ${last}`);
 				} else if (state === "planned") {
 					const b = l.binding as { sid?: string; cid?: string } | undefined;
@@ -199,8 +203,7 @@ export function checkLog(input: unknown): CheckReport {
 					}
 					d.sid = b?.sid;
 					d.cid = b?.cid;
-					if (last !== "" && !(last === "queued" && gid))
-						violations.push(`${at}: planned after ${last}`);
+					if (last !== "" && last !== "queued") violations.push(`${at}: planned after ${last}`);
 				} else if (state === "placing") {
 					if (last !== "planned") violations.push(`${at}: placing after ${last || "nothing"}`);
 				} else if (state === "sending") {

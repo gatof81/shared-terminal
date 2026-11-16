@@ -64,7 +64,8 @@ async function listen(relay: boolean): Promise<void> {
 		fanout,
 		bindings,
 		recipient: async () => ({ kind: "busy", cid: "cid-x" }),
-		onCaptureEvent: () => () => {},
+		// Nothing is ever free here: the queue is not part of these tests.
+		kick: () => {},
 	});
 	await collab.start([]);
 	const api = new ProjectConversationApi({

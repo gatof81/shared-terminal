@@ -67,8 +67,13 @@ export interface MessageFold {
 	grantId?: string;
 	/** D3, `kind: relay`: the agent that wrote it. */
 	from?: string;
-	/** D3, `kind: relay`: its body (what a queued delivery will carry) and its place in the grant. */
+	/** The person who sent it (`kind: owner`). */
+	by?: string;
+	/** Its normalized body: what a queued delivery will carry (§3.6, §7.5). The line's own string, not a copy. */
 	text?: string;
+	/** §6: its artifact references, as written. */
+	artifacts?: Array<{ sha256: string; name: string; bytes: number }>;
+	/** D3, `kind: relay`: its place in the grant. */
 	relay?: { n: number; kind: string };
 }
 
@@ -189,9 +194,13 @@ export function fold(f: Folded, lines: readonly LogLine[]): Folded {
 					to: Array.isArray(l.to) ? (l.to as string[]) : [],
 					...(grantOf(l) ? { grantId: grantOf(l) } : {}),
 					...(typeof l.from === "string" ? { from: l.from } : {}),
+					text: typeof l.text === "string" ? l.text : "",
+					...(l.kind !== "relay" && typeof l.by === "string" ? { by: l.by } : {}),
+					...(Array.isArray(l.artifacts) && l.artifacts.length > 0
+						? { artifacts: l.artifacts as MessageFold["artifacts"] }
+						: {}),
 					...(l.kind === "relay"
 						? {
-								text: typeof l.text === "string" ? l.text : "",
 								relay: {
 									n: Number((l.relay as { n?: unknown } | null)?.n ?? 0),
 									kind: String((l.relay as { kind?: unknown } | null)?.kind ?? ""),

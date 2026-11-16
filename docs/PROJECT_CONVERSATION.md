@@ -4,7 +4,10 @@ Estado: **contrato vinculante, v0.3** (aprobado por el responsable el 2026-11-12
 precisiones de v0.3.1 (D1-b) y v0.3.2 (D2, propuestas en su PR), y la enmienda **v0.3.3** (D2, fix F4)
 **propuesta y pendiente de aprobación del responsable**, y la enmienda **v0.4** (D3 mínimo: consulta
 entre dos agentes; GO de implementación del responsable el 2026-11-14). D1 y D2 están en main; D3 se
-implementa detrás de `PROJECT_RELAY_ENABLED`, apagada.
+implementa detrás de `PROJECT_RELAY_ENABLED`, apagada. Enmienda **v0.5** (consolidación post-D3,
+2026-11-16, pedido del responsable: «enviar cuando el agente esté disponible»): §3.6, un mensaje de la
+persona puede esperar en la cola de su destinatario (`whenFree`); la cola es una por destinatario y
+la comparten la persona y los relays de D3. Sin `whenFree`, nada cambia.
 
 - **v0.1** pasó una revisión adversarial independiente: 2 BLOCKER, 9 SHOULD-FIX y 1 NIT, todos
   incorporados.
@@ -279,8 +282,9 @@ Una entrega por (`msg_id`, destinatario):
     └───────────┴────────────┴──► not-sent{reason}
 ```
 
-- **`queued`:** solo en entregas de D3 (`authorized_by: collab:…`). El mensaje fue admitido y espera
-  a que el destinatario esté libre (§7.5). No hubo efecto y no fija `cid` ni
+- **`queued`:** en entregas de D3 (`authorized_by: collab:…`, §7.5) y, desde v0.5, en las de un mensaje
+  de la persona enviado con `whenFree` (`authorized_by: owner`, §3.6). El mensaje fue admitido y espera
+  a que el destinatario esté libre. No hubo efecto y no fija `cid` ni
   `composer_client_message_id`: eso ocurre en `planned`, al salir de la cola.
 
 - **`planned`:** fija el binding y el `composer_client_message_id`. Todavía no hubo efecto.
@@ -448,7 +452,7 @@ Estas reglas son **MUST** y cada una tiene su prueba en §10:
 4. **Recuperación al abrir el registro** (arranque o encendido de la bandera; si hay una marca
    `RESTORED`, primero las reglas de §8), bajo el lock del proyecto y antes de aceptar requests:
    - primero se trunca el final roto y se comprueba que el registro es legible (§2);
-   - `queued` (D3) sigue en cola: no hubo efecto ni intención;
+   - `queued` (D3, o `whenFree` de la persona) sigue en cola: no hubo efecto ni intención;
    - `planned` sin `placing` ni `sending` ⇒ `not-sent{persist-failed}` (no hubo efecto: el paso 3c no
      llegó a disco);
    - `placing` sin `sending` ⇒ `not-sent{persist-failed, files_possibly_placed}`;
@@ -460,6 +464,48 @@ Estas reglas son **MUST** y cada una tiene su prueba en §10:
    `client_message_id` nuevo. La UI puede ofrecer «Enviar de nuevo» después de un `uncertain`, pero
    solo como un mensaje nuevo, nunca como continuación del anterior.
 6. **Nada en este contrato tiene temporizador de reintento.**
+
+### 3.6 Enviar cuando el agente esté libre (v0.5)
+
+`POST …/messages` acepta `whenFree: true`. Sin el campo (o con `false`) el envío es el de §3.2–§3.3,
+sin ningún cambio, y el cuerpo conserva su hash de §3.4. `whenFree` con `collab` ⇒ 400: la tarea que
+abre una consulta sale ahora o no sale, porque el reloj de su permiso empieza con ella.
+
+- **Admisión (S1).** Por cada destinatario con binding vivo se escribe, en el mismo append que el
+  mensaje, `delivery{queued, binding{binding_id, epoch, sid}, authorized_by: "owner"}`: el binding
+  queda **fijado al encolar**; la conversación (`cid`) y el `composer_client_message_id` se fijan en
+  `planned`, al salir. No se lee el estado del destinatario: **siempre** se encola, y si el agente
+  está libre sale enseguida por el mismo camino. Un destinatario quitado o sin binding es
+  `not-sent{agent-removed|no-target}`, como siempre. La respuesta es 202 inmediato con
+  `state: "queued"`; el resto se sigue por el registro (WS o `GET …/messages/:msgId`).
+- **Una cola por destinatario, entre fuentes.** Las entregas `queued` de un agente —de la persona o
+  relays de D3— se intentan **de a una, la más vieja primero** (por `seq` de su línea `queued`): un
+  mensaje nunca adelanta a otro más viejo que sigue esperando al mismo agente. Agentes distintos son
+  independientes. Un relay cuyo permiso está pausado no detiene a los que vienen detrás.
+- **La puerta** (de `queued` a `planned`) abre cuando el binding fijado sigue vivo en D1 (lectura
+  propia, ≤ 5 s; sin respuesta ⇒ sigue en cola) y la sesión tiene **una** conversación interactiva
+  con pane en `waiting_input` (la misma lectura de §7.1). Se reevalúa con cada evento de captura de
+  esa sesión, con cada línea nueva del proyecto y al menos cada 30 s mientras haya algo en cola.
+  Después, S2–S4 de §3.3 sin cambios: intención en disco antes del efecto, una llamada al Composer
+  como mucho, **ningún reintento**; `uncertain` es final salvo `settled` por evidencia.
+- **Cierres sin efecto** (`not-sent`, nada llegó al agente):
+  - `cancelled` — `POST …/messages/:msgId/cancel` cierra lo que siga `queued` de ese mensaje, en una
+    sección crítica; una entrega ya `planned` o posterior **no** se toca (200 con `cancelled[]` y las
+    entregas como están; idempotente; 404 `message-not-found`). Editar es cancelar y enviar otro;
+  - `binding-changed` — el agente fue quitado o re-ligado: nunca se redirige a la sesión nueva;
+  - `ambiguous-target` — más de una conversación interactiva con pane: nunca una conjetura;
+  - `wait-expired` — esperó más de 24 h.
+- **Límite.** 20 entregas `queued` de la persona por destinatario; la siguiente ⇒ 409 `queue-full`
+  (`detail`: el agente) y no se escribe nada de ese mensaje. Los límites de texto y de adjuntos son
+  los de siempre; los adjuntos se colocan al salir de la cola (§6.4), no al encolar.
+- **Reinicio y restore.** Regla 4 de §3.4: `queued` sigue en cola y se entrega una vez; `planned`
+  sin `sending` ⇒ `not-sent{persist-failed}`. En un restore, como toda entrega sin terminar,
+  `uncertain{restored}`.
+- **Qué no promete.** `delivered` es que el CLI recibió el mensaje, no que terminó. La puerta lee el
+  estado de la captura, que puede ir un instante detrás del CLI: si el Composer encuentra al agente
+  ocupado en su propia comprobación, la entrega termina `refused{busy}` —visible, sin efecto— y **no
+  vuelve a la cola** (una entrega tiene una sola `sending`). Reenviar es un mensaje nuevo.
+- **Bandera.** No tiene una propia: existe con `PROJECT_CONVERSATION_ENABLED`, con o sin D3.
 
 ## 4. Respuestas
 
@@ -543,6 +589,7 @@ asunto de la UI.
 | Método | Ruta | Respuesta |
 | --- | --- | --- |
 | `POST` | `/api/projects/:pid/conversation/messages` | §3.3 |
+| `POST` | `/api/projects/:pid/conversation/messages/:msgId/cancel` | §3.6 |
 | `GET` | `/api/projects/:pid/conversation/events?before=&limit=&ev=` | páginas hacia atrás (≤ 500, ≤ 8 MiB), como §6 de CONVERSATION.md; `ev` filtra por tipo (lista separada por comas) |
 | `GET` | `/api/projects/:pid/conversation/messages/:msgId` | el mensaje (`kind` `owner` o `relay`) con sus entregas plegadas, sus `reply_settling`, `reply_ref`, `reply_late_close` y `owner_ack` |
 | `POST` | `/api/projects/:pid/conversation/acks` | §4.3 |
@@ -1029,7 +1076,7 @@ queda pausado, nunca corriendo.
 - `GET …/conversation/grants/:grantId` → el permiso plegado (estado, participantes, límites, usados,
   causa) y sus eventos `grant`/`outbox`.
 - `features.projectRelay` en `/api/auth/status`, solo con la bandera efectiva.
-- Eventos: §2.2. `logCheck` conoce los nuevos y verifica: `queued` solo en entregas `collab:`;
+- Eventos: §2.2. `logCheck` conoce los nuevos y verifica: `queued` solo en entregas `collab:` o de la persona (§3.6), siempre con su binding fijado;
   ningún `sending` de un permiso pausado, terminado o vencido (`at` ≥ `expires_at`); `relay.n` ≤
   `max_messages`; un `outbox` admitido por identidad como mucho una vez; una segunda pausa solo si
   cambia quién puede levantarla.

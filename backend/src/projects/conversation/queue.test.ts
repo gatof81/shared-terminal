@@ -1,0 +1,550 @@
+/**
+ * projects/conversation/queue.test.ts — §3.6: a message of the person that
+ * waits until its recipient is free (`whenFree`), with D3 off. Real store
+ * and log, the real fan-out; the Composer, D1 and the capture are fakes.
+ *
+ * What these hold: one Composer call per delivery at most, in the order the
+ * person sent them; nothing sent to a binding other than the one fixed when
+ * it was queued; a cancel written before `planned` wins; a restart leaves
+ * the queue as it was and sends each message once.
+ */
+
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { HttpResult } from "../../conversation/composer.js";
+import {
+	OWNER_QUEUE_MAX_PER_AGENT,
+	type ProjectBindings,
+	ProjectFanout,
+	parseBody,
+	requestSha256,
+} from "./fanout.js";
+import { LOG_FILE, type LogLine } from "./log.js";
+import { checkLog } from "./logCheck.js";
+import { projectDir } from "./paths.js";
+import {
+	createDeliveryQueue,
+	type DeliveryQueue,
+	OWNER_QUEUE_WAIT_MS,
+	type RecipientState,
+} from "./queue.js";
+import { recoveryEvents } from "./recovery.js";
+import { ProjectConversationStore } from "./store.js";
+import type { WriterLock } from "./writerLock.js";
+
+const PID = "6b1f0c4e-1d2a-4b3c-8d4e-5f6a7b8c9d0e";
+const OWNER = "u-owner";
+const A = "a0000000-0000-4000-8000-00000000000a";
+const B = "b0000000-0000-4000-8000-00000000000b";
+const SA = "5a000000-0000-4000-8000-0000000000aa";
+const SB = "5b000000-0000-4000-8000-0000000000bb";
+const uuid = () => crypto.randomUUID();
+const lock = (): WriterLock => ({ held: () => true, onLost: () => {}, release: () => {} });
+
+interface Sys {
+	store: ProjectConversationStore;
+	fanout: ProjectFanout;
+	queue: DeliveryQueue;
+	calls: Array<{ sid: string; cid: string; text: string }>;
+	composer: (sid: string, text: string) => Promise<HttpResult>;
+	bindings: () => ProjectBindings | undefined;
+	recipient: Map<string, RecipientState>;
+	targetCalls: number;
+}
+
+let root: string;
+let now: number;
+let sys: Sys;
+
+function bindingsOf(over: Partial<Record<string, { epoch?: number; removed?: boolean }>> = {}) {
+	const m: ProjectBindings = new Map();
+	for (const [agent, sid] of [
+		[A, SA],
+		[B, SB],
+	] as const) {
+		const o = over[agent] ?? {};
+		m.set(agent, {
+			removed: o.removed ?? false,
+			binding: { bindingId: `bind-${agent[0]}`, epoch: o.epoch ?? 1, sessionId: sid },
+		});
+	}
+	return m;
+}
+
+async function lines(): Promise<LogLine[]> {
+	const raw = await fs.readFile(path.join(projectDir(root, PID), LOG_FILE), "utf8");
+	return raw
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => JSON.parse(l) as LogLine);
+}
+
+async function boot(bootId = "boot"): Promise<Sys> {
+	const store = await ProjectConversationStore.start({
+		workspaceRoot: root,
+		bootId,
+		acquire: async () => ({ ok: true, lock: lock() }),
+		now: () => new Date(now),
+	});
+	const s = {
+		store,
+		calls: [],
+		composer: async () => ({
+			status: 202,
+			body: { result: "delivered", promptId: `p-${uuid()}`, seq: 7 },
+		}),
+		bindings: () => bindingsOf(),
+		recipient: new Map<string, RecipientState>([
+			[SA, { kind: "busy", cid: "cid-a" }],
+			[SB, { kind: "busy", cid: "cid-b" }],
+		]),
+		targetCalls: 0,
+	} as unknown as Sys;
+	s.fanout = new ProjectFanout({
+		store,
+		now: () => now,
+		bindings: async () => {
+			const b = s.bindings();
+			if (!b) throw new Error("D1 down");
+			return b;
+		},
+		target: async (sid) => {
+			s.targetCalls++;
+			return { kind: "ok", cid: sid === SA ? "cid-a" : "cid-b" };
+		},
+		sessionMeta: async () => ({ userId: OWNER }),
+		composerSend: async (input) => {
+			s.calls.push({ sid: input.stSessionId, cid: input.cid, text: input.body.text });
+			return s.composer(input.stSessionId, input.body.text);
+		},
+		onDelivered: () => {},
+		onUncertain: () => {},
+	});
+	s.queue = createDeliveryQueue({
+		store,
+		fanout: s.fanout,
+		now: () => now,
+		bindings: async () => {
+			const b = s.bindings();
+			if (!b) throw new Error("D1 down");
+			return b;
+		},
+		recipient: async (sid) => s.recipient.get(sid) ?? { kind: "none" },
+		onCaptureEvent: () => () => {},
+		gateIntervalMs: 3_600_000,
+	});
+	await s.queue.start(await store.openAll());
+	return s;
+}
+
+async function settle(): Promise<void> {
+	const tick = () => new Promise((r) => setTimeout(r, 2));
+	for (let i = 0; i < 30; i++) await tick();
+	const size = async () => (await lines().catch(() => [])).length;
+	let seen = await size();
+	for (let quiet = 0, i = 0; quiet < 3 && i < 400; i++) {
+		await tick();
+		const n = await size();
+		quiet = sys.queue.idle && n === seen ? quiet + 1 : 0;
+		seen = n;
+	}
+}
+
+beforeEach(async () => {
+	root = await fs.mkdtemp(path.join(os.tmpdir(), "st-queue-"));
+	now = Date.parse("2026-11-16T12:00:00.000Z");
+	sys = await boot();
+});
+afterEach(async () => {
+	await settle();
+	expect(checkLog(await lines().catch(() => [])).violations).toEqual([]);
+	sys.queue.stop();
+	await sys.store.close();
+	await fs.rm(root, { recursive: true, force: true });
+});
+
+const body = (text: string, to = [A], extra: Record<string, unknown> = {}) => ({
+	clientMessageId: uuid(),
+	text,
+	to,
+	whenFree: true,
+	...extra,
+});
+async function send(text: string, to = [A], extra: Record<string, unknown> = {}) {
+	const r = await sys.fanout.send(OWNER, PID, body(text, to, extra));
+	return r as { status: number; body: Record<string, unknown> };
+}
+const free = (sid: string, cid: string) => sys.recipient.set(sid, { kind: "ready", cid });
+const busy = (sid: string, cid: string) => sys.recipient.set(sid, { kind: "busy", cid });
+async function states(msgId: string, agentId = A): Promise<string[]> {
+	return (await lines())
+		.filter((l) => l.ev === "delivery" && l.msg_id === msgId && l.agent_id === agentId)
+		.map((l) => (l.reason ? `${l.state}{${l.reason}}` : String(l.state)));
+}
+
+describe("whenFree: the message waits in the log (§3.6)", () => {
+	it("busy recipient ⇒ 202 queued at once, 0 Composer calls, the binding fixed without a conversation", async () => {
+		const r = await send("hola");
+		expect(r.status).toBe(202);
+		expect(r.body.deliveries).toEqual([{ agentId: A, state: "queued" }]);
+		await settle();
+		expect(sys.calls).toHaveLength(0);
+		// The conversation is chosen when its turn comes: no target read now.
+		expect(sys.targetCalls).toBe(0);
+		const q = (await lines()).find((l) => l.ev === "delivery");
+		expect(q).toMatchObject({
+			state: "queued",
+			authorized_by: "owner",
+			binding: { binding_id: "bind-a", epoch: 1, sid: SA },
+		});
+		expect((q?.binding as Record<string, unknown>).cid).toBeUndefined();
+	});
+
+	it("it leaves when the agent is free: queued → planned → sending → delivered, one call, the same text", async () => {
+		const r = await send("tarea 1");
+		const msgId = r.body.msgId as string;
+		await settle();
+		free(SA, "cid-a");
+		sys.queue.kick(PID);
+		await settle();
+		expect(sys.calls).toEqual([{ sid: SA, cid: "cid-a", text: "tarea 1" }]);
+		expect(await states(msgId)).toEqual(["queued", "planned", "sending", "delivered"]);
+		// Nothing more on later looks.
+		sys.queue.kick(PID);
+		await settle();
+		expect(sys.calls).toHaveLength(1);
+	});
+
+	it("a free recipient gets it right away through the same path", async () => {
+		free(SA, "cid-a");
+		const r = await send("ya");
+		await settle();
+		expect(sys.calls).toHaveLength(1);
+		expect(await states(r.body.msgId as string)).toEqual([
+			"queued",
+			"planned",
+			"sending",
+			"delivered",
+		]);
+	});
+
+	it("FIFO per recipient: one at a time, oldest first; another agent's line is independent", async () => {
+		await send("uno");
+		await send("dos");
+		await send("para B", [B]);
+		await send("tres");
+		await settle();
+		// The agent turns busy with each message it takes.
+		sys.composer = async (sid) => {
+			busy(sid, sid === SA ? "cid-a" : "cid-b");
+			return { status: 202, body: { result: "delivered", promptId: `p-${uuid()}`, seq: 7 } };
+		};
+		free(SB, "cid-b");
+		sys.queue.kick(PID);
+		await settle();
+		expect(sys.calls.map((c) => c.text)).toEqual(["para B"]);
+		for (const expected of ["uno", "dos", "tres"]) {
+			free(SA, "cid-a");
+			sys.queue.kick(PID);
+			await settle();
+			expect(sys.calls.at(-1)?.text).toBe(expected);
+		}
+		expect(sys.calls).toHaveLength(4);
+	});
+
+	it("two recipients of one message are queued and delivered independently", async () => {
+		const r = await send("a los dos", [A, B]);
+		const msgId = r.body.msgId as string;
+		free(SB, "cid-b");
+		sys.queue.kick(PID);
+		await settle();
+		expect(await states(msgId, B)).toContain("delivered");
+		expect(await states(msgId, A)).toEqual(["queued"]);
+	});
+
+	it("the same request again replays the queued answer and queues nothing twice", async () => {
+		const b = body("una vez");
+		const r1 = await sys.fanout.send(OWNER, PID, b);
+		const r2 = await sys.fanout.send(OWNER, PID, b);
+		expect(r2.body).toMatchObject({
+			msgId: (r1.body as { msgId: string }).msgId,
+			replayed: true,
+			deliveries: [{ agentId: A, state: "queued" }],
+		});
+		expect((await lines()).filter((l) => l.ev === "delivery")).toHaveLength(1);
+	});
+
+	it("a body without whenFree keeps its request hash and its immediate path", async () => {
+		const plain = parseBody({ clientMessageId: uuid(), text: "x", to: [A] });
+		const queued = parseBody({ clientMessageId: uuid(), text: "x", to: [A], whenFree: true });
+		const off = parseBody({ clientMessageId: uuid(), text: "x", to: [A], whenFree: false });
+		if ("status" in plain || "status" in queued || "status" in off) throw new Error("parse");
+		expect(requestSha256({ ...off, clientMessageId: plain.clientMessageId })).toBe(
+			requestSha256(plain),
+		);
+		expect(requestSha256({ ...queued, clientMessageId: plain.clientMessageId })).not.toBe(
+			requestSha256(plain),
+		);
+		expect(
+			parseBody({ clientMessageId: uuid(), text: "x", to: [A], whenFree: "yes" }),
+		).toMatchObject({ status: 400 });
+		// Without the field: planned and sent now, as before.
+		const r = await sys.fanout.send(OWNER, PID, {
+			clientMessageId: uuid(),
+			text: "ahora",
+			to: [A],
+		});
+		expect(r.body).toMatchObject({ deliveries: [{ agentId: A, state: "delivered" }] });
+		expect(sys.targetCalls).toBe(1);
+	});
+});
+
+describe("ends without an effect (§3.6)", () => {
+	it("cancel closes what is queued; the agent turning free afterwards receives nothing", async () => {
+		const r = await send("no va");
+		const msgId = r.body.msgId as string;
+		const c = await sys.fanout.cancel(PID, msgId);
+		expect(c).toMatchObject({
+			status: 200,
+			body: {
+				cancelled: [A],
+				deliveries: [{ agentId: A, state: "not-sent", reason: "cancelled" }],
+			},
+		});
+		free(SA, "cid-a");
+		sys.queue.kick(PID);
+		await settle();
+		expect(sys.calls).toHaveLength(0);
+		expect(await states(msgId)).toEqual(["queued", "not-sent{cancelled}"]);
+		// Idempotent, and unknown ids are 404.
+		expect(await sys.fanout.cancel(PID, msgId)).toMatchObject({
+			status: 200,
+			body: { cancelled: [] },
+		});
+		expect(await sys.fanout.cancel(PID, uuid())).toMatchObject({ status: 404 });
+	});
+
+	it("cancel after the delivery left the queue changes nothing", async () => {
+		free(SA, "cid-a");
+		const r = await send("ya salió");
+		await settle();
+		const c = await sys.fanout.cancel(PID, r.body.msgId as string);
+		expect(c.body).toMatchObject({ cancelled: [], deliveries: [{ state: "delivered" }] });
+		expect(await states(r.body.msgId as string)).toEqual([
+			"queued",
+			"planned",
+			"sending",
+			"delivered",
+		]);
+	});
+
+	it("a cancel that lands while the binding is being re-read wins over the plan", async () => {
+		const r = await send("carrera");
+		const msgId = r.body.msgId as string;
+		await settle();
+		free(SA, "cid-a");
+		let cancelled: Promise<unknown> | undefined;
+		const real = sys.bindings;
+		sys.bindings = () => {
+			cancelled ??= sys.fanout.cancel(PID, msgId);
+			return real();
+		};
+		sys.queue.kick(PID);
+		await settle();
+		await cancelled;
+		expect(sys.calls).toHaveLength(0);
+		expect(await states(msgId)).toEqual(["queued", "not-sent{cancelled}"]);
+	});
+
+	it("the binding changed while queued ⇒ not-sent{binding-changed}; never sent to the new one", async () => {
+		const r = await send("para el binding viejo");
+		await settle();
+		sys.bindings = () => bindingsOf({ [A]: { epoch: 2 } });
+		free(SA, "cid-a");
+		sys.queue.kick(PID);
+		await settle();
+		expect(sys.calls).toHaveLength(0);
+		expect(await states(r.body.msgId as string)).toEqual(["queued", "not-sent{binding-changed}"]);
+	});
+
+	it("an agent removed while queued ⇒ not-sent{binding-changed}", async () => {
+		const r = await send("x");
+		sys.bindings = () => bindingsOf({ [A]: { removed: true } });
+		free(SA, "cid-a");
+		sys.queue.kick(PID);
+		await settle();
+		expect(sys.calls).toHaveLength(0);
+		expect(await states(r.body.msgId as string)).toEqual(["queued", "not-sent{binding-changed}"]);
+	});
+
+	it("D1 not answering leaves it queued; it goes out when D1 is back", async () => {
+		const r = await send("espera a D1");
+		await settle();
+		free(SA, "cid-a");
+		const real = sys.bindings;
+		sys.bindings = () => undefined;
+		sys.queue.kick(PID);
+		await settle();
+		expect(await states(r.body.msgId as string)).toEqual(["queued"]);
+		sys.bindings = real;
+		sys.queue.kick(PID);
+		await settle();
+		expect(sys.calls).toHaveLength(1);
+	});
+
+	it("two interactive conversations in the session ⇒ not-sent{ambiguous-target}, never a guess", async () => {
+		const r = await send("x");
+		sys.recipient.set(SA, { kind: "ambiguous" });
+		sys.queue.kick(PID);
+		await settle();
+		expect(sys.calls).toHaveLength(0);
+		expect(await states(r.body.msgId as string)).toEqual(["queued", "not-sent{ambiguous-target}"]);
+	});
+
+	it("no conversation yet (session stopped, CLI not started) waits; after 24 h ⇒ not-sent{wait-expired}", async () => {
+		const r = await send("paciencia");
+		sys.recipient.delete(SA);
+		sys.queue.kick(PID);
+		await settle();
+		expect(await states(r.body.msgId as string)).toEqual(["queued"]);
+		now += OWNER_QUEUE_WAIT_MS + 1;
+		sys.queue.kick(PID);
+		await settle();
+		expect(await states(r.body.msgId as string)).toEqual(["queued", "not-sent{wait-expired}"]);
+		expect(sys.calls).toHaveLength(0);
+	});
+
+	it("a closed head does not hold the line: the next one is tried in the same pass", async () => {
+		const r1 = await send("vieja");
+		await settle();
+		now += OWNER_QUEUE_WAIT_MS + 1;
+		const r2 = await send("nueva");
+		free(SA, "cid-a");
+		sys.queue.kick(PID);
+		await settle();
+		expect(await states(r1.body.msgId as string)).toEqual(["queued", "not-sent{wait-expired}"]);
+		expect(sys.calls.map((c) => c.text)).toEqual(["nueva"]);
+		expect(await states(r2.body.msgId as string)).toContain("delivered");
+	});
+
+	it("the limit is per recipient: the 21st is 409 queue-full and writes nothing", async () => {
+		for (let i = 0; i < OWNER_QUEUE_MAX_PER_AGENT; i++) await send(`m${i}`);
+		const before = (await lines()).length;
+		const r = await send("una más");
+		expect(r).toMatchObject({ status: 409, body: { error: "queue-full", detail: A } });
+		expect((await lines()).length).toBe(before);
+		// Another agent's queue is its own.
+		expect((await send("a B", [B])).status).toBe(202);
+	});
+
+	it("whenFree with collab is refused; an agent without a binding is not-sent{no-target}, not queued", async () => {
+		const bad = parseBody(
+			{
+				clientMessageId: uuid(),
+				text: "x",
+				to: [A],
+				whenFree: true,
+				collab: { with: B, maxMessages: 2, maxWaitMin: 5, expiresInMin: 10 },
+			},
+			false,
+			true,
+		);
+		expect(bad).toMatchObject({ status: 400 });
+		sys.bindings = () => {
+			const m = bindingsOf();
+			m.set(A, { removed: false, binding: null });
+			return m;
+		};
+		const r = await send("sin sesión");
+		expect(r.body.deliveries).toEqual([{ agentId: A, state: "not-sent", reason: "no-target" }]);
+	});
+});
+
+describe("uncertainty and restarts (§3.6, §3.4)", () => {
+	it("an uncertain result is final: no later pass calls the Composer again", async () => {
+		const r = await send("incierto");
+		sys.composer = async () => {
+			throw new Error("socket hang up");
+		};
+		free(SA, "cid-a");
+		sys.queue.kick(PID);
+		await settle();
+		expect(await states(r.body.msgId as string)).toEqual([
+			"queued",
+			"planned",
+			"sending",
+			"uncertain{composer-error}",
+		]);
+		for (let i = 0; i < 3; i++) {
+			sys.queue.kick(PID);
+			await settle();
+		}
+		expect(sys.calls).toHaveLength(1);
+	});
+
+	it("a restart leaves the queue as it was and each message is sent once, in order", async () => {
+		await send("antes 1");
+		await send("antes 2");
+		await settle();
+		sys.queue.stop();
+		await sys.store.close();
+		sys = await boot("boot-2");
+		await settle();
+		expect(sys.calls).toHaveLength(0);
+		expect((await lines()).filter((l) => l.ev === "delivery" && l.state !== "queued")).toEqual([]);
+		sys.composer = async (sid) => {
+			busy(sid, "cid-a");
+			return { status: 202, body: { result: "delivered", promptId: `p-${uuid()}`, seq: 7 } };
+		};
+		for (const expected of ["antes 1", "antes 2"]) {
+			free(SA, "cid-a");
+			sys.queue.kick(PID);
+			await settle();
+			expect(sys.calls.at(-1)?.text).toBe(expected);
+		}
+		expect(sys.calls).toHaveLength(2);
+	});
+
+	it("a crash between planned and sending: recovery closes it not-sent, nothing is sent after the restart", async () => {
+		const r = await send("a medias");
+		const msgId = r.body.msgId as string;
+		await sys.store.critical(PID, (tx) =>
+			tx.append([
+				{
+					ev: "delivery",
+					msg_id: msgId,
+					agent_id: A,
+					state: "planned",
+					binding: { binding_id: "bind-a", epoch: 1, sid: SA, cid: "cid-a" },
+					composer_client_message_id: uuid(),
+					authorized_by: "owner",
+				},
+			]),
+		);
+		sys.queue.stop();
+		await sys.store.close();
+		sys = await boot("boot-2");
+		free(SA, "cid-a");
+		sys.queue.kick(PID);
+		await settle();
+		expect(sys.calls).toHaveLength(0);
+		expect((await states(msgId)).at(-1)).toBe("not-sent{persist-failed}");
+	});
+
+	it("a restore closes a queued delivery as uncertain{restored}: the backup may predate its sending", async () => {
+		const r = await send("del backup");
+		const { state } = await sys.store.view(PID);
+		const events = recoveryEvents(
+			state,
+			{ source: "restore", restoreId: "r1", manifestAt: null },
+			{ bootId: "b", truncatedBytes: 0, interleavedWriters: [] },
+		);
+		expect(events.find((e) => e.ev === "delivery")).toMatchObject({
+			msg_id: r.body.msgId,
+			state: "uncertain",
+			reason: "restored",
+		});
+	});
+});

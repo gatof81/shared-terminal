@@ -22,6 +22,7 @@ import { emptyFold, fold } from "./fold.js";
 import { LOG_FILE, type LogLine } from "./log.js";
 import { checkLog } from "./logCheck.js";
 import { projectDir } from "./paths.js";
+import { createDeliveryQueue, type DeliveryQueue } from "./queue.js";
 import { recoveryEvents } from "./recovery.js";
 import { ProjectConversationStore } from "./store.js";
 import type { WriterLock } from "./writerLock.js";
@@ -46,6 +47,7 @@ interface Sys {
 	store: ProjectConversationStore;
 	fanout: ProjectFanout;
 	collab: ProjectCollab;
+	queue: DeliveryQueue;
 	calls: Array<{ sid: string; cid: string; text: string; diskState: string; grant: string }>;
 	composer: (sid: string, text: string) => Promise<HttpResult>;
 	bindings: () => ProjectBindings | Promise<ProjectBindings>;
@@ -138,13 +140,24 @@ async function boot(bootId = "boot"): Promise<Sys> {
 		now: () => now,
 		bindings: async () => s.bindings(),
 		recipient: async (sid) => s.recipient.get(sid) ?? { kind: "none" },
+		kick: (pid) => s.queue.kick(pid),
+	});
+	s.queue = createDeliveryQueue({
+		store,
+		fanout: s.fanout,
+		now: () => now,
+		bindings: async () => s.bindings(),
+		recipient: async (sid) => s.recipient.get(sid) ?? { kind: "none" },
 		onCaptureEvent: (l) => {
 			s.captureListeners.add(l);
 			return () => s.captureListeners.delete(l);
 		},
+		collab: () => s.collab,
 		gateIntervalMs: 3_600_000,
 	});
-	await s.collab.start(await store.openAll());
+	const opened = await store.openAll();
+	await s.collab.start(opened);
+	await s.queue.start(opened);
 	return s;
 }
 
@@ -164,6 +177,7 @@ afterEach(async () => {
 	const report = checkLog(await lines().catch(() => []));
 	expect(report.violations).toEqual([]);
 	sys.collab.stop();
+	sys.queue.stop();
 	await sys.store.close();
 	await fs.rm(root, { recursive: true, force: true });
 });
@@ -177,14 +191,13 @@ afterEach(async () => {
 async function settle(rounds = 30): Promise<void> {
 	const tick = () => new Promise((r) => setTimeout(r, 2));
 	for (let i = 0; i < rounds; i++) await tick();
-	const work = sys.collab as unknown as { draining: Map<string, unknown>; inFlight: Set<string> };
 	// No log yet (a refused create) is a log of zero lines.
 	const size = async () => (await lines().catch(() => [])).length;
 	let seen = await size();
 	for (let quiet = 0, i = 0; quiet < 3 && i < 400; i++) {
 		await tick();
 		const now = await size();
-		quiet = work.draining.size === 0 && work.inFlight.size === 0 && now === seen ? quiet + 1 : 0;
+		quiet = sys.queue.idle && now === seen ? quiet + 1 : 0;
 		seen = now;
 	}
 }
@@ -642,6 +655,57 @@ describe("queue, gate and outcomes (§7.5, M3, M7–M13, M16)", () => {
 		expect(await deliveriesOf(q.msgId)).toEqual(["queued", "planned", "sending", "delivered"]);
 	});
 
+	it("one line per recipient across sources: a `whenFree` message of the person waits behind an older relay (§3.6)", async () => {
+		sys.recipient.set(SB, { kind: "busy", cid: "cid-x" });
+		const q = await ask();
+		if (q.outcome !== "accepted") throw new Error("ask");
+		const own = await sys.fanout.send(OWNER, PID, {
+			clientMessageId: uuid(),
+			text: "de la persona, después",
+			to: [B],
+			whenFree: true,
+		});
+		const ownId = (own.body as { msgId: string }).msgId;
+		await settle();
+		// B takes one message and turns busy with it.
+		const reply = sys.composer;
+		sys.composer = async (sid, text) => {
+			if (sid === SB) sys.recipient.set(SB, { kind: "busy", cid: "cid-b" });
+			return reply(sid, text);
+		};
+		const toB = () => sys.calls.filter((c) => c.sid === SB).map((c) => c.text);
+		sys.recipient.set(SB, { kind: "ready", cid: "cid-b" });
+		sys.queue.kick(PID);
+		await settle();
+		expect(toB()).toHaveLength(1);
+		expect(toB()[0]).toContain("<<<ST-MSG");
+		expect(await deliveriesOf(ownId)).toEqual(["queued"]);
+		sys.recipient.set(SB, { kind: "ready", cid: "cid-b" });
+		sys.queue.kick(PID);
+		await settle();
+		expect(toB()).toHaveLength(2);
+		expect(toB()[1]).toBe("de la persona, después");
+	});
+
+	it("a relay of a paused grant does not hold the recipient's line for the person's message", async () => {
+		sys.recipient.set(SB, { kind: "busy", cid: "cid-x" });
+		const q = await ask();
+		if (q.outcome !== "accepted") throw new Error("ask");
+		await sys.collab.action(OWNER, PID, grantId, "pause");
+		const own = await sys.fanout.send(OWNER, PID, {
+			clientMessageId: uuid(),
+			text: "no espera al permiso pausado",
+			to: [B],
+			whenFree: true,
+		});
+		sys.recipient.set(SB, { kind: "ready", cid: "cid-b" });
+		sys.queue.kick(PID);
+		await settle();
+		expect(await deliveriesOf((own.body as { msgId: string }).msgId)).toContain("delivered");
+		expect(await deliveriesOf(q.msgId)).toEqual(["queued"]);
+		expect(relayCalls()).toHaveLength(0);
+	});
+
 	it("M8: refused / thrown / failed pause the grant and nothing is called again", async () => {
 		let gid = grantId;
 		for (const [answer, state] of [
@@ -667,7 +731,7 @@ describe("queue, gate and outcomes (§7.5, M3, M7–M13, M16)", () => {
 				ref: { msg_id: q.msgId, agent_id: B },
 			});
 			for (const l of sys.captureListeners) l(SB);
-			sys.collab.kick(PID);
+			sys.queue.kick(PID);
 			await settle();
 			expect(relayCalls().length).toBe(before + 1);
 			// Resuming does not resend a finished delivery either.
@@ -689,7 +753,7 @@ describe("queue, gate and outcomes (§7.5, M3, M7–M13, M16)", () => {
 		if (q.outcome !== "accepted") throw new Error("ask");
 		await settle();
 		now += 61 * 60_000;
-		sys.collab.kick(PID);
+		sys.queue.kick(PID);
 		await settle();
 		const ls = await lines();
 		expect(ls.filter((l) => l.msg_id === q.msgId && l.ev === "delivery").pop()).toMatchObject({
@@ -712,7 +776,7 @@ describe("queue, gate and outcomes (§7.5, M3, M7–M13, M16)", () => {
 			state: "paused",
 		});
 		sys.recipient.set(SB, { kind: "ready", cid: "cid-b" });
-		sys.collab.kick(PID);
+		sys.queue.kick(PID);
 		await settle();
 		expect(relayCalls()).toHaveLength(0);
 		await sys.collab.action(OWNER, PID, grantId, "resume");
@@ -836,7 +900,7 @@ describe("queue, gate and outcomes (§7.5, M3, M7–M13, M16)", () => {
 			await settle();
 			sys.bindings = () => bindingsOf({ [B]: over });
 			sys.recipient.set(SB, { kind: "ready", cid: "cid-b" });
-			sys.collab.kick(PID);
+			sys.queue.kick(PID);
 			await settle();
 			expect(
 				(await lines()).filter((l) => l.msg_id === q.msgId && l.ev === "delivery").pop(),
@@ -864,7 +928,7 @@ describe("queue, gate and outcomes (§7.5, M3, M7–M13, M16)", () => {
 		await settle();
 		expect(await deliveriesOf(q.msgId)).toEqual(["queued"]);
 		sys.bindings = () => bindingsOf();
-		sys.collab.kick(PID);
+		sys.queue.kick(PID);
 		await settle();
 		expect((await deliveriesOf(q.msgId)).pop()).toBe("delivered");
 	});
@@ -942,6 +1006,7 @@ describe("a result and its consequence are one append; the person's pause holds 
 		sys.composer = async () => {
 			// The process "dies" for everything but the append in progress.
 			sys.collab.stop();
+			sys.queue.stop();
 			return { status: 502, body: { error: "delivery-failed" } };
 		};
 		const q = await ask();
@@ -1020,6 +1085,7 @@ describe("a result and its consequence are one append; the person's pause holds 
 		if (q.outcome !== "accepted") throw new Error("ask");
 		await settle();
 		sys.collab.stop();
+		sys.queue.stop();
 		await sys.store.critical(PID, (tx) =>
 			tx.append([
 				{ ev: "delivery", msg_id: q.msgId, agent_id: B, state: "settled", result: "delivered" },
@@ -1099,6 +1165,7 @@ describe("a result and its consequence are one append; the person's pause holds 
 describe("restart and restore (§7.5, M12, M18)", () => {
 	async function restart(): Promise<void> {
 		sys.collab.stop();
+		sys.queue.stop();
 		await sys.store.close();
 		sys = await boot(`boot-${uuid()}`);
 		await settle();
@@ -1156,7 +1223,7 @@ describe("restart and restore (§7.5, M12, M18)", () => {
 			});
 			await restart();
 			sys.recipient.set(SB, { kind: "ready", cid: "cid-b" });
-			sys.collab.kick(PID);
+			sys.queue.kick(PID);
 			await settle();
 			const ls = await lines();
 			expect(ls.filter((l) => l.msg_id === q.msgId && l.ev === "delivery").pop()).toMatchObject({

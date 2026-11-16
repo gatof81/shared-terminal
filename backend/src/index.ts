@@ -50,6 +50,7 @@ import { ProjectCollab, type RecipientState } from "./projects/conversation/coll
 import { ProjectFanout, pickTarget } from "./projects/conversation/fanout.js";
 import { OutboxWatcher } from "./projects/conversation/outbox.js";
 import { placeArtifacts } from "./projects/conversation/placement.js";
+import { createDeliveryQueue, type DeliveryQueue } from "./projects/conversation/queue.js";
 import { ReplyWatcher } from "./projects/conversation/replies.js";
 import {
 	ProjectConversationStore,
@@ -333,6 +334,7 @@ let projectConversation: ProjectConversationStore | undefined;
 let projectReplies: ReplyWatcher | undefined;
 let projectCollab: ProjectCollab | undefined;
 let projectOutbox: OutboxWatcher | undefined;
+let projectQueue: DeliveryQueue | undefined;
 // Built before the store exists (the router is built at load, the store
 // takes its lock in start()); the routes answer 503 until `api` is set.
 // The `artifacts` key exists only with D2 effective (routes and features
@@ -732,33 +734,46 @@ async function start() {
 						logger.warn(`[projects] ${pid}: replies not resumed (${(err as Error).message})`),
 					);
 			}
-			if (PROJECT_RELAY_ENABLED) {
-				// §7.1: a participant session has ONE interactive conversation with
-				// a pane. The same reading decides who may send (outbox.ts rule 3)
-				// and where a relay is delivered (collab.ts gate); more than one is
-				// ambiguous for both, never a guess.
-				const soleConversation = async (sid: string): Promise<RecipientState> => {
-					const { conversations, meta } = await conversation.summariesWithMeta(sid);
-					// The list could not be read whole: "the only one" would be a
-					// guess over the resident conversations alone. Fail closed.
-					if (meta !== "ok") return { kind: "none" };
-					const live = conversations.filter(
-						(c) => c.kind === "interactive" && c.paneId !== null && !c.endedAt,
-					);
-					if (live.length === 0) return { kind: "none" };
-					if (live.length > 1) return { kind: "ambiguous" };
-					const only = live[0] as (typeof live)[number];
-					return {
-						kind: only.status === "waiting_input" ? "ready" : "busy",
-						cid: only.sessionId,
-					};
+			// §7.1: a participant session has ONE interactive conversation with
+			// a pane. The same reading decides who may send (outbox.ts rule 3)
+			// and where a queued delivery — a relay or a `whenFree` message of
+			// the person — goes (queue.ts); more than one is ambiguous for
+			// all of them, never a guess.
+			const soleConversation = async (sid: string): Promise<RecipientState> => {
+				const { conversations, meta } = await conversation.summariesWithMeta(sid);
+				// The list could not be read whole: "the only one" would be a
+				// guess over the resident conversations alone. Fail closed.
+				if (meta !== "ok") return { kind: "none" };
+				const live = conversations.filter(
+					(c) => c.kind === "interactive" && c.paneId !== null && !c.endedAt,
+				);
+				if (live.length === 0) return { kind: "none" };
+				if (live.length > 1) return { kind: "ambiguous" };
+				const only = live[0] as (typeof live)[number];
+				return {
+					kind: only.status === "waiting_input" ? "ready" : "busy",
+					cid: only.sessionId,
 				};
+			};
+			// §3.6 / §7.5: the one queue of `queued` deliveries, whoever authorized
+			// them. With D3 off it only ever holds the person's own.
+			const queue = createDeliveryQueue({
+				store,
+				fanout,
+				bindings: (ownerId, pid) => directory.projectBindings(ownerId, pid),
+				recipient: soleConversation,
+				onCaptureEvent: (l) => conversation.onPersistedEvent((sid) => l(sid)),
+				collab: () => projectCollab,
+				log: logger,
+			});
+			projectQueue = queue;
+			if (PROJECT_RELAY_ENABLED) {
 				const collab = new ProjectCollab({
 					store,
 					fanout,
 					bindings: (ownerId, pid) => directory.projectBindings(ownerId, pid),
 					recipient: soleConversation,
-					onCaptureEvent: (l) => conversation.onPersistedEvent((sid) => l(sid)),
+					kick: (pid) => queue.kick(pid),
 					log: logger,
 				});
 				projectCollab = collab;
@@ -778,6 +793,8 @@ async function start() {
 				projectOutbox = outbox;
 				outbox.start();
 			}
+			// Last: every source is ready to take its attempts.
+			await queue.start(opened);
 		}
 		logger.info("[server] project conversation ENABLED (D1)");
 		if (PROJECT_ARTIFACTS_ENABLED) logger.info("[server] project artifacts ENABLED (D2)");
@@ -933,6 +950,7 @@ function shutdown() {
 	// settle an exec as evidence, but nothing further starts (§8.1.4).
 	// D1 — lets the writer-lock helper go (the kernel releases the lock when it exits).
 	projectReplies?.stop();
+	projectQueue?.stop();
 	projectOutbox?.stop();
 	projectCollab?.stop();
 	void projectConversation?.close();

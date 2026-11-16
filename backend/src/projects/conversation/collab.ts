@@ -54,6 +54,7 @@ import {
 	pendingRelays,
 } from "./grantRules.js";
 import type { LogLine, NewEvent } from "./log.js";
+import type { Attempt, RecipientState } from "./queue.js";
 import type { CriticalTx, ProjectConversationStore } from "./store.js";
 
 /** §7.3: `outbox{rejected}` lines a grant may accumulate, and how many of one agent pause it. */
@@ -61,16 +62,10 @@ export const REJECTED_MAX_PER_GRANT = 8;
 export const REJECTED_PAUSE_PER_AGENT = 3;
 /** §7.5: `outbox{unverified}` lines a grant may accumulate. */
 export const UNVERIFIED_MAX_PER_GRANT = 8;
-/** §7.5: the gate is re-evaluated at least this often while something is queued. */
-export const GATE_INTERVAL_MS = 30_000;
 
 const GRANT_RE = /^c-[0-9a-f]{12}$/;
 
-export type RecipientState =
-	| { kind: "ready"; cid: string }
-	| { kind: "busy"; cid: string }
-	| { kind: "none" }
-	| { kind: "ambiguous" };
+export type { RecipientState } from "./queue.js";
 
 export interface CollabDeps {
 	store: ProjectConversationStore;
@@ -82,10 +77,9 @@ export interface CollabDeps {
 	 * the capture has it waiting for input (§7.5). More than one ⇒ ambiguous.
 	 */
 	recipient(sid: string): Promise<RecipientState>;
-	/** Capture events of any session: only a hint to re-evaluate the gate. */
-	onCaptureEvent(listener: (sid: string) => void): () => void;
+	/** Ask the queue (queue.ts) to look at this project again. */
+	kick(projectId: string): void;
 	now?: () => number;
-	gateIntervalMs?: number;
 	log?: { info(m: string): void; warn(m: string): void };
 }
 
@@ -117,14 +111,9 @@ export class ProjectCollab {
 		{ projectId: string; grantId: string; agentId: string; consulted: boolean; createdAt: string }
 	>();
 	private readonly expiry = new Map<string, NodeJS.Timeout>();
-	/** Projects with at least one queued relay, and the keys queued. */
-	private readonly queued = new Map<string, Set<string>>();
-	private readonly draining = new Map<string, { again: boolean }>();
-	private readonly inFlight = new Set<string>();
 	/** Projects whose log has a grant: the others pay nothing for D3. */
 	private readonly withGrants = new Set<string>();
 	private unsubs: Array<() => void> = [];
-	private interval: NodeJS.Timeout | undefined;
 	private stopped = false;
 
 	constructor(private readonly deps: CollabDeps) {}
@@ -136,40 +125,27 @@ export class ProjectCollab {
 	/** After the store opened its projects (boot recovery already written). */
 	async start(projectIds: readonly string[]): Promise<void> {
 		this.unsubs.push(this.deps.store.onAppend((pid, lines) => this.onAppend(pid, lines)));
-		this.unsubs.push(
-			this.deps.onCaptureEvent((sid) => {
-				const e = this.bySession.get(sid);
-				if (e && this.queued.has(e.projectId)) this.kick(e.projectId);
-			}),
-		);
 		for (const pid of projectIds) {
 			try {
 				const { state } = await this.deps.store.view(pid);
 				if (state.grants.size > 0) this.withGrants.add(pid);
 				for (const g of state.grants.values()) if (g.state !== "ended") this.index(pid, g);
 				for (const d of state.deliveries.values()) {
-					if (d.state === "queued" && grantIdOf(d.authorizedBy)) this.noteQueued(pid, d, true);
 					// A `settled` whose follow-up the previous process did not write.
 					if (d.state === "settled" && grantIdOf(d.authorizedBy)) {
 						await this.outcome(pid, d.msgId, d.agentId);
 					}
 				}
-				this.kick(pid);
 			} catch (err) {
 				this.deps.log?.warn(`[collab] ${pid}: not resumed (${(err as Error).message})`);
 			}
 		}
-		this.interval = setInterval(() => {
-			for (const pid of this.queued.keys()) this.kick(pid);
-		}, this.deps.gateIntervalMs ?? GATE_INTERVAL_MS);
-		this.interval.unref?.();
 	}
 
 	stop(): void {
 		this.stopped = true;
 		for (const u of this.unsubs) u();
 		this.unsubs = [];
-		clearInterval(this.interval);
 		for (const t of this.expiry.values()) clearTimeout(t);
 		this.expiry.clear();
 	}
@@ -214,21 +190,6 @@ export class ProjectCollab {
 		this.expiry.delete(grantId);
 	}
 
-	private noteQueued(pid: string, d: { msgId: string; agentId: string }, on: boolean): void {
-		const key = deliveryKey(d.msgId, d.agentId);
-		let set = this.queued.get(pid);
-		if (on) {
-			if (!set) {
-				set = new Set();
-				this.queued.set(pid, set);
-			}
-			set.add(key);
-		} else if (set) {
-			set.delete(key);
-			if (set.size === 0) this.queued.delete(pid);
-		}
-	}
-
 	/**
 	 * Every durable line of every project passes here, synchronously, inside
 	 * the append that wrote it. It only updates the caches and SCHEDULES work:
@@ -250,7 +211,7 @@ export class ProjectCollab {
 				} else if (l.event === "revoked" || l.event === "ended") {
 					this.unindex(l.grant_id as string);
 				} else if (l.event === "resumed") {
-					this.later(() => this.kick(pid));
+					this.later(() => this.deps.kick(pid));
 				}
 				continue;
 			}
@@ -258,11 +219,6 @@ export class ProjectCollab {
 			const msgId = l.msg_id as string;
 			const agentId = l.agent_id as string;
 			const state = l.state as string;
-			const gid = grantIdOf(l.authorized_by as string | undefined);
-			if (gid) {
-				this.noteQueued(pid, { msgId, agentId }, state === "queued");
-				if (state === "queued") this.later(() => this.kick(pid));
-			}
 			// Every other result line carries its consequence in its own append
 			// (grantRules.ts). `settled` is the reply watcher's, written without
 			// knowing about grants: followed up here.
@@ -527,49 +483,12 @@ export class ProjectCollab {
 
 	// ── Queue and gate (§7.5) ─────────────────────────────────────────────
 
-	/** Single-flight per project; a kick during a drain runs one more pass. */
-	kick(projectId: string): void {
-		if (this.stopped) return;
-		const cur = this.draining.get(projectId);
-		if (cur) {
-			cur.again = true;
-			return;
-		}
-		const slot = { again: false };
-		this.draining.set(projectId, slot);
-		void (async () => {
-			try {
-				do {
-					slot.again = false;
-					await this.drain(projectId);
-				} while (slot.again && !this.stopped);
-			} catch (err) {
-				this.warn(`drain ${projectId}`, err);
-			} finally {
-				this.draining.delete(projectId);
-			}
-		})();
-	}
-
-	private async drain(projectId: string): Promise<void> {
-		const items = await this.deps.store.critical(projectId, async (tx) =>
-			[...tx.state.deliveries.values()]
-				.filter((d) => d.state === "queued" && grantIdOf(d.authorizedBy))
-				.map((d) => ({ msgId: d.msgId, agentId: d.agentId, queuedAt: d.queuedAt ?? "" })),
-		);
-		for (const it of items) {
-			const key = `${projectId}/${deliveryKey(it.msgId, it.agentId)}`;
-			if (this.inFlight.has(key)) continue;
-			this.inFlight.add(key);
-			// Not awaited as a group: one busy recipient never holds another's
-			// delivery; each run is independent and ends on its own.
-			void this.tryDeliver(projectId, it.msgId, it.agentId)
-				.catch((err) => this.warn(`delivery ${key}`, err))
-				.finally(() => this.inFlight.delete(key));
-		}
-	}
-
-	private async tryDeliver(projectId: string, msgId: string, agentId: string): Promise<void> {
+	/**
+	 * One attempt of a queued relay, called by the queue when its turn in the
+	 * recipient's line comes (queue.ts). `skip` = it stays queued for a reason
+	 * of its grant (paused), so it does not hold the recipient's line.
+	 */
+	async attempt(projectId: string, msgId: string, agentId: string): Promise<Attempt> {
 		const key = deliveryKey(msgId, agentId);
 		// Everything read here is a hint; the decision is retaken under the lock below.
 		const snap = await this.deps.store.critical(projectId, async (tx) => {
@@ -591,10 +510,13 @@ export class ProjectCollab {
 				body: m.text ?? "",
 			};
 		});
-		if (!snap) return;
-		if (!snap.alive) return this.expire(projectId, snap.grantId);
+		if (!snap) return "done";
+		if (!snap.alive) {
+			await this.expire(projectId, snap.grantId);
+			return "done";
+		}
 		const p = snap.participant;
-		if (!p) return;
+		if (!p) return "skip";
 		// Ends the grant because of THIS queued delivery, which gets its own reason.
 		const endFor = (reason: string): Promise<void> =>
 			this.write(projectId, (state) => {
@@ -611,9 +533,10 @@ export class ProjectCollab {
 
 		// §7.5: a message that waited longer than the person allowed ends the consult.
 		if (Number.isFinite(snap.queuedAt) && this.now() - snap.queuedAt > snap.waitMs) {
-			return endFor("wait-expired");
+			await endFor("wait-expired");
+			return "done";
 		}
-		if (snap.state !== "live") return;
+		if (snap.state !== "live") return "skip";
 
 		// The fixed binding, re-read from D1 (no lock held).
 		let timer: NodeJS.Timeout | undefined;
@@ -624,7 +547,7 @@ export class ProjectCollab {
 			}),
 		]);
 		clearTimeout(timer);
-		if (b === undefined) return; // unverified: it stays queued and is tried again
+		if (b === undefined) return "wait"; // unverified: it stays queued and is tried again
 		const cur = b?.get(agentId);
 		if (
 			!b ||
@@ -635,14 +558,15 @@ export class ProjectCollab {
 			cur.binding.epoch !== p.epoch ||
 			cur.binding.sessionId !== p.sid
 		) {
-			return endFor("binding-changed");
+			await endFor("binding-changed");
+			return "done";
 		}
 
 		const r = await this.deps.recipient(p.sid).catch(() => ({ kind: "none" }) as const);
-		if (r.kind === "busy" || r.kind === "none") return;
+		if (r.kind === "busy" || r.kind === "none") return "wait";
 		if (r.kind === "ambiguous") {
 			// Never a guess (§7.1): the person sorts the session out and resumes.
-			return this.write(projectId, (state) => {
+			await this.write(projectId, (state) => {
 				const d = state.deliveries.get(key);
 				const g = state.grants.get(snap.grantId);
 				if (!d || d.state !== "queued" || !g || g.state === "ended") return [];
@@ -658,6 +582,7 @@ export class ProjectCollab {
 					...deliveryConsequence(state, msgId, agentId, r),
 				];
 			});
+			return "done";
 		}
 
 		// queued → planned: the binding (now with its conversation) and the
@@ -683,7 +608,7 @@ export class ProjectCollab {
 				{ allowMargin: true },
 			);
 		});
-		if (!planned) return;
+		if (!planned) return "skip";
 		const text = relayText({
 			grantId: snap.grantId,
 			n: snap.n,
@@ -715,6 +640,7 @@ export class ProjectCollab {
 			},
 		);
 		// The result line and its consequence for the grant were one append.
+		return "done";
 	}
 
 	// ── What a delivery's end does to its grant (§7.5) ────────────────────

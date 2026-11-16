@@ -214,6 +214,7 @@ async function main(): Promise<void> {
 	const { ProjectConversationStore } = await import("./store.js");
 	const { ProjectFanout } = await import("./fanout.js");
 	const { ProjectCollab } = await import("./collab.js");
+	const { createDeliveryQueue } = await import("./queue.js");
 	const { OutboxWatcher } = await import("./outbox.js");
 	const { parseOutbox } = await import("./collabText.js");
 	const { LOG_FILE } = await import("./log.js");
@@ -452,11 +453,22 @@ async function main(): Promise<void> {
 		fanout,
 		bindings,
 		recipient: soleConversation,
+		kick: (pid) => queue.kick(pid),
+		log,
+	});
+	const queue = createDeliveryQueue({
+		store,
+		fanout,
+		bindings,
+		recipient: soleConversation,
 		onCaptureEvent: (l) => service.onPersistedEvent((sid: string) => l(sid)),
+		collab: () => collab,
 		gateIntervalMs: 1000,
 		log,
 	});
-	await collab.start(await store.openAll());
+	const openedProjects = await store.openAll();
+	await collab.start(openedProjects);
+	await queue.start(openedProjects);
 	const outbox = new OutboxWatcher({
 		collab,
 		onCaptureEvent: (l) => service.onPersistedEvent(l),
@@ -918,6 +930,7 @@ printf '{"skipDangerousModePermissionPrompt": true}\\n' > ~/.claude/settings.jso
 	} finally {
 		outbox.stop();
 		collab.stop();
+		queue.stop();
 		server.close();
 		server.closeAllConnections();
 		await service.shutdown().catch(() => {});
