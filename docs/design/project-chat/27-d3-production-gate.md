@@ -83,7 +83,8 @@ instance), restarted or reconfigured in them, and they do not take part.
 The owner first asked for two additional sessions in a project of their own, then replaced that
 (same day) with the two existing test sessions of the Pilot project, **`pilot-dev` and `pilot-qa`**,
 which already hold a signed-in Claude: no new session, no sign-in step, and the consult runs
-**inside the Pilot project** between the agents `dev-pilot` and `qa-pilor`. The agents of A and B
+**inside the Pilot project** between the agents `dev-pilot` and `qa-pilor` (that is the handle as it was created, typo
+included; the session is `pilot-qa`). The agents of A and B
 are in that project too and are not named in the grant.
 
 Prepared on 2026-11-16 ~19:50Z (VM100 `/root/st-d3-go3-prep-20261116T194656Z` and `…T195041Z`), with
@@ -117,23 +118,58 @@ layers, neither of which changes an existing host or Docker rule or touches anot
 2. On the host, for a reserved range only: each participant is attached to the sessions network
    with a **fixed** address in `172.20.250.0/24` (kept by Docker across restarts), and two chains
    entered only for sources in that range drop forwarded traffic to private ranges and any new
-   connection to the host. They exist whether or not the container runs, so a restart has no open
-   window (layer 1 alone had one of about a second, measured).
+   connection to the host. They do not depend on the container's namespace, so a restart of the
+   **same container while the host stays up** has no open window for those two paths (layer 1 alone
+   had one of about a second, measured).
 
 The unit re-applies layer 1 on every start of a participant or of the backend and re-checks every
 30 s; a container it cannot isolate and verify is disconnected from the sessions network (fail
 closed). Verified from inside both containers: every forbidden target blocked, backend / DNS / model
 API / capture relay working, Composer delivering, capture origin still `match`; restart of one
-participant: address kept, nothing reachable. Known limits: a container *recreated* by the backend
-starts on a dynamic address until the unit re-attaches it (no Claude runs at that moment; not
-exercised); the host rules are restored by the unit after a host reboot, not before Docker starts.
+participant: address kept, nothing reachable.
+
+**This is not isolation "from the first instant" (B's review, 2026-11-16). Three cases stay open and
+block the gate until the owner decides on them:**
+
+- **Host boot.** Session containers have `RestartPolicy: unless-stopped`, so after a reboot of VM100
+  Docker starts the two participants during its own start-up, while the unit runs
+  `After=docker.service` and the host chains do not persist: for an interval nobody has measured
+  they have the network with **neither** layer. No Claude runs then, but the entrypoint and a tmux
+  shell do, over a workspace that has been used in bypass.
+- **Recreation, or a `/start` that finds the container gone and creates another.** The new
+  container is born on a dynamic address: **no layer** until the unit sees its start, re-attaches
+  it with the fixed address and applies layer 1 (under 1.3 s measured for layer 1). That
+  re-attachment (`network disconnect -f` + `connect --ip`) would land in the middle of steps 3–5 of
+  the recreation engine; never exercised.
+- **The first second after any start, inside the bridge.** Traffic between containers of the same
+  bridge (other sessions, any port of the backend) is not filtered by the host (`br_netfilter` is
+  not loaded); only layer 1 cuts it, and it is not there yet.
+
+Also: the fail-closed path lives in the unit. If the unit is disabled, or its config is unreadable,
+nothing is applied after a restart and nothing disconnects the container. And the other four
+sessions (A, B, Home Automation, Educación) are not isolated at all: out of this GO's scope.
+
+Operational rule while they are participants: `pilot-dev` and `pilot-qa` are not recreated and not
+started from an absent container; if that is ever needed they first stop being participants (GO 3
+does not run). Proposed closure, needing the owner's GO and a rehearsal on VM120 first: the host
+rules in an nftables table of their own (`inet`, hooks `forward` and `input`, before Docker's
+priority) loaded by a oneshot unit `Before=docker.service` that `docker.service` requires, plus a
+`bridge` table for the same source range; the real closure for recreation is the backend creating
+the container with its fixed address, a code change with its own GO.
+
 Rollback: `st-pilot-netiso rollback` (removes exactly its chains and jumps and stops the unit).
 
 Consequences:
 
-1. **Permission mode.** With default mode and R-a, the only tool that runs without a dialog is a
-   Write/Edit under `.st-outbox/`; anything else stops at a dialog that nobody answers. This is the
-   configuration both pilot stages and the M3 negatives validated.
+1. **Permission mode.** With default mode and R-a, the only tool **with an effect** that runs
+   without a dialog is a Write/Edit under `.st-outbox/`; anything else with an effect stops at a
+   dialog that nobody answers. Read-only tools inside the workspace (Read, Glob, Grep) also run
+   unprompted, so **what a workspace holds can be quoted in a message**, which then stays in the
+   project log and in the backups. These are not the empty workspaces of the pilot: each holds a
+   checkout of this repository and, under the workspace, `.st/claude-state/.credentials.json` (the
+   session's own Claude sign-in) and an `.env.example` (inventory of 2026-11-16, names only). With
+   an innocuous question that is unlikely, not impossible; a managed deny rule for `.st/` in these
+   two sessions would close it and is proposed with the gate.
 2. **`waiting_permission` after a rejected dialog** applies here: the conversation keeps that state
    until its next tool event, next turn or the silence probe (8 min), and D3 holds deliveries to it
    as `queued` meanwhile. A delay, never a wrong delivery (seen in the M3 negatives).
@@ -144,7 +180,11 @@ Consequences:
    cause that is not `match` explained. A forwarder on loopback inside a participant's container
    *is* that participant (§7.8). Read with the host's `ss` in each container's namespace
    (2026-11-16): the capture relay and Docker's DNS stub in both; in `pilot-qa` also one ephemeral
-   loopback port opened by the `claude` process itself (to be classified before GO 3).
+   loopback port opened by the session's only interactive `claude` process (same pid as in
+   `docker top`). It is bound to `127.0.0.1`, unreachable from another container, so it is not a
+   forwarder in the sense of §7.8: it falls under "the session's own trust domain", a declared
+   risk (B, 2026-11-16). It is recorded at every read before GO 3; a listener on a non-loopback
+   address, or of a process other than that `claude`, the relay or Docker's DNS, stops the gate.
 5. **Capture fidelity (#648).** A hook pair can arrive inverted; it touched no admission event in
    either stage. If it ever hits a Write pair the message is not admitted (the sweep notes the file
    `unverified`). Open in #648, not a blocker.
@@ -197,7 +237,10 @@ step leads automatically into the next.
   conversation each, live CLI version recorded.
 - The owner (or A on his instruction) sends one task from the UI with "allow a consult",
   `maxMessages: 2`, the innocuous question, default expiry. The owner watches the thread.
-- STOP (revoke the grant from the UI and keep everything as it is) on: a message shown twice, a
+- STOP (revoke the grant from the UI and keep everything as it is) on: the `grant{created}` line
+  naming any agent other than `dev-pilot` and `qa-pilor` (read on the first event, before the
+  initiator answers: the project has four agents and the UI offers the consult for any of them), a
+  message shown twice, a
   message in a pane with no `sending` line, an `outbox{accepted}` whose origin is not `match`, any
   tool effect outside the outbox attributable to the consult, a `check-log` violation.
 - Record: the project log, both captures, `check-log`, origin counters before/after. Same private
