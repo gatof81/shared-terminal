@@ -223,8 +223,10 @@ afterEach(async () => {
 import {
 	SESSION_END_GRACE_MS,
 	SILENCE_PROBE_AFTER_MS,
+	SILENCE_SWEEP_INTERVAL_MS,
 	TARGETED_PROBE_DELAY_MS,
 	UNKNOWN_AFTER_SILENCE_MS,
+	UNKNOWN_REPROBE_AFTER_MS,
 } from "./limits.js";
 import { PROBE_ARGV, type ProbeEntry } from "./probe.js";
 
@@ -416,6 +418,88 @@ describe("v1.7.2 — the resumed conversation (Educación HZ, 'not at its prompt
 	});
 });
 
+describe("v1.9.5 — §5.3 (c): an `unknown` conversation with a bound pane is asked again (#654)", () => {
+	const DIALOG: ProbeEntry = {
+		sessionId: "c1",
+		kind: "interactive",
+		pid: CLAUDE_PID,
+		status: "waiting",
+		waitingFor: "dialog open",
+	};
+	const probeCalls = () => box.calls.filter((c) => c.join(" ") === PROBE_ARGV.join(" ")).length;
+
+	async function startedOnDialog() {
+		session("s1");
+		box.probe = [DIALOG];
+		await service.ingest("s1", "%0", hook("SessionStart", { source: "startup", ...PANE }, "c1"));
+		// What the targeted probe saw on VM100: a first-run dialog, nothing applied.
+		await service.probeAndApply("s1");
+		expect(await state("c1")).toMatchObject({ status: "unknown", statusEvidence: "created" });
+	}
+
+	it("dialog at start, dismissed without any hook ⇒ the next sweep finds the idle CLI", async () => {
+		await startedOnDialog();
+		now += UNKNOWN_REPROBE_AFTER_MS;
+		await service.sweepSilence();
+		expect((await state("c1"))?.status).toBe("unknown");
+		box.probe = [interactive("c1")];
+		now += SILENCE_SWEEP_INTERVAL_MS;
+		await service.sweepSilence();
+		expect(await state("c1")).toMatchObject({
+			status: "waiting_input",
+			statusEvidence: "probe:idle",
+		});
+	});
+
+	it("a dialog nobody answers never becomes waiting_input, and the probing slows to the silence cadence", async () => {
+		await startedOnDialog();
+		const before = probeCalls();
+		for (let t = 0; t < UNKNOWN_AFTER_SILENCE_MS; t += SILENCE_SWEEP_INTERVAL_MS) {
+			now += SILENCE_SWEEP_INTERVAL_MS;
+			await service.sweepSilence();
+		}
+		const fast = probeCalls() - before;
+		expect(fast).toBeGreaterThan(0);
+		expect(fast).toBeLessThanOrEqual(UNKNOWN_AFTER_SILENCE_MS / SILENCE_SWEEP_INTERVAL_MS);
+		const mid = probeCalls();
+		for (let t = 0; t < 4 * SILENCE_PROBE_AFTER_MS; t += SILENCE_SWEEP_INTERVAL_MS) {
+			now += SILENCE_SWEEP_INTERVAL_MS;
+			await service.sweepSilence();
+		}
+		expect(probeCalls() - mid).toBeLessThanOrEqual(4);
+		expect(probeCalls() - mid).toBeGreaterThan(0);
+		expect((await state("c1"))?.status).toBe("unknown");
+	});
+
+	it("a real permission prompt is reported as such and stays blocked", async () => {
+		await startedOnDialog();
+		box.probe = [{ ...DIALOG, waitingFor: "permission prompt" }];
+		now += SILENCE_SWEEP_INTERVAL_MS;
+		await service.sweepSilence();
+		expect(await state("c1")).toMatchObject({
+			status: "waiting_permission",
+			statusEvidence: "probe:waiting",
+		});
+	});
+
+	it("an idle answer from a process that is not the pane's interactive CLI changes nothing", async () => {
+		await startedOnDialog();
+		box.probe = [{ sessionId: "c1", kind: "background", pid: BG_PID, status: "idle" }];
+		now += SILENCE_SWEEP_INTERVAL_MS;
+		await service.sweepSilence();
+		expect((await state("c1"))?.status).toBe("unknown");
+	});
+
+	it("after a stop released the pane, nothing is probed", async () => {
+		await startedOnDialog();
+		await service.onSessionDown("s1");
+		const before = probeCalls();
+		now += UNKNOWN_AFTER_SILENCE_MS;
+		await service.sweepSilence();
+		expect(probeCalls()).toBe(before);
+	});
+});
+
 describe("v1.7.2 — §5.3 silence", () => {
 	async function waitingAt(cid = "c1") {
 		session("s1");
@@ -483,8 +567,9 @@ describe("v1.7.2 — §5.3 silence", () => {
 		expect(box.calls.filter((c) => c.join(" ") === PROBE_ARGV.join(" "))).toHaveLength(0);
 	});
 
-	it("unknown and ended are not live claims: the sweep leaves them (and probes nothing for them)", async () => {
-		await resumeIdle();
+	it("an `unknown` without a bound pane is not a live claim: the sweep leaves it (and probes nothing for it)", async () => {
+		session("s1");
+		await service.ingest("s1", undefined, hook("SessionStart", { source: "resume" }, "old"));
 		now += UNKNOWN_AFTER_SILENCE_MS * 2;
 		await service.sweepSilence();
 		expect((await state("old"))?.status).toBe("unknown");

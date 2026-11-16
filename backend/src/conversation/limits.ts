@@ -72,6 +72,16 @@ export const SILENCE_PROBE_AFTER_MS = 8 * 60_000;
 /** How often the silence sweep looks. */
 export const SILENCE_SWEEP_INTERVAL_MS = 60_000;
 /**
+ * v1.9.5 §5.3 (c), #654: an `unknown` conversation with a pane bound in the
+ * current start is asked again — nothing else ever moves it when the first
+ * probe met a first-run dialog and the CLI then sits idle (no hook). Below
+ * the sweep interval on purpose: every sweep qualifies while the last
+ * activity is younger than UNKNOWN_AFTER_SILENCE_MS; after that the cadence
+ * drops to SILENCE_PROBE_AFTER_MS, the live claims' own, so a CLI parked on
+ * a dialog nobody answers costs what an idle one costs.
+ */
+export const UNKNOWN_REPROBE_AFTER_MS = 30_000;
+/**
  * The targeted probe after a SessionStart that leaves `unknown` (the
  * `--resume` case): late enough for the CLI to have drawn its prompt (the
  * §8.2.2 measurements put the switch at ≈ 0.2 s), early enough that Chat

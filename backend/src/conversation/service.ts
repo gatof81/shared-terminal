@@ -53,6 +53,7 @@ import {
 	TARGETED_PROBE_DELAY_MS,
 	TOKEN_CACHE_TTL_MS,
 	UNKNOWN_AFTER_SILENCE_MS,
+	UNKNOWN_REPROBE_AFTER_MS,
 } from "./limits.js";
 import { type NormalizedEvent, normalizeHookInput } from "./normalize.js";
 import {
@@ -285,6 +286,8 @@ interface ConvRuntime {
 	 * restart cannot extend an old live claim's silence window.
 	 */
 	lastHookAt: number;
+	/** ms of the last sweep probe asked for this conversation while `unknown` (v1.9.5 §5.3 c). */
+	lastUnknownProbeAt: number;
 }
 
 /** The ST session was hard-deleted while this work was in flight (B4). */
@@ -844,6 +847,7 @@ export class ConversationService {
 			rateDropped: 0,
 			rateDroppedBytes: 0,
 			lastHookAt: Date.parse(index.lastEventAt ?? "") || this.now(),
+			lastUnknownProbeAt: 0,
 		};
 		this.runtime.set(cid, rt);
 		return rt;
@@ -1945,7 +1949,11 @@ export class ConversationService {
 	 * session whose last evidence — an accepted hook, or a probe that moved
 	 * or renewed its state — is ≥ SILENCE_PROBE_AFTER_MS old: one probe of
 	 * the session. Whatever is still without evidence after
-	 * UNKNOWN_AFTER_SILENCE_MS then decays to `unknown · timeout`. Runtimes
+	 * UNKNOWN_AFTER_SILENCE_MS then decays to `unknown · timeout`. v1.9.5
+	 * (c): an `unknown` conversation with a bound pane is probed too, and a
+	 * probe is all it gets — the transitions and `verifyIdentity` are the
+	 * ordinary ones, so an open dialog or a permission prompt still never
+	 * becomes `waiting_input`. Runtimes
 	 * exist only for sessions whose container is up (onSessionDown drops
 	 * them), which is the table's "con contenedor running".
 	 */
@@ -1971,8 +1979,28 @@ export class ConversationService {
 		for (const rt of this.runtime.values()) {
 			if (this.isDead(rt.stSessionId)) continue;
 			const index = this.deps.store.getResidentIndex(rt.stSessionId, rt.cid);
-			if (!index || !isLiveClaim(index.state.status)) continue;
-			if (now - evidenceAt(rt, index) < SILENCE_PROBE_AFTER_MS) continue;
+			if (!index) continue;
+			if (isLiveClaim(index.state.status)) {
+				if (now - evidenceAt(rt, index) < SILENCE_PROBE_AFTER_MS) continue;
+			} else if (
+				index.state.status === "unknown" &&
+				index.state.evidence !== "timeout" &&
+				index.paneId
+			) {
+				// (c) #654: `unknown` falsifies nothing, so it never decays — but
+				// with a pane bound in this start there is a process to ask, and
+				// an idle CLI will not say anything by itself. The pane is the
+				// bound: a stop releases it, `probe:absent` ends the conversation.
+				// Not `timeout`: that one is where the probes themselves stopped
+				// answering, and it stays left alone (#505 gate 6b).
+				const since = evidenceAt(rt, index);
+				const every =
+					now - since < UNKNOWN_AFTER_SILENCE_MS
+						? UNKNOWN_REPROBE_AFTER_MS
+						: SILENCE_PROBE_AFTER_MS;
+				if (now - Math.max(rt.lastUnknownProbeAt, since) < every) continue;
+				rt.lastUnknownProbeAt = now;
+			} else continue;
 			const list = due.get(rt.stSessionId) ?? [];
 			list.push(rt);
 			due.set(rt.stSessionId, list);
