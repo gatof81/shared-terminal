@@ -492,17 +492,23 @@ abre una consulta sale ahora o no sale, porque el reloj de su permiso empieza co
   captura. Después de una entrega cuyo efecto sobre el pane no se sabe limpio, eso no alcanza: el
   registro de pane del Composer puede seguir sin liberar, o puede haber texto en la entrada, y cada
   mensaje de atrás saldría de la cola solo para terminar `refused` (final). Por eso la fila de un
-  agente se juzga por **la última entrega que salió hacia él** (de la cola o directa, de cualquier
-  fuente; `not-sent` no cuenta, nunca llegó al Composer):
+  agente se juzga por **las entregas que salieron hacia él después de la última que se sabe limpia**
+  (de la cola o directas, de cualquier fuente; `not-sent` no cuenta, nunca llegó al Composer):
   - en curso (`planned`, `placing`, `sending`) ⇒ espera: de a una;
-  - `delivered`, `settled{delivered}` o `settled{resolved}` ⇒ la fila sigue;
   - `refused` con `busy`, `rate-limited` o `shutting-down` (hablan del momento) ⇒ espera 10 min —más
-    de lo que el barrido de silencio tarda en corregir un `waiting_input` viejo— y sale la siguiente;
+    de lo que el barrido de silencio tarda en corregir un `waiting_input` viejo— desde su última línea;
   - cualquier otro resultado (`uncertain`, `unconfirmed`, `failed`, `misdelivered`, otro `refused`,
-    `settled` con otro resultado) ⇒ espera hasta que la evidencia del Composer lo asiente como
-    entregado, la persona lo marque «Hecho» (`owner_ack` de ese mensaje, §4.3) o reanude la consulta
-    que esa entrega pausó (§7.6), una entrega posterior al mismo agente termine `delivered`, o pasen
-    24 h desde su última línea.
+    `settled` con otro resultado) ⇒ espera 24 h desde su última línea.
+  **Se sabe limpia** una entrega `delivered`, `settled{delivered}` o `settled{resolved}`, y la que la
+  persona miró: la marcó «Hecho» (`owner_ack` de ese mensaje, §4.3) o reanudó la consulta que esa
+  entrega pausó (§7.6). Limpia lo suyo y todo lo que salió **antes** que ella: el Composer admite un
+  envío por pane a la vez, así que una posterior que llegó dice que el pane estaba usable.
+  «Antes» y «después» son el orden en que **salieron** (su primera línea que no es `queued` ni
+  `not-sent`), no el de su última línea: un `uncertain` asentado como fallido después de que un
+  mensaje posterior se entregó describe el pane de antes de ese mensaje y no vuelve a detener la
+  fila; y un `settled{delivered}` tardío de una entrega vieja no abre la fila que detiene una
+  posterior. Un rechazo «ahora no» posterior tampoco dice nada de un resultado no limpio anterior:
+  ese sigue deteniendo sus 24 h.
   Mientras espera no se escribe nada: lo encolado sigue `queued`, cancelable y con su propio
   vencimiento. La regla es una función pura del registro (`lineHold`), así que sobrevive a un
   reinicio (`uncertain{orphaned}` detiene igual).

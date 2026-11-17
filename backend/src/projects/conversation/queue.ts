@@ -40,6 +40,7 @@ export const REFUSED_HOLD_MS = 10 * 60_000;
 /** §3.6: past this, a result nobody settled or marked done stops holding the line. */
 export const LINE_HOLD_MAX_MS = 24 * 60 * 60_000;
 
+const IN_FLIGHT: ReadonlySet<string> = new Set(["planned", "placing", "sending"]);
 /** Composer refusals that describe the moment, not something a person has to look at. */
 const TRANSIENT_REFUSALS: ReadonlySet<string> = new Set(["busy", "rate-limited", "shutting-down"]);
 
@@ -52,50 +53,69 @@ const TRANSIENT_REFUSALS: ReadonlySet<string> = new Set(["busy", "rate-limited",
  * enough: the Composer's pane record may still be unreleased, or text may sit
  * in the input, and every message behind it would leave the queue only to be
  * `refused` — final, and the person would have to write each one again. So
- * the line is judged on the LAST delivery that left for this agent (from the
- * queue or sent directly, of any source):
+ * the line is judged on every delivery that left for this agent (from the
+ * queue or sent directly, of any source) AFTER the last one known clean:
  *
  *   in flight                          hold: one at a time;
- *   delivered, settled as delivered    open;
- *   or resolved by an admin
  *   refused "not now" (busy, …)        hold for REFUSED_HOLD_MS — longer than
  *                                      the silence sweep needs to correct a
  *                                      stale `waiting_input` (CONVERSATION.md §5.3);
- *   anything else                      hold until the Composer's evidence
- *                                      settles it clean, the person marks it
- *                                      done (`owner_ack`) or resumes the
- *                                      consult it paused, a later delivery to
- *                                      the agent is delivered, or 24 h pass.
+ *   any other result                   hold for 24 h.
+ *
+ * "Known clean" is a delivery that was delivered, settled as delivered or
+ * resolved by an admin, or one the person looked at: marked done
+ * (`owner_ack`), or the consult it paused resumed by them (§7.6). It clears
+ * itself and everything that left BEFORE it — the Composer takes one send per
+ * pane at a time, so a later one that arrived says the pane was usable then.
+ *
+ * "Before" is the order in which they LEFT (`leftSeq`), not of their last
+ * line: an `uncertain` settled as failed after a later message was delivered
+ * describes the pane as it was before that message, and must not hold the
+ * line again (A's review of #663). The reverse matters as much: a later
+ * "not now" refusal is not evidence about an earlier unclean result, so it
+ * never opens the line that one holds.
  *
  * Pure, from the log: nothing is written while a line is held, and what is
  * queued behind it stays cancellable and keeps its own expiry.
  */
 export function lineHold(state: Folded, agentId: string, nowMs: number): DeliveryFold | null {
-	let last: DeliveryFold | undefined;
-	for (const d of state.deliveries.values()) {
-		// `not-sent` never reached the Composer: it says nothing about the pane.
-		if (d.agentId !== agentId || d.state === "queued" || d.state === "not-sent") continue;
-		if (!last || d.lastSeq > last.lastSeq) last = d;
-	}
-	if (!last) return null;
-	if (last.state === "planned" || last.state === "placing" || last.state === "sending") return last;
-	if (last.state === "delivered") return null;
-	if (last.state === "settled" && (last.result === "delivered" || last.result === "resolved"))
-		return null;
-	// The person looked at it: resumed the consult it paused (§7.6), or marked it done.
-	const grant = state.grants.get(grantIdOf(last.authorizedBy) ?? "");
-	if (grant?.personResumedSeq !== undefined && grant.personResumedSeq > last.lastSeq) return null;
+	const acked = new Set<string>();
 	for (const a of state.acks.values()) {
 		const t = a.target as { msg_id?: string; agent_id?: string } | undefined;
-		if (t?.msg_id === last.msgId && (t.agent_id === undefined || t.agent_id === agentId))
-			return null;
+		if (t?.msg_id && (t.agent_id === undefined || t.agent_id === agentId)) acked.add(t.msg_id);
 	}
-	const age = nowMs - Date.parse(last.lastAt);
-	const limit =
-		last.state === "refused" && TRANSIENT_REFUSALS.has(last.reason ?? "")
-			? REFUSED_HOLD_MS
-			: LINE_HOLD_MAX_MS;
-	return age >= limit ? null : last;
+	// `queued` / `not-sent` never reached the Composer: they say nothing about the pane.
+	const left: Array<DeliveryFold & { leftSeq: number }> = [];
+	let clean = -1;
+	for (const d of state.deliveries.values()) {
+		if (d.agentId !== agentId || d.leftSeq === undefined) continue;
+		if (d.state === "queued" || d.state === "not-sent") continue;
+		left.push(d as DeliveryFold & { leftSeq: number });
+		const grant = state.grants.get(grantIdOf(d.authorizedBy) ?? "");
+		const isClean =
+			d.state === "delivered" ||
+			(d.state === "settled" && (d.result === "delivered" || d.result === "resolved")) ||
+			(!IN_FLIGHT.has(d.state) &&
+				(acked.has(d.msgId) ||
+					(grant?.personResumedSeq !== undefined && grant.personResumedSeq > d.lastSeq)));
+		if (isClean && d.leftSeq > clean) clean = d.leftSeq;
+	}
+	// What the person has to look at comes before what moves on its own.
+	let inFlight: DeliveryFold | null = null;
+	let unclean: DeliveryFold | null = null;
+	let notNow: DeliveryFold | null = null;
+	for (const d of left) {
+		if (d.leftSeq <= clean) continue;
+		if (IN_FLIGHT.has(d.state)) {
+			inFlight = d;
+			continue;
+		}
+		const transient = d.state === "refused" && TRANSIENT_REFUSALS.has(d.reason ?? "");
+		if (nowMs - Date.parse(d.lastAt) >= (transient ? REFUSED_HOLD_MS : LINE_HOLD_MAX_MS)) continue;
+		if (transient) notNow = d;
+		else if (!unclean || d.leftSeq > (unclean.leftSeq as number)) unclean = d;
+	}
+	return inFlight ?? unclean ?? notNow;
 }
 
 export type RecipientState =
