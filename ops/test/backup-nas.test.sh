@@ -24,8 +24,18 @@ echo "payload $RANDOM $d" >"$T_SRC/file.txt"
 tar -czf "$d/workspaces/sid-1.tar.gz" -C "$T_SRC" file.txt
 echo '{"id":1}' >"$d/users.jsonl"
 rows=${FAKE_ROWS:-1}
-printf '{"version":1,"schemaVersion":20,"tables":{"users":%s},"workspaces":{"sid-1":{"tarBytes":%s,"fileCount":1}}}\n' \
-	"$rows" "$(stat -c %s "$d/workspaces/sid-1.tar.gz")" >"$d/manifest.json"
+mkdir -p "$d/projects"
+tar -czf "$d/projects/pid-1.tar.gz" -C "$T_SRC" file.txt
+psha=$(sha256sum "$d/projects/pid-1.tar.gz" | cut -d' ' -f1)
+pbytes=$(stat -c %s "$d/projects/pid-1.tar.gz")
+# After the manifest's numbers are taken: a tarball that no longer is the one the manifest names.
+[ -z "${FAKE_PROJECT_DAMAGE:-}" ] || echo damaged >>"$d/projects/pid-1.tar.gz"
+[ "${FAKE_PROJECT_DAMAGE:-}" != missing ] || rm "$d/projects/pid-1.tar.gz"
+rev=
+if [ -n "${FAKE_REVOKED:-}" ]; then rev=',"globalRevocation":true'; fi
+[ "${FAKE_REVOKED:-}" != file ] || echo r >"$d/REVOKED_ALL"
+printf '{"version":1,"schemaVersion":20,"tables":{"users":%s},"workspaces":{"sid-1":{"tarBytes":%s,"fileCount":1}},"projects":{"pid-1":{"tarBytes":%s,"tarSha256":"%s"}}%s}\n' \
+	"$rows" "$(stat -c %s "$d/workspaces/sid-1.tar.gz")" "$pbytes" "$psha" "$rev" >"$d/manifest.json"
 SH
 chmod +x "$T/fake-backup.sh"
 export T_SRC="$T/src"
@@ -96,6 +106,24 @@ is "a manifest mismatch ends non-zero" "$?" 1
 is "nothing published" "$(published)" 0
 is "nothing reached the NAS" "$(find "$N" -mindepth 1 | wc -l)" 0
 
+# ── The Project Chat log exists only in its tarball: verified like the rest ──
+new_env badproject
+FAKE_PROJECT_DAMAGE=1 run run
+is "a project tarball that is not the manifest's ends non-zero" "$?" 1
+is "…and nothing reached the NAS" "$(find "$N" -mindepth 1 | wc -l)" 0
+if grep -q "project pid-1" "$E/out.txt"; then ok "the log names the project"; else bad "no project line: $(tail -2 "$E/out.txt")"; fi
+sleep 0.01
+FAKE_PROJECT_DAMAGE=missing run run
+is "a missing project tarball ends non-zero" "$?" 1
+is "…nothing published" "$(published)" 0
+sleep 0.01
+FAKE_REVOKED=1 run run
+is "a manifest that declares REVOKED_ALL without the file ends non-zero" "$?" 1
+sleep 0.01
+FAKE_REVOKED=file run run
+is "with the file it is published" "$?" 0
+if [ "$(find "$N" -mindepth 2 -maxdepth 2 -name REVOKED_ALL | wc -l)" = 1 ]; then ok "…and REVOKED_ALL travels"; else bad "REVOKED_ALL not on the NAS"; fi
+
 # ── The NAS is unreachable: locals accumulate, nothing is deleted ────────────
 new_env nasdown
 run run
@@ -156,6 +184,14 @@ sed -i 's/^MIN_FREE_GB=.*/MIN_FREE_GB=100000000/' "$E/conf"
 run run
 is "below the free-space minimum ends non-zero" "$?" 1
 is "and makes no backup" "$(locals)" 0
+
+# ── What a failed backup command left behind is named ────────────────────────
+new_env leftovers
+run run
+mkdir "$B/2020-01-01T08-17-01-000Z"
+run status
+if grep -q "2020-01-01T08-17-01-000Z  (no manifest" "$E/out.txt"; then ok "status marks a local directory without a manifest"; else bad "status does not mark it"; fi
+is "…and only that one" "$(grep -c "no manifest" "$E/out.txt")" 1
 
 if [ "$FAILS" = 0 ]; then echo "all backup-nas tests passed"; else
 	echo "$FAILS backup-nas test(s) FAILED"

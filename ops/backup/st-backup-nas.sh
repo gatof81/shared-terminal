@@ -71,11 +71,12 @@ nas_root() {
 # ── Local verification ───────────────────────────────────────────────────────
 
 # The backup is whole by its own manifest (written last by `npm run backup`): every table has the
-# rows it says, every workspace tarball has the size it says and is a readable gzip, and the set of
-# tarballs is exactly the manifest's.
+# rows it says, every workspace tarball has the size it says and is a readable gzip, every project
+# tarball has the size and sha256 it says (the Project Chat log exists nowhere else — not in D1),
+# both sets of tarballs are exactly the manifest's, and REVOKED_ALL is there iff the manifest says so.
 verify_local() {
 	python3 -I - "$1" <<'PY'
-import gzip, json, os, sys
+import gzip, hashlib, json, os, sys
 d = sys.argv[1]
 m = json.load(open(os.path.join(d, "manifest.json")))
 assert m.get("version") == 1 and m.get("tables"), "manifest"
@@ -94,7 +95,19 @@ for sid, w in m.get("workspaces", {}).items():
     with gzip.open(p, "rb") as g:
         while g.read(1 << 20):
             pass
-print(f"tables {len(m['tables'])} workspaces {len(m.get('workspaces', {}))} schema {m.get('schemaVersion')}")
+pj = m.get("projects", {})
+pd = os.path.join(d, "projects")
+have = sorted(os.listdir(pd)) if os.path.isdir(pd) else []
+assert have == sorted(f"{p}.tar.gz" for p in pj), "project tarballs differ from the manifest"
+for pid, e in pj.items():
+    h, size = hashlib.sha256(), 0
+    with open(os.path.join(pd, f"{pid}.tar.gz"), "rb") as f:
+        while b := f.read(1 << 20):
+            h.update(b)
+            size += len(b)
+    assert size == e["tarBytes"] and h.hexdigest() == e["tarSha256"], f"project {pid}: size or sha256"
+assert os.path.isfile(os.path.join(d, "REVOKED_ALL")) == (m.get("globalRevocation") is True), "REVOKED_ALL differs from the manifest"
+print(f"tables {len(m['tables'])} workspaces {len(m.get('workspaces', {}))} projects {len(pj)} schema {m.get('schemaVersion')}")
 PY
 }
 
@@ -222,7 +235,10 @@ status)
 	echo "on the NAS without a marker (not counted, never removed here):"
 	grep -E "$NAME_RE" <<<"$root" | while read -r n; do grep -qxF "$n.COMPLETE" <<<"$root" || echo "  $n"; done
 	echo "local:"
-	find "$BACKUPS_DIR" -mindepth 1 -maxdepth 1 -type d -printf '  %f\n' | sort
+	find "$BACKUPS_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort | while read -r n; do
+		# What a failed backup command leaves: retention never counts or removes it, so say so.
+		if [ -f "$BACKUPS_DIR/$n/manifest.json" ]; then echo "  $n"; else echo "  $n  (no manifest: incomplete, remove by hand)"; fi
+	done
 	[ -r "$STATE_DIR/status.json" ] && cat "$STATE_DIR/status.json"
 	;;
 *)
