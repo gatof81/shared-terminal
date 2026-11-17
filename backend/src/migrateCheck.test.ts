@@ -112,7 +112,8 @@ describe("db:migrate-check (v20 release gate)", () => {
 		expect(r.failures).toEqual([]);
 		expect(r.ok).toBe(true);
 		expect(r.schemaFrom).toBe(19);
-		expect(r.schemaTo).toBe(FENCE_MIGRATION);
+		// The gate is v20's; later migrations apply after it.
+		expect(r.schemaTo).toBeGreaterThanOrEqual(FENCE_MIGRATION);
 		const by = Object.fromEntries(r.tables.map((t) => [t.name, t]));
 		expect(by.users).toMatchObject({
 			jsonlRows: 2,

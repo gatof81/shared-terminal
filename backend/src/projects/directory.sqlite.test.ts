@@ -341,14 +341,18 @@ describe("migration v19", () => {
 				"idx_projects_request",
 			]),
 		);
-		expect(names("trigger")).toEqual(["trg_project_agent_creation", "trg_project_agent_removed"]);
+		// v19's own triggers (later migrations add others, e.g. v21's).
+		expect(names("trigger").filter((n) => n.startsWith("trg_project"))).toEqual([
+			"trg_project_agent_creation",
+			"trg_project_agent_removed",
+		]);
 		// Recorded (not necessarily the latest: later migrations append after it).
 		expect(count("SELECT COUNT(*) AS n FROM schema_migrations WHERE version = 19")).toBe(1);
 		const { dbm } = await load();
 		await dbm.migrateDb();
 		// Every statement re-applied directly (a crash before the ledger INSERT).
 		for (const sql of dbm.PROJECT_DIRECTORY_DDL) db.exec(sql);
-		expect(names("trigger")).toHaveLength(2);
+		expect(names("trigger").filter((n) => n.startsWith("trg_project"))).toHaveLength(2);
 	});
 
 	it("a boot that died part-way through v19 converges on the next boot", async () => {
@@ -366,7 +370,11 @@ describe("migration v19", () => {
 		expect(count("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'agent_bindings'")).toBe(1);
 		await dbm.migrateDb();
 		expect(count("SELECT COUNT(*) AS n FROM schema_migrations WHERE version = 19")).toBe(1);
-		expect(count("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'trigger'")).toBe(2);
+		expect(
+			count(
+				"SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'trg_project%'",
+			),
+		).toBe(2);
 	});
 
 	it("is additive: no existing table gains or loses a column", async () => {
