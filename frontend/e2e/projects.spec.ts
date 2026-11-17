@@ -259,7 +259,10 @@ test.describe("projects — feature on", () => {
 			"title",
 			/Claude: Needs you · waiting for a permission answer · via hook · /,
 		);
-		await expect(select).toHaveAttribute("aria-label", /agent @designer-hz, Claude: Needs you$/);
+		await expect(select).toHaveAttribute(
+			"aria-label",
+			/^hz-design Needs you @designer-hz, session running$/,
+		);
 		// A phone row stays one line of secondary text: state · agent.
 		await expect(app.sessionRow("hz-design").locator(".session-meta > *")).toHaveCount(2);
 
@@ -851,7 +854,7 @@ test.describe("projects — feature on", () => {
 		// Screen readers get the agent in the row's name (the link is hidden here).
 		await expect(row.locator(".session-select")).toHaveAttribute(
 			"aria-label",
-			/^my-project, running, agent @developer-hz/,
+			/^my-project Working @developer-hz, session running$/,
 		);
 		// The row opens the session (the tag is part of its button).
 		await expect(row.locator(".session-select .session-agent-tag")).toHaveCount(1);

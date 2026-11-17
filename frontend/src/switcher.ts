@@ -476,7 +476,12 @@ export function initSwitcher(isLoggedIn: () => boolean): void {
 	// The hint says the key this keyboard has.
 	const mac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 	const kbd = btn?.querySelector("kbd");
-	if (mac && kbd) kbd.textContent = "⌘K";
+	if (mac && kbd) {
+		kbd.textContent = "⌘K";
+		// The name keeps starting with the text on screen (WCAG 2.5.3; axe reads
+		// the <kbd> as visible text) and says this keyboard's key, not Ctrl.
+		btn?.setAttribute("aria-label", "Conversations ⌘K — go to a conversation");
+	}
 	document.addEventListener("keydown", (e) => {
 		// The key labelled K; the physical K position (e.code) only when the
 		// layout types no Latin letter there (Cyrillic, Greek…) — on Colemak

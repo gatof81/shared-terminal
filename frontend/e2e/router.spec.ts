@@ -39,7 +39,7 @@ test.describe("router", () => {
 		const depthBefore = await page.evaluate(
 			() => (history.state as { st?: { n: number } })?.st?.n ?? 0,
 		);
-		await page.locator('#terminal-tabs [role="tab"]', { hasText: "Tab 2" }).click();
+		await page.locator("#terminal-tabs .tab-chip-btn", { hasText: "Tab 2" }).click();
 		await expect.poll(() => page.url()).toContain(`#/sessions/${S}/terminal/tab-2`);
 		expect(await page.evaluate(() => (history.state as { st?: { n: number } })?.st?.n ?? 0)).toBe(
 			depthBefore,
