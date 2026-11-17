@@ -516,7 +516,12 @@ describe("push_subscriptions (#560)", () => {
 
 	it("an older backup without the table (schema ≥ 14) restores none and says why", async () => {
 		await backupWithSub("BKeyA");
-		await fs.rm(path.join(outDir, "push_subscriptions.jsonl")); // what every backup before #560 looks like
+		// What every backup before #560 looks like: no file, and no count for it.
+		await fs.rm(path.join(outDir, "push_subscriptions.jsonl"));
+		const manifestPath = path.join(outDir, "manifest.json");
+		const manifest = JSON.parse(await fs.readFile(manifestPath, "utf-8"));
+		delete manifest.tables.push_subscriptions;
+		await fs.writeFile(manifestPath, JSON.stringify(manifest));
 		const warn = vi.spyOn(logger, "warn");
 		try {
 			await runRestore(outDir);
@@ -813,6 +818,26 @@ describe("runRestore", () => {
 		await noWrites(() => runRestore(outDir), /unsafe column name/);
 		await fs.writeFile(users, `${good}{"id": \n`);
 		await noWrites(() => runRestore(outDir), /users\.jsonl is not readable JSONL/);
+	});
+
+	it("a dump cut at a line boundary, or missing, refuses before any D1 call", async () => {
+		await makeBackup();
+		const users = path.join(outDir, "users.jsonl");
+		const lines = (await fs.readFile(users, "utf8")).split("\n").filter((l) => l !== "");
+		expect(lines.length).toBeGreaterThan(0);
+		await fs.writeFile(
+			users,
+			lines
+				.slice(0, -1)
+				.map((l) => `${l}\n`)
+				.join(""),
+		);
+		await noWrites(
+			() => runRestore(outDir),
+			new RegExp(`users\\.jsonl has ${lines.length - 1} rows, the manifest says ${lines.length}`),
+		);
+		await fs.rm(users);
+		await noWrites(() => runRestore(outDir), /users\.jsonl has 0 rows, the manifest says/);
 	});
 });
 

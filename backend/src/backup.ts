@@ -460,7 +460,7 @@ export async function runRestore(
 	// or tampered tarball or dump found half-way would leave tables restored
 	// and workspaces not — the same partial state, with no flag asking for it.
 	const workspaces = await preflightWorkspaces(inDir, manifest);
-	await preflightDump(inDir);
+	await preflightDump(inDir, manifest);
 	const skipped = opts.withoutProjects === true ? Object.keys(manifest.projects ?? {}).length : 0;
 	let projectsPlan: Awaited<ReturnType<typeof preflightProjectsRestore>> = null;
 	if (opts.withoutProjects !== true) {
@@ -502,7 +502,9 @@ interface WorkspaceTarball {
 
 /**
  * Every check a workspace tarball must pass, for ALL of them, before the
- * restore's first write (`migrateDb` is one). Reads only.
+ * restore's first write (`migrateDb` is one). Reads only. The extraction
+ * runs later on this verdict, after the tables: the backup directory must
+ * not change while a restore runs (it is root's, and this is an operator tool).
  */
 async function preflightWorkspaces(
 	inDir: string,
@@ -612,8 +614,11 @@ async function preflightWorkspaces(
 	return out;
 }
 
-/** Every table's dump parses and names only plain columns (see SAFE_COL in restoreAll). */
-async function preflightDump(inDir: string): Promise<void> {
+/**
+ * Every table's dump parses, names only plain columns (see SAFE_COL in
+ * restoreAll) and has the rows the manifest counted when it was written.
+ */
+async function preflightDump(inDir: string, manifest: BackupManifest): Promise<void> {
 	for (const t of TABLES) {
 		let rows: Record<string, unknown>[];
 		try {
@@ -628,6 +633,15 @@ async function preflightDump(inDir: string): Promise<void> {
 					`unsafe column name in backup JSONL for ${t.name}: ${JSON.stringify(bad)} — refusing`,
 				);
 			}
+		}
+		// A dump cut at a line boundary, or a missing file, still parses. Only
+		// the tables the manifest names: a backup by an older backend has no
+		// file and no count for the newer ones.
+		const want = manifest.tables?.[t.name];
+		if (want !== undefined && rows.length !== want) {
+			throw new Error(
+				`${t.name}.jsonl has ${rows.length} rows, the manifest says ${want} — refusing`,
+			);
 		}
 	}
 }
