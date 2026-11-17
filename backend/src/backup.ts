@@ -528,7 +528,10 @@ async function preflightWorkspaces(
 		// Entry allowlist: a tampered tarball must not be able to write outside
 		// <sid>/ or .uploads/<sid>/ under WORKSPACE_ROOT (classic tar path
 		// traversal).
+		// LC_ALL=C on both listings: a name from this one is searched in a line
+		// of the verbose one below, and tar escapes non-ASCII bytes by locale.
 		const { stdout } = await execFileP("tar", ["-tzf", tarPath], {
+			env: tarEnv(),
 			maxBuffer: 64 * 1024 * 1024,
 		});
 		const entries = stdout.split("\n").filter((l) => l.trim() !== "");
@@ -564,13 +567,14 @@ async function preflightWorkspaces(
 		// below does write under `.conversations/<sid>/` — a planted
 		// `.conversations/<sid> -> /elsewhere` would make it write there.
 		// Workspace content (`<sid>/…`, uploads) keeps its links.
-		const { stdout: verbose } = await execFileP("tar", ["-tvzf", tarPath], {
+		// LC_ALL=C + numeric owners: the hard-link rule below reads tar's
+		// " link to " text, which is translated, after a name it must find.
+		const { stdout: verbose } = await execFileP("tar", ["--numeric-owner", "-tvzf", tarPath], {
+			env: tarEnv(),
 			maxBuffer: 64 * 1024 * 1024,
 		});
-		const types = verbose
-			.split("\n")
-			.filter((l) => l.trim() !== "")
-			.map((l) => l[0]);
+		const lines = verbose.split("\n").filter((l) => l.trim() !== "");
+		const types = lines.map((l) => l[0]);
 		if (types.length !== entries.length) {
 			throw new Error(`workspace tarball ${file}: listing mismatch — refusing`);
 		}
@@ -595,6 +599,48 @@ async function preflightWorkspaces(
 				);
 			}
 		});
+		// Hard links. tar makes one with link(2) against whatever the target
+		// path names under WORKSPACE_ROOT when the member is reached — `..` and
+		// a leading `/` are stripped, not refused — so `<sid>/x link to
+		// <other sid>/.env` would put another session's file (same inode, read
+		// AND write) inside this session's bind mount. What tar itself writes
+		// for two linked files is always "link to <a member it archived
+		// earlier>"; only that shape is accepted, and only among the session's
+		// own content (`<sid>/…`, `.uploads/<sid>/…`). "Earlier in the tarball"
+		// is not "extracted earlier": the live pass below excludes the control
+		// dir and the revocation markers, so a link to one of THOSE members
+		// would resolve against the destination's live file (A's review of
+		// #670) — and nothing legitimate links into the capture's or the
+		// backend's own directories.
+		const linkable = new Set<string>();
+		entries.forEach((e, i) => {
+			if (types[i] === "h") {
+				const at = (lines[i] as string).indexOf(` ${e} link to `);
+				const target = at < 0 ? null : (lines[i] as string).slice(at + e.length + 10);
+				if (target === null || !linkable.has(target)) {
+					throw new Error(
+						`workspace tarball ${file}: hard link ${JSON.stringify(e)} does not point at an earlier file of the session's content in the same tarball — refusing`,
+					);
+				}
+			}
+			const content = e.startsWith(`${sid}/`) || e.startsWith(`.uploads/${sid}/`);
+			if (content && (types[i] === "-" || types[i] === "l")) linkable.add(e);
+		});
+		// What the backup counted when it wrote this tarball: a different file
+		// under the same name (an older copy, a transfer that kept a stale one)
+		// lists and extracts without a single error.
+		const want = manifest.workspaces[sid];
+		const tarBytes = (await fs.stat(tarPath)).size;
+		if (
+			typeof want?.fileCount === "number" &&
+			typeof want.tarBytes === "number" &&
+			(want.fileCount !== entries.length || want.tarBytes !== tarBytes)
+		) {
+			throw new Error(
+				`workspace tarball ${file} has ${entries.length} entries in ${tarBytes} bytes, ` +
+					`the manifest says ${want.fileCount} in ${want.tarBytes} — refusing`,
+			);
+		}
 		out.push({ file, sid, tarPath, entries });
 	}
 	// A session the manifest lists must have its tarball: without it the row
