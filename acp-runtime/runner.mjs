@@ -105,8 +105,11 @@ function onUpdate(u) {
 		log(`task ${u.asyncTaskId} -> ${u.state}`);
 	} else if (kind === "tool_call") {
 		emit({ kind: "tool", toolCallId: u.toolCallId, title: u.title, toolKind: u.kind, status: u.status ?? "pending" });
-	} else if (kind === "tool_call_update" && u.status) {
-		emit({ kind: "tool", toolCallId: u.toolCallId, title: u.title, status: u.status });
+	} else if (kind === "tool_call_update" && (u.status || u.rawInput?.command)) {
+		// The command text is what makes a "Terminal" row readable; it is the
+		// agent's own input, shown only to the owner of the session.
+		const detail = typeof u.rawInput?.command === "string" ? u.rawInput.command.slice(0, 200) : undefined;
+		emit({ kind: "tool", toolCallId: u.toolCallId, title: u.title, status: u.status, detail });
 	}
 	if (!current) return;
 	if (kind === "async_task_spawned") current.tasks.set(u.asyncTaskId, { taskType: u.taskType, state: "running" });

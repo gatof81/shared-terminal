@@ -227,16 +227,30 @@ function messageEl(m: AcpMessage): HTMLElement {
 	item.append(body);
 	if (m.state === "running") {
 		const acts = activityByMessage.get(m.id) ?? [];
-		const tools = acts.filter((a) => a.kind === "tool" || a.kind === "task");
-		if (tools.length) {
+		// One row per tool call / task, with its latest state (events are deltas).
+		const rows = new Map<string, { label: string; state: string; detail: string }>();
+		for (const a of acts) {
+			if (a.kind !== "tool" && a.kind !== "task") continue;
+			const key = `${a.kind}:${String(a.kind === "task" ? a.taskId : a.toolCallId)}`;
+			const row = rows.get(key) ?? { label: "", state: "", detail: "" };
+			if (a.kind === "task")
+				row.label ||= `tarea ${String(a.taskType ?? "")} ${String(a.name ?? a.taskId)}`;
+			else if (a.title) row.label = String(a.title);
+			if (a.kind === "tool" && typeof a.detail === "string") row.detail = a.detail;
+			const st = a.kind === "task" ? a.state : a.status;
+			if (st) row.state = String(st);
+			rows.set(key, row);
+		}
+		if (rows.size) {
 			const ul = el("ul", "acp-activity");
-			for (const a of tools.slice(-12)) {
-				const label =
-					a.kind === "task"
-						? `tarea ${String(a.taskType ?? "")} ${String(a.name ?? a.taskId)}: ${String(a.state)}`
-						: `${String(a.title ?? "herramienta")}: ${String(a.status)}`;
-				ul.append(el("li", undefined, label));
-			}
+			for (const r of [...rows.values()].slice(-12))
+				ul.append(
+					el(
+						"li",
+						undefined,
+						`${r.label || "herramienta"}${r.detail ? ` · ${r.detail}` : ""}: ${r.state || "…"}`,
+					),
+				);
 			item.append(ul);
 		}
 		const live = liveText.get(m.id);
