@@ -49,7 +49,6 @@ beforeAll(async () => {
 
 async function make(opts: Parameters<typeof fakeDocker>[0]) {
 	const f = fakeDocker(opts);
-	// biome-ignore lint/suspicious/noExplicitAny: a narrow fake of DockerManager
 	const acp = new AcpAgents(acpConfigFromEnv("/ws", 3001), f.docker as any);
 	await acp.bySession(row.session_id); // the agent is known (as after boot/create)
 	return { acp, calls: f.calls };

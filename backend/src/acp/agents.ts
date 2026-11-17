@@ -64,11 +64,12 @@ export function acpConfigFromEnv(workspaceRoot: string, port: number): AcpConfig
 }
 
 const RUNTIME_MOUNT = "/opt/st-acp";
-const RUNNER_PID_FILE = "/tmp/st-acp-runner.pid";
 const RUNNER_LOOP_NAME = "st-acp-runner-loop";
-// exit 0: the pid in the file is a live process running the loop; 1: it is not
-// (no file, no process, or a recycled pid running something else).
-export const RUNNER_PROBE = `p=$(cat ${RUNNER_PID_FILE} 2>/dev/null) && [ -r /proc/$p/cmdline ] && tr '\\0' ' ' < /proc/$p/cmdline | grep -q ${RUNNER_LOOP_NAME} && exit 0; exit 1`;
+const RUNNER_LOCK = "/tmp/st-acp-runner.lock";
+// exit 0: the `flock` holding the launch lock is alive — it exists exactly as
+// long as the loop it runs, whatever version launched it; 1: no holder. The
+// pattern is anchored at `flock` so it never matches this probe's own `sh -c`.
+export const RUNNER_PROBE = `pgrep -f '^flock -n ${RUNNER_LOCK}' >/dev/null`;
 // Names an agent can be addressed by (`st send @name`). `owner` and `system`
 // are the person and Shared Terminal itself.
 export const AGENT_NAME_RE = /^[a-z][a-z0-9-]{1,31}$/;
@@ -414,12 +415,10 @@ export class AcpAgents {
 			[
 				"flock",
 				"-n",
-				"/tmp/st-acp-runner.lock",
+				RUNNER_LOCK,
 				"sh",
 				"-c",
-				// $$ is this loop shell, the process flock keeps the lock for; the
-				// watchdog checks that pid's /proc cmdline for the loop's name ($0).
-				`echo $$ > ${RUNNER_PID_FILE}; while true; do node --no-warnings ${RUNTIME_MOUNT}/st/runner.mjs >> /tmp/st-acp-runner.log 2>&1; sleep 3; done`,
+				`while true; do node --no-warnings ${RUNTIME_MOUNT}/st/runner.mjs >> /tmp/st-acp-runner.log 2>&1; sleep 3; done`,
 				RUNNER_LOOP_NAME,
 			],
 			{
@@ -441,8 +440,8 @@ export class AcpAgents {
 	// ── Watchdog ────────────────────────────────────────────────────────────
 	// Autonomous: every ACP_WATCHDOG_MS, for each known agent whose container is
 	// RUNNING (one Docker inspect by name, no D1), the runner's restart loop is
-	// checked for real — its pid file names a live process whose cmdline is the
-	// loop — and only a loop proven dead is launched again. Silence is never a
+	// checked for real — the process holding its launch lock exists or not
+	// (pgrep, not the lock itself) — and only a loop proven dead is launched again. Silence is never a
 	// death: a runner busy in a long turn says nothing for minutes. The probe
 	// never takes the launch lock (it would make a concurrent launch's `flock
 	// -n` give up); duplicates are impossible anyway because every launch runs
