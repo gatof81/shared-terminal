@@ -456,6 +456,11 @@ export async function runRestore(
 	// logs they describe is a partial restore, and that only happens when
 	// the operator asks for it by name (--without-projects), never as the
 	// outcome of a run that then prints "complete".
+	// The backup's own files first (reads only, no lock taken yet): a damaged
+	// or tampered tarball or dump found half-way would leave tables restored
+	// and workspaces not — the same partial state, with no flag asking for it.
+	const workspaces = await preflightWorkspaces(inDir, manifest);
+	await preflightDump(inDir, manifest);
 	const skipped = opts.withoutProjects === true ? Object.keys(manifest.projects ?? {}).length : 0;
 	let projectsPlan: Awaited<ReturnType<typeof preflightProjectsRestore>> = null;
 	if (opts.withoutProjects !== true) {
@@ -469,7 +474,7 @@ export async function runRestore(
 		}
 	}
 	try {
-		await restoreAll(inDir, manifest, opts);
+		await restoreAll(inDir, manifest, workspaces, opts);
 		if (projectsPlan) {
 			await restoreProjects(inDir, manifest.createdAt, projectsPlan, WORKSPACE_ROOT, opts, logger);
 		}
@@ -487,9 +492,164 @@ export async function runRestore(
 	logger.info(`[restore] complete from ${inDir} (backup of ${manifest.createdAt})`);
 }
 
+interface WorkspaceTarball {
+	file: string;
+	sid: string;
+	tarPath: string;
+	/** Its member names, as listed by the check below. */
+	entries: string[];
+}
+
+/**
+ * Every check a workspace tarball must pass, for ALL of them, before the
+ * restore's first write (`migrateDb` is one). Reads only. The extraction
+ * runs later on this verdict, after the tables: the backup directory must
+ * not change while a restore runs (it is root's, and this is an operator tool).
+ */
+async function preflightWorkspaces(
+	inDir: string,
+	manifest: BackupManifest,
+): Promise<WorkspaceTarball[]> {
+	// Every tarball must be a session of THIS backup, named by a session id.
+	// The name becomes the allowlist prefix and the exclusion patterns of the
+	// extraction: a tarball named `.conversations.tar.gz` would otherwise turn
+	// `.conversations/<victim>/LIFTED` into an in-scope entry that no
+	// exclusion matches.
+	const wsDir = path.join(inDir, "workspaces");
+	const tarballs = await fs.readdir(wsDir).catch(() => [] as string[]);
+	const out: WorkspaceTarball[] = [];
+	for (const file of tarballs) {
+		if (!file.endsWith(".tar.gz")) continue;
+		const sid = file.slice(0, -".tar.gz".length);
+		if (!SESSION_ID_RE.test(sid) || !Object.keys(manifest.workspaces ?? {}).includes(sid)) {
+			throw new Error(`workspace tarball ${file} is not a session of this backup — refusing`);
+		}
+		const tarPath = path.join(wsDir, file);
+		// Entry allowlist: a tampered tarball must not be able to write outside
+		// <sid>/ or .uploads/<sid>/ under WORKSPACE_ROOT (classic tar path
+		// traversal).
+		const { stdout } = await execFileP("tar", ["-tzf", tarPath], {
+			maxBuffer: 64 * 1024 * 1024,
+		});
+		const entries = stdout.split("\n").filter((l) => l.trim() !== "");
+		// Canonical names only: `<sid>//` or `<sid>/./` is the same path to
+		// tar but would slip past the root-type rule below as "not a root"
+		// (2nd review of #520: a symlink member `<sid>//` replaced the live
+		// workspace root, which Docker then bind-mounts read-write).
+		const odd = entries.find((e) => path.posix.normalize(e) !== e);
+		if (odd !== undefined) {
+			throw new Error(
+				`workspace tarball ${file}: non-canonical member ${JSON.stringify(odd)} — refusing`,
+			);
+		}
+		const ok = entries.every(
+			(e) =>
+				(e === sid ||
+					e.startsWith(`${sid}/`) ||
+					e.startsWith(`.uploads/${sid}/`) ||
+					e === `.uploads/${sid}` ||
+					e.startsWith(`.conversations/${sid}/`) ||
+					e === `.conversations/${sid}` ||
+					e.startsWith(`${CONTROL_DIR}/${sid}/`) ||
+					e === `${CONTROL_DIR}/${sid}`) &&
+				!e.includes(".."),
+		);
+		if (!ok) {
+			throw new Error(`workspace tarball ${file} contains out-of-scope paths — refusing`);
+		}
+		// Member TYPES, from the verbose listing (same order, one line per
+		// member). The session's root dirs must be directories and nothing
+		// under its conversations or control dir may be a link: tar never
+		// writes through a symlink it created itself, but the install step
+		// below does write under `.conversations/<sid>/` — a planted
+		// `.conversations/<sid> -> /elsewhere` would make it write there.
+		// Workspace content (`<sid>/…`, uploads) keeps its links.
+		const { stdout: verbose } = await execFileP("tar", ["-tvzf", tarPath], {
+			maxBuffer: 64 * 1024 * 1024,
+		});
+		const types = verbose
+			.split("\n")
+			.filter((l) => l.trim() !== "")
+			.map((l) => l[0]);
+		if (types.length !== entries.length) {
+			throw new Error(`workspace tarball ${file}: listing mismatch — refusing`);
+		}
+		const roots = new Set([
+			sid,
+			`.uploads/${sid}`,
+			`.conversations/${sid}`,
+			`${CONTROL_DIR}/${sid}`,
+		]);
+		entries.forEach((e, i) => {
+			const name = e.replace(/\/$/, "");
+			const t = types[i];
+			const bad = roots.has(name)
+				? t !== "d"
+				: (name.startsWith(`.conversations/${sid}/`) ||
+						name.startsWith(`${CONTROL_DIR}/${sid}/`)) &&
+					t !== "-" &&
+					t !== "d";
+			if (bad) {
+				throw new Error(
+					`workspace tarball ${file}: ${JSON.stringify(name)} is not a plain file or directory — refusing`,
+				);
+			}
+		});
+		out.push({ file, sid, tarPath, entries });
+	}
+	// A session the manifest lists must have its tarball: without it the row
+	// comes back with an empty workspace and the run would still say "complete".
+	for (const sid of Object.keys(manifest.workspaces ?? {})) {
+		if (!out.some((w) => w.sid === sid)) {
+			throw new Error(`workspace tarball ${sid}.tar.gz is in the manifest but not in the backup`);
+		}
+	}
+	if (manifest.globalRevocation === true) {
+		await fs.access(path.join(inDir, REVOKED_ALL_FILE)).catch(() => {
+			throw new Error(
+				`the manifest carries a global revocation but ${REVOKED_ALL_FILE} is missing`,
+			);
+		});
+	}
+	return out;
+}
+
+/**
+ * Every table's dump parses, names only plain columns (see SAFE_COL in
+ * restoreAll) and has the rows the manifest counted when it was written.
+ */
+async function preflightDump(inDir: string, manifest: BackupManifest): Promise<void> {
+	for (const t of TABLES) {
+		let rows: Record<string, unknown>[];
+		try {
+			rows = await readJsonl(inDir, t.name);
+		} catch (err) {
+			throw new Error(`${t.name}.jsonl is not readable JSONL: ${(err as Error).message}`);
+		}
+		for (const row of rows) {
+			const bad = Object.keys(row).find((c) => !/^\w+$/.test(c));
+			if (bad !== undefined) {
+				throw new Error(
+					`unsafe column name in backup JSONL for ${t.name}: ${JSON.stringify(bad)} — refusing`,
+				);
+			}
+		}
+		// A dump cut at a line boundary, or a missing file, still parses. Only
+		// the tables the manifest names: a backup by an older backend has no
+		// file and no count for the newer ones.
+		const want = manifest.tables?.[t.name];
+		if (want !== undefined && rows.length !== want) {
+			throw new Error(
+				`${t.name}.jsonl has ${rows.length} rows, the manifest says ${want} — refusing`,
+			);
+		}
+	}
+}
+
 async function restoreAll(
 	inDir: string,
 	manifest: BackupManifest,
+	workspaces: WorkspaceTarball[],
 	opts: { force?: boolean },
 ): Promise<void> {
 	// Bring the target to current schema FIRST — a fresh D1 gets every
@@ -549,21 +709,6 @@ async function restoreAll(
 					"before any write. The destination must run the SOURCE deployment's key; see " +
 					"docs/SECRETS_ENCRYPTION_KEY.md. (Deliberately not overridable with --force.)",
 			);
-		}
-	}
-
-	// Every tarball must be a session of THIS backup, named by a session id.
-	// The name becomes the allowlist prefix and the exclusion patterns below:
-	// a tarball named `.conversations.tar.gz` would otherwise turn
-	// `.conversations/<victim>/LIFTED` into an in-scope entry that no
-	// exclusion matches. Checked before any write.
-	const wsDir = path.join(inDir, "workspaces");
-	const tarballs = await fs.readdir(wsDir).catch(() => [] as string[]);
-	for (const file of tarballs) {
-		if (!file.endsWith(".tar.gz")) continue;
-		const sid = file.slice(0, -".tar.gz".length);
-		if (!SESSION_ID_RE.test(sid) || !Object.keys(manifest.workspaces ?? {}).includes(sid)) {
-			throw new Error(`workspace tarball ${file} is not a session of this backup — refusing`);
 		}
 	}
 
@@ -677,81 +822,9 @@ async function restoreAll(
 		"UPDATE sessions SET status = 'stopped', container_id = NULL WHERE status = 'running'",
 	);
 
-	// Untar workspaces. Entry allowlist first: a tampered tarball must not
-	// be able to write outside <sid>/ or .uploads/<sid>/ under
-	// WORKSPACE_ROOT (classic tar path traversal).
+	// Untar workspaces: every tarball already passed preflightWorkspaces.
 	let evidenceDir: string | undefined;
-	for (const file of tarballs) {
-		if (!file.endsWith(".tar.gz")) continue;
-		const sid = file.slice(0, -".tar.gz".length);
-		const tarPath = path.join(wsDir, file);
-		const { stdout } = await execFileP("tar", ["-tzf", tarPath], {
-			maxBuffer: 64 * 1024 * 1024,
-		});
-		const entries = stdout.split("\n").filter((l) => l.trim() !== "");
-		// Canonical names only: `<sid>//` or `<sid>/./` is the same path to
-		// tar but would slip past the root-type rule below as "not a root"
-		// (2nd review of #520: a symlink member `<sid>//` replaced the live
-		// workspace root, which Docker then bind-mounts read-write).
-		const odd = entries.find((e) => path.posix.normalize(e) !== e);
-		if (odd !== undefined) {
-			throw new Error(
-				`workspace tarball ${file}: non-canonical member ${JSON.stringify(odd)} — refusing`,
-			);
-		}
-		const ok = entries.every(
-			(e) =>
-				(e === sid ||
-					e.startsWith(`${sid}/`) ||
-					e.startsWith(`.uploads/${sid}/`) ||
-					e === `.uploads/${sid}` ||
-					e.startsWith(`.conversations/${sid}/`) ||
-					e === `.conversations/${sid}` ||
-					e.startsWith(`${CONTROL_DIR}/${sid}/`) ||
-					e === `${CONTROL_DIR}/${sid}`) &&
-				!e.includes(".."),
-		);
-		if (!ok) {
-			throw new Error(`workspace tarball ${file} contains out-of-scope paths — refusing`);
-		}
-		// Member TYPES, from the verbose listing (same order, one line per
-		// member). The session's root dirs must be directories and nothing
-		// under its conversations or control dir may be a link: tar never
-		// writes through a symlink it created itself, but the install step
-		// below does write under `.conversations/<sid>/` — a planted
-		// `.conversations/<sid> -> /elsewhere` would make it write there.
-		// Workspace content (`<sid>/…`, uploads) keeps its links.
-		const { stdout: verbose } = await execFileP("tar", ["-tvzf", tarPath], {
-			maxBuffer: 64 * 1024 * 1024,
-		});
-		const types = verbose
-			.split("\n")
-			.filter((l) => l.trim() !== "")
-			.map((l) => l[0]);
-		if (types.length !== entries.length) {
-			throw new Error(`workspace tarball ${file}: listing mismatch — refusing`);
-		}
-		const roots = new Set([
-			sid,
-			`.uploads/${sid}`,
-			`.conversations/${sid}`,
-			`${CONTROL_DIR}/${sid}`,
-		]);
-		entries.forEach((e, i) => {
-			const name = e.replace(/\/$/, "");
-			const t = types[i];
-			const bad = roots.has(name)
-				? t !== "d"
-				: (name.startsWith(`.conversations/${sid}/`) ||
-						name.startsWith(`${CONTROL_DIR}/${sid}/`)) &&
-					t !== "-" &&
-					t !== "d";
-			if (bad) {
-				throw new Error(
-					`workspace tarball ${file}: ${JSON.stringify(name)} is not a plain file or directory — refusing`,
-				);
-			}
-		});
+	for (const { sid, tarPath, entries } of workspaces) {
 		// Everything EXCEPT the session's control dir and its revocation
 		// markers goes to its live place. Those must never be overwritten by
 		// an older copy: a backup's `.st-control` would bring back a recreation

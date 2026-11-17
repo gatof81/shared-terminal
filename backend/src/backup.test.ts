@@ -516,7 +516,12 @@ describe("push_subscriptions (#560)", () => {
 
 	it("an older backup without the table (schema ≥ 14) restores none and says why", async () => {
 		await backupWithSub("BKeyA");
-		await fs.rm(path.join(outDir, "push_subscriptions.jsonl")); // what every backup before #560 looks like
+		// What every backup before #560 looks like: no file, and no count for it.
+		await fs.rm(path.join(outDir, "push_subscriptions.jsonl"));
+		const manifestPath = path.join(outDir, "manifest.json");
+		const manifest = JSON.parse(await fs.readFile(manifestPath, "utf-8"));
+		delete manifest.tables.push_subscriptions;
+		await fs.writeFile(manifestPath, JSON.stringify(manifest));
 		const warn = vi.spyOn(logger, "warn");
 		try {
 			await runRestore(outDir);
@@ -757,6 +762,82 @@ describe("runRestore", () => {
 		]);
 		await expect(runRestore(outDir)).rejects.toThrow(/out-of-scope/);
 		await fs.rm(evilDir, { recursive: true, force: true });
+	});
+
+	// AUD-05, the rest of the global preflight: what the backup's own files
+	// can tell is decided before the first write (migrateDb is one), so a
+	// damaged backup never leaves tables restored and workspaces not.
+	async function noWrites(run: () => Promise<void>, error: RegExp): Promise<void> {
+		const db = await import("./db.js");
+		vi.mocked(db.d1Query).mockClear();
+		vi.mocked(db.migrateDb).mockClear();
+		dbState.inserts.length = 0;
+		await expect(run()).rejects.toThrow(error);
+		expect(db.migrateDb).not.toHaveBeenCalled();
+		expect(db.d1Query).not.toHaveBeenCalled();
+		expect(dbState.inserts).toHaveLength(0);
+	}
+
+	it("a tampered workspace tarball refuses before any D1 call, migrateDb included", async () => {
+		await makeBackup();
+		const evilDir = mkdtempSync(path.join(os.tmpdir(), "st-evil-"));
+		await fs.mkdir(path.join(evilDir, "other"), { recursive: true });
+		execFileSync("tar", [
+			"-czf",
+			path.join(outDir, "workspaces", "s1.tar.gz"),
+			"-C",
+			evilDir,
+			"other",
+		]);
+		await noWrites(() => runRestore(outDir), /out-of-scope/);
+		await fs.rm(evilDir, { recursive: true, force: true });
+	});
+
+	it("a truncated workspace tarball refuses before any D1 call", async () => {
+		await makeBackup();
+		const tar = path.join(outDir, "workspaces", "s1.tar.gz");
+		const bytes = await fs.readFile(tar);
+		await fs.writeFile(tar, bytes.subarray(0, Math.floor(bytes.length / 2)));
+		await noWrites(() => runRestore(outDir), /./);
+	});
+
+	it("a workspace the manifest lists without its tarball refuses before any D1 call", async () => {
+		await makeBackup();
+		await fs.rm(path.join(outDir, "workspaces", "s1.tar.gz"));
+		await noWrites(
+			() => runRestore(outDir),
+			/s1\.tar\.gz is in the manifest but not in the backup/,
+		);
+	});
+
+	it("an unsafe column name or a line that is not JSON refuses before any D1 call", async () => {
+		await makeBackup();
+		const users = path.join(outDir, "users.jsonl");
+		const good = await fs.readFile(users, "utf8");
+		await fs.writeFile(users, `${JSON.stringify({ "id) SELECT 1--": "x" })}\n`);
+		await noWrites(() => runRestore(outDir), /unsafe column name/);
+		await fs.writeFile(users, `${good}{"id": \n`);
+		await noWrites(() => runRestore(outDir), /users\.jsonl is not readable JSONL/);
+	});
+
+	it("a dump cut at a line boundary, or missing, refuses before any D1 call", async () => {
+		await makeBackup();
+		const users = path.join(outDir, "users.jsonl");
+		const lines = (await fs.readFile(users, "utf8")).split("\n").filter((l) => l !== "");
+		expect(lines.length).toBeGreaterThan(0);
+		await fs.writeFile(
+			users,
+			lines
+				.slice(0, -1)
+				.map((l) => `${l}\n`)
+				.join(""),
+		);
+		await noWrites(
+			() => runRestore(outDir),
+			new RegExp(`users\\.jsonl has ${lines.length - 1} rows, the manifest says ${lines.length}`),
+		);
+		await fs.rm(users);
+		await noWrites(() => runRestore(outDir), /users\.jsonl has 0 rows, the manifest says/);
 	});
 });
 
