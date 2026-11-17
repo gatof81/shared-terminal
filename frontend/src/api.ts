@@ -106,6 +106,17 @@ export function projectRelayEnabled(): boolean {
 	return projectConversationEnabled() && _projectRelay;
 }
 
+// §3.6: `features.projectQueue`, present on a backend that accepts
+// `whenFree` and the cancel route. The frontend is deployed on its own, so
+// against an older backend the key is absent and a message is sent exactly
+// as before (an unknown body field would be refused).
+let _projectQueue = false;
+
+/** True only with the conversation on AND `features.projectQueue === true`. */
+export function projectQueueEnabled(): boolean {
+	return projectConversationEnabled() && _projectQueue;
+}
+
 /** True iff `users.is_admin = 1` for the current session (#50). Gates
  *  invite-mint UI in main.ts. Refreshes on every /auth/status call so a
  *  promotion / demotion takes effect on the next reload. */
@@ -166,6 +177,7 @@ export interface AuthStatus {
 		projectConversation?: boolean;
 		projectArtifacts?: boolean;
 		projectRelay?: boolean;
+		projectQueue?: boolean;
 	};
 }
 
@@ -208,6 +220,10 @@ async function fetchAuthStatus(): Promise<AuthStatus> {
 		typeof data.features === "object" &&
 		data.features !== null &&
 		data.features.projectRelay === true;
+	_projectQueue =
+		typeof data.features === "object" &&
+		data.features !== null &&
+		data.features.projectQueue === true;
 	// #200: mirror caps if present. A pre-#200 backend omits the field
 	// and leaves the v1 defaults in place — same hardcoded ceilings the
 	// form would have used before this PR.
@@ -759,6 +775,12 @@ export interface ProjectMessageBody {
 	 * are left to the server's defaults.
 	 */
 	collab?: { mode: "ask"; with: string; maxMessages?: number };
+	/**
+	 * §3.6: a busy recipient doesn't refuse the message — it waits in the
+	 * project's log and is sent once, when the agent is free. Sent only with
+	 * projectQueueEnabled(), and never with `collab` (the server refuses both).
+	 */
+	whenFree?: true;
 }
 
 export interface ProjectMessageAnswer {
@@ -864,6 +886,22 @@ export function postProjectMessage(
 		{ method: "POST", body: JSON.stringify(body) },
 		(b): b is ProjectMessageAnswer =>
 			isObj(b) && typeof b.msgId === "string" && Array.isArray(b.deliveries),
+	);
+}
+
+/**
+ * §3.6: close what is still queued of one message. Idempotent: what already
+ * left the queue is not touched, so a lost answer is settled by reading the
+ * log. Only called with projectQueueEnabled().
+ */
+export function cancelQueuedProjectMessage(
+	projectId: string,
+	msgId: string,
+): Promise<ProjectAnswer<unknown>> {
+	return projectRequest(
+		`/projects/${encodeURIComponent(projectId)}/conversation/messages/${encodeURIComponent(msgId)}/cancel`,
+		{ method: "POST" },
+		(b): b is unknown => isObj(b),
 	);
 }
 

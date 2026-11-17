@@ -15,6 +15,9 @@ const api = vi.hoisted(() => ({
 		close: vi.fn(),
 	})),
 	readConversationEvent: vi.fn(),
+	// §3.6
+	projectQueueEnabled: vi.fn(() => false),
+	cancelQueuedProjectMessage: vi.fn(),
 	// D3
 	projectRelayEnabled: vi.fn(() => false),
 	postGrantAction: vi.fn(),
@@ -1528,5 +1531,114 @@ describe("consults between two agents (D3)", () => {
 			expect(root.querySelector(".tw-grant-state")?.textContent).toBe("Active");
 			expect(texts(root, ".tw-grant button:disabled")).toEqual([]);
 		});
+	});
+});
+
+describe("§3.6: a message waits for a busy agent", () => {
+	// The log only grows: what happened after `queued` is a later line.
+	const queuedLog = (after?: Record<string, unknown>) => [
+		{ seq: 1, at: NOW, ev: "message", msg_id: "q1", kind: "owner", to: [DEV], text: "Later\nbody" },
+		{ seq: 2, at: NOW, ev: "delivery", msg_id: "q1", agent_id: DEV, state: "queued" },
+		...(after ? [{ seq: 3, at: NOW, ev: "delivery", msg_id: "q1", agent_id: DEV, ...after }] : []),
+	];
+	const serve = (events: unknown[]) =>
+		api.fetchProjectEvents.mockResolvedValue({
+			ok: true,
+			status: 200,
+			body: { events, hasMore: false },
+		});
+	const send = async (root: HTMLElement) => {
+		root.querySelector<HTMLButtonElement>(".tw-chip-add")!.click();
+		root.querySelector<HTMLButtonElement>(".tw-option:not(:disabled)")!.click();
+		root.querySelector<HTMLTextAreaElement>(".tw-composer textarea")!.value = "do it";
+		root.querySelector<HTMLFormElement>(".tw-composer")!.requestSubmit();
+		await flush();
+	};
+	afterEach(() => {
+		api.projectQueueEnabled.mockReturnValue(false);
+		api.projectRelayEnabled.mockReturnValue(false);
+		api.cancelQueuedProjectMessage.mockReset();
+	});
+
+	it("backend without the queue: the body has no whenFree and a queued delivery offers no Cancel", async () => {
+		serve(queuedLog());
+		const root = mount({ kind: "thread", msgId: "q1" });
+		await flush();
+		expect(root.querySelector(".tw-queued")).toBeNull();
+		mount({ kind: "new" });
+		await flush();
+		await send(root);
+		expect(api.postProjectMessage.mock.calls[0]![1]).not.toHaveProperty("whenFree");
+	});
+
+	it("with the queue: every send asks to wait when busy — except one that sets up a consult", async () => {
+		api.projectQueueEnabled.mockReturnValue(true);
+		api.projectRelayEnabled.mockReturnValue(true);
+		const root = mount({ kind: "new" });
+		await flush();
+		await send(root);
+		expect(api.postProjectMessage.mock.calls[0]![1].whenFree).toBe(true);
+		mount({ kind: "new" });
+		await flush();
+		root.querySelector<HTMLButtonElement>(".tw-chip-add")!.click();
+		root.querySelector<HTMLButtonElement>(".tw-option:not(:disabled)")!.click();
+		const box = root.querySelector<HTMLElement>(".tw-consult")!;
+		box.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click();
+		box.querySelectorAll<HTMLSelectElement>("select")[0]!.value = QA;
+		root.querySelector<HTMLTextAreaElement>(".tw-composer textarea")!.value = "ask QA";
+		root.querySelector<HTMLFormElement>(".tw-composer")!.requestSubmit();
+		await flush();
+		const body = api.postProjectMessage.mock.calls[1]![1];
+		expect(body.collab).toBeTruthy();
+		expect(body).not.toHaveProperty("whenFree");
+	});
+
+	it("a queued message says so and can be cancelled; the log decides what is shown after", async () => {
+		api.projectQueueEnabled.mockReturnValue(true);
+		serve(queuedLog());
+		const root = mount({ kind: "thread", msgId: "q1" });
+		await flush();
+		expect(root.querySelector(".tw-del")?.textContent).toBe(
+			"@dev-pilot · Queued: waiting for it to be free",
+		);
+		const cancel = root.querySelector<HTMLButtonElement>(".tw-queued button")!;
+		expect(cancel.textContent).toBe("Cancel");
+		expect(cancel.getAttribute("aria-label")).toBe("Cancel this message while it waits");
+		api.cancelQueuedProjectMessage.mockResolvedValue({ ok: true, status: 200, body: {} });
+		serve(queuedLog({ state: "not-sent", reason: "cancelled" }));
+		cancel.click();
+		await flush();
+		expect(api.cancelQueuedProjectMessage).toHaveBeenCalledWith(PID, "q1");
+		expect(root.querySelector(".tw-queued")).toBeNull();
+		expect(root.querySelector(".tw-del")?.textContent).toBe(
+			"@dev-pilot · Not delivered: you cancelled it while it was queued",
+		);
+	});
+
+	it("a cancel that loses to the send shows what happened, not an error", async () => {
+		api.projectQueueEnabled.mockReturnValue(true);
+		serve(queuedLog());
+		const root = mount({ kind: "thread", msgId: "q1" });
+		await flush();
+		api.cancelQueuedProjectMessage.mockResolvedValue({ ok: true, status: 200, body: {} });
+		serve(queuedLog({ state: "delivered" }));
+		root.querySelector<HTMLButtonElement>(".tw-queued button")!.click();
+		await flush();
+		expect(root.querySelector(".tw-queued")).toBeNull();
+		expect(root.querySelector(".tw-del")?.textContent).toBe("@dev-pilot · Delivered ✓");
+	});
+
+	it("a cancel the server couldn't answer says so and leaves the message as the log has it", async () => {
+		api.projectQueueEnabled.mockReturnValue(true);
+		serve(queuedLog());
+		const root = mount({ kind: "thread", msgId: "q1" });
+		await flush();
+		api.cancelQueuedProjectMessage.mockResolvedValue({ ok: false, status: 503, code: "" });
+		root.querySelector<HTMLButtonElement>(".tw-queued button")!.click();
+		await flush();
+		expect(root.querySelector(".tw-queued .tw-partial")?.textContent).toBe(
+			"The server couldn't cancel it (503). It is still shown as the log has it.",
+		);
+		expect(root.querySelector(".tw-queued button")?.textContent).toBe("Cancel");
 	});
 });

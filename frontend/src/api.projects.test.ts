@@ -286,3 +286,47 @@ describe("D3: features.projectRelay, the collab body and the grant actions", () 
 		});
 	});
 });
+
+describe("§3.6: features.projectQueue, whenFree and the cancel", () => {
+	const all = { projectChat: true, projectConversation: true, projectQueue: true };
+
+	it("needs projectQueue AND the conversation on; an older backend leaves it off", async () => {
+		const api = await loadApi();
+		expect(api.projectQueueEnabled()).toBe(false);
+		fetchSpy.mockResolvedValueOnce(res(200, { ...STATUS, features: all }));
+		await api.checkAuthStatus();
+		expect(api.projectQueueEnabled()).toBe(true);
+		for (const features of [
+			{ ...all, projectConversation: undefined },
+			{ ...all, projectQueue: "true" },
+			{ projectChat: true, projectConversation: true, projectRelay: true },
+			null,
+		]) {
+			fetchSpy.mockResolvedValueOnce(res(200, { ...STATUS, features }));
+			await api.checkAuthStatus();
+			expect(api.projectQueueEnabled()).toBe(false);
+		}
+	});
+
+	it("whenFree travels in the body; the cancel is one POST with no body to the message's own path", async () => {
+		const api = await loadApi();
+		const body = { clientMessageId: "c1", text: "t", to: ["a"], whenFree: true as const };
+		fetchSpy.mockResolvedValueOnce(
+			res(202, { msgId: "m1", deliveries: [{ agentId: "a", state: "queued" }] }),
+		);
+		expect((await api.postProjectMessage("p1", body)).ok).toBe(true);
+		expect(JSON.parse(fetchSpy.mock.calls[0]![1].body)).toEqual(body);
+		fetchSpy.mockResolvedValueOnce(res(200, { msgId: "m1" }));
+		expect((await api.cancelQueuedProjectMessage("p 1", "m/1")).ok).toBe(true);
+		const [url, init] = fetchSpy.mock.calls[1]!;
+		expect(String(url)).toContain("/projects/p%201/conversation/messages/m%2F1/cancel");
+		expect(init.method).toBe("POST");
+		expect(init.body).toBeUndefined();
+		fetchSpy.mockResolvedValueOnce(res(409, { error: "queue-full" }));
+		expect(await api.postProjectMessage("p1", body)).toEqual({
+			ok: false,
+			status: 409,
+			code: "queue-full",
+		});
+	});
+});

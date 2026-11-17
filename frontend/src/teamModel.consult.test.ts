@@ -377,7 +377,7 @@ describe("wording", () => {
 		const t = (reason: string) =>
 			deliveryText({ state: "not-sent", reason, filesPossiblyPlaced: false });
 		expect(t("grant-paused")).toBe("Not delivered: the consult was paused");
-		expect(t("wait-expired")).toBe("Not delivered: it stayed busy for too long");
+		expect(t("wait-expired")).toBe("Not delivered: it wasn't free in time");
 		expect(t("grant-inactive")).toBe("Not delivered: the handoffs had stopped");
 	});
 
