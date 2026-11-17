@@ -1,4 +1,9 @@
 /* ── ACP agent chat (experimental, acpChat.ts) ─────────────────── */
+/* An agent session's Chat is acpChat.ts's: the capture Chat's children stay out
+   whatever their own display rule says (the hidden attribute alone loses to it). */
+#chat-view.acp-owned > :not(#acp-chat) {
+	display: none !important;
+}
 .acp-chat:not([hidden]) {
 	display: flex;
 	flex-direction: column;
