@@ -501,7 +501,7 @@ export class AcpAgents {
 		}
 	}
 
-	private async checkRunner(agent: AgentRow): Promise<void> {
+	async checkRunner(agent: AgentRow): Promise<void> {
 		if (this.checking.has(agent.agent_id)) return; // single-flight per agent
 		this.checking.add(agent.agent_id);
 		try {
@@ -530,18 +530,13 @@ export class AcpAgents {
 
 	/** Boot: running agent sessions get their runner back (a backend restart does not touch containers, but a host reboot does). */
 	async ensureAllRunning(): Promise<void> {
-		const r = await d1Query<AgentRow & { container_id: string | null; status: string }>(
-			"SELECT a.*, s.container_id, s.status FROM acp_agents a JOIN sessions s ON s.session_id = a.session_id WHERE s.status = 'running'",
+		const r = await d1Query<AgentRow>(
+			"SELECT a.* FROM acp_agents a JOIN sessions s ON s.session_id = a.session_id WHERE s.status = 'running'",
 		);
-		for (const row of r.results) {
-			this.byId.set(row.agent_id, row);
-			if (!row.container_id) continue;
-			await this.ensureRunner(row.session_id, row.container_id).catch((err) =>
-				logger.warn(
-					`[acp] boot runner launch for ${row.session_id} failed: ${(err as Error).message}`,
-				),
-			);
-		}
+		for (const row of r.results) this.byId.set(row.agent_id, row);
+		// Through the same probe as the watchdog: a backend restart does not kill
+		// runners, and one alive without its loop must not get a twin.
+		await this.watchdogTick();
 	}
 
 	/** Used by the session route to tell the UI which sessions are agents. */
