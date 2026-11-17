@@ -188,10 +188,11 @@ is "and makes no backup" "$(locals)" 0
 # ── What a failed backup command left behind is named ────────────────────────
 new_env leftovers
 run run
-mkdir "$B/2020-01-01T08-17-01-000Z"
+mkdir "$B/2020-01-01T08-17-01-000Z" "$B/st-control-20200101T000000Z"
 run status
 if grep -q "2020-01-01T08-17-01-000Z  (no manifest" "$E/out.txt"; then ok "status marks a local directory without a manifest"; else bad "status does not mark it"; fi
 is "…and only that one" "$(grep -c "no manifest" "$E/out.txt")" 1
+if grep -qx "  st-control-20200101T000000Z" "$E/out.txt"; then ok "a directory that is not a nightly is listed without a verdict"; else bad "the foreign directory is mislabelled or missing"; fi
 
 if [ "$FAILS" = 0 ]; then echo "all backup-nas tests passed"; else
 	echo "$FAILS backup-nas test(s) FAILED"

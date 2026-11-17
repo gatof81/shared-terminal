@@ -237,7 +237,9 @@ status)
 	echo "local:"
 	find "$BACKUPS_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort | while read -r n; do
 		# What a failed backup command leaves: retention never counts or removes it, so say so.
-		if [ -f "$BACKUPS_DIR/$n/manifest.json" ]; then echo "  $n"; else echo "  $n  (no manifest: incomplete, remove by hand)"; fi
+		# Only a directory with a nightly's name can be this script's leftover; anything else in the
+		# directory (a manual pre-deploy backup, a control-dir copy) is someone else's and is just listed.
+		if [ -f "$BACKUPS_DIR/$n/manifest.json" ] || ! [[ $n =~ $NAME_RE ]]; then echo "  $n"; else echo "  $n  (no manifest: incomplete, remove by hand)"; fi
 	done
 	[ -r "$STATE_DIR/status.json" ] && cat "$STATE_DIR/status.json"
 	;;
