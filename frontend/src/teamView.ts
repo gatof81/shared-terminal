@@ -1897,7 +1897,14 @@ class Workspace {
 		b.dataset.key = `queued:${msgId}:cancel`;
 		b.setAttribute("aria-label", "Cancel this message while it waits");
 		if (busy) b.setAttribute("aria-disabled", "true");
-		box.append(el("span", "tw-muted", "It is sent once, when the agent is free."), b);
+		box.append(
+			el(
+				"span",
+				"tw-muted",
+				"It is sent once, when the agent is free and its earlier messages are resolved.",
+			),
+			b,
+		);
 		const err = this.cancelError.get(msgId);
 		if (err) box.append(el("p", "tw-partial", err));
 		return box;

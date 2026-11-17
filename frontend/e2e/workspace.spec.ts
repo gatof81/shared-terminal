@@ -19,14 +19,18 @@ const ws = (page: Page) => page.locator("#project-view .tw");
 /** The For you list that is on screen (inline or in the right column). */
 const forYou = (page: Page) => page.locator("#project-view .tw-foryou").filter({ visible: true });
 const cards = (page: Page) => forYou(page).locator(".tw-card");
-const threadRows = (page: Page) => page.locator("#project-view .tw-thread-row").filter({ visible: true });
-const composer = (page: Page) => page.locator("#project-view .tw-composer").filter({ visible: true });
+const threadRows = (page: Page) =>
+	page.locator("#project-view .tw-thread-row").filter({ visible: true });
+const composer = (page: Page) =>
+	page.locator("#project-view .tw-composer").filter({ visible: true });
 
 const conversationRequests = (backend: MockBackend) =>
 	backend.requests.filter((r) => r.path.includes("/conversation/"));
 
 async function noHorizontalScroll(page: Page): Promise<void> {
-	const overflow = await page.locator("#project-view").evaluate((el) => el.scrollWidth - el.clientWidth);
+	const overflow = await page
+		.locator("#project-view")
+		.evaluate((el) => el.scrollWidth - el.clientWidth);
 	expect(overflow).toBeLessThanOrEqual(0);
 	const body = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
 	expect(body).toBeLessThanOrEqual(0);
@@ -63,7 +67,9 @@ test.describe("workspace — flag on", () => {
 		await expect(ws(page)).toBeVisible();
 		const agents = page.locator("#project-view .tw-agent");
 		await expect(agents.filter({ hasText: "designer-hz" })).toContainText("Needs you");
-		await expect(agents.filter({ hasText: /^.*developer-hz(?!-2)/ }).first()).toContainText("Working");
+		await expect(agents.filter({ hasText: /^.*developer-hz(?!-2)/ }).first()).toContainText(
+			"Working",
+		);
 		// For you: the permission (presence) first, then the log's items.
 		await expect(cards(page).first()).toContainText("@designer-hz is asking for permission");
 		await expect(cards(page).filter({ hasText: "@developer-hz replied to you" })).toContainText(
@@ -75,7 +81,9 @@ test.describe("workspace — flag on", () => {
 		await expect(cards(page).filter({ hasText: "Not delivered to @architect-hz" })).toContainText(
 			"it was busy",
 		);
-		await expect(cards(page).filter({ hasText: "Not sure it arrived · @developer-hz-2" })).toBeVisible();
+		await expect(
+			cards(page).filter({ hasText: "Not sure it arrived · @developer-hz-2" }),
+		).toBeVisible();
 		await expect(cards(page)).toHaveCount(5);
 		// Threads: the newest activity first; each says its latest fact.
 		await expect(threadRows(page).locator("b")).toHaveText([
@@ -94,8 +102,15 @@ test.describe("workspace — flag on", () => {
 	}) => {
 		// Tamper with the capture behind the dev's reply: the log's hash no longer matches.
 		for (const [k, v] of backend.projectCaptures)
-			if (String((v.data as { last_assistant_message: string }).last_assistant_message).startsWith("Done"))
-				backend.projectCaptures.set(k, { ...v, data: { last_assistant_message: "Something else" } });
+			if (
+				String((v.data as { last_assistant_message: string }).last_assistant_message).startsWith(
+					"Done",
+				)
+			)
+				backend.projectCaptures.set(k, {
+					...v,
+					data: { last_assistant_message: "Something else" },
+				});
 		await app.login("alice", threadHash(PROJECT_MSG_IDS.polling));
 		const timeline = page.locator("#project-view .tw-timeline");
 		await expect(timeline).toContainText("doesn't match what was recorded");
@@ -125,7 +140,10 @@ test.describe("workspace — flag on", () => {
 		const post = backend.projectMessagePosts.at(-1)!;
 		expect(post.to).toEqual([AGENT_IDS.developer]);
 		expect(post.inReplyTo).toBe(PROJECT_MSG_IDS.polling);
-		expect(post.quoteRef).toMatchObject({ msgId: PROJECT_MSG_IDS.polling, agentId: AGENT_IDS.developer });
+		expect(post.quoteRef).toMatchObject({
+			msgId: PROJECT_MSG_IDS.polling,
+			agentId: AGENT_IDS.developer,
+		});
 		// That card is gone; the architect's reply (another thread) stays.
 		await page.goto(`/${projectHash}`);
 		await expect(cards(page).filter({ hasText: "@architect-hz replied to you" })).toBeVisible();
@@ -144,7 +162,9 @@ test.describe("workspace — flag on", () => {
 			await c.locator(".tw-chip-add").click();
 			await c.getByRole("option", { name }).click();
 		}
-		await expect(c.locator(".tw-hint")).toHaveText("Only @architect-hz, @developer-hz will receive this.");
+		await expect(c.locator(".tw-hint")).toHaveText(
+			"Only @architect-hz, @developer-hz will receive this.",
+		);
 		await c.locator("textarea").fill("Both of you: review the CSP");
 		await c.getByRole("button", { name: "Send" }).click();
 		await expect(page).toHaveURL(/\/threads\//);
@@ -158,7 +178,9 @@ test.describe("workspace — flag on", () => {
 		]);
 		await page.goto(`/${projectHash}`);
 		await expect(
-			cards(page).filter({ hasText: "Not delivered to @developer-hz" }).filter({ hasText: "Both of you" }),
+			cards(page)
+				.filter({ hasText: "Not delivered to @developer-hz" })
+				.filter({ hasText: "Both of you" }),
 		).toBeVisible();
 	});
 
@@ -194,15 +216,17 @@ test.describe("workspace — flag on", () => {
 		expect(backend.projectAckPosts.at(-1)).toMatchObject({
 			target: { msgId: PROJECT_MSG_IDS.backup, agentId: AGENT_IDS.architect },
 		});
-		expect(typeof (backend.projectAckPosts.at(-1)!.target as { reportSha256?: unknown }).reportSha256).toBe(
-			"string",
-		);
+		expect(
+			typeof (backend.projectAckPosts.at(-1)!.target as { reportSha256?: unknown }).reportSha256,
+		).toBe("string");
 		// A fresh page (no memory of the click) reads the ack from the log.
 		await page.reload();
 		await expect(cards(page).filter({ hasText: "@developer-hz replied to you" })).toBeVisible();
 		await expect(cards(page).filter({ hasText: "@architect-hz replied to you" })).toHaveCount(0);
 		// The other items of that thread are untouched.
-		await expect(cards(page).filter({ hasText: "Not sure it arrived · @developer-hz-2" })).toBeVisible();
+		await expect(
+			cards(page).filter({ hasText: "Not sure it arrived · @developer-hz-2" }),
+		).toBeVisible();
 	});
 
 	test("a reply in its settle window shows its text as confirming, not in For you", async ({
@@ -210,10 +234,20 @@ test.describe("workspace — flag on", () => {
 		backend,
 		page,
 	}) => {
-		backend.projectTask("c3000000-0000-4000-8000-000000000001", [AGENT_IDS.developer], "Bump the version");
-		await backend.projectReply("c3000000-0000-4000-8000-000000000001", AGENT_IDS.developer, "Bumped to 1.4.0.", "exact", {
-			settleOnly: true,
-		});
+		backend.projectTask(
+			"c3000000-0000-4000-8000-000000000001",
+			[AGENT_IDS.developer],
+			"Bump the version",
+		);
+		await backend.projectReply(
+			"c3000000-0000-4000-8000-000000000001",
+			AGENT_IDS.developer,
+			"Bumped to 1.4.0.",
+			"exact",
+			{
+				settleOnly: true,
+			},
+		);
 		await app.login("alice", threadHash("c3000000-0000-4000-8000-000000000001"));
 		const row = page.locator("#project-view .tw-row-settling");
 		await expect(row).toContainText("reply received, confirming…");
@@ -223,14 +257,30 @@ test.describe("workspace — flag on", () => {
 		await expect(cards(page).filter({ hasText: "Bumped" })).toHaveCount(0);
 	});
 
-	test("live: a reply arrives over WS /ws/project faster than any poll", async ({ app, backend, page }) => {
-		backend.projectTask("c4000000-0000-4000-8000-000000000001", [AGENT_IDS.developer], "Live check");
+	test("live: a reply arrives over WS /ws/project faster than any poll", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.projectTask(
+			"c4000000-0000-4000-8000-000000000001",
+			[AGENT_IDS.developer],
+			"Live check",
+		);
 		await app.login("alice", threadHash("c4000000-0000-4000-8000-000000000001"));
 		await expect(page.locator("#project-view .tw-main-title")).toHaveText("Live check");
-		await expect.poll(() => backend.projectSockets.filter((s) => !s.closed && s.after !== null).length).toBe(1);
-		await backend.projectReply("c4000000-0000-4000-8000-000000000001", AGENT_IDS.developer, "Live reply.");
+		await expect
+			.poll(() => backend.projectSockets.filter((s) => !s.closed && s.after !== null).length)
+			.toBe(1);
+		await backend.projectReply(
+			"c4000000-0000-4000-8000-000000000001",
+			AGENT_IDS.developer,
+			"Live reply.",
+		);
 		// The poll is 5 s (30 s while live): 2 s can only be the socket.
-		await expect(page.locator("#project-view .tw-bubble-agent")).toHaveText("Live reply.", { timeout: 2_000 });
+		await expect(page.locator("#project-view .tw-bubble-agent")).toHaveText("Live reply.", {
+			timeout: 2_000,
+		});
 	});
 
 	test("a refused project socket falls back to polling: the reply still arrives", async ({
@@ -239,11 +289,21 @@ test.describe("workspace — flag on", () => {
 		page,
 	}) => {
 		backend.projectSocketsRefused = true;
-		backend.projectTask("c4000000-0000-4000-8000-000000000002", [AGENT_IDS.developer], "Poll check");
+		backend.projectTask(
+			"c4000000-0000-4000-8000-000000000002",
+			[AGENT_IDS.developer],
+			"Poll check",
+		);
 		await app.login("alice", threadHash("c4000000-0000-4000-8000-000000000002"));
 		await expect(page.locator("#project-view .tw-main-title")).toHaveText("Poll check");
-		await backend.projectReply("c4000000-0000-4000-8000-000000000002", AGENT_IDS.developer, "Polled reply.");
-		await expect(page.locator("#project-view .tw-bubble-agent")).toHaveText("Polled reply.", { timeout: 12_000 });
+		await backend.projectReply(
+			"c4000000-0000-4000-8000-000000000002",
+			AGENT_IDS.developer,
+			"Polled reply.",
+		);
+		await expect(page.locator("#project-view .tw-bubble-agent")).toHaveText("Polled reply.", {
+			timeout: 12_000,
+		});
 	});
 
 	test("New task: @ opens the picker; only chosen agents receive it, typed @names don't", async ({
@@ -294,7 +354,9 @@ test.describe("workspace — flag on", () => {
 		await c.getByRole("option", { name: /architect-hz/ }).click();
 		await c.locator("textarea").fill("Write the release notes (again)");
 		await c.getByRole("button", { name: "Send" }).click();
-		await expect(page.locator("#project-view .tw-del").last()).toHaveText("@architect-hz · Delivered ✓");
+		await expect(page.locator("#project-view .tw-del").last()).toHaveText(
+			"@architect-hz · Delivered ✓",
+		);
 		await page.goto(`/${projectHash}`);
 		await expect(cards(page).filter({ hasText: "Not delivered to @architect-hz" })).toHaveCount(0);
 	});
@@ -316,7 +378,9 @@ test.describe("workspace — flag on", () => {
 		await expect(page).toHaveURL(/\/threads\//);
 		const ids = backend.projectMessagePosts.map((p) => p.clientMessageId);
 		expect(new Set(ids).size).toBe(1);
-		expect(backend.projectLog.filter((e) => e.ev === "message" && e.text === "Rotate the deploy key")).toHaveLength(1);
+		expect(
+			backend.projectLog.filter((e) => e.ev === "message" && e.text === "Rotate the deploy key"),
+		).toHaveLength(1);
 	});
 
 	test("history: a late reply to an old task lands in its own thread, older pages on demand", async ({
@@ -328,8 +392,16 @@ test.describe("workspace — flag on", () => {
 		backend.projectLog = [];
 		backend.projectTask(PROJECT_MSG_IDS.old, [AGENT_IDS.architect], "Old task: audit the CSP");
 		for (let i = 0; i < 6; i++)
-			backend.projectTask(`c2000000-0000-4000-8000-00000000000${i}`, [AGENT_IDS.developer], `Filler task ${i}`);
-		await backend.projectReply(PROJECT_MSG_IDS.old, AGENT_IDS.architect, "CSP audit done: 2 findings.");
+			backend.projectTask(
+				`c2000000-0000-4000-8000-00000000000${i}`,
+				[AGENT_IDS.developer],
+				`Filler task ${i}`,
+			);
+		await backend.projectReply(
+			PROJECT_MSG_IDS.old,
+			AGENT_IDS.architect,
+			"CSP audit done: 2 findings.",
+		);
 		backend.projectPageCap = 5;
 		await app.login("alice", projectHash);
 		// The reply's original was fetched by id: the old thread exists, with its reply.
@@ -339,7 +411,9 @@ test.describe("workspace — flag on", () => {
 			"CSP audit done",
 		);
 		await old.click();
-		await expect(page.locator("#project-view .tw-bubble-agent")).toHaveText("CSP audit done: 2 findings.");
+		await expect(page.locator("#project-view .tw-bubble-agent")).toHaveText(
+			"CSP audit done: 2 findings.",
+		);
 		await page.goto(`/${projectHash}`);
 		// Older threads come page by page.
 		const earlier = page.getByRole("button", { name: "Earlier threads" }).filter({ visible: true });
@@ -554,9 +628,11 @@ test.describe("workspace — consults between two agents (D3)", () => {
 		await sendTaskWithConsult(page);
 		const task = backend.projectMessagePosts.length;
 		expect(task).toBe(1);
-		const taskId = (backend.projectLog.find((l) => l.ev === "grant" && l.event === "created") as {
-			task_msg_id: string;
-		}).task_msg_id;
+		const taskId = (
+			backend.projectLog.find((l) => l.ev === "grant" && l.event === "created") as {
+				task_msg_id: string;
+			}
+		).task_msg_id;
 		const g = backend.lastGrantId();
 		// The shape of the real stage-2 log: three messages, each answered by a turn.
 		await backend.projectReply(taskId, DEV, "I asked the architect; waiting for the answer.");
@@ -794,7 +870,9 @@ test.describe("workspace — layout", () => {
 			);
 		await page.setViewportSize({ width: 390, height: 844 });
 		await app.login("alice", projectHash);
-		const card = cards(page).filter({ has: page.locator(".tw-done") }).first();
+		const card = cards(page)
+			.filter({ has: page.locator(".tw-done") })
+			.first();
 		await expect(card).toBeVisible();
 		const text = (await card.locator(".tw-card-link").boundingBox())!;
 		const done = (await card.locator(".tw-done").boundingBox())!;
@@ -855,9 +933,13 @@ test.describe("workspace — layout", () => {
 		const s = (await strip.boundingBox())!;
 		// One row of chips (was a grid of 84-px cards in two rows, ~200 px).
 		expect(s.height).toBeLessThanOrEqual(60);
-		const tops = await strip.locator(".tw-agent").evaluateAll((as) => as.map((a) => a.getBoundingClientRect().top));
+		const tops = await strip
+			.locator(".tw-agent")
+			.evaluateAll((as) => as.map((a) => a.getBoundingClientRect().top));
 		expect(new Set(tops.map(Math.round)).size).toBe(1);
-		for (const box of await strip.locator(".tw-agent").evaluateAll((as) => as.map((a) => a.getBoundingClientRect().height)))
+		for (const box of await strip
+			.locator(".tw-agent")
+			.evaluateAll((as) => as.map((a) => a.getBoundingClientRect().height)))
 			expect(box).toBeGreaterThanOrEqual(44);
 		// For you's heading sits in the top quarter of the phone (was ~355 px down).
 		const fy = (await page.locator("#project-view .tw-foryou-inline .tw-h3").boundingBox())!;
@@ -865,7 +947,10 @@ test.describe("workspace — layout", () => {
 		await noHorizontalScroll(page);
 	});
 
-	test("wide page: For you moves to its own column; medium: it folds into Now", async ({ app, page }) => {
+	test("wide page: For you moves to its own column; medium: it folds into Now", async ({
+		app,
+		page,
+	}) => {
 		await page.setViewportSize({ width: 1700, height: 900 });
 		await app.login("alice", projectHash);
 		await expect(page.locator("#project-view .tw-side .tw-foryou")).toBeVisible();
@@ -875,5 +960,88 @@ test.describe("workspace — layout", () => {
 		await expect(page.locator("#project-view .tw-side")).toBeHidden();
 		await expect(page.locator("#project-view .tw-foryou-inline")).toBeVisible();
 		await noHorizontalScroll(page);
+	});
+});
+
+test.describe("Team workspace — a message waits for a busy agent (§3.6)", () => {
+	test.beforeEach(async ({ backend }) => {
+		await backend.enableProjectConversation();
+	});
+
+	const send = async (page: Page, text: string) => {
+		const c = composer(page);
+		await c.locator(".tw-chip-add").click();
+		await c.getByRole("option", { name: /^@developer-hz(?!-2)/ }).click();
+		await c.locator("textarea").fill(text);
+		await c.getByRole("button", { name: "Send" }).click();
+		await expect(page).toHaveURL(/\/threads\//);
+	};
+	const lastRow = (page: Page) => page.locator("#project-view .tw-row-me").last();
+
+	test("projectQueue absent: the send carries no whenFree and nothing offers Cancel", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		await app.login("alice", `${projectHash}/new`);
+		await send(page, "Old backend");
+		expect(backend.projectMessagePosts.at(-1)).not.toHaveProperty("whenFree");
+		await expect(page.locator("#project-view .tw-queued")).toHaveCount(0);
+	});
+
+	test("busy agent: queued with Cancel; delivered live when the agent is free", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.projectQueue = true;
+		backend.projectBusyAgents.add(AGENT_IDS.developer);
+		await app.login("alice", `${projectHash}/new`);
+		await send(page, "When you are done: check the CSP");
+		expect(backend.projectMessagePosts.at(-1)?.whenFree).toBe(true);
+		const row = lastRow(page);
+		await expect(row.locator(".tw-del")).toHaveText(
+			"@developer-hz · Queued: waiting for it to be free",
+		);
+		await expect(row.locator(".tw-queued")).toContainText(
+			"It is sent once, when the agent is free",
+		);
+		await expect(
+			row.getByRole("button", { name: "Cancel this message while it waits" }),
+		).toBeVisible();
+		await noHorizontalScroll(page);
+
+		const msgId = [...backend.projectLog].reverse().find((e) => e.ev === "message")!
+			.msg_id as string;
+		backend.projectQueueDeliver(msgId, AGENT_IDS.developer);
+		await expect(row.locator(".tw-del")).toHaveText("@developer-hz · Delivered ✓");
+		await expect(row.locator(".tw-queued")).toHaveCount(0);
+	});
+
+	test("Cancel closes the queued message: not sent, and said so", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.projectQueue = true;
+		backend.projectBusyAgents.add(AGENT_IDS.developer);
+		await app.login("alice", `${projectHash}/new`);
+		await send(page, "Never mind this one");
+		const row = lastRow(page);
+		await row.getByRole("button", { name: "Cancel this message while it waits" }).click();
+		await expect(row.locator(".tw-del")).toHaveText(
+			"@developer-hz · Not delivered: you cancelled it while it was queued",
+		);
+		await expect(row.locator(".tw-queued")).toHaveCount(0);
+		expect(backend.requests.filter((r) => r.path.endsWith("/cancel"))).toHaveLength(1);
+	});
+
+	test("a free agent gets a whenFree message at once", async ({ app, backend, page }) => {
+		backend.projectQueue = true;
+		await app.login("alice", `${projectHash}/new`);
+		await send(page, "You are free");
+		expect(backend.projectMessagePosts.at(-1)?.whenFree).toBe(true);
+		await expect(lastRow(page).locator(".tw-del")).toHaveText("@developer-hz · Delivered ✓");
+		await expect(page.locator("#project-view .tw-queued")).toHaveCount(0);
 	});
 });

@@ -508,6 +508,11 @@ export class MockBackend {
 	>();
 	/** Every POST …/grants/:id/<verb> received, in order. */
 	projectGrantPosts: Array<{ grantId: string; verb: string }> = [];
+	// ── The person's queue (§3.6) ──
+	/** This backend knows `whenFree` and the cancel route: `features.projectQueue`. */
+	projectQueue = false;
+	/** Agents that are not free: a `whenFree` delivery to them stays `queued`. */
+	projectBusyAgents = new Set<string>();
 	/** The next send with `collab` is refused with this answer (e.g. 409 agent-in-collab). */
 	projectCollabRefusal: { status: number; body: Record<string, unknown> } | null = null;
 	/** clientMessageId → msg_id (idempotency, §3.4 rule 2). */
@@ -870,6 +875,14 @@ export class MockBackend {
 		});
 	}
 
+	/** §3.6: the agent became free — its queued delivery of `msgId` leaves the queue. */
+	projectQueueDeliver(msgId: string, agentId: string, state = "delivered", reason?: string): void {
+		const base = { ev: "delivery", msg_id: msgId, agent_id: agentId, authorized_by: "owner" };
+		this.appendProjectEvent({ ...base, state: "planned" });
+		this.appendProjectEvent({ ...base, state: "sending" });
+		this.appendProjectEvent({ ...base, state, ...(reason ? { reason } : {}) });
+	}
+
 	/** An owner message plus its deliveries, as the server would write them. */
 	projectTask(
 		msgId: string,
@@ -894,6 +907,11 @@ export class MockBackend {
 		for (const a of to) {
 			const o = outcome(a);
 			const base = { ev: "delivery", msg_id: msgId, agent_id: a, authorized_by: "owner" };
+			if (o.state === "queued") {
+				// §3.6: nothing was planned or sent; the queue does that later.
+				this.appendProjectEvent({ ...base, state: "queued" });
+				continue;
+			}
 			this.appendProjectEvent({ ...base, state: "planned" });
 			if (files.length > 0) {
 				// §6.4: placing is durable before the inbox is touched.
@@ -1127,22 +1145,34 @@ export class MockBackend {
 			const msgId = `c0000000-0000-4000-8000-${String(this.projectLog.length).padStart(12, "0")}`;
 			const q = body?.quoteRef as Record<string, unknown> | undefined;
 			const grantId = collab ? `c-${String(this.projectLog.length).padStart(12, "0")}` : null;
-			this.projectTask(msgId, to, text, {
-				client_message_id: cmid,
-				artifacts: refs,
-				...(grantId ? { collab: { grant_id: grantId } } : {}),
-				...(typeof body?.inReplyTo === "string" ? { in_reply_to: body.inReplyTo } : {}),
-				...(q
-					? {
-							quote_ref: {
-								msg_id: q.msgId,
-								agent_id: q.agentId,
-								prompt_id: q.promptId,
-								report_sha256: q.reportSha256,
-							},
-						}
-					: {}),
-			});
+			const whenFree = this.projectQueue && body?.whenFree === true && !collab;
+			this.projectTask(
+				msgId,
+				to,
+				text,
+				{
+					client_message_id: cmid,
+					artifacts: refs,
+					...(grantId ? { collab: { grant_id: grantId } } : {}),
+					...(typeof body?.inReplyTo === "string" ? { in_reply_to: body.inReplyTo } : {}),
+					...(q
+						? {
+								quote_ref: {
+									msg_id: q.msgId,
+									agent_id: q.agentId,
+									prompt_id: q.promptId,
+									report_sha256: q.reportSha256,
+								},
+							}
+						: {}),
+				},
+				whenFree
+					? (a) =>
+							this.projectBusyAgents.has(a)
+								? { state: "queued" }
+								: (this.projectSendOutcome.get(a) ?? { state: "delivered" })
+					: undefined,
+			);
 			this.projectSends.set(cmid, { msgId, hash });
 			if (grantId && collab) {
 				this.projectGrants.set(grantId, { state: "live", initiator: to[0]!, with: collab.with! });
@@ -1480,6 +1510,37 @@ export class MockBackend {
 			/^\/projects\/([^/]+)\/conversation\/(events|messages|acks|artifacts)(?:\/([^/]+))?$/.exec(
 				path,
 			);
+		// §3.6: close what is still queued of one message. Unknown path on a backend without the queue.
+		const cancel = /^\/projects\/([^/]+)\/conversation\/messages\/([^/]+)\/cancel$/.exec(path);
+		if (cancel && method === "POST" && this.projectConversation && this.projectQueue) {
+			const project = own(decodeURIComponent(cancel[1]!));
+			const msgId = decodeURIComponent(cancel[2]!);
+			const m = this.projectLog.find((e) => e.ev === "message" && e.msg_id === msgId);
+			if (!project || !m) {
+				await answer(404, { error: "message-not-found" });
+				return true;
+			}
+			const last = (a: string) =>
+				[...this.projectLog]
+					.reverse()
+					.find((e) => e.ev === "delivery" && e.msg_id === msgId && e.agent_id === a);
+			const open = (m.to as string[]).filter((a) => last(a)?.state === "queued");
+			for (const a of open)
+				this.appendProjectEvent({
+					ev: "delivery",
+					msg_id: msgId,
+					agent_id: a,
+					state: "not-sent",
+					reason: "cancelled",
+					authorized_by: "owner",
+				});
+			await answer(200, {
+				msgId,
+				cancelled: open,
+				deliveries: (m.to as string[]).map((a) => ({ agentId: a, state: last(a)?.state })),
+			});
+			return true;
+		}
 		// §7.6: mounted only with the relay flag effective — otherwise the unknown-path 404.
 		const gr = /^\/projects\/([^/]+)\/conversation\/grants\/([^/]+)\/(pause|resume|revoke)$/.exec(
 			path,
@@ -1874,6 +1935,7 @@ export class MockBackend {
 										projectConversation: true,
 										...(this.projectArtifacts ? { projectArtifacts: true } : {}),
 										...(this.projectRelay ? { projectRelay: true } : {}),
+										...(this.projectQueue ? { projectQueue: true } : {}),
 									}
 								: { projectChat: true },
 						}
