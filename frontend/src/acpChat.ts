@@ -46,6 +46,7 @@ let timer: ReturnType<typeof setInterval> | null = null;
 let lastSignature = "";
 let sending = 0;
 let errorText = "";
+let authRequired = false;
 
 const root = el("div", "acp-chat");
 root.id = "acp-chat";
@@ -87,6 +88,7 @@ function apply(): void {
 		liveText.clear();
 		lastSignature = "";
 		errorText = "";
+		authRequired = false;
 		threadEl.textContent = "";
 	}
 	owned = agent;
@@ -127,6 +129,9 @@ async function poll(): Promise<void> {
 		const next = await acpFeed(agent.name, seq);
 		if (owned?.name !== agent.name) return;
 		for (const e of next.activity) {
+			// The runner reports a refused login; any later turn means it got past it.
+			if (e.kind === "auth") authRequired = e.state === "required";
+			if (e.kind === "turn" && e.phase === "answered") authRequired = false;
 			if (e.messageId === null) continue;
 			if (e.kind === "text") liveText.set(e.messageId, String(e.text ?? ""));
 			else {
@@ -192,12 +197,21 @@ function render(): void {
 		feed.messages.map((m) => [m.id, m.state, m.result_text?.length, m.note]),
 		seq,
 		errorText,
+		authRequired,
 	]);
 	if (sig === lastSignature) return;
 	lastSignature = sig;
 	const atBottom = threadEl.scrollHeight - threadEl.scrollTop - threadEl.clientHeight < 40;
 	threadEl.textContent = "";
 	if (errorText) threadEl.append(el("div", "acp-chat-error", errorText));
+	if (authRequired)
+		threadEl.append(
+			el(
+				"div",
+				"acp-chat-error",
+				"El agente no está autenticado. Abrí la pestaña Terminal de esta sesión, ejecutá `claude` e iniciá sesión con /login (una sola vez: queda guardado en la sesión). Tus mensajes quedan pendientes y se procesan solos después.",
+			),
+		);
 	if (feed.messages.length === 0)
 		threadEl.append(
 			el("div", "acp-chat-empty", "Sin mensajes todavía. El agente procesa uno por vez, en orden."),

@@ -31,6 +31,9 @@ const IDLE_SETTLE_MS = 2_000; // idle must hold this long (a shutdown also close
 const STARTUP_WINDOW_MS = 3_000; // what the resume itself triggers arrives within this
 const BG_CHECK_MS = Number(env.BG_CHECK_MS ?? 10 * 60_000); // ask once about tasks still open after this
 const TERMINAL = new Set(["completed", "failed", "stopped"]);
+const AUTH_REQUIRED = -32000; // ACP RequestError.authRequired()
+const AUTH_RETRY_MS = 20_000;
+let authWaitUntil = 0;
 mkdirSync(LOG_DIR, { recursive: true });
 
 const PROTOCOL = [
@@ -233,6 +236,18 @@ function run(sessionId, msg) {
 			segments: [""],
 			allText: "",
 			checked: false,
+			async release(note) {
+				if (current?.msg !== msg) return;
+				clearTimeout(current.timer);
+				clearTimeout(current.bgTimer);
+				record({ released: note });
+				emit({ kind: "auth", state: "required" });
+				current = null;
+				authWaitUntil = Date.now() + AUTH_RETRY_MS;
+				await api("POST", `/runner/messages/${msg.id}/release`, { note });
+				log(`message #${msg.id}: back to pending (${note})`);
+				resolve();
+			},
 			async settle(s, exitAfter = false) {
 				if (current?.msg !== msg) return;
 				clearTimeout(current.timer);
@@ -270,7 +285,16 @@ function run(sessionId, msg) {
 		};
 		request("session/prompt", { sessionId, prompt: [{ type: "text", text: `${marker(msg.id, msg.from_id)}\n${msg.body}` }] })
 			.then(answered)
-			.catch((err) => current?.msg === msg && current.settle({ state: "uncertain", note: `prompt error: ${err.message}` }));
+			.catch((err) => {
+				if (current?.msg !== msg) return;
+				// -32000 Authentication required: the adapter answers it before the
+				// model runs (Claude Code's synthetic login message), so the turn did
+				// nothing — the message goes back to pending, not to `uncertain`, and
+				// the runner waits for a login (the session's ~/.claude, shared with
+				// the terminal's `claude`) before claiming again.
+				if (err.data?.code === AUTH_REQUIRED) return current.release("agent not authenticated: log in with `claude` in this session's terminal");
+				current.settle({ state: "uncertain", note: `prompt error: ${err.message}` });
+			});
 	});
 }
 
@@ -357,7 +381,7 @@ async function main() {
 		if (sys.status === 200) await run(sessionId, sys.body);
 	}
 	for (;;) {
-		if (!agentIdle()) {
+		if (!agentIdle() || Date.now() < authWaitUntil) {
 			await new Promise((ok) => setTimeout(ok, 500));
 			continue;
 		}
