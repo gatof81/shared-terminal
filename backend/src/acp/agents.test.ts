@@ -72,6 +72,13 @@ describe("ACP runner watchdog", () => {
 		expect(calls.launches[0].at(-1)).toBe("st-acp-runner-loop");
 	});
 
+	it("a runner alive without its loop is not doubled", async () => {
+		const { acp, calls } = await make({ running: "c1", probe: { exitCode: 3 } });
+		await acp.watchdogTick();
+		await acp.watchdogTick();
+		expect(calls.launches).toHaveLength(0);
+	});
+
 	it("an unanswered probe (error, timeout) launches nothing", async () => {
 		for (const probe of [new Error("exec failed"), { exitCode: null }, { exitCode: 126 }]) {
 			const { acp, calls } = await make({ running: "c1", probe });

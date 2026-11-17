@@ -66,10 +66,21 @@ export function acpConfigFromEnv(workspaceRoot: string, port: number): AcpConfig
 const RUNTIME_MOUNT = "/opt/st-acp";
 const RUNNER_LOOP_NAME = "st-acp-runner-loop";
 const RUNNER_LOCK = "/tmp/st-acp-runner.lock";
-// exit 0: the `flock` holding the launch lock is alive — it exists exactly as
-// long as the loop it runs, whatever version launched it; 1: no holder. The
-// pattern is anchored at `flock` so it never matches this probe's own `sh -c`.
-export const RUNNER_PROBE = `pgrep -f '^flock -n ${RUNNER_LOCK}' >/dev/null`;
+// Liveness from the processes themselves (never from silence, never by taking
+// the lock — a probe holding it would make a concurrent launch give up):
+// exit 0: the restart loop is there (alive);
+// exit 3: no loop, but a runner (or a holder of the launch lock) still lives —
+//         unsupervised, NOT dead: launching would make a second runner on the
+//         same ACP session, so nothing is launched; when it exits, the next
+//         probe sees 1;
+// exit 1: nothing (dead — safe to launch, still under `flock -n`).
+// Patterns are anchored so they never match this probe's own `sh -c`.
+export const RUNNER_PROBE = [
+	"pgrep -f '^sh -c while true; do node' >/dev/null && exit 0",
+	"pgrep -f '^node --no-warnings /opt/st-acp/st/runner.mjs' >/dev/null && exit 3",
+	`i=$(stat -c %i ${RUNNER_LOCK} 2>/dev/null) && grep -q ":$i " /proc/locks && exit 3`,
+	"exit 1",
+].join("\n");
 // Names an agent can be addressed by (`st send @name`). `owner` and `system`
 // are the person and Shared Terminal itself.
 export const AGENT_NAME_RE = /^[a-z][a-z0-9-]{1,31}$/;
@@ -450,6 +461,7 @@ export class AcpAgents {
 
 	private watchdog: NodeJS.Timeout | null = null;
 	private readonly checking = new Set<string>();
+	private readonly orphanReported = new Set<string>();
 
 	startWatchdog(intervalMs = this.config.watchdogMs): void {
 		this.stopWatchdog();
@@ -466,15 +478,24 @@ export class AcpAgents {
 		await Promise.all([...this.byId.values()].map((a) => this.checkRunner(a)));
 	}
 
-	/** "alive" | "dead" | "unknown" for the runner loop in this container. */
-	async probeRunner(sessionId: string, containerId: string): Promise<"alive" | "dead" | "unknown"> {
+	/** The runner loop's state in this container, from RUNNER_PROBE's exit code. */
+	async probeRunner(
+		sessionId: string,
+		containerId: string,
+	): Promise<"alive" | "dead" | "orphaned" | "unknown"> {
 		try {
 			const r = await this.docker.execCapture(sessionId, ["sh", "-c", RUNNER_PROBE], {
 				containerId,
 				maxBytes: 256,
 				timeoutMs: 10_000,
 			});
-			return r.exitCode === 0 ? "alive" : r.exitCode === 1 ? "dead" : "unknown";
+			return r.exitCode === 0
+				? "alive"
+				: r.exitCode === 1
+					? "dead"
+					: r.exitCode === 3
+						? "orphaned"
+						: "unknown";
 		} catch {
 			return "unknown";
 		}
@@ -489,6 +510,14 @@ export class AcpAgents {
 			);
 			if (!containerId) return;
 			const state = await this.probeRunner(agent.session_id, containerId);
+			if (state === "orphaned" && !this.orphanReported.has(agent.agent_id)) {
+				// warn once per episode: the agent still works, it just has no restart loop
+				this.orphanReported.add(agent.agent_id);
+				logger.warn(
+					`[acp] @${agent.name}: runner alive without its restart loop; not launching a second one (it is relaunched once it exits)`,
+				);
+			}
+			if (state !== "orphaned") this.orphanReported.delete(agent.agent_id);
 			if (state !== "dead") return;
 			logger.warn(`[acp] runner loop of @${agent.name} is not running; launching it`);
 			await this.ensureRunner(agent.session_id, containerId);
