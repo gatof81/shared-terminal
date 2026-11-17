@@ -54,6 +54,13 @@ export interface DeliveryFold {
 	/** On `settled`: the Composer result it settled to. */
 	result?: string;
 	lastSeq: number;
+	/**
+	 * Seq of the first line with which it left for the Composer (any state
+	 * but `queued` / `not-sent`); undefined while it never did. The order in
+	 * which deliveries reached the pane — `lastSeq` also moves with a late
+	 * `settled` (§3.6).
+	 */
+	leftSeq?: number;
 	/** `at` of its last line: what a held line's time limits count from (§3.6). */
 	lastAt: string;
 }
@@ -243,6 +250,8 @@ export function fold(f: Folded, lines: readonly LogLine[]): Folded {
 					reason: (l.reason as string | undefined) ?? undefined,
 					result: (l.result as string | undefined) ?? undefined,
 					lastSeq: l.seq,
+					leftSeq:
+						prev?.leftSeq ?? (state === "queued" || state === "not-sent" ? undefined : l.seq),
 					lastAt: l.at,
 				});
 				break;

@@ -29,6 +29,7 @@ import {
 	createDeliveryQueue,
 	type DeliveryQueue,
 	LINE_HOLD_MAX_MS,
+	lineHold,
 	OWNER_QUEUE_WAIT_MS,
 	REFUSED_HOLD_MS,
 	type RecipientState,
@@ -725,6 +726,74 @@ describe("the line holds after a result that is not clean (§3.6, review of #663
 		await pass(3);
 		expect(sys.calls.map((c) => c.text)).toEqual(["directo"]);
 		expect(await states(m2)).toEqual(["queued"]);
+	});
+
+	// A's review of #663: "last" is the order in which deliveries LEFT for the
+	// pane, not of their last line — a `settled` moves the latter.
+	const settleAs = (msgId: string, result: string) =>
+		sys.store.critical(PID, (tx) =>
+			tx.append([{ ev: "delivery", msg_id: msgId, agent_id: A, state: "settled", result }]),
+		);
+	const heldBy = async () => lineHold((await sys.store.view(PID)).state, A, now)?.msgId ?? null;
+
+	it("a late settled{failed} of an older delivery does not hold again a line a later delivered message opened", async () => {
+		const [m1, m2, m3] = await three(answer("uncertain"));
+		// Busy, so the queue stays where it is while the direct message goes.
+		busy(SA, "cid-a");
+		const direct = await send("directo", [A], { whenFree: false });
+		expect((direct.body.deliveries as Array<{ state: string }>)[0]?.state).toBe("delivered");
+		expect(await heldBy()).toBeNull();
+		await settleAs(m1, "failed");
+		expect(await heldBy()).toBeNull();
+		free(SA, "cid-a");
+		await pass(3);
+		// Each one once: nothing is sent twice by the line opening.
+		expect(sys.calls.map((c) => c.text)).toEqual(["m1", "directo", "m2", "m3"]);
+		expect(await states(m2)).toEqual(["queued", "planned", "sending", "delivered"]);
+		expect(await states(m3)).toEqual(["queued", "planned", "sending", "delivered"]);
+	});
+
+	it('a later "not now" refusal is no evidence about an earlier unclean result: the line stays held past the 10 min', async () => {
+		const [m1, m2] = await three(answer("uncertain"));
+		sys.composer = refuse("busy");
+		await send("directo", [A], { whenFree: false });
+		sys.composer = answer("delivered");
+		expect(await heldBy()).toBe(m1);
+		now += REFUSED_HOLD_MS + 1_000;
+		await pass(3);
+		expect(await heldBy()).toBe(m1);
+		expect(sys.calls.map((c) => c.text)).toEqual(["m1", "directo"]);
+		expect(await states(m2)).toEqual(["queued"]);
+		// …and a late settled{failed} of m1 changes nothing either way.
+		await settleAs(m1, "failed");
+		await pass(2);
+		expect(await states(m2)).toEqual(["queued"]);
+		await ack(m1, A);
+		await settle();
+		expect((await states(m2)).at(-1)).toBe("delivered");
+	});
+
+	it("a later message that ends unclean holds in its turn, whatever the older one settles as", async () => {
+		const [m1, m2] = await three(answer("uncertain"));
+		sys.composer = answer("unconfirmed");
+		const d = (await send("directo", [A], { whenFree: false })).body.msgId as string;
+		sys.composer = answer("delivered");
+		await settleAs(m1, "delivered");
+		expect(await heldBy()).toBe(d);
+		await pass(3);
+		expect(await states(m2)).toEqual(["queued"]);
+	});
+
+	it("marking the later one done covers what left before it", async () => {
+		const [, m2] = await three(refuse("composer-not-empty"));
+		sys.composer = answer("uncertain");
+		const d = (await send("directo", [A], { whenFree: false })).body.msgId as string;
+		sys.composer = answer("delivered");
+		expect(await heldBy()).toBe(d);
+		await ack(d, A);
+		await settle();
+		expect(await heldBy()).toBeNull();
+		expect((await states(m2)).at(-1)).toBe("delivered");
 	});
 
 	it("after 24 h nobody settled or acknowledged it: it stops holding; what expired behind it closes wait-expired", async () => {
