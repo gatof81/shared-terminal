@@ -33,6 +33,7 @@ import { LOG_FILE, type LogLine } from "./log.js";
 import { checkLog } from "./logCheck.js";
 import { type OutboxDeps, OutboxWatcher } from "./outbox.js";
 import { projectDir } from "./paths.js";
+import { createDeliveryQueue, type DeliveryQueue } from "./queue.js";
 import { ProjectConversationStore } from "./store.js";
 
 const PID = "6b1f0c4e-1d2a-4b3c-8d4e-5f6a7b8c9d0e";
@@ -50,6 +51,7 @@ const ABS = "/home/developer/workspace/.st-outbox/";
 let now: number;
 let store: ProjectConversationStore;
 let collab: ProjectCollab;
+let queue: DeliveryQueue;
 let outbox: OutboxWatcher;
 let grantId: string;
 let composerTexts: Array<{ sid: string; text: string }>;
@@ -94,13 +96,12 @@ async function settle(rounds = 30): Promise<void> {
 		await new Promise((r) => setTimeout(r, 2));
 	};
 	for (let i = 0; i < rounds; i++) await tick();
-	const work = collab as unknown as { draining: Map<string, unknown>; inFlight: Set<string> };
 	const size = async () => (await lines().catch(() => [])).length;
 	let seen = await size();
 	for (let quiet = 0, i = 0; quiet < 3 && i < 400; i++) {
 		await tick();
 		const now = await size();
-		quiet = work.draining.size === 0 && work.inFlight.size === 0 && now === seen ? quiet + 1 : 0;
+		quiet = queue.idle && now === seen ? quiet + 1 : 0;
 		seen = now;
 	}
 }
@@ -230,10 +231,20 @@ beforeEach(async () => {
 		now: () => now,
 		bindings: async () => bindings(),
 		recipient: async (sid) => conversation.get(sid) ?? { kind: "none" },
+		kick: (pid) => queue.kick(pid),
+	});
+	queue = createDeliveryQueue({
+		store,
+		fanout,
+		now: () => now,
+		bindings: async () => bindings(),
+		recipient: async (sid) => conversation.get(sid) ?? { kind: "none" },
 		onCaptureEvent: () => () => {},
+		collab: () => collab,
 		gateIntervalMs: 3_600_000,
 	});
 	await collab.start([]);
+	await queue.start([]);
 	outbox = new OutboxWatcher({
 		collab,
 		now: () => now,
@@ -272,6 +283,7 @@ afterEach(async () => {
 	expect(checkLog(ls).violations).toEqual([]);
 	outbox.stop();
 	collab.stop();
+	queue.stop();
 	await store.close();
 	await fs.rm(ROOT, { recursive: true, force: true });
 });

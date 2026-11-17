@@ -298,6 +298,7 @@ async function main(): Promise<void> {
 	const { ProjectConversationStore } = await import("./store.js");
 	const { ProjectFanout } = await import("./fanout.js");
 	const { ProjectCollab } = await import("./collab.js");
+	const { createDeliveryQueue } = await import("./queue.js");
 	const { OutboxWatcher } = await import("./outbox.js");
 	const { LOG_FILE } = await import("./log.js");
 	const { checkLog } = await import("./logCheck.js");
@@ -531,11 +532,22 @@ async function main(): Promise<void> {
 		fanout,
 		bindings,
 		recipient: soleConversation,
+		kick: (pid) => queue.kick(pid),
+		log,
+	});
+	const queue = createDeliveryQueue({
+		store,
+		fanout,
+		bindings,
+		recipient: soleConversation,
 		onCaptureEvent: (l) => service.onPersistedEvent((sid) => l(sid)),
+		collab: () => collab,
 		gateIntervalMs: 500,
 		log,
 	});
-	await collab.start(await store.openAll());
+	const openedProjects = await store.openAll();
+	await collab.start(openedProjects);
+	await queue.start(openedProjects);
 	const outbox = new OutboxWatcher({
 		collab,
 		// Both receivers feed the one watcher: case (f) is "the same write, on
@@ -908,6 +920,7 @@ async function main(): Promise<void> {
 	} finally {
 		outbox.stop();
 		collab.stop();
+		queue.stop();
 		server.close();
 		serverOff.close();
 		server.closeAllConnections();

@@ -100,6 +100,14 @@ export function registerProjectConversationRoutes(router: Router, ctx: RouteCont
 		),
 	);
 	router.post(
+		"/projects/:pid/conversation/messages/:msgId/cancel",
+		requireAuth,
+		projectIp,
+		handle("cancel", (api, _u, req) =>
+			api.cancel(req.params.pid as string, req.params.msgId as string),
+		),
+	);
+	router.post(
 		"/projects/:pid/conversation/acks",
 		requireAuth,
 		projectIp,

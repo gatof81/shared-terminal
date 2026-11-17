@@ -1146,6 +1146,7 @@ describe("agents: reads, boundary and removal", () => {
 		expect((await api("GET", "/auth/status", OWNER)).json.features).toEqual({
 			projectChat: true,
 			projectConversation: true,
+			projectQueue: true,
 		});
 		const r = await api("POST", `/projects/${uuid()}/conversation/messages`, OWNER, {});
 		expect(r.status).toBe(503);
@@ -1176,6 +1177,7 @@ describe("agents: reads, boundary and removal", () => {
 		expect((await api("GET", "/auth/status", OWNER)).json.features).toEqual({
 			projectChat: true,
 			projectConversation: true,
+			projectQueue: true,
 			projectArtifacts: true,
 		});
 		const p = `/projects/${uuid()}/conversation/artifacts`;

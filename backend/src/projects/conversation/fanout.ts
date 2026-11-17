@@ -42,6 +42,8 @@ export const T_HTTP_MS = 30_000;
 /** §3.3: a binding read that has not answered in this long is `binding-unverified`. */
 export const BINDING_READ_MS = 5_000;
 export const MAX_RECIPIENTS = 8;
+/** §3.6: `queued` deliveries of the person one agent may hold. */
+export const OWNER_QUEUE_MAX_PER_AGENT = 20;
 const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SHA_RE = /^[0-9a-f]{64}$/;
@@ -167,6 +169,8 @@ interface Body {
 	artifacts: string[];
 	/** D3: the consult this task authorizes (§7.2), or null. */
 	collab: CollabRequest | null;
+	/** §3.6: wait in the recipient's queue until it is free instead of being sent (or refused) now. */
+	whenFree: boolean;
 }
 
 export interface DeliveryAnswer {
@@ -268,9 +272,15 @@ export function parseBody(raw: unknown, artifactsOn = false, relayOn = false): B
 		if ("status" in c) return c;
 		collab = c;
 	}
+	if (b.whenFree !== undefined && typeof b.whenFree !== "boolean")
+		return err(400, "invalid-body", "whenFree");
+	// §3.6: a task that opens a consult is sent now or not at all — its grant's
+	// clock starts with it.
+	if (b.whenFree === true && collab) return err(400, "invalid-body", "whenFree with collab");
 	const v = validateText(b.text);
 	if (!v.ok) return err(400, v.code);
 	return {
+		whenFree: b.whenFree === true,
 		collab,
 		clientMessageId: b.clientMessageId.toLowerCase(),
 		text: b.text,
@@ -313,6 +323,8 @@ export function requestSha256(b: Body): string {
 			: null,
 		text: b.normalized,
 		to: [...b.to].sort(),
+		// Only when set (§3.6): a body without it keeps its hash.
+		...(b.whenFree ? { when_free: true } : {}),
 	};
 	return createHash("sha256").update(JSON.stringify(canon), "utf8").digest("hex");
 }
@@ -427,6 +439,7 @@ export class ProjectFanout {
 		if (bindings === undefined) return err(503, "binding-unverified");
 		const plans: Array<
 			| { agentId: string; notSent: string }
+			| { agentId: string; queued: { binding_id: string; epoch: number; sid: string } }
 			| {
 					agentId: string;
 					binding: { binding_id: string; epoch: number; sid: string; cid: string };
@@ -452,6 +465,18 @@ export class ProjectFanout {
 				return err(503, "binding-unverified");
 			}
 			if (meta.userId !== ownerId) return err(409, "foreign-session");
+			if (body.whenFree) {
+				// §3.6: the conversation is chosen when its turn comes, not now.
+				plans.push({
+					agentId,
+					queued: {
+						binding_id: a.binding.bindingId,
+						epoch: a.binding.epoch,
+						sid: a.binding.sessionId,
+					},
+				});
+				continue;
+			}
 			const t = await this.deps
 				.target(a.binding.sessionId)
 				.catch(() => ({ kind: "none" }) as const);
@@ -545,6 +570,15 @@ export class ProjectFanout {
 							return { replay: err(409, "agent-in-collab", g.grantId) };
 					}
 				}
+				// §3.6: the limit is per recipient and decided under the lock that
+				// writes the new ones; a full queue refuses the whole message.
+				for (const p of plans) {
+					if (!("queued" in p)) continue;
+					let n = 0;
+					for (const d of tx.state.deliveries.values())
+						if (d.state === "queued" && d.agentId === p.agentId && d.authorizedBy === "owner") n++;
+					if (n >= OWNER_QUEUE_MAX_PER_AGENT) return { replay: err(409, "queue-full", p.agentId) };
+				}
 				for (const ref of [body.inReplyTo, body.quoteRef?.msg_id]) {
 					if (ref && !tx.state.messages.has(ref))
 						return { replay: err(400, "invalid-body", "unknown msgId reference") };
@@ -576,15 +610,24 @@ export class ProjectFanout {
 									reason: p.notSent,
 									authorized_by: "owner",
 								}
-							: {
-									ev: "delivery",
-									msg_id: msgId,
-									agent_id: p.agentId,
-									state: "planned",
-									binding: p.binding,
-									composer_client_message_id: randomUUID(),
-									authorized_by: "owner",
-								},
+							: "queued" in p
+								? {
+										ev: "delivery",
+										msg_id: msgId,
+										agent_id: p.agentId,
+										state: "queued",
+										binding: p.queued,
+										authorized_by: "owner",
+									}
+								: {
+										ev: "delivery",
+										msg_id: msgId,
+										agent_id: p.agentId,
+										state: "planned",
+										binding: p.binding,
+										composer_client_message_id: randomUUID(),
+										authorized_by: "owner",
+									},
 					),
 					...(collab
 						? [
@@ -621,9 +664,12 @@ export class ProjectFanout {
 
 		// ── per recipient, independent ──
 		const answers = new Map<string, DeliveryAnswer>();
-		for (const p of plans)
+		for (const p of plans) {
 			if ("notSent" in p)
 				answers.set(p.agentId, { agentId: p.agentId, state: "not-sent", reason: p.notSent });
+			// §3.6: the queue (queue.ts) takes it from the log; nothing to wait for here.
+			else if ("queued" in p) answers.set(p.agentId, { agentId: p.agentId, state: "queued" });
+		}
 		const runs = s1.planned.map(({ agentId, line }) => {
 			answers.set(agentId, { agentId, state: "planned" });
 			return this.deliver(ownerId, projectId, msgId, agentId, line, sent, refs, answers, {
@@ -675,6 +721,46 @@ export class ProjectFanout {
 						deliveries: answerFor(tx.state, m),
 						...(m.grantId ? { grantId: m.grantId } : {}),
 					},
+				};
+			});
+		} catch (e) {
+			const h = logErrorToHttp(e);
+			if (h) return h;
+			throw e;
+		}
+	}
+
+	/**
+	 * §3.6: close what is still `queued` of one message of the person. Only
+	 * that: a delivery already `planned` or `sending` is past the point where
+	 * "not sent" can be promised, and is left to finish. Idempotent — the
+	 * answer is the deliveries as they stand.
+	 */
+	async cancel(projectId: string, msgId: string): Promise<HttpResult> {
+		try {
+			return await this.deps.store.critical(projectId, async (tx) => {
+				const m = tx.state.messages.get(msgId);
+				if (!m || m.kind !== "owner") return err(404, "message-not-found");
+				const open = m.to.filter((agentId) => {
+					const d = tx.state.deliveries.get(deliveryKey(msgId, agentId));
+					return d?.state === "queued" && d.authorizedBy === "owner";
+				});
+				if (open.length > 0) {
+					await tx.append(
+						open.map((agentId) => ({
+							ev: "delivery",
+							msg_id: msgId,
+							agent_id: agentId,
+							state: "not-sent",
+							reason: "cancelled",
+							authorized_by: "owner",
+						})),
+						{ allowMargin: true },
+					);
+				}
+				return {
+					status: 200,
+					body: { msgId, cancelled: open, deliveries: answerFor(tx.state, m) },
 				};
 			});
 		} catch (e) {

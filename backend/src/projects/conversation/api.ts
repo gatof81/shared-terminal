@@ -72,6 +72,12 @@ export class ProjectConversationApi {
 		return this.deps.fanout.send(ownerId, projectId, body);
 	}
 
+	/** §3.6: close what is still queued of one message of the person. */
+	cancel(projectId: string, msgId: string): Promise<HttpResult> {
+		if (!ID_RE.test(msgId)) return Promise.resolve(err(400, "invalid-msg-id"));
+		return this.deps.fanout.cancel(projectId, msgId.toLowerCase());
+	}
+
 	async events(projectId: string, query: Record<string, unknown>): Promise<HttpResult> {
 		const before = query.before === undefined ? null : Number(query.before);
 		const limit = query.limit === undefined ? EVENTS_PAGE_DEFAULT : Number(query.limit);
