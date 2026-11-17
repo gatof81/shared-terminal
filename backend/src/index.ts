@@ -582,7 +582,7 @@ app.use((_req, res, next) => {
 // (not optional) on buildRouter so a future caller that omits it
 // surfaces as a TypeScript error rather than a silently-dropped
 // postCreate hook (PR #208 round 1 review).
-if (acpAgents) app.use("/api/acp", buildAcpRouter(acpAgents));
+if (acpAgents) app.use("/api/acp", buildAcpRouter(acpAgents, sessions));
 app.use(
 	"/api",
 	buildRouter(sessions, docker, bootstrapBroadcaster, undefined, idleSweeper, conversation, {

@@ -18,6 +18,7 @@ import express, { type NextFunction, type Request, type Response, Router } from 
 import type { AcpAgents, AgentRow } from "../acp/agents.js";
 import { type AuthedRequest, requireAuth } from "../auth.js";
 import { logger } from "../logger.js";
+import type { SessionManager } from "../sessionManager.js";
 
 type Caller = { kind: "owner"; userId: string } | { kind: "agent"; agent: AgentRow };
 
@@ -27,7 +28,7 @@ declare module "express-serve-static-core" {
 	}
 }
 
-export function buildAcpRouter(acp: AcpAgents): Router {
+export function buildAcpRouter(acp: AcpAgents, sessions: SessionManager): Router {
 	const router = Router();
 	router.use(express.json({ limit: acp.config.maxMessageBytes + 64 * 1024 }));
 
@@ -146,6 +147,12 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 			if (c.kind !== "owner") return void res.status(403).json({ error: "owner-only" });
 			const agent = await acp.byName(c.userId, req.params.name);
 			if (!agent) return void res.status(404).json({ error: "not-found" });
+			void sessions
+				.get(agent.session_id)
+				.then((meta) => acp.relaunchIfSilent(agent, meta))
+				.catch((err) =>
+					logger.warn(`[acp] relaunch check for @${agent.name}: ${(err as Error).message}`),
+				);
 			const after = Number(req.query.after ?? 0) || 0;
 			const activity = acp.activitySince(agent.agent_id, after);
 			res.json({

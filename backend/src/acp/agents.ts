@@ -427,6 +427,27 @@ export class AcpAgents {
 		return true;
 	}
 
+	private readonly relaunchedAt = new Map<string, number>();
+
+	/**
+	 * A runner not heard from for 30 s while its session runs is launched again
+	 * (idempotent: flock). Called when someone reads the agent's feed — the
+	 * person is looking at it — at most once per 30 s per agent. This is the only
+	 * recovery for a runner whose restart loop itself died; nothing polls.
+	 */
+	async relaunchIfSilent(
+		agent: AgentRow,
+		session: { status: string; containerId: string | null } | null,
+	): Promise<void> {
+		const seen = this.activity.get(agent.agent_id)?.seenAt ?? 0;
+		const last = this.relaunchedAt.get(agent.agent_id) ?? 0;
+		if (Date.now() - seen < 30_000 || Date.now() - last < 30_000) return;
+		if (session?.status !== "running" || !session.containerId) return;
+		this.relaunchedAt.set(agent.agent_id, Date.now());
+		logger.warn(`[acp] runner of @${agent.name} silent; launching it again`);
+		await this.ensureRunner(agent.session_id, session.containerId);
+	}
+
 	/** Boot: running agent sessions get their runner back (a backend restart does not touch containers, but a host reboot does). */
 	async ensureAllRunning(): Promise<void> {
 		const r = await d1Query<AgentRow & { container_id: string | null; status: string }>(
