@@ -1275,6 +1275,14 @@ tables and workspaces only, `.projects` untouched, and the last line reads
 `[restore] PARTIAL …` instead of `[restore] complete …`. Read that last line:
 a restore is whole only when it says `complete`.
 
+The backup's own files are checked the same way, before the first write: a
+workspace tarball that is missing, truncated, not named after a session of the
+manifest or holding paths outside that session, and a table dump that is not
+valid JSONL, each stop the restore with nothing restored. What only the
+destination can tell (a non-empty D1 without `--force`, a
+`SECRETS_ENCRYPTION_KEY` that does not decrypt the backup) is still decided
+after D1 was migrated to the current schema, and before any row is inserted.
+
 **Who can read a backup (#562).** A dump holds password and token hashes,
 secret ciphertext, conversation titles and every workspace, including a
 `.env` written by `writeEnvFile`. `npm run backup` therefore never creates
