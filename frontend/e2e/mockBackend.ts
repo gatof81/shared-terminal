@@ -513,6 +513,8 @@ export class MockBackend {
 	projectQueue = false;
 	/** Agents that are not free: a `whenFree` delivery to them stays `queued`. */
 	projectBusyAgents = new Set<string>();
+	/** What `GET …/messages/:msgId` says about a queued delivery to this agent (absent ⇒ no key). */
+	projectQueueWaiting = new Map<string, { waiting: string; heldBy?: string }>();
 	/** The next send with `collab` is refused with this answer (e.g. 409 agent-in-collab). */
 	projectCollabRefusal: { status: number; body: Record<string, unknown> } | null = null;
 	/** clientMessageId → msg_id (idempotency, §3.4 rule 2). */
@@ -1073,6 +1075,10 @@ export class MockBackend {
 				deliveries: [...deliveries].map(([agentId, events]) => ({
 					agentId,
 					state: events[events.length - 1]!.state,
+					// §3.6 (#667): the server's reading of why a queued delivery waits.
+					...(events[events.length - 1]!.state === "queued"
+						? (this.projectQueueWaiting.get(agentId) ?? {})
+						: {}),
 					events,
 				})),
 				replies: [...replies].map(([agentId, r]) => ({ agentId, ...r })),

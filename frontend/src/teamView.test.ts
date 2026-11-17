@@ -1560,6 +1560,65 @@ describe("§3.6: a message waits for a busy agent", () => {
 		api.cancelQueuedProjectMessage.mockReset();
 	});
 
+	const detail = (deliveries: unknown[]) => ({
+		ok: true,
+		status: 200,
+		body: { message: {}, deliveries, replies: [], acks: [] },
+	});
+
+	it("says why it waits when the server gives a reason a person can act on", async () => {
+		api.projectQueueEnabled.mockReturnValue(true);
+		serve(queuedLog());
+		api.fetchProjectMessage.mockResolvedValue(
+			detail([{ agentId: DEV, state: "queued", events: [], waiting: "no-conversation" }]),
+		);
+		const root = mount({ kind: "thread", msgId: "q1" });
+		await flush();
+		expect(api.fetchProjectMessage).toHaveBeenCalledWith(PID, "q1");
+		expect(root.querySelector(".tw-queued-why")?.textContent).toBe(
+			"@dev-pilot has no open Claude conversation. It is sent when one is open and free.",
+		);
+	});
+
+	it("held behind an earlier message: says so and links to it", async () => {
+		api.projectQueueEnabled.mockReturnValue(true);
+		serve([
+			{ seq: 1, at: NOW, ev: "message", msg_id: "h0", kind: "owner", to: [DEV], text: "Earlier" },
+			{ seq: 2, at: NOW, ev: "delivery", msg_id: "h0", agent_id: DEV, state: "uncertain" },
+			...queuedLog().map((l) => ({ ...l, seq: l.seq + 2 })),
+		]);
+		api.fetchProjectMessage.mockResolvedValue(
+			detail([{ agentId: DEV, state: "queued", events: [], waiting: "held", heldBy: "h0" }]),
+		);
+		const root = mount({ kind: "thread", msgId: "q1" });
+		await flush();
+		const why = root.querySelector(".tw-queued-why")!;
+		expect(why.textContent).toContain("An earlier message to @dev-pilot didn't end cleanly");
+		expect(why.querySelector("a")?.getAttribute("href")).toContain("/threads/h0");
+	});
+
+	it("busy adds nothing to the panel: the delivery line already says it", async () => {
+		api.projectQueueEnabled.mockReturnValue(true);
+		serve(queuedLog());
+		api.fetchProjectMessage.mockResolvedValue(
+			detail([{ agentId: DEV, state: "queued", events: [], waiting: "busy" }]),
+		);
+		const root = mount({ kind: "thread", msgId: "q1" });
+		await flush();
+		expect(root.querySelector(".tw-queued")).not.toBeNull();
+		expect(root.querySelector(".tw-queued-why")).toBeNull();
+	});
+
+	it("a backend without the field, or a failed read, shows the plain panel", async () => {
+		api.projectQueueEnabled.mockReturnValue(true);
+		serve(queuedLog());
+		api.fetchProjectMessage.mockResolvedValue({ ok: false, status: 503, code: "x" });
+		const root = mount({ kind: "thread", msgId: "q1" });
+		await flush();
+		expect(root.querySelector(".tw-queued button")?.textContent).toBe("Cancel");
+		expect(root.querySelector(".tw-queued-why")).toBeNull();
+	});
+
 	it("backend without the queue: the body has no whenFree and a queued delivery offers no Cancel", async () => {
 		serve(queuedLog());
 		const root = mount({ kind: "thread", msgId: "q1" });
