@@ -626,7 +626,18 @@ export function fetchProjectEvents(
 /** Appendix A: `GET …/messages/:msgId`, the message with its lines grouped (raw log lines inside). */
 export interface ProjectMessageDetail {
 	message: unknown;
-	deliveries: Array<{ agentId: string; state: string; events: unknown[] }>;
+	/**
+	 * `waiting` / `heldBy` (§3.6): on a delivery still `queued`, the server's
+	 * reading — at the moment of the request — of why it has not left. Absent
+	 * when nothing explains it, and on a backend that predates the field.
+	 */
+	deliveries: Array<{
+		agentId: string;
+		state: string;
+		events: unknown[];
+		waiting?: unknown;
+		heldBy?: unknown;
+	}>;
 	replies: Array<{ agentId: string; settling: unknown; ref: unknown; lateCloses: unknown[] }>;
 	acks: unknown[];
 }

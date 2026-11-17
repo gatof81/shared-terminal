@@ -24,6 +24,7 @@ import {
 	type AgentListEntry,
 	cancelQueuedProjectMessage,
 	fetchProjectArtifactText,
+	fetchProjectMessage,
 	listWorkspaceDir,
 	type ProjectMessageBody,
 	postGrantAction,
@@ -95,6 +96,8 @@ import { button, el } from "./ui.js";
 
 /** While the project socket is live, the log is still re-read this often (a missed frame can't linger). */
 const LIVE_SAFETY_POLL_MS = 30_000;
+/** §3.6: how often the reason a queued message waits is asked again while it is on screen. */
+const QUEUED_WHY_MS = 30_000;
 
 // ── Context from the project page ───────────────────────────────────────────
 
@@ -1886,7 +1889,88 @@ class Workspace {
 	private cancelBusy = new Set<string>();
 	private cancelError = new Map<string, string>();
 
+	/**
+	 * Why each queued delivery of a message waits, as the server read it
+	 * (`GET …/messages/:msgId`, §3.6). The rule lives in the server's queue;
+	 * this only shows its answer. A reading of one moment, so it is asked
+	 * again while the message is still on screen and still queued: when the
+	 * log has a new line, or after QUEUED_WHY_MS — never in a loop of its own.
+	 */
+	private queuedWhy = new Map<
+		string,
+		{
+			at: number;
+			/** The log's newest seq when it was asked: a newer line may be what it waited for. */
+			seq: number;
+			busy: boolean;
+			by: Map<string, { waiting: string; heldBy?: string }>;
+		}
+	>();
+
+	private readQueuedWhy(msgId: string): void {
+		const cur = this.queuedWhy.get(msgId);
+		// Every way out of `held` but its 24 h limit writes a log line (the
+		// person's Done, a resumed consult, a later delivery): a log that moved
+		// is asked about at once, so the advice never outlives what it asked for.
+		const seq = this.store.log.newestSeq;
+		if (cur && (cur.busy || (cur.seq === seq && Date.now() - cur.at < QUEUED_WHY_MS))) return;
+		const entry = cur ?? { at: 0, seq, busy: false, by: new Map() };
+		entry.busy = true;
+		entry.seq = seq;
+		this.queuedWhy.set(msgId, entry);
+		void fetchProjectMessage(this.projectId, msgId).then((a) => {
+			entry.busy = false;
+			entry.at = Date.now();
+			// A failed read keeps what was shown: it says nothing new.
+			if (!a.ok) return;
+			entry.by = new Map();
+			for (const d of a.body.deliveries) {
+				if (d.state !== "queued" || typeof d.waiting !== "string") continue;
+				entry.by.set(d.agentId, {
+					waiting: d.waiting,
+					...(typeof d.heldBy === "string" ? { heldBy: d.heldBy } : {}),
+				});
+			}
+			this.render();
+		});
+	}
+
+	/** One line per recipient whose wait has a reason a person can act on. */
+	private queuedReasons(msgId: string): HTMLElement[] {
+		const out: HTMLElement[] = [];
+		for (const [agentId, w] of this.queuedWhy.get(msgId)?.by ?? []) {
+			const who = handleOf(this.agents, agentId);
+			if (w.waiting === "no-conversation") {
+				out.push(
+					el(
+						"p",
+						"tw-queued-why",
+						`${who} has no open Claude conversation. It is sent when one is open and free.`,
+					),
+				);
+			} else if (w.waiting === "held") {
+				const p = el(
+					"p",
+					"tw-queued-why",
+					`An earlier message to ${who} didn't end cleanly, so this one waits behind it. Check it and mark it Done to let this one go. `,
+				);
+				const root = w.heldBy ? threadRootOf(this.store.log, w.heldBy) : null;
+				if (root) {
+					const target = { kind: "thread", msgId: root } as const;
+					p.append(
+						link("Open that message ›", "tw-card-act", panelHref(this.projectId, target), () =>
+							go(this.projectId, target),
+						),
+					);
+				}
+				out.push(p);
+			}
+		}
+		return out;
+	}
+
 	private queuedPanel(msgId: string): HTMLElement {
+		this.readQueuedWhy(msgId);
 		const box = el("div", "tw-queued");
 		const busy = this.cancelBusy.has(msgId);
 		const b = button(
@@ -1905,6 +1989,7 @@ class Workspace {
 			),
 			b,
 		);
+		box.append(...this.queuedReasons(msgId));
 		const err = this.cancelError.get(msgId);
 		if (err) box.append(el("p", "tw-partial", err));
 		return box;

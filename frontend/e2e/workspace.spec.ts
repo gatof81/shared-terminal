@@ -1036,6 +1036,22 @@ test.describe("Team workspace — a message waits for a busy agent (§3.6)", () 
 		expect(backend.requests.filter((r) => r.path.endsWith("/cancel"))).toHaveLength(1);
 	});
 
+	test("a queued message says why it waits when the agent has no open conversation", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.projectQueue = true;
+		backend.projectBusyAgents.add(AGENT_IDS.developer);
+		backend.projectQueueWaiting.set(AGENT_IDS.developer, { waiting: "no-conversation" });
+		await app.login("alice", `${projectHash}/new`);
+		await send(page, "Is anyone there?");
+		await expect(lastRow(page).locator(".tw-queued-why")).toHaveText(
+			"@developer-hz has no open Claude conversation. It is sent when one is open and free.",
+		);
+		await noHorizontalScroll(page);
+	});
+
 	test("a free agent gets a whenFree message at once", async ({ app, backend, page }) => {
 		backend.projectQueue = true;
 		await app.login("alice", `${projectHash}/new`);
