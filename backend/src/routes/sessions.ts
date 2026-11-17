@@ -9,6 +9,7 @@ import { pipeline } from "node:stream/promises";
 import type { NextFunction, Request, Response, Router } from "express";
 import multer from "multer";
 import { v4 as uuidv4 } from "uuid";
+import { agentNameError } from "../acp/agents.js";
 import type { AuthedRequest } from "../auth.js";
 import { isUserAdmin, requireAuth } from "../auth.js";
 import { runAsyncBootstrap } from "../bootstrap.js";
@@ -107,7 +108,8 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 
 	router.post("/sessions", async (req: Request, res: Response) => {
 		const { userId } = req as AuthedRequest;
-		const { name, cols, rows, envVars, config, externalRef, ownerUserId } = req.body as {
+		const { name, cols, rows, envVars, config, externalRef, ownerUserId, acpAgent } = req.body as {
+			acpAgent?: unknown;
 			name?: string;
 			cols?: number;
 			rows?: number;
@@ -156,6 +158,32 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 				error: `body.rows must be an integer in 1..${TERMINAL_DIM_MAX}`,
 			});
 			return;
+		}
+		// Experimental ACP agent (acp/agents.ts): `acpAgent: { name, model? }`.
+		// Without the flag the field is refused, not ignored — a client must not
+		// believe it created an agent.
+		let acpAgentName: string | null = null;
+		let acpAgentModel: string | undefined;
+		if (acpAgent !== undefined && acpAgent !== null) {
+			if (!ctx.acp) {
+				res.status(400).json({ error: "acp-agents-disabled" });
+				return;
+			}
+			const a = acpAgent as { name?: unknown; model?: unknown };
+			const nameErr = agentNameError(a.name);
+			if (nameErr !== null) {
+				res.status(400).json({ error: nameErr });
+				return;
+			}
+			if (
+				a.model !== undefined &&
+				(typeof a.model !== "string" || !/^[a-z0-9.\-[\]]{1,64}$/.test(a.model))
+			) {
+				res.status(400).json({ error: "acpAgent.model must be a model id" });
+				return;
+			}
+			acpAgentName = a.name as string;
+			acpAgentModel = a.model as string | undefined;
 		}
 		// #418 — on create, null and undefined both mean "unset".
 		if (externalRef !== undefined) {
@@ -303,6 +331,15 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 		// the same hold (no recursive acquisition); async bootstrap work
 		// started from here runs after the release and takes the lock
 		// itself where it tears down (failSession).
+		// A friendly 409 for the common case; the UNIQUE index still decides a race.
+		if (
+			ctx.acp &&
+			acpAgentName !== null &&
+			(await ctx.acp.nameTaken(targetOwnerId, acpAgentName))
+		) {
+			res.status(409).json({ error: "agent-name-taken" });
+			return;
+		}
 		const newSessionId = uuidv4();
 		await sessionLifecycleLock.run(newSessionId, "create", async () => {
 			let meta: Awaited<ReturnType<SessionManager["create"]>> | null = null;
@@ -359,6 +396,13 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 						auth: encryptAuthCredentials(validatedConfig.auth),
 					};
 					await persistSessionConfig(meta.sessionId, persistable);
+				}
+				// Before the spawn: prepareSpawn binds the ACP runtime only for a
+				// session that has an agent row. A taken name fails the INSERT (the
+				// UNIQUE index decides, not a pre-check) and the catch below rolls
+				// the session back like any other create failure.
+				if (ctx.acp && acpAgentName !== null) {
+					await ctx.acp.create(meta.sessionId, targetOwnerId, acpAgentName, acpAgentModel);
 				}
 				await docker.spawn(meta.sessionId);
 				const updated = await sessions.get(meta.sessionId);

@@ -1,0 +1,36 @@
+#!/usr/bin/env node
+// st — the agent's side of the Shared Terminal message API (same API the person
+// uses from the web). The sender is the token (ST_TOKEN), never an argument.
+//   st send @agent "text"      st send @agent -f file.md      st agents
+//   st list                    st get <id>
+import { readFileSync } from "node:fs";
+
+const [cmd, ...args] = process.argv.slice(2);
+const API = `${process.env.ST_URL}/api/acp`;
+const headers = { authorization: `Bearer ${process.env.ST_TOKEN ?? ""}`, "content-type": "application/json" };
+
+async function call(method, path, body) {
+	const res = await fetch(API + path, { method, headers, body: body && JSON.stringify(body) });
+	const text = await res.text();
+	if (!res.ok) {
+		console.error(`st: ${res.status} ${text}`);
+		process.exit(1);
+	}
+	return text ? JSON.parse(text) : null;
+}
+
+if (cmd === "send" && args.length >= 2) {
+	const body = args[1] === "-f" ? readFileSync(args[2], "utf8") : args.slice(1).join(" ");
+	const m = await call("POST", "/messages", { to: args[0], body });
+	console.log(`mensaje #${m.id} para @${m.to_id}: ${m.state} (persistido)`);
+} else if (cmd === "agents") {
+	for (const a of await call("GET", "/agents")) console.log(`@${a.name}`);
+} else if (cmd === "list") {
+	for (const m of await call("GET", "/messages"))
+		console.log(`#${m.id} ${m.kind} @${m.from_id} -> @${m.to_id} ${m.state}${m.reply_to ? ` (re #${m.reply_to})` : ""} | ${m.body.replace(/\s+/g, " ").slice(0, 70)}`);
+} else if (cmd === "get" && args[0]) {
+	console.log(JSON.stringify(await call("GET", `/messages/${args[0]}`), null, 2));
+} else {
+	console.error('uso: st send @agente "texto" | st send @agente -f archivo | st agents | st list | st get <id>');
+	process.exit(2);
+}

@@ -15,6 +15,10 @@ import { logger } from "./logger.js";
 const ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID ?? "";
 const API_TOKEN = process.env.CLOUDFLARE_API_TOKEN ?? "";
 const DATABASE_ID = process.env.D1_DATABASE_ID ?? "";
+// Lab/test seam only: points the client at a D1-compatible endpoint (e.g. the
+// SQLite shim in experiments/acp-agents/d1-shim.mjs) so an experimental backend
+// can run without touching a real D1. Unset ⇒ Cloudflare, byte-identical.
+const D1_API_BASE = (process.env.D1_API_BASE ?? "https://api.cloudflare.com").replace(/\/+$/, "");
 
 interface D1QueryResult<T = Record<string, unknown>> {
 	results: T[];
@@ -97,7 +101,7 @@ export async function d1Query<T = Record<string, unknown>>(
 	params?: unknown[],
 ): Promise<D1QueryResult<T>> {
 	d1CallsSinceBoot++;
-	const url = `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/d1/database/${DATABASE_ID}/query`;
+	const url = `${D1_API_BASE}/client/v4/accounts/${ACCOUNT_ID}/d1/database/${DATABASE_ID}/query`;
 
 	let data: D1ApiResponse<T>;
 	try {
@@ -848,6 +852,69 @@ export const MIGRATIONS: readonly Migration[] = [
 		description: "sessions.recreate_fence — recreation commit fence (contract v1.9.4, #627)",
 		apply: () => addColumnIfMissing("sessions", "recreate_fence INTEGER NOT NULL DEFAULT 0"),
 	},
+	{
+		// Additive and inert with ACP_AGENTS_ENABLED off: nothing reads or
+		// writes these tables then.
+		version: 21,
+		description: "acp_agents + agent_messages — ACP agents and their durable inbox (experimental)",
+		apply: () => d1Batch([...ACP_AGENTS_DDL]),
+	},
+];
+
+/**
+ * v21. `agent_messages` is the ONE store of agent messages — person → agent
+ * and agent → agent alike; the chat and (later) Project Chat read it.
+ *
+ * - The reply to an agent's request is written by a trigger in the same
+ *   statement that records the request's result: D1 over HTTP has no
+ *   transaction across calls, and a death between two calls would leave a
+ *   finished request whose sender never hears back.
+ * - "One running message per agent" is the claim statement's own guard
+ *   (acp/agents.ts), not a pre-check.
+ * - `acp_agents.session_id` cascades: the agent row is the session's
+ *   configuration, it goes with a hard delete. Messages carry names, not
+ *   FKs, so their history survives.
+ */
+export const ACP_AGENTS_DDL: readonly string[] = [
+	`CREATE TABLE IF NOT EXISTS acp_agents (
+		agent_id      TEXT PRIMARY KEY,
+		session_id    TEXT NOT NULL UNIQUE REFERENCES sessions(session_id) ON DELETE CASCADE,
+		owner_user_id TEXT NOT NULL REFERENCES users(id),
+		name          TEXT NOT NULL,
+		runtime       TEXT NOT NULL,
+		model         TEXT,
+		created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+		UNIQUE (owner_user_id, name)
+	)`,
+	`CREATE TABLE IF NOT EXISTS agent_messages (
+		id            INTEGER PRIMARY KEY AUTOINCREMENT,
+		owner_user_id TEXT NOT NULL,
+		from_id       TEXT NOT NULL,
+		to_id         TEXT NOT NULL,
+		kind          TEXT NOT NULL CHECK (kind IN ('request', 'reply')),
+		reply_to      INTEGER,
+		body          TEXT NOT NULL,
+		state         TEXT NOT NULL CHECK (state IN ('pending', 'running', 'done', 'failed', 'uncertain')),
+		attempts      INTEGER NOT NULL DEFAULT 0,
+		created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+		started_at    TEXT,
+		finished_at   TEXT,
+		result_text   TEXT,
+		stop_reason   TEXT,
+		note          TEXT
+	)`,
+	"CREATE INDEX IF NOT EXISTS idx_agent_messages_inbox ON agent_messages(owner_user_id, to_id, state, id)",
+	"CREATE INDEX IF NOT EXISTS idx_agent_messages_from ON agent_messages(owner_user_id, from_id, id)",
+	`CREATE TRIGGER IF NOT EXISTS trg_agent_message_reply
+	AFTER UPDATE OF state ON agent_messages
+	WHEN OLD.state = 'running' AND NEW.state = 'done' AND NEW.kind = 'request'
+		AND EXISTS (SELECT 1 FROM acp_agents WHERE owner_user_id = NEW.owner_user_id AND name = NEW.from_id)
+	BEGIN
+		INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, reply_to, body, state)
+		VALUES (NEW.owner_user_id, NEW.to_id, NEW.from_id, 'reply', NEW.id,
+			'Respuesta de @' || NEW.to_id || ' a tu mensaje #' || NEW.id || ':' || char(10) || char(10) || COALESCE(NEW.result_text, '(sin texto)'),
+			'pending');
+	END`,
 ];
 
 /**

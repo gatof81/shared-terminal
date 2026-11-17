@@ -58,7 +58,12 @@ export function buildRouter(
 	// P3a — `projects` too (PROJECT_CHAT_ENABLED); optional for the same reason.
 	conversationExtras: Pick<
 		RouteContext,
-		"recreation" | "conversationAllowUsers" | "composer" | "projects" | "projectConversation"
+		| "recreation"
+		| "conversationAllowUsers"
+		| "composer"
+		| "projects"
+		| "projectConversation"
+		| "acp"
 	> = {},
 ): Router {
 	const router = Router();

@@ -30,6 +30,7 @@
  * terminal: a change only re-renders the list and the header.
  */
 
+import { acpOwns } from "./acpChat.js";
 import {
 	type ConversationCapture,
 	type ConversationServerFrame,
@@ -321,6 +322,8 @@ function deselect(): void {
 
 function startListPoll(): void {
 	stopListPoll();
+	// An ACP agent session's Chat is acpChat.ts's; the capture list stays idle.
+	if (acpOwns(stateSessionId)) return;
 	// The summaries alone (`capture=0`): no relay probe on the container,
 	// so the list can stay fresh while this view is on screen.
 	listTimer = setInterval(() => {
@@ -375,7 +378,7 @@ function isUnread(c: ConversationSummary): boolean {
 
 async function loadList(opts: { quiet?: boolean } = {}): Promise<void> {
 	const sid = stateSessionId;
-	if (sid === null) return;
+	if (sid === null || acpOwns(sid)) return;
 	const gen = generation;
 	const req = ++listReq;
 	const quiet = opts.quiet === true && list.status === "loaded";
@@ -584,7 +587,15 @@ function jumpToLatest(): void {
 function openSocket(): void {
 	const sid = stateSessionId;
 	const cid = selectedCid;
-	if (sid === null || cid === null || threadStatus !== "loaded" || !cur || !isActive()) return;
+	if (
+		sid === null ||
+		cid === null ||
+		threadStatus !== "loaded" ||
+		!cur ||
+		!isActive() ||
+		acpOwns(sid)
+	)
+		return;
 	if (!socket) {
 		// One socket per session view; `follow` retargets it per thread, and
 		// onFrame filters by the selected conversation.
@@ -721,7 +732,7 @@ export function focusAgentWhenOpen(cid: string, agentId: string): void {
 }
 
 function renderAll(opts: { scrollToEnd?: boolean; restoreScroll?: boolean } = {}): void {
-	if (!isActive()) return;
+	if (!isActive() || acpOwns(stateSessionId)) return;
 	if (pendingAgentFocus && Date.now() - pendingAgentFocus.at > AGENT_FOCUS_TTL_MS)
 		pendingAgentFocus = null;
 	if (pendingAgentFocus && pendingAgentFocus.cid === selectedCid && cur !== null) agentsOpen = true;

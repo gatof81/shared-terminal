@@ -25,6 +25,10 @@ COPY backend/package.json backend/package-lock.json ./
 RUN npm ci --omit=dev
 
 COPY --from=build /build/dist ./dist
+# ACP runner files (experimental, ACP_AGENTS_ENABLED): copied at boot into the
+# runtime dir that agent sessions mount read-only. Not the adapter itself —
+# that is installed per version with acp-runtime/install.sh.
+COPY acp-runtime /acp-runtime
 
 EXPOSE 3001
 CMD ["node", "dist/index.js"]

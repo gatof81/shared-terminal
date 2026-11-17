@@ -11,6 +11,7 @@ import cookieParser from "cookie-parser";
 import express from "express";
 import rateLimit from "express-rate-limit";
 import { WebSocketServer } from "ws";
+import { AcpAgents, acpAgentsEnabled, acpConfigFromEnv } from "./acp/agents.js";
 import {
 	ensureAuthReady,
 	originMatches,
@@ -63,6 +64,7 @@ import { d1RecreatePort } from "./recreate/d1.js";
 import { RecreationEngine } from "./recreate/engine.js";
 import { RecreateAttemptStore } from "./recreateAttempt.js";
 import { requestIdMiddleware } from "./requestContext.js";
+import { buildAcpRouter } from "./routes/acp.js";
 import { buildRouter } from "./routes.js";
 import { deriveSubkey, validateSecretsKey } from "./secrets.js";
 import { sessionLifecycleLock } from "./sessionLifecycleLock.js";
@@ -163,6 +165,15 @@ const BOOTED_AT_MS = Date.now();
 const WORKSPACE_ROOT_FOR_CONVERSATION =
 	process.env.WORKSPACE_ROOT ?? "/var/shared-terminal/workspaces";
 const conversationStore = new ConversationStore({ workspaceRoot: WORKSPACE_ROOT_FOR_CONVERSATION });
+// Experimental ACP agents (acp/agents.ts). Off ⇒ nothing constructed, no route,
+// no hook: behaviour-neutral (migration v21 still runs, additive and unread).
+const acpAgents = acpAgentsEnabled(process.env.ACP_AGENTS_ENABLED)
+	? new AcpAgents(acpConfigFromEnv(WORKSPACE_ROOT_FOR_CONVERSATION, PORT), docker)
+	: undefined;
+if (acpAgents) {
+	docker.setAgentHooks(acpAgents.hooks());
+	logger.info("[server] ACP agents ENABLED (experimental)");
+}
 // 3.0d — durable recreation records and the fail-closed
 // `recreate-unresolved` gate (CONVERSATION.md §2.7.4). Installed on the
 // lifecycle lock before the server accepts requests, so every lifecycle
@@ -509,7 +520,12 @@ app.use((req, res, next) => portDispatcher.middleware(req, res, next));
 // own L5-capped body reader, no cookies and no browser caller. It only
 // claims `POST /ingest/claude/hook`; everything else falls through.
 app.use(createIngestHandler({ service: conversation }));
-app.use(express.json());
+// /api/acp parses its own bodies (messages up to ACP_MESSAGE_MAX_BYTES, not the
+// 100 KB default); every other route keeps the global parser unchanged.
+const globalJson = express.json();
+app.use((req, res, next) =>
+	acpAgents && req.path.startsWith("/api/acp/") ? next() : globalJson(req, res, next),
+);
 // Populates `req.cookies` from the Cookie header. requireAuth reads the
 // JWT from `req.cookies.st_token` (#18). No `secret` is passed because we
 // don't use signed cookies — the JWT itself is the integrity-protected
@@ -566,6 +582,7 @@ app.use((_req, res, next) => {
 // (not optional) on buildRouter so a future caller that omits it
 // surfaces as a TypeScript error rather than a silently-dropped
 // postCreate hook (PR #208 round 1 review).
+if (acpAgents) app.use("/api/acp", buildAcpRouter(acpAgents));
 app.use(
 	"/api",
 	buildRouter(sessions, docker, bootstrapBroadcaster, undefined, idleSweeper, conversation, {
@@ -573,6 +590,7 @@ app.use(
 		conversationAllowUsers: CONVERSATION_ALLOW_USERS,
 		composer,
 		projects: projectDirectory,
+		...(acpAgents ? { acp: acpAgents } : {}),
 		...(projectConversationHolder ? { projectConversation: projectConversationHolder } : {}),
 	}),
 );
@@ -821,6 +839,14 @@ async function start() {
 		logger.error(`[server] recreate attempt recovery failed: ${(err as Error).message}`);
 	}
 	await docker.reconcile();
+	if (acpAgents) {
+		try {
+			await acpAgents.installRunnerFiles();
+			await acpAgents.ensureAllRunning();
+		} catch (err) {
+			logger.warn(`[server] ACP agents boot failed: ${(err as Error).message}`);
+		}
+	}
 	try {
 		await recreation.bootPass();
 	} catch (err) {

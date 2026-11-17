@@ -10,6 +10,7 @@
  */
 
 import {
+	acpAgentsEnabled,
 	createSession,
 	createTemplate,
 	deleteTemplate,
@@ -139,7 +140,30 @@ function setNewSessionModalMode(template: Template | null): void {
 	}
 }
 
+// Experimental ACP agent: the field exists only when the backend announces
+// `features.acpAgents` (created here, so the markup is unchanged otherwise).
+let acpAgentInput: HTMLInputElement | null = null;
+function ensureAcpAgentField(): void {
+	if (!acpAgentsEnabled() || acpAgentInput) return;
+	const label = document.createElement("label");
+	label.className = "session-field";
+	const caption = document.createElement("span");
+	caption.className = "session-field-label";
+	caption.textContent = "Agente ACP (opcional)";
+	acpAgentInput = document.createElement("input");
+	acpAgentInput.id = "new-session-acp-agent";
+	acpAgentInput.type = "text";
+	acpAgentInput.placeholder = "nombre, p. ej. developer";
+	acpAgentInput.pattern = "[a-z][a-z0-9-]{1,31}";
+	acpAgentInput.autocomplete = "off";
+	acpAgentInput.title = "Minúsculas, números y guiones. Se lo nombra con @nombre.";
+	label.append(caption, acpAgentInput);
+	newSessionInput.closest("label")?.after(label);
+}
+
 function openNewSessionModal(opener: HTMLElement) {
+	ensureAcpAgentField();
+	if (acpAgentInput) acpAgentInput.value = "";
 	renderSessionTabPlaceholders();
 	setActiveSessionTab("basics");
 	newSessionInput.value = "";
@@ -1108,7 +1132,13 @@ newSessionForm.addEventListener("submit", async (e) => {
 	try {
 		showToast("Creating session…");
 		const config = buildSessionConfigPayload();
-		const session = await createSession(name, undefined, config);
+		const agentName = acpAgentInput?.value.trim() ?? "";
+		const session = await createSession(
+			name,
+			undefined,
+			config,
+			agentName ? { name: agentName } : undefined,
+		);
 		sessions.unshift(session);
 		renderSessionList();
 		if (session.bootstrapping) {

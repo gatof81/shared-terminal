@@ -1,0 +1,124 @@
+/* ── ACP agent chat (experimental, acpChat.ts) ─────────────────── */
+.acp-chat:not([hidden]) {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	min-height: 0;
+}
+.acp-chat-header {
+	padding: 10px 14px;
+	border-bottom: 1px solid var(--border, #333);
+	font-size: 0.9rem;
+}
+.acp-chat-meta,
+.acp-chat-runner {
+	opacity: 0.75;
+}
+.acp-chat-runner.ok {
+	color: var(--success, #3fb950);
+	opacity: 1;
+}
+.acp-chat-thread {
+	flex: 1;
+	min-height: 0;
+	overflow-y: auto;
+	padding: 12px 14px;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+.acp-chat-empty,
+.acp-chat-error {
+	opacity: 0.8;
+	font-size: 0.9rem;
+}
+.acp-chat-error {
+	color: var(--danger, #f85149);
+}
+.acp-msg {
+	border: 1px solid var(--border, #333);
+	border-radius: 8px;
+	padding: 8px 10px;
+	max-width: 100%;
+}
+.acp-msg.acp-mine {
+	border-color: var(--accent, #58a6ff);
+}
+.acp-msg-head {
+	display: flex;
+	justify-content: space-between;
+	gap: 8px;
+	font-size: 0.8rem;
+	opacity: 0.85;
+	margin-bottom: 4px;
+}
+.acp-msg-body,
+.acp-msg-result {
+	margin: 0;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	font-family: var(--font-mono, ui-monospace, monospace);
+	font-size: 0.85rem;
+	max-height: 40vh;
+	overflow-y: auto;
+}
+.acp-msg-result {
+	margin-top: 6px;
+	padding-top: 6px;
+	border-top: 1px dashed var(--border, #333);
+}
+.acp-live {
+	opacity: 0.8;
+}
+.acp-msg-note {
+	margin-top: 4px;
+	font-size: 0.75rem;
+	opacity: 0.7;
+}
+.acp-activity {
+	margin: 6px 0 0;
+	padding-left: 18px;
+	font-size: 0.78rem;
+	opacity: 0.8;
+}
+.acp-badge {
+	border-radius: 10px;
+	padding: 0 8px;
+	border: 1px solid currentColor;
+	white-space: nowrap;
+}
+.acp-badge-running {
+	color: var(--accent, #58a6ff);
+}
+.acp-badge-done {
+	color: var(--success, #3fb950);
+}
+.acp-badge-uncertain,
+.acp-badge-failed {
+	color: var(--warning, #d29922);
+}
+.acp-chat-composer {
+	border-top: 1px solid var(--border, #333);
+	padding: 10px 14px;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+.acp-chat-input {
+	width: 100%;
+	resize: vertical;
+	min-height: 70px;
+	font-family: var(--font-mono, ui-monospace, monospace);
+	font-size: 0.85rem;
+	box-sizing: border-box;
+}
+.acp-chat-actions {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	gap: 8px;
+}
+.acp-chat-hint {
+	font-size: 0.75rem;
+	opacity: 0.7;
+}

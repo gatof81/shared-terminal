@@ -6,6 +6,7 @@
  */
 
 import type { Response } from "express";
+import type { AcpAgents } from "../acp/agents.js";
 import type { BootstrapBroadcaster } from "../bootstrap.js";
 import type { StatsBySession } from "../containerStats.js";
 import type { ComposerService } from "../conversation/composer.js";
@@ -71,6 +72,9 @@ export interface RouteContext {
 	// session list carries no `binding`. The hard-delete guard does NOT depend on
 	// it: the routes call `assertNoLiveBinding` either way (bindings outlive the flag).
 	projects?: ProjectDirectory;
+	// Experimental ACP agents. Present only with ACP_AGENTS_ENABLED: the session
+	// create accepts `acpAgent`, `/auth/status` announces `features.acpAgents`.
+	acp?: AcpAgents;
 	// D1 — the project conversation (docs/PROJECT_CONVERSATION.md). Present only
 	// when PROJECT_CONVERSATION_ENABLED is effective; `api` is null until the
 	// store has started (or for good if it could not take the writer lock),
