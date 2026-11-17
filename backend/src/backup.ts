@@ -127,6 +127,10 @@ export const TABLES: ReadonlyArray<{ name: string; orderBy: string; sinceSchema?
 	{ name: "project_agents", orderBy: "agent_id", sinceSchema: 19 },
 	{ name: "agent_bindings", orderBy: "binding_id", sinceSchema: 19 },
 	{ name: "project_agent_creations", orderBy: "owner_user_id, client_request_id", sinceSchema: 19 },
+	// v21 (experimental ACP agents). After users/sessions (FKs). Replaying a
+	// message row is an INSERT, so the reply trigger (UPDATE OF state) never fires.
+	{ name: "acp_agents", orderBy: "agent_id", sinceSchema: 21 },
+	{ name: "agent_messages", orderBy: "id", sinceSchema: 21 },
 ];
 
 export interface BackupManifest {

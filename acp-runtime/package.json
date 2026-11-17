@@ -1,0 +1,5 @@
+{
+	"name": "st-acp-runtime",
+	"private": true,
+	"type": "module"
+}

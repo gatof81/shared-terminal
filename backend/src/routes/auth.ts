@@ -110,9 +110,12 @@ export function registerAuthRoutes(router: Router, ctx: RouteContext): void {
 			// flag off this answer stays byte-identical. Absent ⇒ false.
 			// D1: `projectConversation` only with its flag effective; absent ⇒ false,
 			// and with it off this answer is byte-identical to before.
+			// Experimental ACP agents: the key exists only with ACP_AGENTS_ENABLED.
+			...(ctx.acp && !ctx.projects ? { features: { acpAgents: true } } : {}),
 			...(ctx.projects
 				? {
 						features: {
+							...(ctx.acp ? { acpAgents: true } : {}),
 							projectChat: true,
 							...(ctx.projectConversation ? { projectConversation: true } : {}),
 							// §3.6: this backend knows `whenFree` and the cancel route. Its own

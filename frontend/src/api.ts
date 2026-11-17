@@ -70,6 +70,14 @@ export function isLoggedIn(): boolean {
 // account's: a logout keeps it (the login screen's own status answered it).
 let _projectChat = false;
 
+// Experimental ACP agents: `features.acpAgents`, present only with
+// ACP_AGENTS_ENABLED. Absent ⇒ no agent field, no /acp request.
+let _acpAgents = false;
+
+export function acpAgentsEnabled(): boolean {
+	return _acpAgents;
+}
+
 /** True only when the last /auth/status said `features.projectChat === true`. */
 export function projectChatEnabled(): boolean {
 	return _projectChat;
@@ -178,6 +186,8 @@ export interface AuthStatus {
 		projectArtifacts?: boolean;
 		projectRelay?: boolean;
 		projectQueue?: boolean;
+		/** Experimental ACP agents: present only with ACP_AGENTS_ENABLED. */
+		acpAgents?: boolean;
 	};
 }
 
@@ -204,6 +214,8 @@ async function fetchAuthStatus(): Promise<AuthStatus> {
 	// isLead() can answer instantly thereafter.
 	setAuthMirror(data.authenticated, data.isAdmin, data.isLead === true);
 	if (data.uiShell === "v1" || data.uiShell === "v2") _uiShell = data.uiShell;
+	_acpAgents =
+		typeof data.features === "object" && data.features !== null && data.features.acpAgents === true;
 	_projectChat =
 		typeof data.features === "object" &&
 		data.features !== null &&
@@ -1139,10 +1151,13 @@ export async function createSession(
 	name: string,
 	envVars?: Record<string, string>,
 	config?: SessionConfigPayload,
+	acpAgent?: { name: string },
 ): Promise<CreateSessionResponse> {
 	const res = await apiFetch("/sessions", {
 		method: "POST",
-		body: JSON.stringify({ name, envVars, config }),
+		body: JSON.stringify(
+			acpAgent ? { name, envVars, config, acpAgent } : { name, envVars, config },
+		),
 	});
 	if (!res.ok) {
 		const body = (await res.json().catch(() => ({}))) as { error?: string };
@@ -2758,3 +2773,67 @@ async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
 
 	return res;
 }
+
+// ── ACP agents (experimental) ───────────────────────────────────────────────
+
+export type AcpMessageState = "pending" | "running" | "done" | "failed" | "uncertain";
+
+export interface AcpMessage {
+	id: number;
+	from_id: string;
+	to_id: string;
+	kind: "request" | "reply";
+	reply_to: number | null;
+	body: string;
+	state: AcpMessageState;
+	attempts: number;
+	created_at: string;
+	started_at: string | null;
+	finished_at: string | null;
+	result_text: string | null;
+	stop_reason: string | null;
+	note: string | null;
+}
+
+export interface AcpAgentInfo {
+	name: string;
+	sessionId: string;
+	runtime: string;
+	model: string | null;
+	runnerSeenAt: string | null;
+}
+
+export interface AcpActivity {
+	seq: number;
+	at: string;
+	messageId: number | null;
+	kind: string;
+	[key: string]: unknown;
+}
+
+export interface AcpFeed {
+	agent: AcpAgentInfo;
+	maxMessageBytes: number;
+	messages: AcpMessage[];
+	activity: AcpActivity[];
+	seq: number;
+}
+
+async function acpJson<T>(path: string, init?: RequestInit): Promise<T> {
+	const res = await apiFetch(`/acp${path}`, init);
+	const body = (await res.json().catch(() => ({}))) as T & { error?: string };
+	if (!res.ok)
+		throw Object.assign(new Error(body.error ?? `HTTP ${res.status}`), {
+			status: res.status,
+			body,
+		});
+	return body;
+}
+
+export const acpListAgents = () => acpJson<AcpAgentInfo[]>("/agents");
+export const acpFeed = (name: string, after: number) =>
+	acpJson<AcpFeed>(`/agents/${encodeURIComponent(name)}/feed?after=${after}`);
+export const acpSend = (to: string, body: string) =>
+	acpJson<AcpMessage>("/messages", { method: "POST", body: JSON.stringify({ to, body }) });
+export const acpRequeue = (id: number) =>
+	acpJson<AcpMessage>(`/messages/${id}/requeue`, { method: "POST" });

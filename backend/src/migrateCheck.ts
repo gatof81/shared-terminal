@@ -93,6 +93,8 @@ export interface CheckReport {
 	schemaTo: number;
 	tables: TableCheck[];
 	fence: { column: boolean; rows: number; nonZero: number };
+	/** Tables that did not exist at the backup's schema, with their row count after the migration (must be 0). */
+	newTables: Array<{ name: string; rows: number }>;
 	ledger: { versions: number; hasFence: boolean; max: number };
 	foreignKeys: { before: number; after: number };
 	integrity: string;
@@ -134,9 +136,12 @@ export async function runMigrateCheck(
 		const { MIGRATIONS, migrateDb } = await import("./db.js");
 		const { TABLES } = await import("./backup.js");
 		const latest = Math.max(...MIGRATIONS.map((m) => m.version));
-		if (manifest.schemaVersion >= FENCE_MIGRATION) {
+		// The gate is for whatever this build adds over the backup (v20 at first,
+		// v21 for the ACP tables): a backup already at the build's latest version
+		// has nothing to prove.
+		if (manifest.schemaVersion >= latest) {
 			throw new RefusedError(
-				`backup is already at schema v${manifest.schemaVersion} (≥ v${FENCE_MIGRATION}): take the backup BEFORE deploying the migration`,
+				`backup is already at schema v${manifest.schemaVersion} (≥ v${latest}, this build's latest): take the backup BEFORE deploying the migration`,
 			);
 		}
 		if (latest < FENCE_MIGRATION) {
@@ -216,6 +221,20 @@ export async function runMigrateCheck(
 		// 4. The migration under test, as a deployment runs it.
 		await (opts.migrate ?? migrateDb)();
 
+		// Tables the pending migrations create start empty: a migration that
+		// copied or invented rows would show up here.
+		const newTables: Array<{ name: string; rows: number }> = [];
+		for (const r of db
+			.prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+			.all() as Array<{
+			name: string;
+		}>) {
+			if (present.has(r.name) || r.name.startsWith("sqlite_")) continue;
+			const rows = count(db, `SELECT COUNT(*) AS n FROM ${quoteIdent(r.name)}`);
+			newTables.push({ name: r.name, rows });
+			if (rows !== 0) failures.push(`${r.name}: new table has ${rows} row(s) after the migration`);
+		}
+
 		// 5. After.
 		for (const l of loaded) {
 			const s = snapshot(db, l.name, l.cols, l.orderBy);
@@ -236,7 +255,10 @@ export async function runMigrateCheck(
 		} else {
 			failures.push("sessions.recreate_fence: column missing after the migration");
 		}
-		if (fence.nonZero > 0) failures.push(`sessions.recreate_fence: ${fence.nonZero} row(s) not 0`);
+		// Only a pre-v20 backup must come out all 0: past v20 the fence moves with
+		// every committed recreation, so real data carries non-zero values.
+		if (fence.nonZero > 0 && manifest.schemaVersion < FENCE_MIGRATION)
+			failures.push(`sessions.recreate_fence: ${fence.nonZero} row(s) not 0`);
 		const versions = (
 			db.prepare("SELECT version FROM schema_migrations ORDER BY version").all() as Array<{
 				version: number;
@@ -247,7 +269,9 @@ export async function runMigrateCheck(
 			hasFence: versions.includes(FENCE_MIGRATION),
 			max: versions.length > 0 ? Math.max(...versions) : 0,
 		};
-		if (!ledger.hasFence) failures.push(`schema_migrations: v${FENCE_MIGRATION} not recorded`);
+		for (const m of MIGRATIONS)
+			if (m.version > manifest.schemaVersion && !versions.includes(m.version))
+				failures.push(`schema_migrations: v${m.version} not recorded`);
 		const fkAfter = fkViolations(db);
 		if (fkAfter > 0)
 			failures.push(`foreign_key_check: ${fkAfter} violation(s) after the migration`);
@@ -264,6 +288,7 @@ export async function runMigrateCheck(
 			schemaTo: ledger.max,
 			tables: loaded.map((l) => l.check),
 			fence,
+			newTables,
 			ledger,
 			foreignKeys: { before: fkBefore, after: fkAfter },
 			integrity: integrity === "ok" ? "ok" : "not ok",
@@ -448,6 +473,8 @@ export function formatReport(dir: string, r: CheckReport): string {
 	out.push(
 		`  schema_migrations: ${r.ledger.versions} version(s), max v${r.ledger.max}, v${FENCE_MIGRATION} ${r.ledger.hasFence ? "recorded  OK" : "MISSING  FAIL"}`,
 	);
+	for (const t of r.newTables)
+		out.push(`  new table ${t.name}: ${t.rows} row(s)  ${t.rows === 0 ? "OK" : "FAIL"}`);
 	out.push(
 		`  foreign_key_check: ${r.foreignKeys.after} violation(s) after (${r.foreignKeys.before} before)  ${r.foreignKeys.after === 0 ? "OK" : "FAIL"}`,
 	);

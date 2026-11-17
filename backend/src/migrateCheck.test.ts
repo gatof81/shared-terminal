@@ -112,7 +112,8 @@ describe("db:migrate-check (v20 release gate)", () => {
 		expect(r.failures).toEqual([]);
 		expect(r.ok).toBe(true);
 		expect(r.schemaFrom).toBe(19);
-		expect(r.schemaTo).toBe(FENCE_MIGRATION);
+		// The gate is v20's; later migrations apply after it.
+		expect(r.schemaTo).toBeGreaterThanOrEqual(FENCE_MIGRATION);
 		const by = Object.fromEntries(r.tables.map((t) => [t.name, t]));
 		expect(by.users).toMatchObject({
 			jsonlRows: 2,
@@ -229,8 +230,24 @@ describe("db:migrate-check (v20 release gate)", () => {
 		expect(JSON.stringify(r)).not.toContain(SECRET);
 	});
 
-	it("refuses a backup already at v20, a directory without a manifest, and a manifest it does not understand", async () => {
+	it("PASS from a v20 backup to v21: data unchanged, the ACP tables new and empty, fence values kept", async () => {
 		await writeBackup(fixture(), { schemaVersion: FENCE_MIGRATION });
+		const r = await runMigrateCheck(dir);
+		expect(r.failures).toEqual([]);
+		expect(r.ok).toBe(true);
+		expect(r.schemaFrom).toBe(20);
+		expect(r.schemaTo).toBe(21);
+		expect(r.newTables).toEqual(
+			expect.arrayContaining([
+				{ name: "acp_agents", rows: 0 },
+				{ name: "agent_messages", rows: 0 },
+			]),
+		);
+		expect(netCalls).toEqual([]);
+	});
+
+	it("refuses a backup already at the build's latest migration, a directory without a manifest, and a manifest it does not understand", async () => {
+		await writeBackup(fixture(), { schemaVersion: 21 });
 		await expect(runMigrateCheck(dir)).rejects.toThrow(RefusedError);
 		await expect(runMigrateCheck(dir)).rejects.toThrow(/BEFORE deploying/);
 		await fs.rm(path.join(dir, "manifest.json"));

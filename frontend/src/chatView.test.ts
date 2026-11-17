@@ -57,6 +57,7 @@ const api = vi.hoisted(() => ({
 	),
 	// P3a project directory: absent, as on a backend without the feature.
 	projectChatEnabled: vi.fn(() => false),
+	acpAgentsEnabled: () => false,
 }));
 vi.mock("./api.js", () => api);
 const core = vi.hoisted(() => ({

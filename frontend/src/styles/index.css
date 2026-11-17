@@ -30,3 +30,5 @@
 @import "./team.css";
 /* Shell v2 overrides, keyed on html[data-shell="v2"] (uiShell.ts). Last on purpose. */
 @import "./shell-v2.css";
+/* Experimental ACP agent chat: classes used only by acpChat.ts. */
+@import "./acp-chat.css";

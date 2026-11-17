@@ -53,6 +53,19 @@ export interface ConversationLifecycleHooks {
 	onSessionPurged(sessionId: string): Promise<void>;
 }
 
+/**
+ * ACP agents (experimental, acp/agents.ts). `prepareSpawn` adds the agent's
+ * extra binds (the read-only ACP runtime) to a NEW container; `onStarted`
+ * fires after a container of the session starts (spawn and /start), so the
+ * runner is (re)launched without the image knowing anything about agents.
+ * Both best-effort for the session: a failure logs and the session runs
+ * without its agent.
+ */
+export interface AgentLifecycleHooks {
+	prepareSpawn(sessionId: string): Promise<{ binds: string[] }>;
+	onStarted(sessionId: string, containerId: string): void;
+}
+
 import { INGEST_TOKEN_ENV, MANAGED_MOUNT_TARGET } from "./conversation/activation.js";
 import {
 	ATTESTATION_KEY_INFO,
@@ -512,6 +525,7 @@ export class DockerManager {
 	// until index.ts wires the ConversationService; every call site is
 	// best-effort so a capture failure never fails a session lifecycle op.
 	private conversation: ConversationLifecycleHooks | null = null;
+	private agents: AgentLifecycleHooks | null = null;
 	private shared = new Map<string /*targetKey*/, Promise<SharedExec>>();
 	private keyOf = new Map<string /*attachId*/, string /*targetKey*/>();
 	// Serialises writeUploads calls per session so the quota check
@@ -558,6 +572,44 @@ export class DockerManager {
 
 	setConversationHooks(hooks: ConversationLifecycleHooks | null): void {
 		this.conversation = hooks;
+	}
+
+	setAgentHooks(hooks: AgentLifecycleHooks | null): void {
+		this.agents = hooks;
+	}
+
+	/** The id of the container with this name if it is RUNNING; null when it is not or does not exist. */
+	async runningContainerId(name: string): Promise<string | null> {
+		try {
+			const info = await this.docker.getContainer(name).inspect();
+			return info.State.Running ? info.Id : null;
+		} catch (err) {
+			if (isNotFound(err)) return null;
+			throw err;
+		}
+	}
+
+	/**
+	 * Starts a process in the container and returns without waiting for it
+	 * (ACP runner). Nothing is attached: its output goes nowhere, and it lives
+	 * exactly as long as the container or its own exit.
+	 */
+	async execDetached(
+		containerId: string,
+		cmd: string[],
+		env: Record<string, string>,
+		workingDir = "/home/developer/workspace",
+	): Promise<void> {
+		const exec = await this.docker.getContainer(containerId).exec({
+			Cmd: cmd,
+			Env: Object.entries(env).map(([k, v]) => `${k}=${v}`),
+			AttachStdin: false,
+			AttachStdout: false,
+			AttachStderr: false,
+			Tty: false,
+			WorkingDir: workingDir,
+		});
+		await exec.start({ Detach: true });
 	}
 
 	constructor(sessions: SessionManager, dockerOpts?: Dockerode.DockerOptions) {
@@ -703,6 +755,16 @@ export class DockerManager {
 		// is requested AND the backend flag is on (§2.4 "spawn" row). A
 		// failure here must not block the session: log and spawn without
 		// capture (the list endpoint will report `effective: false`).
+		let agentBinds: string[] = [];
+		if (this.agents) {
+			try {
+				agentBinds = (await this.agents.prepareSpawn(sessionId)).binds;
+			} catch (err) {
+				logger.warn(
+					`[docker] ACP agent prepare failed for ${sessionId}: ${(err as Error).message}`,
+				);
+			}
+		}
 		let capture: SpawnCaptureResult = { env: [], binds: [] };
 		if (this.conversation) {
 			try {
@@ -737,7 +799,9 @@ export class DockerManager {
 							envArray,
 							// Only the image is overridden: `capture.imageId` still
 							// says whether capture was prepared (attestation below).
-							{ ...capture, imageId: createImage },
+							// ACP agent binds ride with the capture binds: both are
+							// extra mounts of a NEW container only.
+							{ ...capture, binds: [...capture.binds, ...agentBinds], imageId: createImage },
 							uploadsHostDir,
 							meta.containerName,
 						),
@@ -808,6 +872,7 @@ export class DockerManager {
 			await this.attestCaptureContainer(sessionId, containerId, "spawn", null);
 
 		await container.start();
+		this.agents?.onStarted(sessionId, containerId);
 
 		// #190 (direct-proxy switch) — persist the exposed-port set straight
 		// from config; the dispatcher resolves the container by name, so there
@@ -1654,6 +1719,7 @@ export class DockerManager {
 		this.warnIfPreHardened(sessionId, containerId, info.HostConfig);
 		if (!info.State.Running) {
 			await this.docker.getContainer(containerId).start();
+			this.agents?.onStarted(sessionId, containerId);
 			// #190: the exposed set is derived from config (the dispatcher
 			// resolves the container by name), so refresh the mappings
 			// `stopContainer()` cleared; without this the dispatcher would
