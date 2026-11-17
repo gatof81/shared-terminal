@@ -1,0 +1,33 @@
+#!/usr/bin/env node
+// st — tiny HTTP client for the agent inbox. Same API for people and agents:
+// the identity comes from ST_TOKEN, never from an argument.
+//   st send @developer "text"     st list [agent]     st get <id>     st requeue <id>
+const [cmd, ...args] = process.argv.slice(2);
+const base = process.env.ST_URL ?? "http://st:8080";
+const headers = { authorization: `Bearer ${process.env.ST_TOKEN ?? ""}`, "content-type": "application/json" };
+
+async function call(method, path, body) {
+	const res = await fetch(base + path, { method, headers, body: body && JSON.stringify(body) });
+	const text = await res.text();
+	if (!res.ok) {
+		console.error(`st: ${res.status} ${text}`);
+		process.exit(1);
+	}
+	return text ? JSON.parse(text) : null;
+}
+
+if (cmd === "send" && args.length >= 2) {
+	const out = await call("POST", "/v1/messages", { to: args[0], body: args.slice(1).join(" ") });
+	console.log(`mensaje #${out.id} para @${out.to}: ${out.state} (persistido)`);
+} else if (cmd === "list") {
+	const rows = await call("GET", `/v1/messages${args[0] ? `?agent=${encodeURIComponent(args[0])}` : ""}`);
+	for (const m of rows)
+		console.log(`#${m.id} ${m.kind} @${m.from_id} -> @${m.to_id} ${m.state}${m.reply_to ? ` (re #${m.reply_to})` : ""} | ${m.body.replace(/\s+/g, " ").slice(0, 70)}`);
+} else if (cmd === "get" && args[0]) {
+	console.log(JSON.stringify(await call("GET", `/v1/messages/${args[0]}`), null, 2));
+} else if (cmd === "requeue" && args[0]) {
+	console.log(JSON.stringify(await call("POST", `/v1/messages/${args[0]}/requeue`)));
+} else {
+	console.error('uso: st send @agente "texto" | st list [agente] | st get <id> | st requeue <id>');
+	process.exit(2);
+}
