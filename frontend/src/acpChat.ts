@@ -94,10 +94,10 @@ function apply(): void {
 	owned = agent;
 	if (agent) mount();
 	root.hidden = !active;
-	for (const id of ["chat-header", "chat-body"]) {
-		const node = document.getElementById(id);
-		if (node) node.hidden = agent !== null;
-	}
+	// The capture Chat's own children (header, list/thread body, announcer…) are
+	// styled with `display: flex/grid`, which beats the `hidden` attribute: a class
+	// on #chat-view hides every child but this one (acp-chat.css).
+	document.getElementById("chat-view")?.classList.toggle("acp-owned", agent !== null);
 	if (active) {
 		header();
 		start();
@@ -233,7 +233,16 @@ function messageEl(m: AcpMessage): HTMLElement {
 			"acp-msg-who",
 			`#${m.id} ${who(m.from_id)} → ${who(m.to_id)}${m.reply_to ? ` (respuesta a #${m.reply_to})` : ""}`,
 		),
-		el("span", `acp-badge acp-badge-${m.state}`, STATE_LABEL[m.state] ?? m.state),
+		el(
+			"span",
+			`acp-badge acp-badge-${m.state}`,
+			// While the runner reports a missing login, a message to this agent that
+			// is not finished is waiting for that login (each retry claims it for a
+			// moment and gives it back): say so instead of flickering pending/running.
+			authRequired && m.to_id === owned?.name && (m.state === "pending" || m.state === "running")
+				? "esperando login"
+				: (STATE_LABEL[m.state] ?? m.state),
+		),
 	);
 	item.append(head);
 	const body = el("pre", "acp-msg-body");
