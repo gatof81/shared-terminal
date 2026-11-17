@@ -1,12 +1,18 @@
 /* ── Auth view ──────────────────────────────────────────────── */
 #auth-view {
   display: none;
-  align-items: center;
-  justify-content: center;
   flex: 1;
+  /* Its own scroll: with the keyboard up body is fixed (base.css), so nothing taller than the
+     visible band can be reached by scrolling the page — and with the soft
+     keyboard up on a small or landscape phone the card is taller. */
+  min-height: 0;
+  overflow-y: auto;
   background: var(--c-bg);
 }
 .auth-card {
+  /* Centred by auto margins, not align-items: a card taller than the view
+     then starts at the top and scrolls, instead of being cut off above. */
+  margin: auto;
   background: var(--c-surface);
   border: 1px solid var(--c-border);
   border-radius: 12px;

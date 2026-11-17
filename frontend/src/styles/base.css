@@ -29,12 +29,29 @@ body {
   padding-left: env(safe-area-inset-left);
   /* --app-top (main.ts) follows Safari's visual-viewport pan while the
      soft keyboard is up, so the app sits in the visible band instead of
-     above it. 0 everywhere else. */
+     above it. 0 everywhere else. A transform (not `top`): it also makes
+     body the containing block of the fixed dialogs, drawer and toasts,
+     which therefore stay in the visible band too. */
   transform: translateY(var(--app-top, 0px));
 }
 /* Keyboard up: the home-indicator inset is under the keyboard. */
 html[data-kb="open"] body {
   padding-bottom: 0;
+  /* …and body leaves the page's flow, pinned to the layout viewport (#616).
+     In flow, the translate above pushes body's box past the layout viewport,
+     which gives the document something to scroll — and iOS Safari then
+     scrolls the PAGE to reveal the focused field: the conversation jumped
+     and the composer ended near the top. A fixed box adds no scrollable
+     overflow, so the only movement left is the visual-viewport pan that
+     --app-top follows. No page-scroll listener is needed.
+     Only while the keyboard is up: with body always fixed, Chromium drew
+     the text differently everywhere (glyph edges only, no layout shift —
+     every screenshot baseline moved), and there is nothing to fix when no
+     keyboard is open. */
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
 }
 
 /* ── Utilities ──────────────────────────────────────────────── */
