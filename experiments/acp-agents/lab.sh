@@ -68,6 +68,23 @@ agent)
 		-v acplab-runtime:/opt/st-acp:ro -v "$CODE_DIR:/opt/st:ro" -v "acplab-$a:/agent" \
 		--entrypoint node "$IMG" --no-warnings /opt/st/runner.mjs
 	;;
+agent-direct) # same agent identity, direct ACP client (runner-direct.mjs), its own volume
+	a=$2
+	tok=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$LAB/tokens.json" "$a")
+	if ! docker volume inspect "acplab-$a-direct" >/dev/null 2>&1; then
+		docker volume create --label acp-lab=1 "acplab-$a-direct" >/dev/null
+		docker run --rm -u 0 -v "acplab-$a-direct:/agent" --entrypoint sh "$IMG" -c \
+			'mkdir -p /agent/.claude /agent/work && echo "{\"permissions\":{\"defaultMode\":\"bypassPermissions\"}}" > /agent/.claude/settings.json && chown -R 1000:1000 /agent'
+	fi
+	docker rm -f "acplab-$a" >/dev/null 2>&1 || true
+	docker run -d --init --name "acplab-$a" --label acp-lab=1 --network acplab-net --cpus 2 --memory 3g \
+		--env-file "$TOKEN_ENV" -e DISABLE_AUTOUPDATER=1 -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+		-e HOME=/agent -e ST_AGENT="$a" -e ST_TOKEN="$tok" -e ST_URL=http://st:8080 \
+		-e ACP_AGENT_CMD=/opt/st-acp/bin/claude-acp -e AGENT_CWD=/agent/work -e ANTHROPIC_MODEL="${DIRECT_MODEL:-claude-sonnet-5-5}" \
+		-e PATH=/opt/st/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+		-v acplab-runtime:/opt/st-acp:ro -v "$CODE_DIR:/opt/st:ro" -v "acplab-$a-direct:/agent" \
+		--entrypoint node "$IMG" --no-warnings /opt/st/runner-direct.mjs
+	;;
 owner)
 	shift
 	tok=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["owner"])' "$LAB/tokens.json")

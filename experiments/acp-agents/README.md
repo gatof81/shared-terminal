@@ -20,6 +20,12 @@ owner / agent ──st send──▶ server.mjs (SQLite, persisted before 201)
   session identity survives adapter upgrades). After a restart it settles the
   `running` message from acpx's own event log (`sessions watch`): completed ⇒ `done`,
   anything else ⇒ `uncertain`, never resent.
+- `runner-direct.mjs` — same inbox protocol over a direct ACP client (plain JSON-RPC
+  on the adapter's stdio, no acpx, no SDK). Declares the adapter's AIR `asyncTasks`
+  capability, so a message is `done` only when the prompt is answered AND every async
+  task (background shell, monitor, Claude's own follow-up turn) has ended. Own state:
+  `~/.st-agent/session.json` (session id) and one event log per message (recovery).
+  `./lab.sh agent-direct <name>`. `probe-raw.mjs` prints what the adapter emits.
 - `bin/st` — `st send @agent "text"`, `st list`, `st get`, `st requeue`.
 - `lab.sh` — Docker lab (`setup`, `st`, `agent <name>`, `owner …`, `runtime <ver>`, `down`).
   The image only needs Node ≥ 22.13; the ACP runtime is a read-only volume with one
