@@ -506,6 +506,13 @@ abre una consulta sale ahora o no sale, porque el reloj de su permiso empieza co
   Mientras espera no se escribe nada: lo encolado sigue `queued`, cancelable y con su propio
   vencimiento. La regla es una función pura del registro (`lineHold`), así que sobrevive a un
   reinicio (`uncertain{orphaned}` detiene igual).
+- **Por qué espera, para la persona.** `GET …/messages/:msgId` agrega a cada entrega que sigue
+  `queued` una lectura de ese instante, hecha con las mismas dos preguntas de la puerta (`lineHold`
+  y la conversación del destinatario): `waiting: "busy"` (el agente trabaja, o hay un envío en curso
+  o rechazado «ahora no»: sale sola), `"no-conversation"` (su sesión no tiene una conversación
+  interactiva abierta) o `"held"` con `heldBy: <msg_id>` (la entrega anterior que detiene la fila; se
+  destraba con el «Hecho» de ese mensaje). La clave falta cuando nada explica la espera (listo,
+  ambiguo, ilegible): decide la próxima pasada. Es solo lectura: nada de esto se escribe ni decide.
 - **Cierres sin efecto** (`not-sent`, nada llegó al agente):
   - `cancelled` — `POST …/messages/:msgId/cancel` cierra lo que siga `queued` de ese mensaje, en una
     sección crítica; una entrega ya `planned` o posterior **no** se toca (200 con `cancelled[]` y las
@@ -1466,6 +1473,9 @@ no retenida».
   "replies": [ { "agentId": "a0…dev", "settling": { /* reply_settling */ }, "ref": { /* reply_ref */ }, "lateCloses": [] } ],
   "acks": [] }
 ```
+
+Una entrega en `state: "queued"` puede traer además `waiting` (`"busy" | "no-conversation" | "held"`)
+y, con `held`, `heldBy` (§3.6); un cliente que no las conoce las ignora.
 
 **WS `/ws/project/<pid>`**: el cliente envía `{"type":"subscribe","after":<seq>}`; el servidor manda
 `{"type":"event","event":<ProjectEvent>}` en orden de `seq`, sin duplicados, y si se queda atrás

@@ -104,6 +104,45 @@ export type RecipientState =
 	| { kind: "none" }
 	| { kind: "ambiguous" };
 
+/** Why a `queued` delivery has not left yet, for the person (never an input of the queue). */
+export interface QueuedWaiting {
+	/**
+	 * busy             the agent is working, or a send to it is in flight or was
+	 *                  refused "not now" — it moves on its own;
+	 * no-conversation  its session has no open interactive Claude conversation;
+	 * held             an earlier delivery to it ended unclean (`heldBy`): it
+	 *                  moves when the person marks that one done, or `lineHold`'s
+	 *                  other exits.
+	 */
+	waiting: "busy" | "no-conversation" | "held";
+	heldBy?: string;
+}
+
+/**
+ * The read side of the gate: `lineHold` first, then the recipient, the same
+ * two questions an attempt asks. Null when nothing explains the wait (ready,
+ * ambiguous, unreadable): the next pass decides, and a guess would be a lie.
+ */
+export function queuedWaiting(
+	state: Folded,
+	agentId: string,
+	recipient: RecipientState | null,
+	nowMs: number,
+): QueuedWaiting | null {
+	const h = lineHold(state, agentId, nowMs);
+	if (h) {
+		const onItsOwn =
+			h.state === "planned" ||
+			h.state === "placing" ||
+			h.state === "sending" ||
+			(h.state === "refused" && TRANSIENT_REFUSALS.has(h.reason ?? ""));
+		return onItsOwn ? { waiting: "busy" } : { waiting: "held", heldBy: h.msgId };
+	}
+	if (recipient?.kind === "busy") return { waiting: "busy" };
+	if (recipient?.kind === "none") return { waiting: "no-conversation" };
+	return null;
+}
+
 /**
  * What one attempt left behind:
  *   done   the delivery is no longer queued (sent, or closed);

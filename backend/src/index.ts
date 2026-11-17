@@ -721,6 +721,7 @@ async function start() {
 				store,
 				fanout,
 				ownsProject: (ownerId, pid) => directory.ownsProject(ownerId, pid),
+				recipient: (sid) => soleConversation(sid),
 			});
 			projectConversationHolder.api = api;
 			if (artifacts) projectConversationHolder.artifacts = artifacts;

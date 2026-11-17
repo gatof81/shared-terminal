@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { HttpResult } from "../../conversation/composer.js";
+import { ProjectConversationApi } from "./api.js";
 import {
 	OWNER_QUEUE_MAX_PER_AGENT,
 	type ProjectBindings,
@@ -802,5 +803,84 @@ describe("the line holds after a result that is not clean (§3.6, review of #663
 		free(SA, "cid-a");
 		await pass();
 		expect((await states(m2)).at(-1)).toBe("delivered");
+	});
+});
+
+describe("why a queued delivery waits, on the message read (§3.6)", () => {
+	const read = async (msgId: string, agentId = A) => {
+		const api = new ProjectConversationApi({
+			store: sys.store,
+			fanout: sys.fanout,
+			ownsProject: async () => true,
+			recipient: async (sid) => sys.recipient.get(sid) ?? { kind: "none" },
+			now: () => now,
+		});
+		const r = await api.message(PID, msgId);
+		const d = (r.body.deliveries as Array<Record<string, unknown>>).find(
+			(x) => x.agentId === agentId,
+		) as Record<string, unknown>;
+		return { state: d.state, waiting: d.waiting, heldBy: d.heldBy };
+	};
+
+	it("busy, no conversation, and nothing to say once it is ready or gone", async () => {
+		const m = (await send("m1")).body.msgId as string;
+		await settle();
+		expect(await read(m)).toEqual({ state: "queued", waiting: "busy", heldBy: undefined });
+		sys.recipient.delete(SA);
+		expect(await read(m)).toEqual({
+			state: "queued",
+			waiting: "no-conversation",
+			heldBy: undefined,
+		});
+		sys.recipient.set(SA, { kind: "ambiguous" });
+		expect((await read(m)).waiting).toBeUndefined();
+		free(SA, "cid-a");
+		expect((await read(m)).waiting).toBeUndefined();
+		await pass();
+		expect(await read(m)).toEqual({ state: "delivered", waiting: undefined, heldBy: undefined });
+	});
+
+	it("behind an unclean result it names the delivery that holds the line, until the person marks it done", async () => {
+		const ids: string[] = [];
+		for (const t of ["m1", "m2"]) ids.push((await send(t)).body.msgId as string);
+		const [m1, m2] = ids as [string, string];
+		await settle();
+		sys.composer = answer("uncertain");
+		free(SA, "cid-a");
+		await pass();
+		expect(await read(m2)).toEqual({ state: "queued", waiting: "held", heldBy: m1 });
+		// Another agent's line is its own.
+		const other = (await send("to B", [B])).body.msgId as string;
+		await settle();
+		expect((await read(other, B)).waiting).toBe("busy");
+		busy(SA, "cid-a");
+		await ack(m1, A);
+		expect(await read(m2)).toEqual({ state: "queued", waiting: "busy", heldBy: undefined });
+	});
+
+	it('a refusal that says "not now" is the agent being busy, not something to review', async () => {
+		const ids: string[] = [];
+		for (const t of ["m1", "m2"]) ids.push((await send(t)).body.msgId as string);
+		await settle();
+		sys.composer = refuse("busy");
+		free(SA, "cid-a");
+		await pass();
+		expect(await read(ids[1] as string)).toEqual({
+			state: "queued",
+			waiting: "busy",
+			heldBy: undefined,
+		});
+	});
+
+	it("without the queue's reading (dep absent) only the hold is reported", async () => {
+		const m = (await send("m1")).body.msgId as string;
+		await settle();
+		const api = new ProjectConversationApi({
+			store: sys.store,
+			fanout: sys.fanout,
+			ownsProject: async () => true,
+		});
+		const d = ((await api.message(PID, m)).body.deliveries as Array<Record<string, unknown>>)[0];
+		expect(d).not.toHaveProperty("waiting");
 	});
 });
