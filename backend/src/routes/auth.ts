@@ -115,6 +115,10 @@ export function registerAuthRoutes(router: Router, ctx: RouteContext): void {
 						features: {
 							projectChat: true,
 							...(ctx.projectConversation ? { projectConversation: true } : {}),
+							// §3.6: this backend knows `whenFree` and the cancel route. Its own
+							// key because the frontend deploys apart from the backend: a
+							// client must not send the field to a backend that predates it.
+							...(ctx.projectConversation ? { projectQueue: true } : {}),
 							// D2: only with PROJECT_ARTIFACTS_ENABLED effective (the key's presence).
 							...(ctx.projectConversation && "artifacts" in ctx.projectConversation
 								? { projectArtifacts: true }

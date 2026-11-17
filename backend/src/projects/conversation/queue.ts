@@ -25,7 +25,8 @@ import { randomUUID } from "node:crypto";
 import type { ArtifactRef } from "./artifacts.js";
 import { composeText } from "./artifacts.js";
 import { BINDING_READ_MS, type ProjectBindings, type ProjectFanout } from "./fanout.js";
-import { deliveryKey } from "./fold.js";
+import { type DeliveryFold, deliveryKey, type Folded } from "./fold.js";
+import { grantIdOf } from "./grantRules.js";
 import type { LogLine } from "./log.js";
 import type { ProjectConversationStore } from "./store.js";
 
@@ -33,6 +34,69 @@ import type { ProjectConversationStore } from "./store.js";
 export const GATE_INTERVAL_MS = 30_000;
 /** §3.6: a message of the person that waited this long is closed `wait-expired`. */
 export const OWNER_QUEUE_WAIT_MS = 24 * 60 * 60_000;
+
+/** §3.6: how long a refusal that says "not now" keeps its recipient's line waiting. */
+export const REFUSED_HOLD_MS = 10 * 60_000;
+/** §3.6: past this, a result nobody settled or marked done stops holding the line. */
+export const LINE_HOLD_MAX_MS = 24 * 60 * 60_000;
+
+/** Composer refusals that describe the moment, not something a person has to look at. */
+const TRANSIENT_REFUSALS: ReadonlySet<string> = new Set(["busy", "rate-limited", "shutting-down"]);
+
+/**
+ * §3.6 "la fila se detiene": the delivery that keeps an agent's queued
+ * deliveries waiting, or null.
+ *
+ * The gate only knows what the capture says about the recipient. After a
+ * delivery whose effect on the pane is not known to be clean, that is not
+ * enough: the Composer's pane record may still be unreleased, or text may sit
+ * in the input, and every message behind it would leave the queue only to be
+ * `refused` — final, and the person would have to write each one again. So
+ * the line is judged on the LAST delivery that left for this agent (from the
+ * queue or sent directly, of any source):
+ *
+ *   in flight                          hold: one at a time;
+ *   delivered, settled as delivered    open;
+ *   or resolved by an admin
+ *   refused "not now" (busy, …)        hold for REFUSED_HOLD_MS — longer than
+ *                                      the silence sweep needs to correct a
+ *                                      stale `waiting_input` (CONVERSATION.md §5.3);
+ *   anything else                      hold until the Composer's evidence
+ *                                      settles it clean, the person marks it
+ *                                      done (`owner_ack`) or resumes the
+ *                                      consult it paused, a later delivery to
+ *                                      the agent is delivered, or 24 h pass.
+ *
+ * Pure, from the log: nothing is written while a line is held, and what is
+ * queued behind it stays cancellable and keeps its own expiry.
+ */
+export function lineHold(state: Folded, agentId: string, nowMs: number): DeliveryFold | null {
+	let last: DeliveryFold | undefined;
+	for (const d of state.deliveries.values()) {
+		// `not-sent` never reached the Composer: it says nothing about the pane.
+		if (d.agentId !== agentId || d.state === "queued" || d.state === "not-sent") continue;
+		if (!last || d.lastSeq > last.lastSeq) last = d;
+	}
+	if (!last) return null;
+	if (last.state === "planned" || last.state === "placing" || last.state === "sending") return last;
+	if (last.state === "delivered") return null;
+	if (last.state === "settled" && (last.result === "delivered" || last.result === "resolved"))
+		return null;
+	// The person looked at it: resumed the consult it paused (§7.6), or marked it done.
+	const grant = state.grants.get(grantIdOf(last.authorizedBy) ?? "");
+	if (grant?.personResumedSeq !== undefined && grant.personResumedSeq > last.lastSeq) return null;
+	for (const a of state.acks.values()) {
+		const t = a.target as { msg_id?: string; agent_id?: string } | undefined;
+		if (t?.msg_id === last.msgId && (t.agent_id === undefined || t.agent_id === agentId))
+			return null;
+	}
+	const age = nowMs - Date.parse(last.lastAt);
+	const limit =
+		last.state === "refused" && TRANSIENT_REFUSALS.has(last.reason ?? "")
+			? REFUSED_HOLD_MS
+			: LINE_HOLD_MAX_MS;
+	return age >= limit ? null : last;
+}
 
 export type RecipientState =
 	| { kind: "ready"; cid: string }
@@ -44,7 +108,8 @@ export type RecipientState =
  * What one attempt left behind:
  *   done   the delivery is no longer queued (sent, or closed);
  *   wait   still queued because of its RECIPIENT (busy, absent, binding not
- *          readable): younger deliveries to that agent wait behind it;
+ *          readable, its line held by an earlier delivery — `lineHold`):
+ *          younger deliveries to that agent wait behind it;
  *   skip   still queued for a reason of its own (a paused grant): it does
  *          not hold the agent's line.
  */
@@ -134,6 +199,8 @@ export class DeliveryQueue {
 		if (this.stopped) return;
 		let kick = false;
 		for (const l of lines) {
+			// The person marking a delivery done may open the line it held.
+			if (l.ev === "owner_ack") kick = true;
 			if (l.ev !== "delivery") continue;
 			const queued = l.state === "queued";
 			const sid = (l.binding as { sid?: string } | undefined)?.sid ?? "";
@@ -256,6 +323,7 @@ export async function attemptOwnerDelivery(
 			refs: (m.artifacts ?? []) as ArtifactRef[],
 			fixed: d.binding,
 			queuedAt: Date.parse(d.queuedAt ?? ""),
+			held: lineHold(tx.state, agentId, now()) !== null,
 		};
 	});
 	if (!snap) return "done";
@@ -309,15 +377,20 @@ export async function attemptOwnerDelivery(
 		// Never redirected to whatever the agent is bound to now (§3.6).
 		return close("binding-changed");
 	}
+	if (snap.held) return "wait";
 	const r = await deps.recipient(snap.fixed.sid).catch(() => ({ kind: "none" }) as const);
 	if (r.kind === "busy" || r.kind === "none") return "wait";
 	if (r.kind === "ambiguous") return close("ambiguous-target");
 
 	let planned: LogLine | undefined;
+	let held = false;
 	try {
 		await deps.store.critical(projectId, async (tx) => {
 			// A cancel written before this line wins.
 			if (tx.state.deliveries.get(key)?.state !== "queued") return;
+			// So does a result that landed since the snapshot (a direct send's).
+			held = lineHold(tx.state, agentId, now()) !== null;
+			if (held) return;
 			[planned] = await tx.append(
 				[
 					{
@@ -337,7 +410,7 @@ export async function attemptOwnerDelivery(
 		deps.log?.warn(`[queue] plan ${key}: ${(err as Error).message}`);
 		return "wait";
 	}
-	if (!planned) return "done";
+	if (!planned) return held ? "wait" : "done";
 	await deps.fanout.deliver(
 		snap.by,
 		projectId,

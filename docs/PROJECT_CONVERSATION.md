@@ -488,6 +488,24 @@ abre una consulta sale ahora o no sale, porque el reloj de su permiso empieza co
   esa sesión, con cada línea nueva del proyecto y al menos cada 30 s mientras haya algo en cola.
   Después, S2–S4 de §3.3 sin cambios: intención en disco antes del efecto, una llamada al Composer
   como mucho, **ningún reintento**; `uncertain` es final salvo `settled` por evidencia.
+- **La fila se detiene tras un resultado que no es limpio.** La puerta solo sabe lo que dice la
+  captura. Después de una entrega cuyo efecto sobre el pane no se sabe limpio, eso no alcanza: el
+  registro de pane del Composer puede seguir sin liberar, o puede haber texto en la entrada, y cada
+  mensaje de atrás saldría de la cola solo para terminar `refused` (final). Por eso la fila de un
+  agente se juzga por **la última entrega que salió hacia él** (de la cola o directa, de cualquier
+  fuente; `not-sent` no cuenta, nunca llegó al Composer):
+  - en curso (`planned`, `placing`, `sending`) ⇒ espera: de a una;
+  - `delivered`, `settled{delivered}` o `settled{resolved}` ⇒ la fila sigue;
+  - `refused` con `busy`, `rate-limited` o `shutting-down` (hablan del momento) ⇒ espera 10 min —más
+    de lo que el barrido de silencio tarda en corregir un `waiting_input` viejo— y sale la siguiente;
+  - cualquier otro resultado (`uncertain`, `unconfirmed`, `failed`, `misdelivered`, otro `refused`,
+    `settled` con otro resultado) ⇒ espera hasta que la evidencia del Composer lo asiente como
+    entregado, la persona lo marque «Hecho» (`owner_ack` de ese mensaje, §4.3) o reanude la consulta
+    que esa entrega pausó (§7.6), una entrega posterior al mismo agente termine `delivered`, o pasen
+    24 h desde su última línea.
+  Mientras espera no se escribe nada: lo encolado sigue `queued`, cancelable y con su propio
+  vencimiento. La regla es una función pura del registro (`lineHold`), así que sobrevive a un
+  reinicio (`uncertain{orphaned}` detiene igual).
 - **Cierres sin efecto** (`not-sent`, nada llegó al agente):
   - `cancelled` — `POST …/messages/:msgId/cancel` cierra lo que siga `queued` de ese mensaje, en una
     sección crítica; una entrega ya `planned` o posterior **no** se toca (200 con `cancelled[]` y las
@@ -504,8 +522,13 @@ abre una consulta sale ahora o no sale, porque el reloj de su permiso empieza co
 - **Qué no promete.** `delivered` es que el CLI recibió el mensaje, no que terminó. La puerta lee el
   estado de la captura, que puede ir un instante detrás del CLI: si el Composer encuentra al agente
   ocupado en su propia comprobación, la entrega termina `refused{busy}` —visible, sin efecto— y **no
-  vuelve a la cola** (una entrega tiene una sola `sending`). Reenviar es un mensaje nuevo.
-- **Bandera.** No tiene una propia: existe con `PROJECT_CONVERSATION_ENABLED`, con o sin D3.
+  vuelve a la cola** (una entrega tiene una sola `sending`). Reenviar es un mensaje nuevo. Lo que
+  viene detrás no se pierde por eso: espera (regla anterior). Un rechazo que se repite cuesta un
+  mensaje por espera, nunca la fila entera.
+- **Bandera.** No tiene una propia: existe con `PROJECT_CONVERSATION_ENABLED`, con o sin D3. El
+  backend lo anuncia con `features.projectQueue: true` en `/api/auth/status` (presente siempre que
+  `projectConversation` lo esté): el frontend se despliega aparte y no debe mandar `whenFree` a un
+  backend anterior a esta versión.
 
 ## 4. Respuestas
 

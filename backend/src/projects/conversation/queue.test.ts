@@ -27,7 +27,9 @@ import { projectDir } from "./paths.js";
 import {
 	createDeliveryQueue,
 	type DeliveryQueue,
+	LINE_HOLD_MAX_MS,
 	OWNER_QUEUE_WAIT_MS,
+	REFUSED_HOLD_MS,
 	type RecipientState,
 } from "./queue.js";
 import { recoveryEvents } from "./recovery.js";
@@ -177,6 +179,33 @@ async function send(text: string, to = [A], extra: Record<string, unknown> = {})
 	return r as { status: number; body: Record<string, unknown> };
 }
 const free = (sid: string, cid: string) => sys.recipient.set(sid, { kind: "ready", cid });
+/** N gate passes with whatever the recipient says now. */
+async function pass(n = 1): Promise<void> {
+	for (let i = 0; i < n; i++) {
+		sys.queue.kick(PID);
+		await settle();
+	}
+}
+async function ack(msgId: string, agentId?: string): Promise<void> {
+	await sys.store.critical(PID, (tx) =>
+		tx.append([
+			{
+				ev: "owner_ack",
+				ack_id: uuid(),
+				client_ack_id: uuid(),
+				by: OWNER,
+				target: { msg_id: msgId, ...(agentId ? { agent_id: agentId } : {}) },
+				request_sha256: "0".repeat(64),
+			},
+		]),
+	);
+}
+const answer = (result: string) => async () =>
+	({ status: 202, body: { result, promptId: `p-${uuid()}`, seq: 7 } }) as HttpResult;
+const refuse =
+	(code: string, status = 409) =>
+	async () =>
+		({ status, body: { error: code } }) as HttpResult;
 const busy = (sid: string, cid: string) => sys.recipient.set(sid, { kind: "busy", cid });
 async function states(msgId: string, agentId = A): Promise<string[]> {
 	return (await lines())
@@ -484,6 +513,31 @@ describe("uncertainty and restarts (§3.6, §3.4)", () => {
 		expect(sys.calls).toHaveLength(1);
 	});
 
+	it("a restart keeps the hold: an uncertain{orphaned} delivery still holds what was queued behind it", async () => {
+		const m1 = (await send("m1")).body.msgId as string;
+		const m2 = (await send("m2")).body.msgId as string;
+		// The process dies inside the Composer call: `sending` with no result.
+		const line = (state: string) => ({
+			ev: "delivery",
+			msg_id: m1,
+			agent_id: A,
+			state,
+			binding: { binding_id: "bind-a", epoch: 1, sid: SA, cid: "cid-a" },
+			composer_client_message_id: "11111111-1111-4111-8111-111111111111",
+			authorized_by: "owner",
+		});
+		await sys.store.critical(PID, (tx) => tx.append([line("planned")]));
+		await sys.store.critical(PID, (tx) => tx.append([line("sending")]));
+		sys.queue.stop();
+		await sys.store.close();
+		sys = await boot("boot-2");
+		free(SA, "cid-a");
+		await pass(3);
+		expect((await states(m1)).at(-1)).toBe("uncertain{orphaned}");
+		expect(sys.calls).toHaveLength(0);
+		expect(await states(m2)).toEqual(["queued"]);
+	});
+
 	it("a restart leaves the queue as it was and each message is sent once, in order", async () => {
 		await send("antes 1");
 		await send("antes 2");
@@ -546,5 +600,207 @@ describe("uncertainty and restarts (§3.6, §3.4)", () => {
 			state: "uncertain",
 			reason: "restored",
 		});
+	});
+});
+
+describe("the line holds after a result that is not clean (§3.6, review of #663)", () => {
+	// The recipient reads `ready` throughout: only the hold keeps m2 and m3 back.
+	async function three(first: () => Promise<HttpResult>) {
+		const ids: string[] = [];
+		for (const t of ["m1", "m2", "m3"]) ids.push((await send(t)).body.msgId as string);
+		await settle();
+		sys.composer = first;
+		free(SA, "cid-a");
+		await pass();
+		sys.composer = answer("delivered");
+		return ids as [string, string, string];
+	}
+
+	for (const result of ["uncertain", "unconfirmed", "failed", "misdelivered"]) {
+		it(`m1 ends ${result}: N passes with a ready recipient call the Composer once; m2 and m3 stay queued and cancellable`, async () => {
+			const [m1, m2, m3] = await three(answer(result));
+			await pass(4);
+			expect(sys.calls.map((c) => c.text)).toEqual(["m1"]);
+			expect((await states(m1)).at(-1)).toBe(result);
+			expect(await states(m2)).toEqual(["queued"]);
+			expect(await states(m3)).toEqual(["queued"]);
+			const c = await sys.fanout.cancel(PID, m3);
+			expect(c.status).toBe(200);
+			expect(await states(m3)).toEqual(["queued", "not-sent{cancelled}"]);
+		});
+	}
+
+	it("a Composer exception (uncertain{composer-error}) holds the line the same way", async () => {
+		const [, m2] = await three(async () => {
+			throw new Error("socket hang up");
+		});
+		await pass(4);
+		expect(sys.calls).toHaveLength(1);
+		expect(await states(m2)).toEqual(["queued"]);
+	});
+
+	it("another agent's line is not held", async () => {
+		await three(answer("uncertain"));
+		await send("para B", [B]);
+		free(SB, "cid-b");
+		await pass();
+		expect(sys.calls.map((c) => c.text)).toEqual(["m1", "para B"]);
+	});
+
+	it("the person marking it done opens the line: the rest leave in order", async () => {
+		const [m1, m2, m3] = await three(answer("unconfirmed"));
+		await pass(2);
+		await ack(m1, A);
+		await settle();
+		expect(sys.calls.map((c) => c.text)).toEqual(["m1", "m2", "m3"]);
+		expect((await states(m2)).at(-1)).toBe("delivered");
+		expect((await states(m3)).at(-1)).toBe("delivered");
+	});
+
+	it("an ack of another agent's delivery of that message opens nothing", async () => {
+		const m1 = (await send("a los dos", [A, B])).body.msgId as string;
+		const m2 = (await send("m2")).body.msgId as string;
+		await settle();
+		sys.composer = answer("unconfirmed");
+		free(SA, "cid-a");
+		free(SB, "cid-b");
+		await pass();
+		sys.composer = answer("delivered");
+		await ack(m1, B);
+		await pass(2);
+		expect(await states(m2)).toEqual(["queued"]);
+		await ack(m1, A);
+		await settle();
+		expect((await states(m2)).at(-1)).toBe("delivered");
+	});
+
+	it("the Composer's evidence settling it as failed keeps the line held", async () => {
+		const [m1, m2] = await three(answer("uncertain"));
+		const settleAs = (result: string) =>
+			sys.store.critical(PID, (tx) =>
+				tx.append([{ ev: "delivery", msg_id: m1, agent_id: A, state: "settled", result }]),
+			);
+		await settleAs("failed");
+		await pass(2);
+		expect(sys.calls).toHaveLength(1);
+		expect(await states(m2)).toEqual(["queued"]);
+	});
+
+	it("settled{delivered} opens it", async () => {
+		const [m1, , m3] = await three(answer("uncertain"));
+		await sys.store.critical(PID, (tx) =>
+			tx.append([
+				{
+					ev: "delivery",
+					msg_id: m1,
+					agent_id: A,
+					state: "settled",
+					result: "delivered",
+					prompt_id: "p-1",
+				},
+			]),
+		);
+		await settle();
+		expect(sys.calls.map((c) => c.text)).toEqual(["m1", "m2", "m3"]);
+		expect((await states(m3)).at(-1)).toBe("delivered");
+	});
+
+	it("a later direct message that is delivered opens the line", async () => {
+		await three(answer("unconfirmed"));
+		await pass(2);
+		const direct = await send("directo", [A], { whenFree: false });
+		expect((direct.body.deliveries as Array<{ state: string }>)[0]?.state).toBe("delivered");
+		await settle();
+		expect(sys.calls.map((c) => c.text)).toEqual(["m1", "directo", "m2", "m3"]);
+	});
+
+	it("a direct message that ends uncertain holds the queue behind it too", async () => {
+		const m2 = (await send("en cola")).body.msgId as string;
+		await settle();
+		sys.composer = answer("uncertain");
+		await send("directo", [A], { whenFree: false });
+		sys.composer = answer("delivered");
+		free(SA, "cid-a");
+		await pass(3);
+		expect(sys.calls.map((c) => c.text)).toEqual(["directo"]);
+		expect(await states(m2)).toEqual(["queued"]);
+	});
+
+	it("after 24 h nobody settled or acknowledged it: it stops holding; what expired behind it closes wait-expired", async () => {
+		const [, m2] = await three(answer("uncertain"));
+		const late = (await send("tarde")).body.msgId as string;
+		await pass();
+		now += LINE_HOLD_MAX_MS - 60_000;
+		const fresh = (await send("fresco")).body.msgId as string;
+		await pass();
+		expect(sys.calls).toHaveLength(1);
+		now += 2 * 60_000;
+		await pass();
+		// m2, m3 and "tarde" waited their own 24 h; "fresco" did not.
+		expect(await states(m2)).toEqual(["queued", "not-sent{wait-expired}"]);
+		expect(await states(late)).toEqual(["queued", "not-sent{wait-expired}"]);
+		expect((await states(fresh)).at(-1)).toBe("delivered");
+		expect(sys.calls.map((c) => c.text)).toEqual(["m1", "fresco"]);
+	});
+
+	it("a held message still expires on its own clock", async () => {
+		const [, m2] = await three(answer("failed"));
+		now += OWNER_QUEUE_WAIT_MS + 1;
+		// The hold lapsed with it, but nothing is sent: all three were queued together.
+		await pass();
+		expect(await states(m2)).toEqual(["queued", "not-sent{wait-expired}"]);
+		expect(sys.calls).toHaveLength(1);
+	});
+
+	it("refused{busy} — the capture was a moment behind — holds for 10 min, then the next one leaves", async () => {
+		const [m1, m2, m3] = await three(refuse("busy"));
+		await pass(4);
+		expect(await states(m1)).toEqual(["queued", "planned", "sending", "refused{busy}"]);
+		expect(sys.calls).toHaveLength(1);
+		expect(await states(m2)).toEqual(["queued"]);
+		now += REFUSED_HOLD_MS - 1_000;
+		await pass();
+		expect(sys.calls).toHaveLength(1);
+		now += 2_000;
+		await pass();
+		expect(sys.calls.map((c) => c.text)).toEqual(["m1", "m2", "m3"]);
+		expect((await states(m3)).at(-1)).toBe("delivered");
+	});
+
+	for (const code of ["send-in-progress", "composer-not-empty", "cli-unvalidated"]) {
+		it(`refused{${code}} needs a look: it holds until the person marks it done, not for 10 min`, async () => {
+			const [m1, m2] = await three(refuse(code));
+			now += REFUSED_HOLD_MS + 1_000;
+			await pass(3);
+			expect(sys.calls).toHaveLength(1);
+			expect(await states(m2)).toEqual(["queued"]);
+			await ack(m1);
+			await settle();
+			expect(sys.calls.map((c) => c.text)).toEqual(["m1", "m2", "m3"]);
+		});
+	}
+
+	it("a refusal repeated on every attempt costs one message per hold, never the whole line", async () => {
+		const [, m2, m3] = await three(refuse("busy"));
+		sys.composer = refuse("busy");
+		for (let i = 0; i < 5; i++) await pass();
+		expect(sys.calls).toHaveLength(1);
+		now += REFUSED_HOLD_MS;
+		await pass(5);
+		expect(sys.calls).toHaveLength(2);
+		expect((await states(m2)).at(-1)).toBe("refused{busy}");
+		expect(await states(m3)).toEqual(["queued"]);
+	});
+
+	it("not-sent says nothing about the pane: it never holds", async () => {
+		const m1 = (await send("m1")).body.msgId as string;
+		await settle();
+		sys.recipient.set(SA, { kind: "ambiguous" });
+		await pass();
+		expect((await states(m1)).at(-1)).toBe("not-sent{ambiguous-target}");
+		const m2 = (await send("m2")).body.msgId as string;
+		free(SA, "cid-a");
+		await pass();
+		expect((await states(m2)).at(-1)).toBe("delivered");
 	});
 });

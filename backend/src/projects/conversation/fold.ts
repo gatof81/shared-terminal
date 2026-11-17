@@ -54,6 +54,8 @@ export interface DeliveryFold {
 	/** On `settled`: the Composer result it settled to. */
 	result?: string;
 	lastSeq: number;
+	/** `at` of its last line: what a held line's time limits count from (§3.6). */
+	lastAt: string;
 }
 
 export interface MessageFold {
@@ -109,6 +111,8 @@ export interface GrantFold {
 	rejectedBy: Map<string, number>;
 	/** `outbox{unverified}` lines written (§7.5). */
 	unverified: number;
+	/** seq of the last `resumed` the person wrote (never evidence's): §3.6, what opens a held line. */
+	personResumedSeq?: number;
 }
 
 /** §7.2: alive ⇔ not revoked/ended and before `expires_at`. Paused is alive. */
@@ -239,6 +243,7 @@ export function fold(f: Folded, lines: readonly LogLine[]): Folded {
 					reason: (l.reason as string | undefined) ?? undefined,
 					result: (l.result as string | undefined) ?? undefined,
 					lastSeq: l.seq,
+					lastAt: l.at,
 				});
 				break;
 			}
@@ -304,6 +309,7 @@ export function fold(f: Folded, lines: readonly LogLine[]): Folded {
 					g.state = "live";
 					g.reason = undefined;
 					g.pauseRef = undefined;
+					if (l.by !== "evidence") g.personResumedSeq = l.seq;
 				} else if (l.event === "revoked" || l.event === "ended") {
 					g.state = "ended";
 					g.reason = l.event === "revoked" ? "revoked" : (l.reason as string | undefined);

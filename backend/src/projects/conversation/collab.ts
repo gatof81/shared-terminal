@@ -54,7 +54,7 @@ import {
 	pendingRelays,
 } from "./grantRules.js";
 import type { LogLine, NewEvent } from "./log.js";
-import type { Attempt, RecipientState } from "./queue.js";
+import { type Attempt, lineHold, type RecipientState } from "./queue.js";
 import type { CriticalTx, ProjectConversationStore } from "./store.js";
 
 /** §7.3: `outbox{rejected}` lines a grant may accumulate, and how many of one agent pause it. */
@@ -508,6 +508,7 @@ export class ProjectCollab {
 				from: m.from ?? "",
 				n: m.relay?.n ?? 0,
 				body: m.text ?? "",
+				held: lineHold(tx.state, agentId, this.now()) !== null,
 			};
 		});
 		if (!snap) return "done";
@@ -562,6 +563,8 @@ export class ProjectCollab {
 			return "done";
 		}
 
+		// §3.6: the recipient's line is held by an earlier delivery, of any source.
+		if (snap.held) return "wait";
 		const r = await this.deps.recipient(p.sid).catch(() => ({ kind: "none" }) as const);
 		if (r.kind === "busy" || r.kind === "none") return "wait";
 		if (r.kind === "ambiguous") {
@@ -588,11 +591,14 @@ export class ProjectCollab {
 		// queued → planned: the binding (now with its conversation) and the
 		// Composer id are fixed here, once (§3.4 rule 3).
 		let planned: LogLine | undefined;
+		let held = false;
 		await this.deps.store.critical(projectId, async (tx) => {
 			const d = tx.state.deliveries.get(key);
 			const g = tx.state.grants.get(snap.grantId);
 			if (!d || d.state !== "queued" || !g || g.state !== "live" || !grantAlive(g, this.now()))
 				return;
+			held = lineHold(tx.state, agentId, this.now()) !== null;
+			if (held) return;
 			[planned] = await tx.append(
 				[
 					{
@@ -608,7 +614,7 @@ export class ProjectCollab {
 				{ allowMargin: true },
 			);
 		});
-		if (!planned) return "skip";
+		if (!planned) return held ? "wait" : "skip";
 		const text = relayText({
 			grantId: snap.grantId,
 			n: snap.n,
