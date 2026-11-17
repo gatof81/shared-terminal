@@ -113,14 +113,14 @@ is "a project tarball that is not the manifest's ends non-zero" "$?" 1
 is "…and nothing reached the NAS" "$(find "$N" -mindepth 1 | wc -l)" 0
 if grep -q "project pid-1" "$E/out.txt"; then ok "the log names the project"; else bad "no project line: $(tail -2 "$E/out.txt")"; fi
 sleep 0.01
-FAKE_PROJECT_DAMAGE=missing run run
+FAKE_PROJECT_DAMAGE="missing" run run
 is "a missing project tarball ends non-zero" "$?" 1
 is "…nothing published" "$(published)" 0
 sleep 0.01
 FAKE_REVOKED=1 run run
 is "a manifest that declares REVOKED_ALL without the file ends non-zero" "$?" 1
 sleep 0.01
-FAKE_REVOKED=file run run
+FAKE_REVOKED="file" run run
 is "with the file it is published" "$?" 0
 if [ "$(find "$N" -mindepth 2 -maxdepth 2 -name REVOKED_ALL | wc -l)" = 1 ]; then ok "…and REVOKED_ALL travels"; else bad "REVOKED_ALL not on the NAS"; fi
 
