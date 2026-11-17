@@ -1474,8 +1474,8 @@
 
 /* §3.6: why a queued message waits, when a person can do something about it. */
 .tw-queued-why {
-  flex-basis: 100%;
-  margin: 0;
-  font-size: 0.85rem;
-  color: var(--c-text-muted, inherit);
+	flex-basis: 100%;
+	margin: 0;
+	font-size: 0.85rem;
+	color: var(--c-muted);
 }

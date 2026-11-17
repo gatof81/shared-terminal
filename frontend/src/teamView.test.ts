@@ -1597,6 +1597,46 @@ describe("§3.6: a message waits for a busy agent", () => {
 		expect(why.querySelector("a")?.getAttribute("href")).toContain("/threads/h0");
 	});
 
+	it("held, then the log moves (the person's Done): asked again at once, and the advice goes", async () => {
+		api.projectQueueEnabled.mockReturnValue(true);
+		const held = [
+			{ seq: 1, at: NOW, ev: "message", msg_id: "h0", kind: "owner", to: [DEV], text: "Earlier" },
+			{ seq: 2, at: NOW, ev: "delivery", msg_id: "h0", agent_id: DEV, state: "uncertain" },
+			...queuedLog().map((l) => ({ ...l, seq: l.seq + 2 })),
+		];
+		serve(held);
+		api.fetchProjectMessage.mockResolvedValue(
+			detail([{ agentId: DEV, state: "queued", events: [], waiting: "held", heldBy: "h0" }]),
+		);
+		const root = mount({ kind: "thread", msgId: "q1" });
+		await flush();
+		expect(root.querySelector(".tw-queued-why")).not.toBeNull();
+		const asked = api.fetchProjectMessage.mock.calls.length;
+
+		// The agent is busy, so the message stays queued — but no longer behind h0.
+		serve([
+			...held,
+			{
+				seq: 5,
+				at: NOW,
+				ev: "owner_ack",
+				ack_id: "a-1",
+				client_ack_id: "ack-1",
+				by: "u",
+				target: { msg_id: "h0", agent_id: DEV },
+			},
+		]);
+		api.fetchProjectMessage.mockResolvedValue(
+			detail([{ agentId: DEV, state: "queued", events: [], waiting: "busy" }]),
+		);
+		const { logStore } = await import("./teamLog.js");
+		await logStore(PID).refresh();
+		await flush();
+		expect(api.fetchProjectMessage.mock.calls.length).toBe(asked + 1);
+		expect(root.querySelector(".tw-queued")).not.toBeNull();
+		expect(root.querySelector(".tw-queued-why")).toBeNull();
+	});
+
 	it("busy adds nothing to the panel: the delivery line already says it", async () => {
 		api.projectQueueEnabled.mockReturnValue(true);
 		serve(queuedLog());

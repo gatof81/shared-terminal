@@ -1893,19 +1893,30 @@ class Workspace {
 	 * Why each queued delivery of a message waits, as the server read it
 	 * (`GET …/messages/:msgId`, §3.6). The rule lives in the server's queue;
 	 * this only shows its answer. A reading of one moment, so it is asked
-	 * again while the message is still on screen and still queued — at most
-	 * once per QUEUED_WHY_MS per message, never in a loop of its own.
+	 * again while the message is still on screen and still queued: when the
+	 * log has a new line, or after QUEUED_WHY_MS — never in a loop of its own.
 	 */
 	private queuedWhy = new Map<
 		string,
-		{ at: number; busy: boolean; by: Map<string, { waiting: string; heldBy?: string }> }
+		{
+			at: number;
+			/** The log's newest seq when it was asked: a newer line may be what it waited for. */
+			seq: number;
+			busy: boolean;
+			by: Map<string, { waiting: string; heldBy?: string }>;
+		}
 	>();
 
 	private readQueuedWhy(msgId: string): void {
 		const cur = this.queuedWhy.get(msgId);
-		if (cur && (cur.busy || Date.now() - cur.at < QUEUED_WHY_MS)) return;
-		const entry = cur ?? { at: 0, busy: false, by: new Map() };
+		// Every way out of `held` but its 24 h limit writes a log line (the
+		// person's Done, a resumed consult, a later delivery): a log that moved
+		// is asked about at once, so the advice never outlives what it asked for.
+		const seq = this.store.log.newestSeq;
+		if (cur && (cur.busy || (cur.seq === seq && Date.now() - cur.at < QUEUED_WHY_MS))) return;
+		const entry = cur ?? { at: 0, seq, busy: false, by: new Map() };
 		entry.busy = true;
+		entry.seq = seq;
 		this.queuedWhy.set(msgId, entry);
 		void fetchProjectMessage(this.projectId, msgId).then((a) => {
 			entry.busy = false;
