@@ -1058,7 +1058,10 @@ function filterBar(counts: ReturnType<typeof filterCounts>, effective: ChatFilte
 		}
 		b.setAttribute(
 			"aria-label",
-			`${f.label} ${counts[f.id]}${f.id === "archived" && counts.archivedLive > 0 ? ` ${counts.archivedLive} live again` : ""} conversations`,
+			// Starts with the visible text; the two numbers are then said as what they are.
+			f.id === "archived" && counts.archivedLive > 0
+				? `${f.label} ${counts[f.id]} ${counts.archivedLive} live — ${counts[f.id]} archived conversations, ${counts.archivedLive} live again`
+				: `${f.label} ${counts[f.id]} conversations`,
 		);
 		b.addEventListener("click", () => pickFilter(f.id));
 		bar.appendChild(b);
