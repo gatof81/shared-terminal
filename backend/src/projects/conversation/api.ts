@@ -13,6 +13,7 @@ import type { HttpResult } from "../../conversation/composer.js";
 import type { ProjectFanout } from "./fanout.js";
 import type { LogLine } from "./log.js";
 import { ProjectLogError } from "./log.js";
+import { type QueuedWaiting, queuedWaiting, type RecipientState } from "./queue.js";
 import type { ProjectConversationStore } from "./store.js";
 
 export const EVENTS_PAGE_MAX = 500;
@@ -40,6 +41,9 @@ export interface ProjectConversationApiDeps {
 	store: ProjectConversationStore;
 	fanout: ProjectFanout;
 	ownsProject(ownerId: string, projectId: string): Promise<boolean>;
+	/** §3.6: the queue's own reading of a session, to say why a `queued` delivery waits. */
+	recipient?(sid: string): Promise<RecipientState>;
+	now?: () => number;
 }
 
 export class ProjectConversationApi {
@@ -126,7 +130,7 @@ export class ProjectConversationApi {
 	async message(projectId: string, msgId: string): Promise<HttpResult> {
 		if (!ID_RE.test(msgId)) return err(404, "message-not-found");
 		const id = msgId.toLowerCase();
-		const { lines } = await this.deps.store.view(projectId);
+		const { lines, state } = await this.deps.store.view(projectId);
 		const message = lines.find((l) => l.ev === "message" && l.msg_id === id);
 		if (!message) return err(404, "message-not-found");
 		const deliveries = new Map<string, LogLine[]>();
@@ -151,6 +155,20 @@ export class ProjectConversationApi {
 				replies.set(agent, r);
 			}
 		}
+		// §3.6: why each delivery still `queued` waits. A reading of this moment,
+		// from the same two questions the queue asks; the log decides what happens.
+		const waiting = new Map<string, QueuedWaiting>();
+		const now = (this.deps.now ?? Date.now)();
+		for (const [agentId, events] of deliveries) {
+			if ((events[events.length - 1] as LogLine).state !== "queued") continue;
+			const sid = events
+				.map((e) => (e.binding as { sid?: unknown } | undefined)?.sid)
+				.find((v): v is string => typeof v === "string");
+			const recipient =
+				sid && this.deps.recipient ? await this.deps.recipient(sid).catch(() => null) : null;
+			const w = queuedWaiting(state, agentId, recipient, now);
+			if (w) waiting.set(agentId, w);
+		}
 		return {
 			status: 200,
 			body: {
@@ -158,6 +176,7 @@ export class ProjectConversationApi {
 				deliveries: [...deliveries].map(([agentId, events]) => ({
 					agentId,
 					state: (events[events.length - 1] as LogLine).state,
+					...waiting.get(agentId),
 					events,
 				})),
 				replies: [...replies].map(([agentId, r]) => ({ agentId, ...r })),
