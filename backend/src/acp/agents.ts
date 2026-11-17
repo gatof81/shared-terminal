@@ -44,6 +44,8 @@ export interface AcpConfig {
 	backendUrl: string;
 	/** Where the packaged runner files are (copied into `<runtimeDir>/st` at boot). */
 	runnerSrc: string;
+	/** Watchdog period: how often each running agent's runner loop is checked. */
+	watchdogMs: number;
 }
 
 export function acpConfigFromEnv(workspaceRoot: string, port: number): AcpConfig {
@@ -53,6 +55,7 @@ export function acpConfigFromEnv(workspaceRoot: string, port: number): AcpConfig
 		defaultRuntime: env.ACP_DEFAULT_RUNTIME ?? "claude-acp-0.108.0",
 		defaultModel: env.ACP_DEFAULT_MODEL ?? "claude-sonnet-5-5",
 		maxMessageBytes: Number(env.ACP_MESSAGE_MAX_BYTES ?? 256 * 1024),
+		watchdogMs: Number(env.ACP_WATCHDOG_MS ?? 30_000),
 		backendUrl: env.ACP_BACKEND_URL ?? `http://st-backend:${port}`,
 		// src/acp (tsx) and dist/acp (image, which copies it to /acp-runtime)
 		// both resolve to <repo or image root>/acp-runtime.
@@ -61,6 +64,11 @@ export function acpConfigFromEnv(workspaceRoot: string, port: number): AcpConfig
 }
 
 const RUNTIME_MOUNT = "/opt/st-acp";
+const RUNNER_PID_FILE = "/tmp/st-acp-runner.pid";
+const RUNNER_LOOP_NAME = "st-acp-runner-loop";
+// exit 0: the pid in the file is a live process running the loop; 1: it is not
+// (no file, no process, or a recycled pid running something else).
+export const RUNNER_PROBE = `p=$(cat ${RUNNER_PID_FILE} 2>/dev/null) && [ -r /proc/$p/cmdline ] && tr '\\0' ' ' < /proc/$p/cmdline | grep -q ${RUNNER_LOOP_NAME} && exit 0; exit 1`;
 // Names an agent can be addressed by (`st send @name`). `owner` and `system`
 // are the person and Shared Terminal itself.
 export const AGENT_NAME_RE = /^[a-z][a-z0-9-]{1,31}$/;
@@ -409,7 +417,10 @@ export class AcpAgents {
 				"/tmp/st-acp-runner.lock",
 				"sh",
 				"-c",
-				`while true; do node --no-warnings ${RUNTIME_MOUNT}/st/runner.mjs >> /tmp/st-acp-runner.log 2>&1; sleep 3; done`,
+				// $$ is this loop shell, the process flock keeps the lock for; the
+				// watchdog checks that pid's /proc cmdline for the loop's name ($0).
+				`echo $$ > ${RUNNER_PID_FILE}; while true; do node --no-warnings ${RUNTIME_MOUNT}/st/runner.mjs >> /tmp/st-acp-runner.log 2>&1; sleep 3; done`,
+				RUNNER_LOOP_NAME,
 			],
 			{
 				ST_URL: this.config.backendUrl,
@@ -427,25 +438,66 @@ export class AcpAgents {
 		return true;
 	}
 
-	private readonly relaunchedAt = new Map<string, number>();
+	// ── Watchdog ────────────────────────────────────────────────────────────
+	// Autonomous: every ACP_WATCHDOG_MS, for each known agent whose container is
+	// RUNNING (one Docker inspect by name, no D1), the runner's restart loop is
+	// checked for real — its pid file names a live process whose cmdline is the
+	// loop — and only a loop proven dead is launched again. Silence is never a
+	// death: a runner busy in a long turn says nothing for minutes. The probe
+	// never takes the launch lock (it would make a concurrent launch's `flock
+	// -n` give up); duplicates are impossible anyway because every launch runs
+	// under that lock. A probe that cannot answer (exec error, timeout) does
+	// nothing. A runner that is alive but stuck is not this watchdog's case.
 
-	/**
-	 * A runner not heard from for 30 s while its session runs is launched again
-	 * (idempotent: flock). Called when someone reads the agent's feed — the
-	 * person is looking at it — at most once per 30 s per agent. This is the only
-	 * recovery for a runner whose restart loop itself died; nothing polls.
-	 */
-	async relaunchIfSilent(
-		agent: AgentRow,
-		session: { status: string; containerId: string | null } | null,
-	): Promise<void> {
-		const seen = this.activity.get(agent.agent_id)?.seenAt ?? 0;
-		const last = this.relaunchedAt.get(agent.agent_id) ?? 0;
-		if (Date.now() - seen < 30_000 || Date.now() - last < 30_000) return;
-		if (session?.status !== "running" || !session.containerId) return;
-		this.relaunchedAt.set(agent.agent_id, Date.now());
-		logger.warn(`[acp] runner of @${agent.name} silent; launching it again`);
-		await this.ensureRunner(agent.session_id, session.containerId);
+	private watchdog: NodeJS.Timeout | null = null;
+	private readonly checking = new Set<string>();
+
+	startWatchdog(intervalMs = this.config.watchdogMs): void {
+		this.stopWatchdog();
+		this.watchdog = setInterval(() => void this.watchdogTick(), intervalMs);
+		this.watchdog.unref();
+	}
+
+	stopWatchdog(): void {
+		if (this.watchdog) clearInterval(this.watchdog);
+		this.watchdog = null;
+	}
+
+	async watchdogTick(): Promise<void> {
+		await Promise.all([...this.byId.values()].map((a) => this.checkRunner(a)));
+	}
+
+	/** "alive" | "dead" | "unknown" for the runner loop in this container. */
+	async probeRunner(sessionId: string, containerId: string): Promise<"alive" | "dead" | "unknown"> {
+		try {
+			const r = await this.docker.execCapture(sessionId, ["sh", "-c", RUNNER_PROBE], {
+				containerId,
+				maxBytes: 256,
+				timeoutMs: 10_000,
+			});
+			return r.exitCode === 0 ? "alive" : r.exitCode === 1 ? "dead" : "unknown";
+		} catch {
+			return "unknown";
+		}
+	}
+
+	private async checkRunner(agent: AgentRow): Promise<void> {
+		if (this.checking.has(agent.agent_id)) return; // single-flight per agent
+		this.checking.add(agent.agent_id);
+		try {
+			const containerId = await this.docker.runningContainerId(
+				`st-${agent.session_id.slice(0, 12)}`,
+			);
+			if (!containerId) return;
+			const state = await this.probeRunner(agent.session_id, containerId);
+			if (state !== "dead") return;
+			logger.warn(`[acp] runner loop of @${agent.name} is not running; launching it`);
+			await this.ensureRunner(agent.session_id, containerId);
+		} catch (err) {
+			logger.warn(`[acp] watchdog for @${agent.name}: ${(err as Error).message}`);
+		} finally {
+			this.checking.delete(agent.agent_id);
+		}
 	}
 
 	/** Boot: running agent sessions get their runner back (a backend restart does not touch containers, but a host reboot does). */

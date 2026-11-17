@@ -578,6 +578,17 @@ export class DockerManager {
 		this.agents = hooks;
 	}
 
+	/** The id of the container with this name if it is RUNNING; null when it is not or does not exist. */
+	async runningContainerId(name: string): Promise<string | null> {
+		try {
+			const info = await this.docker.getContainer(name).inspect();
+			return info.State.Running ? info.Id : null;
+		} catch (err) {
+			if (isNotFound(err)) return null;
+			throw err;
+		}
+	}
+
 	/**
 	 * Starts a process in the container and returns without waiting for it
 	 * (ACP runner). Nothing is attached: its output goes nowhere, and it lives

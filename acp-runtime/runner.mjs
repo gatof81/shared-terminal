@@ -136,6 +136,9 @@ const finalText = () => current.segments.filter((s) => s.trim()).at(-1)?.trim() 
 
 // `ST-PERSISTENT: <id> …` lines the agent wrote for this message. Honoured only
 // for a task that is open right now: a declaration never hides finished work.
+// PROVISIONAL (owner, 2026-11-17): a textual convention, not a contract — it
+// relies on the model writing the line, cannot be revoked, and nothing tracks the
+// process after the message closes. Replace with a structured signal.
 function adoptPersistent() {
 	for (const m of current.allText.matchAll(/ST-PERSISTENT:\s*`?([A-Za-z0-9_-]+)`?/g)) {
 		if (live.has(m[1]) && !persistent.has(m[1])) {

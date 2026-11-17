@@ -582,7 +582,7 @@ app.use((_req, res, next) => {
 // (not optional) on buildRouter so a future caller that omits it
 // surfaces as a TypeScript error rather than a silently-dropped
 // postCreate hook (PR #208 round 1 review).
-if (acpAgents) app.use("/api/acp", buildAcpRouter(acpAgents, sessions));
+if (acpAgents) app.use("/api/acp", buildAcpRouter(acpAgents));
 app.use(
 	"/api",
 	buildRouter(sessions, docker, bootstrapBroadcaster, undefined, idleSweeper, conversation, {
@@ -843,6 +843,7 @@ async function start() {
 		try {
 			await acpAgents.installRunnerFiles();
 			await acpAgents.ensureAllRunning();
+			acpAgents.startWatchdog();
 		} catch (err) {
 			logger.warn(`[server] ACP agents boot failed: ${(err as Error).message}`);
 		}
