@@ -839,6 +839,68 @@ describe("runRestore", () => {
 		await fs.rm(users);
 		await noWrites(() => runRestore(outDir), /users\.jsonl has 0 rows, the manifest says/);
 	});
+
+	// tar makes a hard link with link(2) against whatever the target names
+	// under WORKSPACE_ROOT: a member `s1/x link to s2/secret` would put the
+	// OTHER session's file, same inode, inside s1's bind mount.
+	it("a hard link to a file that is not in the tarball refuses before any D1 call, and links nothing", async () => {
+		await makeBackup();
+		const src = mkdtempSync(path.join(os.tmpdir(), "st-evil-hl-"));
+		await fs.mkdir(path.join(src, "s1"));
+		await fs.mkdir(path.join(src, "s2"));
+		await fs.writeFile(path.join(src, "s2", "secret"), "x");
+		await fs.link(path.join(src, "s2", "secret"), path.join(src, "s1", "x"));
+		// s2 first, so s1/x is the link member; then s2 is taken out of the archive.
+		const plain = path.join(src, "evil.tar");
+		execFileSync("tar", ["-cf", plain, "-C", src, "s2", "s1"]);
+		execFileSync("tar", ["--delete", "-f", plain, "s2"]);
+		const tar = path.join(outDir, "workspaces", "s1.tar.gz");
+		await fs.writeFile(tar, execFileSync("gzip", ["-c", plain]));
+		expect(
+			execFileSync("tar", ["-tvzf", tar], { env: { ...process.env, LC_ALL: "C" } }).toString(),
+		).toMatch(/^h.* s1\/x link to s2\/secret$/m);
+		// The victim, live on the destination.
+		await seedWorkspace("s2", { "s2/secret": "theirs" });
+		await noWrites(() => runRestore(outDir), /hard link "s1\/x" does not point at an earlier file/);
+		expect(await fs.stat(path.join(WORKSPACE_ROOT, "s1", "x")).catch(() => null)).toBeNull();
+		expect((await fs.stat(path.join(WORKSPACE_ROOT, "s2", "secret"))).nlink).toBe(1);
+		await fs.rm(src, { recursive: true, force: true });
+	});
+
+	it("hard links inside a workspace (files and symlinks) back up and restore still linked", async () => {
+		dbState.tables.set("users", [{ id: "u1", username: "diego" }]);
+		dbState.tables.set("sessions", [{ session_id: "s1", user_id: "u1", status: "stopped" }]);
+		await seedWorkspace("s1", { "s1/a.txt": "same", "s1/link to/odd name": "odd" });
+		const ws = path.join(WORKSPACE_ROOT, "s1");
+		await fs.link(path.join(ws, "a.txt"), path.join(ws, "b.txt"));
+		await fs.link(path.join(ws, "link to", "odd name"), path.join(ws, "link to", "x link to y"));
+		await fs.symlink("a.txt", path.join(ws, "l1"));
+		await fs.link(path.join(ws, "l1"), path.join(ws, "l2"));
+		await runBackup(outDir);
+		await fs.rm(ws, { recursive: true });
+		dbState.tables.clear();
+		await runRestore(outDir);
+		const ino = async (f: string) => (await fs.lstat(path.join(ws, f))).ino;
+		expect(await ino("b.txt")).toBe(await ino("a.txt"));
+		expect(await ino("link to/x link to y")).toBe(await ino("link to/odd name"));
+		expect(await ino("l2")).toBe(await ino("l1"));
+		expect(await fs.readFile(path.join(ws, "b.txt"), "utf8")).toBe("same");
+	});
+
+	it("a tarball that is not the one the manifest counted refuses before any D1 call", async () => {
+		await makeBackup();
+		// A valid, in-scope tarball of the same session — just not this backup's.
+		const src = mkdtempSync(path.join(os.tmpdir(), "st-stale-"));
+		await fs.mkdir(path.join(src, "s1"));
+		await fs.writeFile(path.join(src, "s1", "older.txt"), "an older copy");
+		await fs.writeFile(path.join(src, "s1", "more.txt"), "x");
+		execFileSync("tar", ["-czf", path.join(outDir, "workspaces", "s1.tar.gz"), "-C", src, "s1"]);
+		await noWrites(
+			() => runRestore(outDir),
+			/s1\.tar\.gz has 3 entries in \d+ bytes, the manifest says 2 in \d+ — refusing/,
+		);
+		await fs.rm(src, { recursive: true, force: true });
+	});
 });
 
 // ── Live-session tar outcomes ──────────────────────────────────────────────
