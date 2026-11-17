@@ -867,13 +867,47 @@ describe("runRestore", () => {
 		await fs.rm(src, { recursive: true, force: true });
 	});
 
+	// "Earlier in the tarball" is not "extracted earlier": the live pass
+	// excludes `.st-control` and the revocation markers, so a link to such a
+	// member would be made against the destination's LIVE file — or fail the
+	// extraction after every table was written (A's review of #670).
+	it.each([
+		[".st-control/s1/recreate-attempt.json"],
+		[".conversations/s1/REVOKED"],
+		[".conversations/s1/c1.events.jsonl"],
+	])("a hard link to %s — a member, but not the session's content — refuses before any D1 call", async (target) => {
+		await makeBackup();
+		const src = mkdtempSync(path.join(os.tmpdir(), "st-evil-hl2-"));
+		await fs.mkdir(path.join(src, "s1"));
+		await fs.mkdir(path.dirname(path.join(src, target)), { recursive: true });
+		await fs.writeFile(path.join(src, target), "{}");
+		await fs.link(path.join(src, target), path.join(src, "s1", "x"));
+		const tar = path.join(outDir, "workspaces", "s1.tar.gz");
+		// The target's tree first, so `s1/x` is the link member.
+		execFileSync("tar", ["-czf", tar, "-C", src, target.split("/").slice(0, 2).join("/"), "s1"]);
+		expect(
+			execFileSync("tar", ["-tvzf", tar], { env: { ...process.env, LC_ALL: "C" } }).toString(),
+		).toContain(`s1/x link to ${target}`);
+		// The destination's live file the link would have been made against.
+		await seedWorkspace("s1", { [target]: "live" });
+		await noWrites(() => runRestore(outDir), /hard link "s1\/x" does not point at an earlier file/);
+		expect((await fs.stat(path.join(WORKSPACE_ROOT, target))).nlink).toBe(1);
+		expect(await fs.stat(path.join(WORKSPACE_ROOT, "s1", "x")).catch(() => null)).toBeNull();
+		await fs.rm(src, { recursive: true, force: true });
+	});
+
 	it("hard links inside a workspace (files and symlinks) back up and restore still linked", async () => {
 		dbState.tables.set("users", [{ id: "u1", username: "diego" }]);
 		dbState.tables.set("sessions", [{ session_id: "s1", user_id: "u1", status: "stopped" }]);
-		await seedWorkspace("s1", { "s1/a.txt": "same", "s1/link to/odd name": "odd" });
+		await seedWorkspace("s1", {
+			"s1/a.txt": "same",
+			"s1/link to/odd name": "odd",
+			"s1/ñandú.txt": "utf-8",
+		});
 		const ws = path.join(WORKSPACE_ROOT, "s1");
 		await fs.link(path.join(ws, "a.txt"), path.join(ws, "b.txt"));
 		await fs.link(path.join(ws, "link to", "odd name"), path.join(ws, "link to", "x link to y"));
+		await fs.link(path.join(ws, "ñandú.txt"), path.join(ws, "ñandú 2.txt"));
 		await fs.symlink("a.txt", path.join(ws, "l1"));
 		await fs.link(path.join(ws, "l1"), path.join(ws, "l2"));
 		await runBackup(outDir);
@@ -883,6 +917,7 @@ describe("runRestore", () => {
 		const ino = async (f: string) => (await fs.lstat(path.join(ws, f))).ino;
 		expect(await ino("b.txt")).toBe(await ino("a.txt"));
 		expect(await ino("link to/x link to y")).toBe(await ino("link to/odd name"));
+		expect(await ino("ñandú 2.txt")).toBe(await ino("ñandú.txt"));
 		expect(await ino("l2")).toBe(await ino("l1"));
 		expect(await fs.readFile(path.join(ws, "b.txt"), "utf8")).toBe("same");
 	});

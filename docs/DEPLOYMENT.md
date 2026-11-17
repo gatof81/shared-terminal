@@ -1278,7 +1278,7 @@ a restore is whole only when it says `complete`.
 The backup's own files are checked the same way, before the first write: a
 workspace tarball that is missing, truncated, not named after a session of the
 manifest, holding paths outside that session, holding a hard link to anything
-but an earlier file of the same tarball, or not the size and entry count the
+but an earlier file of that session's own content in the same tarball, or not the size and entry count the
 manifest recorded for it (an older copy under the same name), and a table dump that is not
 valid JSONL or does not have the rows the manifest counted (cut short, or
 missing), each stop the restore with nothing restored. What only the
