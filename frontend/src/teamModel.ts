@@ -733,7 +733,7 @@ const NOT_SENT_REASON: ReadonlyMap<string, string> = new Map([
 	["agent-removed", "it was removed from the project"],
 	["grant-inactive", "the handoffs had stopped"],
 	["grant-paused", "the consult was paused"],
-	["wait-expired", "it stayed busy for too long"],
+	["wait-expired", "it wasn't free in time"],
 	["cancelled", "you cancelled it while it was queued"],
 	["artifact-failed", "a file couldn't be placed"],
 	["persist-failed", "the server couldn't record it"],
