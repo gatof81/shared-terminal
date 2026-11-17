@@ -22,6 +22,7 @@
 
 import {
 	type AgentListEntry,
+	cancelQueuedProjectMessage,
 	fetchProjectArtifactText,
 	listWorkspaceDir,
 	type ProjectMessageBody,
@@ -29,6 +30,7 @@ import {
 	postProjectAck,
 	postProjectMessage,
 	projectArtifactsEnabled,
+	projectQueueEnabled,
 	projectRelayEnabled,
 	registerProjectArtifact,
 	type WorkspaceEntry,
@@ -744,6 +746,9 @@ class Composer {
 			}
 			if (c.collab) body.collab = c.collab;
 		}
+		// §3.6: a busy agent doesn't refuse it — it waits and is sent once, when
+		// the agent is free. Not with a consult (the server refuses the pair).
+		if (projectQueueEnabled() && !body.collab) body.whenFree = true;
 		if (this.files.length > 0) body.artifacts = this.files.map((f) => f.sha256);
 		const inReplyTo = this.replyTarget?.inReplyTo ?? this.rootId;
 		if (inReplyTo) body.inReplyTo = inReplyTo;
@@ -1681,6 +1686,7 @@ class Workspace {
 			const who = handleOf(this.agents, id);
 			if (!d) return "Sending…";
 			const tone = deliveryTone(d.state);
+			if (d.state === "queued") return `Queued for ${who}`;
 			if (tone === "pending") return `Sending to ${who}…`;
 			if (tone === "not-delivered") return `Not delivered to ${who}`;
 			if (tone === "unsure") return `Not sure it arrived · ${who}`;
@@ -1864,9 +1870,55 @@ class Workspace {
 		for (const id of m.message.to)
 			chips.append(this.deliveryChip(id, m.deliveries.get(id) ?? null));
 		li.append(chips);
+		// §3.6: what still waits can be taken back; what already left cannot.
+		if (
+			projectQueueEnabled() &&
+			m.message.to.some((id) => m.deliveries.get(id)?.state === "queued")
+		)
+			li.append(this.queuedPanel(m.message.msgId));
 		if (projectRelayEnabled())
 			for (const g of grantsOfTask(this.store.log, m.message.msgId)) li.append(this.grantPanel(g));
 		return li;
+	}
+
+	// ── A message waiting for a busy agent (§3.6) ──
+
+	private cancelBusy = new Set<string>();
+	private cancelError = new Map<string, string>();
+
+	private queuedPanel(msgId: string): HTMLElement {
+		const box = el("div", "tw-queued");
+		const busy = this.cancelBusy.has(msgId);
+		const b = button(
+			busy ? "Cancelling…" : "Cancel",
+			"tw-btn",
+			() => void this.cancelQueued(msgId),
+		);
+		b.dataset.key = `queued:${msgId}:cancel`;
+		b.setAttribute("aria-label", "Cancel this message while it waits");
+		if (busy) b.setAttribute("aria-disabled", "true");
+		box.append(el("span", "tw-muted", "It is sent once, when the agent is free."), b);
+		const err = this.cancelError.get(msgId);
+		if (err) box.append(el("p", "tw-partial", err));
+		return box;
+	}
+
+	private async cancelQueued(msgId: string): Promise<void> {
+		if (this.cancelBusy.has(msgId)) return;
+		this.cancelBusy.add(msgId);
+		this.cancelError.delete(msgId);
+		this.render();
+		const a = await cancelQueuedProjectMessage(this.projectId, msgId);
+		this.cancelBusy.delete(msgId);
+		if (!a.ok && a.code === "stale") return;
+		// A cancel can lose to the send; the log says which of the two happened.
+		if (!a.ok)
+			this.cancelError.set(
+				msgId,
+				`The server couldn't cancel it (${a.code || a.status}). It is still shown as the log has it.`,
+			);
+		await this.store.refreshAfterWrite();
+		this.render();
 	}
 
 	// ── Consults between two agents (D3, §7) ──

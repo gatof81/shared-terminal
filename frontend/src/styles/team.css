@@ -811,6 +811,15 @@
 }
 
 /* A 202 / a logged message is not every agent's receipt (§3.3 step 4). */
+/* §3.6: a message waiting for a busy agent — what happens next, and the way back. */
+.tw-queued {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.5rem;
+	font-size: 0.82rem;
+}
+
 .tw-partial {
 	margin: 0;
 	font-size: 0.82rem;

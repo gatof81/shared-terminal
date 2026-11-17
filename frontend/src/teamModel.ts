@@ -734,6 +734,7 @@ const NOT_SENT_REASON: ReadonlyMap<string, string> = new Map([
 	["grant-inactive", "the handoffs had stopped"],
 	["grant-paused", "the consult was paused"],
 	["wait-expired", "it stayed busy for too long"],
+	["cancelled", "you cancelled it while it was queued"],
 	["artifact-failed", "a file couldn't be placed"],
 	["persist-failed", "the server couldn't record it"],
 ]);
@@ -1133,6 +1134,10 @@ const POST_ERROR: ReadonlyMap<string, string> = new Map([
 		"This message was already sent with different content. Nothing more was sent.",
 	],
 	["persist-failed", "The server couldn't record the message. Nothing was sent."],
+	[
+		"queue-full",
+		"Too many messages are already waiting for one of these agents. Cancel one or wait for it to be free. Nothing was sent.",
+	],
 	[
 		"project-writer-unavailable",
 		"The server isn't accepting messages right now. Nothing was sent.",
