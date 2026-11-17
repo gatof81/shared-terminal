@@ -27,9 +27,29 @@ The host scripts must use these functions, not their own inline versions. When a
 logic, it lands here first, with a test. The copy on the host is then updated from it, and
 `SHA256SUMS` is regenerated.
 
+## `backup/` — the nightly backup, with its history on the NAS
+
+`backup/st-backup-nas.sh` replaces the mirror (`rsync --delete` of the host's last seven backups):
+
+1. `run` makes a backup and checks it against its own manifest.
+2. It copies it to the NAS and compares the NAS's checksums with the local files.
+3. Only then it uploads `<name>.COMPLETE`. That marker is the publication: a directory without it
+   is reported by `status`, never counted and never removed.
+4. The host keeps its newest backup (a recreation needs a manifest younger than 24 h) and drops an
+   older one only once it is published.
+5. NAS retention removes backups by name (`backup/retention.py`: 3 daily + the newest of the
+   previous ISO week by default), and only in a run that has just published one.
+
+A failure deletes nothing on either side, ends non-zero, writes `status.json` and calls `ALERT_CMD`
+if one is configured. `adopt <name>` publishes a backup that already exists locally (the way to
+bring the mirror's old directories under the marker). The config file (`/etc/st-backup-nas.conf`)
+holds every host-specific value; the script's header lists the keys.
+
 ## Run the tests
 
 ```bash
 bash ops/test/checks.test.sh   # no network, no Docker (a stub stands in for `docker`)
-shellcheck -x ops/lib/checks.sh ops/test/checks.test.sh
+bash ops/test/retention.test.sh
+bash ops/test/backup-nas.test.sh   # needs rsync; a local directory stands in for the NAS
+shellcheck -x ops/lib/checks.sh ops/test/checks.test.sh ops/backup/st-backup-nas.sh ops/test/*.test.sh
 ```

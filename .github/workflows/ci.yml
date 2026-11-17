@@ -243,7 +243,13 @@ jobs:
 
       # shellcheck ships on the ubuntu-24.04 runner image.
       - name: shellcheck
-        run: shellcheck -x ops/lib/checks.sh ops/test/checks.test.sh
+        run: >-
+          shellcheck -x ops/lib/checks.sh ops/test/checks.test.sh
+          ops/backup/st-backup-nas.sh ops/test/retention.test.sh ops/test/backup-nas.test.sh
 
       - name: tests
-        run: bash ops/test/checks.test.sh
+        run: |
+          bash ops/test/checks.test.sh
+          bash ops/test/retention.test.sh
+          # A local directory stands in for the NAS: rsync is the transport either way.
+          bash ops/test/backup-nas.test.sh
