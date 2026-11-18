@@ -42,6 +42,7 @@ import {
 	patchConversationMeta,
 	projectChatEnabled,
 } from "./api.js";
+import { copyButton, markdownBlock } from "./chatMarkdown.js";
 import {
 	automaticTitle,
 	CHAT_FILTERS,
@@ -57,7 +58,6 @@ import {
 	titleProblem,
 	writeFilter,
 } from "./chatMeta.js";
-import { copyText } from "./clipboard.js";
 import { openActionMenu } from "./components/actionMenu.js";
 import { promptDialog } from "./components/dialog.js";
 import {
@@ -80,15 +80,7 @@ import {
 	toolsSummary,
 } from "./conversationModel.js";
 import { formatBytes, relativeDate } from "./format.js";
-import {
-	activeSessionId,
-	currentTabs,
-	isMobile,
-	sessions,
-	showCopySuccessToast,
-	showToast,
-} from "./main.js";
-import { renderMarkdown } from "./markdown.js";
+import { activeSessionId, currentTabs, isMobile, sessions, showToast } from "./main.js";
 import { renderSessionList, showTerminalTab, syncLastConversationCurrent } from "./sessionCore.js";
 import { sessionNoun, switcherWords } from "./switcherModel.js";
 import { button, el, stateBox } from "./ui.js";
@@ -1692,7 +1684,7 @@ function renderItem(item: Exclude<ThreadItem, ToolItem>): HTMLElement {
 			}
 			box.appendChild(head);
 			// Streaming text is plain until the message is final, then Markdown.
-			if (item.final) box.appendChild(markdown(item.text));
+			if (item.final) box.appendChild(markdownBlock(item.text));
 			else box.appendChild(el("div", "chat-text streaming", item.text));
 			if (item.missingFragments > 0)
 				box.appendChild(
@@ -1715,7 +1707,7 @@ function renderItem(item: Exclude<ThreadItem, ToolItem>): HTMLElement {
 				copyButton(item.truncated ? "Copy report (truncated)" : "Copy report", () => item.text),
 			);
 			box.appendChild(head);
-			if (item.text) box.appendChild(markdown(item.text));
+			if (item.text) box.appendChild(markdownBlock(item.text));
 			else box.appendChild(el("div", "chat-note", "Empty report"));
 			if (item.truncated) box.appendChild(truncatedNote(item.originalBytes));
 			return box;
@@ -1750,20 +1742,6 @@ function truncatedNote(originalBytes: number | null): HTMLElement {
 		"chat-note",
 		`Report truncated${originalBytes ? ` (original ${formatBytes(originalBytes)})` : ""} — copying copies what was kept.`,
 	);
-}
-
-/** Rendered Markdown with a Copy button on every code block. */
-function markdown(text: string): HTMLElement {
-	const md = renderMarkdown(text);
-	md.classList.add("chat-md");
-	for (const pre of [...md.querySelectorAll<HTMLElement>("pre.md-pre")]) {
-		const wrap = el("div", "chat-pre");
-		pre.replaceWith(wrap);
-		wrap.appendChild(pre);
-		const code = pre.textContent ?? "";
-		wrap.appendChild(copyButton("Copy", () => code, "Copy code"));
-	}
-	return md;
 }
 
 /**
@@ -1946,7 +1924,7 @@ function agentCard(a: AgentView): HTMLElement {
 		const actions = el("div", "chat-agent-actions");
 		actions.appendChild(copyButton("Copy result", () => result));
 		r.appendChild(actions);
-		r.appendChild(markdown(result));
+		r.appendChild(markdownBlock(result));
 		li.appendChild(r);
 	} else if (a.status === "running") {
 		li.appendChild(el("div", "chat-note", "No end reported yet, so no result to show."));
@@ -1986,23 +1964,6 @@ function openTerminalButton(c: ConversationSummary | undefined): HTMLButtonEleme
 			showToast(`Could not switch to ${tab.label}; check the active tab before typing.`, true);
 	});
 	b.dataset.openTerminalTab = tab?.tabId ?? "";
-	return b;
-}
-
-// ── Copy ────────────────────────────────────────────────────────────────────
-
-function copyButton(label: string, text: () => string, title?: string): HTMLButtonElement {
-	const b = button(
-		label,
-		"files-btn chat-copy",
-		() => {
-			void copyText(text(), b).then(
-				(ok) => (ok ? showCopySuccessToast() : showToast("Copy failed", true)),
-				() => showToast("Copy failed", true),
-			);
-		},
-		title,
-	);
 	return b;
 }
 
