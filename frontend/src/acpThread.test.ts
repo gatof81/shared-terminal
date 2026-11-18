@@ -219,6 +219,87 @@ describe("leaving and coming back", () => {
 	});
 });
 
+describe("a send that fails while the person is elsewhere", () => {
+	function pendingSend() {
+		let fail!: (e: Error) => void;
+		api.acpSend.mockReturnValueOnce(
+			new Promise<AcpMessage>((_, rej) => {
+				fail = rej;
+			}),
+		);
+		return (e: Error) => fail(e);
+	}
+	async function sendInSolo(t: InstanceType<typeof AcpThread>, text: string) {
+		t.open({ kind: "agent", name: "solo" });
+		await flush();
+		t.input.value = text;
+		submit(t);
+		await flush();
+	}
+	const settle = async () => {
+		for (let i = 0; i < 4; i++) await flush();
+	};
+	const errorText = (t: InstanceType<typeof AcpThread>) => {
+		const e = t.root.querySelector<HTMLElement>(".acp-chat-error")!;
+		return e.hidden ? "" : (e.textContent ?? "");
+	};
+	const recoverBtn = (t: InstanceType<typeof AcpThread>) =>
+		t.root.querySelector<HTMLButtonElement>(".acp-recover")!;
+
+	it("A → B: nothing of A shows in B; back in A, the text and the error are there", async () => {
+		api.acpFeed.mockResolvedValue(feed({ agent: agent("solo") }));
+		const fail = pendingSend();
+		const t = mount();
+		await sendInSolo(t, "importante");
+		t.open({ kind: "agent", name: "arq" });
+		fail(new Error("503"));
+		await settle();
+		expect(t.input.value).toBe("");
+		expect(errorText(t)).toBe("");
+		t.open({ kind: "agent", name: "solo" });
+		await settle();
+		expect(t.input.value).toBe("importante");
+		expect(errorText(t)).toContain("503");
+	});
+
+	it("over another draft of A the text is offered, never written over it", async () => {
+		api.acpFeed.mockResolvedValue(feed({ agent: agent("solo") }));
+		const fail = pendingSend();
+		const t = mount();
+		await sendInSolo(t, "importante");
+		t.input.value = "otro borrador";
+		t.open({ kind: "agent", name: "arq" });
+		fail(new Error("503"));
+		await settle();
+		t.open({ kind: "agent", name: "solo" });
+		await settle();
+		expect(t.input.value).toBe("otro borrador");
+		expect(recoverBtn(t).hidden).toBe(false);
+		recoverBtn(t).click();
+		expect(t.input.value).toBe("otro borrador\n\nimportante");
+		await settle();
+		expect(recoverBtn(t).hidden).toBe(true);
+	});
+
+	it("the retry after coming back keeps the client id (an ambiguous failure is not duplicated)", async () => {
+		api.acpFeed.mockResolvedValue(feed({ agent: agent("solo") }));
+		const fail = pendingSend();
+		const t = mount();
+		await sendInSolo(t, "importante");
+		t.open({ kind: "agent", name: "arq" });
+		fail(new Error("timeout"));
+		await settle();
+		t.open({ kind: "agent", name: "solo" });
+		await settle();
+		api.acpSend.mockResolvedValueOnce(msg(7, { to_id: "solo" }));
+		submit(t);
+		await settle();
+		const [first, retry] = api.acpSend.mock.calls;
+		expect(retry![2].clientId).toBe(first![2].clientId);
+		expect(errorText(t)).toBe("");
+	});
+});
+
 describe("consistency", () => {
 	it("a late page does not undo a newer row that arrived live", async () => {
 		const page = deferred<AcpFeed>();

@@ -76,12 +76,30 @@ export class AcpThread {
 	private error = "";
 	private sending = 0;
 	/**
-	 * The last send that did not reach every recipient. Retrying the same text
-	 * reuses its client id AND the exact body each recipient was sent (a long
-	 * message's attachment path): the server replays a retry only when sender,
-	 * body and scope are identical, and refuses anything else as a reused id.
+	 * Per chat (sourceKey), the last send that did not reach every recipient:
+	 * its text, why, and — for a retry — its client id AND the exact body each
+	 * recipient was sent (a long message's attachment path). The server replays
+	 * a retry only when sender, body and scope are identical, so retrying the
+	 * same text, even after leaving the chat and coming back, never duplicates
+	 * a message an ambiguous failure may already have stored. The text goes back
+	 * into the field only when the field is empty (`restored`); over another
+	 * draft it is offered with a button instead of overwriting it.
 	 */
-	private lastFailed: { text: string; clientId: string; bodies: Map<string, string> } | null = null;
+	private readonly unsent = new Map<
+		string,
+		{
+			text: string;
+			clientId: string;
+			bodies: Map<string, string>;
+			error: string;
+			restored: boolean;
+		}
+	>();
+	private readonly recoverBtn = el(
+		"button",
+		"files-btn acp-recover",
+		"Recuperar el texto no enviado",
+	);
 	private unsubscribe: (() => void) | null = null;
 	private poll: ReturnType<typeof setInterval> | null = null;
 	private statusTimer: ReturnType<typeof setInterval> | null = null;
@@ -123,7 +141,18 @@ export class AcpThread {
 		this.input.setAttribute("aria-label", "Mensaje");
 		this.sendBtn.type = "submit";
 		const actions = el("div", "acp-chat-actions");
-		actions.append(this.hint, this.sendBtn);
+		this.recoverBtn.type = "button";
+		this.recoverBtn.hidden = true;
+		this.recoverBtn.addEventListener("click", () => {
+			const u = this.source && this.unsent.get(sourceKey(this.source));
+			if (!u) return;
+			// Added after what is in the field, never instead of it.
+			this.input.value = this.input.value.trim() ? `${this.input.value}\n\n${u.text}` : u.text;
+			u.restored = true;
+			this.input.focus();
+			this.changed();
+		});
+		actions.append(this.hint, this.recoverBtn, this.sendBtn);
 		// Errors sit by the field, not at the top of the thread: a refused send
 		// must be seen where the person is looking, however long the thread.
 		this.errorEl.setAttribute("role", "alert");
@@ -183,7 +212,7 @@ export class AcpThread {
 			this.auth.clear();
 			this.project = null;
 			this.error = "";
-			this.lastFailed = null;
+			this.offerUnsent();
 			this.threadEl.replaceChildren(el("div", "acp-chat-empty", "Cargando…"));
 			this.input.placeholder =
 				source.kind === "agent"
@@ -775,9 +804,20 @@ export class AcpThread {
 		return f;
 	}
 
+	/** This chat's unsent text goes back into the field, if the field is empty. */
+	private offerUnsent(): void {
+		const u = this.source && this.unsent.get(sourceKey(this.source));
+		if (!u || u.restored || this.input.value.trim() !== "") return;
+		this.input.value = u.text;
+		u.restored = true;
+	}
+
 	private renderComposer(): void {
-		this.errorEl.textContent = this.error;
-		this.errorEl.hidden = this.error === "";
+		const u = this.source ? this.unsent.get(sourceKey(this.source)) : undefined;
+		const shown = [this.error, u?.error ?? ""].filter(Boolean).join(" ");
+		this.errorEl.textContent = shown;
+		this.errorEl.hidden = shown === "";
+		this.recoverBtn.hidden = !u || u.restored;
 		const src = this.source;
 		const names = [...this.agents.keys()];
 		this.mentionsEl.replaceChildren();
@@ -807,30 +847,32 @@ export class AcpThread {
 		// finds an empty field and sends nothing. A new message typed meanwhile is
 		// a new send, as always. Same text again after a failure ⇒ same id:
 		// recipients that already got it are not sent twice.
-		const retry = this.lastFailed?.text === text ? this.lastFailed : null;
+		const key = sourceKey(src);
+		const prev = this.unsent.get(key);
+		const retry = prev?.text === text ? prev : null;
 		const clientId = retry?.clientId ?? crypto.randomUUID();
 		const bodies = retry?.bodies ?? new Map<string, string>();
 		this.input.value = "";
 		this.drafts.delete(sourceKey(src));
-		// A send that did not go out gives its text back to its own chat (never
-		// into the field of another chat the person moved to).
-		const giveBack = () => {
-			if (sameChat(this.source, src)) {
-				if (this.input.value === "") this.input.value = text;
-			} else if (!this.drafts.has(sourceKey(src))) this.drafts.set(sourceKey(src), text);
+		// A send that did not go out gives its text back to ITS chat: into the
+		// field if that chat is on screen and the field is empty; otherwise it
+		// waits (with its error) for the person to come back, and over another
+		// draft it is offered, never written over it.
+		const giveBack = (error: string) => {
+			this.unsent.set(key, { text, clientId, bodies, error, restored: false });
+			if (sameChat(this.source, src)) this.offerUnsent();
 		};
 		// Sent before the page arrived (slow link, a phone): who is in the project
 		// is not known yet — load it instead of refusing the message.
 		if (this.agents.size === 0) await this.reload();
 		if (!sameChat(this.source, src)) {
-			giveBack();
+			giveBack("No se envió: cambiaste de conversación antes de que cargara.");
 			return;
 		}
 		const names = [...this.agents.keys()];
 		const to = src.kind === "agent" ? { to: [src.name], error: null } : recipientsOf(text, names);
 		if (to.error) {
-			giveBack();
-			this.error = to.error;
+			giveBack(to.error);
 			this.changed();
 			return;
 		}
@@ -863,18 +905,17 @@ export class AcpThread {
 					failed.push(`@${name}: ${(err as Error).message}`);
 				}
 			}
-			// The person may have moved to another chat meanwhile: the text goes
-			// back to THIS chat's draft, never into the field of the one on screen.
-			const here = sameChat(this.source, src);
-			if (failed.length) {
-				giveBack();
-				if (here) {
-					this.lastFailed = { text, clientId, bodies };
-					this.error = `No se envió a ${failed.join("; ")}. El texto volvió al campo: enviarlo de nuevo no duplica a quienes ya lo recibieron.`;
-				}
-			} else if (here) {
-				this.lastFailed = null;
-				this.error = "";
+			// The person may have moved to another chat meanwhile: nothing of this
+			// send is shown there; it is kept for THIS chat (giveBack).
+			if (failed.length)
+				giveBack(
+					`No se envió a ${failed.join("; ")}. Enviar el mismo texto de nuevo no duplica a quienes ya lo recibieron.`,
+				);
+			else {
+				// Sent: its failure record (if this was its retry, or it was taken
+				// back into the field) is done; an unsent text not yet taken back stays offered.
+				const u = this.unsent.get(key);
+				if (u && (u.clientId === clientId || u.restored)) this.unsent.delete(key);
 			}
 		} finally {
 			this.sending--;
