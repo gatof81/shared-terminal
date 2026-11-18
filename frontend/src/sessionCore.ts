@@ -335,6 +335,19 @@ export function invalidateSessionList(): void {
 	listLoaded = false;
 }
 
+/**
+ * A session this tab just created, shown at once. Every list request already
+ * on its way was read by the server BEFORE the creation: applied after it, its
+ * answer would drop the new session from the sidebar until the next poll. So
+ * they are retired (like a newer refresh would), and one fresh refresh follows.
+ */
+export function addCreatedSession(session: SessionInfo): void {
+	listGen++;
+	sessions.unshift(session);
+	renderSessionList();
+	void refreshSessions();
+}
+
 export function sessionListLoaded(): boolean {
 	return listLoaded;
 }
