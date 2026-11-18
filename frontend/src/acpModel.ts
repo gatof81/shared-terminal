@@ -192,7 +192,7 @@ export function questionForm(requestJson: string): QuestionForm {
 	for (const key of keys) {
 		const p = props[key] ?? {};
 		if (key.endsWith("_custom") && keys.includes(key.slice(0, -7))) continue;
-		const label = String(p.description ?? p.title ?? (keys.length === 1 ? "" : key));
+		const label = String(p.description ?? p.title ?? "");
 		const opts = (list: unknown): QuestionField["options"] =>
 			Array.isArray(list)
 				? list.map((o: EnumOpt | string) =>
