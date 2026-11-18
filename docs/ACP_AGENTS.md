@@ -226,6 +226,10 @@ session.
   - frees its name for a new agent.
 - **Recreating** an agent's container (admin recreation) keeps the read-only runtime mount; the
   watchdog launches the runner in the new container, which resumes the same ACP session.
+- **Evidence.** The two items above are covered by the backend's unit tests (real SQLite, faked
+  Docker). Their real-Docker check, `experiments/acp-agents/acp-r8-docker-check.mjs` (lab only,
+  `LAB=1`, disposable sessions), has not been run yet: until its result is published, treat the
+  container side (mount in the new container, one runner, resumed ACP session) as unverified.
 - **Rollback.** Unset `ACP_AGENTS_ENABLED` and restart: no routes, no runners. Tables stay; agent
   sessions keep working as ordinary sessions.
 
