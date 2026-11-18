@@ -716,6 +716,69 @@ describe("ACP messages: scope, replies, loop guard (v22)", () => {
 		await drain("arquitecto");
 	});
 
+	it("recipients: only the caller owner's agents, in the project when posted there", async () => {
+		const unknown = await call(owner, "POST", "/messages", { to: "@nadie", body: "x" });
+		expect(unknown.status).toBe(400);
+		expect(unknown.body.error).toBe("unknown-recipient");
+		expect(unknown.body.agents).not.toContain("ajeno");
+		// Another owner's agent, the person and Shared Terminal are not recipients.
+		for (const to of ["ajeno", "owner", "system"]) {
+			expect((await call(owner, "POST", "/messages", { to, body: "x" })).status).toBe(400);
+			expect((await call(as("arquitecto"), "POST", "/messages", { to, body: "x" })).status).toBe(
+				400,
+			);
+		}
+		expect(
+			(await call(owner, "POST", "/messages", { to: "solo", body: "x", projectId: "p-1" })).body
+				.error,
+		).toBe("not-in-project");
+		expect(
+			(await call(owner, "POST", "/messages", { to: "developer", body: "x", projectId: "p-x" }))
+				.status,
+		).toBe(404);
+	});
+
+	it("clientId: concurrent retries are one row; a reused id with another sender, text or scope is 409, never someone else's row", async () => {
+		const send = {
+			to: "developer",
+			body: "una vez",
+			projectId: "p-1",
+			clientId: "cid-race-000001",
+		};
+		const all = await Promise.all([1, 2, 3].map(() => call(owner, "POST", "/messages", send)));
+		expect(all.map((r) => r.status).sort()).toEqual([200, 200, 201]);
+		expect(new Set(all.map((r) => r.body.id)).size).toBe(1);
+		const count = () =>
+			(
+				db
+					.prepare("SELECT COUNT(*) AS n FROM agent_messages WHERE client_id = ?")
+					.get(send.clientId) as { n: number }
+			).n;
+		expect(count()).toBe(1);
+		const otherText = await call(owner, "POST", "/messages", { ...send, body: "otra cosa" });
+		expect(otherText.status).toBe(409);
+		expect(otherText.body).toEqual({ error: "client-id-reused", id: all[0]!.body.id });
+		expect((await call(owner, "POST", "/messages", { ...send, projectId: undefined })).status).toBe(
+			409,
+		);
+		// An agent of the same owner reusing the person's id gets no replay of the person's row.
+		await call(owner, "POST", "/messages", { to: "arquitecto", body: "trabajá", projectId: "p-1" });
+		await drain("developer");
+		const a = await call(as("arquitecto"), "POST", "/runner/claim");
+		const byAgent = await call(as("arquitecto"), "POST", "/messages", {
+			to: "developer",
+			body: "una vez",
+			clientId: send.clientId,
+		});
+		expect(byAgent.status).toBe(409);
+		expect(count()).toBe(1);
+		await call(as("arquitecto"), "POST", `/runner/messages/${a.body.id}/result`, {
+			state: "done",
+			text: ".",
+		});
+		await drain("arquitecto", "developer");
+	});
+
 	it("events go only to the owner of the row", () => {
 		expect(events.filter((e) => e.type === "message").every((e) => e.owner === OWNER)).toBe(true);
 	});

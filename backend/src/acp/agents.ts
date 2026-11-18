@@ -186,6 +186,13 @@ export interface ActivityEvent {
 	[key: string]: unknown;
 }
 
+/** A `clientId` already used for a different message to the same recipient. */
+export class ClientIdConflictError extends Error {
+	constructor(readonly existingId: number) {
+		super("clientId already used for a different message");
+	}
+}
+
 const NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 const ACTIVITY_MAX = 500;
 /** Agent → agent hops allowed below one person's message (ACP_MAX_DEPTH). */
@@ -446,8 +453,16 @@ export class AcpAgents {
 			"SELECT * FROM agent_messages WHERE owner_user_id = ? AND client_id = ? AND to_id = ?",
 			[m.ownerUserId, m.clientId ?? null, m.to],
 		);
-		if (!prior.results[0]) throw new Error("message insert returned nothing");
-		return { message: prior.results[0], replayed: true };
+		const p = prior.results[0];
+		if (!p) throw new Error("message insert returned nothing");
+		// A replay is the SAME send retried: same sender, text and scope. The key
+		// space is per owner, shared by the person and that owner's agents, so a
+		// reused id with anything else is refused rather than answered with
+		// someone else's row — which would report a new message as sent while
+		// dropping it. Exact comparison only: no similarity-based deduplication.
+		if (p.from_id !== m.from || p.body !== m.body || p.project_id !== (m.projectId ?? null))
+			throw new ClientIdConflictError(p.id);
+		return { message: p, replayed: true };
 	}
 
 	/**

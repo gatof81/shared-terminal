@@ -15,7 +15,13 @@
  */
 
 import express, { type NextFunction, type Request, type Response, Router } from "express";
-import type { AcpAgents, AgentLoad, AgentRow, MessageRow } from "../acp/agents.js";
+import {
+	type AcpAgents,
+	type AgentLoad,
+	type AgentRow,
+	ClientIdConflictError,
+	type MessageRow,
+} from "../acp/agents.js";
 import { type AuthedRequest, requireAuth } from "../auth.js";
 import { logger } from "../logger.js";
 
@@ -159,15 +165,22 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 				if (cur?.project_id && target.project_id === cur.project_id) scope = cur.project_id;
 			}
 			const from = c.kind === "owner" ? "owner" : c.agent.name;
-			const r = await acp.send({
-				ownerUserId: owner,
-				from,
-				to: target.name,
-				body,
-				projectId: scope,
-				depth,
-				clientId: typeof clientId === "string" ? clientId : null,
-			});
+			const r = await acp
+				.send({
+					ownerUserId: owner,
+					from,
+					to: target.name,
+					body,
+					projectId: scope,
+					depth,
+					clientId: typeof clientId === "string" ? clientId : null,
+				})
+				.catch((err: unknown) => {
+					if (err instanceof ClientIdConflictError) return err;
+					throw err;
+				});
+			if (r instanceof ClientIdConflictError)
+				return void res.status(409).json({ error: "client-id-reused", id: r.existingId });
 			res.status(r.replayed ? 200 : 201).json({ ...r.message, replayed: r.replayed });
 		}),
 	);
