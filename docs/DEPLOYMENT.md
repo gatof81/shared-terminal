@@ -394,11 +394,8 @@ session emits anything.
 > until a coordinated deploy is authorized. The first and only pilot is a
 > **new, disposable** session with no real data (D8). **No real working
 > session is recreated** until a manual administrative recovery procedure
-> exists and has been validated. The workspace CLI a recreation accepts is a
-> plain stable release at or above `RECREATE_CLI_MIN_VERSION` (default
-> 2.1.308) and not in `RECREATE_CLI_DENY` (CONVERSATION.md v1.9.2, owner
-> 2026-11-10; it replaced the exact 2.1.308 allowlist — see "The workspace's
-> Claude Code" below).
+> exists and has been validated. A recreation has no rule on the workspace
+> CLI's version (the `RECREATE_CLI_*` rule was removed on 2026-11-18, #678).
 
 | Variable | Default | Effect |
 | --- | --- | --- |
@@ -438,295 +435,12 @@ point where they are authenticated, with the `observe` mode, which **never refus
    `.conversation.originRejectedSinceBoot` stays empty while capture keeps working. Any
    `wrong_origin` on a legitimate session ⇒ go back to `observe` (or `false`) and restart.
 
-### Composer (3.2, `docs/CONVERSATION.md` §8)
+### Composer — removed
 
-Sending a message to the Claude Code CLI from the Chat view. **Off by
-default**: with `CONVERSATION_COMPOSER_ENABLED` unset the route is not
-mounted (404) and every conversation reports `canSendInput: false`. Turn it
-on only on a backend that already runs the #444 fix (`b1479d5`) and only for
-sessions whose capture is effective — a send is confirmed by the CLI's own
-`UserPromptSubmit`, so without capture it can never be `delivered`.
-
-| Variable | Default | Effect |
-| --- | --- | --- |
-| `CONVERSATION_COMPOSER_ENABLED` | unset (`false`) | Mounts `POST /api/sessions/:id/conversations/:cid/messages` and the admin routes `POST /api/admin/sessions/:id/composer/resolve`, `GET /api/admin/sessions/:id/composer/panes`; `canSendInput` becomes true for interactive conversations with a pane, effective capture and no blocking operation. |
-| `COMPOSER_CLI_VERSIONS` | `2.1.314` | Comma-separated Claude Code versions the §8.2.6 revalidation was run with. A conversation whose CLI (the process in the pane) the policy does not admit — not listed and below `COMPOSER_CLI_MIN_VERSION`, or denied — gets 409 `cli-unvalidated`. With the open minimum (the default), a later stable release needs no entry here. Adding a version means running `backend/src/conversation/composer.smoke.ts` against it: the Session Image workflow's `cli-variants` job does so for 2.1.314, 2.1.316 and 2.1.322 on every change (coverage: with the open minimum a failing version there is a reason to add it to `COMPOSER_CLI_DENY`, not a prerequisite for admitting it). `COMPOSER_CLI_VERSIONS=2.1.314` with the default open minimum already admits the existing sessions (2.1.316) and session A (2.1.322). Since v1.8.2 the version is asked of the pane's Claude process itself (`/proc/<pid>/exe --version`, as its uid, empty env, auto-updater off, starttime checked before and after), never of PATH's `claude` nor of the SessionStart hook's text; when it cannot be established the send is refused (`detail: unverifiable:<reason>`). |
-| `COMPOSER_CLI_MIN_VERSION` | unset = the lowest of `COMPOSER_CLI_VERSIONS` | **Open policy, on by default** (owner, 2026-11-10; CONVERSATION.md v1.9.2): also admit ANY later stable Claude Code release — patch, minor or major, no ceiling. When set, it must be a version listed in `COMPOSER_CLI_VERSIONS`; `off` = the exact list only (the previous behaviour); anything else refuses to start. A broken release goes in `COMPOSER_CLI_DENY` (the daily canary reports it). Judged on the pane's live process (never PATH's `claude` or the hook's text). **Risk:** those releases were never revalidated (§8.2.6); a change in the CLI's terminal behaviour can misdeliver a send in ways the dynamic checks cannot see (CONVERSATION.md §8.1.9). Startup logs a warning while it is set. |
-| `RECREATE_CLI_MIN_VERSION` | unset = 2.1.308 | The floor for the workspace CLI a recreated container runs (CONVERSATION.md §2.7.7, v1.9.2): any plain stable release at or above it passes, validated or not; below it (validated or not), unreadable or pre-release ⇒ `control-marker-incompatible` with a `detail`. When set it must be a validated version (2.1.308, 2.1.314, 2.1.316, 2.1.322); `off` = the validated set only (the previous rule). Malformed ⇒ refuses to start. |
-| `RECREATE_CLI_DENY` | unset | Exact versions that block a recreation whatever the floor says (`detail: denied:X`) — e.g. a release whose `/etc/st-control` handling the canary's conversation smoke found broken. |
-| `COMPOSER_CLI_DENY` | unset | Exact versions refused whatever the list or the minimum say (`detail: denied`). Deny always wins. The daily **Composer CLI canary** workflow runs §8.2.6 against the three newest plain releases (older intermediates are not tested: dispatch it with `cli=<version>` for any version a session log shows) and opens, reopens or comments on one issue per failed version (from a separate job; the job running the CLI has a read-only token) with the procedure: add the version here, `docker compose up -d --no-build app`, check the `[server] composer CLI policy:` line. It never changes production itself, and it is not a prior guarantee. |
-
-Operator surface (`CONVERSATION.md` §8.1.11). A pane whose last send has a
-pending outcome blocks further sends from Chat (409
-`send-in-progress{effects-pending}`); the Chat view explains it and the
-admin stats (`GET /api/admin/stats → composer`) count blocked panes. To
-look and resolve, from the backend container (same exclusion as the API —
-the CLI only calls the backend on loopback and refuses when it is down):
-
-```bash
-npm run composer:resolve -- <sessionId> --list --user <admin>
-npm run composer:resolve -- <sessionId> <paneId> <clientMessageId> reconcile --user <admin>
-npm run composer:resolve -- <sessionId> <paneId> <clientMessageId> discarded|sent-manually --user <admin>
-```
-
-- `reconcile` re-settles the pending execs from Docker's evidence (exit code
-  by inspect, or the container gone) and re-runs the deferred ack; it is
-  idempotent and never writes a second audit row. Repeat it after the
-  container's state changed.
-- `discarded` / `sent-manually` declare what the operator verified in the
-  Terminal (the segment was cleared, or the person sent it by hand). Only
-  possible when no executor is active on the pane and the result is still
-  pending; the API answers 409 `operation-active` / `not-pending` otherwise.
-  Each declaration writes one `operate` row in the observe log.
-- A pane stuck because an exec's outcome can never be inspected (the daemon
-  lost the exec) is released by stopping and starting the session: the
-  container is then gone for the pending execs, which is settlement evidence
-  (`evidence: container-gone`), and `reconcile` releases the pane.
-- A backend restart turns every active operation into `uncertain{orphaned}`
-  (fail-closed: nothing is resent); the person sees it in Chat and the
-  operator resolves as above.
-- A pane record that cannot be parsed makes the whole session unverifiable
-  for the composer (409) and is never deleted by the backend: inspect
-  `<WORKSPACE_ROOT>/.st-control/<sid>/composer/`.
-
-Both variables are forwarded by `docker-compose.yml` with empty defaults
-(before this, setting them in `.env` did nothing under compose — the same
-trap `CONVERSATION_ENABLED` had before 3.0d).
-
-#### Composer for CLI background sessions (EXPERIMENTAL, `CONVERSATION.md` §8.1.12, not approved)
-
-| Variable | Default | Effect |
-| --- | --- | --- |
-| `CONVERSATION_COMPOSER_BG_ENABLED` | unset (`false`) | With the composer on, a send to a conversation the fresh probe reports as `kind: background` goes through the CLI daemon's `reply` op (`nextTurn: true`), never a pane. Off ⇒ today's `409 not-interactive`. |
-| `COMPOSER_BG_CLI_VERSIONS` | **empty** | Exact list (no minimum) of CLI versions whose `composerBg.smoke.ts` (Session Image `cli-variants`) is green. Empty ⇒ every background send is `409 cli-unvalidated`. |
-| `COMPOSER_BG_SESSIONS` | **empty** | Session ids the transport applies to (comma-separated). Empty ⇒ no session, even with the flag on. With the flag off, a malformed value (or a malformed version list) only warns; with it on, it stops the boot. Canary plan: `docs/design/composer-background-sessions.md`. |
-
-A background send's durable record is `<WORKSPACE_ROOT>/.st-control/<sid>/composer/job-<short>.json`;
-it is listed, reconciled and resolved like a pane record, with `job:<short>` as the pane id:
-
-```bash
-npm run composer:resolve -- <sessionId> --list --user <admin>
-npm run composer:resolve -- <sessionId> job:<short> <clientMessageId> reconcile --user <admin>
-npm run composer:resolve -- <sessionId> job:<short> <clientMessageId> discarded|sent-manually --user <admin>
-```
-
-Resolving a `job:` record works whatever `CONVERSATION_COMPOSER_BG_ENABLED`
-says (it settles or declares; it never sends).
-
-**Rollback / turning the flag off — drain job records first.** A backend
-without background-transport support (main before this feature) does not
-know `job-<short>.json`: it reports it as an unexpected file and makes the
-**whole session** unverifiable for the composer (every pane refused
-`send-in-progress{unverifiable}`). Before rolling back to such a backend:
-
-1. Turn `CONVERSATION_COMPOSER_BG_ENABLED` off and restart (no new job
-   records; the existing ones keep settling by evidence, an `accepted` one
-   ends `delivered`/`misdelivered`/`unconfirmed` within 10 min).
-2. List every session's records (`--list`) and resolve what is left
-   (`reconcile`; then `discarded`/`sent-manually` for an `uncertain` one the
-   operator verified in the Terminal) until no `job-*.json` remains under
-   `.st-control/*/composer/`.
-3. Only then deploy the older backend. A record that cannot be drained is
-   evidence: move it aside by hand (never delete it unread) and note why.
-
-#### Composer pilot (disposable `pilot-captura` session only)
-
-Each step needs its own authorization; none of this touches a real session.
-Prerequisites: backend at a main that includes `b3cbdbd` with
-`CONVERSATION_ENABLED=true`; the pilot session created from an image with
-the relay (`io.shared-terminal.conversation-relay="2"`) and capture
-requested for it; the Claude Code version running in its pane is admitted
-by the policy (≥ `COMPOSER_CLI_MIN_VERSION`, by default the lowest of
-`COMPOSER_CLI_VERSIONS`, and not denied).
-
-1. **Capture effective.** `GET /api/sessions/<pilot>/conversations` →
-   `capture.effective: true` (`effectiveAfterRestart` is `false` for a
-   RUNNING container by definition — it describes the stopped-container
-   retention case — so do not wait for it). Open the
-   pilot's terminal, start `claude`, type one prompt by hand: the
-   conversation appears in Chat with its `user_prompt`. Without this the
-   composer can never confirm a send (`capture-inactive`).
-2. **CLI compatible, pane interactive.** The conversation row shows
-   `kind: interactive`, a `paneId` and a `claudeVersion` whose `X.Y.Z` the
-   policy admits (the field is the hook's raw `claude --version` text, e.g.
-   `2.1.314 (Claude Code)`); `claude --version` in the pane matches.
-   (`canSendInput` is still `false` here: the flag is off.) **No pinning
-   needed** (owner, 2026-11-10; CONVERSATION.md v1.9.2): the session's CLI
-   may auto-update, and any stable release at or above
-   `COMPOSER_CLI_MIN_VERSION` (by default the lowest of
-   `COMPOSER_CLI_VERSIONS`) is accepted unless it is in `COMPOSER_CLI_DENY`.
-   Never downgrade a session's CLI to make the composer accept it. Only with
-   `COMPOSER_CLI_MIN_VERSION=off` is a pane on an unlisted version refused
-   with 409 `cli-unvalidated`.
-3. **Turn the flag on** for the backend only (`CONVERSATION_COMPOSER_ENABLED=true`
-   in `.env`, `docker compose up -d app`); the boot log prints
-   `composer ENABLED (CLI versions: …)`. Only now do the composer routes
-   exist (they answer 404 while the flag is off, the admin ones too):
-   `GET /api/admin/sessions/<pilot>/composer/panes` → `panes: []`, and the
-   conversation row shows `canSendInput: true`. Reload the frontend: the
-   composer at the bottom of the thread is enabled while the CLI is at its
-   prompt.
-4. **Send one short, single-line message** from Chat (no leading `/` or `!`).
-   Expected within a second: the optimistic bubble, then the CLI's own
-   `user_prompt` replacing it, HTTP `202 {result: "delivered", promptId}`,
-   and in the events file one `composer_send` per state
-   (`prepared → entered → delivered → released`, no text, only `text_hash`).
-   In the Terminal view the prompt was entered exactly once, byte for byte.
-5. **Reply received in Chat.** The assistant's answer streams into the same
-   thread (`assistant_delta`, `turn_end`); the composer is enabled again when
-   the CLI returns to its prompt.
-6. **Alternate Chat ⇄ Terminal** during a turn: the terminal is never
-   resized or detached; the pane stays the same `%N`; a second send while
-   the CLI is working is refused with 409 `busy` and the draft is kept.
-7. **Negative checks**, each refused before any effect: a message starting
-   with `/` (400 `unsupported-prefix`); a send with text already typed in the
-   terminal's input (409 `composer-not-empty`); a send while a `/help` dialog
-   is open (409 `needs-terminal`).
-8. **Check and resolve the pane records while the flag is still on**:
-   `GET /api/admin/sessions/<pilot>/composer/panes` must answer `panes: []`;
-   if an operation is left, resolve it with `npm run composer:resolve`
-   (above) first — both the endpoint and the CLI need the flag on.
-9. **Turn the flag off** (`CONVERSATION_COMPOSER_ENABLED=` or remove it,
-   `docker compose up -d app`) and verify only this: the send route and the
-   admin composer routes answer 404, every conversation reports
-   `canSendInput: false`, the frontend shows the composer disabled with its
-   reason.
-
-Abort the pilot at the first `uncertain`, `misdelivered` or 502 that is not
-explained by a deliberate negative check; the pane record and the
-`composer_send` events are the evidence to attach.
-
-Host-side directories, all outside the workspace bind mount, next to
-`.uploads`:
-
-- `.conversations/<sessionId>/` holds:
-  - the event logs and index snapshots;
-  - the per-session revocation marker `REVOKED` and, once an admin
-    re-enables, `LIFTED`. A revocation is in effect while `REVOKED` exists
-    and is not the one `LIFTED` names (§2.5). Never delete or edit either by
-    hand.
-
-  `.conversations/REVOKED_ALL` is the global marker. A soft delete keeps all
-  of it, `?hard=true` purges it, and `npm run backup` includes it in the
-  per-session tarball.
-- `.claude-managed/<sessionId>/conversation.json`: the managed-settings hooks
-  file, mounted read-only at `/etc/claude-code/managed-settings.d/`. It is
-  not backed up; `reconcile` regenerates it from D1.
-- `.st-control/<sessionId>/` (3.0d): mounted read-only at `/etc/st-control`
-  in containers created with capture by a 3.0d backend. It holds:
-  - `relay.enabled`: the relay may start;
-  - `defer-skill-seed`: skill seeding is deferred while a recreation is in
-    progress;
-  - `recreate-attempt.json`: the durable recreation record, with no secrets;
-    kept until a hard delete.
-
-  Never edit these by hand.
-
-Requested vs effective (CONVERSATION.md §2.4): a container's env is
-immutable, so whether a container *can* capture (token, mounts, relay) is
-decided when it is **created**. `POST /start` and a stop + start **reuse** a
-container that still exists (§2.4.1), so they never add capture, a new image
-or a token rotation. In 3.0d:
-
-- a container that already has capture is turned on or off in place with
-  `PATCH …/conversation`;
-- a container without it (no token, no control mount, `token-mismatch`)
-  answers `requiresRecreate: true` and only gains it through the recreation
-  endpoint ([below](#recreating-a-session-container)), which the
-  restrictions above confine to the pilot.
-
-`GET /api/sessions/:id/conversations` reports
-`capture.{requested,effective,effectiveAfterRestart,requiresRecreate,pendingReasons}`,
-so nobody is promised capture that is not happening.
-
-Admin surface (`requireAdmin`; the writes also go through `adminActionIp`):
-
-- `PATCH /api/admin/sessions/:id/conversation {"enabled": true|false}` applies
-  the §2.4 row and answers `{ enabled, capture }`.
-  - **Enable** writes only on a running container with full authorization:
-    the marker, then, once the relay identified itself within 5 s, the
-    hooks file. On a stopped container it writes nothing, and a container
-    that can't capture in place answers `requiresRecreate: true`.
-  - Enable runs under the session's lifecycle lock, like start, stop and
-    delete: behind one of those it waits (up to 6 min, then 409 `busy`) and
-    acts on the state they left.
-  - Enable is refused with 409 `flag-off`, `revoked` (a disable or the
-    emergency won meanwhile), `revoked-globally`, `recreate-unresolved` or
-    `busy`.
-  - **Disable** answers `{ enabled: false, emissionStopsAfterRestart: true,
-    capture }` and always works, also while a recreation is unresolved:
-    marker → D1 → hooks file → `relay.enabled`, all done by the time it
-    answers.
-- `GET` and `POST /api/admin/sessions/:id/recreate`: the recreation
-  ([below](#recreating-a-session-container)).
-- `GET /api/admin/stats` → `conversation`:
-  - the fields: `enabledSessions`, `effectiveSessions`, `eventsSinceBoot`,
-    `rejectedSinceBoot.byReason`, `gapsSinceBoot`, `unattributedGaps`,
-    `bytesOnDisk` (re-measured at most once a minute), `queueBytesNow`,
-    `queueBytesMax`, `wsResyncsSinceBoot` (0 until the 3.1 Conversation WS
-    exists) and `recreateOrphans`;
-  - the index-snapshot health (#546): `indexWriteFailures` since boot,
-    `indexWriteLastErrorCode` (an errno such as `EDQUOT`, `ENOSPC`, `EIO`;
-    `null` while none failed), and the evicted indexes kept in memory after
-    a failed snapshot write (`evictionWriteKept` since boot,
-    `evictionWriteKeptNow`) or dropped past the bound of 16
-    (`evictionWriteDropped`: in-memory state lost). A non-zero value with
-    no `gap disk` events usually means inode exhaustion or a quota on
-    `WORKSPACE_ROOT` — appends still work, only the snapshot temp file
-    cannot be created; the log escalates to `error` every 5 failures in a
-    row;
-  - no titles or ids;
-  - `effectiveSessions` is an **estimate of configuration**, computed without
-    probing any relay, never verified availability. The probed value is per
-    session.
-
-Kill switch without a rebuild. Run it inside the backend container, like
-`backup`:
-
-```bash
-npm run conversation:disable -- <sessionId>   # one session
-npm run conversation:disable -- --all         # every session (global marker)
-npm run conversation:enable-all               # remove the global marker only
-```
-
-- **Order:** revocation marker → D1 → hooks file → `relay.enabled`. The
-  command prints success only after all four, and then re-asserts its marker
-  if an overlapping enable lifted it. A disable or emergency always wins over
-  a concurrent enable, in D1, in the marker and for the next spawn (§2.5,
-  3.0d audit A1).
-- **When the cut takes effect:** the receiver checks the markers on **every**
-  event, uncached, so ingest is cut from the moment the marker exists, even
-  though the command can't touch the receiver's in-memory token cache.
-- **If D1 is down,** the command exits non-zero and leaves the marker in
-  place: ingest stays cut, the files are removed by the receiver on the next
-  event, and nothing is regenerated at the next start.
-- **To re-enable a session** cut by the command, use
-  `PATCH …/conversation {"enabled": true}`. The emergency nulls both hashes,
-  so a container that had capture then needs a recreation; the restrictions
-  above apply.
-
-**Transport (§2.6).** Claude Code refuses HTTP hooks to private addresses, so
-the CLI posts to a relay on `127.0.0.1:47613` inside the session container.
-- **When the relay starts:** the entrypoint's supervisor starts with the
-  container's token, but launches the relay only once
-  `/etc/st-control/relay.enabled` exists (3.0d), or a 3.0c-style hooks file.
-  A marker removed later doesn't stop a running relay; it stays inert.
-- **What it does:** it answers every hook 204 at once and forwards, in order,
-  to `st-backend` on `sessions-net` (an alias of the `app` service in
-  `docker-compose.yml`).
-- **When the backend is down or hung:** the agent isn't slowed and nothing
-  shows in the terminal. The relay counts what it could not deliver, and the
-  conversation gets a `gap relay_dropped` when the backend is back. The
-  relay's 204 means "received in the container", not persisted.
-- **Proxies:** if the session env defines `HTTP(S)_PROXY`/`ALL_PROXY`, the
-  backend adds `127.0.0.1` to `NO_PROXY`/`no_proxy` for capturing sessions,
-  so the CLI keeps the hooks local.
-
-**Backend and image go together.** The 3.0d backend prepares capture only
-for an image labelled `io.shared-terminal.conversation-relay="2"`. A spawn
-from an unlabelled image gets no token, no mounts and no hooks file, and its
-leftovers are removed, so a hook never points at a missing relay. Deploy the
-3.0d image together with the 3.0d backend, flag off.
+The Composer (sending text into the Claude Code CLI from the Chat, CONVERSATION.md §8) was removed
+on 2026-11-18 (#678), with `CONVERSATION_COMPOSER_*`, its routes, the `composer:resolve` CLI and the
+composer smokes/canary. The capture Chat of a traditional session is read-only history. Messages
+to agents go through the ACP message API ([ACP_AGENTS.md](./ACP_AGENTS.md)).
 
 ### Coordinated deploy (3.0d) — documented, not yet executed
 
@@ -886,14 +600,9 @@ the session row.
 **Restriction (owner decision D8):** the strict recreation below is used on
 the **disposable pilot session**; an existing working session is recreated
 only through the carry-over mode of the next section, one session at a time
-and each with the owner's explicit GO. The workspace's Claude Code must be a
-plain stable release at or above `RECREATE_CLI_MIN_VERSION` (default 2.1.308)
-and not in `RECREATE_CLI_DENY` (`backend/src/recreate/cliCompat.ts`; owner,
-2026-11-10). A newer release the CLI updated itself to no longer blocks; an
-unreadable version or a pre-release does, with `control-marker-incompatible`
-and its `detail`. `RECREATE_CLI_MIN_VERSION=off` restores the old rule (only
-2.1.308, 2.1.314, 2.1.316 and 2.1.322, which the Session Image workflow's
-`cli-variants` job keeps re-validating as coverage, not as a gate). For every session you recreate:
+and each with the owner's explicit GO. No version of the workspace's Claude Code
+is required or refused (the `RECREATE_CLI_*` rule and `cliCompat.ts` were
+removed on 2026-11-18). For every session you recreate:
 - no pinning and no downgrade: a CLI that updated itself is fine;
 - check `claude --version` right before the `POST` and compare it with the
   preflight (the version is read again under the lock), so the log records
@@ -1015,12 +724,7 @@ Automation: 11.8 GB twice).
    finishes their work. The stop ends the tmux tabs and the Claude processes;
    `claude --resume` continues the conversations afterwards (the CLI's state
    lives in the workspace, which is untouched).
-2. **Composer versions.** If the owner will use the composer, make sure the
-   pane's CLI version is admitted by the policy: with the open default any
-   stable release ≥ the lowest of `COMPOSER_CLI_VERSIONS` passes unless it is
-   in `COMPOSER_CLI_DENY` — no list edit and no pinning; only with
-   `COMPOSER_CLI_MIN_VERSION=off` must the version be listed. A backend
-   restart applies a change; this is independent of the recreation.
+2. *(Removed: the Composer version check — the Composer no longer exists.)*
 3. **Request capture** if not already requested:
    `PATCH /api/admin/sessions/<sid>/conversation {"enabled": true}` answers
    `requiresRecreate: true` on a pre-3.0d container (no control mount) and
@@ -1070,8 +774,7 @@ Automation: 11.8 GB twice).
    2.1.316) and `claude --resume` (previous conversations listed) all look as
    before; `GET /api/sessions/<sid>/conversations` reports
    `capture.effective: true` once a `claude` is running; Chat shows the
-   events; with the flag on and the version allowed, a composer send is
-   `delivered`.
+   events.
 9. **Observe** for the agreed period with the old container retained (it
    costs its layer's disk, nothing else). While it is retained, a further
    recreation answers 409 `retained-pending` and a hard delete 409
@@ -1207,62 +910,40 @@ A soft delete (`DELETE /api/sessions/:id` without `?hard=true`) followed by
 `POST /start` also re-creates the container with the same losses, passing
 through `terminated`; prefer the steps above.
 
-## Project & agent directory (P3a, `docs/PROJECTS.md`)
+## Projects (`docs/PROJECTS.md`)
 
-Off by default (`PROJECT_CHAT_ENABLED` unset). **Its migration (v19) is applied by `migrateDb()` on
-the first boot of a backend that contains it, whatever the flag says**: the flag mounts the routes, it
-does not gate the schema. v19 is additive (four tables, three indexes, two triggers; no existing
-column changes), idempotent, and harmless to the previous backend (no foreign key to `sessions`, so
-its hard delete is unaffected) — rolling the code back needs no schema step and leaves the tables
-inert. Take a backup before the first boot that applies it, as for any migration. Turning the flag on
-is a separate decision. A hard delete of a session bound to a project agent answers 409 `agent-active`
-until the agent is removed, with the flag on or off (bindings outlive the flag). **Rollback after the
-flag has been on is not free:** the previous backend does not guard bound sessions and its backup does
-not export the directory — prefer turning the flag off, and see PROJECTS.md §8 for the conditions.
+Off by default (`PROJECT_CHAT_ENABLED` unset ⇒ `/api/projects` not mounted, `GET /api/auth/status`
+without `features.projectChat`). A project only groups ACP agents and gives them Project Chat, so it is
+useful with `ACP_AGENTS_ENABLED` on. The legacy tables of the retired P3a directory and D1–D3
+conversation (`project_agents`, `agent_bindings`, `project_agent_creations`) and the
+`<WORKSPACE_ROOT>/.projects` directory are no longer read or written. Leave them in place: removing
+them is a separate, owner-approved data step (planned migration v23), after a fresh backup is on the
+NAS. New backups do not carry `.projects`. Restoring an older backup prints where its
+`projects/<pid>.tar.gz` are and does not restore them.
 
-## Project conversation (D1, `docs/PROJECT_CONVERSATION.md`)
+## ACP agents (`docs/ACP_AGENTS.md`)
 
-Off by default (`PROJECT_CONVERSATION_ENABLED` unset; `docker-compose.yml` forwards it with the empty
-default). It is effective only when `PROJECT_CHAT_ENABLED` and `CONVERSATION_COMPOSER_ENABLED` are also
-on; otherwise the routes are not mounted (404), `/ws/project/` is not admitted, nothing is written
-under `<WORKSPACE_ROOT>/.projects/` and `GET /api/auth/status` is byte-identical (with it on, it gains
-`features.projectConversation`). No D1 migration. When on, the backend holds the single-writer lock
-`<WORKSPACE_ROOT>/.projects/.writer.lock` through `/usr/bin/flock` (in the image, checked in CI): a
-second backend on the same `WORKSPACE_ROOT` gets 503 `project-writer-unavailable` and writes nothing.
-`npm run backup` includes `.projects/`; a restore of it refuses while the flag is on (§8). Rollback =
-unset it and restart the backend; the log under `.projects/` stays on disk, inert. Turning it on is a
-separate decision from deploying the code.
+Off by default (`ACP_AGENTS_ENABLED` unset). `docker-compose.yml` forwards the `ACP_*` variables with
+their defaults. Migrations v21–v22 (`acp_agents`, `agent_messages`, `agent_questions`) are additive
+and applied at boot whatever the flag says.
 
-### Project artifacts (D2, §6)
+With the flag on, the backend:
 
-Off by default (`PROJECT_ARTIFACTS_ENABLED` unset; forwarded with the empty default). Effective only with
-the project conversation effective; otherwise the artifact routes are not mounted (404), a message with
-`artifacts[]` is refused with 409 `artifacts-off`, `GET /api/auth/status` has no
-`features.projectArtifacts`, and no workspace file is read or written by this subsystem. When on:
+- mounts `/api/acp` and `/ws/acp`;
+- copies the runner files into `<WORKSPACE_ROOT>/.acp-runtime/st` at boot;
+- mounts that directory read-only into agent sessions;
+- supervises one runner per running agent.
 
-- **Picking a file.** The owner picks a text file from a bound agent's workspace. It goes through the
-  Files opener (denylist, no links), must be ≤ 1 MiB and UTF-8 without NUL, and is stored at
-  `<WORKSPACE_ROOT>/.projects/<pid>/artifacts/<sha256>` (0600). The project total is capped at 256 MiB,
-  and nothing is deleted to make room.
-- **Sending.** Each recipient gets a copy in its own `~/workspace/.st-inbox/<sha12>-<name>` (0644,
-  owned by `WORKSPACE_UID:WORKSPACE_GID`). An existing file is never overwritten.
+Adapters are installed per version into the same directory with `acp-runtime/install.sh`, with no
+session-image rebuild. Runners reach the backend over `SESSIONS_NETWORK` at `ACP_BACKEND_URL` (default
+`http://st-backend:<PORT>`).
 
-`npm run backup` already includes the artifacts. Rollback means unsetting the flag and restarting:
-stored artifacts and inbox copies stay where they are.
-
-## ACP agents (experimental, `docs/ACP_AGENTS.md`)
-
-Off by default (`ACP_AGENTS_ENABLED` unset; `docker-compose.yml` forwards the `ACP_*` variables with
-their defaults). Migration v21 (`acp_agents`, `agent_messages`) is additive and applied at boot
-whatever the flag says. With the flag on the backend mounts `/api/acp`, copies the runner files into
-`<WORKSPACE_ROOT>/.acp-runtime/st` at boot, mounts that directory read-only into agent sessions and
-supervises one runner per running agent. Adapters are installed per version into the same directory
-with `acp-runtime/install.sh` — no session-image rebuild. Runners reach the backend over
-`SESSIONS_NETWORK` at `ACP_BACKEND_URL` (default `http://st-backend:<PORT>`). Configuration table,
-install command, agent login and recovery behaviour: [ACP_AGENTS.md → Setup](./ACP_AGENTS.md#6-setup)
-and [→ Operation](./ACP_AGENTS.md#7-operation-and-recovery). `npm run backup` includes both tables.
-Rollback = unset the flag and restart; the tables stay, agent sessions keep working as ordinary
-sessions.
+- **Setup** (variables, adapter install, login): [ACP_AGENTS.md → Setup](./ACP_AGENTS.md#8-setup).
+- **Recovery behaviour:** [→ Operation](./ACP_AGENTS.md#9-operation-and-recovery).
+- **Backups:** `npm run backup` includes the three tables, and the workspaces include each runner's
+  state.
+- **Rollback:** unset the flag and restart. The tables stay, and agent sessions keep working as
+  ordinary sessions.
 
 ## Backup & restore (#240)
 
@@ -1281,14 +962,9 @@ docker compose exec app npm run restore -- <backupDir>
 docker compose exec app npm run restore -- <backupDir> --force   # non-empty target
 ```
 
-A backup that holds project conversations (`manifest.projects`) restores them
-too, and that needs `PROJECT_CONVERSATION_ENABLED` off in the restore's own
-environment and no backend holding `.projects` open. When either is missing
-the restore **refuses before writing anything** — D1 is not even migrated —
-and says what to fix. `--without-projects` is the explicit partial restore:
-tables and workspaces only, `.projects` untouched, and the last line reads
-`[restore] PARTIAL …` instead of `[restore] complete …`. Read that last line:
-a restore is whole only when it says `complete`.
+A backup made before 2026-11-18 may hold the retired project conversations (`manifest.projects`,
+`projects/<pid>.tar.gz`). Restore does not restore them: nothing reads them any more. It prints where
+they are, as plain `.tar.gz` of `.projects/<pid>`, for anyone who wants to inspect them by hand.
 
 The backup's own files are checked the same way, before the first write: a
 workspace tarball that is missing, truncated, not named after a session of the
@@ -1459,7 +1135,7 @@ Restore guards:
   `.st-control/<sid>/` — no traversal).
 - **Control evidence is never extracted live.** The tarball carries the
   session's `.st-control/<sid>/` (capture attestations, recreation record,
-  composer pane records, `relay.enabled`). Restore extracts it, together
+  `relay.enabled`, and in older backups the retired Composer's pane records). Restore extracts it, together
   with `.conversations/<sid>/REVOKED` and `LIFTED`, into
   `<WORKSPACE_ROOT>/.restore-evidence/<backup>-<random>/` (0700, never read
   by the backend; remove it by hand when no longer needed) and installs

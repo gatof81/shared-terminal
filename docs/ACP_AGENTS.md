@@ -1,34 +1,36 @@
-# ACP agents
+# ACP agents and Project Chat
 
-> **Status: experimental, off by default** (`ACP_AGENTS_ENABLED`). Implemented and tested with
-> Claude only (adapter `@agentclientprotocol/claude-agent-acp`). This page describes what is on
-> `main`; anything marked *in development* or *planned* is not a contract yet and may change.
-> Developer-level detail lives in [CLAUDE.md → ACP agents](../CLAUDE.md) and the code
-> (`backend/src/acp/`, `backend/src/routes/acp.ts`, `acp-runtime/`).
+> **Status:** implemented, behind `ACP_AGENTS_ENABLED` (off by default in a fresh install). Tested with
+> Claude only (adapter `@agentclientprotocol/claude-agent-acp`). This page describes the code on `main`.
+> Developer-level detail: [CLAUDE.md → ACP agents](../CLAUDE.md) and the code (`backend/src/acp/`,
+> `backend/src/routes/acp.ts`, `acp-runtime/`). Anything marked *provisional* may change.
 
 ## 1. Model
 
 **A session is an execution environment; an agent is what works in it.**
 
 - A **session** is a Docker container plus a workspace on the host (`<WORKSPACE_ROOT>/<sessionId>`).
-  It has the same Terminal, Files and Git views whether or not an agent runs in it.
-- An **ACP agent** is a named identity (`@developer`) attached to one session at creation
-  (`acp_agents` row, D1 migration v21; deleted with the session). It has its own context (its ACP
+  Every session has Terminal (tmux), Files and Git, with or without an agent.
+- An **ACP agent** is a named identity (`@developer`) created together with one session
+  (`acp_agents`, D1 v21; deleted with the session on hard delete). It has its own context (its ACP
   session), its own workspace and repository, and the tools of its container.
 - Inside the container, Shared Terminal's **runner** (`acp-runtime/runner.mjs`) is a direct
-  [ACP](https://agentclientprotocol.com) client: it speaks JSON-RPC over the stdio of a provider
-  **adapter** (Claude's today). No tmux, no terminal scraping, no Composer.
-- Messages to and between agents go through **one durable message API** (`/api/acp`, table
-  `agent_messages`), used by the web UI and by the `st` CLI inside containers.
+  [ACP](https://agentclientprotocol.com) client: JSON-RPC over the stdio of a provider **adapter**.
+  No tmux, no terminal scraping.
+- All messages — person → agent and agent → agent, individual chat and Project Chat — go through
+  **one durable message API** (`/api/acp`, table `agent_messages`).
 
 ```
-person (web) ──┐                                   ┌── runner ──ACP──▶ adapter ──▶ model
-               ├──▶ /api/acp/messages ──▶ D1 ──────┤   (session container, one message at a time)
-agent (st send)┘        (stored before 201)        └── results, replies, live activity ──▶ web
+person (web) ──┐                                  ┌── runner ──ACP──▶ adapter ──▶ model
+               ├──▶ POST /api/acp/messages ──▶ D1 ┤   (session container, one message at a time)
+agent (st send)┘      (stored before the 201)     └── results, replies, questions, activity
+                                                        └──▶ /ws/acp ──▶ web
 ```
 
-Traditional sessions (no agent) are unchanged: tmux tabs, optionally Claude Code in the terminal
-with conversation capture and the Composer ([CONVERSATION.md](./CONVERSATION.md)).
+**Traditional sessions** (no agent) are worked from their Terminal. If conversation capture is on
+(`CONVERSATION_ENABLED`), their Chat shows Claude Code's conversation as **read-only history**
+([CONVERSATION.md](./CONVERSATION.md)). The Composer — typing into a CLI in tmux from the Chat — and
+the Composer-based project conversation (D1–D3) were **removed** on 2026-11-18.
 
 ## 2. Runtime independent of the image
 
@@ -39,21 +41,24 @@ bind-mounted **read-only** at `/opt/st-acp` only into agent sessions:
 ```
 .acp-runtime/
   st/                       runner.mjs, bin/st — copied from the backend image at every boot
-  claude-acp-0.108.0/       one directory per adapter version (installed by acp-runtime/install.sh)
-    agent                   stable entry point the runner executes
+  claude-acp-0.108.0/       one directory per adapter version (acp-runtime/install.sh)
+    agent                   the entry point the runner executes
+  st-test-agent/            only with ACP_TEST_RUNTIME=1: deterministic adapter, no model
 ```
 
-- Upgrading an adapter = installing a new directory and pointing `ACP_DEFAULT_RUNTIME` at it. No
-  image rebuild, and existing agents keep the runtime recorded when they were created.
-- Any image with Node ≥ 22 can run the runtime.
-- The session image still ships the Claude Code CLI for terminal use (and for logging the agent
-  in, see §6). Making the image fully provider-neutral is *planned*.
+- An adapter upgrade is a new directory, not an image rebuild. Each agent keeps the runtime it was
+  created with; `GET /api/acp/runtimes` lists the installed ones and the new-session form offers them.
+- A backend upgrade replaces `st/`; a running runner restarts into the new version as soon as it is idle.
+- The session image still ships the Claude Code CLI, used for the Terminal (and for logging in from
+  it). Nothing in Shared Terminal checks its version.
 
 ## 3. Messages
 
-`POST /api/acp/messages {to: "@name", body}` is the only way to send. The row is inserted in D1
-**before** the `201`; the sender is always the caller's credential (the person's cookie or the
-agent's token), never a field of the body. Bodies are capped at `ACP_MESSAGE_MAX_BYTES` (256 KiB).
+`POST /api/acp/messages {to: "@name", body, projectId?, clientId?}` is the only way to send. The row
+is inserted in D1 **before** the `201`. The sender is always the credential — the person's cookie or
+the agent's token — never a field of the body. Bodies are capped at `ACP_MESSAGE_MAX_BYTES`
+(256 KiB; 413 above). A `clientId` makes the send idempotent per recipient (a retry answers `200`
+with `replayed: true` and the first row).
 
 | State | Meaning |
 | --- | --- |
@@ -61,122 +66,165 @@ agent's token), never a field of the body. Bodies are capped at `ACP_MESSAGE_MAX
 | `running` | claimed by the recipient's runner (at most one per agent) |
 | `done` | the turn ended and every background task it started ended (or was declared persistent) |
 | `failed` | the turn ended with an error |
-| `uncertain` | the run was interrupted (runner/adapter/container died mid-turn) |
+| `uncertain` | the run was interrupted (runner, adapter or container died mid-turn) |
 
-Rules:
-
-- **One message at a time per agent**, oldest first; the claim is a single conditional D1 update.
-- **Never resent.** An interrupted run becomes `uncertain`; only the owner can put it back to
-  `pending` (`POST /api/acp/messages/:id/requeue`). The agent then receives one `system` message
-  asking it to report the state without repeating effects — this also closes the orphan turn the
-  adapter reopens on resume.
-- A message that the runner gives back before starting it (e.g. the agent is not logged in yet)
-  returns to `pending`, not `uncertain`.
-- **Replies between agents are automatic.** When an agent's request to another agent finishes, the
-  result is written back to the sender as a `reply` (`reply_to` = the request) by a D1 trigger in
-  the same statement as the result.
+- **FIFO, one at a time per agent.** The claim is one conditional UPDATE: the oldest `pending`, only
+  if nothing of that agent is `running`. Different agents work in parallel.
+- **Never resent.** An interrupted run becomes `uncertain`; only the person can requeue it
+  (`POST /api/acp/messages/:id/requeue`). After a restart the agent receives one `system` message
+  asking for a read-only report of what was left done or undone.
+- A message given back before its prompt left (e.g. the agent is not logged in) returns to `pending`,
+  not `uncertain`.
 - **Done means idle.** The runner closes a message only when the prompt is answered **and** every
-  async task it started (background shell, monitor, a follow-up turn) has ended. Never by a timer.
+  background task it started has ended. Never by a timer.
+- **Replies between agents are automatic.** When an agent's request to another agent ends `done`, the
+  result goes back to the sender as a `reply` (`reply_to` = the request, same scope and depth),
+  written by a D1 trigger in the same statement as the result. A reply never produces a reply.
+- **Loop guard.** A person's message has depth 0; a request an agent sends while working on a
+  message of depth *d* has depth *d+1*, refused past `ACP_MAX_DEPTH` (6) with 409 `depth-limit`.
+- Pending messages survive backend, runner and container restarts: they are rows in D1.
 
-> **Provisional — not a contract.** A background process meant to keep running (a dev server) is
-> declared by the agent writing `ST-PERSISTENT: <task id>` in its answer. It depends on the model
-> writing that line; it cannot be revoked and the process is not tracked after the message closes.
-> Without it the message stays `running` until the task ends (plus one check question after
-> `BG_CHECK_MS`, 10 min). It is to be replaced by a structured signal.
+> **Provisional.** A background process meant to keep running (a dev server) is declared by the agent
+> writing `ST-PERSISTENT: <task id>` in its answer. It depends on the model writing that line, cannot
+> be revoked, and the process is not tracked after the message closes. Without it the message stays
+> `running` until the task ends (plus one check question after `BG_CHECK_MS`, 10 min). To be replaced
+> by a structured signal.
 
 **Activity** (tool calls, background tasks, partial text) is pushed by the runner and kept **in
-backend memory** (last 500 events per agent). It is the live view; history is the messages and
-their results. A backend restart loses activity, never messages.
+backend memory** (last 500 events per agent). It is the live view; history is the messages. A backend
+restart loses activity, never messages.
 
-## 4. Agent ↔ agent: the `st` CLI
+## 4. Individual Chat and Project Chat
 
-Inside an agent session, `st` is on `PATH` and calls the same API with the agent's token
-(`ST_TOKEN`, `ST_URL` are set by the backend for the runner and its children):
+A message's `project_id` is its **scope**:
+
+| | Individual Chat | Project Chat |
+| --- | --- | --- |
+| Where | the agent's session, Chat view | the project page, `#/projects/<pid>/chat` |
+| Shows | everything to or from that agent, any scope | only what was posted in that project |
+| Scope of a person's message | direct (`projectId` absent) | the project (`projectId`, the agent must be in it) |
+| Recipients | the agent | chosen in the UI from the message's `@mentions`; the API receives one `POST` per recipient, each checked to be in the project |
+
+- An agent takes part in at most one project (`acp_agents.project_id`), chosen at creation or with
+  `PATCH /api/acp/agents/:name {projectId}` (an explicit button in the UI). It keeps its session,
+  context and history when it joins or leaves.
+- An agent **never chooses** scope: a request it sends takes the scope of the message it is working
+  on when the recipient is in that project, and is direct otherwise. A consult started in Project
+  Chat stays there; a private one stays private.
+- Projects themselves (`/api/projects`, behind `PROJECT_CHAT_ENABLED`) only group agents and give
+  them Project Chat. Archiving a project makes its agents leave it.
+- **Live:** `/ws/acp` pushes every message row, question and activity batch to the owner's browsers.
+  The client loads a page over REST (`…/feed?before=` for older pages), applies pushed rows by id,
+  reloads after a reconnect, and polls slowly only while the socket is down.
+
+## 5. Agent ↔ agent: the `st` CLI
+
+Inside an agent session, `st` is on the runner's `PATH` and calls the same API with the agent's token
+(`ST_TOKEN`, `ST_URL`):
 
 ```
 st agents                  st send @name "text"       st send @name -f file.md
 st list                    st get <id>
 ```
 
-An agent can message any other agent of the same owner. Agent credentials are
-`acp1.<agentId>.<HMAC>` with a key derived from `SECRETS_ENCRYPTION_KEY`: recomputable, never
-stored, scoped to that owner's agents and messages.
+The runner's protocol tells the agent that the answer to its request arrives later as a new message,
+and not to wait for it. Agent credentials are `acp1.<agentId>.<HMAC>` with a key derived from
+`SECRETS_ENCRYPTION_KEY`: recomputable, never stored, limited to `/api/acp` for that owner's agents.
 
-## 5. Chat and Project Chat
+## 6. Questions from an agent
 
-- **Chat (implemented).** In an agent session the Chat view is that agent's inbox: everything sent
-  to or by it, results, and live activity, polled from `GET /api/acp/agents/:name/feed`. It replaces
-  the capture-based Chat for that session.
-- **Project Chat (*in development*, [#674](https://github.com/gatof81/shared-terminal/pull/674)).**
-  A channel per project where the person and the project's ACP agents post, with mentions. The
-  direction in that PR: the same `agent_messages` store and delivery, with a project scope on each
-  message (direct messages stay visible only in the two individual chats), a depth limit on
-  agent→agent chains, and live updates over WebSocket. Details belong here once merged.
-- **Legacy project conversation.** The current Projects view's conversation and agent consults
-  (D1–D3) go through the Composer into a CLI in tmux — see
-  [PROJECT_CONVERSATION.md](./PROJECT_CONVERSATION.md). It stays until Project Chat on ACP replaces
-  it.
+When the agent needs a decision (Claude's `AskUserQuestion`, or an MCP form), the adapter sends an
+ACP `elicitation/create`. The runner registers it (`agent_questions`, v22) and keeps the ACP request
+open; the Chat shows the form (single/multiple choice, *Other*, text) and the agent as *esperando tu
+respuesta*.
 
-## 6. Setup
+- Only the person answers (`POST /api/acp/questions/:id/answer {action: accept|decline|cancel,
+  content?}`); an agent's token is refused, and a second answer gets 409.
+- The runner marks the question `delivered` **before** handing the answer to the waiting request, so
+  an answer is used at most once.
+- A runner restart loses the waiting request: open or answered-but-undelivered questions become
+  `orphaned`, never treated as answered. The agent is told in its recovery message; the person can
+  send the decision as a normal message instead.
+- URL-mode elicitations (an MCP OAuth) are declined: the runner declares only `form`.
 
-1. **Backend env** (`.env`, forwarded by `docker-compose.yml`):
+## 7. Login
+
+The agent authenticates like Claude Code in that session (the login lives in the session's persistent
+`~/.claude`, shared with the Terminal), or with a `CLAUDE_CODE_OAUTH_TOKEN` secret env var on the
+session.
+
+- **From Chat:** *Conectar cuenta* opens a Terminal tab of the agent's session running the adapter's
+  own login command (its advertised terminal-auth method; only programs under `/opt/st-acp` or
+  `/usr/(local/)bin` with plain arguments are accepted).
+- **From Terminal:** run `claude` and `/login`.
+- While not authenticated, messages stay `pending` (*esperando login*). The runner restarts its
+  adapter as soon as the credentials file changes, or every 60 s otherwise.
+
+## 8. Setup
+
+1. **Backend env** (`.env`; `docker-compose.yml` forwards the `ACP_*` variables):
 
    | Variable | Default | |
    | --- | --- | --- |
-   | `ACP_AGENTS_ENABLED` | off | `true` constructs the subsystem and mounts `/api/acp`; off ⇒ nothing new runs or is mounted |
-   | `ACP_DEFAULT_RUNTIME` | `claude-acp-0.108.0` | adapter directory recorded on new agents |
+   | `ACP_AGENTS_ENABLED` | off | `true`/`1` mounts `/api/acp` and `/ws/acp` and supervises runners |
+   | `PROJECT_CHAT_ENABLED` | off | `/api/projects` and Project Chat |
+   | `ACP_DEFAULT_RUNTIME` | `claude-acp-0.108.0` | adapter directory for new agents |
    | `ACP_DEFAULT_MODEL` | `claude-sonnet-5-5` | model when the create request names none |
    | `ACP_MESSAGE_MAX_BYTES` | `262144` | per-message cap |
+   | `ACP_MAX_DEPTH` | `6` | agent → agent chain limit |
+   | `ACP_TEST_RUNTIME` | unset | `1` installs the deterministic `st-test-agent` runtime |
    | `ACP_RUNTIME_DIR` | `<WORKSPACE_ROOT>/.acp-runtime` | runtime directory (same path on host and backend) |
    | `ACP_BACKEND_URL` | `http://st-backend:<PORT>` | how runners reach the backend over the sessions network |
    | `ACP_WATCHDOG_MS` | `30000` | runner liveness check period |
 
-2. **Install an adapter** once per version (no image rebuild):
+2. **Install an adapter** once per version:
 
    ```bash
    docker run --rm -u 0 -v $WORKSPACE_ROOT:$WORKSPACE_ROOT -v $PWD/acp-runtime:/src:ro \
      --entrypoint bash shared-terminal-session /src/install.sh $WORKSPACE_ROOT/.acp-runtime 0.108.0
    ```
 
-3. **Migrate and restart** the backend (migration v21 is additive and runs at boot).
+3. **Restart the backend.** Migrations v21–v22 are additive and run at boot whatever the flags say.
 
-4. **Create an agent session**: the New session form's agent-name field (shown when the backend
-   reports `features.acpAgents`), or `POST /api/sessions` with `acpAgent: {name, model?}`. The name
-   is `[a-z][a-z0-9-]{1,31}`, unique per owner.
+4. **Create an agent session:** the New session form's agent fields (name, project, runtime — shown
+   when `/api/auth/status` reports `features.acpAgents`), or `POST /api/sessions` with
+   `acpAgent: {name, model?, runtime?, projectId?}`. The name is `[a-z][a-z0-9-]{1,31}`, unique per
+   owner; `owner`, `system` and `all` are reserved.
 
-5. **Log the agent in**: it authenticates like Claude Code in that session — run `claude` and
-   `/login` once in its Terminal (the login is kept in the workspace), or give the session a
-   `CLAUDE_CODE_OAUTH_TOKEN` secret env var. Until then the Chat shows *waiting for login* and
-   messages stay `pending`.
+5. **Log the agent in** (§7).
 
-## 7. Operation and recovery
+## 9. Operation and recovery
 
 - **Launch.** On every container start and at backend boot, the backend `docker exec`s the runner
-  under `flock -n` inside a restart loop: a second runner for the same agent can never start.
-- **Watchdog.** Every `ACP_WATCHDOG_MS` each running agent's loop is checked through its processes
-  (`/proc`, no D1). Only a loop **proven dead** is relaunched; silence is never taken as death (a long
-  turn is silent), a probe that cannot answer does nothing, and a runner alive without its loop is
-  left alone (logged once). A runner that is alive but stuck is not detected.
-- **Runner state** lives in the workspace (`~/workspace/.st/acp`: ACP session id, one event log per
-  message), so it survives container re-creation; on restart the runner resumes its ACP session and
-  settles an interrupted message as `uncertain`.
-- **Logs**: `/tmp/st-acp-runner.log` inside the container; backend lines are prefixed `[acp]`.
-- **Backup & restore** include `acp_agents` and `agent_messages`.
-- **Permissions.** The runner sets `bypassPermissions` on its ACP session: the container is the
-  sandbox, the workspace is not protected from the agent (same posture as the `claude` alias in
-  traditional sessions; see [SECURITY.md](./SECURITY.md#acp-agents-experimental)).
-- **Rollback.** Unset `ACP_AGENTS_ENABLED` and restart: routes and runners are no longer started;
-  the tables stay (additive migration), agent sessions remain ordinary sessions.
+  under `flock -n` inside a restart loop: two runners for one agent cannot run.
+- **Watchdog.** Every `ACP_WATCHDOG_MS`, each running agent's loop is checked through its processes
+  (no D1 call). Only a loop **proven dead** is relaunched; silence is never taken as death, a probe
+  that cannot answer does nothing, and a runner alive without its loop is left alone (logged once). A
+  runner that is alive but stuck is not detected.
+- **Adapter gone.** If the adapter exits mid-message, the message becomes `uncertain` and the runner
+  exits; the loop restarts it and the adapter with it.
+- **Continuity.** The runner's state is in the workspace (`~/workspace/.st/acp`: ACP session id, one
+  event log per message), so it survives runner, container and backend restarts and a container
+  re-creation; the runner resumes the same ACP session (same context) and settles an interrupted
+  message from its log — re-posting a result whose answer was lost, releasing one that never reached
+  the prompt, `uncertain` otherwise.
+- **Logs:** `/tmp/st-acp-runner.log` in the container; backend lines prefixed `[acp]`.
+- **Backup & restore** include `acp_agents`, `agent_messages` and `agent_questions`, and the
+  workspace (with the runner state). Restored sessions come back stopped; on their next start the
+  runner settles whatever was `running`.
+- **Deleting.** A soft delete keeps the agent (restartable). A hard delete removes the agent row with
+  the session; its name can be reused by a new agent, which never inherits what the old one left
+  unfinished.
+- **Rollback.** Unset `ACP_AGENTS_ENABLED` and restart: no routes, no runners. Tables stay; agent
+  sessions keep working as ordinary sessions.
 
-## 8. Transition from Composer and capture
+## 10. Known limitations
 
-| Today | Direction |
-| --- | --- |
-| Traditional sessions: tmux + Claude Code CLI, capture (hooks) for the Chat, Composer to type into the CLI | stay supported for terminal work |
-| Project conversation and consults through the Composer (D1–D3) | replaced by Project Chat on ACP (*in development*) |
-| Composer as the way to deliver a message to an agent | being retired; agents receive messages through ACP (*in development*) |
-| Conversation capture | kept while traditional sessions rely on it; retirement *planned* once ACP covers its uses |
-| Questions an agent asks the person mid-turn | *in development* |
-
-Nothing in this table removes a flag or a route yet; each retirement will be its own change with
-its own rollback.
+- Claude is the only adapter tested. Codex, Pi, OpenCode and others are planned, not implemented.
+- The runner sets `bypassPermissions`: the container is the sandbox, the workspace is not protected
+  from the agent ([SECURITY.md](./SECURITY.md#acp-agents)).
+- `ST-PERSISTENT` is provisional (§3).
+- Activity and the "needs login" state are in backend memory; after a backend restart a runner
+  waiting for login reports it again within about a minute.
+- A runner that is alive but stuck is not restarted automatically.
+- One backend host; session containers share one Docker network (single-tenant).
