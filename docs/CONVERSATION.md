@@ -1,5 +1,7 @@
 # Conversation & Agent Activity — contrato técnico (Fase 3)
 
+> **Estado (2026-11-18).** La captura por hooks (§1–§7, §9) sigue vigente para las **sesiones tradicionales**: su Chat es historial de **solo lectura**. El **Composer (§8) fue retirado** del código (#678) junto con su bandera, rutas y smokes; §8 queda como registro histórico. La regla de versión del CLI para la recreación (`cliCompat`, `RECREATE_CLI_*`) también se retiró. Los agentes ACP no usan captura: ver [ACP_AGENTS.md](./ACP_AGENTS.md).
+
 Estado: **v1.6 (3.0a, rondas 1 a 3 de revisión Work; en 3.0c, transporte por relay local §2.6, aprobado
 por el responsable el 2026-10-23; decisiones de cierre de 3.0c sobre `emissionStopsAfterRestart` y el
 par `tool_failed`/`tool_end`, 2026-10-23; en 3.0d, recreación administrativa y activación

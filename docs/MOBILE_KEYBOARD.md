@@ -39,14 +39,14 @@ only be checked on the device. This page is that check.
    anything anywhere:
 
 ```js
-(()=>{const d=document.createElement('pre');Object.assign(d.style,{position:'fixed',top:'0',left:'0',zIndex:99999,background:'#000c',color:'#0f0',font:'11px monospace',margin:0,padding:'4px',pointerEvents:'none'});document.body.append(d);const f=()=>{const vv=visualViewport,cs=getComputedStyle(document.documentElement),ta=document.querySelector('.chat-composer textarea'),nav=document.getElementById('view-nav');const b=e=>e?Math.round(e.getBoundingClientRect().bottom):'-';d.textContent=`scrollY ${scrollY} inner ${innerHeight}\nvv.h ${Math.round(vv.height)} vv.top ${Math.round(vv.offsetTop)}\n--app-vh ${cs.getPropertyValue('--app-vh')} --app-top ${cs.getPropertyValue('--app-top')} kb ${document.documentElement.dataset.kb||'-'}\nta.bottom ${b(ta)} nav.top ${nav&&!nav.hidden?Math.round(nav.getBoundingClientRect().top):'-'}\nkbTop ${Math.round(vv.offsetTop+vv.height)}`};f();visualViewport.addEventListener('resize',f);visualViewport.addEventListener('scroll',f);setInterval(f,500)})()
+(()=>{const d=document.createElement('pre');Object.assign(d.style,{position:'fixed',top:'0',left:'0',zIndex:99999,background:'#000c',color:'#0f0',font:'11px monospace',margin:0,padding:'4px',pointerEvents:'none'});document.body.append(d);const f=()=>{const vv=visualViewport,cs=getComputedStyle(document.documentElement),ta=document.querySelector('.acp-chat-composer textarea'),nav=document.getElementById('view-nav');const b=e=>e?Math.round(e.getBoundingClientRect().bottom):'-';d.textContent=`scrollY ${scrollY} inner ${innerHeight}\nvv.h ${Math.round(vv.height)} vv.top ${Math.round(vv.offsetTop)}\n--app-vh ${cs.getPropertyValue('--app-vh')} --app-top ${cs.getPropertyValue('--app-top')} kb ${document.documentElement.dataset.kb||'-'}\nta.bottom ${b(ta)} nav.top ${nav&&!nav.hidden?Math.round(nav.getBoundingClientRect().top):'-'}\nkbTop ${Math.round(vv.offsetTop+vv.height)}`};f();visualViewport.addEventListener('resize',f);visualViewport.addEventListener('scroll',f);setInterval(f,500)})()
 ```
 
 ## What to check (both shells, Safari and the home-screen app)
 
 | Step | Expected | If not |
 |---|---|---|
-| Tap the composer | keyboard opens; `kb open`; `ta.bottom` within a few px of `kbTop` (v2) or of `nav.top` (v1) | `vv.top` > 0 but the gap ≈ `vv.top`: the offset mirror is not applied — report the numbers |
+| Tap the message box (`.acp-chat-composer`) | keyboard opens; `kb open`; `ta.bottom` within a few px of `kbTop` (v2) or of `nav.top` (v1) | `vv.top` > 0 but the gap ≈ `vv.top`: the offset mirror is not applied — report the numbers |
 | Same, read `scrollY` | stays `0` | Safari scrolled the layout viewport; report it (needs `scrollTo(0,0)` too) |
 | Type 4 lines | the textarea grows; the last message stays visible (once the re-anchor PR lands) | the thread slides under the composer |
 | Tap outside / Done | `kb -`, `--app-top 0px`, `ta.bottom` back where it was | numbers stuck: report them |

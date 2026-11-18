@@ -356,6 +356,40 @@ export or a backup can therefore point another user's browser at their own
 notifications; backups are protected for that reason (#562). Changing the
 re-assignment rule is a separate decision (#566).
 
+## ACP agents
+
+Off unless `ACP_AGENTS_ENABLED` is set ([ACP_AGENTS.md](./ACP_AGENTS.md)). What changes when it is on:
+
+- **The agent acts without asking.** The runner sets `bypassPermissions` on its ACP session. The
+  container's hardening (unprivileged user, no capabilities, `no-new-privileges`) still bounds it,
+  but nothing protects the session's workspace, its credentials (Git, `gh`, the Claude login) or
+  anything those reach from what the agent decides to do — the same posture as the `claude` alias in
+  a traditional session.
+- **Agent credentials.** Each runner gets `ST_TOKEN = acp1.<agentId>.<HMAC>`, keyed by a subkey of
+  `SECRETS_ENCRYPTION_KEY`; it is never stored and is recomputed on launch. It authorizes only the
+  `/api/acp` surface for that owner's agents: sending and reading the owner's agent messages and the
+  runner protocol — no session, file, exec or admin route, no project feed, and it cannot answer a
+  question addressed to the person or start a login. Anything running in the container (the
+  agent, a dependency it installs) can read it from the runner's environment, so treat an agent
+  session as able to message every agent of the same owner. Rotating `SECRETS_ENCRYPTION_KEY`
+  invalidates all agent tokens (and, as documented above, every stored secret).
+- **Runtime mount.** The runner and adapters are bound read-only at `/opt/st-acp`; an agent cannot
+  modify the code that drives it or other agents' runtime. Adapter versions are pinned by directory;
+  installing one runs `npm install` of that exact version on the host's workspace volume.
+- **Message content** is stored in D1 (`agent_messages`, and the questions and answers in
+  `agent_questions`) in clear text, like session metadata, and is included in backups. Do not send
+  secrets in messages or answers.
+- **Scope is decided by the server.** A person chooses whether a message is direct or posted in a
+  project; an agent never does (its requests inherit the scope of the message it is working on), so
+  an agent cannot move a private exchange into a project's chat. Live events (`/ws/acp`) go only to
+  the owner's own sockets.
+- **Login from Chat** (*Conectar cuenta*) runs, in a Terminal tab of that agent's session, a command
+  the adapter advertised. The backend accepts only a program under `/opt/st-acp` or `/usr/(local/)bin`
+  with arguments from a plain alphabet (no shell syntax), and only the owner can start it. The
+  credentials land in that session's own `~/.claude`.
+- **Network.** Runners reach the backend over `SESSIONS_NETWORK`; the backend authenticates them by
+  token, not by source address.
+
 ## Optional: docker-socket-proxy
 
 For deployments that want to shrink the backend's daemon surface

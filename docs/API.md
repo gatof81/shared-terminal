@@ -40,7 +40,7 @@ Auth is via the httpOnly cookie `st_token` set by `POST /api/auth/login` and `PO
 | GET    | /api/sessions/:id/exec/:execId | Exec status: `running` / `exited` / `unknown`                  |
 | POST   | /api/sessions/:id/exec/:execId/kill | Kill the exec's process group (race-free, idempotent)     |
 
-`POST /api/sessions` accepts a typed `body.config` mirroring `SessionConfigSchema` in `backend/src/sessionConfig.ts`: `envVars` (typed entries with `plain` / `secret` discriminator), `repo` + `auth`, `ports[]` + `allowPrivilegedPorts`, `gitIdentity`, `dotfiles`, `agentSeed`, `postCreateCmd`, `postStartCmd`, `cpuLimit`, `memLimit`, `idleTtlSeconds`. Every field is optional; a bare `POST` (no `config`) creates a default session.
+`POST /api/sessions` accepts a typed `body.config` mirroring `SessionConfigSchema` in `backend/src/sessionConfig.ts`: `envVars` (typed entries with `plain` / `secret` discriminator), `repo` + `auth`, `ports[]` + `allowPrivilegedPorts`, `gitIdentity`, `dotfiles`, `agentSeed`, `postCreateCmd`, `postStartCmd`, `cpuLimit`, `memLimit`, `idleTtlSeconds`. Every field is optional; a bare `POST` (no `config`) creates a default session. With `ACP_AGENTS_ENABLED`, a top-level `acpAgent: {name, model?, runtime?, projectId?}` makes the session an ACP agent session (without the flag the field is refused with 400 `acp-agents-disabled`) — see [ACP_AGENTS.md](./ACP_AGENTS.md).
 
 The Git routes are strictly read-only (no stage / commit / checkout / push exists) and run git **inside the session container**, so they answer `409 {code:"session-not-running"}` for a stopped session. `status` returns `{repo:false, candidates:[…]}` (top-level dirs holding a `.git`) when `dir` isn't a repository, otherwise `{repo:true, root, branch, detached, head, upstream, ahead, behind, changes[], truncated}` where each change is `{area: staged|unstaged|untracked|conflict, status, xy, path, oldPath, additions, deletions, binary, restricted}`. `area` on `diff` selects index-vs-HEAD (`staged`), worktree-vs-index (`unstaged`/`conflict`) or worktree-vs-`/dev/null` (`untracked`); `dir` must be the `root` reported by `status`; `oldPath` is only a hint that lets git detect a rename — the names git itself reports are what is checked and diffed. Errors carry `code`: `timeout` (504), `unsafe-repository` (409, git's `safe.directory` refusal), `git-failed` (502), `outside-workspace` (403, `dir` reaches a repository through a symlink or a redirected worktree), `restricted` (403, a path git resolved for this diff is on the credential denylist), `not-a-single-file` (400, the pathspec is a directory or matches several entries). Concurrency: at most 2 git requests in flight per user and 8 per process (429 + `Retry-After`), a slot being held until the git process has ended — not until the client disconnects.
 
@@ -76,13 +76,58 @@ Cross-user observability + force-actions surfaced to the admin dashboard. All ro
 | GET    | /api/admin/users                | Users list with quota overrides, effective quotas, and current usage (#202)                  |
 | PATCH  | /api/admin/users/:id/quotas     | Set per-user quota overrides; `null` clears back to the deployment default (#202)            |
 
+## Conversation capture (`CONVERSATION_ENABLED`, traditional sessions, read-only)
+
+| Method | Path | Description |
+| ------ | ---- | ----------- |
+| GET    | /api/sessions/:id/conversations[?capture=0] | Captured Claude Code conversations of the session (`capture=0`: summaries only, no container probe — use it when polling) |
+| PATCH  | /api/sessions/:id/conversations/:cid | Owner metadata: rename / archive |
+| GET    | /api/sessions/:id/conversations/:cid/events[?before=] | Backward page of events |
+| GET    | /api/sessions/:id/conversations/:cid/events/:seq | One event |
+| GET    | /api/sessions/:id/conversations/:cid/agents | Subagents of the conversation |
+| PATCH  | /api/admin/sessions/:id/conversation | Admin: `{enabled}` — request or disable capture |
+| GET/POST | /api/admin/sessions/:id/recreate | Admin: preflight / recreate the session container (`…/recreate/{approve,rollback,recover}` for the carry-over and recovery verbs) |
+
+Contract: [CONVERSATION.md](./CONVERSATION.md) (§6). There is no write path into the CLI: the Composer was removed.
+
+## Projects (`PROJECT_CHAT_ENABLED`)
+
+| Method | Path | Description |
+| ------ | ---- | ----------- |
+| POST   | /api/projects | `{name, clientRequestId}` — idempotent create (409 `project-limit`, 503 `outcome-unknown`: retry with the same id) |
+| GET    | /api/projects | Live projects with `agentCount` |
+| DELETE | /api/projects/:pid | Archive (its agents leave it) |
+
+See [PROJECTS.md](./PROJECTS.md).
+
+## ACP agents (`ACP_AGENTS_ENABLED`)
+
+Mounted at `/api/acp` only with the flag on. Two callers share it: the person (cookie) and an agent's runner or `st` CLI (`Authorization: Bearer acp1.…`); the sender of a message is always the credential. Model, states, scope and recovery: [ACP_AGENTS.md](./ACP_AGENTS.md).
+
+| Method | Path | Caller | Description |
+| ------ | ---- | ------ | ----------- |
+| GET    | /api/acp/agents | both | The owner's agents: `name`, `sessionId`, `runtime`, `model`, `projectId`, `running`, `pending`, `waitingInput`, `authRequired`, `loginMethods`, `runnerSeenAt` |
+| POST   | /api/acp/messages | both | `{to: "@name", body, projectId?, clientId?}` — stored in D1 before the 201 (200 `replayed` for a retried `clientId`). Errors: 400 `empty-body` / `unknown-recipient` / `not-in-project` / `self` / `bad-client-id`, 404 `project-not-found`, 409 `depth-limit` / `client-id-reused`, 413 `too-large` |
+| GET    | /api/acp/messages[?agent=&before=] | both | Messages, newest page first returned oldest-first (an agent sees its own) |
+| GET    | /api/acp/messages/:id | both | One message with its result |
+| GET    | /api/acp/runtimes | person | `{default, available}` — installed adapter runtimes |
+| PATCH  | /api/acp/agents/:name | person | `{projectId \| null}` — join or leave a project |
+| GET    | /api/acp/agents/:name/feed[?before=] | person | Individual Chat: messages (any scope), questions, activity |
+| GET    | /api/acp/projects/:pid/feed[?before=] | person | Project Chat: messages posted there, its agents, questions, activity |
+| POST   | /api/acp/messages/:id/requeue | person | `uncertain` → `pending` (409 `not-uncertain`) |
+| POST   | /api/acp/agents/:name/login | person | `{methodId}` — opens a Terminal tab running the adapter's login command |
+| POST   | /api/acp/questions/:id/answer | person | `{action: accept\|decline\|cancel, content?}` — once (409 `not-open`) |
+| *      | /api/acp/runner/… | agent | Runner protocol — internal: `running`, `claim`, `system-message`, `messages/:id/result`, `messages/:id/release`, `auth-methods`, `questions`, `questions/:id`, `questions/:id/{delivered,withdrawn}`, `questions-orphan`, `activity` |
+
 ## WebSocket
 
-Two channels, both cookie-authed (browser sends `st_token` automatically on the upgrade handshake to the cookie's domain). CSWSH defence is independent: `isAllowedWsOrigin` rejects unlisted origins before the handshake completes.
+All channels are cookie-authed (browser sends `st_token` automatically on the upgrade handshake to the cookie's domain). CSWSH defence is independent: `isAllowedWsOrigin` rejects unlisted origins before the handshake completes. The admitted paths are `WS_PATH_PREFIXES` in `backend/src/wsUpgrade.ts`.
 
 ```
 wss://host/ws/sessions/<sessionId>?tab=<tabId>     # terminal attach
 wss://host/ws/bootstrap/<sessionId>                # bootstrap pipeline live-tail
+wss://host/ws/conversation/<sessionId>             # captured Claude Code conversation (CONVERSATION.md §6.1)
+wss://host/ws/acp                                  # ACP messages, questions and activity of the owner, only with ACP_AGENTS_ENABLED
 ```
 
 **Terminal — Client → Server:** `input`, `resize`
