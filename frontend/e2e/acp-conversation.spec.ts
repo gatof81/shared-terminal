@@ -1,0 +1,151 @@
+// ACP chat as a conversation: the person on the right, each agent's answer on
+// the left under the message it answers, a consult's delivered reply shown
+// once, technical activity folded, a question inside the answer it blocks.
+
+import { expect, test } from "./fixtures.js";
+import { PROJECT_IDS } from "./mockBackend.js";
+
+const SHOTS = process.env.ACP_SHOTS;
+
+test.describe("ACP conversation", () => {
+	test.beforeEach(({ backend }) => {
+		backend.enableAcp();
+		const hz = PROJECT_IDS.hz;
+		const post = "c-post-1";
+		backend.addAcpMessage({
+			to_id: "arq",
+			body: "@arq @dev ¿cómo encaramos el login?",
+			client_id: post,
+			project_id: hz,
+			state: "done",
+			result_text: "Propongo **OAuth** con PKCE. Le consulto a @dev el estado del backend.",
+		});
+		backend.addAcpMessage({
+			to_id: "dev",
+			body: "@arq @dev ¿cómo encaramos el login?",
+			client_id: post,
+			project_id: hz,
+			state: "done",
+			result_text: "El backend ya tiene sesiones; falta el callback.",
+		});
+		const consult = backend.addAcpMessage({
+			from_id: "arq",
+			to_id: "dev",
+			body: "¿El callback de OAuth está implementado?",
+			project_id: hz,
+			depth: 1,
+			state: "done",
+			result_text: "Todavía no: lo agrego hoy en `auth/callback.ts`.",
+		});
+		backend.addAcpMessage({
+			from_id: "dev",
+			to_id: "arq",
+			kind: "reply",
+			reply_to: consult.id,
+			body: "Todavía no: lo agrego hoy en `auth/callback.ts`.",
+			project_id: hz,
+			depth: 1,
+			state: "done",
+			result_text: "Anotado.",
+		});
+		const running = backend.addAcpMessage({
+			to_id: "dev",
+			body: "@dev implementá el callback",
+			project_id: hz,
+			state: "running",
+		});
+		backend.acpActivity = {
+			dev: [
+				{
+					seq: 1,
+					at: "2026-10-31T10:29:00Z",
+					messageId: running.id,
+					kind: "tool",
+					toolCallId: "t1",
+					title: "Read",
+					detail: "auth/session.ts",
+					status: "completed",
+				},
+				{
+					seq: 2,
+					at: "2026-10-31T10:29:10Z",
+					messageId: running.id,
+					kind: "tool",
+					toolCallId: "t2",
+					title: "Edit",
+					detail: "auth/callback.ts",
+					status: "in_progress",
+				},
+			],
+		};
+		const asking = backend.addAcpMessage({
+			to_id: "arq",
+			body: "@arq elegí el proveedor",
+			project_id: hz,
+			state: "running",
+		});
+		backend.acpQuestions = [
+			{
+				id: 1,
+				agent: "arq",
+				message_id: asking.id,
+				request: JSON.stringify({
+					message: "¿Qué proveedor usamos?",
+					requestedSchema: {
+						type: "object",
+						properties: { p: { type: "string", title: "Proveedor", enum: ["GitHub", "Google"] } },
+						required: ["p"],
+					},
+				}),
+				state: "open",
+				answer: null,
+				created_at: "2026-10-31T10:29:30Z",
+				answered_at: null,
+				delivered_at: null,
+				note: null,
+			},
+		];
+		backend.addAcpMessage({ to_id: "dev", body: "@dev después revisá los tests", project_id: hz });
+	});
+
+	test("the person on the right, each answer on the left under what it answers", async ({
+		page,
+		app,
+	}, info) => {
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		const thread = page.locator(".acp-project .acp-chat-thread");
+		const post = thread.locator("article.acp-msg", { hasText: "¿cómo encaramos el login?" });
+		await expect(post.locator(".acp-sub")).toHaveCount(2);
+		const box = (await thread.boundingBox())!;
+		const out = (await post.locator(".acp-out").boundingBox())!;
+		const answer = (await post.locator(".acp-sub").first().boundingBox())!;
+		// Right edge vs left edge of the thread (its padding aside).
+		expect(box.x + box.width - (out.x + out.width)).toBeLessThan(40);
+		expect(answer.x - box.x).toBeLessThan(40);
+		await expect(post.locator(".acp-sub").first().locator(".acp-agent-id")).toHaveText(/@arq/);
+
+		// The consult's answer is shown once: the delivered reply is one folded line.
+		const said = "lo agrego hoy";
+		await expect(
+			thread.locator(".acp-msg-result, .acp-msg-body").filter({ hasText: said, visible: true }),
+		).toHaveCount(1);
+		await expect(thread.locator(".acp-handoff")).toHaveCount(1);
+
+		// Activity folded, its latest step named; a question inside its answer.
+		const work = thread.locator("article.acp-msg", { hasText: "implementá el callback" });
+		await expect(work.locator(".acp-details > summary")).toHaveText(/Actividad \(2\) · Edit/);
+		await expect(work.locator(".acp-activity")).toBeHidden();
+		const ask = thread.locator("article.acp-msg", { hasText: "elegí el proveedor" });
+		await expect(ask.locator(".acp-sub .acp-question-open")).toBeVisible();
+		await expect(ask.locator(".acp-badge-waiting")).toHaveText("esperando tu respuesta");
+		const queued = thread.locator("article.acp-msg", { hasText: "después revisá los tests" });
+		await expect(queued.locator(".acp-typing")).toHaveText(/En cola/);
+		if (SHOTS) {
+			await page.screenshot({ path: `${SHOTS}/${info.project.name}.png` });
+			await thread.evaluate((t) => {
+				t.scrollTop = 0;
+			});
+			await page.screenshot({ path: `${SHOTS}/${info.project.name}-top.png` });
+		}
+	});
+});

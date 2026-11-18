@@ -81,14 +81,6 @@
 .acp-msg-time {
 	opacity: 0.7;
 }
-.acp-sub {
-	margin-top: 8px;
-	padding: 6px 8px;
-	border-left: 2px solid var(--c-border);
-}
-.acp-msg.acp-reply {
-	border-style: dashed;
-}
 .acp-details > summary {
 	cursor: pointer;
 	font-size: 0.8rem;
@@ -204,6 +196,12 @@
 	pre.acp-msg-body {
 		max-height: 50vh;
 	}
+	.acp-bubble {
+		max-width: 92%;
+	}
+	.acp-chat-thread {
+		gap: 14px;
+	}
 	.acp-project .acp-thread {
 		border-left: none;
 		border-right: none;
@@ -256,7 +254,7 @@
 	padding: 12px 14px;
 	display: flex;
 	flex-direction: column;
-	gap: 10px;
+	gap: 18px;
 }
 .acp-chat-empty {
 	opacity: 0.8;
@@ -266,22 +264,102 @@
 	font-size: 0.9rem;
 	color: var(--c-err);
 }
+/* A turn of the conversation (acpThread.ts itemEl): what was said, then one
+   answer bubble per recipient. The person on the right, agents on the left;
+   no card around the turn — spacing separates turns, bubbles separate voices. */
 .acp-msg {
-	border: 1px solid var(--c-border);
-	border-radius: 8px;
-	padding: 8px 10px;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
 	max-width: 100%;
+	min-width: 0;
 }
-.acp-msg.acp-mine {
-	border-color: var(--c-accent);
+.acp-bubble {
+	box-sizing: border-box;
+	max-width: min(85%, 46rem);
+	min-width: 0;
+	padding: 8px 12px;
+	border-radius: 14px;
+	overflow-wrap: anywhere;
+}
+.acp-out {
+	align-self: flex-end;
+	background: rgba(var(--c-accent-rgb, 88, 166, 255), 0.14);
+	border-bottom-right-radius: 4px;
+}
+.acp-in {
+	align-self: flex-start;
+	background: var(--c-surface);
+	border: 1px solid var(--c-border);
+	border-bottom-left-radius: 4px;
+}
+/* A consult between agents and a Shared Terminal note are not the person's
+   voice: left, quieter, marked by a rule instead of a bubble. */
+.acp-consult > .acp-bubble:first-child,
+.acp-system > .acp-bubble:first-child {
+	background: transparent;
+	border: none;
+	border-left: 3px solid var(--c-border);
+	border-radius: 0;
+	padding: 2px 10px;
+	font-size: 0.88rem;
+}
+.acp-system > .acp-bubble:first-child {
+	opacity: 0.8;
+}
+/* The answers of a consult sit under it, indented: they belong to it. */
+.acp-consult > .acp-sub,
+.acp-system > .acp-sub {
+	margin-left: 14px;
+}
+.acp-handoff {
+	font-size: 0.82rem;
+	opacity: 0.85;
+	padding-left: 10px;
+	border-left: 3px dotted var(--c-border);
 }
 .acp-msg-head {
 	display: flex;
-	justify-content: space-between;
-	gap: 8px;
-	font-size: 0.8rem;
-	opacity: 0.85;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 4px 8px;
+	font-size: 0.78rem;
 	margin-bottom: 4px;
+}
+.acp-msg-head:has(> .acp-msg-who:empty) {
+	justify-content: flex-end;
+}
+.acp-msg-head .acp-msg-who:empty {
+	display: none;
+}
+.acp-msg-head .acp-msg-time {
+	margin-left: auto;
+	opacity: 0.6;
+}
+.acp-out .acp-msg-head {
+	opacity: 0.8;
+}
+.acp-agent-id {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font-weight: 600;
+	color: hsl(var(--acp-hue, 210) 55% 62%);
+}
+.acp-avatar {
+	display: inline-grid;
+	place-items: center;
+	width: 1.35rem;
+	height: 1.35rem;
+	border-radius: 50%;
+	font-size: 0.72rem;
+	color: #fff;
+	background: hsl(var(--acp-hue, 210) 45% 42%);
+}
+.acp-typing {
+	font-size: 0.82rem;
+	opacity: 0.7;
+	font-style: italic;
 }
 /* What the person typed: as typed (monospace, kept). A long paste scrolls in
    its own box; an agent's answer never does (it is the content to read, and a
@@ -291,8 +369,12 @@ pre.acp-msg-body,
 	margin: 0;
 	white-space: pre-wrap;
 	overflow-wrap: anywhere;
+	font-family: inherit;
+	font-size: 0.9rem;
+}
+.acp-live {
 	font-family: var(--font-mono, ui-monospace, monospace);
-	font-size: 0.85rem;
+	font-size: 0.82rem;
 }
 pre.acp-msg-body {
 	max-height: 40vh;
@@ -312,9 +394,7 @@ pre.acp-msg-body {
 	margin-bottom: 0;
 }
 .acp-msg-result {
-	margin-top: 6px;
-	padding-top: 6px;
-	border-top: 1px dashed var(--c-border);
+	margin-top: 2px;
 }
 .acp-live {
 	opacity: 0.8;
@@ -335,12 +415,22 @@ pre.acp-msg-body {
 	padding: 0 8px;
 	border: 1px solid currentColor;
 	white-space: nowrap;
+	font-size: 0.72rem;
+}
+/* Done is the normal end: said quietly, not as a pill. */
+.acp-badge-done {
+	border-color: transparent;
+	padding: 0;
+	opacity: 0.6;
 }
 .acp-badge-running {
 	color: var(--c-accent);
 }
 .acp-badge-done {
 	color: var(--c-ok);
+}
+.acp-details {
+	margin-top: 2px;
 }
 .acp-badge-uncertain,
 .acp-badge-failed {
