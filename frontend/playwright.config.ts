@@ -9,13 +9,34 @@ import type { ShellOptions } from "./e2e/fixtures.js";
 // stay in the Session Image workflow's smokes.
 const PORT = 5174;
 
+// CI profile. Pull requests run `E2E_PROFILE=pr`; pushes to main and local
+// runs keep the whole matrix (the default). The primary shell is v1: VM100
+// runs with UI_SHELL unset, so /api/auth/status answers `uiShell: "v1"`
+// (checked 2026-11-18) and that is what every browser without a `?ui=`
+// override mounts — so `desktop` and `mobile` (v1) run the whole suite on
+// every PR. The v2 projects keep, on a PR, the specs whose behaviour depends
+// on the shell or the bar (view tabs, Chat-first landing, the terminal
+// invariant, history/back, the session bar, the phone keyboard and their
+// screenshots); every other spec drives the same views through the same
+// mock and runs under v2 on main. If the primary shell changes, swap these.
+const PR_PROFILE = process.env.E2E_PROFILE === "pr";
+const V2_SPECIFIC =
+	/(shell-v2|chat-first|terminal-invariant|navigation|router|session-bar|keyboard|visual)\.spec\.ts/;
+const STACKED_BAR = PR_PROFILE
+	? /(shell-v2|terminal-invariant|navigation)\.spec\.ts/
+	: /(navigation|terminal-invariant|shell-v2|visual)\.spec\.ts/;
+const v2Match = PR_PROFILE ? { testMatch: V2_SPECIFIC } : {};
+
 export default defineConfig<ShellOptions>({
 	testDir: "./e2e",
 	testMatch: /.*\.spec\.ts/,
 	fullyParallel: true,
 	forbidOnly: !!process.env.CI,
 	retries: process.env.CI ? 1 : 0,
-	workers: process.env.CI ? 2 : undefined,
+	// The CI runner has 4 vCPUs. Against the production build (below) four
+	// workers kept every test green with no retries in the measurements of
+	// #681 (2026-11-18); against the dev server they saturated the CPU.
+	workers: process.env.CI ? 4 : undefined,
 	reporter: process.env.CI ? [["list"], ["html", { open: "never" }]] : [["list"]],
 	// The router scenarios chain a dozen navigations and deliberately slow
 	// answers; 30 s was too tight for them under a loaded box.
@@ -79,10 +100,12 @@ export default defineConfig<ShellOptions>({
 		// override is set before the app loads (e2e/fixtures.ts).
 		{
 			name: "desktop-v2",
+			...v2Match,
 			use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 800 }, shell: "v2" },
 		},
 		{
 			name: "mobile-v2",
+			...v2Match,
 			use: {
 				...devices["Desktop Chrome"],
 				viewport: { width: 390, height: 844 },
@@ -95,10 +118,10 @@ export default defineConfig<ShellOptions>({
 		// The stacked-bar alternative of v2 on a phone (uiShell.ts
 		// `?bar=stacked`; the merged bar is the default that `mobile-v2`
 		// runs): the navigation, the invariant, the shell spec and the
-		// screenshots.
+		// screenshots (on a PR, the bar's own specs without the screenshots).
 		{
 			name: "mobile-v2-stacked",
-			testMatch: /(navigation|terminal-invariant|shell-v2|visual)\.spec\.ts/,
+			testMatch: STACKED_BAR,
 			use: {
 				...devices["Desktop Chrome"],
 				viewport: { width: 390, height: 844 },
@@ -111,10 +134,17 @@ export default defineConfig<ShellOptions>({
 		},
 	],
 	webServer: {
-		command: `npx vite --port ${PORT} --strictPort`,
+		// CI serves the production build (`E2E_SERVER=preview`): the shipped
+		// bundle, and one script per page load instead of ~100 modules the
+		// dev server transforms on every test's fresh page (−25 % wall time
+		// at equal workers). Locally the dev server stays the default.
+		command:
+			process.env.E2E_SERVER === "preview"
+				? `npx vite build && npx vite preview --port ${PORT} --strictPort`
+				: `npx vite --port ${PORT} --strictPort`,
 		url: `http://localhost:${PORT}`,
 		reuseExistingServer: !process.env.CI,
 		env: { VITE_API_URL: `http://localhost:${PORT}` },
-		timeout: 60_000,
+		timeout: 120_000,
 	},
 });
