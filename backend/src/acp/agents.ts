@@ -328,7 +328,9 @@ export class AcpAgents {
 		if (row) {
 			this.byId.set(row.agent_id, row);
 			this.publish(ownerUserId, { type: "agents" });
-			logger.info(`[acp] @${name} ${projectId ? `joined project ${projectId}` : "left its project"}`);
+			logger.info(
+				`[acp] @${name} ${projectId ? `joined project ${projectId}` : "left its project"}`,
+			);
 		}
 		return row;
 	}
