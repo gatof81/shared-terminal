@@ -22,9 +22,13 @@ async function call(method, path, body) {
 if (cmd === "send" && args.length >= 2) {
 	const body = args[1] === "-f" ? readFileSync(args[2], "utf8") : args.slice(1).join(" ");
 	const m = await call("POST", "/messages", { to: args[0], body });
-	console.log(`mensaje #${m.id} para @${m.to_id}: ${m.state} (persistido)`);
+	console.log(`mensaje #${m.id} para @${m.to_id}: ${m.state} (persistido${m.project_id ? ", en el proyecto" : ", directo"})`);
 } else if (cmd === "agents") {
-	for (const a of await call("GET", "/agents")) console.log(`@${a.name}`);
+	const me = process.env.ST_AGENT;
+	const all = await call("GET", "/agents");
+	const mine = all.find((a) => a.name === me)?.projectId ?? null;
+	for (const a of all)
+		console.log(`@${a.name}${a.name === me ? " (vos)" : ""}${mine && a.projectId === mine ? " · mismo proyecto" : ""}`);
 } else if (cmd === "list") {
 	for (const m of await call("GET", "/messages"))
 		console.log(`#${m.id} ${m.kind} @${m.from_id} -> @${m.to_id} ${m.state}${m.reply_to ? ` (re #${m.reply_to})` : ""} | ${m.body.replace(/\s+/g, " ").slice(0, 70)}`);

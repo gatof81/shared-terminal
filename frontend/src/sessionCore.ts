@@ -9,6 +9,7 @@
  * used only inside functions, so the circular import is TDZ-safe.
  */
 
+import { acpEntry } from "./acpRegistry.js";
 import { openObserversModalFor } from "./admin.js";
 import {
 	ApiCodeError,
@@ -478,6 +479,12 @@ export function syncLastConversationCurrent(): void {
 // Leaving Chat (or coming back) changes which link is the open conversation.
 onViewChange(() => syncLastConversationCurrent());
 
+// ACP agents joined / left a project: their rows move between groups.
+if (typeof window !== "undefined")
+	window.addEventListener("st:acp-agents", () => {
+		if (sessionListLoaded()) renderSessionList();
+	});
+
 export function renderSessionList() {
 	// Re-rendered on every 5 s poll: keep the keyboard user's place.
 	const active = document.activeElement;
@@ -594,6 +601,19 @@ function renderGroupedSessions(): void {
 		if (rows) rows.push(b);
 		else unnamed.push(b);
 	}
+	// ACP agent sessions sit under the project they take part in (they have no
+	// older-team binding, so they would otherwise read as unassigned).
+	const acpRows = new Map<string, SessionInfo[]>();
+	const keepOutOfAcpProject = (s: SessionInfo) => {
+		const pid = acpEntry(s.sessionId)?.projectId;
+		if (!pid || !byProject.has(pid)) return true;
+		acpRows.set(pid, [...(acpRows.get(pid) ?? []), s]);
+		return false;
+	};
+	groups.unassigned = groups.unassigned.filter(keepOutOfAcpProject);
+	// A session just created here has no binding key until the next list read;
+	// an ACP agent's project is known already.
+	groups.unknown = groups.unknown.filter(keepOutOfAcpProject);
 	// Claude's state is read only for the projects whose rows can be seen:
 	// expanded, with a running session (a stopped one's state is its own
 	// word), and with the sidebar open (the phone's drawer, or the desktop
@@ -618,12 +638,16 @@ function renderGroupedSessions(): void {
 				project: p.projectId,
 				cls: "sgroup-project",
 				tooltip: `Open ${p.name} · ${agentCountText(p.agentCount)}`,
-				rows: rows.map(({ session, binding }) => buildSessionItem(session, binding)),
+				rows: [
+					...rows.map(({ session, binding }) => buildSessionItem(session, binding)),
+					...(acpRows.get(p.projectId) ?? []).map((s) => buildSessionItem(s, null)),
+				],
 				// With the bindings unread, its sessions may be the ones under
 				// "Assignment unknown": neither a count nor "none" is known.
 				countUnknown: groups.unknown.length > 0,
 				// "shown": its sessions may also be terminated ones the list hides.
-				empty: p.agentCount === 0 ? "No agents yet." : "No sessions shown.",
+				empty:
+					p.agentCount === 0 && !acpRows.has(p.projectId) ? "No agents yet." : "No sessions shown.",
 			}),
 		);
 	}

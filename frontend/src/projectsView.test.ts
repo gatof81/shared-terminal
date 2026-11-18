@@ -30,7 +30,7 @@ const core = vi.hoisted(() => ({
 }));
 const toast = vi.hoisted(() => ({ showToast: vi.fn() }));
 
-vi.mock("./api.js", () => api);
+vi.mock("./api.js", () => ({ acpAgentsEnabled: () => false, ...api }));
 vi.mock("./main.js", () => mainMock);
 vi.mock("./sessionCore.js", () => core);
 vi.mock("./components/toast.js", () => toast);

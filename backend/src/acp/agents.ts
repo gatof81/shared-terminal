@@ -46,6 +46,10 @@ export interface AcpConfig {
 	runnerSrc: string;
 	/** Watchdog period: how often each running agent's runner loop is checked. */
 	watchdogMs: number;
+	/** Loop guard: the deepest agent → agent request a person's message may start. */
+	maxDepth: number;
+	/** Install the deterministic test adapter as runtime `st-test-agent` (ACP_TEST_RUNTIME=1). */
+	testRuntime: boolean;
 }
 
 export function acpConfigFromEnv(workspaceRoot: string, port: number): AcpConfig {
@@ -56,6 +60,8 @@ export function acpConfigFromEnv(workspaceRoot: string, port: number): AcpConfig
 		defaultModel: env.ACP_DEFAULT_MODEL ?? "claude-sonnet-5-5",
 		maxMessageBytes: Number(env.ACP_MESSAGE_MAX_BYTES ?? 256 * 1024),
 		watchdogMs: Number(env.ACP_WATCHDOG_MS ?? 30_000),
+		maxDepth: Number(env.ACP_MAX_DEPTH ?? DEFAULT_MAX_DEPTH),
+		testRuntime: env.ACP_TEST_RUNTIME === "1",
 		backendUrl: env.ACP_BACKEND_URL ?? `http://st-backend:${port}`,
 		// src/acp (tsx) and dist/acp (image, which copies it to /acp-runtime)
 		// both resolve to <repo or image root>/acp-runtime.
@@ -64,6 +70,7 @@ export function acpConfigFromEnv(workspaceRoot: string, port: number): AcpConfig
 }
 
 const RUNTIME_MOUNT = "/opt/st-acp";
+export const TEST_RUNTIME = "st-test-agent";
 const RUNNER_LOOP_NAME = "st-acp-runner-loop";
 const RUNNER_LOCK = "/tmp/st-acp-runner.lock";
 // Liveness from the processes themselves (never from silence, never by taking
@@ -103,6 +110,8 @@ export interface AgentRow {
 	runtime: string;
 	model: string | null;
 	created_at: string;
+	/** The project this agent takes part in (v22); NULL = none. */
+	project_id: string | null;
 }
 
 export type MessageState = "pending" | "running" | "done" | "failed" | "uncertain";
@@ -123,6 +132,23 @@ export interface MessageRow {
 	result_text: string | null;
 	stop_reason: string | null;
 	note: string | null;
+	/** Scope (v22): NULL = direct message, else posted in that project's chat. */
+	project_id: string | null;
+	/** Hops from the person's message (loop guard); 0 = sent by a person. */
+	depth: number;
+	client_id: string | null;
+}
+
+/** What the live channel (/ws/acp) pushes to an owner's browsers. */
+export type AcpEvent =
+	| { type: "message"; message: MessageRow }
+	| { type: "activity"; agent: string; events: ActivityEvent[] }
+	| { type: "agents" };
+
+export interface AgentLoad {
+	/** Id of the message the agent is working on, if any. */
+	running: number | null;
+	pending: number;
 }
 
 export interface ActivityEvent {
@@ -135,19 +161,43 @@ export interface ActivityEvent {
 
 const NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 const ACTIVITY_MAX = 500;
+/** Agent → agent hops allowed below one person's message (ACP_MAX_DEPTH). */
+export const DEFAULT_MAX_DEPTH = 6;
 
 export class AcpAgents {
 	private readonly tokenKey = deriveSubkey("st-acp-agent-token/v1");
 	private readonly byId = new Map<string, AgentRow>();
-	private readonly activity = new Map<
-		string,
-		{ seq: number; events: ActivityEvent[]; seenAt: number }
-	>();
+	private readonly activity = new Map<string, { events: ActivityEvent[]; seenAt: number }>();
+	/** One sequence for every agent's activity, so a project view keeps one cursor. */
+	private activitySeq = 0;
+	private readonly listeners = new Set<(ownerUserId: string, ev: AcpEvent) => void>();
 
 	constructor(
 		readonly config: AcpConfig,
 		private readonly docker: DockerManager,
 	) {}
+
+	// ── Live events (in-process: every write goes through this object) ─────
+
+	onEvent(fn: (ownerUserId: string, ev: AcpEvent) => void): () => void {
+		this.listeners.add(fn);
+		return () => this.listeners.delete(fn);
+	}
+
+	private publish(ownerUserId: string, ev: AcpEvent): void {
+		for (const fn of this.listeners) {
+			try {
+				fn(ownerUserId, ev);
+			} catch (err) {
+				logger.warn(`[acp] event listener: ${(err as Error).message}`);
+			}
+		}
+	}
+
+	private published(row: MessageRow | null | undefined): MessageRow | null {
+		if (row) this.publish(row.owner_user_id, { type: "message", message: row });
+		return row ?? null;
+	}
 
 	// ── Runtime files ──────────────────────────────────────────────────────
 
@@ -161,6 +211,23 @@ export class AcpAgents {
 			await fs.chmod(tmp, 0o755);
 			await fs.rename(tmp, path.join(dest, f));
 		}
+		// The deterministic test adapter (acp-runtime/test-agent.mjs): a runtime
+		// like any other, present only when asked for.
+		const testDir = path.join(this.config.runtimeDir, TEST_RUNTIME);
+		if (this.config.testRuntime) {
+			await fs.copyFile(
+				path.join(this.config.runnerSrc, "test-agent.mjs"),
+				path.join(dest, "test-agent.mjs.tmp"),
+			);
+			await fs.rename(path.join(dest, "test-agent.mjs.tmp"), path.join(dest, "test-agent.mjs"));
+			await fs.mkdir(testDir, { recursive: true });
+			await fs.writeFile(
+				path.join(testDir, "agent.tmp"),
+				`#!/bin/sh\nexec node ${RUNTIME_MOUNT}/st/test-agent.mjs "$@"\n`,
+				{ mode: 0o755 },
+			);
+			await fs.rename(path.join(testDir, "agent.tmp"), path.join(testDir, "agent"));
+		} else await fs.rm(testDir, { recursive: true, force: true });
 		const runtimes = await fs.readdir(this.config.runtimeDir).catch(() => []);
 		logger.info(
 			`[acp] runner installed in ${dest}; runtimes present: ${runtimes.filter((r) => r !== "st").join(", ") || "none"}`,
@@ -173,23 +240,72 @@ export class AcpAgents {
 		sessionId: string,
 		ownerUserId: string,
 		name: string,
-		model?: string,
+		opts: { model?: string; runtime?: string; projectId?: string | null } = {},
 	): Promise<AgentRow> {
 		const row = (
 			await d1Query<AgentRow>(
-				"INSERT INTO acp_agents (agent_id, session_id, owner_user_id, name, runtime, model) VALUES (?, ?, ?, ?, ?, ?) RETURNING *",
+				"INSERT INTO acp_agents (agent_id, session_id, owner_user_id, name, runtime, model, project_id) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *",
 				[
 					randomUUID(),
 					sessionId,
 					ownerUserId,
 					name,
-					this.config.defaultRuntime,
-					model ?? this.config.defaultModel,
+					opts.runtime ?? this.config.defaultRuntime,
+					opts.model ?? this.config.defaultModel,
+					opts.projectId ?? null,
 				],
 			)
 		).results[0];
 		this.byId.set(row.agent_id, row);
+		this.publish(ownerUserId, { type: "agents" });
 		return row;
+	}
+
+	/** Adapter bundles installed in the runtime dir (one dir each, with an `agent` entry). */
+	async runtimes(): Promise<string[]> {
+		const out: string[] = [];
+		for (const d of await fs.readdir(this.config.runtimeDir).catch(() => [] as string[])) {
+			if (d === "st" || d.startsWith(".")) continue;
+			if (
+				await fs
+					.access(path.join(this.config.runtimeDir, d, "agent"))
+					.then(() => true)
+					.catch(() => false)
+			)
+				out.push(d);
+		}
+		return out.sort();
+	}
+
+	/** Joins (or, with null, leaves) a project. The agent keeps its session, context and history. */
+	async setProject(
+		ownerUserId: string,
+		name: string,
+		projectId: string | null,
+	): Promise<AgentRow | null> {
+		const r = await d1Query<AgentRow>(
+			"UPDATE acp_agents SET project_id = ? WHERE owner_user_id = ? AND name = ? RETURNING *",
+			[projectId, ownerUserId, name],
+		);
+		const row = r.results[0] ?? null;
+		if (row) {
+			this.byId.set(row.agent_id, row);
+			this.publish(ownerUserId, { type: "agents" });
+		}
+		return row;
+	}
+
+	/** Running message and queue length per agent name (one query). */
+	async loads(ownerUserId: string): Promise<Map<string, AgentLoad>> {
+		const r = await d1Query<{ to_id: string; running: number | null; pending: number }>(
+			`SELECT to_id, MAX(CASE WHEN state = 'running' THEN id END) AS running,
+				SUM(CASE WHEN state = 'pending' THEN 1 ELSE 0 END) AS pending
+			 FROM agent_messages WHERE owner_user_id = ? AND state IN ('pending', 'running') GROUP BY to_id`,
+			[ownerUserId],
+		);
+		return new Map(
+			r.results.map((x) => [x.to_id, { running: x.running ?? null, pending: Number(x.pending) }]),
+		);
 	}
 
 	async nameTaken(ownerUserId: string, name: string): Promise<boolean> {
@@ -258,20 +374,61 @@ export class AcpAgents {
 
 	// ── Messages ───────────────────────────────────────────────────────────
 
-	async send(ownerUserId: string, from: string, to: string, body: string): Promise<MessageRow> {
-		return (
-			await d1Query<MessageRow>(
-				"INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, body, state) VALUES (?, ?, ?, 'request', ?, 'pending') RETURNING *",
-				[ownerUserId, from, to, body],
-			)
-		).results[0];
+	/**
+	 * Persists one message (the INSERT is the acknowledgement). With a
+	 * `clientId` the send is idempotent per recipient: a retry returns the row
+	 * the first attempt wrote (`replayed`).
+	 */
+	async send(m: {
+		ownerUserId: string;
+		from: string;
+		to: string;
+		body: string;
+		projectId?: string | null;
+		depth?: number;
+		clientId?: string | null;
+	}): Promise<{ message: MessageRow; replayed: boolean }> {
+		const params = [
+			m.ownerUserId,
+			m.from,
+			m.to,
+			m.body,
+			m.projectId ?? null,
+			m.depth ?? 0,
+			m.clientId ?? null,
+		];
+		const r = await d1Query<MessageRow>(
+			"INSERT OR IGNORE INTO agent_messages (owner_user_id, from_id, to_id, kind, body, state, project_id, depth, client_id) VALUES (?, ?, ?, 'request', ?, 'pending', ?, ?, ?) RETURNING *",
+			params,
+		);
+		if (r.results[0])
+			return { message: this.published(r.results[0]) as MessageRow, replayed: false };
+		const prior = await d1Query<MessageRow>(
+			"SELECT * FROM agent_messages WHERE owner_user_id = ? AND client_id = ? AND to_id = ?",
+			[m.ownerUserId, m.clientId ?? null, m.to],
+		);
+		if (!prior.results[0]) throw new Error("message insert returned nothing");
+		return { message: prior.results[0], replayed: true };
 	}
 
-	async messages(ownerUserId: string, agent: string | null, limit = 200): Promise<MessageRow[]> {
+	/**
+	 * A page of messages, newest `limit` before `before` (exclusive), oldest
+	 * first. `agent`: everything to or from that agent, any scope (its
+	 * individual chat — the owner's view of the agent's whole inbox).
+	 * `projectId`: only what was posted in that project.
+	 */
+	async messages(
+		ownerUserId: string,
+		filter: { agent?: string | null; projectId?: string | null; before?: number | null },
+		limit = 100,
+	): Promise<MessageRow[]> {
 		const r = await d1Query<MessageRow>(
-			`SELECT * FROM (SELECT * FROM agent_messages WHERE owner_user_id = ?1 AND (?2 IS NULL OR to_id = ?2 OR from_id = ?2)
-			 ORDER BY id DESC LIMIT ?3) ORDER BY id`,
-			[ownerUserId, agent, limit],
+			`SELECT * FROM (SELECT * FROM agent_messages WHERE owner_user_id = ?1
+				AND (?2 IS NULL OR to_id = ?2 OR from_id = ?2)
+				AND (?3 IS NULL OR project_id = ?3)
+				AND (?4 IS NULL OR id < ?4)
+			 ORDER BY id DESC LIMIT ?5) ORDER BY id`,
+			[ownerUserId, filter.agent ?? null, filter.projectId ?? null, filter.before ?? null, limit],
 		);
 		return r.results;
 	}
@@ -282,6 +439,35 @@ export class AcpAgents {
 			[ownerUserId, id],
 		);
 		return r.results[0] ?? null;
+	}
+
+	/** The project as an agent's prompt names it: its name and who takes part. */
+	async projectContext(
+		ownerUserId: string,
+		projectId: string,
+	): Promise<{ id: string; name: string; agents: string[] } | null> {
+		const r = await d1Query<{ name: string; agents: string | null }>(
+			`SELECT p.name AS name, (SELECT group_concat(a.name, ' ') FROM acp_agents a
+				WHERE a.owner_user_id = p.owner_user_id AND a.project_id = p.project_id) AS agents
+			 FROM projects p WHERE p.project_id = ? AND p.owner_user_id = ?`,
+			[projectId, ownerUserId],
+		);
+		const row = r.results[0];
+		if (!row) return null;
+		return {
+			id: projectId,
+			name: row.name,
+			agents: (row.agents ?? "").split(" ").filter(Boolean).sort(),
+		};
+	}
+
+	/** Live (not archived) project of this owner. */
+	async ownsProject(ownerUserId: string, projectId: string): Promise<boolean> {
+		const r = await d1Query(
+			"SELECT 1 FROM projects WHERE project_id = ? AND owner_user_id = ? AND archived_at IS NULL",
+			[projectId, ownerUserId],
+		);
+		return r.results.length > 0;
 	}
 
 	async running(agent: AgentRow): Promise<MessageRow | null> {
@@ -302,7 +488,7 @@ export class AcpAgents {
 			 RETURNING *`,
 			[agent.owner_user_id, agent.name],
 		);
-		return r.results[0] ?? null;
+		return this.published(r.results[0]);
 	}
 
 	/**
@@ -318,7 +504,7 @@ export class AcpAgents {
 			 RETURNING *`,
 			[agent.owner_user_id, agent.name, body],
 		);
-		return r.results[0] ?? null;
+		return this.published(r.results[0]);
 	}
 
 	/** Records the run's result; the reply to an agent's request is the v21 trigger's, same statement. */
@@ -345,7 +531,16 @@ export class AcpAgents {
 				agent.name,
 			],
 		);
-		return r.results[0] ?? null;
+		const row = this.published(r.results[0]);
+		// The trigger's reply (same statement) is a new message: push it too.
+		if (row?.state === "done" && row.kind === "request" && row.from_id !== "owner") {
+			const reply = await d1Query<MessageRow>(
+				"SELECT * FROM agent_messages WHERE owner_user_id = ? AND reply_to = ? AND kind = 'reply'",
+				[row.owner_user_id, row.id],
+			).catch(() => null);
+			this.published(reply?.results[0]);
+		}
+		return row;
 	}
 
 	/** The runner proved the prompt never left (adapter did not start): back to pending. */
@@ -354,7 +549,7 @@ export class AcpAgents {
 			"UPDATE agent_messages SET state = 'pending', note = ? WHERE id = ? AND owner_user_id = ? AND to_id = ? AND state = 'running' RETURNING *",
 			[note, id, agent.owner_user_id, agent.name],
 		);
-		return r.results[0] ?? null;
+		return this.published(r.results[0]);
 	}
 
 	/** A person's decision, never automatic. */
@@ -363,13 +558,13 @@ export class AcpAgents {
 			"UPDATE agent_messages SET state = 'pending', note = 'requeued by owner' WHERE id = ? AND owner_user_id = ? AND state = 'uncertain' RETURNING *",
 			[id, ownerUserId],
 		);
-		return r.results[0] ?? null;
+		return this.published(r.results[0]);
 	}
 
 	// ── Activity (memory only) ─────────────────────────────────────────────
 
 	private touch(agentId: string) {
-		const a = this.activity.get(agentId) ?? { seq: 0, events: [], seenAt: 0 };
+		const a = this.activity.get(agentId) ?? { events: [], seenAt: 0 };
 		a.seenAt = Date.now();
 		this.activity.set(agentId, a);
 		return a;
@@ -377,22 +572,41 @@ export class AcpAgents {
 
 	pushActivity(agent: AgentRow, events: Array<Record<string, unknown>>): void {
 		const a = this.touch(agent.agent_id);
+		const added: ActivityEvent[] = [];
 		for (const e of events.slice(0, 100)) {
-			a.events.push({
+			const ev: ActivityEvent = {
 				...e,
-				seq: ++a.seq,
+				seq: ++this.activitySeq,
 				at: new Date().toISOString(),
 				messageId: typeof e.messageId === "number" ? e.messageId : null,
 				kind: String(e.kind ?? "event"),
-			});
+			};
+			a.events.push(ev);
+			added.push(ev);
 		}
 		if (a.events.length > ACTIVITY_MAX) a.events.splice(0, a.events.length - ACTIVITY_MAX);
+		if (added.length)
+			this.publish(agent.owner_user_id, { type: "activity", agent: agent.name, events: added });
 	}
 
-	activitySince(agentId: string, after: number): { seq: number; events: ActivityEvent[] } {
-		const a = this.activity.get(agentId);
-		if (!a) return { seq: 0, events: [] };
-		return { seq: a.seq, events: a.events.filter((e) => e.seq > after) };
+	/** The retained activity of one agent after `after` (0 = all it keeps). */
+	activitySince(agentId: string, after = 0): ActivityEvent[] {
+		return (this.activity.get(agentId)?.events ?? []).filter((e) => e.seq > after);
+	}
+
+	/** Last reported login state of an agent's adapter (from its `auth` / turn events). */
+	authRequired(agentId: string): boolean {
+		const evs = this.activity.get(agentId)?.events ?? [];
+		for (let i = evs.length - 1; i >= 0; i--) {
+			const e = evs[i];
+			if (e.kind === "auth") return e.state === "required";
+			if (e.kind === "turn" && e.phase === "answered") return false;
+		}
+		return false;
+	}
+
+	get currentActivitySeq(): number {
+		return this.activitySeq;
 	}
 
 	// ── Runner lifecycle ───────────────────────────────────────────────────

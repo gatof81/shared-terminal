@@ -6,6 +6,7 @@ import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { v4 as uuidv4 } from "uuid";
 import { type RawData, WebSocket, type WebSocketServer } from "ws";
+import type { AcpWsHub } from "./acp/ws.js";
 import { verifyWsToken } from "./auth.js";
 import type { BootstrapBroadcaster, BootstrapMessage } from "./bootstrap.js";
 import type { ConversationWsHub } from "./conversation/ws.js";
@@ -67,6 +68,8 @@ export function handleWsConnection(
 	// D1 — `/ws/project/<pid>` (PROJECT_CONVERSATION.md §5); absent ⇒ refused
 	// (and the upgrade filter does not even admit the path).
 	projectWs?: { api: ProjectConversationApi | null; hub: ProjectWsHub | null },
+	// Experimental ACP agents — `/ws/acp`; absent ⇒ refused (and not admitted by the filter).
+	acpWs?: AcpWsHub,
 ): void {
 	// #376 — capture the upgrade's correlation id into an explicit child
 	// logger. The ambient pino mixin can't cover a long-lived connection:
@@ -203,6 +206,17 @@ export function handleWsConnection(
 				ws.close(1011, "Internal error");
 			},
 		);
+		return;
+	}
+
+	// `/ws/acp`: the owner's ACP message rows and agent activity, live.
+	if (/^\/ws\/acp(?:[?#]|$)/.test(url)) {
+		if (!acpWs) {
+			sendError(ws, "ACP channel unavailable");
+			ws.close(1011, "ACP channel unavailable");
+			return;
+		}
+		acpWs.serve(ws, userId);
 		return;
 	}
 

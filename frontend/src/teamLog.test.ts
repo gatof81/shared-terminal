@@ -6,7 +6,7 @@ const api = vi.hoisted(() => ({
 	readConversationEvent: vi.fn(),
 	openProjectSocket: vi.fn(),
 }));
-vi.mock("./api.js", () => api);
+vi.mock("./api.js", () => ({ acpAgentsEnabled: () => false, ...api }));
 
 const { ProjectLogStore } = await import("./teamLog.js");
 

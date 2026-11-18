@@ -22,6 +22,7 @@
 
 import {
 	type AgentListEntry,
+	acpAgentsEnabled,
 	cancelQueuedProjectMessage,
 	fetchProjectArtifactText,
 	fetchProjectMessage,
@@ -193,13 +194,21 @@ function link(
 	return a;
 }
 
+// With ACP agents on, a project's default page may be ACP Project Chat: this
+// workspace's own "Now" is then addressed explicitly (`/team`).
+function nowPanel(panel: ProjectPanel | null): ProjectPanel | null {
+	return panel ?? (acpAgentsEnabled() ? { kind: "team" } : null);
+}
+
 function go(projectId: string, panel: ProjectPanel | null): void {
-	navigateProject(panel ? { projectId, agentId: null, panel } : { projectId, agentId: null });
+	const p = nowPanel(panel);
+	navigateProject(p ? { projectId, agentId: null, panel: p } : { projectId, agentId: null });
 }
 
 function panelHref(projectId: string, panel: ProjectPanel | null): string {
+	const p = nowPanel(panel);
 	return projectRouteHash(
-		panel ? { projectId, agentId: null, panel } : { projectId, agentId: null },
+		p ? { projectId, agentId: null, panel: p } : { projectId, agentId: null },
 	);
 }
 

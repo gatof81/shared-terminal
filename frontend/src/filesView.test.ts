@@ -52,7 +52,7 @@ const api = vi.hoisted(() => {
 		downloadSessionFile: vi.fn(),
 	};
 });
-vi.mock("./api.js", () => api);
+vi.mock("./api.js", () => ({ acpAgentsEnabled: () => false, ...api }));
 
 const saveBlob = vi.hoisted(() => vi.fn());
 vi.mock("./saveBlob.js", () => ({ saveBlob }));

@@ -66,7 +66,7 @@ const api = vi.hoisted(() => {
 		downloadSessionFile: vi.fn(),
 	};
 });
-vi.mock("./api.js", () => api);
+vi.mock("./api.js", () => ({ acpAgentsEnabled: () => false, ...api }));
 
 const core = vi.hoisted(() => ({
 	refreshSessions: vi.fn(async () => {}),

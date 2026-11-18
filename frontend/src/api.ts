@@ -1151,7 +1151,7 @@ export async function createSession(
 	name: string,
 	envVars?: Record<string, string>,
 	config?: SessionConfigPayload,
-	acpAgent?: { name: string },
+	acpAgent?: { name: string; projectId?: string | null; runtime?: string },
 ): Promise<CreateSessionResponse> {
 	const res = await apiFetch("/sessions", {
 		method: "POST",
@@ -2793,6 +2793,10 @@ export interface AcpMessage {
 	result_text: string | null;
 	stop_reason: string | null;
 	note: string | null;
+	/** Scope: null = direct message; else posted in that project's chat. */
+	project_id?: string | null;
+	depth?: number;
+	client_id?: string | null;
 }
 
 export interface AcpAgentInfo {
@@ -2800,7 +2804,12 @@ export interface AcpAgentInfo {
 	sessionId: string;
 	runtime: string;
 	model: string | null;
+	projectId?: string | null;
 	runnerSeenAt: string | null;
+	/** Message being worked on, if any. */
+	running?: number | null;
+	pending?: number;
+	authRequired?: boolean;
 }
 
 export interface AcpActivity {
@@ -2811,29 +2820,60 @@ export interface AcpActivity {
 	[key: string]: unknown;
 }
 
+/** One page of a chat: the individual chat of an agent or a Project Chat. */
 export interface AcpFeed {
-	agent: AcpAgentInfo;
+	agent?: AcpAgentInfo;
+	project?: { id: string; name: string };
+	agents?: AcpAgentInfo[];
 	maxMessageBytes: number;
 	messages: AcpMessage[];
-	activity: AcpActivity[];
-	seq: number;
+	/** Retained live activity per agent name. */
+	activity: Record<string, AcpActivity[]>;
+	activitySeq: number;
 }
 
 async function acpJson<T>(path: string, init?: RequestInit): Promise<T> {
 	const res = await apiFetch(`/acp${path}`, init);
-	const body = (await res.json().catch(() => ({}))) as T & { error?: string };
+	const body = (await res.json().catch(() => ({}))) as T & { error?: string; message?: string };
 	if (!res.ok)
-		throw Object.assign(new Error(body.error ?? `HTTP ${res.status}`), {
+		throw Object.assign(new Error(body.message ?? body.error ?? `HTTP ${res.status}`), {
 			status: res.status,
+			code: body.error,
 			body,
 		});
 	return body;
 }
 
+const beforeQ = (before?: number | null) => (before ? `?before=${before}` : "");
 export const acpListAgents = () => acpJson<AcpAgentInfo[]>("/agents");
-export const acpFeed = (name: string, after: number) =>
-	acpJson<AcpFeed>(`/agents/${encodeURIComponent(name)}/feed?after=${after}`);
-export const acpSend = (to: string, body: string) =>
-	acpJson<AcpMessage>("/messages", { method: "POST", body: JSON.stringify({ to, body }) });
+export const acpFeed = (name: string, before?: number | null) =>
+	acpJson<AcpFeed>(`/agents/${encodeURIComponent(name)}/feed${beforeQ(before)}`);
+export const acpProjectFeed = (projectId: string, before?: number | null) =>
+	acpJson<AcpFeed>(`/projects/${encodeURIComponent(projectId)}/feed${beforeQ(before)}`);
+export const acpSend = (
+	to: string,
+	body: string,
+	opts: { projectId?: string | null; clientId?: string } = {},
+) =>
+	acpJson<AcpMessage>("/messages", {
+		method: "POST",
+		body: JSON.stringify({
+			to,
+			body,
+			...(opts.projectId ? { projectId: opts.projectId } : {}),
+			...(opts.clientId ? { clientId: opts.clientId } : {}),
+		}),
+	});
+export const acpSetProject = (name: string, projectId: string | null) =>
+	acpJson<AcpAgentInfo>(`/agents/${encodeURIComponent(name)}`, {
+		method: "PATCH",
+		body: JSON.stringify({ projectId }),
+	});
+export const acpRuntimes = () => acpJson<{ default: string; available: string[] }>("/runtimes");
+
+/** `/ws/acp`: the owner's message rows and agent activity, live. */
+export function openAcpSocket(): WebSocket {
+	return new WebSocket(`${WS_BASE}/ws/acp`);
+}
 export const acpRequeue = (id: number) =>
 	acpJson<AcpMessage>(`/messages/${id}/requeue`, { method: "POST" });

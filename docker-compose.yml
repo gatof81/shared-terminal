@@ -102,6 +102,10 @@ services:
       - ACP_DEFAULT_RUNTIME=${ACP_DEFAULT_RUNTIME:-claude-acp-0.108.0}
       - ACP_DEFAULT_MODEL=${ACP_DEFAULT_MODEL:-claude-sonnet-5-5}
       - ACP_MESSAGE_MAX_BYTES=${ACP_MESSAGE_MAX_BYTES:-262144}
+      - ACP_MAX_DEPTH=${ACP_MAX_DEPTH:-6}
+      # 1 ⇒ also installs the deterministic test adapter as runtime
+      # `st-test-agent` (no model, no credentials) for end-to-end checks.
+      - ACP_TEST_RUNTIME=${ACP_TEST_RUNTIME:-}
       # D1 project conversation (docs/PROJECT_CONVERSATION.md §1). Empty ⇒ off:
       # no routes, no /ws/project/, nothing under .projects/, auth/status
       # byte-identical. Effective only with PROJECT_CHAT_ENABLED and
