@@ -57,7 +57,7 @@ const api = vi.hoisted(() => ({
 	),
 	// P3a project directory: absent, as on a backend without the feature.
 	projectChatEnabled: vi.fn(() => false),
-	acpAgentsEnabled: () => false,
+	acpAgentsEnabled: vi.fn(() => false),
 }));
 vi.mock("./api.js", () => api);
 const core = vi.hoisted(() => ({
@@ -280,6 +280,20 @@ describe("Chat overlay", () => {
 		expect(ta?.disabled).toBe(true);
 		// Live socket follows from the newest seq loaded.
 		expect(sock.follow).toHaveBeenCalledWith("c1", 6);
+	});
+
+	it("with ACP agents on, a traditional session's Chat is read-only history: no composer input", async () => {
+		api.acpAgentsEnabled.mockReturnValue(true);
+		try {
+			await openChat();
+			await openThread([ev("user_prompt", { prompt: "hola" })]);
+			const thread = $("chat-thread");
+			expect(thread.querySelector(".chat-composer")).toBeNull();
+			expect(thread.querySelector("textarea")).toBeNull();
+			expect(thread.querySelector(".chat-readonly-note")?.textContent).toContain("Terminal");
+		} finally {
+			api.acpAgentsEnabled.mockReturnValue(false);
+		}
 	});
 
 	it("Copy report copies last_assistant_message byte for byte", async () => {
