@@ -611,14 +611,22 @@ export class AcpAgents {
 	 * and terminal state (an `uncertain` request the person requeues may still
 	 * end `done`, and then the trigger's real reply follows). A person's
 	 * message gets none: the person sees the state in Chat.
+	 *
+	 * The notice must not become a resend by other means: the requester is a
+	 * model that could simply ask again, repeating effects the interrupted run
+	 * may already have had. Shared Terminal itself never re-sends; the text
+	 * tells the agent not to either, and leaves the retry to the person
+	 * (requeue). A repeat the agent sends anyway is still bounded by depth.
 	 */
 	private async noticeUnfinished(ownerUserId: string, id: number): Promise<void> {
 		const r = await d1Query<MessageRow>(
 			`INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, reply_to, body, state, project_id, depth, note)
 			 SELECT m.owner_user_id, m.to_id, m.from_id, 'reply', m.id,
 				'Tu mensaje #' || m.id || ' a @' || m.to_id || ' no terminó: ' ||
-				CASE m.state WHEN 'failed' THEN 'falló' ELSE 'se interrumpió y quedó incierto (no se reenvía salvo que la persona lo decida)' END ||
-				COALESCE(' — ' || m.note, '') || '. No hay respuesta de @' || m.to_id || ' para ese pedido.',
+				CASE m.state WHEN 'failed' THEN 'falló' ELSE 'se interrumpió y su estado es incierto: pudo haber hecho parte del trabajo' END ||
+				COALESCE(' — ' || m.note, '') || '. No hay respuesta de @' || m.to_id || ' para ese pedido. ' ||
+				'No lo repitas ni lo reenvíes por tu cuenta: puede haber tenido efectos, y si se reintenta lo decide la persona. ' ||
+				'Decí en tu respuesta que ese pedido no terminó y seguí solo con lo que no dependa de él.',
 				'pending', m.project_id, m.depth, 'unfinished:' || m.state
 			 FROM agent_messages m
 			 WHERE m.owner_user_id = ?1 AND m.id = ?2 AND m.kind = 'request' AND m.state IN ('failed', 'uncertain')

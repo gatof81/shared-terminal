@@ -618,7 +618,21 @@ describe("ACP messages: scope, replies, loop guard (v22)", () => {
 			state: "uncertain",
 			note: "runner restarted",
 		});
-		expect(repliesTo(interrupted.body.id)).toHaveLength(1);
+		const notice = repliesTo(interrupted.body.id);
+		expect(notice).toHaveLength(1);
+		// Informing is not retrying: the notice tells the requester not to repeat
+		// the request, and nothing re-sends it (still one request, still uncertain).
+		expect(String(notice[0]!.body)).toContain("No lo repitas ni lo reenvíes");
+		expect(
+			db
+				.prepare(
+					"SELECT COUNT(*) AS n FROM agent_messages WHERE from_id = 'arquitecto' AND to_id = 'developer' AND body = 'esto se interrumpe'",
+				)
+				.get(),
+		).toEqual({ n: 1 });
+		expect((await call(owner, "GET", `/messages/${interrupted.body.id}`)).body.state).toBe(
+			"uncertain",
+		);
 		// The person requeues it and it ends done: the real reply follows the notice.
 		expect((await call(owner, "POST", `/messages/${u.body.id}/requeue`)).status).toBe(200);
 		const again = await call(as("developer"), "POST", "/runner/claim");
