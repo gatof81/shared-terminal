@@ -116,6 +116,27 @@ describe("sending", () => {
 		expect(api.acpSend.mock.calls[0]![2].clientId).not.toBe(api.acpSend.mock.calls[1]![2].clientId);
 	});
 
+	it("a retry of a long message reuses its id AND the exact body (no second upload)", async () => {
+		api.acpFeed.mockResolvedValue(feed({ agent: agent("dev"), maxMessageBytes: 8 }));
+		api.uploadSessionFiles.mockResolvedValue({ paths: ["/home/developer/uploads/m.md"] });
+		api.acpSend.mockRejectedValueOnce(new Error("503")).mockResolvedValueOnce(msg(4));
+		const t = mount();
+		t.open({ kind: "agent", name: "dev" });
+		await flush();
+		t.input.value = "un mensaje largo";
+		submit(t);
+		await flush();
+		await flush();
+		expect(t.input.value).toBe("un mensaje largo");
+		submit(t);
+		await flush();
+		await flush();
+		expect(api.uploadSessionFiles).toHaveBeenCalledTimes(1);
+		const [first, second] = api.acpSend.mock.calls;
+		expect(second![1]).toBe(first![1]);
+		expect(second![2].clientId).toBe(first![2].clientId);
+	});
+
 	it("an unknown leading mention sends nothing and keeps the text", async () => {
 		api.acpProjectFeed.mockResolvedValue(
 			feed({ project: { id: "p1", name: "P" }, agents: [agent("dev", "p1"), agent("qa", "p1")] }),

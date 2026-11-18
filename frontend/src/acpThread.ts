@@ -75,7 +75,14 @@ export class AcpThread {
 	private project: { id: string; name: string } | null = null;
 	private error = "";
 	private sending = 0;
-	private lastFailed: { text: string; clientId: string } | null = null;
+	/**
+	 * The last send that did not reach every recipient. Retrying the same text
+	 * reuses its client id AND the exact body each recipient was sent (a long
+	 * message's attachment path): the server replays a retry only when sender,
+	 * body and scope are identical, and refuses anything else as a reused id.
+	 */
+	private lastFailed: { text: string; clientId: string; bodies: Map<string, string> } | null =
+		null;
 	private unsubscribe: (() => void) | null = null;
 	private poll: ReturnType<typeof setInterval> | null = null;
 	private statusTimer: ReturnType<typeof setInterval> | null = null;
@@ -801,8 +808,9 @@ export class AcpThread {
 		// finds an empty field and sends nothing. A new message typed meanwhile is
 		// a new send, as always. Same text again after a failure ⇒ same id:
 		// recipients that already got it are not sent twice.
-		const clientId =
-			this.lastFailed?.text === text ? this.lastFailed.clientId : crypto.randomUUID();
+		const retry = this.lastFailed?.text === text ? this.lastFailed : null;
+		const clientId = retry?.clientId ?? crypto.randomUUID();
+		const bodies = retry?.bodies ?? new Map<string, string>();
 		this.input.value = "";
 		this.drafts.delete(sourceKey(src));
 		// A send that did not go out gives its text back to its own chat (never
@@ -835,13 +843,14 @@ export class AcpThread {
 			const tooBig = new TextEncoder().encode(text).length > this.maxBytes;
 			for (const name of to.to) {
 				try {
-					let body = text;
-					if (tooBig) {
+					let body = bodies.get(name) ?? text;
+					if (tooBig && !bodies.has(name)) {
 						const agent = this.agents.get(name);
 						if (!agent) throw new Error(`@${name} desconocido`);
 						const file = new File([text], `mensaje-${Date.now()}.md`, { type: "text/markdown" });
 						const { paths } = await uploadSessionFiles(agent.sessionId, [file]);
 						body = `Te envío un mensaje largo como adjunto (${file.size} bytes): ${paths[0]}\nLeelo completo y tratalo como el contenido de este mensaje.`;
+						bodies.set(name, body);
 					}
 					const row = await acpSend(name, body, {
 						...(src.kind === "project" ? { projectId: src.projectId } : {}),
@@ -861,7 +870,7 @@ export class AcpThread {
 			if (failed.length) {
 				giveBack();
 				if (here) {
-					this.lastFailed = { text, clientId };
+					this.lastFailed = { text, clientId, bodies };
 					this.error = `No se envió a ${failed.join("; ")}. El texto volvió al campo: enviarlo de nuevo no duplica a quienes ya lo recibieron.`;
 				}
 			} else if (here) {
