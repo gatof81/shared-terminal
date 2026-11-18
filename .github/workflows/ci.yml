@@ -171,14 +171,31 @@ jobs:
 
   frontend-e2e:
     name: Frontend e2e (Playwright, desktop + mobile)
-    # Pinned, not ubuntu-latest: `playwright install --with-deps` only knows
-    # the Ubuntu releases its version shipped with (1.52 → up to 24.04); on a
-    # newer runner it refuses to install the browser's shared libraries.
-    # Bump the runner together with the Playwright version.
     runs-on: ubuntu-24.04
+    # Playwright's own image for the version in package-lock.json (1.52.0):
+    # Chromium and every library and font it links against are already in
+    # it, which replaces `playwright install --with-deps chromium` — an apt
+    # step that took from 22 s to 9 min 21 s (measured 2026-11-18, #681).
+    # Pinned by digest because the screenshot baselines depend on its FONTS:
+    # glyphs the vendored Liberation fonts lack (⎇ ↻ ↳ ↑ ↓) fall back to a
+    # system font, and the apt-installed set drew them differently (11
+    # baselines were regenerated in this image). A new digest or Playwright
+    # version = regenerate the screenshots in the new image. Bump the tag
+    # together with @playwright/test (the browser build is looked up by
+    # version). uid 1001 is the runner's, so the checkout and the npm cache
+    # stay writable; --ipc=host because Docker's 64 MB /dev/shm slowed
+    # Chromium (+20 % test time without it), both per Playwright's CI guide.
+    container:
+      image: mcr.microsoft.com/playwright:v1.52.0-noble@sha256:a021500a801bab0611049217ffad6b9697d827205c15babb86a53bc1a61c02d5
+      options: --user 1001 --ipc=host
     defaults:
       run:
         working-directory: frontend
+    env:
+      # playwright.config.ts: a PR runs the primary shell's whole suite and
+      # the other shell's specific specs; main runs the full matrix.
+      E2E_PROFILE: ${{ github.event_name == 'pull_request' && 'pr' || 'full' }}
+      E2E_SERVER: preview
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -194,12 +211,6 @@ jobs:
 
       - name: Install
         run: npm ci
-
-      # The harness runs the app on the Vite dev server against the
-      # deterministic mock backend in e2e/mockBackend.ts — no Docker. Only Chromium is needed; `--with-deps` installs the
-      # shared libraries it links against.
-      - name: Playwright browser
-        run: npx playwright install --with-deps chromium
 
       - name: Typecheck e2e
         run: npm run typecheck:e2e
