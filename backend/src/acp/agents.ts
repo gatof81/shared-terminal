@@ -170,6 +170,14 @@ export interface AgentLoad {
 	pending: number;
 }
 
+export interface LoginMethod {
+	id: string;
+	name: string;
+	description: string;
+	/** argv: the adapter's own login command (terminal-auth). */
+	command: string[];
+}
+
 export interface ActivityEvent {
 	seq: number;
 	at: string;
@@ -694,6 +702,56 @@ export class AcpAgents {
 			[ownerUserId],
 		);
 		return new Set(r.results.map((x) => x.agent));
+	}
+
+	// ── Login (the adapter's terminal-auth methods) ─────────────────────────
+	// The runner reports what its adapter advertises at `initialize`; the
+	// person starts one from Chat ("Conectar cuenta"): the exact command runs in
+	// a new terminal tab of the agent's session, as the session's user, so the
+	// credentials land in the agent's own persistent ~/.claude. Memory only:
+	// a runner reports again on every start.
+
+	private readonly loginMethods = new Map<string, LoginMethod[]>();
+
+	setLoginMethods(agent: AgentRow, methods: unknown): void {
+		const ok: LoginMethod[] = [];
+		for (const m of Array.isArray(methods) ? methods.slice(0, 8) : []) {
+			const t = (m as { terminal?: { command?: unknown; args?: unknown; label?: unknown } })
+				?.terminal;
+			const id = (m as { id?: unknown })?.id;
+			if (typeof id !== "string" || !/^[a-z0-9-]{1,40}$/.test(id) || !t) continue;
+			// Only a program under the runtime mount or a system path, args from a
+			// safe alphabet: this becomes a shell line in the tab.
+			if (
+				typeof t.command !== "string" ||
+				!/^\/(opt\/st-acp|usr\/(local\/)?bin)\/[A-Za-z0-9._/-]+$/.test(t.command)
+			)
+				continue;
+			const args = Array.isArray(t.args) ? t.args : [];
+			if (!args.every((a) => typeof a === "string" && /^[A-Za-z0-9._/=-]{1,200}$/.test(a)))
+				continue;
+			ok.push({
+				id,
+				name: String((m as { name?: unknown }).name ?? id).slice(0, 80),
+				description: String((m as { description?: unknown }).description ?? "").slice(0, 200),
+				command: [t.command, ...(args as string[])],
+			});
+		}
+		this.loginMethods.set(agent.agent_id, ok);
+		this.publish(agent.owner_user_id, { type: "agents" });
+	}
+
+	loginMethodsOf(agentId: string): LoginMethod[] {
+		return this.loginMethods.get(agentId) ?? [];
+	}
+
+	/** Opens a terminal tab in the agent's session running the method's login command. */
+	async startLogin(agent: AgentRow, methodId: string): Promise<{ tabId: string } | null> {
+		const m = this.loginMethodsOf(agent.agent_id).find((x) => x.id === methodId);
+		if (!m) return null;
+		const line = `${m.command.map((a) => `'${a}'`).join(" ")}; echo; echo 'Listo. Si el login terminó bien, el agente se reactiva solo en unos segundos. Podés cerrar esta pestaña.'; exec bash -l`;
+		const tab = await this.docker.createTab(agent.session_id, "Conectar cuenta", line);
+		return { tabId: tab.tabId };
 	}
 
 	// ── Activity (memory only) ─────────────────────────────────────────────

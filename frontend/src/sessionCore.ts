@@ -1869,6 +1869,22 @@ function openTab(tabId: string) {
 	renderTabBar();
 }
 
+// A tab another module created on the server (ACP "Conectar cuenta": the
+// adapter's login command): re-read the tab list and show that tab.
+if (typeof window !== "undefined")
+	window.addEventListener("st:open-terminal-tab", (e) => {
+		const { sessionId, tabId } = (e as CustomEvent<{ sessionId: string; tabId: string }>).detail;
+		if (sessionId !== activeSessionId) return;
+		void listTabs(sessionId)
+			.then((tabs) => {
+				if (activeSessionId !== sessionId) return;
+				setCurrentTabs(tabs.sort((a, b) => a.createdAt - b.createdAt));
+				renderTabBar();
+				showTerminalTab(tabId);
+			})
+			.catch((err) => showToast((err as Error).message, true));
+	});
+
 async function addTab(triggeredBy?: HTMLButtonElement) {
 	if (!activeSessionId) return;
 	const sessionId = activeSessionId;

@@ -24,6 +24,17 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { createInterface } from "node:readline";
 
 const ME = process.env.ST_AGENT ?? "test";
+// Login like a real adapter: `--login` is the command it advertises as its
+// terminal-auth method; it writes the session's credentials file and exits.
+// Credentials are required only when `<state>/test-agent/require-auth` exists.
+const CREDS = `${process.env.HOME}/.claude/.credentials.json`;
+if (process.argv.includes("--login")) {
+	const { mkdirSync: mk, writeFileSync: wf } = await import("node:fs");
+	mk(`${process.env.HOME}/.claude`, { recursive: true });
+	wf(CREDS, JSON.stringify({ test: true, at: new Date().toISOString() }), { mode: 0o600 });
+	console.log("Login de prueba completo: credenciales guardadas en ~/.claude.");
+	process.exit(0);
+}
 const DIR = `${process.env.RUNNER_STATE ?? `${process.env.HOME}/.st-test-agent`}/test-agent`;
 const FILE = `${DIR}/sessions.json`;
 mkdirSync(DIR, { recursive: true });
@@ -138,7 +149,14 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
 			result = {
 				protocolVersion: 1,
 				agentCapabilities: {},
-				authMethods: [],
+				authMethods: [
+					{
+						id: "test-login",
+						name: "Login de prueba",
+						description: "Escribe credenciales de prueba en ~/.claude",
+						_meta: { "terminal-auth": { command: process.execPath, args: [new URL(import.meta.url).pathname, "--login"], label: "Login de prueba" } },
+					},
+				],
 				_meta: { jetbrains: { air: { version: 1, capabilities: ["asyncTasks"] } } },
 			};
 		else if (method === "session/new") {
@@ -150,6 +168,8 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
 			if (!sessions[params.sessionId]) throw Object.assign(new Error("unknown session"), { code: -32002 });
 			result = {};
 		} else if (method === "session/set_mode") result = {};
+		else if (method === "session/prompt" && existsSync(`${DIR}/require-auth`) && !existsSync(CREDS))
+			throw Object.assign(new Error("Authentication required"), { code: -32000 });
 		else if (method === "session/prompt") result = await prompt(params.sessionId, params.prompt.map((b) => b.text ?? "").join("\n"));
 		else throw Object.assign(new Error(`unsupported ${method}`), { code: -32601 });
 		out({ id, result });

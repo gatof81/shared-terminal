@@ -85,6 +85,9 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 		running: loads.get(a.name)?.running ?? null,
 		pending: loads.get(a.name)?.pending ?? 0,
 		authRequired: acp.authRequired(a.agent_id),
+		loginMethods: acp
+			.loginMethodsOf(a.agent_id)
+			.map((m) => ({ id: m.id, name: m.name, description: m.description })),
 	});
 	const beforeOf = (req: Request) => {
 		const n = Number(req.query.before);
@@ -306,6 +309,29 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 		}),
 	);
 
+	// POST /agents/:name/login {methodId} — "Conectar cuenta": opens a terminal
+	// tab in the agent's session running the adapter's own login command. The
+	// person completes the official flow there; the runner notices the new
+	// credentials and restarts its adapter by itself.
+	router.post(
+		"/agents/:name/login",
+		wrap(async (req, res) => {
+			const owner = ownerOnly(res);
+			if (!owner) return;
+			const agent = await acp.byName(owner, req.params.name);
+			if (!agent) return void res.status(404).json({ error: "not-found" });
+			const methodId = String((req.body as { methodId?: unknown })?.methodId ?? "");
+			const r = await acp.startLogin(agent, methodId).catch((err: Error) => {
+				logger.warn(`[acp] login tab for @${agent.name}: ${err.message}`);
+				return "failed" as const;
+			});
+			if (r === "failed") return void res.status(409).json({ error: "session-not-running" });
+			r
+				? res.status(201).json({ sessionId: agent.session_id, ...r })
+				: res.status(404).json({ error: "unknown-method" });
+		}),
+	);
+
 	// POST /questions/:id/answer {action: accept|decline|cancel, content?} — the
 	// person only (an agent's token is refused: a question to the person is never
 	// answered by another agent). A second answer finds nothing open: 409.
@@ -405,6 +431,16 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 	);
 
 	// Questions from the runner's side: register one, wait for its answer, close it.
+	router.post(
+		"/runner/auth-methods",
+		wrap(async (req, res) => {
+			const agent = agentOnly(res);
+			if (!agent) return;
+			acp.setLoginMethods(agent, (req.body as { methods?: unknown })?.methods);
+			res.status(204).end();
+		}),
+	);
+
 	router.post(
 		"/runner/questions",
 		wrap(async (req, res) => {

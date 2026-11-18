@@ -14,10 +14,12 @@ import {
 	type AcpAgentInfo,
 	acpAgentsEnabled,
 	acpListAgents,
+	acpLogin,
 	acpSetProject,
 	fetchProjects,
 	projectChatEnabled,
 } from "./api.js";
+import { showToast } from "./components/toast.js";
 import { activeSessionId } from "./main.js";
 import { navigateProject } from "./router.js";
 import { el } from "./ui.js";
@@ -124,17 +126,40 @@ function renderHeader(s: ThreadState): void {
 	noticeEl.replaceChildren();
 	noticeEl.hidden = !auth;
 	if (auth) {
-		const open = el("button", "files-btn", "Abrir Terminal");
-		open.type = "button";
-		open.addEventListener("click", () => setView("terminal"));
 		noticeEl.append(
 			el(
 				"div",
 				undefined,
-				"El agente necesita iniciar sesión en Claude (una sola vez por sesión). En la Terminal ejecutá `claude`, escribí /login y completá el ingreso en el navegador; después salí con /exit. Tus mensajes quedan pendientes y se procesan solos.",
+				"El agente necesita conectar una cuenta de Claude (una sola vez por sesión; queda guardada en la sesión). Tus mensajes quedan pendientes y se procesan solos al conectar.",
 			),
-			open,
 		);
+		const actions = el("div", "acp-login-actions");
+		// The adapter's own login methods: each opens a terminal tab of this
+		// session running the official `claude auth login` flow.
+		for (const m of a.loginMethods ?? []) {
+			const b = el("button", "files-btn primary", `Conectar cuenta · ${m.name}`);
+			b.type = "button";
+			b.title = m.description || m.name;
+			b.addEventListener("click", () => {
+				b.disabled = true;
+				void acpLogin(a.name, m.id)
+					.then(({ sessionId, tabId }) =>
+						window.dispatchEvent(
+							new CustomEvent("st:open-terminal-tab", { detail: { sessionId, tabId } }),
+						),
+					)
+					.catch((err: Error) => showToast(`No se pudo abrir el login: ${err.message}`, true))
+					.finally(() => (b.disabled = false));
+			});
+			actions.append(b);
+		}
+		const open = el("button", "files-btn", "Abrir Terminal");
+		open.type = "button";
+		open.title =
+			"También podés ejecutar `claude auth login` (o `claude` y /login) en la Terminal de esta sesión.";
+		open.addEventListener("click", () => setView("terminal"));
+		actions.append(open);
+		noticeEl.append(actions);
 	}
 }
 

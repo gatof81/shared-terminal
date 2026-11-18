@@ -3091,7 +3091,7 @@ export class DockerManager {
 	 * "foo" from listTabs). The API rejects leading/trailing whitespace
 	 * instead, so the value stored equals the value accepted.
 	 */
-	async createTab(sessionId: string, label?: string): Promise<Tab> {
+	async createTab(sessionId: string, label?: string, command?: string): Promise<Tab> {
 		// 64 bits of entropy. 32 bits (the previous size) is unlikely to
 		// collide at realistic per-session tab counts, but if it ever does
 		// the inner `tmux new-session -d -s <tabId>` exits non-zero and
@@ -3118,6 +3118,9 @@ export class DockerManager {
 			"120",
 			"-y",
 			"36",
+			// Optional shell command the tab starts with (ACP "Conectar cuenta":
+			// the adapter's own login command, built and quoted by the caller).
+			...(command ? [command] : []),
 		]);
 		if (create.exitCode !== 0) {
 			throw new Error(`tmux new-session failed (exit ${create.exitCode}): ${create.stdout}`);

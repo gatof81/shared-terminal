@@ -246,6 +246,33 @@ async function main() {
 	const u2b = await get(ask2.id);
 	check("the interrupted message was not run again", u2b.state === "uncertain" && u2b.attempts === 1, `${u2b.state}/${u2b.attempts}`);
 
+	// 6e. Login: an agent that needs credentials waits ("esperando login"), "Conectar cuenta" runs the adapter's
+	// own advertised login in a terminal tab of the session, and the agent resumes by itself — same session,
+	// same ACP context, nothing recreated.
+	const execIn = async (sid, cmd) => {
+		const r = await fetch(`${ST}/api/sessions/${sid}/exec`, {
+			method: "POST",
+			headers: { "content-type": "application/json", cookie },
+			body: JSON.stringify({ cmd }),
+		});
+		return (await r.text()).includes('"exit"');
+	};
+	const taDir = "/home/developer/workspace/.st/acp/test-agent";
+	check("test agent set to require credentials (none present)", await execIn(sids[DEV], ["sh", "-c", `mkdir -p ${taDir} && touch ${taDir}/require-auth && rm -f $HOME/.claude/.credentials.json`]));
+	const needs = await send(DEV, "¿estás conectado?", pid);
+	const waiting = await waitFor("auth required", async () => (await agents()).find((a) => a.name === DEV && a.authRequired), 60_000);
+	check("the agent reports it needs a login; the message waits (not failed, not uncertain)", !!waiting && (await get(needs.id)).state !== "uncertain", waiting && JSON.stringify(waiting.loginMethods));
+	const ctxBefore = Number(/sesión ACP: (\d+)/.exec((await agentFeed(DEV)).messages.filter((m) => m.result_text).at(-1)?.result_text ?? "")?.[1] ?? 0);
+	const method = waiting?.loginMethods?.[0]?.id;
+	const login = await api("POST", `/api/acp/agents/${DEV}/login`, { methodId: method });
+	check("Conectar cuenta opens a terminal tab running the adapter's login", login.status === 201 && /^tab-/.test(login.body?.tabId ?? ""), JSON.stringify(login.body));
+	const resumed = await waitMsg(needs.id, ["done", "uncertain", "failed"], 120_000);
+	check("after the login the agent resumes by itself and answers the waiting message", resumed.state === "done" && resumed.attempts >= 1, short(resumed.result_text));
+	const ctxAfter = Number(/sesión ACP: (\d+)/.exec(resumed.result_text ?? "")?.[1] ?? 0);
+	check("same ACP session (context kept) across the adapter restart", ctxAfter > ctxBefore, `${ctxBefore} → ${ctxAfter}`);
+	check("the agent no longer reports a missing login", !(await agents()).find((a) => a.name === DEV)?.authRequired);
+	await execIn(sids[DEV], ["sh", "-c", `rm -f ${taDir}/require-auth`]);
+
 	// 6b. Backend restart (RESTART_CMD): queued messages are D1 rows; runners retry until it is back.
 	if (process.env.RESTART_CMD) {
 		const busy = await send(DEV, "esperá 8", pid);

@@ -428,3 +428,8 @@
 	font-size: 0.82rem;
 	color: var(--c-muted);
 }
+.acp-login-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+}

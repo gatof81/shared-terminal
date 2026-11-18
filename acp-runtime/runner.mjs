@@ -17,7 +17,7 @@
 // so it survives a re-created container): the ACP session id and one event log
 // per message.
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 const env = process.env;
@@ -32,8 +32,27 @@ const STARTUP_WINDOW_MS = 3_000; // what the resume itself triggers arrives with
 const BG_CHECK_MS = Number(env.BG_CHECK_MS ?? 10 * 60_000); // ask once about tasks still open after this
 const TERMINAL = new Set(["completed", "failed", "stopped"]);
 const AUTH_REQUIRED = -32000; // ACP RequestError.authRequired()
-const AUTH_RETRY_MS = 20_000;
+const AUTH_RETRY_MS = 60_000; // without new credentials, the adapter is restarted anyway after this
+const API_TIMEOUT_MS = 30_000;
+const CREDENTIALS = `${env.HOME}/.claude/.credentials.json`;
+const SELF = new URL(import.meta.url).pathname;
+const selfMtime = () => {
+	try {
+		return statSync(SELF).mtimeMs;
+	} catch {
+		return 0;
+	}
+};
+const credentialsMtime = () => {
+	try {
+		return statSync(CREDENTIALS).mtimeMs;
+	} catch {
+		return 0;
+	}
+};
+const startedMtime = selfMtime();
 let authWaitUntil = 0;
+let authCredentials = null; // credentials mtime when the adapter said "not authenticated"
 mkdirSync(LOG_DIR, { recursive: true });
 
 const PROTOCOL = [
@@ -62,10 +81,14 @@ const marker = (msg) => {
 async function api(method, path, body) {
 	for (;;) {
 		try {
+			// A bounded wait: an answer that never comes (lost on the way, a backend
+			// stuck on D1) must not park the runner forever. A retried POST is safe:
+			// every runner route is idempotent or conditional on state.
 			const res = await fetch(API + path, {
 				method,
 				headers: { authorization: `Bearer ${env.ST_TOKEN}`, "content-type": "application/json" },
 				body: body && JSON.stringify(body),
+				signal: AbortSignal.timeout(API_TIMEOUT_MS),
 			});
 			const text = await res.text();
 			return { status: res.status, body: text ? JSON.parse(text) : null };
@@ -274,11 +297,18 @@ async function openSession() {
 		// arrive as `elicitation/create` requests that Shared Terminal shows in Chat.
 		clientCapabilities: {
 			elicitation: { form: {} },
-			_meta: { jetbrains: { air: { version: 1, capabilities: ["asyncTasks"] } } },
+			// terminal-auth: the adapter advertises its official login commands
+			// (`claude auth login …`), which Shared Terminal runs in a terminal tab
+			// of this session ("Conectar cuenta"). No OAuth of our own.
+			_meta: { "terminal-auth": true, jetbrains: { air: { version: 1, capabilities: ["asyncTasks"] } } },
 		},
 	});
 	const air = init._meta?.jetbrains?.air?.capabilities ?? [];
 	if (!air.includes("asyncTasks")) throw new Error(`adapter does not offer asyncTasks (offers: ${air.join(",")})`);
+	const methods = (init.authMethods ?? [])
+		.filter((m) => m?._meta?.["terminal-auth"]?.command)
+		.map((m) => ({ id: m.id, name: m.name, description: m.description, terminal: m._meta["terminal-auth"] }));
+	await api("POST", "/runner/auth-methods", { methods });
 	const systemPrompt = { mode: "append", content: [{ type: "text", text: PROTOCOL }] };
 	let sessionId;
 	if (existsSync(SESSION_FILE)) {
@@ -317,6 +347,7 @@ function run(sessionId, msg) {
 				emit({ kind: "auth", state: "required" });
 				current = null;
 				authWaitUntil = Date.now() + AUTH_RETRY_MS;
+				authCredentials = credentialsMtime();
 				await api("POST", `/runner/messages/${msg.id}/release`, { note });
 				log(`message #${msg.id}: back to pending (${note})`);
 				resolve();
@@ -404,23 +435,37 @@ function bgCheck(sessionId) {
 }
 
 // ── Recovery ──────────────────────────────────────────────────────────────
-// The interrupted message is judged from its own log: a settle written but not
-// posted is re-posted as written; anything else is `uncertain`, never resent.
+// A message found `running` with nobody working on it is judged from its own
+// log, on its LAST attempt only:
+// - no prompt since its last release (or none at all): the claim's answer was
+//   lost or the runner stopped before prompting — the prompt never left, so it
+//   goes back to pending (`release`), nothing to be uncertain about;
+// - a settle written after the last prompt but not posted: re-posted as written;
+// - anything else: `uncertain`, never resent.
 async function settleInterrupted(msg) {
 	const file = `${LOG_DIR}/m-${msg.id}.ndjson`;
 	const lines = existsSync(file) ? readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
-	const written = lines.find((l) => l.settled)?.settled;
-	if (written) {
-		await api("POST", `/runner/messages/${msg.id}/result`, written);
+	const last = (pred) => lines.findLastIndex(pred);
+	const p = last((l) => l.prompt !== undefined);
+	const settled = last((l) => l.settled);
+	if (settled > p && p !== -1) {
+		await api("POST", `/runner/messages/${msg.id}/result`, lines[settled].settled);
 		return null;
 	}
+	if (p === -1 || last((l) => l.released) > p) {
+		const note = "claimed but never sent to the agent (claim answer lost or runner restarted before the prompt)";
+		await api("POST", `/runner/messages/${msg.id}/release`, { note });
+		log(`#${msg.id}: ${note}; back to pending`);
+		return null;
+	}
+	const attempt = lines.slice(p);
 	const open = new Map();
-	for (const { update: u } of lines) {
+	for (const { update: u } of attempt) {
 		if (u?.sessionUpdate === "async_task_spawned") open.set(u.asyncTaskId, u.taskType);
 		if (u?.sessionUpdate === "async_task_state_update" && TERMINAL.has(u.state)) open.delete(u.asyncTaskId);
 	}
-	const answered = lines.some((l) => l.promptResult);
-	const note = `runner restarted: ${lines.length ? (answered ? "turn answered" : "turn in progress") : "no trace of the turn"}${open.size ? `; background open at the time: ${[...open].map(([id, t]) => `${id}(${t})`).join(" ")}` : ""}`;
+	const answered = attempt.some((l) => l.promptResult);
+	const note = `runner restarted: ${answered ? "turn answered" : "turn in progress"}${open.size ? `; background open at the time: ${[...open].map(([id, t]) => `${id}(${t})`).join(" ")}` : ""}`;
 	await api("POST", `/runner/messages/${msg.id}/result`, { state: "uncertain", note });
 	log(`interrupted #${msg.id}: uncertain (${note})`);
 	return note;
@@ -460,13 +505,36 @@ async function main() {
 		if (sys.status === 200) await run(sessionId, sys.body);
 	}
 	for (;;) {
-		if (!agentIdle() || Date.now() < authWaitUntil) {
+		// After "not authenticated", the adapter (and the Claude process it
+		// started without credentials) is replaced: the restart loop relaunches
+		// this runner in 3 s with the same ACP session. At once when the
+		// session's credentials change (a login from the Terminal or from
+		// "Conectar cuenta"), else after AUTH_RETRY_MS.
+		if (authCredentials !== null && !current) {
+			if (credentialsMtime() !== authCredentials || Date.now() >= authWaitUntil) {
+				log(credentialsMtime() !== authCredentials ? "credentials changed: restarting the adapter" : "still not authenticated: restarting the adapter to check again");
+				process.exit(0);
+			}
+			await new Promise((ok) => setTimeout(ok, 1_000));
+			continue;
+		}
+		// A new runner was installed (backend upgrade): hand over while idle.
+		if (!current && live.size === 0 && selfMtime() !== startedMtime) {
+			log("runner updated on disk: restarting into the new version");
+			process.exit(0);
+		}
+		if (!agentIdle()) {
 			await new Promise((ok) => setTimeout(ok, 500));
 			continue;
 		}
 		const r = await api("POST", "/runner/claim");
 		if (r.status === 200) await run(sessionId, r.body);
-		else await new Promise((ok) => setTimeout(ok, 2_000));
+		else if (r.status === 409) {
+			// Something of ours is `running` while we run nothing: our claim
+			// landed but its answer was lost. Judge it like a restart would.
+			const cur = await api("GET", "/runner/running");
+			if (cur.status === 200 && !current) await settleInterrupted(cur.body);
+		} else await new Promise((ok) => setTimeout(ok, 2_000));
 	}
 }
 

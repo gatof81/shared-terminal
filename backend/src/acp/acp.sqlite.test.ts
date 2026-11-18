@@ -490,6 +490,64 @@ describe("ACP messages: scope, replies, loop guard (v22)", () => {
 		});
 	});
 
+	it("Conectar cuenta: only the adapter's safe terminal-auth commands, run in a tab of the agent's session", async () => {
+		const createTab = vi.fn(async (_sid: string, _label?: string, _cmd?: string) => ({
+			tabId: "tab-login",
+		}));
+		(acp as unknown as { docker: unknown }).docker = { createTab };
+		const reported = await call(as("arquitecto"), "POST", "/runner/auth-methods", {
+			methods: [
+				{
+					id: "claude-ai-login",
+					name: "Claude Subscription",
+					terminal: {
+						command: "/usr/local/bin/node",
+						args: [
+							"/opt/st-acp/claude-acp-0.108.0/node_modules/x/index.js",
+							"--cli",
+							"auth",
+							"login",
+							"--claudeai",
+						],
+					},
+				},
+				{
+					id: "evil",
+					name: "x",
+					terminal: { command: "/usr/bin/sh", args: ["-c", "rm -rf ~; echo"] },
+				},
+				{ id: "bad-path", name: "x", terminal: { command: "/tmp/x", args: [] } },
+			],
+		});
+		expect(reported.status).toBe(204);
+		const ag = (await call(owner, "GET", "/agents")).body.find(
+			(a: { name: string }) => a.name === "arquitecto",
+		);
+		expect(ag.loginMethods).toEqual([
+			{ id: "claude-ai-login", name: "Claude Subscription", description: "" },
+		]);
+		expect(
+			(await call(owner, "POST", "/agents/arquitecto/login", { methodId: "evil" })).status,
+		).toBe(404);
+		expect(
+			(
+				await call(as("arquitecto"), "POST", "/agents/arquitecto/login", {
+					methodId: "claude-ai-login",
+				})
+			).status,
+		).toBe(403);
+		const r = await call(owner, "POST", "/agents/arquitecto/login", {
+			methodId: "claude-ai-login",
+		});
+		expect(r.status).toBe(201);
+		expect(r.body).toEqual({ sessionId: SID.arq, tabId: "tab-login" });
+		const [sid, label, line] = createTab.mock.calls[0]!;
+		expect([sid, label]).toEqual([SID.arq, "Conectar cuenta"]);
+		expect(line).toMatch(
+			/^'\/usr\/local\/bin\/node' '\/opt\/st-acp\/[^']+' '--cli' 'auth' 'login' '--claudeai'; /,
+		);
+	});
+
 	it("events go only to the owner of the row", () => {
 		expect(events.filter((e) => e.type === "message").every((e) => e.owner === OWNER)).toBe(true);
 	});

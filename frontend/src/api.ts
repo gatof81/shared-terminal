@@ -2812,6 +2812,8 @@ export interface AcpAgentInfo {
 	authRequired?: boolean;
 	/** An open question of this agent waits for the person. */
 	waitingInput?: boolean;
+	/** Login methods its adapter advertises (terminal-auth), for "Conectar cuenta". */
+	loginMethods?: Array<{ id: string; name: string; description: string }>;
 }
 
 export type AcpQuestionState = "open" | "answered" | "delivered" | "withdrawn" | "orphaned";
@@ -2895,6 +2897,11 @@ export const acpAnswer = (
 	body: { action: "accept" | "decline"; content?: Record<string, unknown> },
 ) =>
 	acpJson<AcpQuestion>(`/questions/${id}/answer`, { method: "POST", body: JSON.stringify(body) });
+export const acpLogin = (name: string, methodId: string) =>
+	acpJson<{ sessionId: string; tabId: string }>(`/agents/${encodeURIComponent(name)}/login`, {
+		method: "POST",
+		body: JSON.stringify({ methodId }),
+	});
 export const acpRuntimes = () => acpJson<{ default: string; available: string[] }>("/runtimes");
 
 /** `/ws/acp`: the owner's message rows and agent activity, live. */
