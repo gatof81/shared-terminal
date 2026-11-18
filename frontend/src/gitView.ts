@@ -120,11 +120,42 @@ let mobilePane: "list" | "diff" = "list";
 // A route detail (<area>:<path>) that arrived before the status did.
 let pendingDetail: string | null = null;
 
-// Route detail = the selected change (#/sessions/<id>/git/<area>:<path>).
+// Route detail = the selected change (#/sessions/<id>/git/<area>:<path>), in a
+// nested repository prefixed with it: `@<encoded dir>:<area>:<path>`. Without
+// the repository a link to a nested repo's diff opened the workspace root,
+// where that change does not exist. An area never starts with "@", and
+// encodeURIComponent leaves no ":" in the dir, so old links (root) still parse.
+export function gitDetail(repoDir: string, area: string, path: string): string {
+	return `${repoDir ? `@${encodeURIComponent(repoDir)}:` : ""}${area}:${path}`;
+}
+
+export function parseGitDetail(detail: string): { dir: string; key: string } {
+	if (!detail.startsWith("@")) return { dir: "", key: detail };
+	const i = detail.indexOf(":");
+	if (i === -1) return { dir: "", key: detail };
+	try {
+		return { dir: decodeURIComponent(detail.slice(1, i)), key: detail.slice(i + 1) };
+	} catch {
+		return { dir: "", key: detail };
+	}
+}
+
 registerRouteDetail("git", {
-	current: () => (selected ? `${selected.area}:${selected.path}` : null),
-	apply: (detail) => {
+	current: () => (selected ? gitDetail(dir, selected.area, selected.path) : null),
+	apply: (routeDetail) => {
 		pendingDetail = null;
+		const parsed = routeDetail === null ? null : parseGitDetail(routeDetail);
+		const detail = parsed?.key ?? null;
+		if (parsed && parsed.dir !== dir) {
+			// Another repository of the workspace: load it, then select the change.
+			dir = parsed.dir;
+			selected = null;
+			clearDiff();
+			mobilePane = "list";
+			pendingDetail = detail;
+			void load();
+			return;
+		}
 		if (detail === null) {
 			selected = null;
 			clearDiff();

@@ -459,6 +459,29 @@ describe("diff", () => {
 		});
 	});
 
+	it("a link to a nested repository's diff names the repository and opens it", async () => {
+		expect(gv.parseGitDetail(gv.gitDetail("app/sub", "staged", "a:b.md"))).toEqual({
+			dir: "app/sub",
+			key: "staged:a:b.md",
+		});
+		// Old links (the workspace-root repository) read as before.
+		expect(gv.parseGitDetail("unstaged:src/x.ts")).toEqual({ dir: "", key: "unstaged:src/x.ts" });
+		api.fetchGitStatus.mockResolvedValueOnce({ repo: false, candidates: ["app"] });
+		api.fetchGitLog.mockRejectedValueOnce(new Error("x"));
+		await openGit();
+		// A route naming the nested repo: its status is loaded and the change selected.
+		api.fetchGitStatus.mockResolvedValueOnce({ ...DIRTY, root: "app" });
+		vs.applyRouteView("git", gv.gitDetail("app", "staged", "docs/b.md"));
+		await flush();
+		expect(api.fetchGitStatus).toHaveBeenLastCalledWith("s1", "app");
+		expect(api.fetchGitDiff).toHaveBeenLastCalledWith("s1", {
+			path: "docs/b.md",
+			area: "staged",
+			oldPath: "docs/a.md",
+			dir: "app",
+		});
+	});
+
 	it("never requests a diff for a restricted entry", async () => {
 		api.fetchGitStatus.mockResolvedValue(DIRTY);
 		await openGit();

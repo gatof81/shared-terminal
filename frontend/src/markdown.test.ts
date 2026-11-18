@@ -74,6 +74,24 @@ describe("renderMarkdown — safety", () => {
 		expect(window.location.href).toBe(before);
 	});
 
+	it("without a relative-link handler, a relative link is readable text, not a dead link", () => {
+		const root = render("Mirá [archivo](src/main.ts) y [src/x.ts](src/x.ts).");
+		expect(root.querySelector("a")).toBeNull();
+		const spans = [...root.querySelectorAll(".md-link-relative")].map((x) => x.textContent);
+		expect(spans).toEqual(["archivo (src/main.ts)", "src/x.ts"]);
+		expect(root.textContent).toBe("Mirá archivo (src/main.ts) y src/x.ts.");
+		// External links and anchors are untouched; a blocked scheme stays blocked.
+		const other = render("[web](https://example.com) [arriba](#top) [x](javascript:alert(1))");
+		expect(other.querySelector("a[target=_blank]")?.getAttribute("href")).toBe(
+			"https://example.com",
+		);
+		expect([...other.querySelectorAll("a")].map((x) => x.getAttribute("href"))).toEqual([
+			"https://example.com",
+			"#",
+		]);
+		expect(other.querySelector(".md-link-blocked")?.textContent).toBe("x");
+	});
+
 	it("renders images as inert placeholders (no <img> request)", () => {
 		const root = render("![diagram](https://evil.example/track.png)");
 		expect(root.querySelector("img")).toBeNull();

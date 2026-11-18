@@ -298,6 +298,15 @@ function renderLink(text: Node[], rawHref: string, opts: MarkdownOptions): Node 
 		appendAll(span, text);
 		return span;
 	}
+	if (target.kind === "relative" && !opts.onRelativeLink) {
+		// Nothing can open a workspace path here (a chat has no Files handler):
+		// a link that does nothing when clicked misleads. Show it as readable,
+		// copyable text instead — `archivo (src/main.ts)`.
+		const span = el("span", "md-link-relative");
+		appendAll(span, text);
+		if (span.textContent !== target.href) span.append(` (${target.href})`);
+		return span;
+	}
 	const a = el("a");
 	appendAll(a, text);
 	if (target.kind === "external") {

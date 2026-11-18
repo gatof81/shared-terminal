@@ -201,8 +201,7 @@
 		min-height: 56px;
 		font-size: 16px; /* no iOS zoom on focus */
 	}
-	.acp-msg-body,
-	.acp-msg-result {
+	pre.acp-msg-body {
 		max-height: 50vh;
 	}
 	.acp-project .acp-thread {
@@ -265,8 +264,6 @@
 }
 .acp-chat-error {
 	font-size: 0.9rem;
-}
-.acp-chat-error {
 	color: var(--c-err);
 }
 .acp-msg {
@@ -286,15 +283,33 @@
 	opacity: 0.85;
 	margin-bottom: 4px;
 }
-.acp-msg-body,
-.acp-msg-result {
+/* What the person typed: as typed (monospace, kept). A long paste scrolls in
+   its own box; an agent's answer never does (it is the content to read, and a
+   scroll box inside the thread traps the thumb on a phone). */
+pre.acp-msg-body,
+.acp-live {
 	margin: 0;
 	white-space: pre-wrap;
 	overflow-wrap: anywhere;
 	font-family: var(--font-mono, ui-monospace, monospace);
 	font-size: 0.85rem;
+}
+pre.acp-msg-body {
 	max-height: 40vh;
 	overflow-y: auto;
+}
+.acp-md,
+.acp-msg-result {
+	overflow-wrap: anywhere;
+	font-size: 0.9rem;
+}
+.acp-md .chat-md > :first-child,
+.acp-msg-result .chat-md > :first-child {
+	margin-top: 0;
+}
+.acp-md .chat-md > :last-child,
+.acp-msg-result .chat-md > :last-child {
+	margin-bottom: 0;
 }
 .acp-msg-result {
 	margin-top: 6px;

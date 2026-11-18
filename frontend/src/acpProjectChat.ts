@@ -1,6 +1,5 @@
 // acpProjectChat.ts — ACP Project Chat (experimental, `features.acpAgents`),
-// shown on the project page (`#/projects/<pid>/chat`, and the default page of
-// a project with ACP agents or no older team agents).
+// the project page (`#/projects/<pid>`).
 //
 // A project only groups agents and gives them a shared conversation: each
 // agent keeps its own session (environment, repository, terminal, ACP
@@ -15,7 +14,7 @@ import { type AcpAgentInfo, acpListAgents, acpSetProject } from "./api.js";
 import { confirmDialog } from "./components/dialog.js";
 import { showToast } from "./components/toast.js";
 import { routeHash } from "./router.js";
-import { el } from "./ui.js";
+import { el, syncChildren } from "./ui.js";
 
 const root = el("div", "pv-page acp-project");
 const barEl = el("div", "acp-project-agents");
@@ -24,7 +23,6 @@ let headerEl: HTMLElement | null = null;
 let shownPid: string | null = null;
 let others: AcpAgentInfo[] = [];
 let state: ThreadState | null = null;
-let legacyLink: HTMLElement | null = null;
 root.setAttribute("role", "region");
 root.setAttribute("aria-labelledby", "pv-title");
 thread.onState = (s) => {
@@ -55,17 +53,11 @@ export function projectHasAcpAgents(pid: string): boolean | null {
 /**
  * The page element for project `pid` (one element, kept across the project
  * page's re-renders so the draft, scroll and live socket survive).
- * `header`: the page header built by projectsView; `legacy`: a link to the
- * project's older team workspace, when it has one.
+ * `header`: the page header built by projectsView.
  */
-export function acpProjectPage(
-	pid: string,
-	header: HTMLElement,
-	legacy: HTMLElement | null,
-): HTMLElement {
+export function acpProjectPage(pid: string, header: HTMLElement): HTMLElement {
 	if (headerEl !== header) {
 		headerEl = header;
-		legacyLink = legacy;
 		root.replaceChildren(header, barEl, thread.root);
 	}
 	if (shownPid !== pid) {
@@ -96,29 +88,60 @@ export function resetAcpProject(): void {
 
 // ── Agents bar ───────────────────────────────────────────────────────────
 
+// Rebuilt on every thread change (activity, the 15 s status poll): each part
+// only when what it shows changed, so an agent picked in "Agregar agente
+// existente…" (not added yet) or the focus on a chip's × survives.
+let chipsEl: HTMLElement | null = null;
+let chipsKey = "";
+let toolsEl: HTMLElement | null = null;
+let toolsKey = "";
+const helpEl = el("p", "acp-project-help");
+
 function renderBar(): void {
 	const pid = shownPid;
 	if (!pid) return;
 	const members = state?.agents ?? allAgents.filter((a) => a.projectId === pid);
 	const now = Date.now();
-	const chips = el("ul", "acp-agent-chips");
-	chips.setAttribute("aria-label", "Agentes del proyecto");
-	for (const a of members) {
-		const st = agentStatus(a, now, state?.auth.get(a.name) === true);
-		const li = el("li", `acp-agent-chip acp-tone-${st.tone}`);
-		const link = el("a", "acp-agent-name", `@${a.name}`);
-		link.href = routeHash({ sessionId: a.sessionId, view: "chat", detail: null });
-		link.title = "Abrir su sesión (Chat individual, Terminal, Files, Git)";
-		const remove = el("button", "acp-chip-remove", "×");
-		remove.type = "button";
-		remove.title = `Quitar a @${a.name} del proyecto (conserva su sesión e historial)`;
-		remove.setAttribute("aria-label", remove.title);
-		remove.addEventListener("click", () => void removeAgent(pid, a));
-		li.append(link, el("span", `acp-status acp-status-${st.tone}`, st.label), remove);
-		chips.append(li);
+	const statuses = members.map((a) => ({
+		a,
+		st: agentStatus(a, now, state?.auth.get(a.name) === true),
+	}));
+	const ck = JSON.stringify([
+		pid,
+		statuses.map(({ a, st }) => [a.name, a.sessionId, st.label, st.tone]),
+	]);
+	if (ck !== chipsKey || !chipsEl) {
+		chipsKey = ck;
+		chipsEl = el("ul", "acp-agent-chips");
+		chipsEl.setAttribute("aria-label", "Agentes del proyecto");
+		for (const { a, st } of statuses) {
+			const li = el("li", `acp-agent-chip acp-tone-${st.tone}`);
+			const link = el("a", "acp-agent-name", `@${a.name}`);
+			link.href = routeHash({ sessionId: a.sessionId, view: "chat", detail: null });
+			link.title = "Abrir su sesión (Chat individual, Terminal, Files, Git)";
+			const remove = el("button", "acp-chip-remove", "×");
+			remove.type = "button";
+			remove.title = `Quitar a @${a.name} del proyecto (conserva su sesión e historial)`;
+			remove.setAttribute("aria-label", remove.title);
+			remove.addEventListener("click", () => void removeAgent(pid, a));
+			li.append(link, el("span", `acp-status acp-status-${st.tone}`, st.label), remove);
+			chipsEl.append(li);
+		}
 	}
-	const tools = el("div", "acp-project-tools");
 	const candidates = others.filter((a) => a.projectId !== pid);
+	const tk = JSON.stringify([pid, candidates.map((a) => [a.name, a.projectId ?? null])]);
+	if (tk !== toolsKey || !toolsEl) {
+		toolsKey = tk;
+		toolsEl = buildTools(pid, candidates);
+	}
+	helpEl.textContent = members.length
+		? "Empezá el mensaje con @agente (uno o varios): cada uno lo recibe en su cola y responde acá. Pueden consultarse entre ellos (st send); esas consultas también aparecen acá."
+		: "Este proyecto todavía no tiene agentes ACP. Creá una sesión con agente o agregá una existente.";
+	syncChildren(barEl, [chipsEl, toolsEl, helpEl]);
+}
+
+function buildTools(pid: string, candidates: AcpAgentInfo[]): HTMLElement {
+	const tools = el("div", "acp-project-tools");
 	if (candidates.length) {
 		const select = el("select", "acp-add-select");
 		select.setAttribute("aria-label", "Agregar un agente existente");
@@ -145,15 +168,7 @@ function renderBar(): void {
 		window.dispatchEvent(new CustomEvent("st:new-acp-session", { detail: { projectId: pid } })),
 	);
 	tools.append(create);
-	if (legacyLink) tools.append(legacyLink);
-	const help = el(
-		"p",
-		"acp-project-help",
-		members.length
-			? "Empezá el mensaje con @agente (uno o varios): cada uno lo recibe en su cola y responde acá. Pueden consultarse entre ellos (st send); esas consultas también aparecen acá."
-			: "Este proyecto todavía no tiene agentes ACP. Creá una sesión con agente o agregá una existente.",
-	);
-	barEl.replaceChildren(chips, tools, help);
+	return tools;
 }
 
 async function addAgent(pid: string, name: string): Promise<void> {

@@ -20,6 +20,8 @@ type Listener = (ev: AcpLiveEvent) => void;
 const listeners = new Set<Listener>();
 let sock: WebSocket | null = null;
 let up = false;
+/** "down" was announced for the current outage (once per outage, also before the first hello). */
+let downSaid = false;
 let retry = 0;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
 let idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -40,6 +42,7 @@ function connect(): void {
 	try {
 		s = openAcpSocket();
 	} catch {
+		announceDown();
 		schedule();
 		return;
 	}
@@ -53,6 +56,7 @@ function connect(): void {
 		}
 		if (ev.type === "hello") {
 			up = true;
+			downSaid = false;
 			retry = 0;
 			emit({ type: "open" });
 		} else if (
@@ -66,11 +70,19 @@ function connect(): void {
 	s.onclose = () => {
 		if (sock !== s) return;
 		sock = null;
-		if (up) emit({ type: "down" });
 		up = false;
+		// Also when it never opened: a first connection refused before its hello
+		// must still start the listeners' REST poll until a socket works.
+		announceDown();
 		schedule();
 	};
 	s.onerror = () => s.close();
+}
+
+function announceDown(): void {
+	if (downSaid) return;
+	downSaid = true;
+	emit({ type: "down" });
 }
 
 function schedule(): void {
@@ -93,6 +105,8 @@ export function subscribeAcp(fn: Listener): () => void {
 	idleTimer = null;
 	connect();
 	if (up) queueMicrotask(() => listeners.has(fn) && fn({ type: "open" }));
+	// A listener joining during an outage polls too.
+	else if (downSaid) queueMicrotask(() => listeners.has(fn) && fn({ type: "down" }));
 	return () => {
 		listeners.delete(fn);
 		if (listeners.size === 0 && !idleTimer)
