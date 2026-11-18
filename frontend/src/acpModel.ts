@@ -25,19 +25,33 @@ export function parseMentions(text: string, names: readonly string[]): string[] 
 	return out;
 }
 
-/** Who a Project Chat post goes to: its mentions, or the only agent when there is one. */
+/**
+ * Who a Project Chat post goes to. The agents named at the START of the
+ * message (`@a @b, haced X`) are its recipients; a mention inside the text is
+ * part of the instruction ("@arq consultá a @dev: …" goes to @arq only).
+ * Without leading mentions: the one agent mentioned anywhere, or the only
+ * agent of the project; otherwise the person is asked to start with one.
+ */
 export function recipientsOf(
 	text: string,
 	names: readonly string[],
 ): { to: string[]; error: string | null } {
-	const to = parseMentions(text, names);
-	if (to.length) return { to, error: null };
-	if (names.length === 1) return { to: [names[0]!], error: null };
+	const known = new Set(names);
+	const lead = /^\s*((?:@[a-z][a-z0-9-]{1,31}[\s,;:]*)+)/.exec(text);
+	if (lead) {
+		const to = [...new Set([...lead[1]!.matchAll(/@([a-z][a-z0-9-]{1,31})/g)].map((m) => m[1]!))];
+		const unknown = to.filter((n) => !known.has(n));
+		if (unknown.length === 0) return { to, error: null };
+		if (unknown.length < to.length) return { to: to.filter((n) => known.has(n)), error: null };
+	}
+	const any = parseMentions(text, names);
+	if (any.length === 1) return { to: any, error: null };
+	if (names.length === 1 && any.length === 0) return { to: [names[0]!], error: null };
 	if (names.length === 0)
 		return { to: [], error: "Este proyecto no tiene agentes todavía: agregá uno." };
 	return {
 		to: [],
-		error: `Mencioná al menos un agente: ${names.map((n) => `@${n}`).join(", ")}`,
+		error: `Empezá el mensaje con el agente al que va dirigido: ${names.map((n) => `@${n}`).join(", ")}`,
 	};
 }
 

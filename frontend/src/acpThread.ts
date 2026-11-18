@@ -143,7 +143,7 @@ export class AcpThread {
 			this.input.placeholder =
 				source.kind === "agent"
 					? `Escribile a @${source.name}. Ctrl+Enter envía. Podés seguir enviando mientras trabaja.`
-					: "Escribí al proyecto mencionando agentes (@nombre). Ctrl+Enter envía. Los mensajes se encolan si están ocupados.";
+					: "Empezá con el agente (@nombre) al que va dirigido. Ctrl+Enter envía. Los mensajes se encolan si está ocupado.";
 		}
 		if (!this.unsubscribe) this.unsubscribe = subscribeAcp((ev) => this.onLive(ev));
 		// Runner liveness and queue sizes are not pushed: re-read every 15 s while shown.
@@ -674,6 +674,10 @@ export class AcpThread {
 		const src = this.source;
 		const text = this.input.value;
 		if (!src || text.trim() === "") return;
+		// Sent before the page arrived (slow link, a phone): who is in the project
+		// is not known yet — load it instead of refusing the message.
+		if (this.agents.size === 0) await this.reload();
+		if (this.source !== src) return;
 		const names = [...this.agents.keys()];
 		const to = src.kind === "agent" ? { to: [src.name], error: null } : recipientsOf(text, names);
 		if (to.error) {

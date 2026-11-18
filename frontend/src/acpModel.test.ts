@@ -46,6 +46,11 @@ describe("mentions", () => {
 		expect(recipientsOf("hola", names).error).toContain("@arquitecto");
 		expect(recipientsOf("hola", []).error).toContain("no tiene agentes");
 		expect(recipientsOf("@qa-1 mirá", names).to).toEqual(["qa-1"]);
+		// Leading mentions are the recipients; one inside the text is part of the instruction.
+		expect(recipientsOf("@arquitecto consultá a @dev: ¿listo?", names).to).toEqual(["arquitecto"]);
+		expect(recipientsOf("@arquitecto @dev, revisen esto", names).to).toEqual(["arquitecto", "dev"]);
+		expect(recipientsOf("Revisá esto @dev", names).to).toEqual(["dev"]);
+		expect(recipientsOf("que @dev hable con @arquitecto", names).error).toContain("Empezá");
 	});
 });
 
