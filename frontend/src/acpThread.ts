@@ -37,7 +37,8 @@ import {
 	acpSend,
 	uploadSessionFiles,
 } from "./api.js";
-import { el } from "./ui.js";
+import { markdownBlock } from "./chatMarkdown.js";
+import { el, syncChildren } from "./ui.js";
 
 export type ThreadSource = { kind: "agent"; name: string } | { kind: "project"; projectId: string };
 
@@ -83,6 +84,30 @@ export class AcpThread {
 	private questions = new Map<number, AcpQuestion>();
 	/** Question cards kept across renders (keyed by id + state): typed answers and focus survive. */
 	private readonly cards = new Map<number, { state: string; el: HTMLElement }>();
+	/**
+	 * Thread items kept across renders, keyed by message and rebuilt only when
+	 * what they show changed. A live event (activity, a status poll) must not
+	 * replace the rest of the thread: that cleared the reader's text selection
+	 * and closed nothing but cost a full rebuild on every activity batch.
+	 */
+	private readonly items = new Map<string, { sig: string; el: HTMLElement }>();
+	private readonly errorEl = el("div", "acp-chat-error");
+	private readonly emptyEl = el("div", "acp-chat-empty");
+	private readonly moreBtn = el("button", "files-btn acp-more", "Cargar anteriores");
+	/** Unsent text per chat (agent or project): a draft never follows the person into another chat. */
+	private readonly drafts = new Map<string, string>();
+	/** The person just sent: show the bottom of the thread whatever the scroll position. */
+	private toBottom = false;
+	/**
+	 * Rows and questions learned AFTER a page request left (live frames, the
+	 * answers to a send / requeue / answer), stamped with a counter. A page is
+	 * a snapshot taken when the server read it: whatever arrived after the
+	 * request was sent is at least as new, so it is laid back over the page —
+	 * a late REST answer never brings an older state back.
+	 */
+	private liveTick = 0;
+	private readonly liveRows = new Map<number, { tick: number; row: AcpMessage }>();
+	private readonly liveQuestions = new Map<number, { tick: number; q: AcpQuestion }>();
 
 	/** Called after every change of agents / auth / project / error (headers use it). */
 	onState: (s: ThreadState) => void = () => {};
@@ -93,7 +118,16 @@ export class AcpThread {
 		this.sendBtn.type = "submit";
 		const actions = el("div", "acp-chat-actions");
 		actions.append(this.hint, this.sendBtn);
-		this.composer.append(this.mentionsEl, this.input, actions);
+		// Errors sit by the field, not at the top of the thread: a refused send
+		// must be seen where the person is looking, however long the thread.
+		this.errorEl.setAttribute("role", "alert");
+		this.errorEl.hidden = true;
+		this.composer.append(this.errorEl, this.mentionsEl, this.input, actions);
+		this.moreBtn.type = "button";
+		this.moreBtn.addEventListener("click", () => {
+			this.moreBtn.disabled = true;
+			void this.loadEarlier();
+		});
 		this.root.append(this.threadEl, this.composer);
 		this.composer.addEventListener("submit", (e) => {
 			e.preventDefault();
@@ -126,7 +160,12 @@ export class AcpThread {
 				: source.projectId === (this.source as { projectId: string }).projectId);
 		if (!same) {
 			this.gen++;
+			if (this.source) this.saveDraft(this.source, this.input.value);
 			this.source = source;
+			this.input.value = this.drafts.get(sourceKey(source)) ?? "";
+			this.items.clear();
+			this.liveRows.clear();
+			this.liveQuestions.clear();
 			this.messages = [];
 			this.hasEarlier = false;
 			this.activity.clear();
@@ -155,6 +194,14 @@ export class AcpThread {
 		void this.reload();
 	}
 
+	/** An agent's row as a write just answered it (e.g. its project changed here). */
+	updateAgent(info: AcpAgentInfo): void {
+		const prev = this.agents.get(info.name);
+		if (!prev) return;
+		this.agents.set(info.name, { ...prev, ...info });
+		this.changed();
+	}
+
 	/** Stops following (the DOM and state stay for a quick return). */
 	close(): void {
 		this.unsubscribe?.();
@@ -164,17 +211,24 @@ export class AcpThread {
 		this.statusTimer = null;
 	}
 
+	private saveDraft(src: ThreadSource, text: string): void {
+		if (text.trim() === "") this.drafts.delete(sourceKey(src));
+		else this.drafts.set(sourceKey(src), text);
+	}
+
 	// ── Data ─────────────────────────────────────────────────────────────
 
 	private async reload(): Promise<void> {
 		const src = this.source;
 		const gen = this.gen;
 		if (!src) return;
+		const mark = this.liveTick;
 		try {
 			const feed =
 				src.kind === "agent" ? await acpFeed(src.name) : await acpProjectFeed(src.projectId);
 			if (gen !== this.gen) return;
 			this.applyFeed(feed, false);
+			this.replayLive(mark);
 			this.error = "";
 		} catch (err) {
 			if (gen !== this.gen) return;
@@ -219,6 +273,7 @@ export class AcpThread {
 		const gen = this.gen;
 		const first = this.messages[0]?.id;
 		if (!src || !first) return;
+		const mark = this.liveTick;
 		try {
 			const feed =
 				src.kind === "agent"
@@ -226,10 +281,32 @@ export class AcpThread {
 					: await acpProjectFeed(src.projectId, first);
 			if (gen !== this.gen) return;
 			this.applyFeed(feed, true);
+			this.replayLive(mark);
 		} catch (err) {
+			if (gen !== this.gen) return;
 			this.error = `No se pudieron cargar los anteriores: ${(err as Error).message}`;
 		}
 		this.changed();
+	}
+
+	/** Notes a row or question that is newer than any page requested before now. */
+	private noteLive(x: { row?: AcpMessage; q?: AcpQuestion }): void {
+		const tick = ++this.liveTick;
+		if (x.row) this.liveRows.set(x.row.id, { tick, row: x.row });
+		if (x.q) this.liveQuestions.set(x.q.id, { tick, q: x.q });
+		// Only the recent past matters (pages in flight): keep the maps small.
+		for (const m of [this.liveRows, this.liveQuestions] as Map<number, { tick: number }>[])
+			if (m.size > 300) for (const k of [...m.keys()].slice(0, m.size - 300)) m.delete(k);
+	}
+
+	/** Lays what arrived after `mark` back over a page that was requested at `mark`. */
+	private replayLive(mark: number): void {
+		const shownFrom = this.messages[0]?.id ?? Number.POSITIVE_INFINITY;
+		for (const { tick, row } of this.liveRows.values())
+			if (tick > mark && this.relevant(row) && (row.id >= shownFrom || !this.hasEarlier))
+				this.messages = upsert(this.messages, row);
+		for (const { tick, q } of this.liveQuestions.values())
+			if (tick > mark) this.questions.set(q.id, q);
 	}
 
 	private relevant(m: AcpMessage): boolean {
@@ -251,6 +328,7 @@ export class AcpThread {
 				return;
 			case "message":
 				if (!this.relevant(ev.message)) return;
+				this.noteLive({ row: ev.message });
 				if (this.messages.length && ev.message.id < this.messages[0]!.id && this.hasEarlier) return;
 				this.messages = upsert(this.messages, ev.message);
 				this.refreshAgentsSoon();
@@ -263,6 +341,7 @@ export class AcpThread {
 					(q.message_id !== null && this.messages.some((m) => m.id === q.message_id)) ||
 					(src?.kind === "agent" && q.agent === src.name);
 				if (!inScope) return;
+				this.noteLive({ q });
 				this.questions.set(q.id, q);
 				this.refreshAgentsSoon(0);
 				this.changed();
@@ -354,38 +433,71 @@ export class AcpThread {
 		const prevHeight = t.scrollHeight;
 		const prevTop = t.scrollTop;
 		const nodes: HTMLElement[] = [];
-		if (this.error) nodes.push(el("div", "acp-chat-error", this.error));
 		if (this.hasEarlier) {
-			const more = el("button", "files-btn acp-more", "Cargar anteriores");
-			more.type = "button";
-			more.addEventListener("click", () => {
-				more.disabled = true;
-				void this.loadEarlier();
-			});
-			nodes.push(more);
+			this.moreBtn.disabled = false;
+			nodes.push(this.moreBtn);
 		}
-		if (this.messages.length === 0)
-			nodes.push(
-				el(
-					"div",
-					"acp-chat-empty",
-					this.source?.kind === "project"
-						? "Sin mensajes en este proyecto todavía. Mencioná a un agente para empezar; cada agente procesa sus mensajes de a uno, en orden."
-						: "Sin mensajes todavía. El agente procesa uno por vez, en orden.",
-				),
-			);
-		for (const item of groupThread(this.messages)) nodes.push(this.itemEl(item));
+		if (this.messages.length === 0) {
+			this.emptyEl.textContent =
+				this.source?.kind === "project"
+					? "Sin mensajes en este proyecto todavía. Mencioná a un agente para empezar; cada agente procesa sus mensajes de a uno, en orden."
+					: "Sin mensajes todavía. El agente procesa uno por vez, en orden.";
+			nodes.push(this.emptyEl);
+		}
+		const used = new Set<string>();
+		for (const item of groupThread(this.messages)) {
+			const first = item.kind === "post" ? item.messages[0]! : item.message;
+			const key = `${item.kind}:${first.id}`;
+			const sig = this.itemSig(item);
+			let cached = this.items.get(key);
+			if (cached?.sig !== sig) {
+				cached = { sig, el: this.itemEl(item) };
+				this.items.set(key, cached);
+			}
+			used.add(key);
+			nodes.push(cached.el);
+		}
+		for (const key of [...this.items.keys()]) if (!used.has(key)) this.items.delete(key);
 		// Questions whose message is not on this page (an older page, or none).
 		const shown = new Set(this.messages.map((m) => m.id));
 		for (const q of this.questions.values())
 			if ((q.message_id === null || !shown.has(q.message_id)) && q.state === "open")
 				nodes.push(this.questionEl(q));
-		t.replaceChildren(...nodes);
+		syncChildren(t, nodes);
 		if (keepFocus?.isConnected) keepFocus.focus({ preventScroll: true });
-		if (atBottom) t.scrollTop = t.scrollHeight;
+		if (atBottom || this.toBottom) t.scrollTop = t.scrollHeight;
 		else if (prevTop < 5 && t.scrollHeight > prevHeight) t.scrollTop = t.scrollHeight - prevHeight;
 		else t.scrollTop = prevTop;
+		this.toBottom = false;
 		this.renderComposer();
+	}
+
+	/** Everything an item shows: equal ⇒ the element on screen is still right. */
+	private itemSig(item: ThreadItem): string {
+		const ms = item.kind === "post" ? item.messages : [item.message];
+		return JSON.stringify([
+			item.kind === "post" ? item.body : null,
+			ms.map((m) => [
+				m.id,
+				m.state,
+				m.kind,
+				m.from_id,
+				m.to_id,
+				m.reply_to,
+				m.project_id ?? null,
+				m.body,
+				m.result_text,
+				m.note,
+				this.auth.get(m.to_id) === true,
+				[...this.questions.values()]
+					.filter((q) => q.message_id === m.id)
+					.map((q) => `${q.id}:${q.state}`),
+				m.state === "running" || m.state === "pending"
+					? activityRows(this.activity.get(m.id) ?? [])
+					: null,
+				m.state === "running" ? (this.liveText.get(m.id) ?? "") : null,
+			]),
+		]);
 	}
 
 	private openQuestionOf(id: number): boolean {
@@ -411,14 +523,14 @@ export class AcpThread {
 		return m.project_id ? " · en el proyecto" : " · directo";
 	}
 
-	private collapsible(key: string, summary: string, text: string, cls: string): HTMLElement {
+	private collapsible(key: string, summary: string, content: HTMLElement): HTMLElement {
 		const d = el("details", "acp-details");
 		d.open = this.openDetails.has(key);
 		d.addEventListener("toggle", () => {
 			if (d.open) this.openDetails.add(key);
 			else this.openDetails.delete(key);
 		});
-		d.append(el("summary", undefined, summary), el("pre", cls, text));
+		d.append(el("summary", undefined, summary), content);
 		return d;
 	}
 
@@ -456,10 +568,8 @@ export class AcpThread {
 		art.append(head);
 		// A reply repeats the answer already shown under its request: kept folded.
 		if (m.kind === "reply")
-			art.append(
-				this.collapsible(`b${m.id}`, "Ver la respuesta entregada", m.body, "acp-msg-body"),
-			);
-		else art.append(el("pre", "acp-msg-body", m.body));
+			art.append(this.collapsible(`b${m.id}`, "Ver la respuesta entregada", agentText(m.body)));
+		else art.append(mine ? el("pre", "acp-msg-body", m.body) : agentText(m.body));
 		art.append(...this.outcome(m));
 		return art;
 	}
@@ -487,8 +597,8 @@ export class AcpThread {
 			if (live && m.state === "running") out.push(el("pre", "acp-msg-result acp-live", live));
 		}
 		if (m.result_text) {
-			const res = el("pre", "acp-msg-result");
-			res.textContent = m.result_text;
+			const res = el("div", "acp-msg-result");
+			res.append(markdownBlock(m.result_text));
 			out.push(res);
 		}
 		if (m.note && (m.state === "uncertain" || m.state === "failed"))
@@ -500,12 +610,19 @@ export class AcpThread {
 				"La ejecución se interrumpió y no se repite sola: puede haber tenido efectos. Reencolar es decisión tuya.";
 			again.addEventListener("click", () => {
 				again.disabled = true;
+				// The answer may land after the person moved to another chat: it
+				// belongs to the chat it was asked from, never to the one on screen then.
+				const gen = this.gen;
 				void acpRequeue(m.id)
 					.then((row) => {
+						if (gen !== this.gen || !this.relevant(row)) return;
+						this.noteLive({ row });
 						this.messages = upsert(this.messages, row);
 						this.changed();
 					})
 					.catch((err) => {
+						if (gen !== this.gen) return;
+						again.disabled = false;
 						this.error = (err as Error).message;
 						this.changed();
 					});
@@ -624,8 +741,11 @@ export class AcpThread {
 		const submit = (body: { action: "accept" | "decline"; content?: Record<string, unknown> }) => {
 			send.disabled = skip.disabled = true;
 			status.textContent = "Enviando…";
+			const gen = this.gen;
 			void acpAnswer(q.id, body)
 				.then((row) => {
+					if (gen !== this.gen) return;
+					this.noteLive({ q: row });
 					this.questions.set(row.id, row);
 					this.changed();
 				})
@@ -650,6 +770,8 @@ export class AcpThread {
 	}
 
 	private renderComposer(): void {
+		this.errorEl.textContent = this.error;
+		this.errorEl.hidden = this.error === "";
 		const src = this.source;
 		const names = [...this.agents.keys()];
 		this.mentionsEl.replaceChildren();
@@ -674,23 +796,38 @@ export class AcpThread {
 		const src = this.source;
 		const text = this.input.value;
 		if (!src || text.trim() === "") return;
+		// Reserve this send BEFORE any await: the text leaves the field and gets
+		// its client id now, so a second click (or Ctrl+Enter) on the same draft
+		// finds an empty field and sends nothing. A new message typed meanwhile is
+		// a new send, as always. Same text again after a failure ⇒ same id:
+		// recipients that already got it are not sent twice.
+		const clientId =
+			this.lastFailed?.text === text ? this.lastFailed.clientId : crypto.randomUUID();
+		this.input.value = "";
+		this.drafts.delete(sourceKey(src));
+		// A send that did not go out gives its text back to its own chat (never
+		// into the field of another chat the person moved to).
+		const giveBack = () => {
+			if (this.source === src) {
+				if (this.input.value === "") this.input.value = text;
+			} else if (!this.drafts.has(sourceKey(src))) this.drafts.set(sourceKey(src), text);
+		};
 		// Sent before the page arrived (slow link, a phone): who is in the project
 		// is not known yet — load it instead of refusing the message.
 		if (this.agents.size === 0) await this.reload();
-		if (this.source !== src) return;
+		if (this.source !== src) {
+			giveBack();
+			return;
+		}
 		const names = [...this.agents.keys()];
 		const to = src.kind === "agent" ? { to: [src.name], error: null } : recipientsOf(text, names);
 		if (to.error) {
+			giveBack();
 			this.error = to.error;
 			this.changed();
 			return;
 		}
-		// Same text again after a failure ⇒ same id: recipients that already got it are not sent twice.
-		const clientId =
-			this.lastFailed?.text === text ? this.lastFailed.clientId : crypto.randomUUID();
-		// The field is free again at once; on a failure the text comes back if
-		// it is still empty, so nothing typed is lost.
-		this.input.value = "";
+		this.toBottom = true;
 		this.sending++;
 		this.sendBtn.textContent = this.sending > 1 ? `Enviando (${this.sending})…` : "Enviando…";
 		const failed: string[] = [];
@@ -710,16 +847,24 @@ export class AcpThread {
 						...(src.kind === "project" ? { projectId: src.projectId } : {}),
 						clientId,
 					});
-					if (this.source === src && this.relevant(row)) this.messages = upsert(this.messages, row);
+					if (this.source === src && this.relevant(row)) {
+						this.noteLive({ row });
+						this.messages = upsert(this.messages, row);
+					}
 				} catch (err) {
 					failed.push(`@${name}: ${(err as Error).message}`);
 				}
 			}
+			// The person may have moved to another chat meanwhile: the text goes
+			// back to THIS chat's draft, never into the field of the one on screen.
+			const here = this.source === src;
 			if (failed.length) {
-				if (this.input.value === "") this.input.value = text;
-				this.lastFailed = { text, clientId };
-				this.error = `No se envió a ${failed.join("; ")}. El texto volvió al campo: enviarlo de nuevo no duplica a quienes ya lo recibieron.`;
-			} else {
+				giveBack();
+				if (here) {
+					this.lastFailed = { text, clientId };
+					this.error = `No se envió a ${failed.join("; ")}. El texto volvió al campo: enviarlo de nuevo no duplica a quienes ya lo recibieron.`;
+				}
+			} else if (here) {
 				this.lastFailed = null;
 				this.error = "";
 			}
@@ -749,4 +894,15 @@ function time(iso: string): string {
 	return Number.isNaN(d.getTime())
 		? ""
 		: d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+}
+
+function sourceKey(src: ThreadSource): string {
+	return src.kind === "agent" ? `a:${src.name}` : `p:${src.projectId}`;
+}
+
+/** An agent's text (its answer, a consult, a system note): Markdown, like the capture Chat. */
+function agentText(text: string): HTMLElement {
+	const box = el("div", "acp-msg-body acp-md");
+	box.append(markdownBlock(text));
+	return box;
 }

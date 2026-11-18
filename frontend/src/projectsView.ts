@@ -189,7 +189,7 @@ function renderPage(): void {
 	if (!pageEl || !shown) return;
 	const name = projectName(shown);
 	setTitlePage(name ?? "Proyecto");
-	const page = acpProjectPage(shown, header(shown, name), null);
+	const page = acpProjectPage(shown, header(shown, name));
 	if (pageEl.childNodes.length !== 1 || pageEl.firstChild !== page) pageEl.replaceChildren(page);
 }
 

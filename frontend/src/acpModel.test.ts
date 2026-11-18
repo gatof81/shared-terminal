@@ -52,6 +52,14 @@ describe("mentions", () => {
 		expect(recipientsOf("Revisá esto @dev", names).to).toEqual(["dev"]);
 		expect(recipientsOf("que @dev hable con @arquitecto", names).error).toContain("Empezá");
 	});
+	it("an unknown leading mention refuses the whole post (no partial send, no fallback)", () => {
+		const typo = recipientsOf("@devv revisá con @qa-1", names);
+		expect(typo.to).toEqual([]);
+		expect(typo.error).toContain("@devv");
+		expect(recipientsOf("@arquitecto @devv, revisen", names).to).toEqual([]);
+		expect(recipientsOf("@Dev hola", names).to).toEqual([]);
+		expect(recipientsOf("@todos hola", ["dev"]).error).toContain("@todos");
+	});
 });
 
 describe("thread", () => {

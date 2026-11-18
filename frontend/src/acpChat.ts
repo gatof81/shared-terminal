@@ -22,12 +22,15 @@ import {
 import { showToast } from "./components/toast.js";
 import { activeSessionId } from "./main.js";
 import { navigateProject } from "./router.js";
-import { el } from "./ui.js";
+import { el, syncChildren } from "./ui.js";
 import { getView, onSessionSync, onViewChange, setView } from "./viewSwitch.js";
 
 let agentsBySession = new Map<string, AcpAgentInfo>();
 let owned: AcpAgentInfo | null = null;
 let projectNames = new Map<string, string>();
+let projectRowEl: HTMLElement | null = null;
+let shownProjectKey = "";
+let shownNoticeKey = "";
 
 const root = el("div", "acp-chat");
 root.id = "acp-chat";
@@ -110,7 +113,9 @@ function renderHeader(s: ThreadState): void {
 	const a = owned;
 	const auth = s.auth.get(a.name) === true;
 	const st = agentStatus(a, Date.now(), auth);
-	headerEl.replaceChildren();
+	// Called on every thread change (each activity batch, the 15 s status
+	// poll). Each part is rebuilt only when what it shows changed: a rebuilt
+	// project <select> lost the choice the person had not saved yet.
 	const line = el("div", "acp-chat-title");
 	line.append(
 		el("strong", undefined, `@${a.name}`),
@@ -121,8 +126,19 @@ function renderHeader(s: ThreadState): void {
 		"acp-chat-meta",
 		`${a.model ?? "modelo por defecto"} · ${a.runtime} · mensajes directos: privados entre vos y @${a.name}`,
 	);
-	headerEl.append(line, meta);
-	if (projectChatEnabled()) headerEl.append(projectRow(a));
+	const projectKey = projectChatEnabled()
+		? JSON.stringify([a.name, a.projectId ?? null, [...projectNames]])
+		: "";
+	if (projectKey !== shownProjectKey || !projectRowEl) {
+		shownProjectKey = projectKey;
+		projectRowEl = projectKey ? projectRow(a) : null;
+	}
+	const parts: HTMLElement[] = [line, meta];
+	if (projectRowEl) parts.push(projectRowEl);
+	syncChildren(headerEl, parts);
+	const noticeKey = JSON.stringify([a.name, auth, a.loginMethods ?? []]);
+	if (noticeKey === shownNoticeKey) return;
+	shownNoticeKey = noticeKey;
 	noticeEl.replaceChildren();
 	noticeEl.hidden = !auth;
 	if (auth) {
@@ -184,9 +200,13 @@ function projectRow(a: AcpAgentInfo): HTMLElement {
 			.then((info) => {
 				if (owned?.name === info.name) owned = { ...owned, ...info };
 				agentsBySession.set(info.sessionId, { ...a, ...info });
+				// The thread's copy too: its next state must not bring the old project back.
+				thread.updateAgent(info);
 			})
-			.catch(() => {
+			.catch((err: Error) => {
 				select.value = a.projectId ?? "";
+				save.hidden = true;
+				showToast(`No se pudo cambiar el proyecto: ${err.message}`, true);
 			})
 			.finally(() => {
 				select.disabled = save.disabled = false;

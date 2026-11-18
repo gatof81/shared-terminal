@@ -29,20 +29,28 @@ export function parseMentions(text: string, names: readonly string[]): string[] 
  * Who a Project Chat post goes to. The agents named at the START of the
  * message (`@a @b, haced X`) are its recipients; a mention inside the text is
  * part of the instruction ("@arq consultá a @dev: …" goes to @arq only).
- * Without leading mentions: the one agent mentioned anywhere, or the only
- * agent of the project; otherwise the person is asked to start with one.
+ * Every leading mention must be an agent of the project: one that is not
+ * (a typo, an agent of another project) refuses the whole post — never a
+ * partial send, and never a fallback to a name found later in the text
+ * ("@devv revisá con @qa" must not reach @qa). Without leading mentions: the
+ * one agent mentioned anywhere, or the only agent of the project; otherwise
+ * the person is asked to start with one.
  */
 export function recipientsOf(
 	text: string,
 	names: readonly string[],
 ): { to: string[]; error: string | null } {
 	const known = new Set(names);
-	const lead = /^\s*((?:@[a-z][a-z0-9-]{1,31}[\s,;:]*)+)/.exec(text);
+	const valid = names.map((n) => `@${n}`).join(", ");
+	const lead = /^\s*((?:@[A-Za-z0-9_-]+[\s,;:.!?]*)+)/.exec(text);
 	if (lead) {
-		const to = [...new Set([...lead[1]!.matchAll(/@([a-z][a-z0-9-]{1,31})/g)].map((m) => m[1]!))];
+		const to = [...new Set([...lead[1]!.matchAll(/@([A-Za-z0-9_-]+)/g)].map((m) => m[1]!))];
 		const unknown = to.filter((n) => !known.has(n));
 		if (unknown.length === 0) return { to, error: null };
-		if (unknown.length < to.length) return { to: to.filter((n) => known.has(n)), error: null };
+		return {
+			to: [],
+			error: `${unknown.map((n) => `@${n}`).join(", ")} no ${unknown.length === 1 ? "es un agente" : "son agentes"} de este proyecto${names.length ? ` (agentes: ${valid})` : ""}. No se envió nada.`,
+		};
 	}
 	const any = parseMentions(text, names);
 	if (any.length === 1) return { to: any, error: null };
@@ -51,7 +59,7 @@ export function recipientsOf(
 		return { to: [], error: "Este proyecto no tiene agentes todavía: agregá uno." };
 	return {
 		to: [],
-		error: `Empezá el mensaje con el agente al que va dirigido: ${names.map((n) => `@${n}`).join(", ")}`,
+		error: `Empezá el mensaje con el agente al que va dirigido: ${valid}`,
 	};
 }
 
