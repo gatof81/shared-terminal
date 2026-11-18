@@ -35,7 +35,7 @@ const api = vi.hoisted(() => ({
 		}
 	},
 }));
-vi.mock("./api.js", () => api);
+vi.mock("./api.js", () => ({ acpAgentsEnabled: () => false, ...api }));
 
 type View = typeof import("./teamView.js");
 

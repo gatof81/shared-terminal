@@ -9,20 +9,26 @@
  * close functions are exported for main.ts's Escape handler.
  */
 
+import { setAcpAgents } from "./acpRegistry.js";
 import {
 	acpAgentsEnabled,
+	acpListAgents,
+	acpRuntimes,
+	createProject,
 	createSession,
 	createTemplate,
 	deleteTemplate,
 	type EnvVarEntryInput,
 	fetchBootstrapLog,
 	fetchMyQuotas,
+	fetchProjects,
 	getResourceCaps,
 	getTemplate,
 	idleSecondsToFormUnit,
 	listTemplates,
 	memBytesToFormUnit,
 	openBootstrapWs,
+	projectChatEnabled,
 	type SessionConfigPayload,
 	type SessionInfo,
 	stripConfigForTemplate,
@@ -140,16 +146,30 @@ function setNewSessionModalMode(template: Template | null): void {
 	}
 }
 
-// Experimental ACP agent: the field exists only when the backend announces
+// Experimental ACP agent: the fields exist only when the backend announces
 // `features.acpAgents` (created here, so the markup is unchanged otherwise).
+// Agent name, the project it joins (existing or new) and, when more than one
+// adapter runtime is installed, which one.
 let acpAgentInput: HTMLInputElement | null = null;
-function ensureAcpAgentField(): void {
-	if (!acpAgentsEnabled() || acpAgentInput) return;
+let acpProjectSelect: HTMLSelectElement | null = null;
+let acpNewProjectInput: HTMLInputElement | null = null;
+let acpRuntimeSelect: HTMLSelectElement | null = null;
+let acpRuntimeLabel: HTMLLabelElement | null = null;
+let acpPreselectProject: string | null = null;
+const NEW_PROJECT = "__new__";
+
+function acpField(caption: string, control: HTMLElement): HTMLLabelElement {
 	const label = document.createElement("label");
 	label.className = "session-field";
-	const caption = document.createElement("span");
-	caption.className = "session-field-label";
-	caption.textContent = "Agente ACP (opcional)";
+	const cap = document.createElement("span");
+	cap.className = "session-field-label";
+	cap.textContent = caption;
+	label.append(cap, control);
+	return label;
+}
+
+function ensureAcpAgentField(): void {
+	if (!acpAgentsEnabled() || acpAgentInput) return;
 	acpAgentInput = document.createElement("input");
 	acpAgentInput.id = "new-session-acp-agent";
 	acpAgentInput.type = "text";
@@ -157,13 +177,97 @@ function ensureAcpAgentField(): void {
 	acpAgentInput.pattern = "[a-z][a-z0-9-]{1,31}";
 	acpAgentInput.autocomplete = "off";
 	acpAgentInput.title = "Minúsculas, números y guiones. Se lo nombra con @nombre.";
-	label.append(caption, acpAgentInput);
-	newSessionInput.closest("label")?.after(label);
+	const agentLabel = acpField("Agente ACP (opcional)", acpAgentInput);
+	acpProjectSelect = document.createElement("select");
+	acpProjectSelect.id = "new-session-acp-project";
+	acpNewProjectInput = document.createElement("input");
+	acpNewProjectInput.id = "new-session-acp-new-project";
+	acpNewProjectInput.type = "text";
+	acpNewProjectInput.placeholder = "Nombre del proyecto nuevo";
+	acpNewProjectInput.maxLength = 80;
+	acpNewProjectInput.hidden = true;
+	const projectLabel = acpField("Proyecto del agente", acpProjectSelect);
+	projectLabel.append(acpNewProjectInput);
+	acpRuntimeSelect = document.createElement("select");
+	acpRuntimeSelect.id = "new-session-acp-runtime";
+	acpRuntimeLabel = acpField("Runtime ACP", acpRuntimeSelect);
+	acpRuntimeLabel.hidden = true;
+	const sync = () => {
+		const on = acpAgentInput?.value.trim() !== "";
+		projectLabel.hidden = !on;
+		if (acpRuntimeLabel)
+			acpRuntimeLabel.hidden = !on || (acpRuntimeSelect?.options.length ?? 0) < 2;
+		if (acpNewProjectInput)
+			acpNewProjectInput.hidden = !on || acpProjectSelect?.value !== NEW_PROJECT;
+	};
+	acpAgentInput.addEventListener("input", sync);
+	acpProjectSelect.addEventListener("change", sync);
+	acpSyncFields = sync;
+	newSessionInput.closest("label")?.after(agentLabel, projectLabel, acpRuntimeLabel);
 }
+let acpSyncFields: () => void = () => {};
+
+async function loadAcpChoices(): Promise<void> {
+	const select = acpProjectSelect;
+	if (!select) return;
+	const keep = acpPreselectProject ?? select.value;
+	select.replaceChildren(new Option("Sin proyecto", ""));
+	if (projectChatEnabled()) {
+		const r = await fetchProjects().catch(() => null);
+		if (r?.ok) for (const p of r.body.projects) select.append(new Option(p.name, p.projectId));
+		select.append(new Option("+ Proyecto nuevo…", NEW_PROJECT));
+	}
+	select.value = [...select.options].some((o) => o.value === keep) ? keep : "";
+	const rt = acpRuntimeSelect;
+	if (rt && rt.options.length === 0) {
+		const r = await acpRuntimes().catch(() => null);
+		for (const name of r?.available ?? [])
+			rt.append(
+				new Option(
+					name === r?.default
+						? `${name} (por defecto)`
+						: name === "st-test-agent"
+							? `${name} (prueba: sin IA, responde fijo)`
+							: name,
+					name,
+				),
+			);
+		if (r) rt.value = r.default;
+	}
+	acpSyncFields();
+}
+
+/** The ACP part of the create request; creates the new project first when asked. */
+async function acpAgentForCreate(): Promise<
+	{ name: string; projectId?: string; runtime?: string } | undefined
+> {
+	const name = acpAgentInput?.value.trim() ?? "";
+	if (!name) return undefined;
+	let projectId = acpProjectSelect?.value || undefined;
+	if (projectId === NEW_PROJECT) {
+		const pname = acpNewProjectInput?.value.trim() ?? "";
+		if (!pname) throw new Error("Poné un nombre para el proyecto nuevo");
+		const r = await createProject(pname, crypto.randomUUID());
+		if (!r.ok) throw new Error(`No se pudo crear el proyecto (${r.code})`);
+		projectId = r.body.projectId;
+		window.dispatchEvent(new CustomEvent("st:projects-changed"));
+	}
+	const runtime = acpRuntimeSelect && !acpRuntimeLabel?.hidden ? acpRuntimeSelect.value : undefined;
+	return { name, ...(projectId ? { projectId } : {}), ...(runtime ? { runtime } : {}) };
+}
+
+/** Opens the new-session dialog for an ACP agent, optionally already in a project (from Project Chat). */
+window.addEventListener("st:new-acp-session", (e) => {
+	acpPreselectProject = (e as CustomEvent<{ projectId?: string }>).detail?.projectId ?? null;
+	openNewSessionModal(newSessionBtn);
+	acpAgentInput?.focus();
+});
 
 function openNewSessionModal(opener: HTMLElement) {
 	ensureAcpAgentField();
 	if (acpAgentInput) acpAgentInput.value = "";
+	if (acpNewProjectInput) acpNewProjectInput.value = "";
+	if (acpAgentInput) void loadAcpChoices().finally(() => (acpPreselectProject = null));
 	renderSessionTabPlaceholders();
 	setActiveSessionTab("basics");
 	newSessionInput.value = "";
@@ -1132,13 +1236,10 @@ newSessionForm.addEventListener("submit", async (e) => {
 	try {
 		showToast("Creating session…");
 		const config = buildSessionConfigPayload();
-		const agentName = acpAgentInput?.value.trim() ?? "";
-		const session = await createSession(
-			name,
-			undefined,
-			config,
-			agentName ? { name: agentName } : undefined,
-		);
+		const acpAgent = await acpAgentForCreate();
+		const session = await createSession(name, undefined, config, acpAgent);
+		// The sidebar files an agent session under its project from this list.
+		if (acpAgent) await acpListAgents().then(setAcpAgents, () => {});
 		sessions.unshift(session);
 		renderSessionList();
 		if (session.bootstrapping) {

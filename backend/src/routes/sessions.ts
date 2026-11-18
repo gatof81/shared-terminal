@@ -164,12 +164,19 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 		// believe it created an agent.
 		let acpAgentName: string | null = null;
 		let acpAgentModel: string | undefined;
+		let acpAgentRuntime: string | undefined;
+		let acpAgentProject: string | null = null;
 		if (acpAgent !== undefined && acpAgent !== null) {
 			if (!ctx.acp) {
 				res.status(400).json({ error: "acp-agents-disabled" });
 				return;
 			}
-			const a = acpAgent as { name?: unknown; model?: unknown };
+			const a = acpAgent as {
+				name?: unknown;
+				model?: unknown;
+				runtime?: unknown;
+				projectId?: unknown;
+			};
 			const nameErr = agentNameError(a.name);
 			if (nameErr !== null) {
 				res.status(400).json({ error: nameErr });
@@ -181,6 +188,24 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			) {
 				res.status(400).json({ error: "acpAgent.model must be a model id" });
 				return;
+			}
+			// A runtime is a directory installed under ACP_RUNTIME_DIR (one per
+			// pinned adapter version or provider); only an installed one is taken.
+			if (a.runtime !== undefined) {
+				if (typeof a.runtime !== "string" || !(await ctx.acp.runtimes()).includes(a.runtime)) {
+					res.status(400).json({ error: "acpAgent.runtime is not an installed runtime" });
+					return;
+				}
+				acpAgentRuntime = a.runtime;
+			}
+			if (a.projectId !== undefined && a.projectId !== null) {
+				// The session's owner (an admin may create on behalf of another user).
+				const owner = typeof ownerUserId === "string" ? ownerUserId : userId;
+				if (typeof a.projectId !== "string" || !(await ctx.acp.ownsProject(owner, a.projectId))) {
+					res.status(404).json({ error: "project-not-found" });
+					return;
+				}
+				acpAgentProject = a.projectId;
 			}
 			acpAgentName = a.name as string;
 			acpAgentModel = a.model as string | undefined;
@@ -402,7 +427,11 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 				// UNIQUE index decides, not a pre-check) and the catch below rolls
 				// the session back like any other create failure.
 				if (ctx.acp && acpAgentName !== null) {
-					await ctx.acp.create(meta.sessionId, targetOwnerId, acpAgentName, acpAgentModel);
+					await ctx.acp.create(meta.sessionId, targetOwnerId, acpAgentName, {
+						...(acpAgentModel ? { model: acpAgentModel } : {}),
+						...(acpAgentRuntime ? { runtime: acpAgentRuntime } : {}),
+						projectId: acpAgentProject,
+					});
 				}
 				await docker.spawn(meta.sessionId);
 				const updated = await sessions.get(meta.sessionId);

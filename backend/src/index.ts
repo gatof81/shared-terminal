@@ -12,6 +12,7 @@ import express from "express";
 import rateLimit from "express-rate-limit";
 import { WebSocketServer } from "ws";
 import { AcpAgents, acpAgentsEnabled, acpConfigFromEnv } from "./acp/agents.js";
+import { ACP_WS_PREFIX, AcpWsHub } from "./acp/ws.js";
 import {
 	ensureAuthReady,
 	originMatches,
@@ -617,7 +618,10 @@ server.on(
 		trustProxyValue,
 		corsOrigins: CORS_ORIGINS,
 		nodeEnv: process.env.NODE_ENV,
-		...(projectConversationHolder ? { extraPathPrefixes: [PROJECT_WS_PREFIX] } : {}),
+		extraPathPrefixes: [
+			...(projectConversationHolder ? [PROJECT_WS_PREFIX] : []),
+			...(acpAgents ? [ACP_WS_PREFIX] : []),
+		],
 	}),
 );
 
@@ -626,6 +630,8 @@ server.on(
 // shutdown path can stop the timer before `wss.close()` to avoid
 // racing teardown.
 const stopHeartbeat = startWsHeartbeat(wss, 30_000);
+
+const acpWs = acpAgents ? new AcpWsHub(acpAgents) : null;
 
 // 3.1 — the Conversation WS (replay + live of persisted events, owner-only).
 const conversationWs = new ConversationWsHub(conversation);
@@ -640,6 +646,7 @@ wss.on("connection", (ws, req) => {
 		idleSweeper,
 		conversationWs,
 		projectConversationHolder,
+		acpWs ?? undefined,
 	);
 });
 

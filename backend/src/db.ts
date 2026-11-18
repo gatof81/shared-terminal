@@ -859,6 +859,72 @@ export const MIGRATIONS: readonly Migration[] = [
 		description: "acp_agents + agent_messages — ACP agents and their durable inbox (experimental)",
 		apply: () => d1Batch([...ACP_AGENTS_DDL]),
 	},
+	{
+		// Additive like v21: columns NULL/0 on existing rows mean exactly what
+		// v21 did (no project, a person's message, no idempotency key).
+		version: 22,
+		description: "ACP agents in projects — message scope, hop depth, client ids; agent questions",
+		apply: async () => {
+			await addColumnIfMissing("acp_agents", "project_id TEXT");
+			await addColumnIfMissing("agent_messages", "project_id TEXT");
+			await addColumnIfMissing("agent_messages", "depth INTEGER NOT NULL DEFAULT 0");
+			await addColumnIfMissing("agent_messages", "client_id TEXT");
+			await d1Batch([...ACP_PROJECTS_DDL]);
+		},
+	},
+];
+
+/**
+ * v22. A message's `project_id` is its SCOPE, not a property of its agents:
+ * NULL = a direct message (shown only in the individual chats of its two
+ * ends), set = posted in that project's Project Chat. The reply the trigger
+ * writes keeps the request's scope and depth, so an agent ↔ agent exchange
+ * started from Project Chat stays in Project Chat, and one started in a
+ * direct chat stays private.
+ *
+ * `depth` is the loop guard: a person's message is 0, a request an agent
+ * sends while working on message M is M.depth + 1 (acp/agents.ts refuses past
+ * the cap), and a reply never produces a reply — that is what ends a chain.
+ *
+ * `client_id` makes a send idempotent per recipient: Project Chat sends one
+ * row per mentioned agent under one id, and a retried POST finds its row.
+ */
+export const ACP_PROJECTS_DDL: readonly string[] = [
+	"CREATE INDEX IF NOT EXISTS idx_agent_messages_project ON agent_messages(owner_user_id, project_id, id)",
+	"CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_messages_client ON agent_messages(owner_user_id, client_id, to_id) WHERE client_id IS NOT NULL",
+	"CREATE INDEX IF NOT EXISTS idx_acp_agents_project ON acp_agents(owner_user_id, project_id)",
+	// A question an agent asks while working on a message (ACP `elicitation/create`,
+	// e.g. Claude's AskUserQuestion). `request` is the form as the adapter sent it;
+	// only the person answers (`answered`, one conditional UPDATE: a second answer
+	// finds nothing open). `delivered` = the runner handed it to the waiting ACP
+	// request. A runner restart loses that request: whatever was open or answered
+	// but not delivered becomes `orphaned` — never treated as answered.
+	`CREATE TABLE IF NOT EXISTS agent_questions (
+		id            INTEGER PRIMARY KEY AUTOINCREMENT,
+		owner_user_id TEXT NOT NULL,
+		agent         TEXT NOT NULL,
+		message_id    INTEGER,
+		request       TEXT NOT NULL,
+		state         TEXT NOT NULL CHECK (state IN ('open', 'answered', 'delivered', 'withdrawn', 'orphaned')),
+		answer        TEXT,
+		created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+		answered_at   TEXT,
+		delivered_at  TEXT,
+		note          TEXT
+	)`,
+	"CREATE INDEX IF NOT EXISTS idx_agent_questions_agent ON agent_questions(owner_user_id, agent, state)",
+	"CREATE INDEX IF NOT EXISTS idx_agent_questions_message ON agent_questions(owner_user_id, message_id)",
+	"DROP TRIGGER IF EXISTS trg_agent_message_reply",
+	`CREATE TRIGGER IF NOT EXISTS trg_agent_message_reply
+	AFTER UPDATE OF state ON agent_messages
+	WHEN OLD.state = 'running' AND NEW.state = 'done' AND NEW.kind = 'request'
+		AND EXISTS (SELECT 1 FROM acp_agents WHERE owner_user_id = NEW.owner_user_id AND name = NEW.from_id)
+	BEGIN
+		INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, reply_to, body, state, project_id, depth)
+		VALUES (NEW.owner_user_id, NEW.to_id, NEW.from_id, 'reply', NEW.id,
+			'Respuesta de @' || NEW.to_id || ' a tu mensaje #' || NEW.id || ':' || char(10) || char(10) || COALESCE(NEW.result_text, '(sin texto)'),
+			'pending', NEW.project_id, NEW.depth);
+	END`,
 ];
 
 /**

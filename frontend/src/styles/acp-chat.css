@@ -10,9 +10,236 @@
 	height: 100%;
 	min-height: 0;
 }
+/* Thread + composer: the thread scrolls, the composer stays at the bottom. */
+.acp-thread {
+	flex: 1;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+}
+.acp-chat-title {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px 10px;
+}
+.acp-chat-meta {
+	font-size: 0.78rem;
+	margin-top: 2px;
+	overflow-wrap: anywhere;
+}
+.acp-chat-project {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px 10px;
+	margin-top: 6px;
+	font-size: 0.85rem;
+}
+.acp-project-select,
+.acp-add-select {
+	max-width: 100%;
+	min-height: 2rem;
+	background: var(--c-bg);
+	color: inherit;
+	border: 1px solid var(--c-border);
+	border-radius: 6px;
+	padding: 2px 6px;
+}
+.acp-link {
+	color: var(--c-accent);
+}
+.acp-chat-notice:not([hidden]) {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px 12px;
+	padding: 8px 14px;
+	border-bottom: 1px solid var(--c-border);
+	color: var(--c-warn);
+	font-size: 0.85rem;
+}
+.acp-status {
+	font-size: 0.78rem;
+	border-radius: 10px;
+	padding: 0 8px;
+	border: 1px solid currentColor;
+	white-space: nowrap;
+}
+.acp-status-ok {
+	color: var(--c-ok);
+}
+.acp-status-busy {
+	color: var(--c-accent);
+}
+.acp-status-warn {
+	color: var(--c-warn);
+}
+.acp-status-off {
+	opacity: 0.7;
+}
+.acp-msg-time {
+	opacity: 0.7;
+}
+.acp-sub {
+	margin-top: 8px;
+	padding: 6px 8px;
+	border-left: 2px solid var(--c-border);
+}
+.acp-msg.acp-reply {
+	border-style: dashed;
+}
+.acp-details > summary {
+	cursor: pointer;
+	font-size: 0.8rem;
+	opacity: 0.85;
+}
+.acp-more {
+	align-self: center;
+}
+.acp-mentions:not([hidden]) {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+}
+.acp-mention {
+	font-size: 0.8rem;
+	border: 1px solid var(--c-border);
+	border-radius: 12px;
+	padding: 2px 10px;
+	background: transparent;
+	color: inherit;
+	cursor: pointer;
+	min-height: 1.9rem;
+}
+.acp-act-failed {
+	color: var(--c-err);
+}
+
+/* ── ACP Project Chat (acpProjectChat.ts) ─────────────────────────────── */
+#project-view:has(> .acp-project) {
+	overflow: hidden;
+}
+.pv-page.acp-project {
+	height: 100%;
+	display: flex;
+	flex-direction: column;
+	box-sizing: border-box;
+	padding-bottom: var(--s-3, 12px);
+}
+.acp-project .pv-header {
+	flex: none;
+}
+.acp-project-agents {
+	flex: none;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 8px 0;
+	border-bottom: 1px solid var(--c-border);
+}
+.acp-agent-chips {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	list-style: none;
+	margin: 0;
+	padding: 0;
+}
+.acp-agent-chip {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	border: 1px solid var(--c-border);
+	border-radius: 14px;
+	padding: 2px 4px 2px 10px;
+	font-size: 0.85rem;
+	max-width: 100%;
+}
+.acp-agent-name {
+	font-weight: 600;
+	color: inherit;
+}
+.acp-chip-remove {
+	border: none;
+	background: transparent;
+	color: inherit;
+	opacity: 0.6;
+	cursor: pointer;
+	min-width: 1.8rem;
+	min-height: 1.8rem;
+	font-size: 1rem;
+}
+.acp-chip-remove:hover {
+	opacity: 1;
+}
+.acp-project-tools {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px 8px;
+	align-items: center;
+}
+.acp-project-help {
+	margin: 0;
+	font-size: 0.78rem;
+	opacity: 0.75;
+}
+.acp-project .acp-thread {
+	border: 1px solid var(--c-border);
+	border-top: none;
+	border-radius: 0 0 8px 8px;
+}
+
+@media (max-width: 640px) {
+	.acp-chat-header,
+	.acp-chat-thread,
+	.acp-chat-composer {
+		padding-left: 10px;
+		padding-right: 10px;
+	}
+	.acp-chat-input {
+		min-height: 56px;
+		font-size: 16px; /* no iOS zoom on focus */
+	}
+	.acp-msg-body,
+	.acp-msg-result {
+		max-height: 50vh;
+	}
+	.acp-project .acp-thread {
+		border-left: none;
+		border-right: none;
+		border-radius: 0;
+	}
+	.acp-chat-send {
+		min-height: 2.75rem;
+		min-width: 5.5rem;
+	}
+	/* The thread is what matters on a phone: the agents bar stays compact. */
+	.acp-project-help {
+		display: none;
+	}
+	.acp-project .pv-title {
+		font-size: 1rem;
+	}
+	.acp-agent-chip {
+		font-size: 0.78rem;
+	}
+	.acp-project-tools .files-btn,
+	.acp-add-select {
+		font-size: 0.78rem;
+		min-height: 2.2rem;
+	}
+	.acp-project-agents {
+		gap: 4px;
+		padding: 4px 0;
+	}
+	.acp-mention {
+		font-size: 0.75rem;
+	}
+}
 .acp-chat-header {
 	padding: 10px 14px;
-	border-bottom: 1px solid var(--border, #333);
+	border-bottom: 1px solid var(--c-border);
 	font-size: 0.9rem;
 }
 .acp-chat-meta,
@@ -20,7 +247,7 @@
 	opacity: 0.75;
 }
 .acp-chat-runner.ok {
-	color: var(--success, #3fb950);
+	color: var(--c-ok);
 	opacity: 1;
 }
 .acp-chat-thread {
@@ -38,16 +265,16 @@
 	font-size: 0.9rem;
 }
 .acp-chat-error {
-	color: var(--danger, #f85149);
+	color: var(--c-err);
 }
 .acp-msg {
-	border: 1px solid var(--border, #333);
+	border: 1px solid var(--c-border);
 	border-radius: 8px;
 	padding: 8px 10px;
 	max-width: 100%;
 }
 .acp-msg.acp-mine {
-	border-color: var(--accent, #58a6ff);
+	border-color: var(--c-accent);
 }
 .acp-msg-head {
 	display: flex;
@@ -70,7 +297,7 @@
 .acp-msg-result {
 	margin-top: 6px;
 	padding-top: 6px;
-	border-top: 1px dashed var(--border, #333);
+	border-top: 1px dashed var(--c-border);
 }
 .acp-live {
 	opacity: 0.8;
@@ -93,17 +320,17 @@
 	white-space: nowrap;
 }
 .acp-badge-running {
-	color: var(--accent, #58a6ff);
+	color: var(--c-accent);
 }
 .acp-badge-done {
-	color: var(--success, #3fb950);
+	color: var(--c-ok);
 }
 .acp-badge-uncertain,
 .acp-badge-failed {
-	color: var(--warning, #d29922);
+	color: var(--c-warn);
 }
 .acp-chat-composer {
-	border-top: 1px solid var(--border, #333);
+	border-top: 1px solid var(--c-border);
 	padding: 10px 14px;
 	display: flex;
 	flex-direction: column;
@@ -111,6 +338,11 @@
 }
 .acp-chat-input {
 	width: 100%;
+	background: var(--c-surface);
+	color: var(--c-text);
+	border: 1px solid var(--c-border);
+	border-radius: 6px;
+	padding: 6px 8px;
 	resize: vertical;
 	min-height: 70px;
 	font-family: var(--font-mono, ui-monospace, monospace);
@@ -126,4 +358,78 @@
 .acp-chat-hint {
 	font-size: 0.75rem;
 	opacity: 0.7;
+}
+
+/* ── Questions from an agent (ACP form elicitation) ─────────────────────── */
+.acp-badge-waiting {
+	color: var(--c-warn);
+	font-weight: 600;
+}
+.acp-question {
+	margin-top: 8px;
+	padding: 8px 10px;
+	border: 1px solid var(--c-warn);
+	border-radius: 8px;
+	background: rgba(var(--c-warn-rgb), 0.06);
+}
+.acp-question-delivered,
+.acp-question-answered,
+.acp-question-withdrawn {
+	border-color: var(--c-border);
+	background: transparent;
+}
+.acp-question-head {
+	font-size: 0.78rem;
+	opacity: 0.85;
+}
+.acp-question-text {
+	margin: 4px 0 6px;
+	font-weight: 600;
+	white-space: pre-wrap;
+}
+.acp-question-field {
+	border: none;
+	margin: 0 0 6px;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+.acp-option {
+	display: flex;
+	align-items: baseline;
+	gap: 6px;
+	min-height: 1.9rem;
+	cursor: pointer;
+}
+.acp-question-input,
+.acp-question-other {
+	background: var(--c-surface);
+	color: var(--c-text);
+	border: 1px solid var(--c-border);
+	border-radius: 6px;
+	padding: 4px 8px;
+	font: inherit;
+	min-height: 2rem;
+}
+.acp-question-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	align-items: center;
+}
+.acp-question-state {
+	font-size: 0.85rem;
+	white-space: pre-wrap;
+}
+.chat-readonly-note {
+	padding: 10px 14px;
+	border-top: 1px solid var(--c-border);
+	font-size: 0.82rem;
+	color: var(--c-muted);
+}
+.acp-login-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
 }

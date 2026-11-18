@@ -97,7 +97,7 @@ const api = vi.hoisted(() => ({
 	projectChatEnabled: () => false,
 	TabNotFoundError: class extends Error {},
 }));
-vi.mock("./api.js", () => api);
+vi.mock("./api.js", () => ({ acpAgentsEnabled: () => false, ...api }));
 vi.mock("./admin.js", () => ({ openObserversModalFor: vi.fn() }));
 vi.mock("./components/actionMenu.js", () => ({ openActionMenu: vi.fn() }));
 vi.mock("./components/dialog.js", () => ({ confirmDialog: vi.fn() }));

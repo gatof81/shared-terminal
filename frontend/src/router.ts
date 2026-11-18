@@ -116,7 +116,14 @@ export function readRoute(): Route | null {
  * P3a agent directory. Absent = the workspace's "Now". With the v3 flag off
  * a panel is ignored and the project page is the P3a directory.
  */
-export type ProjectPanel = { kind: "thread"; msgId: string } | { kind: "new" } | { kind: "agents" };
+export type ProjectPanel =
+	| { kind: "thread"; msgId: string }
+	| { kind: "new" }
+	| { kind: "agents" }
+	/** ACP Project Chat (acpProjectChat.ts). */
+	| { kind: "chat" }
+	/** The Projects v3 workspace, explicitly (when ACP Project Chat is the default). */
+	| { kind: "team" };
 
 export interface ProjectRoute {
 	projectId: string;
@@ -128,7 +135,7 @@ export interface ProjectRoute {
 
 export function parseProjectRoute(hash: string): ProjectRoute | null {
 	const m =
-		/^#\/projects\/([^/?#]+)(?:\/agents\/([^/?#]+)|\/(agents|new)|\/threads\/([^/?#]+))?$/.exec(
+		/^#\/projects\/([^/?#]+)(?:\/agents\/([^/?#]+)|\/(agents|new|chat|team)|\/threads\/([^/?#]+))?$/.exec(
 			hash,
 		);
 	if (!m) return null;
@@ -141,6 +148,8 @@ export function parseProjectRoute(hash: string): ProjectRoute | null {
 	}
 	if (m[3] === "agents") return { projectId, agentId: null, panel: { kind: "agents" } };
 	if (m[3] === "new") return { projectId, agentId: null, panel: { kind: "new" } };
+	if (m[3] === "chat") return { projectId, agentId: null, panel: { kind: "chat" } };
+	if (m[3] === "team") return { projectId, agentId: null, panel: { kind: "team" } };
 	if (m[4] !== undefined) {
 		const msgId = decode(m[4]);
 		if (msgId === null || msgId === "") return null;
@@ -159,6 +168,10 @@ export function projectRouteHash(route: ProjectRoute): string {
 			return `${h}/new`;
 		case "agents":
 			return `${h}/agents`;
+		case "chat":
+			return `${h}/chat`;
+		case "team":
+			return `${h}/team`;
 		default:
 			return h;
 	}

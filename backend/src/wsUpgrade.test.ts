@@ -16,6 +16,7 @@ import type { AddressInfo } from "node:net";
 import jwt from "jsonwebtoken";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocket, WebSocketServer } from "ws";
+import { ACP_WS_PREFIX, type AcpWsHub } from "./acp/ws.js";
 import { __resetJwtSecretForTests, validateJwtSecret } from "./auth.js";
 import { BootstrapBroadcaster } from "./bootstrap.js";
 import { ConversationWsHub } from "./conversation/ws.js";
@@ -85,6 +86,7 @@ const summaries = vi.fn(async (_sid: string) => []);
 async function start(
 	overrides: Partial<WsUpgradeDeps> = {},
 	projectWs?: Parameters<typeof handleWsConnection>[7],
+	acpWs?: Parameters<typeof handleWsConnection>[8],
 ) {
 	wss = new WebSocketServer({ noServer: true });
 	broadcaster = new BootstrapBroadcaster();
@@ -118,7 +120,7 @@ async function start(
 		}),
 	);
 	wss.on("connection", (ws, req) => {
-		handleWsConnection(ws, req, sessions, docker, broadcaster, undefined, hub, projectWs);
+		handleWsConnection(ws, req, sessions, docker, broadcaster, undefined, hub, projectWs, acpWs);
 	});
 	await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
 	port = (server.address() as AddressInfo).port;
@@ -243,6 +245,34 @@ describe("WS /ws/project/<pid> through server.on('upgrade')", () => {
 		await c.close;
 		const other = await connect(`/ws/project/aaaaaaaa-1d2a-4b3c-8d4e-5f6a7b8c9d0e`, asOwner());
 		expect(await other.close).toEqual({ code: 1008, reason: "Not found" });
+	});
+});
+
+// ── /ws/acp (experimental ACP agents) ─────────────────────────────────────────
+
+describe("WS /ws/acp through server.on('upgrade')", () => {
+	it("flag off: not admitted (404)", async () => {
+		const c = await connect("/ws/acp", asOwner());
+		expect(c.status).toBe(404);
+	});
+
+	it("flag on: admitted, served for the cookie's user; no cookie is refused", async () => {
+		await new Promise<void>((r) => server.close(() => r()));
+		const owners: string[] = [];
+		await start({ extraPathPrefixes: [ACP_WS_PREFIX] }, undefined, {
+			serve: (ws: WebSocket, owner: string) => {
+				owners.push(owner);
+				ws.send(JSON.stringify({ type: "hello" }));
+			},
+		} as unknown as AcpWsHub);
+		const c = await connect("/ws/acp", asOwner());
+		expect(c.opened).toBe(true);
+		await waitFor(() => c.frames.some((f) => f.type === "hello"));
+		expect(owners).toEqual([OWNER]);
+		c.ws.close();
+		await c.close;
+		const anon = await connect("/ws/acp", { origin: ALLOWED_ORIGIN });
+		expect((await anon.close).code).toBe(1008);
 	});
 });
 

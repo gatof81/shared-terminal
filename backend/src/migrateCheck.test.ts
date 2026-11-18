@@ -230,13 +230,13 @@ describe("db:migrate-check (v20 release gate)", () => {
 		expect(JSON.stringify(r)).not.toContain(SECRET);
 	});
 
-	it("PASS from a v20 backup to v21: data unchanged, the ACP tables new and empty, fence values kept", async () => {
+	it("PASS from a v20 backup to the latest (v22): data unchanged, the ACP tables new and empty, fence values kept", async () => {
 		await writeBackup(fixture(), { schemaVersion: FENCE_MIGRATION });
 		const r = await runMigrateCheck(dir);
 		expect(r.failures).toEqual([]);
 		expect(r.ok).toBe(true);
 		expect(r.schemaFrom).toBe(20);
-		expect(r.schemaTo).toBe(21);
+		expect(r.schemaTo).toBe(22);
 		expect(r.newTables).toEqual(
 			expect.arrayContaining([
 				{ name: "acp_agents", rows: 0 },
@@ -247,7 +247,7 @@ describe("db:migrate-check (v20 release gate)", () => {
 	});
 
 	it("refuses a backup already at the build's latest migration, a directory without a manifest, and a manifest it does not understand", async () => {
-		await writeBackup(fixture(), { schemaVersion: 21 });
+		await writeBackup(fixture(), { schemaVersion: 22 });
 		await expect(runMigrateCheck(dir)).rejects.toThrow(RefusedError);
 		await expect(runMigrateCheck(dir)).rejects.toThrow(/BEFORE deploying/);
 		await fs.rm(path.join(dir, "manifest.json"));
@@ -256,6 +256,55 @@ describe("db:migrate-check (v20 release gate)", () => {
 		await expect(runMigrateCheck(dir)).rejects.toThrow(
 			/not a backup manifest this tool understands/,
 		);
+		expect(netCalls).toEqual([]);
+	});
+
+	it("PASS from a v21 backup with ACP rows to v22: existing agents and messages unchanged, new columns empty", async () => {
+		const t = fixture() as Record<string, Array<Record<string, unknown>>>;
+		t.acp_agents = [
+			{
+				agent_id: "0c9e2f00-0000-4000-8000-000000000001",
+				session_id: S1,
+				owner_user_id: U1,
+				name: "asistente",
+				runtime: "claude-acp-0.108.0",
+				model: "claude-sonnet-5-5",
+				created_at: "2026-11-17 23:40:00",
+			},
+		];
+		t.agent_messages = [
+			{
+				id: 1,
+				owner_user_id: U1,
+				from_id: "owner",
+				to_id: "asistente",
+				kind: "request",
+				reply_to: null,
+				body: `hola ${SECRET}`,
+				state: "pending",
+				attempts: 3,
+				created_at: "2026-11-17T23:41:00.000Z",
+				started_at: null,
+				finished_at: null,
+				result_text: null,
+				stop_reason: null,
+				note: "agent not authenticated",
+			},
+		];
+		await writeBackup(t, { schemaVersion: 21 });
+		const r = await runMigrateCheck(dir);
+		expect(r.failures).toEqual([]);
+		expect(r.ok).toBe(true);
+		expect(r.schemaFrom).toBe(21);
+		expect(r.schemaTo).toBe(22);
+		const acp = r.tables.filter((x) => x.name === "acp_agents" || x.name === "agent_messages");
+		expect(
+			acp.map((x) => [x.name, x.rowsBefore, x.rowsAfter, x.hashBefore === x.hashAfter]),
+		).toEqual([
+			["acp_agents", 1, 1, true],
+			["agent_messages", 1, 1, true],
+		]);
+		expect(JSON.stringify(r)).not.toContain(SECRET);
 		expect(netCalls).toEqual([]);
 	});
 

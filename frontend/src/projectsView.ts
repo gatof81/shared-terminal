@@ -22,10 +22,18 @@
  */
 
 import {
+	acpProjectPage,
+	projectHasAcpAgents,
+	refreshAcpAgents,
+	resetAcpProject,
+	suspendAcpProject,
+} from "./acpProjectChat.js";
+import {
 	type AgentDetail,
 	type AgentListEntry,
 	type AgentsResponse,
 	type Allowed,
+	acpAgentsEnabled,
 	createAgent,
 	createProject,
 	fetchAgent,
@@ -42,8 +50,6 @@ import { confirmDialog, createDialog } from "./components/dialog.js";
 import { showToast } from "./components/toast.js";
 import { relativeDate } from "./format.js";
 import { sessions } from "./main.js";
-import { initPilotOptIn } from "./pilotModel.js";
-import { pilotPanel, resetPilot, suspendPilot } from "./pilotPanel.js";
 import {
 	clearProjects,
 	currentProject,
@@ -335,10 +341,18 @@ function sync(): void {
 	}
 }
 
+/** The ACP page's header: kept as one element per project (the page keeps it). */
+let acpHeaderFor: { pid: string; name: string | null; el: HTMLElement } | null = null;
+function acpHeader(pid: string, name: string | null): HTMLElement {
+	if (acpHeaderFor?.pid !== pid || acpHeaderFor.name !== name)
+		acpHeaderFor = { pid, name, el: pageHeader(name ?? "Proyecto", null) };
+	return acpHeaderFor.el;
+}
+
 function hidePage(): void {
 	if (shown === null && pageEl?.hidden !== false) return;
 	shown = null;
-	suspendPilot();
+	suspendAcpProject();
 	suspendWorkspaces();
 	document.body.classList.remove("project-page-on");
 	if (pageEl) {
@@ -357,14 +371,34 @@ function leavePage(): void {
 	sync();
 }
 
-/** Pilot 1 (doc 18): the "Ask the agents" panel, opt-in per browser (`?pilot=1`). */
-let pilotOn = false;
-/** The re-rendered part of the page; the pilot panel sits beside it, never inside. */
+/** The re-rendered part of the page. */
 const contentHost = el("div", "pv-content");
 
 /** The v3 workspace owns the project page (not the agent page, not "Manage agents"). */
 function v3Workspace(r: ProjectRoute): boolean {
 	return projectConversationEnabled() && r.agentId === null && r.panel?.kind !== "agents";
+}
+
+/**
+ * ACP Project Chat owns the project page when asked for (`/chat`) or, as the
+ * default page, when the project has ACP agents or no older team agents.
+ */
+function acpProjectShown(r: ProjectRoute): boolean {
+	if (!acpAgentsEnabled() || r.agentId !== null) return false;
+	if (r.panel?.kind === "chat") return true;
+	if (r.panel !== undefined) return false;
+	const legacy = projects().find((p) => p.projectId === r.projectId)?.agentCount ?? null;
+	return projectHasAcpAgents(r.projectId) === true || legacy === 0;
+}
+
+/** On a page of the older team: the way to the project's ACP chat. */
+function acpChatButton(pid: string): HTMLElement[] {
+	if (!acpAgentsEnabled()) return [];
+	const b = button("Project Chat (ACP)", "pv-btn", () =>
+		navigateProject({ projectId: pid, agentId: null, panel: { kind: "chat" } }),
+	);
+	b.dataset.key = "acp-chat";
+	return [b];
 }
 
 // Re-rendered on every poll: keep the keyboard user's place (by data-key).
@@ -374,10 +408,31 @@ function renderPage(): void {
 		"#project-view [data-key]",
 	)?.dataset.key;
 	const scroll = pageEl.scrollTop;
+	if (acpProjectShown(shown)) {
+		suspendWorkspaces();
+		const pid = shown.projectId;
+		const name = projectName(pid);
+		setTitlePage(pageTitle(name, null));
+		const legacyCount = projects().find((p) => p.projectId === pid)?.agentCount ?? 0;
+		let legacy: HTMLElement | null = null;
+		if (legacyCount > 0) {
+			legacy = button("Equipo anterior", "pv-btn", () =>
+				navigateProject({
+					projectId: pid,
+					agentId: null,
+					panel: { kind: projectConversationEnabled() ? "team" : "agents" },
+				}),
+			);
+			legacy.title = "Los agentes del proyecto que usan Composer";
+		}
+		const page = acpProjectPage(pid, acpHeader(pid, name), legacy);
+		if (pageEl.childNodes.length !== 1 || pageEl.firstChild !== page) pageEl.replaceChildren(page);
+		return;
+	}
+	suspendAcpProject();
 	// Projects v3: the workspace (Now · Threads · New task) is the project
 	// page; the P3a directory is its "Manage agents" panel.
 	if (v3Workspace(shown)) {
-		suspendPilot();
 		const name = projectName(shown.projectId);
 		setTitlePage(pageTitle(name, null));
 		const state = agentLists.get(shown.projectId);
@@ -388,10 +443,10 @@ function renderPage(): void {
 		}
 		const ws = teamWorkspace({
 			projectId: shown.projectId,
-			panel: shown.panel ?? null,
+			panel: shown.panel && shown.panel.kind !== "team" ? shown.panel : null,
 			agents: state?.data?.agents ?? null,
 			clock: listClock(state),
-			header: pageHeader(name ?? "Project", null),
+			header: pageHeader(name ?? "Project", null, ...acpChatButton(shown.projectId)),
 		});
 		if (pageEl.childNodes.length !== 1 || pageEl.firstChild !== ws) pageEl.replaceChildren(ws);
 		return;
@@ -413,22 +468,8 @@ function renderPage(): void {
 		});
 		content.prepend(back);
 	}
-	// The panel is kept as one element across polls (its draft, selection and
-	// focus live in it), so it is re-attached only when the page's shape
-	// changes — re-inserting it on every poll would blur the textarea.
-	const pilot =
-		pilotOn && shown.agentId === null && !projectConversationEnabled()
-			? pilotPanel(shown.projectId, agentLists.get(shown.projectId)?.data?.agents ?? null)
-			: null;
-	// Off screen (the agent page): its sockets close, its lanes stay.
-	if (!pilot) suspendPilot();
-	const shape = pilot ? [contentHost, pilot] : [contentHost];
-	if (
-		pageEl.childNodes.length !== shape.length ||
-		shape.some((n, i) => pageEl?.childNodes[i] !== n)
-	) {
-		pageEl.replaceChildren(...shape);
-	}
+	if (pageEl.childNodes.length !== 1 || pageEl.firstChild !== contentHost)
+		pageEl.replaceChildren(contentHost);
 	contentHost.replaceChildren(content);
 	pageEl.scrollTop = scroll;
 	if (focusKey !== undefined) {
@@ -662,7 +703,7 @@ function renderProjectPage(pid: string): HTMLElement {
 	);
 	const refresh = button("↻", "pv-btn pv-icon", () => void loadAgents(pid, true), "Refresh");
 	refresh.dataset.key = "refresh";
-	const header = pageHeader(name ?? "Project", null, refresh, createBtn);
+	const header = pageHeader(name ?? "Project", null, ...acpChatButton(pid), refresh, createBtn);
 	const now = Date.now();
 	const clock = listClock(state);
 	const sub = el("p", "pv-sub");
@@ -1338,7 +1379,6 @@ function wire(): void {
  */
 export function startProjects(): void {
 	if (!projectChatEnabled()) return;
-	pilotOn = initPilotOptIn();
 	wire();
 	active = true;
 	// Held only while the address still names the page: a session link
@@ -1348,6 +1388,9 @@ export function startProjects(): void {
 	renderSection();
 	lastProjectsAt = Date.now();
 	void loadProjects();
+	// Which page a project opens on depends on whether it has ACP agents.
+	if (acpAgentsEnabled()) void refreshAcpAgents().then(() => renderPage());
+	window.addEventListener("st:projects-changed", () => void loadProjects(true));
 	sync();
 	schedulePoll();
 	startSidebarPresence(
@@ -1368,8 +1411,8 @@ export function resetProjects(): void {
 	openDialogs.clear();
 	clearProjects();
 	clearSidebarPresence();
-	resetPilot();
 	resetWorkspaces();
+	resetAcpProject();
 	projectsState = blank();
 	agentLists = new Map();
 	agentDetails = new Map();
