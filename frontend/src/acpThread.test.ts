@@ -193,6 +193,32 @@ describe("drafts", () => {
 	});
 });
 
+describe("leaving and coming back", () => {
+	it("a send that fails after A → B → A returns its text to A's field, with the error", async () => {
+		api.acpFeed.mockResolvedValue(feed({ agent: agent("solo") }));
+		let fail!: (e: Error) => void;
+		api.acpSend.mockReturnValueOnce(
+			new Promise<AcpMessage>((_, rej) => {
+				fail = rej;
+			}),
+		);
+		const t = mount();
+		t.open({ kind: "agent", name: "solo" });
+		await flush();
+		t.input.value = "importante";
+		submit(t);
+		await flush();
+		t.open({ kind: "agent", name: "arq" });
+		t.open({ kind: "agent", name: "solo" });
+		fail(new Error("503"));
+		await flush();
+		await flush();
+		await flush();
+		expect(t.input.value).toBe("importante");
+		expect(t.root.querySelector(".acp-chat-error")?.textContent).toContain("503");
+	});
+});
+
 describe("consistency", () => {
 	it("a late page does not undo a newer row that arrived live", async () => {
 		const page = deferred<AcpFeed>();

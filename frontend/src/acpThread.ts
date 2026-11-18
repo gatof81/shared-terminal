@@ -815,14 +815,14 @@ export class AcpThread {
 		// A send that did not go out gives its text back to its own chat (never
 		// into the field of another chat the person moved to).
 		const giveBack = () => {
-			if (this.source === src) {
+			if (sameChat(this.source, src)) {
 				if (this.input.value === "") this.input.value = text;
 			} else if (!this.drafts.has(sourceKey(src))) this.drafts.set(sourceKey(src), text);
 		};
 		// Sent before the page arrived (slow link, a phone): who is in the project
 		// is not known yet — load it instead of refusing the message.
 		if (this.agents.size === 0) await this.reload();
-		if (this.source !== src) {
+		if (!sameChat(this.source, src)) {
 			giveBack();
 			return;
 		}
@@ -855,7 +855,7 @@ export class AcpThread {
 						...(src.kind === "project" ? { projectId: src.projectId } : {}),
 						clientId,
 					});
-					if (this.source === src && this.relevant(row)) {
+					if (sameChat(this.source, src) && this.relevant(row)) {
 						this.noteLive({ row });
 						this.messages = upsert(this.messages, row);
 					}
@@ -865,7 +865,7 @@ export class AcpThread {
 			}
 			// The person may have moved to another chat meanwhile: the text goes
 			// back to THIS chat's draft, never into the field of the one on screen.
-			const here = this.source === src;
+			const here = sameChat(this.source, src);
 			if (failed.length) {
 				giveBack();
 				if (here) {
@@ -913,4 +913,9 @@ function agentText(text: string): HTMLElement {
 	const box = el("div", "acp-msg-body acp-md");
 	box.append(markdownBlock(text));
 	return box;
+}
+
+/** Same chat, whatever object `open()` was given (a return to it creates a new one). */
+function sameChat(a: ThreadSource | null, b: ThreadSource): boolean {
+	return a !== null && sourceKey(a) === sourceKey(b);
 }
