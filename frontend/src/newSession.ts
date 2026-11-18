@@ -9,6 +9,7 @@
  * close functions are exported for main.ts's Escape handler.
  */
 
+import { ACP_MODELS } from "./acpModel.js";
 import { setAcpAgents } from "./acpRegistry.js";
 import {
 	acpAgentsEnabled,
@@ -155,6 +156,8 @@ let acpProjectSelect: HTMLSelectElement | null = null;
 let acpNewProjectInput: HTMLInputElement | null = null;
 let acpRuntimeSelect: HTMLSelectElement | null = null;
 let acpRuntimeLabel: HTMLLabelElement | null = null;
+let acpModelSelect: HTMLSelectElement | null = null;
+let acpModelLabel: HTMLLabelElement | null = null;
 let acpPreselectProject: string | null = null;
 const NEW_PROJECT = "__new__";
 
@@ -192,9 +195,16 @@ function ensureAcpAgentField(): void {
 	acpRuntimeSelect.id = "new-session-acp-runtime";
 	acpRuntimeLabel = acpField("Runtime ACP", acpRuntimeSelect);
 	acpRuntimeLabel.hidden = true;
+	acpModelSelect = document.createElement("select");
+	acpModelSelect.id = "new-session-acp-model";
+	for (const m of ACP_MODELS) acpModelSelect.append(new Option(m.label, m.id));
+	acpModelSelect.value = ACP_MODELS[0]!.id;
+	acpModelLabel = acpField("Modelo", acpModelSelect);
+	acpModelLabel.hidden = true;
 	const sync = () => {
 		const on = acpAgentInput?.value.trim() !== "";
 		projectLabel.hidden = !on;
+		if (acpModelLabel) acpModelLabel.hidden = !on;
 		if (acpRuntimeLabel)
 			acpRuntimeLabel.hidden = !on || (acpRuntimeSelect?.options.length ?? 0) < 2;
 		if (acpNewProjectInput)
@@ -203,7 +213,7 @@ function ensureAcpAgentField(): void {
 	acpAgentInput.addEventListener("input", sync);
 	acpProjectSelect.addEventListener("change", sync);
 	acpSyncFields = sync;
-	newSessionInput.closest("label")?.after(agentLabel, projectLabel, acpRuntimeLabel);
+	newSessionInput.closest("label")?.after(agentLabel, projectLabel, acpModelLabel, acpRuntimeLabel);
 }
 let acpSyncFields: () => void = () => {};
 
@@ -239,7 +249,7 @@ async function loadAcpChoices(): Promise<void> {
 
 /** The ACP part of the create request; creates the new project first when asked. */
 async function acpAgentForCreate(): Promise<
-	{ name: string; projectId?: string; runtime?: string } | undefined
+	{ name: string; projectId?: string; runtime?: string; model?: string } | undefined
 > {
 	const name = acpAgentInput?.value.trim() ?? "";
 	if (!name) return undefined;
@@ -253,7 +263,13 @@ async function acpAgentForCreate(): Promise<
 		window.dispatchEvent(new CustomEvent("st:projects-changed"));
 	}
 	const runtime = acpRuntimeSelect && !acpRuntimeLabel?.hidden ? acpRuntimeSelect.value : undefined;
-	return { name, ...(projectId ? { projectId } : {}), ...(runtime ? { runtime } : {}) };
+	const model = acpModelSelect?.value || undefined;
+	return {
+		name,
+		...(projectId ? { projectId } : {}),
+		...(runtime ? { runtime } : {}),
+		...(model ? { model } : {}),
+	};
 }
 
 /** Opens the new-session dialog for an ACP agent, optionally already in a project (from Project Chat). */
@@ -267,6 +283,8 @@ function openNewSessionModal(opener: HTMLElement) {
 	ensureAcpAgentField();
 	if (acpAgentInput) acpAgentInput.value = "";
 	if (acpNewProjectInput) acpNewProjectInput.value = "";
+	// Every new agent starts on the default (Sonnet) unless chosen otherwise.
+	if (acpModelSelect) acpModelSelect.value = ACP_MODELS[0]!.id;
 	if (acpAgentInput) void loadAcpChoices().finally(() => (acpPreselectProject = null));
 	renderSessionTabPlaceholders();
 	setActiveSessionTab("basics");

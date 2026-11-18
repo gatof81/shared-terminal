@@ -156,7 +156,7 @@ async function call(who: Who, method: string, path: string, body?: unknown) {
 		...(body === undefined ? {} : { body: JSON.stringify(body) }),
 	});
 	const text = await res.text();
-	return { status: res.status, body: text ? JSON.parse(text) : null };
+	return { status: res.status, body: text ? JSON.parse(text) : null, headers: res.headers };
 }
 const owner: Who = { user: OWNER };
 const as = (agent: string): Who => ({ agent });
@@ -791,6 +791,45 @@ describe("ACP messages: scope, replies, loop guard (v22)", () => {
 			text: ".",
 		});
 		await drain("arquitecto", "developer");
+	});
+
+	it("model: the owner changes it; the runner gets it with every claim and reports what the adapter applied", async () => {
+		const devOf = async () =>
+			((await call(owner, "GET", "/agents")).body as Array<Record<string, unknown>>).find(
+				(a) => a.name === "developer",
+			)!;
+		const before = await devOf();
+		expect((await call(owner, "PATCH", "/agents/developer", { model: "Opus 5" })).status).toBe(400);
+		expect((await call(owner, "PATCH", "/agents/developer", {})).status).toBe(400);
+		expect(
+			(await call(as("developer"), "PATCH", "/agents/developer", { model: "claude-opus-5-5" }))
+				.status,
+		).toBe(403);
+		const p = await call(owner, "PATCH", "/agents/developer", { model: "claude-opus-5-5" });
+		expect(p.status).toBe(200);
+		// Only the model changed: the project membership is kept.
+		expect(p.body).toMatchObject({ model: "claude-opus-5-5", projectId: before.projectId });
+		const c = await call(as("developer"), "POST", "/runner/claim");
+		expect(c.headers.get("x-st-model")).toBe("claude-opus-5-5");
+		if (c.status === 200)
+			await call(as("developer"), "POST", `/runner/messages/${c.body.id}/result`, {
+				state: "done",
+				text: ".",
+			});
+		expect(
+			(
+				await call(as("developer"), "POST", "/runner/model", {
+					requested: "claude-opus-5-5",
+					current: "claude-opus-5-5",
+				})
+			).status,
+		).toBe(204);
+		expect((await devOf()).modelApplied).toMatchObject({
+			requested: "claude-opus-5-5",
+			current: "claude-opus-5-5",
+			error: null,
+		});
+		expect(events.some((e) => e.type === "agents")).toBe(true);
 	});
 
 	it("events go only to the owner of the row", () => {

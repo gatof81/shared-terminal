@@ -5,6 +5,8 @@ import {
 	answerText,
 	authFromActivity,
 	groupThread,
+	modelLabel,
+	modelState,
 	parseMentions,
 	questionForm,
 	recipientsOf,
@@ -192,5 +194,31 @@ describe("questions", () => {
 				0,
 			).label,
 		).toBe("esperando tu respuesta");
+	});
+});
+
+describe("model", () => {
+	it("labels known ids and shows unknown ones as they are", () => {
+		expect(modelLabel("claude-opus-5-5")).toBe("Claude Opus 5.5");
+		expect(modelLabel("claude-sonnet-5-5")).toBe("Claude Sonnet 5.5");
+		expect(modelLabel("otro-modelo")).toBe("otro-modelo");
+		expect(modelLabel(null)).toBe("modelo por defecto");
+	});
+	it("a change is pending until the runner reports that same model, then applied or failed", () => {
+		const opus = "claude-opus-5-5";
+		expect(modelState({ model: opus, modelApplied: null })).toBe("pending");
+		expect(
+			modelState({
+				model: opus,
+				modelApplied: { requested: "claude-sonnet-5-5", current: "x", error: null },
+			}),
+		).toBe("pending");
+		expect(
+			modelState({ model: opus, modelApplied: { requested: opus, current: opus, error: null } }),
+		).toBe("applied");
+		expect(
+			modelState({ model: opus, modelApplied: { requested: opus, current: null, error: "no" } }),
+		).toBe("failed");
+		expect(modelState({ model: null, modelApplied: null })).toBe("unknown");
 	});
 });

@@ -4,6 +4,35 @@
 
 import type { AcpActivity, AcpAgentInfo, AcpMessage } from "./api.js";
 
+/** The models offered for an ACP agent; the first is the default. */
+export const ACP_MODELS: ReadonlyArray<{ id: string; label: string }> = [
+	{ id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5" },
+	{ id: "claude-opus-5-5", label: "Claude Opus 5.5" },
+];
+
+/** A model id as people read it (an id the list does not know is shown as is). */
+export function modelLabel(id: string | null | undefined): string {
+	if (!id) return "modelo por defecto";
+	return ACP_MODELS.find((m) => m.id === id)?.label ?? id;
+}
+
+/**
+ * Where an agent's model change stands. `pending`: the runner has not applied
+ * the stored model yet (it switches while idle, before its next message).
+ */
+export function modelState(a: {
+	model: string | null;
+	modelApplied?: { requested: string; current: string | null; error: string | null } | null;
+}): "applied" | "pending" | "failed" | "unknown" {
+	const ap = a.modelApplied;
+	if (!a.model) return "unknown";
+	// Nothing reported since the runner started (or since the change): it
+	// reports right after its next idle claim.
+	if (!ap) return "pending";
+	if (ap.requested !== a.model) return "pending";
+	return ap.error ? "failed" : "applied";
+}
+
 export const STATE_LABEL: Record<string, string> = {
 	pending: "pendiente",
 	running: "en curso",

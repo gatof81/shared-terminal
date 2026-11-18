@@ -7,7 +7,7 @@
 //
 // Messages typed here are DIRECT: private to the person and this agent.
 
-import { agentStatus } from "./acpModel.js";
+import { ACP_MODELS, agentStatus, modelLabel, modelState } from "./acpModel.js";
 import { setAcpAgents } from "./acpRegistry.js";
 import { AcpThread, type ThreadState } from "./acpThread.js";
 import {
@@ -15,6 +15,7 @@ import {
 	acpAgentsEnabled,
 	acpListAgents,
 	acpLogin,
+	acpSetModel,
 	acpSetProject,
 	fetchProjects,
 	projectChatEnabled,
@@ -30,6 +31,8 @@ let owned: AcpAgentInfo | null = null;
 let projectNames = new Map<string, string>();
 let projectRowEl: HTMLElement | null = null;
 let shownProjectKey = "";
+let modelRowEl: HTMLElement | null = null;
+let shownModelKey = "";
 let shownNoticeKey = "";
 
 const root = el("div", "acp-chat");
@@ -124,7 +127,7 @@ function renderHeader(s: ThreadState): void {
 	const meta = el(
 		"div",
 		"acp-chat-meta",
-		`${a.model ?? "modelo por defecto"} · ${a.runtime} · mensajes directos: privados entre vos y @${a.name}`,
+		`${a.runtime} · mensajes directos: privados entre vos y @${a.name}`,
 	);
 	const projectKey = projectChatEnabled()
 		? JSON.stringify([a.name, a.projectId ?? null, [...projectNames]])
@@ -133,7 +136,19 @@ function renderHeader(s: ThreadState): void {
 		shownProjectKey = projectKey;
 		projectRowEl = projectKey ? projectRow(a) : null;
 	}
-	const parts: HTMLElement[] = [line, meta];
+	const ms = modelState(a);
+	const modelKey = JSON.stringify([
+		a.name,
+		a.model,
+		ms,
+		a.modelApplied?.error ?? null,
+		a.modelApplied?.current ?? null,
+	]);
+	if (modelKey !== shownModelKey || !modelRowEl) {
+		shownModelKey = modelKey;
+		modelRowEl = modelRow(a);
+	}
+	const parts: HTMLElement[] = [line, meta, modelRowEl];
 	if (projectRowEl) parts.push(projectRowEl);
 	syncChildren(headerEl, parts);
 	const noticeKey = JSON.stringify([a.name, auth, a.loginMethods ?? []]);
@@ -177,6 +192,61 @@ function renderHeader(s: ThreadState): void {
 		actions.append(open);
 		noticeEl.append(actions);
 	}
+}
+
+/**
+ * The agent's model and how to change it. A change is stored at once and its
+ * runner switches the live ACP session while idle (a message in progress
+ * finishes on the model it started with): context, history and queue stay.
+ */
+function modelRow(a: AcpAgentInfo): HTMLElement {
+	const row = el("div", "acp-chat-project acp-chat-model");
+	const select = el("select", "acp-model-select");
+	select.setAttribute("aria-label", "Modelo del agente");
+	for (const m of ACP_MODELS) select.append(new Option(m.label, m.id));
+	if (a.model && !ACP_MODELS.some((m) => m.id === a.model))
+		select.append(new Option(a.model, a.model));
+	if (!a.model) select.append(new Option("Por defecto", ""));
+	select.value = a.model ?? "";
+	// Saved by an explicit button, never on `change` alone (keyboard type-ahead fires it).
+	const save = el("button", "files-btn", "Cambiar modelo");
+	save.type = "button";
+	save.hidden = true;
+	select.addEventListener(
+		"change",
+		() => (save.hidden = select.value === (a.model ?? "") || select.value === ""),
+	);
+	save.addEventListener("click", () => {
+		select.disabled = save.disabled = true;
+		void acpSetModel(a.name, select.value)
+			.then((info) => {
+				if (owned?.name === info.name) owned = { ...owned, ...info };
+				agentsBySession.set(info.sessionId, { ...a, ...info });
+				thread.updateAgent(info);
+			})
+			.catch((err: Error) => {
+				select.value = a.model ?? "";
+				save.hidden = true;
+				showToast(`No se pudo cambiar el modelo: ${err.message}`, true);
+			})
+			.finally(() => {
+				select.disabled = save.disabled = false;
+				renderHeader(thread.state);
+			});
+	});
+	const ms = modelState(a);
+	const note =
+		ms === "pending"
+			? `Se aplica cuando @${a.name} esté libre (el mensaje en curso termina con el modelo anterior).`
+			: ms === "failed"
+				? `El adaptador rechazó ${modelLabel(a.model)}: ${a.modelApplied?.error ?? ""}`
+				: ms === "applied"
+					? "Aplicado."
+					: "";
+	const status = el("span", `acp-model-state acp-model-${ms}`, note);
+	status.setAttribute("role", "status");
+	row.append(el("span", undefined, "Modelo:"), select, save, status);
+	return row;
 }
 
 function projectRow(a: AcpAgentInfo): HTMLElement {

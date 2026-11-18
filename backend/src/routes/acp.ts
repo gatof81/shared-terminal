@@ -86,6 +86,7 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 		sessionId: a.session_id,
 		runtime: a.runtime,
 		model: a.model,
+		modelApplied: acp.modelAppliedOf(a.agent_id),
 		projectId: a.project_id ?? null,
 		runnerSeenAt: acp.runnerSeenAt(a.agent_id),
 		running: loads.get(a.name)?.running ?? null,
@@ -232,18 +233,30 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 		}),
 	);
 
-	// PATCH /agents/:name {projectId: string | null} — join / leave a project.
+	// PATCH /agents/:name {projectId?: string | null, model?: string} — join /
+	// leave a project; change the model (applied by the runner when idle).
 	router.patch(
 		"/agents/:name",
 		wrap(async (req, res) => {
 			const owner = ownerOnly(res);
 			if (!owner) return;
-			const { projectId } = (req.body ?? {}) as { projectId?: unknown };
-			if (projectId !== null && typeof projectId !== "string")
+			const body = (req.body ?? {}) as { projectId?: unknown; model?: unknown };
+			const hasProject = "projectId" in body;
+			const hasModel = "model" in body;
+			if (!hasProject && !hasModel)
+				return void res.status(400).json({ error: "projectId or model is required" });
+			const { projectId, model } = body;
+			if (hasProject && projectId !== null && typeof projectId !== "string")
 				return void res.status(400).json({ error: "projectId must be a project id or null" });
-			if (projectId !== null && !(await acp.ownsProject(owner, projectId)))
+			// Same rule as acpAgent.model at create (routes/sessions.ts).
+			if (hasModel && (typeof model !== "string" || !/^[a-z0-9.\-[\]]{1,64}$/.test(model)))
+				return void res.status(400).json({ error: "model must be a model id" });
+			if (hasProject && projectId !== null && !(await acp.ownsProject(owner, projectId as string)))
 				return void res.status(404).json({ error: "project-not-found" });
-			const row = await acp.setProject(owner, req.params.name, projectId);
+			let row = hasProject
+				? await acp.setProject(owner, req.params.name, projectId as string | null)
+				: null;
+			if (hasModel) row = await acp.setModel(owner, req.params.name, model as string);
 			if (!row) return void res.status(404).json({ error: "not-found" });
 			res.json(agentView(row, await acp.loads(owner)));
 		}),
@@ -391,6 +404,9 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 		wrap(async (_req, res) => {
 			const agent = agentOnly(res);
 			if (!agent) return;
+			// The model this agent should run, with every claim: the runner switches
+			// to it while idle, before it starts the next message.
+			res.setHeader("X-ST-Model", agent.model ?? acp.config.defaultModel);
 			const msg = await acp.claim(agent);
 			if (msg) return void res.json(await withContext(agent, msg));
 			const running = await acp.running(agent);
@@ -444,6 +460,17 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 	);
 
 	// Questions from the runner's side: register one, wait for its answer, close it.
+	// What the adapter reported after the runner asked it for a model.
+	router.post(
+		"/runner/model",
+		wrap(async (req, res) => {
+			const agent = agentOnly(res);
+			if (!agent) return;
+			acp.setModelApplied(agent, req.body);
+			res.status(204).end();
+		}),
+	);
+
 	router.post(
 		"/runner/auth-methods",
 		wrap(async (req, res) => {

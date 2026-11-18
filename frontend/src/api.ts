@@ -624,7 +624,7 @@ export async function createSession(
 	name: string,
 	envVars?: Record<string, string>,
 	config?: SessionConfigPayload,
-	acpAgent?: { name: string; projectId?: string | null; runtime?: string },
+	acpAgent?: { name: string; projectId?: string | null; runtime?: string; model?: string },
 ): Promise<CreateSessionResponse> {
 	const res = await apiFetch("/sessions", {
 		method: "POST",
@@ -2277,6 +2277,13 @@ export interface AcpAgentInfo {
 	sessionId: string;
 	runtime: string;
 	model: string | null;
+	/** What the agent's adapter reported after its runner last switched model (null: not reported yet). */
+	modelApplied?: {
+		requested: string;
+		current: string | null;
+		error: string | null;
+		at: string;
+	} | null;
 	projectId?: string | null;
 	runnerSeenAt: string | null;
 	/** Message being worked on, if any. */
@@ -2364,6 +2371,12 @@ export const acpSetProject = (name: string, projectId: string | null) =>
 	acpJson<AcpAgentInfo>(`/agents/${encodeURIComponent(name)}`, {
 		method: "PATCH",
 		body: JSON.stringify({ projectId }),
+	});
+/** Change an agent's model: applied by its runner while idle, without restarting anything. */
+export const acpSetModel = (name: string, model: string) =>
+	acpJson<AcpAgentInfo>(`/agents/${encodeURIComponent(name)}`, {
+		method: "PATCH",
+		body: JSON.stringify({ model }),
 	});
 export const acpAnswer = (
 	id: number,
