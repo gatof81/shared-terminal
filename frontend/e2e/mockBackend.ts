@@ -143,6 +143,44 @@ export const PROJECT_SESSION_IDS = {
 	scratch: "01d00000-0000-4000-8000-000000000099",
 };
 
+// ── ACP agents ──────────────────────────────
+// `enableAcp()` (implies projects): three agents on alice's sessions — @arq and
+// @dev in "Educación HZ", @solo without a project — a few finished messages,
+// and `/ws/acp` (hello on connect; `pushAcp` delivers a live event).
+
+export interface MockAcpAgent {
+	name: string;
+	sessionId: string;
+	runtime: string;
+	model: string | null;
+	projectId: string | null;
+	runnerSeenAt: string | null;
+	running: number | null;
+	pending: number;
+	authRequired?: boolean;
+	loginMethods?: Array<{ id: string; name: string; description: string }>;
+}
+
+export interface MockAcpMessage {
+	id: number;
+	from_id: string;
+	to_id: string;
+	kind: "request" | "reply";
+	reply_to: number | null;
+	body: string;
+	state: "pending" | "running" | "done" | "failed" | "uncertain";
+	attempts: number;
+	created_at: string;
+	started_at: string | null;
+	finished_at: string | null;
+	result_text: string | null;
+	stop_reason: string | null;
+	note: string | null;
+	project_id: string | null;
+	depth: number;
+	client_id: string | null;
+}
+
 export interface MockProject {
 	projectId: string;
 	ownerUserId: string;
@@ -425,6 +463,14 @@ export class MockBackend {
 	private creations = new Map<string, { hash: string; id: string }>();
 	private seq = 100;
 
+	// ── ACP ──
+	/** ACP_AGENTS_ENABLED: `features.acpAgents` + the /acp routes and /ws/acp. */
+	acp = false;
+	acpAgents: MockAcpAgent[] = [];
+	acpMessages: MockAcpMessage[] = [];
+	acpSockets: WebSocketRoute[] = [];
+	private acpSeq = 0;
+
 	/** Start every test logged in as `username` (skips the login form). */
 	loginAs(username: keyof typeof USERS): void {
 		this.current = USERS[username]!;
@@ -432,6 +478,80 @@ export class MockBackend {
 
 	session(id: string): MockSession | undefined {
 		return this.sessions.find((s) => s.sessionId === id);
+	}
+
+	/** Turn ACP agents on (and projects): @arq and @dev in the project, @solo without one. */
+	enableAcp(): void {
+		if (!this.projectChat) this.enableProjects();
+		this.acp = true;
+		const agent = (name: string, sessionId: string, projectId: string | null): MockAcpAgent => ({
+			name,
+			sessionId,
+			runtime: "claude-acp-0.108.0",
+			model: null,
+			projectId,
+			// Just before the page clock (FIXED_NOW): the status reads "libre", not "sin señal".
+			runnerSeenAt: iso(1790),
+			running: null,
+			pending: 0,
+		});
+		this.acpAgents = [
+			agent("arq", PROJECT_SESSION_IDS.architect, PROJECT_IDS.hz),
+			agent("dev", PROJECT_SESSION_IDS.developer2, PROJECT_IDS.hz),
+			agent("solo", PROJECT_SESSION_IDS.scratch, null),
+		];
+		this.acpMessages = [];
+		this.addAcpMessage({
+			to_id: "solo",
+			body: "Resumí el README",
+			state: "done",
+			result_text:
+				"## Resumen\n\nEl proyecto expone **dos** servicios:\n\n- `api`: REST\n- `ws`: tiempo real\n\n```ts\nconst x = 1;\n```",
+		});
+		this.addAcpMessage({
+			to_id: "arq",
+			body: "@arq revisá el diseño",
+			state: "done",
+			result_text: "Listo: el diseño está bien.",
+			project_id: PROJECT_IDS.hz,
+		});
+	}
+
+	addAcpMessage(m: Partial<MockAcpMessage> & { to_id: string; body: string }): MockAcpMessage {
+		const row: MockAcpMessage = {
+			id: ++this.acpSeq,
+			from_id: "owner",
+			kind: "request",
+			reply_to: null,
+			state: "pending",
+			attempts: 0,
+			created_at: iso(this.acpSeq * 10),
+			started_at: null,
+			finished_at: null,
+			result_text: null,
+			stop_reason: null,
+			note: null,
+			project_id: null,
+			depth: 0,
+			client_id: null,
+			...m,
+		};
+		this.acpMessages.push(row);
+		return row;
+	}
+
+	/** Deliver one live `/ws/acp` frame (a message row, activity, agents) to every open socket. */
+	pushAcp(frame: Record<string, unknown>): void {
+		for (const s of this.acpSockets) s.send(JSON.stringify(frame));
+	}
+
+	/** Update a message row and push it live (as the backend does on every write). */
+	updateAcpMessage(id: number, patch: Partial<MockAcpMessage>): MockAcpMessage {
+		const m = this.acpMessages.find((x) => x.id === id);
+		if (!m) throw new Error(`no acp message ${id}`);
+		Object.assign(m, patch);
+		this.pushAcp({ type: "message", message: m });
+		return m;
 	}
 
 	/** Turn projects on: one project and a few more sessions of alice's. */
@@ -530,6 +650,93 @@ export class MockBackend {
 		}
 		await json(404, { error: `No mock for ${method} ${path}` });
 		return true;
+	}
+
+	private async handleAcp(
+		method: string,
+		path: string,
+		req: ReturnType<Route["request"]>,
+		json: (status: number, body: unknown) => Promise<void>,
+	): Promise<boolean> {
+		const page = (msgs: MockAcpMessage[]) => msgs.slice(-100);
+		if (path === "/acp/agents" && method === "GET") {
+			await json(200, this.acpAgents);
+			return true;
+		}
+		if (path === "/acp/runtimes" && method === "GET") {
+			await json(200, { default: "claude-acp-0.108.0", available: ["claude-acp-0.108.0"] });
+			return true;
+		}
+		const feed = /^\/acp\/agents\/([^/]+)\/feed$/.exec(path);
+		if (feed && method === "GET") {
+			const a = this.acpAgents.find((x) => x.name === decodeURIComponent(feed[1]!));
+			if (!a) {
+				await json(404, { error: "agent-not-found" });
+				return true;
+			}
+			await json(200, {
+				agent: a,
+				maxMessageBytes: 262144,
+				messages: page(this.acpMessages.filter((m) => m.to_id === a.name || m.from_id === a.name)),
+				questions: [],
+				activity: {},
+				activitySeq: 0,
+			});
+			return true;
+		}
+		const pfeed = /^\/acp\/projects\/([^/]+)\/feed$/.exec(path);
+		if (pfeed && method === "GET") {
+			const pid = decodeURIComponent(pfeed[1]!);
+			const p = this.projects.find((x) => x.projectId === pid);
+			if (!p) {
+				await json(404, { error: "project-not-found" });
+				return true;
+			}
+			await json(200, {
+				project: { id: p.projectId, name: p.name },
+				agents: this.acpAgents.filter((a) => a.projectId === pid),
+				maxMessageBytes: 262144,
+				messages: page(this.acpMessages.filter((m) => m.project_id === pid)),
+				questions: [],
+				activity: {},
+				activitySeq: 0,
+			});
+			return true;
+		}
+		if (path === "/acp/messages" && method === "POST") {
+			const b = JSON.parse(req.postData() ?? "{}") as {
+				to: string;
+				body: string;
+				projectId?: string;
+				clientId?: string;
+			};
+			if (!this.acpAgents.some((a) => a.name === b.to)) {
+				await json(404, { error: "agent-not-found" });
+				return true;
+			}
+			const row = this.addAcpMessage({
+				to_id: b.to,
+				body: b.body,
+				project_id: b.projectId ?? null,
+				client_id: b.clientId ?? null,
+			});
+			this.pushAcp({ type: "message", message: row });
+			await json(201, row);
+			return true;
+		}
+		const agentPatch = /^\/acp\/agents\/([^/]+)$/.exec(path);
+		if (agentPatch && method === "PATCH") {
+			const a = this.acpAgents.find((x) => x.name === decodeURIComponent(agentPatch[1]!));
+			if (!a) {
+				await json(404, { error: "agent-not-found" });
+				return true;
+			}
+			const b = JSON.parse(req.postData() ?? "{}") as { projectId?: string | null };
+			a.projectId = b.projectId ?? null;
+			await json(200, a);
+			return true;
+		}
+		return false;
 	}
 
 	async install(page: Page): Promise<void> {
@@ -637,6 +844,18 @@ export class MockBackend {
 			);
 			return;
 		}
+		if (kind === "acp") {
+			if (!this.acp) {
+				ws.close({ code: 1008, reason: "Unknown route" });
+				return;
+			}
+			this.acpSockets.push(ws);
+			ws.onClose(() => {
+				this.acpSockets = this.acpSockets.filter((x) => x !== ws);
+			});
+			ws.send(JSON.stringify({ type: "hello" }));
+			return;
+		}
 		if (kind === "conversation") {
 			const sock: ConversationSocket = { sessionId, following: null, route: ws };
 			this.conversationSockets.push(sock);
@@ -704,7 +923,7 @@ export class MockBackend {
 				// P3a: present only with the flag on (byte-identical answer otherwise).
 				...(this.projectChat
 					? {
-							features: { projectChat: true },
+							features: { projectChat: true, ...(this.acp ? { acpAgents: true } : {}) },
 						}
 					: {}),
 			});
@@ -792,7 +1011,9 @@ export class MockBackend {
 
 		// ── projects ──
 		if (await this.handleProjects(method, path, req, me, json, route)) return;
-		// ── ACP (what a project page reads; no agents in this mock) ──
+		// ── ACP ──
+		if (this.acp && (await this.handleAcp(method, path, req, json))) return;
+		// Projects without ACP: what a project page reads (no agents).
 		if (this.projectChat && path === "/acp/agents" && method === "GET") return json(200, []);
 		const acpFeed = /^\/acp\/projects\/([^/]+)\/feed$/.exec(path);
 		if (this.projectChat && acpFeed && method === "GET") {
