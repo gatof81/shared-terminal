@@ -8,6 +8,7 @@ import type { AcpActivity, AcpAgentInfo, AcpMessage } from "./api.js";
 export const ACP_MODELS: ReadonlyArray<{ id: string; label: string }> = [
 	{ id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5" },
 	{ id: "claude-opus-5-5", label: "Claude Opus 5.5" },
+	{ id: "claude-fable-5-2", label: "Claude Fable 5.2" },
 ];
 
 /** A model id as people read it (an id the list does not know is shown as is). */

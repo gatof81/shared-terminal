@@ -201,6 +201,7 @@ describe("model", () => {
 	it("labels known ids and shows unknown ones as they are", () => {
 		expect(modelLabel("claude-opus-5-5")).toBe("Claude Opus 5.5");
 		expect(modelLabel("claude-sonnet-5-5")).toBe("Claude Sonnet 5.5");
+		expect(modelLabel("claude-fable-5-2")).toBe("Claude Fable 5.2");
 		expect(modelLabel("otro-modelo")).toBe("otro-modelo");
 		expect(modelLabel(null)).toBe("modelo por defecto");
 	});

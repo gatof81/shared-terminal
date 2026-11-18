@@ -241,7 +241,7 @@ function modelRow(a: AcpAgentInfo): HTMLElement {
 			: ms === "failed"
 				? `El adaptador rechazó ${modelLabel(a.model)}: ${a.modelApplied?.error ?? ""}`
 				: ms === "applied"
-					? "Aplicado."
+					? `Aplicado${a.modelApplied?.current ? ` (el adaptador usa ${a.modelApplied.current})` : ""}.`
 					: "";
 	const status = el("span", `acp-model-state acp-model-${ms}`, note);
 	status.setAttribute("role", "status");

@@ -127,6 +127,11 @@ test.describe("ACP model", () => {
 		const model = page.locator("#new-session-acp-model");
 		await expect(model).toBeVisible();
 		await expect(model).toHaveValue("claude-sonnet-5-5");
+		expect(await model.locator("option").allTextContents()).toEqual([
+			"Claude Sonnet 5.5",
+			"Claude Opus 5.5",
+			"Claude Fable 5.2",
+		]);
 		await model.selectOption({ label: "Claude Opus 5.5" });
 		await page.click("#new-session-submit");
 		await expect.poll(() => created.length).toBe(1);

@@ -337,15 +337,32 @@ async function openSession() {
 // session (context, history) is kept. A refused switch is reported and not
 // retried until a different model is requested.
 let modelTried = null;
+// "claude-fable-5-2" vs a row "fable Fable 5.2 · …": same family and version.
+function sameModel(requested, row) {
+	const m = /^(?:claude-)?([a-z]+)-(\d+)-(\d+)/.exec(requested);
+	if (!m) return true; // not a family-version id: nothing to compare
+	const text = row.toLowerCase();
+	return text.includes(m[1]) && text.includes(`${m[2]}.${m[3]}`);
+}
 async function applyModel(sessionId, model) {
 	if (!model || model === modelTried) return;
 	modelTried = model;
 	try {
 		const r = await request("session/set_config_option", { sessionId, configId: "model", value: model });
 		const opt = (r?.configOptions ?? []).find((o) => o.id === "model");
-		const current = typeof opt?.currentValue === "string" ? opt.currentValue : null;
-		log(`model → ${model} (adapter reports ${current ?? "nothing"})`);
-		await api("POST", "/runner/model", { requested: model, current });
+		const value = typeof opt?.currentValue === "string" ? opt.currentValue : null;
+		const chosen = (opt?.options ?? []).find((o) => o.value === value);
+		const current = chosen?.name ?? value;
+		// The adapter resolves an id loosely (claude-opus-5-5 → its "opus" row): a
+		// request it does not know could land on another model without an error.
+		// Accept only a row that names the same family and version.
+		const mismatch = chosen && !sameModel(model, `${chosen.value} ${chosen.name ?? ""} ${chosen.description ?? ""}`);
+		log(`model → ${model} (adapter reports ${current ?? "nothing"}${mismatch ? ", NOT the requested one" : ""})`);
+		await api("POST", "/runner/model", {
+			requested: model,
+			current,
+			...(mismatch ? { error: `el adaptador eligió ${current} en lugar de ${model}` } : {}),
+		});
 	} catch (err) {
 		log(`model ${model} refused by the adapter: ${err.message}`);
 		await api("POST", "/runner/model", { requested: model, current: null, error: String(err.message).slice(0, 300) });
