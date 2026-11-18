@@ -222,7 +222,16 @@ async function loadAcpChoices(): Promise<void> {
 	if (rt && rt.options.length === 0) {
 		const r = await acpRuntimes().catch(() => null);
 		for (const name of r?.available ?? [])
-			rt.append(new Option(name === r?.default ? `${name} (por defecto)` : name, name));
+			rt.append(
+				new Option(
+					name === r?.default
+						? `${name} (por defecto)`
+						: name === "st-test-agent"
+							? `${name} (prueba: sin IA, responde fijo)`
+							: name,
+					name,
+				),
+			);
 		if (r) rt.value = r.default;
 	}
 	acpSyncFields();
