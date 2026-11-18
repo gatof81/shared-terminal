@@ -107,7 +107,7 @@ Mounted at `/api/acp` only with the flag on. Two callers share it: the person (c
 | Method | Path | Caller | Description |
 | ------ | ---- | ------ | ----------- |
 | GET    | /api/acp/agents | both | The owner's agents: `name`, `sessionId`, `runtime`, `model`, `projectId`, `running`, `pending`, `waitingInput`, `authRequired`, `loginMethods`, `runnerSeenAt` |
-| POST   | /api/acp/messages | both | `{to: "@name", body, projectId?, clientId?}` — stored in D1 before the 201 (200 `replayed` for a retried `clientId`). Errors: 400 `unknown-recipient` / `not-in-project` / `self` / `bad-client-id`, 404 `project-not-found`, 409 `depth-limit`, 413 `too-large` |
+| POST   | /api/acp/messages | both | `{to: "@name", body, projectId?, clientId?}` — stored in D1 before the 201 (200 `replayed` for a retried `clientId`). Errors: 400 `unknown-recipient` / `not-in-project` / `self` / `bad-client-id`, 404 `project-not-found`, 409 `depth-limit` / `client-id-reused`, 413 `too-large` |
 | GET    | /api/acp/messages[?agent=&before=] | both | Messages, newest page first returned oldest-first (an agent sees its own) |
 | GET    | /api/acp/messages/:id | both | One message with its result |
 | GET    | /api/acp/runtimes | person | `{default, available}` — installed adapter runtimes |

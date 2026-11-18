@@ -57,8 +57,9 @@ bind-mounted **read-only** at `/opt/st-acp` only into agent sessions:
 `POST /api/acp/messages {to: "@name", body, projectId?, clientId?}` is the only way to send. The row
 is inserted in D1 **before** the `201`. The sender is always the credential — the person's cookie or
 the agent's token — never a field of the body. Bodies are capped at `ACP_MESSAGE_MAX_BYTES`
-(256 KiB; 413 above). A `clientId` makes the send idempotent per recipient (a retry answers `200`
-with `replayed: true` and the first row).
+(256 KiB; 413 above). A `clientId` makes the send idempotent per recipient. A retry with the same
+sender, body and scope answers `200` with `replayed: true` and the first row. The same id with
+anything else is refused with `409 client-id-reused`, never answered with another message's row.
 
 | State | Meaning |
 | --- | --- |
@@ -80,6 +81,10 @@ with `replayed: true` and the first row).
 - **Replies between agents are automatic.** When an agent's request to another agent ends `done`, the
   result goes back to the sender as a `reply` (`reply_to` = the request, same scope and depth),
   written by a D1 trigger in the same statement as the result. A reply never produces a reply.
+- **An unfinished request is answered too.** If it ends `failed` or `uncertain`, the sender gets one
+  correlated `reply` (`note: unfinished:<state>`) saying so. The reply tells the agent not to repeat
+  or resend the request (it may have had effects) and that a retry is the person's decision. Nothing
+  re-sends it.
 - **Loop guard.** A person's message has depth 0; a request an agent sends while working on a
   message of depth *d* has depth *d+1*, refused past `ACP_MAX_DEPTH` (6) with 409 `depth-limit`.
 - Pending messages survive backend, runner and container restarts: they are rows in D1.
@@ -103,7 +108,7 @@ A message's `project_id` is its **scope**:
 | Where | the agent's session, Chat view | the project page, `#/projects/<pid>/chat` |
 | Shows | everything to or from that agent, any scope | only what was posted in that project |
 | Scope of a person's message | direct (`projectId` absent) | the project (`projectId`, the agent must be in it) |
-| Recipients | the agent | chosen in the UI from the message's `@mentions`; the API receives one `POST` per recipient, each checked to be in the project |
+| Recipients | the agent | the `@mentions` at the start of the message, all of which must be agents of the project (one unknown name refuses the whole post); without them, the one agent mentioned or the project's only agent. The API receives one `POST` per recipient, each checked to be in the project |
 
 - An agent takes part in at most one project (`acp_agents.project_id`), chosen at creation or with
   `PATCH /api/acp/agents/:name {projectId}` (an explicit button in the UI). It keeps its session,
@@ -136,7 +141,8 @@ and not to wait for it. Agent credentials are `acp1.<agentId>.<HMAC>` with a key
 When the agent needs a decision (Claude's `AskUserQuestion`, or an MCP form), the adapter sends an
 ACP `elicitation/create`. The runner registers it (`agent_questions`, v22) and keeps the ACP request
 open; the Chat shows the form (single/multiple choice, *Other*, text) and the agent as *esperando tu
-respuesta*.
+respuesta*. A question is attached to a message only if it is the message the agent is running, so it
+shows in that message's chat and nowhere else.
 
 - Only the person answers (`POST /api/acp/questions/:id/answer {action: accept|decline|cancel,
   content?}`); an agent's token is refused, and a second answer gets 409.
@@ -212,9 +218,14 @@ session.
 - **Backup & restore** include `acp_agents`, `agent_messages` and `agent_questions`, and the
   workspace (with the runner state). Restored sessions come back stopped; on their next start the
   runner settles whatever was `running`.
-- **Deleting.** A soft delete keeps the agent (restartable). A hard delete removes the agent row with
-  the session; its name can be reused by a new agent, which never inherits what the old one left
-  unfinished.
+- **Deleting.** A soft delete keeps the agent (restartable). A hard delete of an agent's session:
+  - closes what was queued or running for it as `failed`, and agents that had asked it something get
+    the unfinished reply above;
+  - orphans its open questions;
+  - makes its token stop working;
+  - frees its name for a new agent.
+- **Recreating** an agent's container (admin recreation) keeps the read-only runtime mount; the
+  watchdog launches the runner in the new container, which resumes the same ACP session.
 - **Rollback.** Unset `ACP_AGENTS_ENABLED` and restart: no routes, no runners. Tables stay; agent
   sessions keep working as ordinary sessions.
 
