@@ -144,7 +144,7 @@ function renderBar(): void {
 		"p",
 		"acp-project-help",
 		members.length
-			? "Mencioná agentes con @nombre: cada uno recibe el mensaje en su cola y responde acá. Pueden consultarse entre ellos (st send); esas consultas también aparecen acá."
+			? "Empezá el mensaje con @agente (uno o varios): cada uno lo recibe en su cola y responde acá. Pueden consultarse entre ellos (st send); esas consultas también aparecen acá."
 			: "Este proyecto todavía no tiene agentes ACP. Creá una sesión con agente o agregá una existente.",
 	);
 	barEl.replaceChildren(chips, tools, help);

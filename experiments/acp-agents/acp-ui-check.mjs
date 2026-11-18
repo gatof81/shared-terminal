@@ -72,10 +72,13 @@ try {
 		} else await page.selectOption("#new-session-acp-project", projectChoice.id);
 		await page.selectOption("#new-session-acp-runtime", "st-test-agent");
 		await page.click("#new-session-submit");
-		await page.waitForFunction((a) => location.hash.startsWith("#/sessions/"), agent, { timeout: 30_000 });
-		await page.waitForTimeout(1_000);
-		const agents = (await json(page, "/api/acp/agents")).body;
-		const a = agents.find((x) => x.name === agent);
+		// The address may already name the previous session: wait for the agent itself.
+		let a = null;
+		for (let i = 0; i < 60 && !a; i++) {
+			await page.waitForTimeout(1_000);
+			a = (await json(page, "/api/acp/agents")).body.find((x) => x.name === agent) ?? null;
+		}
+		await page.waitForFunction((sid) => location.hash.includes(sid), a?.sessionId ?? "", { timeout: 30_000 }).catch(() => {});
 		check(`UI: session with @${agent} created`, !!a, a && `${a.runtime} project ${a.projectId}`);
 		if (a) created.push(a.sessionId);
 		return a;
@@ -100,10 +103,12 @@ try {
 	const send = page.locator(".acp-project .acp-chat-send");
 	await page.click(`.acp-mention:has-text("@${ARQ}")`);
 	await input.type(`consultá a @${DEV}: ¿listo para revisar?`);
+	// The mention inside the text is part of the instruction: only @arq receives it.
 	await send.click();
 	await page.waitForFunction(() => /Recibí la respuesta de @/.test(document.querySelector(".acp-project .acp-chat-thread")?.textContent ?? ""), null, { timeout: 60_000 }).catch(() => {});
 	const text = await page.locator(".acp-project .acp-chat-thread").textContent();
 	check("agent consulted the other (st send) and the consult is visible in Project Chat", text.includes(`@${ARQ} → @${DEV} (consulta)`));
+	check("a mention inside the text did not make @dev a recipient", !text.includes("error: st: 400"));
 	check("the answer came back to the first agent, shown in Project Chat", /recibe la respuesta de @/.test(text) && /Recibí la respuesta de @/.test(text));
 	await page.screenshot({ path: `${shots}/ui-2-project-chat.png` });
 
@@ -116,6 +121,7 @@ try {
 	await page.waitForTimeout(800);
 	check("input free right after sending while an agent works", (await input.isEnabled()) && (await input.inputValue()) === "");
 	const post = page.locator(".acp-project article.acp-msg", { hasText: "los dos: ¿siguen ahí?" });
+	await page.waitForFunction(() => [...document.querySelectorAll(".acp-project article.acp-msg")].some((a) => /los dos: ¿siguen ahí\?/.test(a.textContent) && a.querySelectorAll(".acp-sub").length === 2), null, { timeout: 30_000 }).catch(() => {});
 	check("a post to two agents is one bubble with one row per agent", (await post.locator(".acp-sub").count()) === 2);
 	const badges = await post.locator(".acp-sub .acp-badge").allTextContents();
 	check("…the busy agent's copy waits (pending) while the other proceeds", badges.includes("pendiente") || badges.includes("en curso"), badges.join(","));
