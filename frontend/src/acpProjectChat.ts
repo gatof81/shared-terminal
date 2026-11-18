@@ -122,16 +122,22 @@ function renderBar(): void {
 	if (candidates.length) {
 		const select = el("select", "acp-add-select");
 		select.setAttribute("aria-label", "Agregar un agente existente");
-		select.append(new Option("+ Agregar agente existente…", ""));
+		select.append(new Option("Agregar agente existente…", ""));
 		for (const a of candidates)
 			select.append(
 				new Option(`@${a.name}${a.projectId ? " (está en otro proyecto)" : ""}`, a.name),
 			);
-		select.addEventListener("change", () => {
+		// An explicit button: a <select> alone would act on its `change`, which
+		// keyboard type-ahead fires while it has the focus (typing "@…" picked an agent).
+		const add = el("button", "files-btn", "Agregar");
+		add.type = "button";
+		add.disabled = true;
+		select.addEventListener("change", () => (add.disabled = select.value === ""));
+		add.addEventListener("click", () => {
 			const name = select.value;
 			if (name) void addAgent(pid, name);
 		});
-		tools.append(select);
+		tools.append(select, add);
 	}
 	const create = el("button", "files-btn", "+ Nueva sesión con agente");
 	create.type = "button";

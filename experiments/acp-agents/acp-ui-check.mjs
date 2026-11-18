@@ -59,6 +59,8 @@ const page = await ctx.newPage();
 const created = [];
 try {
 	await login(page);
+	// Agents that are not this run's: their project must not move (a regression once moved one).
+	var others = (await json(page, "/api/acp/agents")).body.filter((a) => !a.name.startsWith(`${P}-`)).map((a) => [a.name, a.projectId]);
 
 	// ── 1. Two agent sessions created from the new-session form, the first in a NEW project.
 	async function createAgent(agent, projectChoice) {
@@ -221,6 +223,10 @@ try {
 	await m.screenshot({ path: `${shots}/ui-mobile-error.png` }).catch(() => {});
 }
 
+{
+	const after = (await json(page, "/api/acp/agents")).body.filter((a) => !a.name.startsWith(`${P}-`)).map((a) => [a.name, a.projectId]);
+	check("agents outside this run kept their project", JSON.stringify(after) === JSON.stringify(typeof others === "undefined" ? after : others), JSON.stringify(after));
+}
 if (process.env.KEEP !== "1")
 	for (const sid of created) {
 		const d = await json(page, `/api/sessions/${sid}?hard=true`, { method: "DELETE" });
