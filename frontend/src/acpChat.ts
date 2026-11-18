@@ -172,8 +172,13 @@ function projectRow(a: AcpAgentInfo): HTMLElement {
 	if (a.projectId && !projectNames.has(a.projectId))
 		select.append(new Option("(proyecto)", a.projectId));
 	select.value = a.projectId ?? "";
-	select.addEventListener("change", () => {
-		select.disabled = true;
+	// Saved by an explicit button, never on `change` alone (keyboard type-ahead fires it).
+	const save = el("button", "files-btn", "Guardar");
+	save.type = "button";
+	save.hidden = true;
+	select.addEventListener("change", () => (save.hidden = select.value === (a.projectId ?? "")));
+	save.addEventListener("click", () => {
+		select.disabled = save.disabled = true;
 		const pid = select.value || null;
 		void acpSetProject(a.name, pid)
 			.then((info) => {
@@ -184,11 +189,11 @@ function projectRow(a: AcpAgentInfo): HTMLElement {
 				select.value = a.projectId ?? "";
 			})
 			.finally(() => {
-				select.disabled = false;
+				select.disabled = save.disabled = false;
 				renderHeader(thread.state);
 			});
 	});
-	row.append(el("span", undefined, "Proyecto:"), select);
+	row.append(el("span", undefined, "Proyecto:"), select, save);
 	if (a.projectId) {
 		const link = el("a", "acp-link", "Abrir Project Chat");
 		link.href = `#/projects/${encodeURIComponent(a.projectId)}/chat`;
