@@ -1,15 +1,15 @@
 import { expect, test } from "./fixtures.js";
 
 /**
- * The list's "Live" section (v1.8: renamed from "Active", now a filter) and the composer's reasons follow the
+ * The list's "Live" section (v1.8: renamed from "Active", now a filter) follows the
  * backend's status AND the age of its evidence (conversationModel
  * presentStatus): a live claim nobody has confirmed for 10 minutes, an
  * `unknown` conversation and one without a pane are listed under
- * "Earlier", stay readable, and explain why Chat cannot send to them.
+ * "Earlier" and stay readable. The capture's Chat is read-only history.
  * The fixed test clock is 2026-10-31T10:30:00Z.
  */
 test.describe("chat: active vs earlier", () => {
-	test("stale, unknown and pane-less conversations are Earlier, readable, and say why they cannot take input", async ({
+	test("stale, unknown and pane-less conversations are Earlier, readable, and read-only", async ({
 		app,
 		backend,
 		page,
@@ -53,63 +53,11 @@ test.describe("chat: active vs earlier", () => {
 		await expect(row("Resumed session")).toContainText("State unknown");
 		await expect(row("Displaced session")).toContainText("State unknown");
 
-		// Unknown: readable, and the composer explains how it resolves.
+		// Readable, read-only (no input): the history of a traditional session.
 		await row("Resumed session").click();
 		await expect(page.locator("#chat-thread .chat-assistant")).toContainText("All green");
-		// The next message can be written; only Send waits (owner priority 2).
-		await expect(page.locator(".chat-composer textarea")).toBeEnabled();
-		await expect(page.locator(".chat-composer .chat-send")).toBeDisabled();
-		await expect(page.locator(".chat-composer-status")).toContainText("State unknown");
-		await expect(page.locator(".chat-composer-status")).toContainText("Terminal");
-		if (app.mobile) await page.click("#chat-back-btn");
-
-		// No pane: readable, and the reason is the pane, not a generic refusal.
-		await row("Displaced session").click();
-		await expect(page.locator("#chat-thread .chat-assistant")).toContainText("All green");
-		await expect(page.locator(".chat-composer-status")).toContainText(
-			"no longer has a terminal pane",
-		);
-	});
-
-	test("a conversation that never had a pane (e.g. a background Claude session) is not told it was taken over", async ({
-		app,
-		backend,
-		page,
-	}) => {
-		const c1 = backend.conversations[0]!;
-		c1.status = "unknown";
-		c1.statusEvidence = "timeout";
-		c1.paneId = null;
-		c1.canSendInput = false;
-		await app.login("alice");
-		await app.openSession("my-project");
-		await app.switchView("chat");
-		await page.locator("#chat-list .chat-conv-row", { hasText: "Refactor auth flow" }).click();
-		const status = page.locator(".chat-composer-status");
-		await expect(status).toContainText("Chat can't tie this conversation to a terminal pane");
-		await expect(status).toContainText("background session");
-		await expect(status).not.toContainText("took it over");
-		await expect(status).not.toContainText("started in it");
-	});
-
-	test("a conversation still bound to its pane that cannot take input does not claim the pane was lost", async ({
-		app,
-		backend,
-		page,
-	}) => {
-		// Bound (paneId set) and fresh, but not sendable for another reason
-		// (e.g. the viewer may not operate it): the generic reason, not "no pane".
-		const c1 = backend.conversations[0]!;
-		c1.canSendInput = false;
-		c1.paneId = "%1";
-		await app.login("alice");
-		await app.openSession("my-project");
-		await app.switchView("chat");
-		await page.locator("#chat-list .chat-conv-row", { hasText: "Refactor auth flow" }).click();
-		const status = page.locator(".chat-composer-status");
-		await expect(status).toContainText("Sending from Chat is not available");
-		await expect(status).not.toContainText("no longer has a terminal pane");
-		await expect(status).not.toContainText("can't tie this conversation");
+		await expect(page.locator("#chat-thread textarea")).toHaveCount(0);
+		await expect(page.locator("#chat-thread .chat-readonly-note")).toContainText("Terminal");
 	});
 
 	test("a long turn that keeps emitting events stays Active although its status time is old", async ({
@@ -172,7 +120,7 @@ test.describe("chat: active vs earlier", () => {
 		);
 		await app.switchView("chat");
 		await page.locator("#chat-list .chat-conv-row", { hasText: "Refactor auth flow" }).click();
-		const link = page.locator(".chat-composer-status button", { hasText: "Open terminal" });
+		const link = page.locator(".chat-readonly-note button", { hasText: "Open terminal" });
 		await expect(link).toHaveText("Open terminal · Tab 2");
 		await link.click();
 		await expect(page.locator("#terminal-tabs .tab-chip.active")).toHaveAttribute(

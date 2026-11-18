@@ -1025,71 +1025,6 @@
 .chat-agent-actions .chat-copy {
   margin-left: 0;
 }
-
-/* Composer (3.2) */
-.chat-composer {
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
-  padding: 0.5rem 0.9rem;
-  border-top: 1px solid var(--c-border);
-  background: var(--c-surface);
-  flex-shrink: 0;
-}
-.chat-composer-row {
-  display: flex;
-  gap: 0.5rem;
-  align-items: flex-end;
-}
-.chat-composer textarea {
-  flex: 1;
-  min-width: 0;
-  resize: none;
-  /* Grows with the text (autosize in chatView.ts) up to here, then scrolls. */
-  max-height: 12rem;
-  overflow-y: auto;
-  background: var(--c-bg);
-  color: var(--c-text);
-  border: 1px solid var(--c-border);
-  border-radius: 8px;
-  padding: 0.45rem 0.6rem;
-  font: inherit;
-  font-size: 0.85rem;
-  line-height: 1.35;
-}
-.chat-composer textarea:disabled {
-  color: var(--c-muted);
-}
-.chat-composer-draft-note {
-  color: var(--c-faint);
-}
-.chat-composer-status {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.4rem 0.6rem;
-  align-items: center;
-  font-size: 0.78rem;
-  color: var(--c-muted);
-  min-width: 0;
-}
-.chat-composer-status.warn {
-  color: var(--c-warn, #b26a00);
-}
-.chat-composer-status.error {
-  color: var(--c-err);
-}
-.chat-composer-status .chat-link {
-  padding: 0;
-}
-.chat-pending {
-  opacity: 0.65;
-  border-style: dashed;
-}
-.chat-pending .chat-pending-state {
-  font-size: 0.75rem;
-  color: var(--c-muted);
-  margin-top: 0.2rem;
-}
 .chat-empty .files-btn {
   margin-top: 0.25rem;
 }
@@ -1114,12 +1049,6 @@
   }
 }
 /* Mobile: one pane, agents as a bottom sheet, bigger targets */
-@media (max-width: 768px) {
-  /* The soft keyboard takes half the screen: a shorter cap keeps the thread visible. */
-  .chat-composer textarea {
-    max-height: 7.5rem;
-  }
-}
 @media (max-width: 768px) {
   /* The summary bar above already shows this conversation's name and
      status: the head drops both (one status, not two) and keeps its
@@ -1170,8 +1099,5 @@
   }
   .chat-agents-head {
     border-radius: 14px 14px 0 0;
-  }
-  .chat-composer {
-    padding: 0.5rem 0.65rem;
   }
 }

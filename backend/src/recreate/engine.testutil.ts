@@ -566,8 +566,6 @@ export async function harness(
 	const lock = opts.lock ?? new SessionLifecycleLock();
 	lock.setGuard((sid) => attempts.assertResolved(sid));
 	const workspaceSkills = new Map<string, WorkspaceSkill>();
-	/** The workspace CLI N would run (control-marker-incompatible). */
-	const cli: { version: string | null } = { version: "2.1.308" };
 	/** Carry-over preconditions (§2.7.7): free disk and backup freshness, as the host would report them. */
 	const disk: { free: number | null } = { free: 64 * 1024 ** 3 };
 	const backup: { fresh: boolean } = { fresh: true };
@@ -582,13 +580,12 @@ export async function harness(
 		lock,
 		capture,
 		readWorkspaceSkill: async (_sid, rel) => workspaceSkills.get(rel) ?? { kind: "absent" },
-		readCliVersion: async () => cli.version,
 		diskFree: async () => disk.free,
 		backupFresh: async () => backup.fresh,
 		config: { ...FAST, ...opts.config },
 		...(opts.now ? { now: opts.now } : {}),
 	});
-	return { root, docker, d1, capture, attempts, lock, engine, workspaceSkills, cli, disk, backup };
+	return { root, docker, d1, capture, attempts, lock, engine, workspaceSkills, disk, backup };
 }
 
 /**

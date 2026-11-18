@@ -23,7 +23,6 @@ import {
 } from "./rateLimit.js";
 import { registerAdminRoutes } from "./routes/admin.js";
 import { registerAuthRoutes } from "./routes/auth.js";
-import { registerComposerAdminRoutes, registerComposerRoutes } from "./routes/composer.js";
 import { registerConversationAdminRoutes } from "./routes/conversationAdmin.js";
 import { registerConversationRoutes } from "./routes/conversations.js";
 import { registerExecRoutes } from "./routes/exec.js";
@@ -31,7 +30,6 @@ import { registerFileRoutes } from "./routes/files.js";
 import { registerGitRoutes } from "./routes/git.js";
 import { registerGroupRoutes } from "./routes/groups.js";
 import { registerInviteRoutes } from "./routes/invites.js";
-import { registerProjectConversationRoutes } from "./routes/projectConversation.js";
 import { registerProjectRoutes } from "./routes/projects.js";
 import { registerPushRoutes } from "./routes/push.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
@@ -58,12 +56,7 @@ export function buildRouter(
 	// P3a — `projects` too (PROJECT_CHAT_ENABLED); optional for the same reason.
 	conversationExtras: Pick<
 		RouteContext,
-		| "recreation"
-		| "conversationAllowUsers"
-		| "composer"
-		| "projects"
-		| "projectConversation"
-		| "acp"
+		"recreation" | "conversationAllowUsers" | "projects" | "acp"
 	> = {},
 ): Router {
 	const router = Router();
@@ -150,12 +143,9 @@ export function buildRouter(
 	registerGitRoutes(router, ctx);
 	registerConversationRoutes(router, ctx);
 	registerConversationAdminRoutes(router, ctx);
-	registerComposerRoutes(router, ctx);
-	registerComposerAdminRoutes(router, ctx);
 	registerExecRoutes(router, ctx);
 	registerTemplateRoutes(router, ctx);
 	registerProjectRoutes(router, ctx);
-	registerProjectConversationRoutes(router, ctx);
 
 	return router;
 }

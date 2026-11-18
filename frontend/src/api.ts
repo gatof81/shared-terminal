@@ -83,48 +83,6 @@ export function projectChatEnabled(): boolean {
 	return _projectChat;
 }
 
-// Projects v3 (docs/PROJECT_CONVERSATION.md, D1): `features.projectConversation`
-// on /auth/status, present only with PROJECT_CONVERSATION_ENABLED on (whose
-// routes 404 otherwise). It is the v3 workspace's flag: absent ⇒ the project
-// page is exactly the P3a one, and no conversation request is ever sent.
-let _projectConversation = false;
-
-/** True only when the last /auth/status said `features.projectConversation === true` (and projectChat). */
-export function projectConversationEnabled(): boolean {
-	return _projectChat && _projectConversation;
-}
-
-// D2 (Appendix A.2): `features.projectArtifacts`, present only with
-// PROJECT_ARTIFACTS_ENABLED on. Absent ⇒ no attach UI and no request to
-// …/artifacts at all; a message's files are still listed (read from the log).
-let _projectArtifacts = false;
-
-/** True only with the conversation on AND `features.projectArtifacts === true`. */
-export function projectArtifactsEnabled(): boolean {
-	return projectConversationEnabled() && _projectArtifacts;
-}
-
-// D3 (§7): `features.projectRelay`, present only with PROJECT_RELAY_ENABLED
-// effective. Absent ⇒ no consult control, no grant request, and the thread
-// renders exactly as before it existed.
-let _projectRelay = false;
-
-/** True only with the conversation on AND `features.projectRelay === true`. */
-export function projectRelayEnabled(): boolean {
-	return projectConversationEnabled() && _projectRelay;
-}
-
-// §3.6: `features.projectQueue`, present on a backend that accepts
-// `whenFree` and the cancel route. The frontend is deployed on its own, so
-// against an older backend the key is absent and a message is sent exactly
-// as before (an unknown body field would be refused).
-let _projectQueue = false;
-
-/** True only with the conversation on AND `features.projectQueue === true`. */
-export function projectQueueEnabled(): boolean {
-	return projectConversationEnabled() && _projectQueue;
-}
-
 /** True iff `users.is_admin = 1` for the current session (#50). Gates
  *  invite-mint UI in main.ts. Refreshes on every /auth/status call so a
  *  promotion / demotion takes effect on the next reload. */
@@ -182,10 +140,6 @@ export interface AuthStatus {
 	/** P3a: present only with PROJECT_CHAT_ENABLED on. Absent ⇒ no project surface. */
 	features?: {
 		projectChat?: boolean;
-		projectConversation?: boolean;
-		projectArtifacts?: boolean;
-		projectRelay?: boolean;
-		projectQueue?: boolean;
 		/** Experimental ACP agents: present only with ACP_AGENTS_ENABLED. */
 		acpAgents?: boolean;
 	};
@@ -220,22 +174,6 @@ async function fetchAuthStatus(): Promise<AuthStatus> {
 		typeof data.features === "object" &&
 		data.features !== null &&
 		data.features.projectChat === true;
-	_projectConversation =
-		typeof data.features === "object" &&
-		data.features !== null &&
-		data.features.projectConversation === true;
-	_projectArtifacts =
-		typeof data.features === "object" &&
-		data.features !== null &&
-		data.features.projectArtifacts === true;
-	_projectRelay =
-		typeof data.features === "object" &&
-		data.features !== null &&
-		data.features.projectRelay === true;
-	_projectQueue =
-		typeof data.features === "object" &&
-		data.features !== null &&
-		data.features.projectQueue === true;
 	// #200: mirror caps if present. A pre-#200 backend omits the field
 	// and leaves the v1 defaults in place — same hardcoded ceilings the
 	// form would have used before this PR.
@@ -399,71 +337,17 @@ export interface SessionInfo {
 		memLimitBytes: number;
 		memPercent: number;
 	} | null;
-	/**
-	 * P3a (PROJECTS.md §4.6), only with the project feature on: an object =
-	 * bound to that agent; null = unassigned; the key ABSENT = unknown (the
-	 * directory read failed) — never read absence as null (`"binding" in s`).
-	 */
-	binding?: SessionBinding | null;
 }
 
-// ── Project directory types (P3a, docs/PROJECTS.md §4) ─────────────────────
+// ── Projects (ACP agents take part in one) ──────────────────────────────────
 
-export type Allowed = { allowed: true } | { allowed: false; reason: string };
-
-export interface Presence {
-	value: "working" | "waiting_input" | "needs_attention" | "disconnected" | "unknown";
-	detail?: string;
-	source: string;
-	/** ISO; null = no evidence. */
-	at: string | null;
-	/** Only on waiting_input: true ⇔ a probe said it. */
-	verified?: boolean;
-}
-
-export interface Binding {
-	bindingId: string;
-	epoch: number;
-	sessionId: string;
-	state: "active" | "draining" | "retired";
-	createdAt?: string;
-}
-
-export interface AgentListEntry {
-	agentId: string;
-	handle: string;
-	role: string | null;
-	provider: string;
-	template: null;
-	binding: Binding | null;
-	presence: Presence;
-}
-
-export interface AgentHistoryBinding extends Binding {
-	retiredAt: string | null;
-	retireReason: string | null;
-}
-
-export interface AgentDetail extends AgentListEntry {
-	projectId: string;
-	createdAt: string;
-	removedAt: string | null;
-	capabilities: { capture: boolean; channels: boolean; directControl: boolean };
-	bindings: AgentHistoryBinding[];
-	can: { remove: Allowed };
-}
-
-export interface AgentsResponse {
-	projectId: string;
-	generatedAt: string;
-	agents: AgentListEntry[];
-	can: { createAgent: Allowed };
-}
+type Allowed = { allowed: true } | { allowed: false; reason: string };
 
 export interface ProjectSummary {
 	projectId: string;
 	name: string;
 	createdAt: string;
+	/** ACP agents in the project. */
 	agentCount: number;
 }
 
@@ -472,39 +356,19 @@ export interface ProjectsResponse {
 	can: { createProject: Allowed };
 }
 
-export interface SessionBinding {
-	projectId: string;
-	agentId: string;
-	handle: string;
-	bindingId: string;
-	epoch: number;
-}
-
 export interface CreatedProject extends ProjectSummary {
 	replayed: boolean;
 }
 
-export interface CreatedAgent {
-	agentId: string;
-	projectId: string;
-	handle: string;
-	role: string | null;
-	binding: Binding | null;
-	replayed: boolean;
-}
-
 /**
- * What a project-directory request came back with. `code` is the server's
- * `error` (PROJECTS.md §4.7) — the UI decides on it, never on `message` —
- * or one of the client's own: "network" (no answer: the outcome of a write
- * is NOT known), "bad-answer" (a 2xx without the expected body: proves
- * nothing either), "stale" (answered for an account that is no longer the
- * signed-in one: drop it).
+ * What a project request came back with. `code` is the server's `error`, or
+ * one of the client's own: "network" (no answer: a write's outcome is NOT
+ * known), "bad-answer" (a 2xx without the expected body), "stale" (answered
+ * for an account that is no longer the signed-in one: drop it).
  */
 export type ProjectAnswer<T> =
 	| { ok: true; status: number; body: T }
-	/** `detail`: the answer's own `detail` when it is a string (the D3 codes carry one, §7.2). */
-	| { ok: false; status: number; code: string; detail?: string };
+	| { ok: false; status: number; code: string };
 
 async function projectRequest<T>(
 	path: string,
@@ -516,8 +380,7 @@ async function projectRequest<T>(
 	try {
 		res = await apiFetch(path, init);
 	} catch {
-		if (epoch !== authEpoch) return { ok: false, status: 0, code: "stale" };
-		return { ok: false, status: 0, code: "network" };
+		return { ok: false, status: 0, code: epoch !== authEpoch ? "stale" : "network" };
 	}
 	const body: unknown = res.status === 204 ? null : await res.json().catch(() => null);
 	if (epoch !== authEpoch) return { ok: false, status: res.status, code: "stale" };
@@ -531,11 +394,7 @@ async function projectRequest<T>(
 		typeof (body as { error?: unknown }).error === "string"
 			? (body as { error: string }).error
 			: "";
-	const detail =
-		typeof body === "object" && body !== null ? (body as { detail?: unknown }).detail : undefined;
-	return typeof detail === "string"
-		? { ok: false, status: res.status, code, detail }
-		: { ok: false, status: res.status, code };
+	return { ok: false, status: res.status, code };
 }
 
 const isObj = (b: unknown): b is Record<string, unknown> => typeof b === "object" && b !== null;
@@ -548,26 +407,6 @@ export function fetchProjects(): Promise<ProjectAnswer<ProjectsResponse>> {
 	);
 }
 
-export function fetchProjectAgents(projectId: string): Promise<ProjectAnswer<AgentsResponse>> {
-	return projectRequest(
-		`/projects/${encodeURIComponent(projectId)}/agents`,
-		undefined,
-		(b): b is AgentsResponse => isObj(b) && Array.isArray(b.agents),
-	);
-}
-
-export function fetchAgent(
-	projectId: string,
-	agentId: string,
-): Promise<ProjectAnswer<AgentDetail>> {
-	return projectRequest(
-		`/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agentId)}`,
-		undefined,
-		(b): b is AgentDetail => isObj(b) && typeof b.agentId === "string" && Array.isArray(b.bindings),
-	);
-}
-
-/** One user action = one `clientRequestId`; a retry of THAT action reuses it (PROJECTS.md §3). */
 export function createProject(
 	name: string,
 	clientRequestId: string,
@@ -579,378 +418,12 @@ export function createProject(
 	);
 }
 
-export function createAgent(
-	projectId: string,
-	input: { handle: string; role: string | null; sessionId: string },
-	clientRequestId: string,
-): Promise<ProjectAnswer<CreatedAgent>> {
+/** Archive: the project leaves every list; its agents leave it. */
+export function archiveProject(projectId: string): Promise<ProjectAnswer<null>> {
 	return projectRequest(
-		`/projects/${encodeURIComponent(projectId)}/agents`,
-		{
-			method: "POST",
-			body: JSON.stringify({
-				handle: input.handle,
-				...(input.role ? { role: input.role } : {}),
-				sessionId: input.sessionId,
-				clientRequestId,
-			}),
-		},
-		(b): b is CreatedAgent => isObj(b) && typeof b.agentId === "string",
-	);
-}
-
-/** Idempotent server-side: a retry after a lost answer is always safe. */
-export function removeAgent(projectId: string, agentId: string): Promise<ProjectAnswer<null>> {
-	return projectRequest(
-		`/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agentId)}`,
+		`/projects/${encodeURIComponent(projectId)}`,
 		{ method: "DELETE" },
 		(b): b is null => b === null,
-	);
-}
-
-// ── Project conversation (Projects v3, PROJECT_CONVERSATION.md §5) ──────────
-
-/** A backward page of the project log: raw persisted lines (teamModel.parseLogEvent reads them). */
-export interface ProjectEventsPage {
-	/** Ascending seq (§5). */
-	events: unknown[];
-	/** The last line examined; the next page backward is `before = oldestSeq`. */
-	oldestSeq: number | null;
-	hasMore: boolean;
-}
-
-/** One page of the project log; no `before` = the newest page. */
-export function fetchProjectEvents(
-	projectId: string,
-	opts: { before?: number; limit?: number } = {},
-): Promise<ProjectAnswer<ProjectEventsPage>> {
-	const qs = new URLSearchParams();
-	if (opts.before !== undefined) qs.set("before", String(opts.before));
-	qs.set("limit", String(opts.limit ?? 200));
-	return projectRequest(
-		`/projects/${encodeURIComponent(projectId)}/conversation/events?${qs}`,
-		undefined,
-		(b): b is ProjectEventsPage =>
-			isObj(b) && Array.isArray(b.events) && typeof b.hasMore === "boolean",
-	);
-}
-
-/** Appendix A: `GET …/messages/:msgId`, the message with its lines grouped (raw log lines inside). */
-export interface ProjectMessageDetail {
-	message: unknown;
-	/**
-	 * `waiting` / `heldBy` (§3.6): on a delivery still `queued`, the server's
-	 * reading — at the moment of the request — of why it has not left. Absent
-	 * when nothing explains it, and on a backend that predates the field.
-	 */
-	deliveries: Array<{
-		agentId: string;
-		state: string;
-		events: unknown[];
-		waiting?: unknown;
-		heldBy?: unknown;
-	}>;
-	replies: Array<{ agentId: string; settling: unknown; ref: unknown; lateCloses: unknown[] }>;
-	acks: unknown[];
-}
-
-/**
- * One message by id — the anchor of a thread whose original is older than
- * the loaded window (a late reply, a follow-up to an old task).
- */
-export function fetchProjectMessage(
-	projectId: string,
-	msgId: string,
-): Promise<ProjectAnswer<ProjectMessageDetail>> {
-	return projectRequest(
-		`/projects/${encodeURIComponent(projectId)}/conversation/messages/${encodeURIComponent(msgId)}`,
-		undefined,
-		(b): b is ProjectMessageDetail =>
-			isObj(b) &&
-			isObj(b.message) &&
-			Array.isArray(b.deliveries) &&
-			Array.isArray(b.replies) &&
-			Array.isArray(b.acks),
-	);
-}
-
-/**
- * §4.3 "Done": one click, one clientAckId; repeating the same body with the
- * same id is answered from the log (`replayed`), never written twice.
- */
-export function postProjectAck(
-	projectId: string,
-	body: { clientAckId: string; target: { msgId: string; agentId?: string; reportSha256?: string } },
-): Promise<ProjectAnswer<{ ackId: string; replayed: boolean }>> {
-	return projectRequest(
-		`/projects/${encodeURIComponent(projectId)}/conversation/acks`,
-		{ method: "POST", body: JSON.stringify(body) },
-		(b): b is { ackId: string; replayed: boolean } => isObj(b) && typeof b.ackId === "string",
-	);
-}
-
-/** A project socket that stayed open this long earned a fresh (fast) backoff. */
-const STABLE_SOCKET_MS = 10_000;
-
-/** Appendix A: `WS /ws/project/<pid>` server frames. Events are raw log lines (parseLogEvent reads them). */
-export type ProjectServerFrame =
-	| { type: "event"; event: unknown }
-	| { type: "resync"; fromSeq: number };
-
-export interface ProjectSocket {
-	/** (Re)subscribe from this seq: the server sends every persisted event > after, once, in order, then live. */
-	follow(after: number): void;
-	close(): void;
-}
-
-/**
- * The project's live log (PROJECT_CONVERSATION.md §5). Reconnects with
- * backoff, except after 1008 (refused: not the owner, or the feature went
- * off) — then `onState(false, true)` and the caller falls back to polling.
- * A `resync` means the server stopped sending (backpressure): the caller
- * re-reads by GET and follows again.
- */
-export function openProjectSocket(
-	projectId: string,
-	onFrame: (f: ProjectServerFrame) => void,
-	onState?: (connected: boolean, refused?: boolean) => void,
-): ProjectSocket {
-	let ws: WebSocket | null = null;
-	let closed = false;
-	let after: number | null = null;
-	let backoff = 500;
-	let timer: ReturnType<typeof setTimeout> | null = null;
-	const subscribe = () => {
-		if (ws?.readyState === WebSocket.OPEN && after !== null)
-			ws.send(JSON.stringify({ type: "subscribe", after }));
-	};
-	const connect = () => {
-		if (closed) return;
-		const sock = new WebSocket(`${WS_BASE}/ws/project/${encodeURIComponent(projectId)}`);
-		ws = sock;
-		let openedAt = 0;
-		sock.addEventListener("open", () => {
-			// The backoff resets only once a connection has PROVED useful (close
-			// below): the server completes the handshake before it authorizes,
-			// and an immediate 1011 (store unavailable, D1 hiccup) must not turn
-			// into a reconnect + GET every 500 ms.
-			openedAt = Date.now();
-			onState?.(true);
-			subscribe();
-		});
-		sock.addEventListener("message", (e) => {
-			let f: unknown;
-			try {
-				f = JSON.parse(e.data as string);
-			} catch {
-				return;
-			}
-			if (!isObj(f)) return;
-			if (f.type === "event" && isObj(f.event) && typeof f.event.seq === "number") {
-				// Our cursor follows what arrived, so a reconnect resumes after it.
-				if (after !== null && f.event.seq <= after) return;
-				after = f.event.seq;
-				onFrame({ type: "event", event: f.event });
-			} else if (f.type === "resync" && typeof f.fromSeq === "number") {
-				onFrame({ type: "resync", fromSeq: f.fromSeq });
-			}
-		});
-		sock.addEventListener("close", (e) => {
-			if (ws !== sock) return;
-			ws = null;
-			onState?.(false, e.code === 1008);
-			if (closed || e.code === 1008) return;
-			if (openedAt && Date.now() - openedAt > STABLE_SOCKET_MS) backoff = 500;
-			timer = setTimeout(connect, backoff);
-			backoff = Math.min(backoff * 2, 15_000);
-		});
-	};
-	connect();
-	return {
-		follow(seq) {
-			after = seq;
-			subscribe();
-		},
-		close() {
-			closed = true;
-			if (timer) clearTimeout(timer);
-			try {
-				ws?.close(1000, "view closed");
-			} catch {
-				/* already closed */
-			}
-			ws = null;
-		},
-	};
-}
-
-export interface ProjectMessageBody {
-	clientMessageId: string;
-	text: string;
-	to: string[];
-	inReplyTo?: string;
-	quoteRef?: { msgId: string; agentId: string; promptId: string; reportSha256: string };
-	/** D2: sha256s registered in the project, ≤ 4, distinct; part of the idempotent body. */
-	artifacts?: string[];
-	/**
-	 * D3 (§7.2): let the ONE recipient consult `with`, up to `maxMessages`
-	 * between the two. Sent only with projectRelayEnabled(); the time limits
-	 * are left to the server's defaults.
-	 */
-	collab?: { mode: "ask"; with: string; maxMessages?: number };
-	/**
-	 * §3.6: a busy recipient doesn't refuse the message — it waits in the
-	 * project's log and is sent once, when the agent is free. Sent only with
-	 * projectQueueEnabled(), and never with `collab` (the server refuses both).
-	 */
-	whenFree?: true;
-}
-
-export interface ProjectMessageAnswer {
-	msgId: string;
-	replayed?: boolean;
-	/** D3: the consult permission created with the task (`c-` + 12 hex). */
-	grantId?: string;
-	deliveries: Array<{
-		agentId: string;
-		state: string;
-		reason?: string;
-		/** D2: files may already be in that agent's inbox although it wasn't delivered. */
-		filesPossiblyPlaced?: boolean;
-	}>;
-}
-
-export interface RegisteredArtifact {
-	sha256: string;
-	name: string;
-	bytes: number;
-	replayed: boolean;
-}
-
-/**
- * §6.1.1: register a file of the session the agent has bound NOW (the
- * server reads it through the same opener as Files). A refusal registers
- * nothing; repeating the same file from the same place answers 200
- * `replayed`. Only called with projectArtifactsEnabled().
- */
-export function registerProjectArtifact(
-	projectId: string,
-	body: { agentId: string; path: string },
-): Promise<ProjectAnswer<RegisteredArtifact>> {
-	return projectRequest(
-		`/projects/${encodeURIComponent(projectId)}/conversation/artifacts`,
-		{ method: "POST", body: JSON.stringify(body) },
-		(b): b is RegisteredArtifact =>
-			isObj(b) &&
-			typeof b.sha256 === "string" &&
-			/^[0-9a-f]{64}$/.test(b.sha256) &&
-			typeof b.name === "string" &&
-			typeof b.bytes === "number",
-	);
-}
-
-/**
- * A registered file's bytes AS TEXT (Appendix A.2: fetched, never
- * navigated — it is another agent's data). The text is checked against
- * its sha256 here too, so what is shown is exactly what the message names.
- */
-export async function fetchProjectArtifactText(
-	projectId: string,
-	sha256: string,
-): Promise<{ ok: true; text: string } | { ok: false; status: number; code: string }> {
-	const epoch = authEpoch;
-	let res: Response;
-	try {
-		res = await apiFetch(
-			`/projects/${encodeURIComponent(projectId)}/conversation/artifacts/${encodeURIComponent(sha256)}`,
-		);
-	} catch {
-		return { ok: false, status: 0, code: epoch !== authEpoch ? "stale" : "network" };
-	}
-	if (epoch !== authEpoch) return { ok: false, status: res.status, code: "stale" };
-	if (!res.ok) {
-		const b: unknown = await res.json().catch(() => null);
-		return {
-			ok: false,
-			status: res.status,
-			code: isObj(b) && typeof b.error === "string" ? b.error : "",
-		};
-	}
-	// The body can still fail (a reset mid-body, up to 1 MiB) and so can the
-	// digest (no crypto.subtle outside a secure context): answered, never
-	// thrown, so the caller's "loading" always ends and can be retried.
-	let buf: ArrayBuffer;
-	let digest: ArrayBuffer;
-	try {
-		buf = await res.arrayBuffer();
-		digest = await crypto.subtle.digest("SHA-256", buf);
-	} catch {
-		return { ok: false, status: res.status, code: epoch !== authEpoch ? "stale" : "network" };
-	}
-	if (epoch !== authEpoch) return { ok: false, status: res.status, code: "stale" };
-	const got = [...new Uint8Array(digest)].map((x) => x.toString(16).padStart(2, "0")).join("");
-	if (got !== sha256) return { ok: false, status: res.status, code: "hash-mismatch" };
-	return { ok: true, text: new TextDecoder("utf-8", { fatal: false }).decode(buf) };
-}
-
-/**
- * §3.3: one click, one clientMessageId. The answer can take up to the
- * Composer's T_http per recipient (the server sends before answering).
- * Repeating THIS body with THIS id is safe — the server answers what it
- * stored and sends nothing again (§3.4 rule 2) — which is what "Check
- * again" after a lost answer does; a new send is always a new id.
- */
-export function postProjectMessage(
-	projectId: string,
-	body: ProjectMessageBody,
-): Promise<ProjectAnswer<ProjectMessageAnswer>> {
-	return projectRequest(
-		`/projects/${encodeURIComponent(projectId)}/conversation/messages`,
-		{ method: "POST", body: JSON.stringify(body) },
-		(b): b is ProjectMessageAnswer =>
-			isObj(b) && typeof b.msgId === "string" && Array.isArray(b.deliveries),
-	);
-}
-
-/**
- * §3.6: close what is still queued of one message. Idempotent: what already
- * left the queue is not touched, so a lost answer is settled by reading the
- * log. Only called with projectQueueEnabled().
- */
-export function cancelQueuedProjectMessage(
-	projectId: string,
-	msgId: string,
-): Promise<ProjectAnswer<unknown>> {
-	return projectRequest(
-		`/projects/${encodeURIComponent(projectId)}/conversation/messages/${encodeURIComponent(msgId)}/cancel`,
-		{ method: "POST" },
-		(b): b is unknown => isObj(b),
-	);
-}
-
-export interface GrantActionAnswer {
-	grantId: string;
-	state: "live" | "paused" | "ended";
-	reason?: string;
-}
-
-/**
- * §7.6: pause / resume / stop a consult. Idempotent server-side (repeating
- * one answers the state it left), so a lost answer is settled by reading
- * the log, never by guessing. Only called with projectRelayEnabled().
- */
-export function postGrantAction(
-	projectId: string,
-	grantId: string,
-	verb: "pause" | "resume" | "revoke",
-): Promise<ProjectAnswer<GrantActionAnswer>> {
-	return projectRequest(
-		`/projects/${encodeURIComponent(projectId)}/conversation/grants/${encodeURIComponent(grantId)}/${verb}`,
-		{ method: "POST" },
-		(b): b is GrantActionAnswer =>
-			isObj(b) &&
-			typeof b.grantId === "string" &&
-			(b.state === "live" || b.state === "paused" || b.state === "ended"),
 	);
 }
 

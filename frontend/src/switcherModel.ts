@@ -12,7 +12,7 @@
  * and a failed project is shown as failed — never as an empty list.
  */
 
-import type { ConversationSummary, SessionBinding } from "./api.js";
+import type { ConversationSummary } from "./api.js";
 import { attentionKind } from "./attentionRule.js";
 import { displayTitle, isArchived } from "./chatMeta.js";
 import {
@@ -411,17 +411,6 @@ export function switcherWords(noun: SessionNoun): SwitcherWords {
 		loading: (loading, total) => `Loading ${loading} of ${total} ${plural(total, noun)}…`,
 		otherConversations: `Other ${noun === "project" ? "projects'" : "sessions'"} conversations…`,
 	};
-}
-
-/**
- * The agent a session is bound to, as "@handle" (PROJECTS.md §4.6): an
- * object = bound; null = unassigned and an absent key = unknown, both shown
- * as nothing.
- */
-export function boundHandle(s: { binding?: SessionBinding | null }): string | null {
-	const b = s.binding;
-	if (b === null || b === undefined || typeof b !== "object") return null;
-	return typeof b.handle === "string" && b.handle !== "" ? `@${b.handle}` : null;
 }
 
 /** A row's session line: its name, then "· @handle" when bound. */

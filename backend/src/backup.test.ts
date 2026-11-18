@@ -588,50 +588,6 @@ describe("runRestore", () => {
 		return pdir;
 	}
 
-	it(".projects refused (flag on): the whole restore refuses before any write (PROJECT_CONVERSATION.md §8)", async () => {
-		const pdir = await backupWithProject();
-		const db = await import("./db.js");
-		vi.mocked(db.d1Query).mockClear();
-		vi.mocked(db.migrateDb).mockClear();
-		vi.stubEnv("PROJECT_CONVERSATION_ENABLED", "true");
-		try {
-			await expect(runRestore(outDir)).rejects.toThrow(
-				/PROJECT_CONVERSATION_ENABLED is on.*Nothing was restored.*--without-projects/s,
-			);
-		} finally {
-			vi.unstubAllEnvs();
-		}
-		// Not one D1 call (migrateDb included), no workspace, no project dir.
-		expect(db.migrateDb).not.toHaveBeenCalled();
-		expect(db.d1Query).not.toHaveBeenCalled();
-		expect(dbState.inserts).toHaveLength(0);
-		await expect(fs.lstat(path.join(WORKSPACE_ROOT, "s1"))).rejects.toMatchObject({
-			code: "ENOENT",
-		});
-		await expect(fs.lstat(pdir)).rejects.toMatchObject({ code: "ENOENT" });
-	});
-
-	it("--without-projects: tables and workspaces restored, .projects untouched, and the last line says PARTIAL, never complete", async () => {
-		const pdir = await backupWithProject();
-		vi.stubEnv("PROJECT_CONVERSATION_ENABLED", "true");
-		const info = vi.spyOn(logger, "info");
-		const warn = vi.spyOn(logger, "warn");
-		try {
-			await runRestore(outDir, { withoutProjects: true });
-			expect(info.mock.calls.some((c) => /\[restore\] complete/.test(String(c[0])))).toBe(false);
-			expect(String(warn.mock.calls.at(-1)?.[0])).toMatch(
-				/\[restore\] PARTIAL .*\.projects NOT restored \(--without-projects, 1 project/,
-			);
-		} finally {
-			info.mockRestore();
-			warn.mockRestore();
-			vi.unstubAllEnvs();
-		}
-		expect(dbState.inserts.some((i) => /INTO users /.test(i.sql))).toBe(true);
-		expect(await fs.readFile(path.join(WORKSPACE_ROOT, "s1", "hello.txt"), "utf-8")).toBe("hola");
-		await expect(fs.lstat(pdir)).rejects.toMatchObject({ code: "ENOENT" });
-	});
-
 	it("--without-projects on a backup that has no projects is an ordinary complete restore", async () => {
 		await makeBackup();
 		const info = vi.spyOn(logger, "info");

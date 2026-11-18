@@ -5,7 +5,6 @@
  * Database is Cloudflare D1 (accessed via HTTP API).
  */
 
-import { randomUUID } from "node:crypto";
 import http from "node:http";
 import cookieParser from "cookie-parser";
 import express from "express";
@@ -25,40 +24,16 @@ import { BellSweeper } from "./bellSweeper.js";
 import { BootstrapBroadcaster, drainInFlightBootstraps } from "./bootstrap.js";
 import { parseAllowUsers } from "./conversation/allowUsers.js";
 import { ATTESTATION_KEY_INFO } from "./conversation/captureAttestation.js";
-import {
-	policyWarnings as cliPolicyWarnings,
-	describePolicy as describeCliPolicy,
-	parsePolicy as parseCliPolicy,
-} from "./conversation/cliPolicy.js";
-import { ComposerService, composerFlagEnabled } from "./conversation/composer.js";
-import { bgConfigFromEnv, workspaceTranscripts } from "./conversation/composerBg.js";
 import { IngestOriginVerifier } from "./conversation/ingestOrigin.js";
 import { createIngestHandler } from "./conversation/ingestRoute.js";
-import { PaneRecordStore } from "./conversation/paneRecord.js";
 import { ConversationService } from "./conversation/service.js";
 import { ConversationStore } from "./conversation/store.js";
 import { ConversationWsHub } from "./conversation/ws.js";
 import { migrateDb, validateD1Config } from "./db.js";
-import { DockerManager, WORKSPACE_GID, WORKSPACE_UID } from "./dockerManager.js";
+import { DockerManager } from "./dockerManager.js";
 import { IdleSweeper, listRunningSessionIds } from "./idleSweeper.js";
 import { logger } from "./logger.js";
 import { createPortDispatcher, validatePortProxyBaseDomain } from "./portDispatcher.js";
-import { ProjectConversationApi } from "./projects/conversation/api.js";
-import {
-	ProjectArtifacts,
-	projectArtifactsFlagEnabled,
-} from "./projects/conversation/artifacts.js";
-import { ProjectCollab, type RecipientState } from "./projects/conversation/collab.js";
-import { ProjectFanout, pickTarget } from "./projects/conversation/fanout.js";
-import { OutboxWatcher } from "./projects/conversation/outbox.js";
-import { placeArtifacts } from "./projects/conversation/placement.js";
-import { createDeliveryQueue, type DeliveryQueue } from "./projects/conversation/queue.js";
-import { ReplyWatcher } from "./projects/conversation/replies.js";
-import {
-	ProjectConversationStore,
-	projectConversationFlagEnabled,
-} from "./projects/conversation/store.js";
-import { ProjectWsHub } from "./projects/conversation/ws.js";
 import { ProjectDirectory, projectChatFlagEnabled } from "./projects/directory.js";
 import { conversationRecreatePort } from "./recreate/capturePort.js";
 import { d1RecreatePort } from "./recreate/d1.js";
@@ -69,12 +44,11 @@ import { buildAcpRouter } from "./routes/acp.js";
 import { buildRouter } from "./routes.js";
 import { deriveSubkey, validateSecretsKey } from "./secrets.js";
 import { sessionLifecycleLock } from "./sessionLifecycleLock.js";
-import { ForbiddenError, NotFoundError, SessionManager } from "./sessionManager.js";
+import { SessionManager } from "./sessionManager.js";
 import { parseTrustProxy, TrustProxyError, warnIfProductionMisconfigured } from "./trustProxy.js";
 import { configureWebPush, isPushEnabled, sendToUser } from "./webPush.js";
-import { listWorkspaceDir, openWorkspaceFile } from "./workspaceFiles.js";
 import { handleWsConnection, startWsHeartbeat } from "./wsHandler.js";
-import { createWsUpgradeHandler, PROJECT_WS_PREFIX } from "./wsUpgrade.js";
+import { createWsUpgradeHandler } from "./wsUpgrade.js";
 import { createWsUpgradeRateLimiter } from "./wsUpgradeRateLimit.js";
 
 // ── Configuration ─────────────────────────────────────────────────────────────
@@ -160,9 +134,6 @@ if (INGEST_ORIGIN_MODE === null && !["", "false"].includes(INGEST_ORIGIN_FLAG)) 
 }
 // 3.0d (§7): owners whose NEW sessions are born with capture requested.
 const CONVERSATION_ALLOW_USERS = parseAllowUsers(process.env.CONVERSATION_ALLOW_USERS);
-// D1 §4.1: a capture event stamped before this moment was received by a
-// previous process, so a settle window it opened was not observed here.
-const BOOTED_AT_MS = Date.now();
 const WORKSPACE_ROOT_FOR_CONVERSATION =
 	process.env.WORKSPACE_ROOT ?? "/var/shared-terminal/workspaces";
 const conversationStore = new ConversationStore({ workspaceRoot: WORKSPACE_ROOT_FOR_CONVERSATION });
@@ -247,125 +218,14 @@ logger.info(
 		? "[server] conversation capture ENABLED (per-session opt-in)"
 		: "[server] conversation capture disabled (CONVERSATION_ENABLED unset)",
 );
-// 3.2 — the composer (CONVERSATION.md §8). Off by default: with the flag off
-// its routes are not mounted and `canSendInput` stays false. The Docker port
-// is the composer's own (evidence-only execs with stdin), the pane records
-// live under `.st-control/<sid>/composer/`, and the ack listens to the same
-// persisted-event stream the WS uses.
-const COMPOSER_ENABLED = composerFlagEnabled(process.env.CONVERSATION_COMPOSER_ENABLED);
-// §8.1.9: exact list + optional open minimum + deny list. A malformed
-// setting throws here and the backend refuses to start.
-const COMPOSER_CLI_POLICY = parseCliPolicy(process.env);
-// v1.9 §8.1.12 (EXPERIMENTAL): the background-session transport, through the
-// CLI daemon's `reply` op. Off unless `true`/`1`, only with the composer on,
-// and only for the sessions in COMPOSER_BG_SESSIONS (empty ⇒ none). Its
-// version list is EXACT with an EMPTY default (nothing validated ⇒ every send
-// is `cli-unvalidated`). With the flag on a malformed list stops the boot;
-// with it off a malformed list only warns (bgConfigFromEnv).
-const COMPOSER_BG = bgConfigFromEnv(process.env, COMPOSER_ENABLED);
-const composer = new ComposerService({
-	enabled: COMPOSER_ENABLED,
-	cliPolicy: COMPOSER_CLI_POLICY,
-	store: conversationStore,
-	conversation: {
-		probeSession: (sid) => conversation.probeSession(sid),
-		onPersistedEvent: (l) => conversation.onPersistedEvent(l),
-		captureEffective: async (sid) => (await conversation.authority.capture(sid)).effective,
-	},
-	sessions,
-	docker: docker.composerPort(),
-	records: new PaneRecordStore(WORKSPACE_ROOT_FOR_CONVERSATION),
-	bg: {
-		enabled: COMPOSER_BG.enabled,
-		versions: COMPOSER_BG.versions,
-		sessions: COMPOSER_BG.sessions,
-		transcripts: workspaceTranscripts,
-	},
-});
-logger.info(
-	COMPOSER_ENABLED
-		? `[server] composer ENABLED (CLI versions: ${[...COMPOSER_CLI_POLICY.exact].join(", ")})`
-		: "[server] composer disabled (CONVERSATION_COMPOSER_ENABLED unset)",
-);
-// Same line as before the policy existed (deploy checks match it), then the
-// whole policy on its own line.
-if (COMPOSER_ENABLED) {
-	logger.info(`[server] composer CLI policy: ${describeCliPolicy(COMPOSER_CLI_POLICY)}`);
-	for (const w of cliPolicyWarnings(COMPOSER_CLI_POLICY)) logger.warn(`[server] ${w}`);
-}
-// Nothing at all with the flag unset (boot logs unchanged), except a warning
-// for a malformed experimental variable that is being ignored.
-for (const w of COMPOSER_BG.warnings) logger.warn(`[server] ${w}`);
-// P3a — the project & agent directory (docs/PROJECTS.md). Off by default:
-// with the flag off nothing is constructed, its routes are not mounted and
-// every existing answer is unchanged. Its migration (v19) runs at boot either
-// way — the flag gates the surface, not the schema.
+// Composer (sending into a tmux pane) is retired: traditional sessions are
+// worked from their Terminal; agents talk through ACP (acp/agents.ts).
+logger.info("[server] composer disabled (retired)");
+// Projects (ACP agents take part in one). Off by default: with the flag off
+// nothing is constructed and its routes are not mounted.
 const PROJECT_CHAT_ENABLED = projectChatFlagEnabled(process.env.PROJECT_CHAT_ENABLED);
 const projectDirectory = PROJECT_CHAT_ENABLED ? new ProjectDirectory() : undefined;
-if (PROJECT_CHAT_ENABLED) logger.info("[server] project directory ENABLED (P3a)");
-// D1 — the project conversation (docs/PROJECT_CONVERSATION.md §1). It sends
-// only through the composer and only to agents of the directory, so it is
-// effective only with both on; a flag set without them is logged and stays
-// off. Off ⇒ nothing is constructed and nothing under `.projects/` is created.
-const PROJECT_CONVERSATION_FLAG = projectConversationFlagEnabled(
-	process.env.PROJECT_CONVERSATION_ENABLED,
-);
-const PROJECT_CONVERSATION_ENABLED =
-	PROJECT_CONVERSATION_FLAG && PROJECT_CHAT_ENABLED && COMPOSER_ENABLED;
-if (PROJECT_CONVERSATION_FLAG && !PROJECT_CONVERSATION_ENABLED) {
-	logger.warn(
-		"[server] PROJECT_CONVERSATION_ENABLED is set but needs PROJECT_CHAT_ENABLED and " +
-			"CONVERSATION_COMPOSER_ENABLED — project conversation stays OFF",
-	);
-}
-// D2 — artifacts (§6). Needs D1 effective; set without it, logged and OFF.
-// Off ⇒ no artifact route, `artifacts[]` stays 409 `artifacts-off`, and no
-// workspace file is read or written by this subsystem.
-const PROJECT_ARTIFACTS_FLAG = projectArtifactsFlagEnabled(process.env.PROJECT_ARTIFACTS_ENABLED);
-const PROJECT_ARTIFACTS_ENABLED = PROJECT_ARTIFACTS_FLAG && PROJECT_CONVERSATION_ENABLED;
-if (PROJECT_ARTIFACTS_FLAG && !PROJECT_ARTIFACTS_ENABLED) {
-	logger.warn(
-		"[server] PROJECT_ARTIFACTS_ENABLED is set but needs PROJECT_CONVERSATION_ENABLED " +
-			"effective — project artifacts stay OFF",
-	);
-}
-// D3 — a consult between two agents (§7). Needs D1 effective AND the ingest
-// origin check running (`observe` or `true`): an agent message is admitted
-// only on events whose network origin was verified (§7.3.1), so with the
-// check off there is nothing to admit on. Set without them, logged and OFF.
-const PROJECT_RELAY_FLAG = projectConversationFlagEnabled(process.env.PROJECT_RELAY_ENABLED);
-const PROJECT_RELAY_ENABLED =
-	PROJECT_RELAY_FLAG && PROJECT_CONVERSATION_ENABLED && INGEST_ORIGIN_MODE !== null;
-if (PROJECT_RELAY_FLAG && !PROJECT_RELAY_ENABLED) {
-	logger.warn(
-		"[server] PROJECT_RELAY_ENABLED is set but needs PROJECT_CONVERSATION_ENABLED effective and " +
-			"INGEST_REQUIRE_SESSION_ORIGIN=observe|true — agent collaboration stays OFF",
-	);
-}
-let projectConversation: ProjectConversationStore | undefined;
-let projectReplies: ReplyWatcher | undefined;
-let projectCollab: ProjectCollab | undefined;
-let projectOutbox: OutboxWatcher | undefined;
-let projectQueue: DeliveryQueue | undefined;
-// Built before the store exists (the router is built at load, the store
-// takes its lock in start()); the routes answer 503 until `api` is set.
-// The `artifacts` key exists only with D2 effective (routes and features
-// read its presence).
-const projectConversationHolder:
-	| {
-			api: ProjectConversationApi | null;
-			hub: ProjectWsHub | null;
-			artifacts?: ProjectArtifacts | null;
-			collab?: ProjectCollab | null;
-	  }
-	| undefined = PROJECT_CONVERSATION_ENABLED
-	? {
-			api: null,
-			hub: null,
-			...(PROJECT_ARTIFACTS_ENABLED ? { artifacts: null } : {}),
-			...(PROJECT_RELAY_ENABLED ? { collab: null } : {}),
-		}
-	: undefined;
+if (PROJECT_CHAT_ENABLED) logger.info("[server] projects ENABLED");
 // Single shared bootstrap broadcaster (PR 185b2b). Owned at the server
 // scope so the route's runAsyncBootstrap and the WS handler's
 // /ws/bootstrap subscriber see the same per-session listener sets and
@@ -589,10 +449,8 @@ app.use(
 	buildRouter(sessions, docker, bootstrapBroadcaster, undefined, idleSweeper, conversation, {
 		recreation,
 		conversationAllowUsers: CONVERSATION_ALLOW_USERS,
-		composer,
 		projects: projectDirectory,
 		...(acpAgents ? { acp: acpAgents } : {}),
-		...(projectConversationHolder ? { projectConversation: projectConversationHolder } : {}),
 	}),
 );
 app.get("/health", (_req, res) => res.json({ ok: true }));
@@ -618,10 +476,7 @@ server.on(
 		trustProxyValue,
 		corsOrigins: CORS_ORIGINS,
 		nodeEnv: process.env.NODE_ENV,
-		extraPathPrefixes: [
-			...(projectConversationHolder ? [PROJECT_WS_PREFIX] : []),
-			...(acpAgents ? [ACP_WS_PREFIX] : []),
-		],
+		extraPathPrefixes: [...(acpAgents ? [ACP_WS_PREFIX] : [])],
 	}),
 );
 
@@ -645,7 +500,6 @@ wss.on("connection", (ws, req) => {
 		bootstrapBroadcaster,
 		idleSweeper,
 		conversationWs,
-		projectConversationHolder,
 		acpWs ?? undefined,
 	);
 });
@@ -654,178 +508,6 @@ wss.on("connection", (ws, req) => {
 
 async function start() {
 	await migrateDb();
-	// Before the server accepts requests: the store takes the cross-process
-	// writer lock (§2.1) and, without it, stays unavailable (503) — never a
-	// second writer on the same logs.
-	if (PROJECT_CONVERSATION_ENABLED) {
-		projectConversation = await ProjectConversationStore.start({
-			workspaceRoot: WORKSPACE_ROOT_FOR_CONVERSATION,
-			bootId: randomUUID(),
-			log: logger,
-		});
-		if (projectConversationHolder && projectDirectory && !projectConversation.unavailable) {
-			const store = projectConversation;
-			const directory = projectDirectory;
-			const replies = new ReplyWatcher({
-				store,
-				onCaptureEvent: (l) => conversation.onPersistedEvent(l),
-				readCapture: (sid, cid, after) =>
-					conversationStore.readEvents(sid, cid, after, Number.MAX_SAFE_INTEGER, { archive: true }),
-				bootAt: BOOTED_AT_MS,
-				log: logger,
-			});
-			projectReplies = replies;
-			const artifacts = PROJECT_ARTIFACTS_ENABLED
-				? new ProjectArtifacts({
-						store,
-						workspaceRoot: WORKSPACE_ROOT_FOR_CONVERSATION,
-						bindings: (ownerId, pid) => directory.projectBindings(ownerId, pid),
-						openSource: (sid, rel, o) => openWorkspaceFile(sid, rel, o),
-						assertOwner: (sid, ownerId) => sessions.assertOwnedBy(sid, ownerId),
-						isForbidden: (e) => e instanceof NotFoundError || e instanceof ForbiddenError,
-					})
-				: undefined;
-			const fanout = new ProjectFanout({
-				store,
-				bindings: (ownerId, pid) => directory.projectBindings(ownerId, pid),
-				target: async (sid) => {
-					const { conversations } = await conversation.summariesWithMeta(sid);
-					const av = await composer.availability(
-						sid,
-						conversations.map((c) => ({
-							cid: c.sessionId,
-							kind: c.kind,
-							paneId: c.paneId,
-							endedAt: c.endedAt,
-						})),
-						{ captureEffective: true, callerMayOperate: true },
-					);
-					return pickTarget(
-						conversations.map((c) => ({
-							cid: c.sessionId,
-							kind: c.kind,
-							paneId: c.paneId,
-							endedAt: c.endedAt,
-							blocked: av.get(c.sessionId)?.composer.blocked === true,
-						})),
-					);
-				},
-				sessionMeta: (sid, ownerId) => sessions.assertCanOperate(sid, ownerId),
-				composerSend: (input) =>
-					composer.send({
-						...input,
-						meta: input.meta as Awaited<ReturnType<typeof sessions.assertCanOperate>>,
-						// The project's owner is the session's owner (§3.3), so the
-						// composer never asks for a cross-user row; fail closed if it did.
-						audit: async () => {
-							throw new Error("project conversation sends only to the owner's sessions");
-						},
-					}),
-				onDelivered: (d) => replies.watch(d),
-				onUncertain: (d) => replies.watchUncertain(d),
-				isForbidden: (e) => e instanceof NotFoundError || e instanceof ForbiddenError,
-				relay: PROJECT_RELAY_ENABLED,
-				...(artifacts
-					? {
-							artifacts: {
-								lookup: (pid, shas) => artifacts.lookup(pid, shas),
-								readContent: (pid, sha) => artifacts.readContent(pid, sha),
-								place: (sid, list) =>
-									placeArtifacts({
-										workspaceRoot: WORKSPACE_ROOT_FOR_CONVERSATION,
-										sessionId: sid,
-										artifacts: list,
-										uid: WORKSPACE_UID,
-										gid: WORKSPACE_GID,
-									}),
-							},
-						}
-					: {}),
-			});
-			const api = new ProjectConversationApi({
-				store,
-				fanout,
-				ownsProject: (ownerId, pid) => directory.ownsProject(ownerId, pid),
-				recipient: (sid) => soleConversation(sid),
-			});
-			projectConversationHolder.api = api;
-			if (artifacts) projectConversationHolder.artifacts = artifacts;
-			projectConversationHolder.hub = new ProjectWsHub(store);
-			// Recovery of every project now, then resume the replies being decided.
-			const opened = await store.openAll();
-			for (const pid of opened) {
-				await replies
-					.resume(pid)
-					.catch((err) =>
-						logger.warn(`[projects] ${pid}: replies not resumed (${(err as Error).message})`),
-					);
-			}
-			// §7.1: a participant session has ONE interactive conversation with
-			// a pane. The same reading decides who may send (outbox.ts rule 3)
-			// and where a queued delivery — a relay or a `whenFree` message of
-			// the person — goes (queue.ts); more than one is ambiguous for
-			// all of them, never a guess.
-			const soleConversation = async (sid: string): Promise<RecipientState> => {
-				const { conversations, meta } = await conversation.summariesWithMeta(sid);
-				// The list could not be read whole: "the only one" would be a
-				// guess over the resident conversations alone. Fail closed.
-				if (meta !== "ok") return { kind: "none" };
-				const live = conversations.filter(
-					(c) => c.kind === "interactive" && c.paneId !== null && !c.endedAt,
-				);
-				if (live.length === 0) return { kind: "none" };
-				if (live.length > 1) return { kind: "ambiguous" };
-				const only = live[0] as (typeof live)[number];
-				return {
-					kind: only.status === "waiting_input" ? "ready" : "busy",
-					cid: only.sessionId,
-				};
-			};
-			// §3.6 / §7.5: the one queue of `queued` deliveries, whoever authorized
-			// them. With D3 off it only ever holds the person's own.
-			const queue = createDeliveryQueue({
-				store,
-				fanout,
-				bindings: (ownerId, pid) => directory.projectBindings(ownerId, pid),
-				recipient: soleConversation,
-				onCaptureEvent: (l) => conversation.onPersistedEvent((sid) => l(sid)),
-				collab: () => projectCollab,
-				log: logger,
-			});
-			projectQueue = queue;
-			if (PROJECT_RELAY_ENABLED) {
-				const collab = new ProjectCollab({
-					store,
-					fanout,
-					bindings: (ownerId, pid) => directory.projectBindings(ownerId, pid),
-					recipient: soleConversation,
-					kick: (pid) => queue.kick(pid),
-					log: logger,
-				});
-				projectCollab = collab;
-				projectConversationHolder.collab = collab;
-				// After the recovery batches: queued relays of the previous process
-				// are still queued, and nothing else is resumed (§7.5).
-				await collab.start(opened);
-				const outbox = new OutboxWatcher({
-					collab,
-					onCaptureEvent: (l) => conversation.onPersistedEvent(l),
-					bindings: (ownerId, pid) => directory.projectBindings(ownerId, pid),
-					conversation: soleConversation,
-					openFile: (sid, rel, o) => openWorkspaceFile(sid, rel, o),
-					listDir: (sid, rel, o) => listWorkspaceDir(sid, rel, o),
-					log: logger,
-				});
-				projectOutbox = outbox;
-				outbox.start();
-			}
-			// Last: every source is ready to take its attempts.
-			await queue.start(opened);
-		}
-		logger.info("[server] project conversation ENABLED (D1)");
-		if (PROJECT_ARTIFACTS_ENABLED) logger.info("[server] project artifacts ENABLED (D2)");
-		if (PROJECT_RELAY_ENABLED) logger.info("[server] agent collaboration ENABLED (D3)");
-	}
 	// #355 — configure Web Push from VAPID env (or warn + disable). Must run
 	// AFTER migrateDb so the push_subscriptions table exists before any
 	// subscribe/send, and before the server accepts requests.
@@ -980,19 +662,6 @@ function shutdown() {
 	const conversationDrained = conversation.shutdown().catch((err) => {
 		logger.warn(`[server] conversation shutdown failed: ${(err as Error).message}`);
 	});
-	// 3.2 — refuse new sends and cancel the active executors durably (record
-	// phase `cancelled`, reason `shutdown`): a late Docker answer may still
-	// settle an exec as evidence, but nothing further starts (§8.1.4).
-	// D1 — lets the writer-lock helper go (the kernel releases the lock when it exits).
-	projectReplies?.stop();
-	projectQueue?.stop();
-	projectOutbox?.stop();
-	projectCollab?.stop();
-	void projectConversation?.close();
-	const composerDrained = composer.shutdown().catch((err) => {
-		logger.warn(`[server] composer shutdown failed: ${(err as Error).message}`);
-	});
-
 	// Watchdog: if a client stalls its close handshake, the bootstrap
 	// drain wedges on Docker/D1, or some other handle keeps the event
 	// loop alive, exit anyway after a grace period instead of hanging
@@ -1009,11 +678,9 @@ function shutdown() {
 		// under the drain's in-flight D1 writes. `finally` (not `then`):
 		// drainInFlightBootstraps never rejects today (Promise.allSettled
 		// inside), but the exit must not hinge on that staying true.
-		void Promise.allSettled([bootstrapsDrained, conversationDrained, composerDrained]).finally(
-			() => {
-				clearTimeout(watchdog);
-				process.exit(0);
-			},
-		);
+		void Promise.allSettled([bootstrapsDrained, conversationDrained]).finally(() => {
+			clearTimeout(watchdog);
+			process.exit(0);
+		});
 	});
 }

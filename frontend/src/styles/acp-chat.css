@@ -259,9 +259,11 @@
 	flex-direction: column;
 	gap: 10px;
 }
-.acp-chat-empty,
-.acp-chat-error {
+.acp-chat-empty {
 	opacity: 0.8;
+	font-size: 0.9rem;
+}
+.acp-chat-error {
 	font-size: 0.9rem;
 }
 .acp-chat-error {

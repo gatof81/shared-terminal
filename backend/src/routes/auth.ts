@@ -108,8 +108,6 @@ export function registerAuthRoutes(router: Router, ctx: RouteContext): void {
 			uiShell: UI_SHELL,
 			// P3a (E-6): present only with PROJECT_CHAT_ENABLED on, so with the
 			// flag off this answer stays byte-identical. Absent ⇒ false.
-			// D1: `projectConversation` only with its flag effective; absent ⇒ false,
-			// and with it off this answer is byte-identical to before.
 			// Experimental ACP agents: the key exists only with ACP_AGENTS_ENABLED.
 			...(ctx.acp && !ctx.projects ? { features: { acpAgents: true } } : {}),
 			...(ctx.projects
@@ -117,19 +115,6 @@ export function registerAuthRoutes(router: Router, ctx: RouteContext): void {
 						features: {
 							...(ctx.acp ? { acpAgents: true } : {}),
 							projectChat: true,
-							...(ctx.projectConversation ? { projectConversation: true } : {}),
-							// §3.6: this backend knows `whenFree` and the cancel route. Its own
-							// key because the frontend deploys apart from the backend: a
-							// client must not send the field to a backend that predates it.
-							...(ctx.projectConversation ? { projectQueue: true } : {}),
-							// D2: only with PROJECT_ARTIFACTS_ENABLED effective (the key's presence).
-							...(ctx.projectConversation && "artifacts" in ctx.projectConversation
-								? { projectArtifacts: true }
-								: {}),
-							// D3: only with PROJECT_RELAY_ENABLED effective (the key's presence).
-							...(ctx.projectConversation && "collab" in ctx.projectConversation
-								? { projectRelay: true }
-								: {}),
 						},
 					}
 				: {}),

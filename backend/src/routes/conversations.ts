@@ -7,7 +7,7 @@
  * Owner-only via `assertOwnedByOr404` (design §3.4, decision 6: titles
  * and derived metadata are conversation content, so a foreign session
  * answers like a missing one). An unknown conversation id answers the
- * same 404 as a foreign one. `canSendInput` is pinned to false until 3.2.
+ * same 404 as a foreign one. Read-only: the capture's history (`canSendInput` is always false).
  *
  * Reads stream the events file (it can be 64 MiB before rotating), so
  * they hold an `InFlightLimiter` slot — 4 per user, 16 process-wide — until
@@ -40,41 +40,9 @@ function intParam(v: unknown): number | undefined {
 }
 
 export function registerConversationRoutes(router: Router, ctx: RouteContext): void {
-	const { sessions, conversation, composer } = ctx;
+	const { sessions, conversation } = ctx;
 	const { conversationIp, conversationMetaIp } = ctx.limiters;
 	const readSlots = new InFlightLimiter(READ_IN_FLIGHT_PER_USER, READ_IN_FLIGHT_TOTAL);
-
-	/**
-	 * 3.2 (§8.1.1, §6): `canSendInput` and the `composer` block, orientative
-	 * — no probe, no exec. The owner is the only caller of this route, so
-	 * `callerMayOperate` is true; `capture.effective` comes from this request
-	 * when it computed it, else from the last one that did.
-	 */
-	const decorate = async (
-		sid: string,
-		capture: { effective: boolean } | null,
-		summaries: Awaited<ReturnType<ConversationService["summaries"]>>,
-	) => {
-		if (!composer) return summaries;
-		if (capture) composer.noteCapture(sid, capture.effective);
-		const av = await composer.availability(
-			sid,
-			summaries.map((s) => ({
-				cid: s.sessionId,
-				kind: s.kind,
-				paneId: s.paneId,
-				endedAt: s.endedAt,
-			})),
-			{
-				captureEffective: capture?.effective ?? composer.lastCaptureEffective(sid),
-				callerMayOperate: true,
-			},
-		);
-		return summaries.map((s) => ({
-			...s,
-			...(av.get(s.sessionId) ?? { canSendInput: false, composer: { blocked: false } }),
-		}));
-	};
 
 	/** Ownership, then the conversation (throws NotFoundError for either). */
 	const resolve = async (req: Request, res: Response) => {
@@ -132,7 +100,7 @@ export function registerConversationRoutes(router: Router, ctx: RouteContext): v
 					const { conversations, meta } = await conversation.summariesWithMeta(req.params.id);
 					res.json({
 						capture: null,
-						conversations: await decorate(req.params.id, null, conversations),
+						conversations,
 						meta,
 					});
 					return;
@@ -140,7 +108,7 @@ export function registerConversationRoutes(router: Router, ctx: RouteContext): v
 				const data = await conversation.list(req.params.id);
 				res.json({
 					...data,
-					conversations: await decorate(req.params.id, data.capture, data.conversations),
+					conversations: data.conversations,
 				});
 			} catch (err) {
 				handleSessionError(err, res);
@@ -210,8 +178,7 @@ export function registerConversationRoutes(router: Router, ctx: RouteContext): v
 				logger.info(
 					`[conversation] owner meta ${req.params.id}/${req.params.cid}: ${Object.keys(patch).join("+")}`,
 				);
-				const [decorated] = await decorate(req.params.id, null, [summary]);
-				res.json(decorated);
+				res.json(summary);
 			} catch (err) {
 				handleSessionError(err, res);
 			}

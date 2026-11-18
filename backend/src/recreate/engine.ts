@@ -50,12 +50,6 @@ import {
 	planCarry,
 	requiredFreeBytes,
 } from "./carry.js";
-import {
-	decideRecreateCli,
-	parseRecreateCliPolicy,
-	type RecreateCliPolicy,
-	readWorkspaceCliVersion,
-} from "./cliCompat.js";
 import type { RecreateD1Port, RecreateSessionConfig, RecreateSessionRow } from "./d1.js";
 import {
 	CLI_URL_HANDLER,
@@ -269,10 +263,6 @@ export interface RecreationDeps {
 	lock: SessionLifecycleLock;
 	capture: RecreateCapturePort;
 	readWorkspaceSkill?: (sessionId: string, rel: string) => Promise<WorkspaceSkill>;
-	/** The workspace CLI's version (cliCompat.ts); null when unreadable. */
-	readCliVersion?: (sessionId: string) => Promise<string | null>;
-	/** The workspace-CLI rule (cliCompat.ts); default: RECREATE_CLI_* from the environment. */
-	cliPolicy?: RecreateCliPolicy;
 	/** Free bytes of the filesystem holding Docker's layers (default: statfs of the workspace root — same disk on the deployment). */
 	/**
 	 * Free bytes on the filesystem that holds Docker's data root (where N's
@@ -492,8 +482,6 @@ export class RecreationEngine {
 	private readonly now: () => number;
 	private readonly sleep: (ms: number) => Promise<void>;
 	private readonly readW: (sessionId: string, rel: string) => Promise<WorkspaceSkill>;
-	private readonly readCli: (sessionId: string) => Promise<string | null>;
-	private readonly cliPolicy: RecreateCliPolicy;
 	private readonly diskFree: () => Promise<number | null>;
 	private readonly dockerFsPath: string | null;
 	private readonly backupFresh: (
@@ -511,8 +499,6 @@ export class RecreationEngine {
 		this.now = deps.now ?? Date.now;
 		this.sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
 		this.readW = deps.readWorkspaceSkill ?? readWorkspaceSkill;
-		this.readCli = deps.readCliVersion ?? readWorkspaceCliVersion;
-		this.cliPolicy = deps.cliPolicy ?? parseRecreateCliPolicy(process.env);
 		this.dockerFsPath = deps.dockerFsPath ?? null;
 		this.diskFree =
 			deps.diskFree ??
@@ -1041,12 +1027,8 @@ export class RecreationEngine {
 				this.readW(sessionId, rel),
 			)),
 		);
-		if (done()) return result();
-		// §2.7.5: N mounts /etc/st-control and runs the workspace's CLI: a
-		// stable release at or above the floor and not denied (cliCompat.ts,
-		// owner 2026-11-10); an unreadable version still blocks.
-		const cli = decideRecreateCli(this.cliPolicy, await this.readCli(sessionId));
-		if (!cli.ok) blockers.push({ code: "control-marker-incompatible", detail: cli.detail });
+		// No rule on the workspace CLI's version: whether N's capture works is
+		// judged on evidence after the start (relay identified, files converged).
 		if (blockers.length > 0 || !image) return result();
 		return result({ row, o, image, config, layer, imageOSkills, carry, sizeRw });
 	}

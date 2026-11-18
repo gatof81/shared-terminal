@@ -15,24 +15,10 @@ test.describe("session bar", () => {
 		page,
 	}) => {
 		test.skip(app.mobile, "the phone bar has its own layout (drawer / merged header)");
-		// Bound to an agent: the bar also carries "@handle · project".
-		backend.enableProjects();
 		await app.login("alice");
 		await app.openSession("my-project");
 		const bar = page.locator("#terminal-toolbar");
-		await expect(page.locator("#terminal-session-agent")).toBeVisible();
 		const short = (await bar.boundingBox())!.height;
-
-		// A long project name is the agent link's problem, not the session
-		// name's: the name stays whole while the link gives way.
-		backend.projects[0]!.name = "Shared Terminal — plataforma de agentes y sesiones (producción)";
-		await page.reload();
-		const shortName = page.locator("#terminal-session-name");
-		await expect(page.locator("#terminal-session-agent")).toContainText("plataforma");
-		expect(await shortName.evaluate((el) => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(
-			0,
-		);
-		expect((await bar.boundingBox())!.height).toBe(short);
 
 		backend.session(SESSION_IDS.running)!.name = LONG;
 		for (const width of [1920, 1440, 1280, 1024]) {
@@ -41,7 +27,6 @@ test.describe("session bar", () => {
 			const name = page.locator("#terminal-session-name");
 			await expect(name).toHaveText(LONG);
 			expect((await bar.boundingBox())!.height, `bar height at ${width}px`).toBe(short);
-			await expect(page.locator("#terminal-session-agent")).toBeVisible();
 			// #terminal-area clips, so a too-wide bar never widens the page:
 			// measure the bar itself — no control may be pushed out of it.
 			const overflow = await bar.evaluate((el) => el.scrollWidth - el.clientWidth);

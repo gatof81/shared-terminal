@@ -88,11 +88,6 @@ services:
       # CONVERSATION.md §3.1.1 — empty ⇒ off; `observe` = activation gate (never
       # refuses); `true` ONLY after that gate passes (DEPLOYMENT.md "Ingest network origin").
       - INGEST_REQUIRE_SESSION_ORIGIN=${INGEST_REQUIRE_SESSION_ORIGIN:-}
-      # Composer 3.2 (docs/CONVERSATION.md §8, DEPLOYMENT.md "Composer").
-      # Same trap, same shape: empty ⇒ the backend keeps the composer OFF
-      # (routes not mounted, canSendInput false) and the CLI allowlist at its
-      # default (2.1.314); a value in .env now reaches the container.
-      - CONVERSATION_COMPOSER_ENABLED=${CONVERSATION_COMPOSER_ENABLED:-}
       - UI_SHELL=${UI_SHELL:-}
       - PROJECT_CHAT_ENABLED=${PROJECT_CHAT_ENABLED:-}
       # Experimental ACP agents (backend/src/acp/agents.ts). Unset ⇒ off,
@@ -106,32 +101,9 @@ services:
       # 1 ⇒ also installs the deterministic test adapter as runtime
       # `st-test-agent` (no model, no credentials) for end-to-end checks.
       - ACP_TEST_RUNTIME=${ACP_TEST_RUNTIME:-}
-      # D1 project conversation (docs/PROJECT_CONVERSATION.md §1). Empty ⇒ off:
-      # no routes, no /ws/project/, nothing under .projects/, auth/status
-      # byte-identical. Effective only with PROJECT_CHAT_ENABLED and
-      # CONVERSATION_COMPOSER_ENABLED also on.
-      - PROJECT_CONVERSATION_ENABLED=${PROJECT_CONVERSATION_ENABLED:-}
-      # D2 artifacts (docs/PROJECT_CONVERSATION.md §6). Empty ⇒ off: no artifact
-      # routes, `artifacts[]` refused with 409, no workspace file read or
-      # written. Effective only with PROJECT_CONVERSATION_ENABLED effective.
-      - PROJECT_ARTIFACTS_ENABLED=${PROJECT_ARTIFACTS_ENABLED:-}
-      # D3 agent consult (docs/PROJECT_CONVERSATION.md §7). Empty ⇒ off: no grant
-      # routes, `collab` refused with 409, no outbox file read. Effective only
-      # with PROJECT_CONVERSATION_ENABLED effective and the ingest origin check
-      # in `observe` or `true`.
-      - PROJECT_RELAY_ENABLED=${PROJECT_RELAY_ENABLED:-}
       # #562 — who may read `npm run backup` output: unset ⇒ 0700/0600 root only;
       # a numeric GID ⇒ 0750/0640 in that group (the off-host mirror's user).
       - BACKUP_GROUP_GID=${BACKUP_GROUP_GID:-}
-      - COMPOSER_CLI_VERSIONS=${COMPOSER_CLI_VERSIONS:-}
-      - COMPOSER_CLI_MIN_VERSION=${COMPOSER_CLI_MIN_VERSION:-}
-      - COMPOSER_CLI_DENY=${COMPOSER_CLI_DENY:-}
-      - RECREATE_CLI_MIN_VERSION=${RECREATE_CLI_MIN_VERSION:-}
-      - RECREATE_CLI_DENY=${RECREATE_CLI_DENY:-}
-      # §8.1.12 EXPERIMENTAL background transport: empty ⇒ OFF, no version validated.
-      - CONVERSATION_COMPOSER_BG_ENABLED=${CONVERSATION_COMPOSER_BG_ENABLED:-}
-      - COMPOSER_BG_CLI_VERSIONS=${COMPOSER_BG_CLI_VERSIONS:-}
-      - COMPOSER_BG_SESSIONS=${COMPOSER_BG_SESSIONS:-}
       # §2.7.7 carry-over recreation: a path inside this container on the same
       # filesystem as Docker's data root (DEPLOYMENT.md "Activating an
       # existing session"). Unset ⇒ carry-overs refuse (disk-space-unknown).

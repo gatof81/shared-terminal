@@ -43,41 +43,6 @@ test.describe("chat", () => {
 		await expect(page.locator(".tab-pane.active")).toContainText("Welcome");
 	});
 
-	test("composer: a send shows a pending bubble that yields to the CLI's own prompt", async ({
-		app,
-		backend,
-		page,
-	}) => {
-		await app.login("alice");
-		await app.openSession("my-project");
-		await app.switchView("chat");
-		await page.locator("#chat-list .chat-conv-row", { hasText: "Refactor auth flow" }).click();
-		const ta = page.locator(".chat-composer textarea");
-		await expect(ta).toBeEnabled();
-		await ta.fill("Also add a logout test.");
-		await page.locator(".chat-send").click();
-		await expect
-			.poll(() => backend.requests.some((r) => r.method === "POST" && r.path.endsWith("/messages")))
-			.toBe(true);
-		const you = page.locator("#chat-thread .chat-user", { hasText: "Also add a logout test." });
-		await expect(you).toHaveCount(1);
-		await expect(you).not.toHaveClass(/chat-pending/);
-		await expect(ta).toHaveValue("");
-	});
-
-	test("composer is disabled with a reason when the conversation cannot take input", async ({
-		app,
-		page,
-	}) => {
-		await app.login("alice");
-		await app.openSession("my-project");
-		await app.switchView("chat");
-		await page.locator("#chat-list .chat-conv-row", { hasText: "Fix tests" }).click();
-		const ta = page.locator(".chat-composer textarea");
-		await expect(ta).toBeDisabled();
-		await expect(page.locator(".chat-composer-status")).toContainText(/not available|has ended/);
-	});
-
 	test("mobile: thread → back returns to the list; reopening is instant (cached)", async ({
 		app,
 		backend,

@@ -349,36 +349,15 @@ phase "Phase 0: compose alias"
 ALIASES=$(cd "$REPO_ROOT" && JWT_SECRET=x SECRETS_ENCRYPTION_KEY=x docker compose -f docker-compose.yml config --format json 2>/dev/null |
 	jq -c '.services.app.networks["sessions-net"].aliases // []')
 check "app has the st-backend alias on sessions-net ($ALIASES)" grep -q '"st-backend"' <<<"$ALIASES"
-# Composer 3.2 env forwarding (docker compose config, the real interpolation):
-# without the variables in the environment the backend must receive EMPTY
-# values (composer off, allowlist default); with them set, the exact values.
-compose_env() { # compose_env <VAR> [env assignments…]
-	local var="$1"
-	shift
-	(cd "$REPO_ROOT" && env "$@" JWT_SECRET=x SECRETS_ENCRYPTION_KEY=x docker compose -f docker-compose.yml config --format json 2>/dev/null |
-		jq -r --arg v "$var" '.services.app.environment[$v] // "<absent>"')
+# Composer and the D1–D3 project conversation are retired: compose no longer
+# forwards their flags (nothing in the backend reads them).
+compose_env() { # compose_env <VAR>
+	(cd "$REPO_ROOT" && JWT_SECRET=x SECRETS_ENCRYPTION_KEY=x docker compose -f docker-compose.yml config --format json 2>/dev/null |
+		jq -r --arg v "$1" '.services.app.environment[$v] // "<absent>"')
 }
-check "compose forwards CONVERSATION_COMPOSER_ENABLED as empty when unset (composer off)" \
-	[ "$(compose_env CONVERSATION_COMPOSER_ENABLED)" = "" ]
-check "compose forwards COMPOSER_CLI_VERSIONS as empty when unset (default allowlist)" \
-	[ "$(compose_env COMPOSER_CLI_VERSIONS)" = "" ]
-check "compose forwards CONVERSATION_COMPOSER_ENABLED=true when set" \
-	[ "$(compose_env CONVERSATION_COMPOSER_ENABLED CONVERSATION_COMPOSER_ENABLED=true)" = "true" ]
-check "compose forwards the CLI allowlist verbatim when set" \
-	[ "$(compose_env COMPOSER_CLI_VERSIONS COMPOSER_CLI_VERSIONS=2.1.314,2.1.320)" = "2.1.314,2.1.320" ]
-# D1 project conversation: same shape — empty when unset (off), verbatim when set.
-check "compose forwards PROJECT_CONVERSATION_ENABLED as empty when unset (D1 off)" \
-	[ "$(compose_env PROJECT_CONVERSATION_ENABLED)" = "" ]
-check "compose forwards PROJECT_CONVERSATION_ENABLED=true when set" \
-	[ "$(compose_env PROJECT_CONVERSATION_ENABLED PROJECT_CONVERSATION_ENABLED=true)" = "true" ]
-check "compose forwards PROJECT_ARTIFACTS_ENABLED as empty when unset (D2 off)" \
-	[ "$(compose_env PROJECT_ARTIFACTS_ENABLED)" = "" ]
-check "compose forwards PROJECT_ARTIFACTS_ENABLED=true when set" \
-	[ "$(compose_env PROJECT_ARTIFACTS_ENABLED PROJECT_ARTIFACTS_ENABLED=true)" = "true" ]
-check "compose forwards PROJECT_RELAY_ENABLED as empty when unset (D3 off)" \
-	[ "$(compose_env PROJECT_RELAY_ENABLED)" = "" ]
-check "compose forwards PROJECT_RELAY_ENABLED=true when set" \
-	[ "$(compose_env PROJECT_RELAY_ENABLED PROJECT_RELAY_ENABLED=true)" = "true" ]
+for v in CONVERSATION_COMPOSER_ENABLED COMPOSER_CLI_VERSIONS PROJECT_CONVERSATION_ENABLED PROJECT_RELAY_ENABLED RECREATE_CLI_MIN_VERSION; do
+	check "compose no longer forwards $v" [ "$(compose_env "$v")" = "<absent>" ]
+done
 
 # ── Phase 1 ─────────────────────────────────────────────────────────────────
 phase "Phase 1: image layout and pin"

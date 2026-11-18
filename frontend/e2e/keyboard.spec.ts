@@ -138,7 +138,8 @@ test.describe("soft keyboard (simulated visual viewport)", () => {
 		await app.openSession("my-project");
 		await app.switchView("chat");
 		await page.locator("#chat-list .chat-conv-row", { hasText: "Refactor auth flow" }).click();
-		const ta = page.locator(".chat-composer textarea");
+		// The thread's last element (the read-only note) is what must stay above the keyboard.
+		const ta = page.locator("#chat-thread .chat-readonly-note");
 		await expect(ta).toBeVisible();
 
 		// Keyboard up, Safari panned the view 300 px down to reveal the field.
@@ -151,16 +152,13 @@ test.describe("soft keyboard (simulated visual viewport)", () => {
 		expect(Math.round(body!.height)).toBe(visible);
 		const taBox = await ta.boundingBox();
 		// v1 keeps its bottom view bar (#view-nav) above the keyboard: the
-		// composer ends at the bar, not at the keyboard (a known v1 cost).
+		// thread ends at the bar, not at the keyboard (a known v1 cost).
 		const nav = page.locator("#view-nav");
 		const keyboardTop = (await nav.isVisible()) ? (await nav.boundingBox())!.y : 300 + visible;
-		expect(taBox!.y + taBox!.height, "the composer is inside the visible band").toBeLessThanOrEqual(
-			keyboardTop + 1,
-		);
 		expect(
-			keyboardTop - (taBox!.y + taBox!.height),
-			"no gap above the keyboard beyond the composer's own padding",
-		).toBeLessThan(24);
+			taBox!.y + taBox!.height,
+			"the thread's end is inside the visible band",
+		).toBeLessThanOrEqual(keyboardTop + 1);
 
 		// Keyboard down: back to the full height, no offset, flag cleared.
 		await keyboard(page, viewport.height, 0);

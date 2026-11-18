@@ -135,69 +135,37 @@ describe("reads", () => {
 	});
 });
 
-describe("project routes (P3a)", () => {
+describe("project routes", () => {
 	const PID = "6b1f2c3d-0000-4000-8000-000000000001";
 	const AID = "a0000000-0000-4000-8000-0000000000a2";
 
-	it("parses the project and agent pages and round-trips them", () => {
-		expect(parseProjectRoute(`#/projects/${PID}`)).toEqual({ projectId: PID, agentId: null });
-		expect(parseProjectRoute(`#/projects/${PID}/agents/${AID}`)).toEqual({
-			projectId: PID,
-			agentId: AID,
-		});
-		for (const r of [
-			{ projectId: PID, agentId: null },
-			{ projectId: "p 1", agentId: "a/1" },
-		]) {
+	it("parses the project page and round-trips it", () => {
+		expect(parseProjectRoute(`#/projects/${PID}`)).toEqual({ projectId: PID });
+		for (const r of [{ projectId: PID }, { projectId: "p 1" }])
 			expect(parseProjectRoute(projectRouteHash(r))).toEqual(r);
-		}
 	});
 
-	it("parses the v3 workspace panels and round-trips them", () => {
-		const MID = "m0000000-0000-4000-8000-000000000001";
-		expect(parseProjectRoute(`#/projects/${PID}/threads/${MID}`)).toEqual({
-			projectId: PID,
-			agentId: null,
-			panel: { kind: "thread", msgId: MID },
-		});
-		expect(parseProjectRoute(`#/projects/${PID}/new`)).toEqual({
-			projectId: PID,
-			agentId: null,
-			panel: { kind: "new" },
-		});
-		expect(parseProjectRoute(`#/projects/${PID}/agents`)).toEqual({
-			projectId: PID,
-			agentId: null,
-			panel: { kind: "agents" },
-		});
-		for (const r of [
-			{ projectId: PID, agentId: null, panel: { kind: "thread" as const, msgId: "a/b c" } },
-			{ projectId: PID, agentId: null, panel: { kind: "new" as const } },
-			{ projectId: PID, agentId: null, panel: { kind: "agents" as const } },
-		]) {
-			expect(parseProjectRoute(projectRouteHash(r))).toEqual(r);
-		}
+	it("addresses of the retired project views land on the project page", () => {
 		for (const h of [
-			`#/projects/${PID}/threads/`,
-			`#/projects/${PID}/threads/x/y`,
-			`#/projects/${PID}/new/x`,
+			`#/projects/${PID}/chat`,
+			`#/projects/${PID}/team`,
+			`#/projects/${PID}/new`,
+			`#/projects/${PID}/agents`,
+			`#/projects/${PID}/agents/${AID}`,
+			`#/projects/${PID}/threads/m1`,
 		])
-			expect(parseProjectRoute(h), h).toBeNull();
+			expect(parseProjectRoute(h), h).toEqual({ projectId: PID });
 	});
 
-	it("rejects other shapes — the chat route of a later phase included", () => {
+	it("rejects other shapes", () => {
 		for (const h of [
 			"",
 			"#/projects/",
 			"#/projects//agents/x",
-			`#/projects/${PID}/agents/`,
-			`#/projects/${PID}/agents/${AID}/chat`,
-			`#/projects/${PID}/settings`,
 			"#/projects/%zz",
 			`#/sessions/${SID}`,
-		]) {
+		])
 			expect(parseProjectRoute(h), h).toBeNull();
-		}
 	});
 
 	it("never changes how a session route parses, and a project hash is no session route", () => {
@@ -226,7 +194,7 @@ describe("project routes (P3a)", () => {
 		navigate({ sessionId: SID, view: "terminal", detail: null }, { replace: true });
 		const writes: string[] = [];
 		onAddressWrite(() => writes.push(window.location.hash));
-		navigateProject({ projectId: PID, agentId: null });
+		navigateProject({ projectId: PID });
 		shown = true;
 		expect(window.location.hash).toBe(`#/projects/${PID}`);
 		expect(depth()).toBe(1);
@@ -243,7 +211,7 @@ describe("project routes (P3a)", () => {
 		const shown = true;
 		enableProjectRoutes(() => shown);
 		navigate({ sessionId: SID, view: "chat", detail: null }, { replace: true });
-		navigateProject({ projectId: PID, agentId: AID });
+		navigateProject({ projectId: PID });
 		pushSessionAddress();
 		expect(window.location.hash).toBe(`#/sessions/${SID}/chat`);
 		expect(depth()).toBe(2);

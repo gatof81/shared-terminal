@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 import type { ConversationSummary } from "./api.js";
 import { STALE_EVIDENCE_MS } from "./conversationModel.js";
 import {
-	boundHandle,
 	bucketOf,
 	type FetchList,
 	loadProjects,
@@ -382,13 +381,6 @@ describe("words: with Projects on, the switcher says 'session' (a project is onl
 });
 
 describe("bound agent handle (PROJECTS.md §4.6: object = bound, null = unassigned, absent = unknown)", () => {
-	const binding = { projectId: "p1", agentId: "a1", handle: "reviewer", bindingId: "b1", epoch: 1 };
-	it("only a binding object yields @handle", () => {
-		expect(boundHandle({ binding })).toBe("@reviewer");
-		expect(boundHandle({ binding: null })).toBeNull();
-		expect(boundHandle({})).toBeNull();
-		expect(boundHandle({ binding: { ...binding, handle: "" } })).toBeNull();
-	});
 	it("the row label is the name alone unless bound", () => {
 		expect(sessionLabel("alpha", null)).toBe("alpha");
 		expect(sessionLabel("alpha", undefined)).toBe("alpha");

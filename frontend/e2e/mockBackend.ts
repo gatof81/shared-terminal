@@ -14,7 +14,6 @@
  * Shapes mirror `src/api.ts`; keep them in step when the API changes.
  */
 
-import { createHash } from "node:crypto";
 import type { Page, Route, WebSocketRoute } from "@playwright/test";
 import { normalizeTitle } from "../src/conversationTitle.js";
 
@@ -128,31 +127,13 @@ export const SESSION_IDS = {
 	bob: "dddddddd-4444-4444-8444-444444444444",
 };
 
-// ── Projects & Agents (P3a, docs/PROJECTS.md) ──────────────────────────────
+// ── Projects ──────────────────────────────
 // Off by default: with `projectChat` false the mock answers exactly as before
-// (no `features`, no `binding`, the project routes 404) — the visual
-// baselines and every other spec run against that. `enableProjects()` seeds
-// the Educación HZ directory of design 16's fixture, re-stamped around this
-// harness's clock and bound to alice's own sessions.
+// (no `features`, the project routes 404) — the visual baselines and every
+// other spec run against that. `enableProjects()` seeds one project and a few
+// more sessions of alice's.
 
 export const PROJECT_IDS = { hz: "6b1f2c3d-0000-4000-8000-000000000001" };
-
-/** The seeded project-conversation threads (enableProjectConversation). */
-export const PROJECT_MSG_IDS = {
-	polling: "c1000000-0000-4000-8000-000000000001",
-	notes: "c1000000-0000-4000-8000-000000000002",
-	backup: "c1000000-0000-4000-8000-000000000003",
-	old: "c1000000-0000-4000-8000-000000000000",
-};
-
-export const AGENT_IDS = {
-	architect: "a0000000-0000-4000-8000-0000000000a1",
-	developer: "a0000000-0000-4000-8000-0000000000a2",
-	developer2: "a0000000-0000-4000-8000-0000000000a3",
-	qa: "a0000000-0000-4000-8000-0000000000a4",
-	designer: "a0000000-0000-4000-8000-0000000000a5",
-	removed: "a0000000-0000-4000-8000-0000000000a9",
-};
 
 /** Sessions `enableProjects()` adds to alice's list. */
 export const PROJECT_SESSION_IDS = {
@@ -161,35 +142,6 @@ export const PROJECT_SESSION_IDS = {
 	designer: "d5e60000-0000-4000-8000-000000000005",
 	scratch: "01d00000-0000-4000-8000-000000000099",
 };
-
-export interface MockPresence {
-	value: string;
-	detail?: string;
-	source: string;
-	at: string | null;
-	verified?: boolean;
-}
-
-export interface MockBinding {
-	bindingId: string;
-	epoch: number;
-	sessionId: string;
-	state: "active" | "draining" | "retired";
-	createdAt: string;
-	retiredAt: string | null;
-	retireReason: string | null;
-}
-
-export interface MockAgent {
-	agentId: string;
-	projectId: string;
-	handle: string;
-	role: string | null;
-	createdAt: string;
-	removedAt: string | null;
-	bindings: MockBinding[];
-	presence: MockPresence;
-}
 
 export interface MockProject {
 	projectId: string;
@@ -465,77 +417,12 @@ export class MockBackend {
 	 */
 	delays: Partial<Record<DelayKey, number>> = {};
 
-	// ── Projects & Agents (P3a) ──
-	/** PROJECT_CHAT_ENABLED: `features.projectChat` + `binding` on rows + the routes. */
+	// ── Projects ──
+	/** PROJECT_CHAT_ENABLED: `features.projectChat` + the /projects routes. */
 	projectChat = false;
-	/** `GET /projects/:id/agents` answers this status (the presence read fails). */
-	agentsReadFails: number | null = null;
-	/** The directory read failed: `/sessions` rows carry NO `binding` key (unknown). */
-	bindingReadFails = false;
-	/**
-	 * A hard delete of a bound session is refused at the server's SECOND
-	 * check (PROJECTS.md §6): the soft delete has already happened (the row
-	 * is `terminated`, kept) when the 409 `agent-active` answers.
-	 */
-	hardDeleteRefusedAfterSoftDelete = false;
 	projects: MockProject[] = [];
-	agents: MockAgent[] = [];
-	// ── Project conversation (Projects v3, PROJECT_CONVERSATION.md D1) ──
-	/** PROJECT_CONVERSATION_ENABLED: `features.projectConversation` + the §5 routes. */
-	projectConversation = false;
-	/** The project log, persisted lines in seq order (§2.2 shape). */
-	projectLog: Array<Record<string, unknown>> = [];
-	/** The events page never holds more than this (a test lowers it to exercise paging). */
-	projectPageCap = 500;
-	/** What a send to each agent ends as (default: delivered). */
-	projectSendOutcome = new Map<string, { state: string; reason?: string }>();
-	// ── D2 artifacts (Appendix A.2) ──
-	/** PROJECT_ARTIFACTS_ENABLED: `features.projectArtifacts` + the …/artifacts routes. */
-	projectArtifacts = false;
-	/** Registered file contents by sha256 (what GET …/artifacts/:sha serves). */
-	projectArtifactContent = new Map<string, string>();
-	/** Placing into this agent's inbox fails with this artifact_error (not-sent, files maybe placed). */
-	projectPlacementError = new Map<string, string>();
-	/** Every POST …/artifacts body received. */
-	projectArtifactPosts: Array<Record<string, unknown>> = [];
-	// ── D3 consults (PROJECT_CONVERSATION.md §7) ──
-	/** PROJECT_RELAY_ENABLED: `features.projectRelay`, `collab` on a send, the …/grants routes. */
-	projectRelay = false;
-	/** grant_id → its folded state, as the server keeps it. */
-	projectGrants = new Map<
-		string,
-		{ state: "live" | "paused" | "ended"; reason?: string; initiator: string; with: string }
-	>();
-	/** Every POST …/grants/:id/<verb> received, in order. */
-	projectGrantPosts: Array<{ grantId: string; verb: string }> = [];
-	// ── The person's queue (§3.6) ──
-	/** This backend knows `whenFree` and the cancel route: `features.projectQueue`. */
-	projectQueue = false;
-	/** Agents that are not free: a `whenFree` delivery to them stays `queued`. */
-	projectBusyAgents = new Set<string>();
-	/** What `GET …/messages/:msgId` says about a queued delivery to this agent (absent ⇒ no key). */
-	projectQueueWaiting = new Map<string, { waiting: string; heldBy?: string }>();
-	/** The next send with `collab` is refused with this answer (e.g. 409 agent-in-collab). */
-	projectCollabRefusal: { status: number; body: Record<string, unknown> } | null = null;
-	/** clientMessageId → msg_id (idempotency, §3.4 rule 2). */
-	private projectSends = new Map<string, { msgId: string; hash: string }>();
-	/** Agent text in the captures, by `${sid}\n${cid}\n${seq}` (what a reply_ref points at). */
-	projectCaptures = new Map<string, Record<string, unknown>>();
-	/** Every POST body the conversation route received. */
-	projectMessagePosts: Array<Record<string, unknown>> = [];
-	/** Every ack POST body received. */
-	projectAckPosts: Array<Record<string, unknown>> = [];
-	/** The next message POST is written, then its answer is lost (the connection resets). */
-	loseNextMessageAnswer = false;
 	/** Idempotency records, by `${owner}\n${clientRequestId}`. */
-	private creations = new Map<string, { hash: string; kind: "project" | "agent"; id: string }>();
-	/**
-	 * The next project write (POST /projects, POST …/agents, DELETE …/agents/:aid)
-	 * answers this instead. `apply`: the write lands first (a lost answer).
-	 */
-	failNextProjectWrite: { status: number; error: string; apply: boolean } | null = null;
-	/** Every project-directory write, with its JSON body, in arrival order. */
-	projectWrites: Array<{ method: string; path: string; body: Record<string, unknown> | null }> = [];
+	private creations = new Map<string, { hash: string; id: string }>();
 	private seq = 100;
 
 	/** Start every test logged in as `username` (skips the login form). */
@@ -547,65 +434,9 @@ export class MockBackend {
 		return this.sessions.find((s) => s.sessionId === id);
 	}
 
-	/**
-	 * Pilot 1 (doc 18): after `enableProjects()`, give three agents' sessions
-	 * their own conversation — the architect's and developer-2's answer a
-	 * delivered send, the designer's refuses every send with 409 `busy`.
-	 */
-	seedPilot(): void {
-		const conv = (
-			cid: string,
-			sessionId: string,
-			title: string,
-			extra: Partial<Conversation>,
-		): Conversation => ({
-			cid,
-			title,
-			kind: "interactive",
-			status: "waiting_input",
-			statusEvidence: "probe:idle",
-			canSendInput: true,
-			startedAt: iso(-600),
-			sessionId,
-			events: [
-				{
-					seq: 1,
-					ts: iso(-600),
-					ev: "session_start",
-					prompt_id: null,
-					turn_id: null,
-					agent_id: null,
-					pane: "%1",
-					data: {},
-				},
-			],
-			...extra,
-		});
-		for (const sid of [
-			PROJECT_SESSION_IDS.architect,
-			PROJECT_SESSION_IDS.developer2,
-			PROJECT_SESSION_IDS.designer,
-		]) {
-			this.historySessions.add(sid);
-			this.scopedSessions.add(sid);
-		}
-		this.conversations.push(
-			conv("c-pilot-arch", PROJECT_SESSION_IDS.architect, "Architecture", {
-				reply: "Plan: split the import into two steps.",
-			}),
-			conv("c-pilot-dev2", PROJECT_SESSION_IDS.developer2, "Implementation", {
-				reply: "Review: step two needs a rollback.",
-			}),
-			conv("c-pilot-design", PROJECT_SESSION_IDS.designer, "Design", {
-				sendError: { status: 409, error: "busy" },
-			}),
-		);
-	}
-
-	/** Turn the P3a directory on, seeded (design 16 fixture, bound to alice's sessions). */
+	/** Turn projects on: one project and a few more sessions of alice's. */
 	enableProjects(): void {
 		this.projectChat = true;
-		const at = (sec: number) => iso(30 * 60 - sec); // `sec` before the page's clock
 		const extra = (sessionId: string, name: string, status: MockSession["status"]) =>
 			this.sessions.push({
 				sessionId,
@@ -619,793 +450,14 @@ export class MockBackend {
 		extra(PROJECT_SESSION_IDS.developer2, "hz-dev-2", "running");
 		extra(PROJECT_SESSION_IDS.designer, "hz-design", "running");
 		extra(PROJECT_SESSION_IDS.scratch, "scratch", "running");
-		const pid = PROJECT_IDS.hz;
 		this.projects = [
-			{ projectId: pid, ownerUserId: "u-alice", name: "Educación HZ", createdAt: iso(-7200) },
-		];
-		const bind = (id: string, sessionId: string, createdAt: string): MockBinding => ({
-			bindingId: `b0000000-0000-4000-8000-0000000000${id}`,
-			epoch: 1,
-			sessionId,
-			state: "active",
-			createdAt,
-			retiredAt: null,
-			retireReason: null,
-		});
-		const agent = (
-			agentId: string,
-			handle: string,
-			role: string,
-			binding: MockBinding,
-			presence: MockPresence,
-		): MockAgent => ({
-			agentId,
-			projectId: pid,
-			handle,
-			role,
-			createdAt: binding.createdAt,
-			removedAt: null,
-			bindings: [binding],
-			presence,
-		});
-		this.agents = [
-			agent(
-				AGENT_IDS.architect,
-				"architect-hz",
-				"Architect",
-				bind("b1", PROJECT_SESSION_IDS.architect, iso(-3600)),
-				{ value: "waiting_input", source: "probe", at: at(34), verified: true },
-			),
-			agent(
-				AGENT_IDS.developer,
-				"developer-hz",
-				"Developer",
-				bind("b2", SESSION_IDS.running, iso(-3300)),
-				{ value: "working", source: "hook", at: at(5) },
-			),
-			agent(
-				AGENT_IDS.developer2,
-				"developer-hz-2",
-				"Developer",
-				bind("b5", PROJECT_SESSION_IDS.developer2, iso(-2400)),
-				{ value: "unknown", detail: "stale", source: "hook", at: at(31 * 60) },
-			),
-			agent(AGENT_IDS.qa, "qa-hz", "QA & Release", bind("b3", SESSION_IDS.stopped, iso(-3000)), {
-				value: "disconnected",
-				detail: "session-stopped",
-				source: "session",
-				at: at(80 * 60),
-			}),
-			agent(
-				AGENT_IDS.designer,
-				"designer-hz",
-				"Designer",
-				bind("b4", PROJECT_SESSION_IDS.designer, iso(-2700)),
-				{ value: "needs_attention", detail: "waiting_permission", source: "hook", at: at(47) },
-			),
 			{
-				agentId: AGENT_IDS.removed,
-				projectId: pid,
-				handle: "designer-old",
-				role: "Designer",
-				createdAt: iso(-90000),
-				removedAt: iso(-5000),
-				bindings: [
-					{
-						...bind("b9", "d5e60000-0000-4000-8000-000000000004", iso(-90000)),
-						state: "retired",
-						retiredAt: iso(-5000),
-						retireReason: "agent-removed",
-					},
-				],
-				presence: {
-					value: "disconnected",
-					detail: "agent-removed",
-					source: "directory",
-					at: iso(-5000),
-				},
+				projectId: PROJECT_IDS.hz,
+				ownerUserId: "u-alice",
+				name: "Educación HZ",
+				createdAt: iso(-7200),
 			},
 		];
-	}
-
-	// ── Project conversation (Projects v3) ──
-
-	private projectSeq = 0;
-
-	/** Open project sockets (WS /ws/project/<pid>). */
-	projectSockets: Array<{ route: WebSocketRoute; after: number | null; closed: boolean }> = [];
-	/** Refuse every project socket (1008): the frontend must fall back to polling. */
-	projectSocketsRefused = false;
-
-	private sendProjectEvent(
-		sock: { route: WebSocketRoute; after: number | null; closed: boolean },
-		e: Record<string, unknown>,
-	): void {
-		if (sock.closed || sock.after === null || (e.seq as number) <= sock.after) return;
-		sock.after = e.seq as number;
-		sock.route.send(JSON.stringify({ type: "event", event: e }));
-	}
-
-	/** Append a line to the project log (seq assigned here, like the writer). */
-	appendProjectEvent(line: Record<string, unknown>): Record<string, unknown> {
-		// Appendix A: `at` (ISO UTC) and the writer's identity on every line.
-		const e = {
-			seq: ++this.projectSeq,
-			at: line.at ?? iso(30 * 60 - 60 + this.projectSeq),
-			w: "b-mock",
-			bn: 0,
-			...line,
-		};
-		this.projectLog.push(e);
-		for (const sock of this.projectSockets) this.sendProjectEvent(sock, e);
-		return e;
-	}
-
-	// ── D3: what the agents and the server write under a consult ──
-
-	/** The id of the newest consult (the one a test just created through the UI). */
-	lastGrantId(): string {
-		const id = [...this.projectGrants.keys()].at(-1);
-		if (!id) throw new Error("no grant yet");
-		return id;
-	}
-
-	/** A `grant` line, folded like the server folds it (an ended grant never changes). */
-	grantEvent(grantId: string, event: string, extra: Record<string, unknown> = {}): void {
-		const g = this.projectGrants.get(grantId);
-		if (!g) throw new Error(`no grant ${grantId}`);
-		this.appendProjectEvent({ ev: "grant", grant_id: grantId, event, ...extra });
-		if (g.state === "ended") return;
-		if (event === "paused") Object.assign(g, { state: "paused", reason: extra.reason });
-		else if (event === "resumed") Object.assign(g, { state: "live", reason: undefined });
-		else if (event === "revoked" || event === "ended")
-			Object.assign(g, { state: "ended", reason: event === "revoked" ? "revoked" : extra.reason });
-	}
-
-	private queuedRelays(grantId: string): Array<Record<string, unknown>> {
-		const last = new Map<string, Record<string, unknown>>();
-		for (const l of this.projectLog)
-			if (l.ev === "delivery" && l.authorized_by === `collab:${grantId}`)
-				last.set(`${l.msg_id}\n${l.agent_id}`, l);
-		return [...last.values()]
-			.filter((l) => l.state === "queued")
-			.map((l) => ({
-				ev: "delivery",
-				msg_id: l.msg_id,
-				agent_id: l.agent_id,
-				authorized_by: l.authorized_by,
-			}));
-	}
-
-	/**
-	 * An agent wrote a valid file in its outbox: `outbox{accepted}` + the relay
-	 * message + its delivery (§7.3–§7.4). `state: "queued"` leaves it waiting;
-	 * anything else walks planned → sending → that state. Returns the msg id.
-	 */
-	projectRelayMessage(
-		grantId: string,
-		from: string,
-		text: string,
-		opts: { kind?: "ask" | "reply"; state?: string; reason?: string } = {},
-	): string {
-		const g = this.projectGrants.get(grantId);
-		if (!g) throw new Error(`no grant ${grantId}`);
-		const to = from === g.initiator ? g.with : g.initiator;
-		const n =
-			this.projectLog.filter(
-				(l) =>
-					l.ev === "message" && (l.relay as { grant_id?: string } | null)?.grant_id === grantId,
-			).length + 1;
-		const msgId = `d0000000-0000-4000-8000-${String(this.projectLog.length).padStart(12, "0")}`;
-		const kind = opts.kind ?? (n === 1 ? "ask" : "reply");
-		const sid = this.agent(from).bindings[0]!.sessionId;
-		this.appendProjectEvent({
-			ev: "outbox",
-			grant_id: grantId,
-			event: "accepted",
-			from: { agent_id: from, binding_id: `b-${from}`, epoch: 1, sid, cid: "cid" },
-			path: `.st-outbox/${kind}-${n}.md`,
-			origin: "match",
-			kind,
-			msg_id: msgId,
-		});
-		this.appendProjectEvent({
-			ev: "message",
-			msg_id: msgId,
-			client_message_id: null,
-			by: "u-alice",
-			kind: "relay",
-			from,
-			to: [to],
-			text,
-			in_reply_to: null,
-			artifacts: [],
-			relay: { grant_id: grantId, n, kind, file_sha256: "f".repeat(64) },
-		});
-		const base = {
-			ev: "delivery",
-			msg_id: msgId,
-			agent_id: to,
-			authorized_by: `collab:${grantId}`,
-		};
-		this.appendProjectEvent({ ...base, state: "queued" });
-		const state = opts.state ?? "delivered";
-		if (state !== "queued") this.projectRelayDeliver(grantId, msgId, state, opts.reason);
-		return msgId;
-	}
-
-	/** A queued relay leaves the queue and ends as `state`. */
-	projectRelayDeliver(grantId: string, msgId: string, state = "delivered", reason?: string): void {
-		const q = this.queuedRelays(grantId).find((d) => d.msg_id === msgId);
-		if (!q) throw new Error(`relay ${msgId} is not queued`);
-		if (state !== "not-sent") {
-			this.appendProjectEvent({ ...q, state: "planned" });
-			this.appendProjectEvent({ ...q, state: "sending" });
-		}
-		this.appendProjectEvent({ ...q, state, ...(reason ? { reason } : {}) });
-	}
-
-	/**
-	 * The recipient of a delivered relay ends its turn: its report lands in its
-	 * capture and the log gets `reply_settling` + `reply_ref` for THAT relay's
-	 * delivery, exactly as for an owner message (the stage-2 log has one per
-	 * message: task, ask and reply).
-	 */
-	async projectRelayReport(msgId: string, text: string): Promise<void> {
-		const m = this.projectLog.find((l) => l.ev === "message" && l.msg_id === msgId);
-		const to = (m?.to as string[] | undefined)?.[0];
-		if (!m || m.kind !== "relay" || !to) throw new Error(`no relay ${msgId} with a recipient`);
-		await this.projectReply(msgId, to, text);
-	}
-
-	/** A file the server would not pass on (`rejected`) or could not attribute (`unverified`). */
-	projectOutbox(
-		grantId: string,
-		from: string,
-		event: "rejected" | "unverified",
-		reason?: string,
-	): void {
-		const sid = this.agent(from).bindings[0]!.sessionId;
-		this.appendProjectEvent({
-			ev: "outbox",
-			grant_id: grantId,
-			event,
-			from: { agent_id: from, binding_id: `b-${from}`, epoch: 1, sid, cid: "cid" },
-			path: ".st-outbox/x.md",
-			origin: event === "unverified" ? "none" : "match",
-			...(reason ? { reason } : {}),
-		});
-	}
-
-	/** §3.6: the agent became free — its queued delivery of `msgId` leaves the queue. */
-	projectQueueDeliver(msgId: string, agentId: string, state = "delivered", reason?: string): void {
-		const base = { ev: "delivery", msg_id: msgId, agent_id: agentId, authorized_by: "owner" };
-		this.appendProjectEvent({ ...base, state: "planned" });
-		this.appendProjectEvent({ ...base, state: "sending" });
-		this.appendProjectEvent({ ...base, state, ...(reason ? { reason } : {}) });
-	}
-
-	/** An owner message plus its deliveries, as the server would write them. */
-	projectTask(
-		msgId: string,
-		to: string[],
-		text: string,
-		extra: Record<string, unknown> = {},
-		outcome: (agentId: string) => { state: string; reason?: string } = (a) =>
-			this.projectSendOutcome.get(a) ?? { state: "delivered" },
-	): void {
-		this.appendProjectEvent({
-			ev: "message",
-			msg_id: msgId,
-			client_message_id: `cm-${msgId}`,
-			by: "u-alice",
-			kind: "owner",
-			to,
-			text,
-			artifacts: [],
-			...extra,
-		});
-		const files = (extra.artifacts as Array<{ sha256: string; name: string }> | undefined) ?? [];
-		for (const a of to) {
-			const o = outcome(a);
-			const base = { ev: "delivery", msg_id: msgId, agent_id: a, authorized_by: "owner" };
-			if (o.state === "queued") {
-				// §3.6: nothing was planned or sent; the queue does that later.
-				this.appendProjectEvent({ ...base, state: "queued" });
-				continue;
-			}
-			this.appendProjectEvent({ ...base, state: "planned" });
-			if (files.length > 0) {
-				// §6.4: placing is durable before the inbox is touched.
-				this.appendProjectEvent({ ...base, state: "placing", artifacts: files });
-				const err = this.projectPlacementError.get(a);
-				if (err) {
-					this.appendProjectEvent({
-						...base,
-						state: "not-sent",
-						reason: "artifact-failed",
-						artifact_error: err,
-						files_possibly_placed: true,
-					});
-					continue;
-				}
-			}
-			if (o.state !== "not-sent")
-				this.appendProjectEvent({
-					...base,
-					state: "sending",
-					...(files.length > 0
-						? {
-								artifacts_placed: files.map((f) => ({
-									sha256: f.sha256,
-									path: `.st-inbox/${f.sha256.slice(0, 12)}-${f.name}`,
-								})),
-							}
-						: {}),
-				});
-			this.appendProjectEvent({
-				...base,
-				state: o.state,
-				...(o.reason ? { reason: o.reason } : {}),
-			});
-		}
-	}
-
-	/** The agent's turn ends: its text lands in its capture and the log gets a reply_ref. */
-	async projectReply(
-		msgId: string,
-		agentId: string,
-		text: string,
-		attribution = "exact",
-		opts: { settleOnly?: boolean } = {},
-	): Promise<void> {
-		const a = this.agent(agentId);
-		const sid = a.bindings[0]!.sessionId;
-		const cid = `conv-${agentId.slice(-4)}`;
-		const turnEndSeq = 1000 + this.projectCaptures.size;
-		this.projectCaptures.set(`${sid}\n${cid}\n${turnEndSeq}`, {
-			seq: turnEndSeq,
-			ts: iso(30 * 60 - 30),
-			ev: "turn_end",
-			prompt_id: `p-${msgId}-${agentId.slice(-4)}`,
-			turn_id: null,
-			agent_id: null,
-			pane: null,
-			data: { last_assistant_message: text },
-		});
-		const digest = createHash("sha256").update(text, "utf8").digest("hex");
-		const fields = {
-			msg_id: msgId,
-			agent_id: agentId,
-			sid,
-			cid,
-			prompt_id: `p-${msgId}-${agentId.slice(-4)}`,
-			seq_from: turnEndSeq - 3,
-			seq_to: turnEndSeq,
-			turn_end_seq: turnEndSeq,
-			report_sha256: digest,
-			report_bytes: Buffer.byteLength(text),
-			truncated: false,
-		};
-		// §4.1: the settle window opens, then (10 s later on the real server) the reply_ref.
-		this.appendProjectEvent({ ev: "reply_settling", ...fields, settle_until: iso(30 * 60 - 20) });
-		if (opts.settleOnly) return;
-		this.appendProjectEvent({ ev: "reply_ref", ...fields, attribution });
-	}
-
-	/** Projects on, plus the conversation log, seeded with three concurrent threads. */
-	async enableProjectConversation(): Promise<void> {
-		this.enableProjects();
-		this.projectConversation = true;
-		const dev = AGENT_IDS.developer;
-		const arch = AGENT_IDS.architect;
-		const dev2 = AGENT_IDS.developer2;
-		this.projectTask(
-			PROJECT_MSG_IDS.polling,
-			[dev],
-			"Make the project page poll adaptively\n5 s while an agent works, 15 s at rest.",
-		);
-		this.projectTask(PROJECT_MSG_IDS.notes, [arch], "Write the release notes", {}, () => ({
-			state: "refused",
-			reason: "busy",
-		}));
-		this.projectTask(PROJECT_MSG_IDS.backup, [arch, dev2], "Check the VM backups", {}, (a) =>
-			a === dev2 ? { state: "unconfirmed" } : { state: "delivered" },
-		);
-		await this.projectReply(
-			PROJECT_MSG_IDS.polling,
-			dev,
-			"Done: adaptive cadence, timer stopped on logout. 628 tests pass.",
-		);
-		await this.projectReply(
-			PROJECT_MSG_IDS.backup,
-			arch,
-			"Backups verified: 3 of 3 manifests are fresh.",
-		);
-	}
-
-	private async projectConversationRoute(
-		method: string,
-		kind: string,
-		id: string | undefined,
-		req: ReturnType<Route["request"]>,
-		body: Record<string, unknown> | null,
-		json: (status: number, body: unknown) => Promise<void>,
-		route: Route,
-	): Promise<void> {
-		if (kind === "events" && method === "GET" && id === undefined) {
-			const url = new URL(req.url());
-			const before = Number(url.searchParams.get("before") ?? Number.POSITIVE_INFINITY);
-			const limit = Math.min(Number(url.searchParams.get("limit") ?? 200), this.projectPageCap);
-			const older = this.projectLog.filter((e) => (e.seq as number) < before);
-			const page = older.slice(Math.max(0, older.length - limit));
-			await json(200, {
-				events: page,
-				oldestSeq: (page[0]?.seq as number | undefined) ?? null,
-				hasMore: page.length < older.length,
-			});
-			return;
-		}
-		if (kind === "messages" && method === "GET" && id !== undefined) {
-			const msgId = decodeURIComponent(id);
-			const message = this.projectLog.find((e) => e.ev === "message" && e.msg_id === msgId);
-			if (!message) return json(404, { error: "message-not-found" });
-			// Appendix A: the message with its lines grouped, as #590 answers.
-			const deliveries = new Map<string, Array<Record<string, unknown>>>();
-			const replies = new Map<string, { settling: unknown; ref: unknown; lateCloses: unknown[] }>();
-			const acks: unknown[] = [];
-			for (const l of this.projectLog) {
-				if (l.ev === "owner_ack") {
-					if ((l.target as { msg_id?: string }).msg_id === msgId) acks.push(l);
-					continue;
-				}
-				if (l.msg_id !== msgId) continue;
-				const agent = l.agent_id as string;
-				if (l.ev === "delivery") deliveries.set(agent, [...(deliveries.get(agent) ?? []), l]);
-				else if (l.ev === "reply_settling" || l.ev === "reply_ref" || l.ev === "reply_late_close") {
-					const r = replies.get(agent) ?? { settling: null, ref: null, lateCloses: [] };
-					if (l.ev === "reply_settling") r.settling = l;
-					else if (l.ev === "reply_ref") r.ref = l;
-					else r.lateCloses.push(l);
-					replies.set(agent, r);
-				}
-			}
-			return json(200, {
-				message,
-				deliveries: [...deliveries].map(([agentId, events]) => ({
-					agentId,
-					state: events[events.length - 1]!.state,
-					// §3.6 (#667): the server's reading of why a queued delivery waits.
-					...(events[events.length - 1]!.state === "queued"
-						? (this.projectQueueWaiting.get(agentId) ?? {})
-						: {}),
-					events,
-				})),
-				replies: [...replies].map(([agentId, r]) => ({ agentId, ...r })),
-				acks,
-			});
-		}
-		if (kind === "messages" && method === "POST" && id === undefined) {
-			this.projectMessagePosts.push(body ?? {});
-			const cmid = body?.clientMessageId;
-			const to = Array.isArray(body?.to) ? (body.to as string[]) : [];
-			const text = typeof body?.text === "string" ? body.text : "";
-			if (typeof cmid !== "string" || to.length < 1 || to.length > 8 || text.trim() === "")
-				return json(400, { error: "invalid-body" });
-			const collab = (body?.collab ?? null) as {
-				mode?: string;
-				with?: string;
-				maxMessages?: number;
-			} | null;
-			if (collab) {
-				if (!this.projectRelay) return json(409, { error: "relay-off" });
-				if (to.length !== 1 || collab.mode !== "ask" || typeof collab.with !== "string")
-					return json(400, { error: "invalid-body", detail: "collab" });
-				if (collab.with === to[0])
-					return json(400, { error: "invalid-body", detail: "collab.with" });
-				if (this.projectCollabRefusal) {
-					const r = this.projectCollabRefusal;
-					this.projectCollabRefusal = null;
-					return json(r.status, r.body);
-				}
-			}
-			const shas = Array.isArray(body?.artifacts) ? (body.artifacts as string[]) : [];
-			if (shas.length > 0 && !this.projectArtifacts) return json(409, { error: "artifacts-off" });
-			if (shas.length > 4) return json(400, { error: "too-many-artifacts" });
-			const firstOf = (sha: string) =>
-				this.projectLog.find((e) => e.ev === "artifact" && e.sha256 === sha);
-			for (const sha of shas)
-				if (!firstOf(sha)) return json(400, { error: "artifact-unknown", detail: sha });
-			const refs = shas.map((sha) => {
-				const a = firstOf(sha)!;
-				return { sha256: sha, name: a.name, bytes: a.bytes };
-			});
-			const hash = JSON.stringify({
-				text,
-				to: [...to].sort(),
-				q: body?.quoteRef ?? null,
-				r: body?.inReplyTo ?? null,
-				a: shas,
-			});
-			const prev = this.projectSends.get(cmid);
-			const deliveriesOf = (msgId: string) =>
-				to.map((agentId) => {
-					const last = [...this.projectLog]
-						.reverse()
-						.find((e) => e.ev === "delivery" && e.msg_id === msgId && e.agent_id === agentId);
-					return {
-						agentId,
-						state: last?.state,
-						...(last?.reason ? { reason: last.reason } : {}),
-						...(last?.files_possibly_placed ? { filesPossiblyPlaced: true } : {}),
-					};
-				});
-			if (prev) {
-				if (prev.hash !== hash) return json(409, { error: "idempotency-conflict" });
-				return json(202, {
-					msgId: prev.msgId,
-					replayed: true,
-					deliveries: deliveriesOf(prev.msgId),
-				});
-			}
-			const msgId = `c0000000-0000-4000-8000-${String(this.projectLog.length).padStart(12, "0")}`;
-			const q = body?.quoteRef as Record<string, unknown> | undefined;
-			const grantId = collab ? `c-${String(this.projectLog.length).padStart(12, "0")}` : null;
-			const whenFree = this.projectQueue && body?.whenFree === true && !collab;
-			this.projectTask(
-				msgId,
-				to,
-				text,
-				{
-					client_message_id: cmid,
-					artifacts: refs,
-					...(grantId ? { collab: { grant_id: grantId } } : {}),
-					...(typeof body?.inReplyTo === "string" ? { in_reply_to: body.inReplyTo } : {}),
-					...(q
-						? {
-								quote_ref: {
-									msg_id: q.msgId,
-									agent_id: q.agentId,
-									prompt_id: q.promptId,
-									report_sha256: q.reportSha256,
-								},
-							}
-						: {}),
-				},
-				whenFree
-					? (a) =>
-							this.projectBusyAgents.has(a)
-								? { state: "queued" }
-								: (this.projectSendOutcome.get(a) ?? { state: "delivered" })
-					: undefined,
-			);
-			this.projectSends.set(cmid, { msgId, hash });
-			if (grantId && collab) {
-				this.projectGrants.set(grantId, { state: "live", initiator: to[0]!, with: collab.with! });
-				this.appendProjectEvent({
-					ev: "grant",
-					grant_id: grantId,
-					event: "created",
-					mode: "ask",
-					task_msg_id: msgId,
-					initiator: to[0],
-					with: collab.with,
-					participants: [],
-					max_messages: collab.maxMessages ?? 2,
-					max_wait_min: 60,
-					expires_at: iso(2 * 60 * 60),
-					by: "u-alice",
-				});
-			}
-			if (this.loseNextMessageAnswer) {
-				// Written, but the client never hears back.
-				this.loseNextMessageAnswer = false;
-				return route.abort("connectionreset");
-			}
-			return json(202, {
-				msgId,
-				replayed: false,
-				deliveries: deliveriesOf(msgId),
-				...(grantId ? { grantId } : {}),
-			});
-		}
-		if (kind === "acks" && method === "POST" && id === undefined) {
-			this.projectAckPosts.push(body ?? {});
-			const cak = body?.clientAckId;
-			const t = body?.target as Record<string, unknown> | undefined;
-			if (typeof cak !== "string" || !t || typeof t.msgId !== "string")
-				return json(400, { error: "invalid-body" });
-			const target: Record<string, string> = { msg_id: t.msgId };
-			if (typeof t.agentId === "string") target.agent_id = t.agentId;
-			if (typeof t.reportSha256 === "string") target.report_sha256 = t.reportSha256;
-			const known = this.projectLog.find((e) => e.ev === "owner_ack" && e.client_ack_id === cak);
-			if (known) {
-				return JSON.stringify(known.target) === JSON.stringify(target)
-					? json(200, { ackId: known.ack_id, seq: known.seq, replayed: true })
-					: json(409, { error: "idempotency-conflict" });
-			}
-			if (!this.projectLog.some((e) => e.ev === "message" && e.msg_id === t.msgId))
-				return json(404, { error: "message-not-found" });
-			const line = this.appendProjectEvent({
-				ev: "owner_ack",
-				ack_id: `ack-${this.projectLog.length}`,
-				client_ack_id: cak,
-				by: "u-alice",
-				target,
-			});
-			return json(201, { ackId: line.ack_id, seq: line.seq, replayed: false });
-		}
-		if (kind === "artifacts" && this.projectArtifacts) {
-			if (method === "POST" && id === undefined) {
-				this.projectArtifactPosts.push(body ?? {});
-				const agentId = body?.agentId;
-				const rel = body?.path;
-				if (typeof agentId !== "string" || typeof rel !== "string" || rel.startsWith("/"))
-					return json(400, { error: "invalid-body" });
-				const bound = this.agents.find((a) => a.agentId === agentId);
-				const binding = bound ? this.liveBinding(bound) : null;
-				if (!binding) return json(409, { error: "agent-not-bound" });
-				const node = this.resolve(rel);
-				if (!node) return json(404, { error: "artifact-not-found" });
-				if (node.restricted) return json(403, { error: "artifact-restricted" });
-				if (node.type !== "file") return json(400, { error: "invalid-body" });
-				if (node.content.length > 1024 * 1024) return json(413, { error: "artifact-too-large" });
-				if (node.content === "" || node.content.includes("\0"))
-					return json(415, { error: "artifact-not-text" });
-				const sha256 = createHash("sha256").update(node.content, "utf8").digest("hex");
-				const name = rel
-					.split("/")
-					.pop()!
-					.replace(/[^A-Za-z0-9._-]/g, "_")
-					.replace(/^\./, "_");
-				const bytes = Buffer.byteLength(node.content);
-				const same = this.projectLog.find(
-					(e) =>
-						e.ev === "artifact" &&
-						e.sha256 === sha256 &&
-						(e.source as { sid: string; path: string }).sid === binding.sessionId &&
-						(e.source as { sid: string; path: string }).path === rel,
-				);
-				if (same) return json(200, { sha256, name: same.name, bytes, replayed: true });
-				this.projectArtifactContent.set(sha256, node.content);
-				this.appendProjectEvent({
-					ev: "artifact",
-					sha256,
-					name,
-					bytes,
-					source: { kind: "owner", sid: binding.sessionId, path: rel, agent_id: agentId },
-					by: "u-alice",
-				});
-				return json(201, { sha256, name, bytes, replayed: false });
-			}
-			if (method === "GET" && id !== undefined) {
-				const sha = decodeURIComponent(id);
-				const content = this.projectArtifactContent.get(sha);
-				if (
-					content === undefined ||
-					!this.projectLog.some((e) => e.ev === "artifact" && e.sha256 === sha)
-				)
-					return json(404, { error: "artifact-not-found" });
-				return route.fulfill({
-					status: 200,
-					headers: {
-						"Content-Type": "text/plain; charset=utf-8",
-						"X-Content-Type-Options": "nosniff",
-						"Content-Disposition": "attachment",
-					},
-					body: content,
-				});
-			}
-		}
-		return json(404, { error: `No mock for ${method} conversation/${kind}` });
-	}
-
-	agent(agentId: string): MockAgent {
-		const a = this.agents.find((x) => x.agentId === agentId);
-		if (!a) throw new Error(`no agent ${agentId}`);
-		return a;
-	}
-
-	private liveBinding(a: MockAgent): MockBinding | null {
-		return a.bindings.find((b) => b.state === "active" || b.state === "draining") ?? null;
-	}
-
-	/** The live binding holding a session, in any project. */
-	private bindingOf(sessionId: string): { agent: MockAgent; binding: MockBinding } | null {
-		for (const agent of this.agents) {
-			const b = this.liveBinding(agent);
-			if (b?.sessionId === sessionId) return { agent, binding: b };
-		}
-		return null;
-	}
-
-	/** Bind a session to a fresh agent behind the app's back (another tab took it). */
-	takeSession(sessionId: string, handle = "someone-else"): void {
-		const id = String(++this.seq).padStart(3, "0");
-		this.agents.push({
-			agentId: `a0000000-0000-4000-8000-000000000${id}`,
-			projectId: PROJECT_IDS.hz,
-			handle,
-			role: null,
-			createdAt: iso(1700),
-			removedAt: null,
-			bindings: [
-				{
-					bindingId: `b0000000-0000-4000-8000-000000000${id}`,
-					epoch: 1,
-					sessionId,
-					state: "active",
-					createdAt: iso(1700),
-					retiredAt: null,
-					retireReason: null,
-				},
-			],
-			presence: { value: "unknown", source: "capture", at: null },
-		});
-	}
-
-	private sessionBinding(sessionId: string) {
-		const hit = this.bindingOf(sessionId);
-		if (!hit) return null;
-		return {
-			projectId: hit.agent.projectId,
-			agentId: hit.agent.agentId,
-			handle: hit.agent.handle,
-			bindingId: hit.binding.bindingId,
-			epoch: hit.binding.epoch,
-		};
-	}
-
-	private presenceOf(a: MockAgent): MockPresence {
-		if (a.removedAt)
-			return {
-				value: "disconnected",
-				detail: "agent-removed",
-				source: "directory",
-				at: a.removedAt,
-			};
-		return a.presence;
-	}
-
-	private agentEntry(a: MockAgent) {
-		const b = this.liveBinding(a);
-		return {
-			agentId: a.agentId,
-			handle: a.handle,
-			role: a.role,
-			provider: "claude-code",
-			template: null,
-			binding: b
-				? {
-						bindingId: b.bindingId,
-						epoch: b.epoch,
-						sessionId: b.sessionId,
-						state: b.state,
-						createdAt: b.createdAt,
-					}
-				: null,
-			presence: this.presenceOf(a),
-		};
-	}
-
-	private agentDetail(a: MockAgent) {
-		return {
-			...this.agentEntry(a),
-			projectId: a.projectId,
-			createdAt: a.createdAt,
-			removedAt: a.removedAt,
-			capabilities: { capture: true, channels: false, directControl: true },
-			bindings: a.bindings.map((b) => ({ ...b })),
-			can: {
-				remove: a.removedAt ? { allowed: false, reason: "agent-removed" } : { allowed: true },
-			},
-		};
-	}
-
-	private liveAgents(pid: string): MockAgent[] {
-		return this.agents
-			.filter((a) => a.projectId === pid && a.removedAt === null)
-			.sort((x, y) => x.createdAt.localeCompare(y.createdAt) || x.handle.localeCompare(y.handle));
 	}
 
 	private projectSummary(p: MockProject) {
@@ -1413,7 +465,7 @@ export class MockBackend {
 			projectId: p.projectId,
 			name: p.name,
 			createdAt: p.createdAt,
-			agentCount: this.liveAgents(p.projectId).length,
+			agentCount: 0,
 		};
 	}
 
@@ -1432,68 +484,26 @@ export class MockBackend {
 			await json(404, { error: `No mock for ${method} ${path}` });
 			return true;
 		}
-		const body =
-			method === "POST" ? ((req.postDataJSON() ?? null) as Record<string, unknown> | null) : null;
-		if (method !== "GET") this.projectWrites.push({ method, path, body });
-		const fail = method !== "GET" ? this.failNextProjectWrite : null;
-		if (fail) this.failNextProjectWrite = null;
-		// The write's own answer, or the injected one (after applying it when `apply`).
-		// A lost answer (`apply`): the write lands, the client hears only the failure.
-		const answer = async (status: number, payload: unknown) => {
-			if (fail) return json(fail.status, { error: fail.error, message: fail.error });
-			if (status === 204) return route.fulfill({ status: 204 });
-			return json(status, payload);
-		};
-		// Refused before any write (`apply: false`).
-		if (fail && !fail.apply) {
-			await json(fail.status, { error: fail.error, message: fail.error });
-			return true;
-		}
-		const own = (pid: string) =>
-			this.projects.find((p) => p.projectId === pid && p.ownerUserId === me.userId);
-		type Idem =
-			| { kind: "new"; key: string }
-			| { kind: "bad" }
-			| { kind: "conflict" }
-			| { kind: "replay"; id: string };
-		const idem = (crid: unknown, kind: "project" | "agent", hash: string): Idem => {
-			if (typeof crid !== "string" || !/^[0-9a-f-]{36}$/i.test(crid)) return { kind: "bad" };
-			const key = `${me.userId}\n${crid}`;
-			const rec = this.creations.get(key);
-			if (!rec) return { kind: "new", key };
-			if (rec.kind !== kind || rec.hash !== hash) return { kind: "conflict" };
-			return { kind: "replay", id: rec.id };
-		};
-
+		const mine = () => this.projects.filter((p) => p.ownerUserId === me.userId);
 		if (path === "/projects" && method === "GET") {
-			const mine = this.projects.filter((p) => p.ownerUserId === me.userId);
 			await json(200, {
-				projects: mine.map((p) => this.projectSummary(p)),
-				can: {
-					createProject:
-						mine.length < 50 ? { allowed: true } : { allowed: false, reason: "project-limit" },
-				},
+				projects: mine().map((p) => this.projectSummary(p)),
+				can: { createProject: { allowed: true } },
 			});
 			return true;
 		}
 		if (path === "/projects" && method === "POST") {
-			const name = typeof body?.name === "string" ? body.name.trim() : "";
-			if (name === "" || name.length > 80) {
-				await answer(400, { error: "invalid-name", message: "invalid-name" });
+			const body = (req.postDataJSON() ?? {}) as { name?: unknown; clientRequestId?: unknown };
+			const name = typeof body.name === "string" ? body.name.trim() : "";
+			if (name === "") {
+				await json(400, { error: "invalid-name" });
 				return true;
 			}
-			const r = idem(body?.clientRequestId, "project", JSON.stringify({ name }));
-			if (r.kind === "bad") {
-				await answer(400, { error: "invalid-client-request-id" });
-				return true;
-			}
-			if (r.kind === "conflict") {
-				await answer(409, { error: "idempotency-conflict" });
-				return true;
-			}
-			if (r.kind === "replay") {
-				const p = this.projects.find((x) => x.projectId === r.id)!;
-				await answer(201, { ...this.projectSummary(p), replayed: true });
+			const key = `${me.userId}\n${String(body.clientRequestId)}`;
+			const prior = this.creations.get(key);
+			if (prior) {
+				const p = this.projects.find((x) => x.projectId === prior.id)!;
+				await json(201, { ...this.projectSummary(p), replayed: true });
 				return true;
 			}
 			const id = String(++this.seq).padStart(3, "0");
@@ -1504,232 +514,18 @@ export class MockBackend {
 				createdAt: iso(1700),
 			};
 			this.projects.push(p);
-			this.creations.set(r.key, {
-				kind: "project",
-				hash: JSON.stringify({ name }),
-				id: p.projectId,
-			});
-			await answer(201, { ...this.projectSummary(p), replayed: false });
+			this.creations.set(key, { hash: name, id: p.projectId });
+			await json(201, { ...this.projectSummary(p), replayed: false });
 			return true;
 		}
-		const cv =
-			/^\/projects\/([^/]+)\/conversation\/(events|messages|acks|artifacts)(?:\/([^/]+))?$/.exec(
-				path,
+		const del = /^\/projects\/([^/]+)$/.exec(path);
+		if (del && method === "DELETE") {
+			const before = this.projects.length;
+			this.projects = this.projects.filter(
+				(p) => !(p.projectId === decodeURIComponent(del[1]!) && p.ownerUserId === me.userId),
 			);
-		// §3.6: close what is still queued of one message. Unknown path on a backend without the queue.
-		const cancel = /^\/projects\/([^/]+)\/conversation\/messages\/([^/]+)\/cancel$/.exec(path);
-		if (cancel && method === "POST" && this.projectConversation && this.projectQueue) {
-			const project = own(decodeURIComponent(cancel[1]!));
-			const msgId = decodeURIComponent(cancel[2]!);
-			const m = this.projectLog.find((e) => e.ev === "message" && e.msg_id === msgId);
-			if (!project || !m) {
-				await answer(404, { error: "message-not-found" });
-				return true;
-			}
-			const last = (a: string) =>
-				[...this.projectLog]
-					.reverse()
-					.find((e) => e.ev === "delivery" && e.msg_id === msgId && e.agent_id === a);
-			const open = (m.to as string[]).filter((a) => last(a)?.state === "queued");
-			for (const a of open)
-				this.appendProjectEvent({
-					ev: "delivery",
-					msg_id: msgId,
-					agent_id: a,
-					state: "not-sent",
-					reason: "cancelled",
-					authorized_by: "owner",
-				});
-			await answer(200, {
-				msgId,
-				cancelled: open,
-				deliveries: (m.to as string[]).map((a) => ({ agentId: a, state: last(a)?.state })),
-			});
-			return true;
-		}
-		// §7.6: mounted only with the relay flag effective — otherwise the unknown-path 404.
-		const gr = /^\/projects\/([^/]+)\/conversation\/grants\/([^/]+)\/(pause|resume|revoke)$/.exec(
-			path,
-		);
-		if (gr) {
-			const project = own(decodeURIComponent(gr[1]!));
-			if (!project || !this.projectConversation || !this.projectRelay || method !== "POST") {
-				await json(404, { error: "not-found" });
-				return true;
-			}
-			const grantId = decodeURIComponent(gr[2]!);
-			const verb = gr[3]!;
-			this.projectGrantPosts.push({ grantId, verb });
-			const g = this.projectGrants.get(grantId);
-			if (!g) {
-				await json(404, { error: "grant-not-found" });
-				return true;
-			}
-			if (g.state === "ended") {
-				// Idempotent, except that an ended consult can't be resumed.
-				if (verb === "resume") await json(409, { error: "grant-ended", detail: g.reason });
-				else await json(200, { grantId, state: g.state, reason: g.reason });
-				return true;
-			}
-			if (verb === "pause" && !(g.state === "paused" && g.reason === "owner"))
-				this.grantEvent(grantId, "paused", { reason: "owner", by: "u-alice" });
-			else if (verb === "resume" && g.state === "paused")
-				this.grantEvent(grantId, "resumed", { by: "u-alice" });
-			else if (verb === "revoke") {
-				// What was waiting is never sent (§7.5), in the same batch as the end.
-				for (const d of this.queuedRelays(grantId))
-					this.appendProjectEvent({ ...d, state: "not-sent", reason: "grant-inactive" });
-				this.grantEvent(grantId, "revoked", { by: "u-alice" });
-			}
-			const now = this.projectGrants.get(grantId)!;
-			await json(200, { grantId, state: now.state, ...(now.reason ? { reason: now.reason } : {}) });
-			return true;
-		}
-		if (cv) {
-			const project = own(decodeURIComponent(cv[1]!));
-			if (!project || !this.projectConversation) {
-				await json(404, { error: "not-found" });
-				return true;
-			}
-			await this.projectConversationRoute(method, cv[2]!, cv[3], req, body, json, route);
-			return true;
-		}
-		const m = /^\/projects\/([^/]+)\/agents(?:\/([^/]+))?$/.exec(path);
-		if (!m) {
-			await json(404, { error: `No mock for ${method} ${path}` });
-			return true;
-		}
-		const pid = decodeURIComponent(m[1]!);
-		const aid = m[2] === undefined ? null : decodeURIComponent(m[2]);
-		const project = own(pid);
-		if (aid === null && method === "GET") {
-			if (this.agentsReadFails !== null) {
-				await json(this.agentsReadFails, { error: "unavailable", message: "unavailable" });
-				return true;
-			}
-			if (!project) {
-				await json(404, { error: "project-not-found", message: "project-not-found" });
-				return true;
-			}
-			const live = this.liveAgents(pid);
-			await json(200, {
-				projectId: pid,
-				generatedAt: new Date(T0 + 30 * 60 * 1000).toISOString(),
-				agents: live.map((a) => this.agentEntry(a)),
-				can: {
-					createAgent:
-						live.length < 32 ? { allowed: true } : { allowed: false, reason: "agent-limit" },
-				},
-			});
-			return true;
-		}
-		if (aid === null && method === "POST") {
-			if (!project) {
-				await answer(404, { error: "project-not-found" });
-				return true;
-			}
-			const handle = typeof body?.handle === "string" ? body.handle : "";
-			const role = typeof body?.role === "string" ? body.role : null;
-			const sessionId = typeof body?.sessionId === "string" ? body.sessionId : "";
-			if (!/^[a-z][a-z0-9-]{1,31}$/.test(handle)) {
-				await answer(400, { error: "invalid-handle" });
-				return true;
-			}
-			const hash = JSON.stringify({ pid, handle, role, sessionId });
-			const r = idem(body?.clientRequestId, "agent", hash);
-			if (r.kind === "bad") {
-				await answer(400, { error: "invalid-client-request-id" });
-				return true;
-			}
-			if (r.kind === "conflict") {
-				await answer(409, { error: "idempotency-conflict" });
-				return true;
-			}
-			if (r.kind === "replay") {
-				const a = this.agent(r.id);
-				await answer(201, {
-					...this.agentEntry(a),
-					projectId: pid,
-					createdAt: a.createdAt,
-					removedAt: a.removedAt,
-					replayed: true,
-				});
-				return true;
-			}
-			const s = this.session(sessionId);
-			if (!s || s.ownerUserId !== me.userId || s.status === "terminated") {
-				await answer(404, { error: "session-not-found" });
-				return true;
-			}
-			if (this.agents.some((a) => a.projectId === pid && a.handle === handle)) {
-				await answer(409, { error: "handle-taken" });
-				return true;
-			}
-			if (this.bindingOf(sessionId)) {
-				await answer(409, { error: "session-taken" });
-				return true;
-			}
-			if (this.liveAgents(pid).length >= 32) {
-				await answer(409, { error: "agent-limit" });
-				return true;
-			}
-			const id = String(++this.seq).padStart(3, "0");
-			const a: MockAgent = {
-				agentId: `a0000000-0000-4000-8000-000000000${id}`,
-				projectId: pid,
-				handle,
-				role,
-				createdAt: iso(1700),
-				removedAt: null,
-				bindings: [
-					{
-						bindingId: `b0000000-0000-4000-8000-000000000${id}`,
-						epoch: 1,
-						sessionId,
-						state: "active",
-						createdAt: iso(1700),
-						retiredAt: null,
-						retireReason: null,
-					},
-				],
-				presence:
-					s.status === "running"
-						? { value: "unknown", source: "capture", at: null }
-						: { value: "disconnected", detail: `session-${s.status}`, source: "session", at: null },
-			};
-			this.agents.push(a);
-			this.creations.set(r.key, { kind: "agent", hash, id: a.agentId });
-			await answer(201, {
-				...this.agentEntry(a),
-				projectId: pid,
-				createdAt: a.createdAt,
-				removedAt: null,
-				replayed: false,
-			});
-			return true;
-		}
-		const a =
-			aid === null ? undefined : this.agents.find((x) => x.agentId === aid && x.projectId === pid);
-		if (!project || !a) {
-			if (method === "DELETE") await answer(404, { error: "agent-not-found" });
-			else await json(404, { error: "agent-not-found", message: "agent-not-found" });
-			return true;
-		}
-		if (method === "GET") {
-			await json(200, this.agentDetail(a));
-			return true;
-		}
-		if (method === "DELETE") {
-			if (a.removedAt === null) {
-				a.removedAt = iso(1700);
-				const live = this.liveBinding(a);
-				if (live) {
-					live.state = "retired";
-					live.retiredAt = a.removedAt;
-					live.retireReason = "agent-removed";
-				}
-			}
-			await answer(204, null);
+			if (this.projects.length === before) await json(404, { error: "project-not-found" });
+			else await route.fulfill({ status: 204 });
 			return true;
 		}
 		await json(404, { error: `No mock for ${method} ${path}` });
@@ -1796,33 +592,6 @@ export class MockBackend {
 		const sessionId = decodeURIComponent(parts[2] ?? "");
 		if (!this.current) {
 			ws.close({ code: 1008, reason: "Unauthorized" });
-			return;
-		}
-		if (kind === "project") {
-			// D1 — WS /ws/project/<pid> (Appendix A): every event > after, once, in order, then live.
-			const pid = sessionId;
-			const own = this.projects.some(
-				(p) => p.projectId === pid && p.ownerUserId === this.current?.userId,
-			);
-			if (!this.projectConversation || !own || this.projectSocketsRefused) {
-				ws.close({ code: 1008, reason: "Forbidden" });
-				return;
-			}
-			const sock = { route: ws, after: null as number | null, closed: false };
-			this.projectSockets.push(sock);
-			ws.onMessage((raw) => {
-				try {
-					const msg = JSON.parse(String(raw)) as { type?: string; after?: number };
-					if (msg.type !== "subscribe") return;
-					sock.after = typeof msg.after === "number" ? msg.after : 0;
-					for (const e of this.projectLog) this.sendProjectEvent(sock, e);
-				} catch {
-					/* ignore non-JSON */
-				}
-			});
-			ws.onClose(() => {
-				sock.closed = true;
-			});
 			return;
 		}
 		if (kind === "sessions") {
@@ -1935,15 +704,7 @@ export class MockBackend {
 				// P3a: present only with the flag on (byte-identical answer otherwise).
 				...(this.projectChat
 					? {
-							features: this.projectConversation
-								? {
-										projectChat: true,
-										projectConversation: true,
-										...(this.projectArtifacts ? { projectArtifacts: true } : {}),
-										...(this.projectRelay ? { projectRelay: true } : {}),
-										...(this.projectQueue ? { projectQueue: true } : {}),
-									}
-								: { projectChat: true },
+							features: { projectChat: true },
 						}
 					: {}),
 			});
@@ -2029,8 +790,24 @@ export class MockBackend {
 			return json(404, { error: "Not found" });
 		}
 
-		// ── projects & agents (P3a) ──
+		// ── projects ──
 		if (await this.handleProjects(method, path, req, me, json, route)) return;
+		// ── ACP (what a project page reads; no agents in this mock) ──
+		if (this.projectChat && path === "/acp/agents" && method === "GET") return json(200, []);
+		const acpFeed = /^\/acp\/projects\/([^/]+)\/feed$/.exec(path);
+		if (this.projectChat && acpFeed && method === "GET") {
+			const p = this.projects.find((x) => x.projectId === decodeURIComponent(acpFeed[1]!));
+			if (!p) return json(404, { error: "project-not-found" });
+			return json(200, {
+				project: { id: p.projectId, name: p.name },
+				agents: [],
+				maxMessageBytes: 262144,
+				messages: [],
+				questions: [],
+				activity: {},
+				activitySeq: 0,
+			});
+		}
 
 		// ── sessions ──
 		if (path === "/sessions" && method === "GET") {
@@ -2039,13 +816,7 @@ export class MockBackend {
 				200,
 				this.sessions
 					.filter((s) => s.ownerUserId === me.userId && (all || s.status !== "terminated"))
-					.map((s) =>
-						// P3a: `binding` only with the flag on, and the key ABSENT when the directory
-						// read failed — the frontend must tell that apart from null.
-						this.projectChat && !this.bindingReadFails
-							? { ...this.serialize(s), binding: this.sessionBinding(s.sessionId) }
-							: this.serialize(s),
-					),
+					.map((s) => this.serialize(s)),
 			);
 		}
 		const m = /^\/sessions\/([^/]+)(\/.*)?$/.exec(path);
@@ -2069,11 +840,6 @@ export class MockBackend {
 			}
 			if (rest === "" && method === "DELETE") {
 				if (url.searchParams.get("hard") === "true") {
-					// PROJECTS.md §6: a live binding refuses the hard delete.
-					if (this.projectChat && this.bindingOf(id)) {
-						if (this.hardDeleteRefusedAfterSoftDelete) s.status = "terminated";
-						return json(409, { error: "agent-active" });
-					}
 					this.sessions = this.sessions.filter((x) => x.sessionId !== id);
 				} else {
 					s.status = "terminated";
@@ -2273,8 +1039,6 @@ export class MockBackend {
 			if (one && method === "GET") {
 				const cid = decodeURIComponent(one[1]!);
 				const seq = Number(one[2]);
-				const cap = this.projectCaptures.get(`${id}\n${cid}\n${seq}`);
-				if (cap) return json(200, cap);
 				const e = this.conversations.find((c) => c.cid === cid)?.events.find((x) => x.seq === seq);
 				return e ? json(200, e) : json(404, { error: "Event not found" });
 			}
@@ -2290,95 +1054,6 @@ export class MockBackend {
 					events: page,
 					hasMore: page.length < older.length,
 					firstRetainedSeq: 1,
-				});
-			}
-			const msg = /^\/conversations\/([^/]+)\/messages$/.exec(rest);
-			if (msg && method === "POST") {
-				const conv = this.conversations.find((c) => c.cid === decodeURIComponent(msg[1]!));
-				const body = req.postDataJSON() as { text: string; clientMessageId: string };
-				if (!conv || !conv.canSendInput) return json(409, { error: "needs-terminal" });
-				if (conv.sendError) {
-					const { status, ...err } = conv.sendError;
-					return json(status, err);
-				}
-				if (conv.transport === "background") {
-					const id = body.clientMessageId;
-					const cs = (state: string, extra: Record<string, unknown> = {}) =>
-						this.pushConversationEvent(conv.cid, {
-							ts: new Date().toISOString(),
-							ev: "composer_send",
-							prompt_id: null,
-							turn_id: null,
-							agent_id: null,
-							pane: null,
-							data: { state, client_message_id: id, transport: "background", ...extra },
-						});
-					setTimeout(() => cs("accepted"), 30);
-					setTimeout(() => {
-						if (conv.bgOutcome === "unconfirmed") {
-							cs("unconfirmed", { detail: "t-ack-bg" });
-							return;
-						}
-						cs("delivered", { prompt_id: `p-${id}` });
-						this.pushConversationEvent(conv.cid, {
-							ts: new Date().toISOString(),
-							ev: "user_prompt",
-							prompt_id: `p-${id}`,
-							turn_id: null,
-							agent_id: null,
-							pane: null,
-							data: { prompt: body.text },
-						});
-						if (conv.bgOutcome === "duplicated" || conv.bgOutcome === "possible-duplicate")
-							setTimeout(
-								() =>
-									cs(conv.bgOutcome as string, {
-										prompt_id: `p2-${id}`,
-										first_prompt_id: `p-${id}`,
-									}),
-								200,
-							);
-					}, 1500);
-					return json(202, { result: "accepted", clientMessageId: id });
-				}
-				// Delivered: the CLI's own user_prompt follows over the socket, and
-				// the answer carries its prompt id and seq as the real server's does
-				// (§8.1.5: the ack names the user_prompt it matched).
-				const promptId = `p-${body.clientMessageId}`;
-				const promptSeq = (conv.events[conv.events.length - 1]?.seq ?? 0) + 1;
-				const reply = conv.reply;
-				setTimeout(() => {
-					const base = { turn_id: null, agent_id: null, pane: "%1" };
-					this.pushConversationEvent(conv.cid, {
-						...base,
-						ts: new Date().toISOString(),
-						ev: "user_prompt",
-						prompt_id: promptId,
-						data: { prompt: body.text, source: "user" },
-					});
-					if (reply === undefined) return;
-					setTimeout(() => {
-						this.pushConversationEvent(conv.cid, {
-							...base,
-							ts: new Date().toISOString(),
-							ev: "assistant_delta",
-							prompt_id: promptId,
-							data: { message_id: `m-${promptId}`, index: 0, delta: reply, final: true },
-						});
-						this.pushConversationEvent(conv.cid, {
-							...base,
-							ts: new Date().toISOString(),
-							ev: "turn_end",
-							prompt_id: promptId,
-							data: { last_assistant_message: reply },
-						});
-					}, 150);
-				}, 50);
-				return json(202, {
-					result: "delivered",
-					clientMessageId: body.clientMessageId,
-					promptId,
-					seq: promptSeq,
 				});
 			}
 		}

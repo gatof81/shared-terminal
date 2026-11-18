@@ -32,7 +32,6 @@
 
 import { acpOwns } from "./acpChat.js";
 import {
-	acpAgentsEnabled,
 	type ConversationCapture,
 	type ConversationServerFrame,
 	type ConversationSocket,
@@ -42,7 +41,6 @@ import {
 	openConversationSocket,
 	patchConversationMeta,
 	projectChatEnabled,
-	sendConversationMessage,
 } from "./api.js";
 import {
 	automaticTitle,
@@ -62,10 +60,8 @@ import {
 import { copyText } from "./clipboard.js";
 import { openActionMenu } from "./components/actionMenu.js";
 import { promptDialog } from "./components/dialog.js";
-import { explainCode, normalizeText, validateText } from "./composerText.js";
 import {
 	type AgentView,
-	BG_TEXT,
 	buildThread,
 	type ConversationEvent,
 	clock,
@@ -75,9 +71,7 @@ import {
 	lastEvidenceAt,
 	presentClaim,
 	presentStatus,
-	STALE_EVIDENCE_MS,
 	STATUS_LABEL,
-	statusIsLiveClaim,
 	statusTone,
 	type ThreadBlock,
 	type ThreadItem,
@@ -85,7 +79,6 @@ import {
 	toolLine,
 	toolsSummary,
 } from "./conversationModel.js";
-import { forgetAllDrafts, readDraft, writeDraft } from "./draftStore.js";
 import { formatBytes, relativeDate } from "./format.js";
 import {
 	activeSessionId,
@@ -744,7 +737,6 @@ function renderAll(opts: { scrollToEnd?: boolean; restoreScroll?: boolean } = {}
 	renderSummary();
 	renderList();
 	renderThread({ stick: opts.scrollToEnd === true, restore: opts.restoreScroll === true });
-	renderComposer();
 	renderAgents();
 }
 
@@ -1486,7 +1478,7 @@ function renderThread(opts: { stick: boolean; restore?: boolean }): void {
 		}
 		threadEl.appendChild(scroller);
 		threadEl.appendChild(floatPill());
-		threadEl.appendChild(composer());
+		threadEl.appendChild(readOnlyNote());
 	}
 	syncOffline();
 	const model = buildThread(t.window.events);
@@ -1539,7 +1531,6 @@ function renderThread(opts: { stick: boolean; restore?: boolean }): void {
 		nodes.push(stateBox("empty", "No events in this conversation yet."));
 	}
 	scroller.replaceChildren(...nodes);
-	renderPendingBubble();
 	t.renderedLastSeq = t.window.events[t.window.events.length - 1]?.seq ?? 0;
 	if (wasEmpty || t.window.lastSeq > (seen.get(t.cid) ?? -1)) {
 		if (!document.hidden) markSeen(t.cid, t.window.lastSeq);
@@ -1963,631 +1954,39 @@ function agentCard(a: AgentView): HTMLElement {
 	return li;
 }
 
-// ── Composer (3.2) ──────────────────────────────────────────────────────────
-// CONVERSATION.md §8. The server decides everything; this is the person's
-// side of it: one draft per conversation, one clientMessageId per click,
-// never an automatic retry, and every refusal shown in the server's words.
-
-interface ComposerNotice {
-	tone: "info" | "warn" | "error";
-	text: string;
-	/** A partial delivery (§8.1.6): the next send waits for the person to confirm they looked at the Terminal. */
-	blockUntilChecked?: boolean;
-	/** `misdelivered`: the conversation the text landed in. */
-	conversation?: string;
-	/** v1.9 §8.1.12.8: the one-time background notice — Send waits for "I understand". */
-	confirmBackground?: boolean;
-	/** v1.9: `accepted` has its own indicator, never the delivered ✓. */
-	indicator?: "accepted";
-}
-interface ComposerState {
-	/** The project the conversation belongs to: the stored draft's key. */
-	sessionId: string | null;
-	draft: string;
-	sending: boolean;
-	notice: ComposerNotice | null;
-	/** The optimistic bubble: shown until the matching `user_prompt` arrives or the send is not delivered. */
-	pending: { id: string; text: string; sentAt: number } | null;
-	checked: boolean;
-	/**
-	 * v1.9 §8.1.12.6: a background send Claude Code ACCEPTED (not delivered).
-	 * The draft is kept and locked until the send's final state arrives as a
-	 * `composer_send` event: delivered/misdelivered clear it; unconfirmed,
-	 * failed or uncertain keep it and ask to check the Terminal.
-	 */
-	accepted: { id: string } | null;
-	/** The send in flight goes through the background transport. */
-	background: boolean;
-	/**
-	 * D1: a background send of this text that ended `unconfirmed`. The next
-	 * send, once the person confirmed they checked the Terminal, carries its
-	 * id so the server records the acknowledgement (durable, server-side).
-	 */
-	unconfirmedId: string | null;
-}
+// ── Read-only note ──────────────────────────────────────────────────────────
 
 /**
- * v1.9 §8.1.12.8: the background notice is shown once per conversation (per
- * page life — a reload shows it again, which errs on the side of saying it).
+ * The capture's Chat is read-only history: a traditional session is worked
+ * from its Terminal (Composer is retired); an ACP agent session has its own
+ * Chat (acpChat.ts).
  */
-const backgroundNoticeSeen = new Set<string>();
-const composerStates = new Map<string, ComposerState>();
-function composerStateFor(cid: string): ComposerState {
-	let st = composerStates.get(cid);
-	if (!st) {
-		const sessionId = stateSessionId;
-		// A draft left on this browser (a reload, a closed tab) comes back as
-		// text in the box — never as a send.
-		const draft = sessionId !== null ? readDraft(sessionId, cid) : "";
-		st = {
-			sessionId,
-			draft,
-			sending: false,
-			notice: null,
-			pending: null,
-			checked: false,
-			accepted: null,
-			background: false,
-			unconfirmedId: null,
-		};
-		composerStates.set(cid, st);
-	}
-	return st;
-}
-
-function setDraft(cid: string, st: ComposerState, text: string): void {
-	st.draft = text;
-	if (st.sessionId !== null) writeDraft(st.sessionId, cid, text);
-}
-
-/** Logout: the next account on this browser starts with no composer state at all. */
-export function forgetComposerState(): void {
-	composerStates.clear();
-	backgroundNoticeSeen.clear();
-	forgetAllDrafts();
-}
-
-/** Why the composer is disabled right now, in the person's words; null when it can send. */
-function composerBlockReason(c: ConversationSummary | undefined, st: ComposerState): string | null {
-	if (!c) return "Open a conversation to send a message.";
-	if (c.composer?.blocked) return explainCode("send-in-progress", c.composer.reason);
-	// Over, or lost: say that before anything about the pane.
-	if (c.status === "ended" || c.status === "ending")
-		return "This conversation has ended. Start a new one in the terminal.";
-	if (c.status === "disconnected" || c.status === "error")
-		return "This conversation is no longer reachable from Chat.";
-	if (!c.canSendInput) {
-		if (c.kind !== "interactive")
-			return "Only an interactive Claude Code session can take a message from Chat.";
-		if (list.status === "loaded" && list.capture && !list.capture.effective)
-			return "Capture is not active on this session, so a send could not be confirmed.";
-		// The backend took the pane away from this conversation (another one
-		// started or resumed in it, or the container went down): its history
-		// stays readable here, input goes through the terminal.
-		// paneId, not tabId: the tab can be unknown on a well-bound pane
-		// (the hook carried no tmux session), and canSendInput follows the pane.
-		// Two different situations, said apart (B, 2026-11-05: a background
-		// Claude session was told "another conversation took it over"):
-		// - binding_lost: another conversation started in its pane;
-		// - no pane ever: its hooks carry none (e.g. Claude runs it as a
-		//   background session) — nothing was taken; Chat just cannot prove
-		//   where a message would go.
-		if (c.statusEvidence === "binding_lost")
-			return "This conversation no longer has a terminal pane — another conversation started in it, or the session was restarted. Its history stays readable; type in the Terminal to continue.";
-		if (c.paneId === null && runsInBackground(c))
-			return "Claude Code runs this conversation as a background session. The terminal shows a client attached to it, not the conversation itself, so Chat can't prove where a message would land and doesn't send. Its history stays live here; to write to it, type in the Terminal.";
-		if (c.paneId === null)
-			return "Chat can't tie this conversation to a terminal pane, so it can't confirm where a message would go (for example, Claude runs it as a background session). Its history stays readable; type in the Terminal to continue.";
-		return "Sending from Chat is not available for this conversation.";
-	}
-	// The CLI must be at its prompt (§10 "3.2 composer": waiting_input/idle). The
-	// server decides anyway (409 busy / needs-terminal); this only explains the
-	// obvious case before a request. A live claim with stale evidence does not
-	// block — the list may be behind, and the server has the fresh probe.
-	const stale =
-		statusIsLiveClaim(c.status) && Date.now() - Date.parse(lastEvidenceAt(c)) > STALE_EVIDENCE_MS;
-	if (!stale) {
-		if (c.status === "running") return "Claude is working; wait for the turn to finish.";
-		if (c.status === "waiting_permission")
-			return "A permission prompt is open in the terminal. Answer it there first.";
-		if (c.status === "unknown")
-			return "State unknown — Claude Code hasn't reported since it started or resumed. It updates when it reports or a check confirms it's at its prompt; typing in the Terminal also updates it.";
-		if (c.status !== "waiting_input" && c.status !== "waiting_background")
-			return "This conversation is not at its prompt.";
-	}
-	if (st.sending) return "Sending…";
-	if (st.accepted) return BG_TEXT.accepted;
-	if (st.notice?.blockUntilChecked && !st.checked)
-		return "Check the Terminal for partial text, then confirm below.";
-	return null;
-}
-
-/**
- * Whether the textarea takes typing — separate from whether Send is enabled.
- * While Claude is working, waiting on a permission or not yet confirmed at
- * its prompt (or another send is settling), the person can write the next
- * message; Send stays off until the composer allows it, and nothing is ever
- * sent on its own when that changes (no queue: the click is the send). Kept
- * off where a draft cannot go anywhere (ended, unreachable, no pane, not
- * interactive), while a send is in flight, and after a failed delivery until
- * the Terminal has been checked.
- */
-function composerDraftable(c: ConversationSummary | undefined, st: ComposerState): boolean {
-	if (!c || st.sending) return false;
-	// Accepted by Claude Code: the draft stays, locked, until the outcome is known.
-	if (st.accepted) return false;
-	if (st.notice?.blockUntilChecked && !st.checked) return false;
-	if (
-		c.status === "ended" ||
-		c.status === "ending" ||
-		c.status === "disconnected" ||
-		c.status === "error"
-	)
-		return false;
-	return c.canSendInput || c.composer?.blocked === true;
-}
-
-/**
- * Grow the textarea with its content; CSS max-height caps it, then it scrolls.
- * The measurement collapses the box to one row for a moment, which lets the
- * thread above clamp its scrollTop; the reader's place is put back after
- * (kept at the bottom if they were there), or every keystroke of a long
- * draft would pull the thread up while Claude streams.
- */
-function autosize(ta: HTMLTextAreaElement): void {
-	if (!ta.isConnected) return;
-	const sc = threadScroller();
-	const top = sc?.scrollTop ?? 0;
-	// The tracked state, not a live read: it is the pre-measure truth.
-	const stick = sc !== null && (cur?.atBottom ?? nearBottom(sc));
-	ta.style.height = "auto";
-	if (ta.scrollHeight > 0) ta.style.height = `${ta.scrollHeight + 2}px`;
-	// Instant, not the scroller's smooth behaviour: an animated restore fires
-	// scroll events mid-way that would mark the reader as not at the bottom.
-	if (sc) setScrollNow(sc, stick ? sc.scrollHeight : top);
-}
-
-function composer(): HTMLElement {
-	// With ACP agents on, Composer is retired as a way to talk to a session:
-	// this Chat is the read-only history of a traditional session, which is
-	// worked with from its Terminal (an ACP agent session has its own Chat).
-	if (acpAgentsEnabled())
-		return el(
-			"div",
-			"chat-readonly-note",
-			"Historial de lectura. Esta sesión tradicional se usa desde su Terminal; para chatear con un agente, creá una sesión con agente ACP.",
-		);
-	const box = el("div", "chat-composer");
-	const c = selected();
-	const cid = selectedCid;
-	if (cid) box.dataset.cid = cid;
-	const st = cid ? composerStateFor(cid) : null;
-	const row = el("div", "chat-composer-row");
-	const ta = el("textarea");
-	ta.rows = 1;
-	ta.setAttribute("aria-label", "Message to Claude");
-	ta.setAttribute("aria-describedby", "chat-composer-status");
-	const sendBtn = button("Send", "files-btn primary chat-send", () => void submitComposer());
-	const reason = st ? composerBlockReason(c, st) : "Open a conversation to send a message.";
-	const can = reason === null;
-	ta.disabled = !(st && composerDraftable(c, st));
-	sendBtn.disabled = !can;
-	// The reason a send is blocked lives in the status line only; the
-	// placeholder repeating it was cut off on narrow screens.
-	ta.placeholder = "Message Claude…";
-	if (st) {
-		ta.value = st.draft;
-		ta.addEventListener("input", () => {
-			setDraft(cid as string, st, ta.value);
-			autosize(ta);
-		});
-		// Measured once it is in the document.
-		requestAnimationFrame(() => autosize(ta));
-	}
-	ta.addEventListener("keydown", (e) => {
-		if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-			e.preventDefault();
-			void submitComposer();
-		}
-	});
-	const status = composerStatus(st, reason, st !== null && composerDraftable(c, st));
-	row.appendChild(ta);
-	row.appendChild(sendBtn);
-	box.appendChild(status);
-	box.appendChild(row);
-	return box;
+function readOnlyNote(): HTMLElement {
+	const note = el(
+		"div",
+		"chat-readonly-note",
+		"Historial de lectura. Esta sesión tradicional se usa desde su Terminal; para chatear con un agente, creá una sesión con agente ACP. ",
+	);
+	note.appendChild(openTerminalButton(selected()));
+	return note;
 }
 
 /**
  * "Open terminal" for a conversation goes to ITS tab — the one whose pane runs
- * that Claude — and says which. When the tab is unknown (the hook carried no
- * tmux session) or no longer listed, the label says so before the click, and
- * the click shows the Terminal without switching tabs.
+ * that Claude — not to whichever tab happens to be active.
  */
 function openTerminalButton(c: ConversationSummary | undefined): HTMLButtonElement {
 	if (!c) return button("Open terminal", "chat-link", () => setView("terminal"));
 	const tab = c.tabId ? currentTabs.find((t) => t.tabId === c.tabId) : undefined;
-	const label = tab ? `Open terminal · ${tab.label}` : "Open terminal (its tab is unknown)";
+	const label = tab ? `Open terminal · ${tab.label}` : "Open terminal";
 	const b = button(label, "chat-link", () => {
-		// A listed tab that could not be opened is the one case to warn about;
-		// a stopped session shows its own state in the Terminal.
-		const r = showTerminalTab(c.tabId);
-		// The button named a tab and it was not opened (gone from the list
-		// since, or the switch failed): say so. A stopped session shows its
-		// own state in the Terminal.
+		const r = showTerminalTab(c.tabId ?? null);
+		// The button named a tab and it was not opened: say so before anyone types.
 		if (tab && (r === "failed" || r === "unknown"))
 			showToast(`Could not switch to ${tab.label}; check the active tab before typing.`, true);
 	});
 	b.dataset.openTerminalTab = tab?.tabId ?? "";
 	return b;
-}
-
-/** The composer's status line: the notice, or the hint, or the block reason. */
-function composerStatus(
-	st: ComposerState | null,
-	reason: string | null,
-	draftable: boolean,
-): HTMLElement {
-	const status = el("div", "chat-composer-status");
-	// The textarea points here (aria-describedby): a blocked composer's
-	// reason is read with it, now that the placeholder no longer carries it.
-	status.id = "chat-composer-status";
-	const can = reason === null;
-	if (st?.notice) {
-		status.classList.add(st.notice.tone);
-		if (st.notice.indicator === "accepted") {
-			status.classList.add("accepted");
-			// Its own mark: a clock, never the delivered check.
-			status.appendChild(el("span", "chat-composer-accepted", "◷"));
-		}
-		status.appendChild(el("span", undefined, st.notice.text));
-		if (st.notice.confirmBackground) {
-			const cidNow = selectedCid;
-			status.appendChild(
-				button("I understand — send", "chat-link", () => {
-					if (cidNow) backgroundNoticeSeen.add(cidNow);
-					st.notice = null;
-					void submitComposer();
-				}),
-			);
-		}
-		if (st.notice.conversation) {
-			const target = st.notice.conversation;
-			status.appendChild(button("Open it", "chat-link", () => void openConversation(target)));
-		}
-		if (st.notice.blockUntilChecked && !st.checked) {
-			status.appendChild(
-				button("I checked the Terminal", "chat-link", () => {
-					st.checked = true;
-					renderComposer();
-				}),
-			);
-		}
-		status.appendChild(openTerminalButton(selected()));
-	} else if (can) {
-		// Narrow (mobile) layout: the Send button is the affordance there.
-		status.appendChild(
-			el(
-				"span",
-				undefined,
-				isMobile()
-					? "/ and ! commands belong in the Terminal"
-					: "Ctrl+Enter sends · / and ! commands belong in the Terminal",
-			),
-		);
-	} else {
-		status.appendChild(el("span", undefined, reason ?? ""));
-		// Typing is open while Send waits: say what happens to the draft.
-		if (draftable && reason !== null)
-			status.appendChild(
-				el(
-					"span",
-					"chat-composer-draft-note",
-					// A send settling on the pane clears on the backend, not when
-					// Claude reaches its prompt: say which wait this is.
-					selected()?.composer?.blocked
-						? "You can keep writing; Send turns on once the previous send is settled."
-						: "You can keep writing; Send turns on when Claude is ready.",
-				),
-			);
-		status.appendChild(openTerminalButton(selected()));
-	}
-	return status;
-}
-
-/**
- * Re-render only the composer (keeps the thread's DOM and scroll). The
- * textarea is updated IN PLACE when it already belongs to the selected
- * conversation: replacing it on every list poll would reset the caret and
- * drop an in-progress IME composition while the person types.
- */
-function renderComposer(): void {
-	if (acpAgentsEnabled()) return;
-	const old = threadEl.querySelector<HTMLElement>(".chat-composer");
-	if (!old) return;
-	const cid = selectedCid;
-	const ta = old.querySelector<HTMLTextAreaElement>("textarea");
-	if (!ta || !cid || old.dataset.cid !== cid) {
-		const hadFocus = old.contains(document.activeElement);
-		const fresh = composer();
-		old.replaceWith(fresh);
-		if (hadFocus) {
-			const nta = fresh.querySelector<HTMLTextAreaElement>("textarea");
-			nta?.focus();
-			nta?.setSelectionRange(nta.value.length, nta.value.length);
-		}
-		return;
-	}
-	const st = composerStateFor(cid);
-	const reason = composerBlockReason(selected(), st);
-	const can = reason === null;
-	ta.disabled = !composerDraftable(selected(), st);
-	// The reason a send is blocked lives in the status line only; the
-	// placeholder repeating it was cut off on narrow screens.
-	ta.placeholder = "Message Claude…";
-	// The draft is the state; the DOM follows it only when they differ (a
-	// send cleared it, a result restored it), never while they agree.
-	if (ta.value !== st.draft) {
-		ta.value = st.draft;
-		autosize(ta);
-	}
-	const sendBtn = old.querySelector<HTMLButtonElement>(".chat-send");
-	if (sendBtn) sendBtn.disabled = !can;
-	const status = old.querySelector<HTMLElement>(".chat-composer-status");
-	if (status) status.replaceWith(composerStatus(st, reason, composerDraftable(selected(), st)));
-}
-
-async function submitComposer(): Promise<void> {
-	const sid = stateSessionId;
-	const cid = selectedCid;
-	if (sid === null || cid === null) return;
-	const st = composerStateFor(cid);
-	if (st.sending || composerBlockReason(selected(), st) !== null) return;
-	const v = validateText(st.draft);
-	if (!v.ok) {
-		st.notice = { tone: "error", text: explainCode(v.code) };
-		renderComposer();
-		return;
-	}
-	// v1.9 §8.1.12.8: before the first send to a background session, say
-	// what "accepted" means and that it can't be cancelled from Chat; the
-	// send waits for the person's "I understand".
-	const background = selected()?.transport === "background";
-	if (background && !backgroundNoticeSeen.has(cid)) {
-		st.notice = { tone: "info", text: BG_TEXT.notice, confirmBackground: true };
-		renderComposer();
-		return;
-	}
-	st.background = background;
-	// D1: decided before `checked` is reset for this send.
-	const ack = st.checked && st.unconfirmedId ? st.unconfirmedId : undefined;
-	// One id per click (§8.1.4): a resend is the person's new action.
-	const id = crypto.randomUUID();
-	st.sending = true;
-	st.checked = false;
-	st.notice = { tone: "info", text: "Sending…" };
-	st.pending = { id, text: v.normalized, sentAt: Date.now() };
-	renderComposer();
-	renderPendingBubble();
-	try {
-		const r = await sendConversationMessage(
-			sid,
-			cid,
-			st.draft,
-			id,
-			ack ? { acknowledgeUnconfirmed: ack } : {},
-		);
-		if (ack && r.status >= 200 && r.status < 300) st.unconfirmedId = null;
-		applyComposerResult(cid, r.status, r.body);
-	} catch (err) {
-		st.pending = null;
-		st.notice = { tone: "error", text: `Send failed: ${(err as Error).message}` };
-	} finally {
-		st.sending = false;
-		renderComposer();
-		renderPendingBubble();
-		// The pane's blocking state and canSendInput come from the list.
-		void loadList({ quiet: true });
-	}
-}
-
-function applyComposerResult(
-	cid: string,
-	status: number,
-	body: Awaited<ReturnType<typeof sendConversationMessage>>["body"],
-): void {
-	const st = composerStateFor(cid);
-	if (status === 202) {
-		switch (body.result) {
-			case "delivered":
-				setDraft(cid, st, "");
-				st.notice = st.background ? { tone: "info", text: BG_TEXT.delivered } : null;
-				// The bubble stays until the real `user_prompt` arrives over the socket.
-				return;
-			case "accepted":
-				// NOT delivered: the draft stays (locked), the bubble says so.
-				st.accepted = { id: st.pending?.id ?? body.clientMessageId ?? "" };
-				st.notice = { tone: "info", text: BG_TEXT.accepted, indicator: "accepted" };
-				return;
-			case "misdelivered":
-				setDraft(cid, st, "");
-				st.pending = null;
-				st.notice = {
-					tone: "info",
-					text: "Delivered, but to another conversation of this pane.",
-					conversation: body.conversation,
-				};
-				return;
-			case "unconfirmed":
-				if (st.background) st.unconfirmedId = body.clientMessageId ?? st.pending?.id ?? null;
-				st.pending = null;
-				st.notice = st.background
-					? { tone: "warn", text: BG_TEXT.unconfirmed, blockUntilChecked: true }
-					: {
-							tone: "warn",
-							text: "Claude Code did not confirm the message — check the Terminal. It was not retried.",
-						};
-				return;
-			case "uncertain":
-				st.pending = null;
-				st.notice = st.background
-					? { tone: "warn", text: BG_TEXT.uncertain, blockUntilChecked: true }
-					: {
-							tone: "warn",
-							text: "The outcome is not known yet; the pane stays blocked until it is verified. Nothing is retried.",
-						};
-				return;
-		}
-	}
-	st.pending = null;
-	// D1: an earlier identical background send is unconfirmed: the person
-	// checks the Terminal, confirms, and the next send acknowledges it.
-	if (
-		status === 409 &&
-		body.error === "duplicate-pending" &&
-		body.detail === "unconfirmed-unacknowledged" &&
-		body.clientMessageId
-	) {
-		st.unconfirmedId = body.clientMessageId;
-		st.notice = {
-			tone: "warn",
-			text: explainCode("duplicate-pending", body.detail),
-			blockUntilChecked: true,
-		};
-		return;
-	}
-	if (status === 502 && body.error === "delivery-failed" && st.background) {
-		st.notice = {
-			tone: "error",
-			text: `${BG_TEXT.failed} (${body.detail ?? "refused"})`,
-			blockUntilChecked: true,
-		};
-		return;
-	}
-	if (status === 502 && body.error === "delivery-failed") {
-		st.notice = {
-			tone: "error",
-			text: `${explainCode("delivery-failed")} (${body.segmentsSent ?? 0} of ${body.segments ?? "?"} parts were pasted.)`,
-			blockUntilChecked: true,
-		};
-		return;
-	}
-	st.notice = { tone: "error", text: explainCode(body.error ?? `http-${status}`, body.detail) };
-}
-
-/**
- * v1.9 §8.1.12.6: an `accepted` background send learns its outcome from its
- * own `composer_send` events in the window. delivered / misdelivered clear
- * the draft; unconfirmed / failed / uncertain keep it and the next send asks
- * to check the Terminal. Returns whether anything changed.
- */
-function settleAccepted(cid: string, st: ComposerState): boolean {
-	if (!st.accepted || !cur || cur.cid !== cid) return false;
-	const id = st.accepted.id;
-	let final: string | null = null;
-	let target: string | undefined;
-	for (const e of cur.window.events) {
-		if (e.ev !== "composer_send") continue;
-		const d = e.data as Record<string, unknown>;
-		if (d.client_message_id !== id) continue;
-		const s = typeof d.state === "string" ? d.state : "";
-		if (
-			["delivered", "misdelivered", "unconfirmed", "failed", "uncertain", "resolved"].includes(s)
-		) {
-			final = s;
-			if (typeof d.misdelivered_to === "string") target = d.misdelivered_to;
-		}
-	}
-	if (final === null) return false;
-	st.accepted = null;
-	if (final === "delivered" || final === "misdelivered") {
-		setDraft(cid, st, "");
-		st.notice =
-			final === "delivered"
-				? { tone: "info", text: BG_TEXT.delivered }
-				: { tone: "info", text: BG_TEXT.misdelivered, conversation: target };
-		if (final === "misdelivered") st.pending = null;
-		return true;
-	}
-	st.pending = null;
-	if (final === "unconfirmed") st.unconfirmedId = id;
-	st.notice = {
-		tone: "warn",
-		text:
-			final === "unconfirmed"
-				? BG_TEXT.unconfirmed
-				: final === "failed"
-					? BG_TEXT.failed
-					: BG_TEXT.uncertain,
-		blockUntilChecked: true,
-	};
-	return true;
-}
-
-/**
- * The optimistic bubble (§10 "3.2 composer"): appended under the thread
- * while a send is in flight or delivered-but-not-yet-seen, removed as soon
- * as a `user_prompt` with the same normalized text is in the window.
- */
-function renderPendingBubble(): void {
-	const sc = threadScroller();
-	if (!sc || !cur) return;
-	const st = composerStates.get(cur.cid);
-	if (st && settleAccepted(cur.cid, st)) renderComposer();
-	sc.querySelector(".chat-pending")?.remove();
-	if (!st?.pending) return;
-	// The CLI's own prompt for this send: a human `user_prompt` with the same
-	// normalized text, not older than the send. Scanned on the raw events,
-	// newest first — never a second thread build per live event.
-	const pending = st.pending;
-	const background = st.background;
-	const seen = (() => {
-		const evs = cur.window.events;
-		// v1.9 §8.1.12.8: a background send's bubble yields ONLY to the
-		// user_prompt of its own ack (the prompt_id its `delivered` names) —
-		// never to the same words typed in the Terminal.
-		if (background) {
-			const acked = evs.find(
-				(e) =>
-					e.ev === "composer_send" &&
-					(e.data as Record<string, unknown>).client_message_id === pending.id &&
-					(e.data as Record<string, unknown>).state === "delivered",
-			);
-			const pid = acked ? (acked.data as Record<string, unknown>).prompt_id : undefined;
-			return (
-				typeof pid === "string" && evs.some((e) => e.ev === "user_prompt" && e.prompt_id === pid)
-			);
-		}
-		for (let i = evs.length - 1; i >= 0; i--) {
-			const e = evs[i]!;
-			if (Date.parse(e.ts) < pending.sentAt - 60_000) break;
-			if (e.ev !== "user_prompt") continue;
-			const d = e.data as Record<string, unknown>;
-			if (d.origin === "unverified" || (d.source !== undefined && d.source !== "user")) continue;
-			if (typeof d.prompt === "string" && normalizeText(d.prompt) === pending.text) return true;
-		}
-		return false;
-	})();
-	if (seen) {
-		st.pending = null;
-		return;
-	}
-	const bubble = el("article", "chat-msg chat-user chat-pending");
-	bubble.appendChild(meta("You", new Date(st.pending.sentAt).toISOString()));
-	bubble.appendChild(el("div", "chat-text", st.pending.text));
-	bubble.appendChild(
-		el(
-			"div",
-			st.accepted ? "chat-pending-state accepted" : "chat-pending-state",
-			st.sending
-				? "Sending…"
-				: st.accepted
-					? BG_TEXT.accepted
-					: "Delivered — waiting for it to appear",
-		),
-	);
-	sc.appendChild(bubble);
-	if (cur.atBottom) sc.scrollTop = sc.scrollHeight;
 }
 
 // ── Copy ────────────────────────────────────────────────────────────────────
