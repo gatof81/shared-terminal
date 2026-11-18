@@ -33,14 +33,6 @@ export const WS_PATH_PREFIXES: readonly string[] = [
 	"/ws/conversation/",
 ];
 
-/**
- * D1 — `/ws/project/<pid>` (docs/PROJECT_CONVERSATION.md §5). NOT in the list
- * above: it is admitted only when the project conversation is on (passed as
- * `extraPathPrefixes`), so with the flag off the upgrade filter answers
- * exactly as before (404).
- */
-export const PROJECT_WS_PREFIX = "/ws/project/";
-
 /** Does `url` (the raw request-target of an upgrade) name an app WebSocket? */
 export function isWsPath(url: string): boolean {
 	return WS_PATH_PREFIXES.some((prefix) => url.startsWith(prefix));

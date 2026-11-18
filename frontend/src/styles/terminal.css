@@ -36,33 +36,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* P3a: "@handle · project" of a session bound to an agent (sessionCore.ts
-   renderToolbarAgent). One line, ellipsis, never taller than the name
-   beside it: the bar's height is part of the terminal's box. */
-#terminal-session-agent {
-  /* Gives way long before the session name does: the name is the primary text. */
-  flex: 0 1000 auto;
-  /* …but never to nothing: "@han…" still says the session has an agent. */
-  min-width: 5ch;
-  /* No max-width: a clamped item is frozen by the flex algorithm and the
-     rest of the deficit then lands on the name alone ("st-fronte…" beside
-     a 24rem agent link). Unclamped, the link takes all of it down to its floor before the
-     name loses a pixel. */
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--c-accent);
-  text-decoration: none;
-}
-#terminal-session-agent:hover {
-  text-decoration: underline;
-}
 @media (max-width: 768px) {
-  /* No room on a phone's bar (v1 scrolls sideways, v2 shares the header's
-     line): left out rather than wrapped or squeezing the session name. */
-  #terminal-session-agent {
-    display: none;
-  }
   /* The v1 phone bar scrolls sideways (mobile.css): squeezing the name
      there buys nothing and left "my-p…" for a ten-letter name. */
   html:not([data-shell="v2"]) #terminal-session-name {

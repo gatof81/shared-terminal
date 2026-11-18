@@ -40,7 +40,6 @@ import {
 	removeAllRelayMarkers,
 	removeRelayEnabled,
 } from "./captureAuth.js";
-import { ancestryArgv, EXEC_TIMEOUT_S, paneStateArgv, parsePaneState } from "./composerText.js";
 import { DedupeTable, identityKey, payloadHash } from "./dedupe.js";
 import { isSafeClaudeSessionId, isSafeStSessionId } from "./ids.js";
 import type { IngestOriginVerifier } from "./ingestOrigin.js";
@@ -56,6 +55,7 @@ import {
 	UNKNOWN_REPROBE_AFTER_MS,
 } from "./limits.js";
 import { type NormalizedEvent, normalizeHookInput } from "./normalize.js";
+import { ancestryArgv, EXEC_TIMEOUT_S, paneStateArgv, parsePaneState } from "./paneFacts.js";
 import {
 	PROBE_ARGV,
 	PROBE_MAX_BYTES,

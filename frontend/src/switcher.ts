@@ -12,6 +12,7 @@
  * Chat; nothing is sent to any session.
  */
 
+import { acpEntry } from "./acpRegistry.js";
 import { type AgentsAtAGlance, agentName, agentsLine, atAGlance } from "./agentsSummary.js";
 import {
 	type ConversationSummary,
@@ -26,7 +27,6 @@ import { isMobile, sessions } from "./main.js";
 import { routeHash } from "./router.js";
 import {
 	BUCKET_LABEL,
-	boundHandle,
 	explainProjectError,
 	matches,
 	type Project,
@@ -80,12 +80,11 @@ export function openSwitcher(opener?: Element | null): void {
 	// Read once per open: the feature only changes on a fresh /auth/status.
 	const noun = sessionNoun(projectChatEnabled());
 	const words = switcherWords(noun);
-	// "@handle" of the agent each running session is bound to (only present
-	// with the Projects feature on; rows without a live binding show nothing).
+	// "@name" of the ACP agent a session runs (acpRegistry.ts); others show nothing.
 	const handles = new Map<string, string>();
 	for (const s of sessions) {
-		const h = boundHandle(s);
-		if (h !== null) handles.set(s.sessionId, h);
+		const a = acpEntry(s.sessionId);
+		if (a) handles.set(s.sessionId, `@${a.name}`);
 	}
 	const projects = new Map<string, Project>();
 	for (const p of runningProjects())

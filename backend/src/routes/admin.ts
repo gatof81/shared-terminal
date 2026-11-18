@@ -8,7 +8,6 @@ import { DEFAULT_MEMORY_BYTES, DEFAULT_NANO_CPUS } from "../dockerManager.js";
 import { logger } from "../logger.js";
 import * as observeLog from "../observeLog.js";
 import { getDispatcherStats } from "../portDispatcher.js";
-import { AgentActiveError, assertNoLiveBinding } from "../projects/directory.js";
 import { RecreateRetainedError, RecreateUnresolvedError } from "../recreateAttempt.js";
 import {
 	EFFECTIVE_CPU_NANO_MAX,
@@ -100,9 +99,6 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 					conversationStats = {
 						...(await conversation.adminStats()),
 						recreateOrphans: recreation?.stats.recreateOrphans ?? 0,
-						// 3.2 (§8.1.8): aggregates only — states, codes, blocked panes;
-						// present only while the composer flag is on.
-						...(ctx.composer?.enabled ? { composer: await ctx.composer.adminStats() } : {}),
 					};
 				} catch (err) {
 					logger.warn(`[admin] conversation stats failed: ${(err as Error).message}`);
@@ -366,8 +362,6 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 				await sessionLifecycleLock.run(req.params.id, hard ? "delete-hard" : "delete", async () => {
 					const current = await sessions.get(req.params.id);
 					if (!current) return;
-					// P3a (03 §2.1): same guard as the owner's hard delete, flag on or off.
-					if (hard) await assertNoLiveBinding(req.params.id);
 					// Idempotent soft branch — only kill + terminate if not
 					// already torn down.
 					// Same shape as the owner route: kill on every delete (a
@@ -382,11 +376,6 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 						idleSweeper?.forget(req.params.id);
 					}
 					if (hard) {
-						// Again after the terminate: an agent creation that landed between the
-						// first check and here is seen now, and none can land later (the
-						// creation trigger refuses a terminated session). A hit leaves an
-						// ordinary soft delete: row kept, nothing purged.
-						await assertNoLiveBinding(req.params.id);
 						await docker.purgeWorkspace(req.params.id).catch((err) => {
 							throw new TeardownFailedError("purge", err);
 						});
@@ -403,10 +392,6 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 					res
 						.status(500)
 						.json({ error: "teardown-failed", stage: err.stage, message: err.message });
-					return;
-				}
-				if (err instanceof AgentActiveError) {
-					res.status(409).json({ error: "agent-active" });
 					return;
 				}
 				if (err instanceof SessionBusyError) {

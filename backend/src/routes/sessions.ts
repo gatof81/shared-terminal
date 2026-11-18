@@ -17,7 +17,6 @@ import { EnvVarValidationError, validateEnvVars } from "../envVarValidation.js";
 import { logger } from "../logger.js";
 import * as observeLog from "../observeLog.js";
 import { mappingsFromConfig, setPortMappings } from "../portMappings.js";
-import { assertNoLiveBinding } from "../projects/directory.js";
 import {
 	encryptAuthCredentials,
 	encryptSecretEntries,
@@ -96,7 +95,7 @@ function externalRefError(value: unknown): string | null {
 const TAB_SEARCH_QUERY_MAX_LEN = 256;
 
 export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
-	const { sessions, docker, broadcaster, idleSweeper, projects } = ctx;
+	const { sessions, docker, broadcaster, idleSweeper } = ctx;
 	// `execIp` covers the tab-search route too (#357): search and exec
 	// are the same abuse surface — an authed caller driving docker execs
 	// into a container (each search = 1-2 tmux execs + a D1 ownership
@@ -678,7 +677,7 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			// the (slower) Docker stats fan-out.
 			const ids = list.map((row) => row.sessionId);
 			const running = list.filter((row) => row.status === "running");
-			const [caps, stats, bindings] = await Promise.all([
+			const [caps, stats] = await Promise.all([
 				listResourceCaps(ids),
 				docker.gatherStats(
 					running.map((row) => ({
@@ -686,15 +685,6 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 						containerId: row.containerId,
 					})),
 				),
-				// P3a (E-4): only with the directory on. A failed read leaves
-				// `binding` OUT of every row (= unknown), never `null` (= not
-				// bound), and never fails the list.
-				projects
-					? projects.liveBindingsForOwner(userId).catch((err) => {
-							logger.warn(`[routes] session bindings read failed: ${(err as Error).message}`);
-							return undefined;
-						})
-					: Promise.resolve(undefined),
 			]);
 			res.json(
 				list.map((row) => {
@@ -705,7 +695,6 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 						cpuLimit: sCaps?.cpuLimit ?? null,
 						memLimit: sCaps?.memLimit ?? null,
 						usage,
-						...(bindings ? { binding: bindings.get(row.sessionId) ?? null } : {}),
 					};
 				}),
 			);
@@ -852,13 +841,6 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			await sessionLifecycleLock.run(req.params.id, hard ? "delete-hard" : "delete", async () => {
 				const meta = await sessions.get(req.params.id);
 				if (!meta) throw new NotFoundError("Session not found");
-				// P3a (03 §2.1): a hard delete of a session bound to a project
-				// agent is refused BEFORE any effect (409 agent-active), flag on
-				// or off (bindings outlive the flag, PROJECTS.md §6). A soft
-				// delete keeps the row, so the binding stays readable and is
-				// not refused.
-				if (hard) await assertNoLiveBinding(req.params.id);
-
 				// kill() runs on EVERY delete, `terminated` rows included
 				// (P1-C): a row can say terminated while Docker still holds
 				// the container (a teardown that was not confirmed, a spawn
@@ -887,11 +869,6 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 				}
 
 				if (hard) {
-					// Again after the terminate: an agent creation that landed between the
-					// first check and here is seen now, and none can land later (the
-					// creation trigger refuses a terminated session). A hit leaves an
-					// ordinary soft delete: row kept, nothing purged.
-					await assertNoLiveBinding(req.params.id);
 					// Wipe workspace files, then drop the row. The row is the
 					// only reference that lets a retry purge the workspace,
 					// uploads, `.st-control` and conversation data: a failed

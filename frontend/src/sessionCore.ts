@@ -12,7 +12,6 @@
 import { acpEntry } from "./acpRegistry.js";
 import { openObserversModalFor } from "./admin.js";
 import {
-	ApiCodeError,
 	createTab,
 	deleteSession,
 	deleteTab,
@@ -25,14 +24,13 @@ import {
 	listSessions,
 	listTabs,
 	projectChatEnabled,
-	type SessionBinding,
 	type SessionInfo,
 	startSession,
 	stopSession,
 	TabNotFoundError,
 } from "./api.js";
 import { openActionMenu } from "./components/actionMenu.js";
-import { alertDialog, confirmDialog } from "./components/dialog.js";
+import { confirmDialog } from "./components/dialog.js";
 import { formatBytes, formatCpuCores, formatCpuPercent } from "./format.js";
 import { transformKeyInput } from "./keyBar.js";
 import {
@@ -59,15 +57,7 @@ import { renderSidebarObservables } from "./myGroups.js";
 import { openBootstrapLogModal } from "./newSession.js";
 import { openObserveModalFor } from "./observeModal.js";
 import { openPortsModalFor } from "./ports.js";
-import { currentProject, projectName, projects } from "./projectDirectory.js";
-import {
-	agentActiveDeleteText,
-	agentCountText,
-	groupSessionsByBinding,
-	LABEL_NO_RECENT,
-	LABEL_READY,
-	type PresenceView,
-} from "./projectModel.js";
+import { currentProject, projects } from "./projectDirectory.js";
 import {
 	clear as clearRoute,
 	navigateProject,
@@ -82,7 +72,6 @@ import {
 	sessionActions,
 	terminalState,
 } from "./sessionActions.js";
-import { sidebarPresenceOf, watchSidebarPresence } from "./sidebarPresence.js";
 import { badgeFor, clearBadge, recordOutput } from "./tabActivity.js";
 import { openTerminalSession, type SessionStatus } from "./terminal.js";
 import { currentShell } from "./uiShell.js";
@@ -225,14 +214,6 @@ export async function runSessionAction(s: SessionInfo, id: SessionActionId): Pro
 		case "terminate":
 		case "delete": {
 			const hard = id === "delete";
-			// A session bound to a project agent can't be hard-deleted (the
-			// server answers 409 agent-active, PROJECTS.md §6): say so and
-			// where to go BEFORE asking for its name, and send nothing.
-			const guard = hard && projectChatEnabled();
-			if (guard && isBinding(s.binding)) {
-				await explainAgentActive(s.name, s.binding, false);
-				return;
-			}
 			// An irreversible delete asks for the session's name (§9.5 of
 			// docs/design/ui-unificada.md); a terminate is reversible
 			// (Restore) and only needs a plain confirmation.
@@ -263,62 +244,11 @@ export async function runSessionAction(s: SessionInfo, id: SessionActionId): Pro
 				}
 				await refreshSessions();
 			} catch (err) {
-				if (guard && err instanceof ApiCodeError && err.code === "agent-active") {
-					await explainAgentActiveAfterRefusal(s);
-					return;
-				}
 				showToast((err as Error).message, true);
 			}
 			return;
 		}
 	}
-}
-
-function isBinding(b: SessionInfo["binding"]): b is SessionBinding {
-	return typeof b === "object" && b !== null;
-}
-
-/**
- * The server refused a hard delete with `agent-active` although this page
- * did not know the session as bound (binding key absent, or a stale row).
- * Re-read the list for the binding — and for the status: the server's
- * second check refuses AFTER the soft delete happened (PROJECTS.md §6), so
- * a row that was live may now be `terminated`, files kept.
- */
-async function explainAgentActiveAfterRefusal(s: SessionInfo): Promise<void> {
-	await refreshSessions();
-	let fresh: SessionInfo | null = sessions.find((x) => x.sessionId === s.sessionId) ?? null;
-	// Hidden from the list (terminated rows are shown only with the toggle on).
-	if (fresh === null) fresh = await getSession(s.sessionId).catch(() => null);
-	// The fresh row decides when it carries the key; an absent key (unknown)
-	// keeps what the page knew before, a null (now unbound) means stale.
-	const binding = fresh && "binding" in fresh ? fresh.binding : s.binding;
-	const terminated = s.status !== "terminated" && fresh?.status === "terminated";
-	await explainAgentActive(s.name, isBinding(binding) ? binding : null, terminated);
-}
-
-/** "Can't delete permanently": whose session it is, and a way to that agent. */
-async function explainAgentActive(
-	name: string,
-	binding: SessionBinding | null,
-	terminated: boolean,
-): Promise<void> {
-	const agent = binding && {
-		handle: binding.handle,
-		projectName: projectName(binding.projectId),
-	};
-	const { title, message } = agentActiveDeleteText(name, agent, terminated);
-	if (binding === null) {
-		await alertDialog({ title, message, okLabel: "Close" });
-		return;
-	}
-	const open = await confirmDialog({
-		title,
-		message,
-		confirmLabel: `Open @${binding.handle}`,
-		cancelLabel: "Close",
-	});
-	if (open) navigateProject({ projectId: binding.projectId, agentId: binding.agentId });
 }
 
 /** The ⋯ menu of the ACTIVE session (shell v2's session bar). */
@@ -503,7 +433,7 @@ export function renderSessionList() {
 	// list only: with the project feature off the sidebar is exactly as before.
 	sessionList.classList.toggle("session-list-grouped", projectChatEnabled());
 	if (projectChatEnabled()) renderGroupedSessions();
-	else for (const s of sessions) sessionList.appendChild(buildSessionItem(s, null));
+	else for (const s of sessions) sessionList.appendChild(buildSessionItem(s));
 	if (focusedId !== undefined) {
 		sessionList
 			.querySelector<HTMLElement>(
@@ -520,115 +450,24 @@ export function renderSessionList() {
 	// Sidebar observables (#394) dedupe against THIS list, so re-render
 	// them whenever it changes.
 	renderSidebarObservables();
-	// A binding made or removed, or a project's name loaded: the session
-	// bar names the agent too.
-	renderToolbarAgent();
 }
 
 /**
- * P3a: the session bar says which agent the open session is —
- * "@handle · <project>" (just "@handle" until the project's name is
- * loaded), a link to the agent's page. Only for a binding OBJECT (§4.6):
- * `null` (unassigned) and an absent key (unknown) show nothing. With the
- * feature off the element is never created.
- *
- * One line with an ellipsis inside the room the bar already has
- * (terminal.css `#terminal-session-agent`): it must never make the bar
- * taller — the bar's height is part of the terminal's box, and a change
- * there refits xterm and resizes tmux for every viewer. Where there is no
- * room (phones, both shells) the CSS leaves it out rather than wrap.
- */
-let toolbarAgentLink: HTMLAnchorElement | null = null;
-
-function renderToolbarAgent(): void {
-	const s = projectChatEnabled()
-		? sessions.find((x) => x.sessionId === activeSessionId)
-		: undefined;
-	const binding = s?.binding;
-	if (!binding || typeof binding !== "object") {
-		toolbarAgentLink?.remove();
-		toolbarAgentLink = null;
-		return;
-	}
-	if (!toolbarAgentLink) {
-		const a = document.createElement("a");
-		a.id = "terminal-session-agent";
-		a.addEventListener("click", (e) => {
-			if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-			const pid = a.dataset.projectId;
-			const aid = a.dataset.agentId;
-			if (pid === undefined || aid === undefined) return;
-			e.preventDefault();
-			navigateProject({ projectId: pid, agentId: aid });
-		});
-		toolbarAgentLink = a;
-	}
-	const a = toolbarAgentLink;
-	const route = { projectId: binding.projectId, agentId: binding.agentId };
-	a.dataset.projectId = route.projectId;
-	a.dataset.agentId = route.agentId;
-	a.href = projectRouteHash(route);
-	const project = projectName(binding.projectId);
-	const text = project ? `@${binding.handle} · ${project}` : `@${binding.handle}`;
-	if (a.textContent !== text) a.textContent = text;
-	a.title = `Open the agent ${text}`;
-	if (a.previousElementSibling !== terminalStatusBadge) terminalStatusBadge.after(a);
-}
-
-/**
- * P3a (PROJECTS.md §4.6, rule 1): with the project feature on, the rows are
- * grouped by their binding — bound ones first, each naming its agent; then
- * «Unassigned sessions» (`binding: null`); then the rows whose binding is
- * UNKNOWN (the key is absent: the directory read failed), which are never
- * listed as unassigned. The rows themselves are the same as without the
- * feature: binding a session changes nothing about it (rule 8).
+ * With projects on, the rows are grouped by the project their ACP agent
+ * takes part in (acpRegistry.ts), in the project list's order and including
+ * the projects without a session yet — the tree is where projects are
+ * listed; every other session is in "Sin proyecto". The rows themselves are
+ * the same as without the feature.
  */
 function renderGroupedSessions(): void {
-	const groups = groupSessionsByBinding(sessions);
-	// One group per PROJECT, keyed by id (two projects may share a name), in
-	// the directory's order and including the ones without a session yet —
-	// the tree is where projects are listed (they used to appear twice: a
-	// list above the sessions and a heading among them; UX audit N1). A
-	// bound session whose project isn't in the loaded list (the list hasn't
-	// arrived, or it lags a creation) falls into one "Agent sessions" group
-	// instead of several identical headings.
-	type Row = (typeof groups.bound)[number];
-	const byProject = new Map<string, Row[]>();
-	const unnamed: Row[] = [];
+	const byProject = new Map<string, SessionInfo[]>();
 	for (const p of projects()) byProject.set(p.projectId, []);
-	for (const b of groups.bound) {
-		const rows = byProject.get(b.binding.projectId);
-		if (rows) rows.push(b);
-		else unnamed.push(b);
+	const loose: SessionInfo[] = [];
+	for (const s of sessions) {
+		const rows = byProject.get(acpEntry(s.sessionId)?.projectId ?? "");
+		if (rows) rows.push(s);
+		else loose.push(s);
 	}
-	// ACP agent sessions sit under the project they take part in (they have no
-	// older-team binding, so they would otherwise read as unassigned).
-	const acpRows = new Map<string, SessionInfo[]>();
-	const keepOutOfAcpProject = (s: SessionInfo) => {
-		const pid = acpEntry(s.sessionId)?.projectId;
-		if (!pid || !byProject.has(pid)) return true;
-		acpRows.set(pid, [...(acpRows.get(pid) ?? []), s]);
-		return false;
-	};
-	groups.unassigned = groups.unassigned.filter(keepOutOfAcpProject);
-	// A session just created here has no binding key until the next list read;
-	// an ACP agent's project is known already.
-	groups.unknown = groups.unknown.filter(keepOutOfAcpProject);
-	// Claude's state is read only for the projects whose rows can be seen:
-	// expanded, with a running session (a stopped one's state is its own
-	// word), and with the sidebar open (the phone's drawer, or the desktop
-	// column, which the ☰ button folds to nothing).
-	const folded = collapsed();
-	watchSidebarPresence(
-		projects()
-			.filter(
-				(p) =>
-					!folded.has(p.projectId) &&
-					(byProject.get(p.projectId) ?? []).some((r) => r.session.status === "running"),
-			)
-			.map((p) => p.projectId),
-		document.querySelector("main.sidebar-open") !== null,
-	);
 	for (const p of projects()) {
 		const rows = byProject.get(p.projectId) ?? [];
 		sessionList.appendChild(
@@ -637,54 +476,22 @@ function renderGroupedSessions(): void {
 				title: p.name,
 				project: p.projectId,
 				cls: "sgroup-project",
-				tooltip: `Open ${p.name} · ${agentCountText(p.agentCount)}`,
-				rows: [
-					...rows.map(({ session, binding }) => buildSessionItem(session, binding)),
-					...(acpRows.get(p.projectId) ?? []).map((s) => buildSessionItem(s, null)),
-				],
-				// With the bindings unread, its sessions may be the ones under
-				// "Assignment unknown": neither a count nor "none" is known.
-				countUnknown: groups.unknown.length > 0,
+				tooltip: `Abrir ${p.name}`,
+				rows: rows.map((s) => buildSessionItem(s)),
 				// "shown": its sessions may also be terminated ones the list hides.
-				empty:
-					p.agentCount === 0 && !acpRows.has(p.projectId) ? "No agents yet." : "No sessions shown.",
+				empty: p.agentCount === 0 ? "Sin agentes todavía." : "No sessions shown.",
 			}),
 		);
 	}
-	if (unnamed.length > 0) {
-		sessionList.appendChild(
-			buildGroup({
-				key: "~agents",
-				title: "Agent sessions",
-				project: null,
-				cls: "sgroup-project",
-				rows: unnamed.map(({ session, binding }) => buildSessionItem(session, binding)),
-			}),
-		);
-	}
-	if (groups.unassigned.length > 0) {
+	if (loose.length > 0) {
 		sessionList.appendChild(
 			buildGroup({
 				key: "~unassigned",
-				title: "Unassigned",
+				title: "Sin proyecto",
 				project: null,
 				cls: "sgroup-unassigned",
-				tooltip: "Sessions that don't belong to any project's agent.",
-				rows: groups.unassigned.map((s) => buildSessionItem(s, null)),
-			}),
-		);
-	}
-	if (groups.unknown.length > 0) {
-		sessionList.appendChild(
-			buildGroup({
-				key: "~unknown",
-				title: "Assignment unknown",
-				project: null,
-				cls: "sgroup-unknown",
-				tooltip:
-					"The project directory could not be read: these sessions may or may not belong to an agent.",
-				note: "Couldn't read which agent these belong to.",
-				rows: groups.unknown.map((s) => buildSessionItem(s, null)),
+				tooltip: "Sesiones que no participan en ningún proyecto.",
+				rows: loose.map((s) => buildSessionItem(s)),
 			}),
 		);
 	}
@@ -793,7 +600,7 @@ function buildGroup(g: {
 		// A project's name opens its page (the chevron beside it folds the
 		// group): the same link the old Projects list was, same class.
 		const a = document.createElement("a");
-		const route = { projectId: g.project, agentId: null };
+		const route = { projectId: g.project };
 		a.className = "sgroup-title project-item";
 		a.dataset.projectId = g.project;
 		a.dataset.role = "project";
@@ -857,31 +664,7 @@ function buildGroup(g: {
 	return section;
 }
 
-/**
- * The row's one-word form of a presence. The full wording (`label`, owner
- * rules of 2026-11-09) stays in the tooltip and the accessible name; a
- * shorter word never claims more than the label does.
- */
-function shortPresence(v: PresenceView): { word: string; cls: string } {
-	switch (v.tone) {
-		case "working":
-			return { word: "Working", cls: "" };
-		case "attention":
-			return { word: "Needs you", cls: "" };
-		case "ready":
-			return v.label === LABEL_READY
-				? { word: "Ready", cls: "" }
-				: { word: "Ready?", cls: " unverified" };
-		case "off":
-			return { word: "Claude off", cls: "" };
-		default:
-			return v.label === LABEL_NO_RECENT
-				? { word: "Quiet", cls: " stale" }
-				: { word: "Unknown", cls: "" };
-	}
-}
-
-function buildSessionItem(s: SessionInfo, binding: SessionBinding | null): HTMLElement {
+function buildSessionItem(s: SessionInfo): HTMLElement {
 	const item = document.createElement("div");
 	// Status class on the wrapper mirrors the session-dot rules so CSS
 	// can target failed/terminated items uniformly.
@@ -957,39 +740,12 @@ function buildSessionItem(s: SessionInfo, binding: SessionBinding | null): HTMLE
 						: s.status;
 		meta.appendChild(state);
 	}
-	// Claude's state in a running session bound to an agent: one short word
-	// and a mark whose SHAPE differs per state; what it rests on is in the
-	// tooltip and the row's accessible name. Nothing while it isn't known
-	// whether anything was read (a collapsed or not-yet-read project).
-	let claudePart = "";
-	const presence =
-		tree && binding !== null && s.status === "running"
-			? sidebarPresenceOf(binding.projectId, binding.agentId, s.sessionId)
-			: null;
-	if (presence !== null) {
-		const short = shortPresence(presence);
-		const chip = document.createElement("span");
-		chip.className = `session-presence tone-${presence.tone}${short.cls}`;
-		chip.dataset.presence = presence.tone;
-		chip.setAttribute("aria-hidden", "true");
-		const mark = document.createElement("span");
-		mark.className = "session-presence-mark";
-		chip.appendChild(mark);
-		chip.appendChild(document.createTextNode(short.word));
-		meta.appendChild(chip);
-		const why = [presence.label, presence.reason, presence.evidence].filter(Boolean).join(" · ");
-		select.title = `${select.title || s.name}\nClaude: ${why}`;
-		// The row's word already says it unless it is the short form.
-		if (presence.label !== short.word) claudePart = `, Claude: ${presence.label}`;
-	}
-	// Phones: the agent as a word in this line (the separate agent link is
-	// desktop-only there — the row is too narrow for both). Not a link: the
-	// whole row opens the session; the agent page is one tap away from its
-	// project, which is this group's heading.
-	if (binding !== null) {
+	// An ACP agent's session: its name, as the agent is addressed.
+	const acp = acpEntry(s.sessionId);
+	if (acp) {
 		const tag = document.createElement("span");
 		tag.className = "session-agent-tag";
-		tag.textContent = `@${binding.handle}`;
+		tag.textContent = `@${acp.name}`;
 		meta.appendChild(tag);
 	}
 	// A space between the row's words: laid out by flex they need none, but
@@ -1005,7 +761,7 @@ function buildSessionItem(s: SessionInfo, binding: SessionBinding | null): HTMLE
 	const shown = [s.name, ...[...meta.children].map((c) => c.textContent ?? "")].join(" ");
 	select.setAttribute(
 		"aria-label",
-		`${shown}, session ${s.status}${claudePart}${s.status === "failed" ? " — view the bootstrap log" : ""}`,
+		`${shown}, session ${s.status}${s.status === "failed" ? " — view the bootstrap log" : ""}`,
 	);
 	select.addEventListener("click", () => {
 		// A failed session has no workspace: the row opens its log.
@@ -1072,28 +828,6 @@ function buildSessionItem(s: SessionInfo, binding: SessionBinding | null): HTMLE
 			if (window.location.hash !== hash) window.location.hash = hash;
 		});
 		item.appendChild(last);
-	}
-
-	// P3a: the agent this session is bound to — a way to its page. A
-	// name, not identity: the link carries the ids (rule 3).
-	if (binding !== null) {
-		const agent = document.createElement("a");
-		agent.className = "session-agent-link";
-		agent.dataset.role = "agent";
-		const route = { projectId: binding.projectId, agentId: binding.agentId };
-		agent.href = projectRouteHash(route);
-		// The project is the group's heading now: the row names the agent only.
-		const project = projectName(binding.projectId);
-		agent.textContent = `@${binding.handle}`;
-		agent.title = project
-			? `Open the agent @${binding.handle} · ${project}`
-			: `Open the agent @${binding.handle}`;
-		agent.addEventListener("click", (e) => {
-			if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-			e.preventDefault();
-			navigateProject(route);
-		});
-		item.appendChild(agent);
 	}
 
 	return item;
@@ -1429,7 +1163,6 @@ registerRouteDetail("terminal", {
 });
 
 export function updateToolbar() {
-	renderToolbarAgent();
 	const s = sessions.find((x) => x.sessionId === activeSessionId);
 	if (!s) {
 		terminalToolbar.style.display = "none";

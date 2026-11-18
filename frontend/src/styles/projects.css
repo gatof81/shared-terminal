@@ -286,93 +286,11 @@ button.sgroup-title:focus-visible {
 .session-usage-hot {
   color: var(--c-warn);
 }
-/* Claude's state on a row: one short word plus a mark whose SHAPE differs
-   per state (never colour alone): working ◔ · ready ○ · unverified ◌ ·
-   needs you ◆ · off — · quiet / unknown ·. */
-.session-presence {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  font-size: 0.66rem;
-  color: var(--c-faint);
-  flex-shrink: 0;
-}
-.session-presence-mark {
-  flex: 0 0 auto;
-  box-sizing: border-box;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--c-dim);
-}
-.session-presence.tone-working {
-  color: var(--c-text-2);
-}
-/* An arc, not a second green dot beside the session's own: it turns while
-   Claude works (still, and still an arc, under reduced motion). */
-.session-presence.tone-working .session-presence-mark {
-  width: 8px;
-  height: 8px;
-  background: transparent;
-  border: 1.5px solid var(--c-ok);
-  border-left-color: transparent;
-  animation: session-presence-turn 1.1s linear infinite;
-}
-@keyframes session-presence-turn {
-  to {
-    transform: rotate(360deg);
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .session-presence.tone-working .session-presence-mark {
-    animation: none;
-  }
-}
-.session-presence.tone-ready .session-presence-mark {
-  background: transparent;
-  border: 1.5px solid var(--c-ok);
-}
-.session-presence.tone-ready.unverified .session-presence-mark {
-  border-style: dashed;
-  border-color: var(--c-muted);
-}
-.session-presence.tone-attention {
-  color: var(--c-warn);
-  font-weight: 600;
-}
-.session-presence.tone-attention .session-presence-mark {
-  border-radius: 1px;
-  background: var(--c-warn);
-  transform: rotate(45deg);
-}
-.session-presence.tone-off .session-presence-mark {
-  height: 2px;
-  border-radius: 1px;
-  background: var(--c-muted);
-}
-.session-presence.tone-unknown .session-presence-mark {
-  width: 3px;
-  height: 3px;
-  margin-inline: 2px;
-}
+
 .session-group-note {
   font-size: 0.7rem;
   color: var(--c-warn);
   padding: 0 0.6rem 0.3rem;
-}
-.session-agent-link {
-  flex-basis: 100%;
-  padding-left: 1.1rem;
-  font-size: 0.72rem;
-  color: var(--c-accent);
-  text-decoration: none;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.session-agent-link:hover,
-.session-agent-link:focus-visible {
-  text-decoration: underline;
 }
 
 /* ── The page, over the session ──
@@ -433,9 +351,7 @@ body.project-page-on #actions-btn {
   text-decoration: underline;
 }
 .pv-back:focus-visible,
-.pv-agent-handle:focus-visible,
 .pv-session-link:focus-visible,
-.session-agent-link:focus-visible,
 .pv-btn:focus-visible,
 .pv-close:focus-visible,
 #new-project-btn:focus-visible {
@@ -531,57 +447,12 @@ body.project-page-on #actions-btn {
   background: rgba(var(--c-warn-rgb), 0.08);
   font-size: 0.82rem;
 }
-
-/* Agent directory */
-.pv-agents {
-  list-style: none;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
-  gap: var(--s-3);
-}
-.pv-agent {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-  padding: var(--s-3);
-  border: 1px solid var(--c-border);
-  border-radius: var(--radius-m);
-  background: var(--c-surface);
-  min-width: 0;
-}
-/* A card that needs the person: an accent edge (tokens only), same box —
-   the inset shadow takes no space, so the grid never shifts on a poll. */
-.pv-agent.pv-agent-attention {
-  border-color: rgba(var(--c-warn-rgb), 0.6);
-  box-shadow: inset 3px 0 0 var(--c-warn);
-}
-.pv-agent-top {
-  display: flex;
-  align-items: baseline;
-  gap: var(--s-2);
-  min-width: 0;
-}
-.pv-agent-handle {
-  font-weight: 600;
-  font-size: 0.9rem;
-  color: var(--c-accent);
-  text-decoration: none;
-  overflow-wrap: anywhere;
-}
-.pv-agent-handle:hover {
-  text-decoration: underline;
-}
 .pv-role {
   font-size: 0.75rem;
   color: var(--c-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.pv-agent-session {
-  font-size: 0.78rem;
-  min-width: 0;
-  overflow-wrap: anywhere;
 }
 .pv-session-link {
   display: inline-flex;
@@ -621,51 +492,6 @@ body.project-page-on #actions-btn {
   max-width: 100%;
 }
 .pv-free-count {
-  color: var(--c-muted);
-}
-
-/* Presence: words first (the dot only repeats the tone) */
-.pv-presence-block {
-  display: flex;
-  flex-direction: column;
-  gap: 0.2rem;
-}
-.pv-presence {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  align-self: flex-start;
-  padding: 0.12rem 0.55rem;
-  border-radius: 999px;
-  border: 1px solid var(--c-border);
-  font-size: 0.75rem;
-  font-weight: 500;
-}
-.pv-presence-dot {
-  width: 0.5rem;
-  height: 0.5rem;
-  border-radius: 50%;
-  background: var(--c-muted);
-}
-.pv-presence.tone-working .pv-presence-dot {
-  background: var(--c-ok);
-}
-.pv-presence.tone-ready .pv-presence-dot {
-  background: transparent;
-  border: 1.5px solid var(--c-ok);
-}
-.pv-presence.tone-attention {
-  border-color: rgba(var(--c-warn-rgb), 0.6);
-  color: var(--c-warn);
-}
-.pv-presence.tone-attention .pv-presence-dot {
-  background: var(--c-warn);
-}
-.pv-presence.tone-off .pv-presence-dot {
-  background: transparent;
-  border: 1.5px dashed var(--c-muted);
-}
-.pv-presence.tone-unknown {
   color: var(--c-muted);
 }
 .pv-evidence {
@@ -710,22 +536,6 @@ body.project-page-on #actions-btn {
 }
 .pv-caps .on .pv-cap-mark {
   color: var(--c-ok);
-}
-.pv-history {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.78rem;
-}
-.pv-history th,
-.pv-history td {
-  text-align: left;
-  padding: 0.35rem 0.5rem;
-  border-bottom: 1px solid var(--c-border-soft);
-  vertical-align: top;
-}
-.pv-history th {
-  color: var(--c-muted);
-  font-weight: 500;
 }
 .pv-state.retired {
   color: var(--c-muted);
@@ -804,17 +614,11 @@ body.project-page-on #actions-btn {
   .session-list-grouped .session-name {
     font-size: 0.86rem;
   }
-  /* A one-line ellipsised link: line-height, not flex (a flex box would
-     drop the ellipsis). */
-  .session-agent-link {
-    line-height: 2.75rem;
-  }
   .pv-back {
     display: flex;
     align-items: center;
     min-height: 2.75rem;
   }
-  .pv-agent-handle,
   .pv-session-link {
     display: inline-flex;
     align-items: center;
@@ -832,13 +636,6 @@ body.project-page-on #actions-btn {
   }
   .pv-page {
     padding: var(--s-3) var(--s-4) var(--s-6);
-  }
-  .pv-agents {
-    grid-template-columns: 1fr;
-  }
-  .pv-history th:nth-child(4),
-  .pv-history td:nth-child(4) {
-    display: none;
   }
 }
 

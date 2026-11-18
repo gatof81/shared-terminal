@@ -196,12 +196,12 @@ function projectRow(a: AcpAgentInfo): HTMLElement {
 	row.append(el("span", undefined, "Proyecto:"), select, save);
 	if (a.projectId) {
 		const link = el("a", "acp-link", "Abrir Project Chat");
-		link.href = `#/projects/${encodeURIComponent(a.projectId)}/chat`;
+		link.href = `#/projects/${encodeURIComponent(a.projectId)}`;
 		const pid = a.projectId;
 		link.addEventListener("click", (e) => {
 			if (e.button !== 0 || e.metaKey || e.ctrlKey) return;
 			e.preventDefault();
-			navigateProject({ projectId: pid, agentId: null, panel: { kind: "chat" } });
+			navigateProject({ projectId: pid });
 		});
 		row.append(link);
 	}

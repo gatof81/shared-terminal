@@ -1,4 +1,4 @@
-import { expect, FIXED_NOW, test } from "./fixtures.js";
+import { expect, test } from "./fixtures.js";
 import { SESSION_IDS } from "./mockBackend.js";
 
 const S = SESSION_IDS.running;
@@ -222,48 +222,5 @@ test.describe("chat states", () => {
 		backend.override = null;
 		await page.locator("#chat-list button", { hasText: "Retry" }).click();
 		await expect(empty).toContainText("No conversations recorded yet");
-	});
-
-	test("an ended conversation says so in the composer; a permission prompt and a working turn too", async ({
-		app,
-		backend,
-		page,
-	}) => {
-		await app.login("alice");
-		await app.openSession("my-project");
-		await app.switchView("chat");
-		const row = (title: string) => page.locator("#chat-list .chat-conv-row", { hasText: title });
-		const toList = async () => {
-			if (app.mobile) await page.click("#chat-back-btn");
-		};
-		await expect(row("Fix tests")).toContainText("Ended");
-		await row("Fix tests").click();
-		// One visible status for the open conversation: the head's on desktop,
-		// the summary bar's on a phone (the head's chip is hidden there).
-		const shown = page
-			.locator(app.mobile ? "#chat-summary .chat-status" : ".chat-thread-head .chat-status")
-			.filter({ visible: true });
-		await expect(shown).toContainText("Ended");
-		if (app.mobile)
-			await expect(page.locator("#chat-view .chat-status").filter({ visible: true })).toHaveCount(
-				1,
-			);
-		await expect(page.locator(".chat-composer-status")).toContainText("has ended");
-		await toList();
-		// The list's status is the summary's; the composer explains the same thing.
-		const conv = backend.conversations.find((c) => c.cid === "conv-1")!;
-		// Fresh evidence: a live claim older than a few minutes does not block the composer.
-		conv.events[conv.events.length - 1]!.ts = FIXED_NOW;
-		conv.status = "waiting_permission";
-		await page.click("#chat-refresh-btn");
-		await expect(row("Refactor auth flow")).toContainText("Needs permission");
-		await row("Refactor auth flow").click();
-		await expect(page.locator(".chat-composer-status")).toContainText("permission prompt");
-		await toList();
-		conv.status = "running";
-		await page.click("#chat-refresh-btn");
-		await expect(row("Refactor auth flow")).toContainText("Working");
-		await row("Refactor auth flow").click();
-		await expect(page.locator(".chat-composer-status")).toContainText("Claude is working");
 	});
 });

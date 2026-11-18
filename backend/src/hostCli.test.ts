@@ -1,6 +1,6 @@
 /**
- * The host CLIs' production wiring (`hostDeps` of recreate/adminCli.ts and
- * conversation/composerCli.ts): both run in their own process, so they must
+ * The host CLI's production wiring (`hostDeps` of recreate/adminCli.ts): it
+ * runs in its own process, so it must
  * validate the JWT secret themselves before signing — on VM100 (2026-10-31)
  * every verb died with "jwtSecret() called before validateJwtSecret()".
  * Positive: with a secret in the env, `hostDeps()` signs a verifiable 2-minute
@@ -32,10 +32,7 @@ afterEach(() => {
 	process.env.NODE_ENV = saved.NODE_ENV;
 });
 
-for (const [label, modulePath] of [
-	["recreate:admin", "./recreate/adminCli.js"],
-	["composer:resolve", "./conversation/composerCli.js"],
-] as const) {
+for (const [label, modulePath] of [["recreate:admin", "./recreate/adminCli.js"]] as const) {
 	describe(`${label} host wiring`, () => {
 		it("signs a verifiable short-lived token for a D1 admin and refuses non-admins / unknown users", async () => {
 			const { hostDeps } = (await import(modulePath)) as {

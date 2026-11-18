@@ -33,7 +33,6 @@ import {
 // else imports them by name, so the side-effect imports keep them in.
 import "./filesView.js";
 import "./gitView.js";
-import { forgetComposerState } from "./chatView.js";
 import { escapeHandledByDialog } from "./components/dialog.js";
 import { showCopySuccessToast, showToast } from "./components/toast.js";
 import "./invites.js";
@@ -652,7 +651,6 @@ function handleLogout(toastMessage?: string): void {
 	forgetAllLastConversationTitles();
 	forgetSidebarCollapsed();
 	// Unsent drafts are the person's words: none survives for the next account.
-	forgetComposerState();
 	void logout();
 	// The project directory (P3a) is this account's: caches, dialogs and an
 	// open project page go with it.

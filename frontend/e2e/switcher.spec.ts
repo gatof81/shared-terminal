@@ -179,18 +179,11 @@ test.describe("conversation switcher", () => {
 		await expect(page.locator(".switcher-empty")).toContainText("No running projects");
 	});
 
-	test("Ctrl+K opens it from the page but never while typing in the composer", async ({
-		app,
-		page,
-	}) => {
+	test("Ctrl+K opens it from the page", async ({ app, page }) => {
 		await app.login("alice");
 		await app.openSession("my-project");
 		await app.switchView("chat");
 		await page.locator("#chat-list .chat-conv-row", { hasText: "Refactor auth flow" }).click();
-		const ta = page.locator(".chat-composer textarea");
-		await ta.click();
-		await page.keyboard.press("Control+k");
-		await expect(page.locator(".switcher-card")).toHaveCount(0);
 		await page.locator("#chat-thread .chat-assistant").first().click();
 		await page.keyboard.press("Control+k");
 		await expect(page.locator(".switcher-card")).toBeVisible();

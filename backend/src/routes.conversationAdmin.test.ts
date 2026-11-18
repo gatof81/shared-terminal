@@ -770,18 +770,13 @@ describe("GET /admin/sessions/:id/recreate (preflight, no effects)", () => {
 	it("blockers are listed, every one of them; an unresolved record is one", async () => {
 		await spinUp();
 		h.capture.revocation = "session";
-		// A newer stable CLI no longer blocks (owner, 2026-11-10); an unreadable one does.
-		h.cli.version = null;
 		let body = (await (await call("GET", `/admin/sessions/${SID}/recreate`)).json()) as {
 			recreatable: boolean;
 			blockers: Array<{ code: string }>;
 		};
 		expect(body.recreatable).toBe(false);
-		expect(body.blockers.map((b) => b.code)).toEqual(
-			expect.arrayContaining(["revoked", "control-marker-incompatible"]),
-		);
+		expect(body.blockers.map((b) => b.code)).toEqual(expect.arrayContaining(["revoked"]));
 		h.capture.revocation = "none";
-		h.cli.version = "2.1.308";
 		await h.attempts.begin(SID, {
 			attemptId: "a1",
 			oContainerId: O_ID,

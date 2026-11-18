@@ -9,18 +9,13 @@ import type { Response } from "express";
 import type { AcpAgents } from "../acp/agents.js";
 import type { BootstrapBroadcaster } from "../bootstrap.js";
 import type { StatsBySession } from "../containerStats.js";
-import type { ComposerService } from "../conversation/composer.js";
 import type { ConversationService } from "../conversation/service.js";
 import type { DockerManager } from "../dockerManager.js";
 import { UploadQuotaExceededError } from "../dockerManager.js";
 import type { ExecRegistry } from "../execRegistry.js";
 import type { IdleSweeperStats } from "../idleSweeper.js";
 import { logger } from "../logger.js";
-import type { ProjectConversationApi } from "../projects/conversation/api.js";
-import type { ProjectArtifacts } from "../projects/conversation/artifacts.js";
-import type { ProjectCollab } from "../projects/conversation/collab.js";
 import type { ProjectDirectory } from "../projects/directory.js";
-import { AgentActiveError } from "../projects/directory.js";
 import type { createAuthRateLimiters, RateLimitConfig, UsernameRateLimiter } from "../rateLimit.js";
 import type { RecreationEngine } from "../recreate/engine.js";
 import { RecreateRetainedError, RecreateUnresolvedError } from "../recreateAttempt.js";
@@ -64,32 +59,12 @@ export interface RouteContext {
 	recreation?: RecreationEngine;
 	// 3.0d — `CONVERSATION_ALLOW_USERS` (§7), lowercase user ids. Absent ⇒ empty.
 	conversationAllowUsers?: ReadonlySet<string>;
-	// 3.2 — the composer (CONVERSATION.md §8). Absent or disabled ⇒ its routes
-	// are not mounted and `canSendInput` is false everywhere.
-	composer?: ComposerService;
-	// P3a — the project directory (docs/PROJECTS.md). Present only when
-	// PROJECT_CHAT_ENABLED is on; absent ⇒ its routes are not mounted and the
-	// session list carries no `binding`. The hard-delete guard does NOT depend on
-	// it: the routes call `assertNoLiveBinding` either way (bindings outlive the flag).
+	// Projects (ACP agents take part in one). Present only when
+	// PROJECT_CHAT_ENABLED is on; absent ⇒ its routes are not mounted.
 	projects?: ProjectDirectory;
 	// Experimental ACP agents. Present only with ACP_AGENTS_ENABLED: the session
 	// create accepts `acpAgent`, `/auth/status` announces `features.acpAgents`.
 	acp?: AcpAgents;
-	// D1 — the project conversation (docs/PROJECT_CONVERSATION.md). Present only
-	// when PROJECT_CONVERSATION_ENABLED is effective; `api` is null until the
-	// store has started (or for good if it could not take the writer lock),
-	// and the routes then answer 503 `project-writer-unavailable`.
-	// D2 adds `artifacts`, and the KEY is present only when
-	// PROJECT_ARTIFACTS_ENABLED is effective (§1): absent ⇒ no artifact route
-	// is mounted and `features` does not announce it.
-	// The `collab` key exists only when PROJECT_RELAY_ENABLED is effective
-	// (§7.1): absent ⇒ no grant route is mounted and `features` does not
-	// announce it.
-	projectConversation?: {
-		api: ProjectConversationApi | null;
-		artifacts?: ProjectArtifacts | null;
-		collab?: ProjectCollab | null;
-	};
 }
 
 // Exported so wsHandler can apply the same upper bound when validating
@@ -227,13 +202,6 @@ export function handleSessionError(err: unknown, res: Response): void {
 		// A carry-over or rollback still retains a container (§2.7.7): a
 		// hard delete would orphan it. Nothing was done.
 		res.status(409).json({ error: "retained-present" });
-	} else if (err instanceof AgentActiveError) {
-		// P3a (03 §2.1): the session is bound to a project agent; the owner
-		// removes the agent first. The hard delete checks twice: refused at the
-		// first check, nothing was done; refused at the second (after kill and
-		// terminate, before the purge), the session is soft-deleted and its
-		// workspace and row are kept — the same verb again finishes once unbound.
-		res.status(409).json({ error: "agent-active" });
 	} else if (err instanceof SessionBusyError) {
 		// Another lifecycle operation holds the session's lock and the wait
 		// cap ran out (or this verb never waits). Nothing was done.

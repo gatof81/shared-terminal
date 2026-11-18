@@ -1,18 +1,11 @@
 import { describe, expect, it } from "vitest";
-import type { Presence } from "./api.js";
 import {
 	ATTENTION_STALE_MS,
 	attentionKind,
 	evidenceSource,
 	lastEvidenceMs,
 } from "./attentionRule.js";
-import {
-	lastEvidenceAt,
-	presentClaim,
-	presentStatus,
-	STALE_EVIDENCE_MS,
-} from "./conversationModel.js";
-import { presentPresence } from "./projectModel.js";
+import { lastEvidenceAt, presentStatus, STALE_EVIDENCE_MS } from "./conversationModel.js";
 
 const NOW = Date.parse("2026-11-06T12:00:00Z");
 const ago = (ms: number) => new Date(NOW - ms).toISOString();
@@ -98,41 +91,5 @@ describe("'needs you' is the CLI's own hook only (owner rule 2026-11-09, #569)",
 		expect(evidenceSource("")).toBe("capture");
 		expect(evidenceSource(":x")).toBe("capture");
 		expect(evidenceSource(undefined)).toBe("capture");
-	});
-
-	it("the Chat switcher and the project page agree on 'needs you' for the same evidence", () => {
-		const clock = { generatedAt: new Date(NOW).toISOString(), receivedAt: NOW };
-		for (const ev of [
-			"hook:PermissionRequest",
-			"hook",
-			"probe:waiting",
-			"reconcile:x",
-			"",
-			"timeout",
-		]) {
-			for (const age of [
-				0,
-				60_000,
-				ATTENTION_STALE_MS - 1,
-				ATTENTION_STALE_MS,
-				ATTENTION_STALE_MS + 1,
-			]) {
-				const x = c("waiting_permission", age, null, ev);
-				// What backend/src/projects/presence.ts derives from the same row.
-				const p: Presence = {
-					value: "needs_attention",
-					detail: "waiting_permission",
-					source: evidenceSource(ev),
-					at: x.statusAt,
-				};
-				const chat = attentionKind(x, NOW) === "attention";
-				const projects = presentPresence(p, clock, NOW).label === "Needs you";
-				expect(chat, `${ev} @ ${age}`).toBe(projects);
-				// The Chat list row and chip: "Needs permission" exactly when it is "Needs you".
-				const row = presentClaim({ status: x.status, at: lastEvidenceAt(x), evidence: ev }, NOW);
-				expect(row.label === "Needs permission", `row ${ev} @ ${age}`).toBe(projects);
-				if (!projects && !row.stale) expect(row.label).toBe("State unknown");
-			}
-		}
 	});
 });

@@ -74,10 +74,10 @@ test.describe("shell v2", () => {
 		await expect(header.locator("#actions-btn")).toHaveCount(0);
 		await app.switchView("chat");
 		await expect(page.locator("#tab-tools #actions-btn")).toBeHidden();
-		// The soft keyboard takes about half the height: the bar stays one line and the composer is reachable.
+		// The soft keyboard takes about half the height: the bar stays one line and the thread's end is reachable.
 		await page.locator("#chat-list .chat-conv-row", { hasText: "Refactor auth flow" }).click();
 		await page.setViewportSize({ width: 390, height: 420 });
-		await expect(page.locator(".chat-composer textarea")).toBeInViewport();
+		await expect(page.locator("#chat-thread .chat-readonly-note")).toBeInViewport();
 		expect((await box("header")).height).toBeLessThanOrEqual(48);
 		await expect(page.locator("#view-terminal-btn")).toBeInViewport();
 		await page.setViewportSize({ width: 390, height: 844 });

@@ -62,24 +62,21 @@ describe("features.projectChat", () => {
 describe("project requests", () => {
 	it("decide on `error`, never `message`", async () => {
 		const api = await loadApi();
-		fetchSpy.mockResolvedValueOnce(
-			res(409, { error: "session-taken", message: "handle-taken (a misleading message)" }),
-		);
-		const a = await api.createAgent("p1", { handle: "dev", role: null, sessionId: "s1" }, "id-1");
-		expect(a).toEqual({ ok: false, status: 409, code: "session-taken" });
+		fetchSpy.mockResolvedValueOnce(res(409, { error: "project-limit", message: "misleading" }));
+		expect(await api.createProject("X", "id-1")).toEqual({
+			ok: false,
+			status: 409,
+			code: "project-limit",
+		});
 	});
 
-	it("sends one clientRequestId, the role only when given", async () => {
+	it("create sends the name and one clientRequestId", async () => {
 		const api = await loadApi();
-		fetchSpy.mockResolvedValueOnce(res(201, { agentId: "a1", replayed: false }));
-		await api.createAgent("p 1", { handle: "dev", role: null, sessionId: "s1" }, "id-1");
+		fetchSpy.mockResolvedValueOnce(res(201, { projectId: "p1", replayed: false }));
+		await api.createProject("Web", "id-1");
 		const [url, init] = fetchSpy.mock.calls[0]!;
-		expect(String(url)).toMatch(/\/api\/projects\/p%201\/agents$/);
-		expect(JSON.parse(init.body)).toEqual({
-			handle: "dev",
-			sessionId: "s1",
-			clientRequestId: "id-1",
-		});
+		expect(String(url)).toMatch(/\/api\/projects$/);
+		expect(JSON.parse(init.body)).toEqual({ name: "Web", clientRequestId: "id-1" });
 	});
 
 	it("no answer is `network`; a 2xx without its body is `bad-answer` — neither proves a write", async () => {
@@ -94,10 +91,11 @@ describe("project requests", () => {
 		});
 	});
 
-	it("DELETE 204 is success", async () => {
+	it("archive is one DELETE; 204 is success", async () => {
 		const api = await loadApi();
 		fetchSpy.mockResolvedValueOnce(res(204, null));
-		expect(await api.removeAgent("p", "a")).toEqual({ ok: true, status: 204, body: null });
+		expect(await api.archiveProject("p 1")).toEqual({ ok: true, status: 204, body: null });
+		expect(String(fetchSpy.mock.calls[0]![0])).toMatch(/\/api\/projects\/p%201$/);
 	});
 
 	it("an answer that lands after a logout is `stale` (another account's)", async () => {
@@ -111,222 +109,5 @@ describe("project requests", () => {
 		await api.logout();
 		release(res(200, { projects: [{ projectId: "p" }], can: {} }));
 		expect(await pending).toMatchObject({ ok: false, code: "stale" });
-	});
-});
-
-describe("D2: features.projectArtifacts and the artifact reads", () => {
-	const all = { projectChat: true, projectConversation: true, projectArtifacts: true };
-
-	it("needs projectArtifacts AND the conversation on; anything else is off", async () => {
-		const api = await loadApi();
-		fetchSpy.mockResolvedValueOnce(res(200, { ...STATUS, features: all }));
-		await api.checkAuthStatus();
-		expect(api.projectArtifactsEnabled()).toBe(true);
-		fetchSpy.mockResolvedValueOnce(
-			res(200, { ...STATUS, features: { ...all, projectConversation: undefined } }),
-		);
-		await api.checkAuthStatus();
-		expect(api.projectArtifactsEnabled()).toBe(false);
-		fetchSpy.mockResolvedValueOnce(
-			res(200, { ...STATUS, features: { ...all, projectArtifacts: "1" } }),
-		);
-		await api.checkAuthStatus();
-		expect(api.projectArtifactsEnabled()).toBe(false);
-	});
-
-	const bytesRes = (status: number, text: string): Response =>
-		({
-			status,
-			ok: status >= 200 && status < 300,
-			arrayBuffer: async () => new TextEncoder().encode(text).buffer,
-			json: async () => null,
-		}) as unknown as Response;
-	const sha256 = async (t: string) =>
-		[...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(t)))]
-			.map((x) => x.toString(16).padStart(2, "0"))
-			.join("");
-
-	it("returns the text only when it hashes to the sha256 it was asked for", async () => {
-		const api = await loadApi();
-		const good = await sha256("hello\n");
-		fetchSpy.mockResolvedValueOnce(bytesRes(200, "hello\n"));
-		expect(await api.fetchProjectArtifactText("p", good)).toEqual({ ok: true, text: "hello\n" });
-		expect(String(fetchSpy.mock.calls[0]![0])).toMatch(
-			/\/projects\/p\/conversation\/artifacts\/[0-9a-f]{64}$/,
-		);
-		fetchSpy.mockResolvedValueOnce(bytesRes(200, "tampered\n"));
-		expect(await api.fetchProjectArtifactText("p", good)).toEqual({
-			ok: false,
-			status: 200,
-			code: "hash-mismatch",
-		});
-	});
-
-	it("register: only a well-formed sha256 answer counts; an error carries its code", async () => {
-		const api = await loadApi();
-		fetchSpy.mockResolvedValueOnce(
-			res(201, { sha256: "a".repeat(64), name: "f.diff", bytes: 3, replayed: false }),
-		);
-		const ok = await api.registerProjectArtifact("p", { agentId: "a1", path: "out/f.diff" });
-		expect(ok.ok).toBe(true);
-		const init = fetchSpy.mock.calls[0]![1] as RequestInit;
-		expect(init.method).toBe("POST");
-		expect(JSON.parse(String(init.body))).toEqual({ agentId: "a1", path: "out/f.diff" });
-		fetchSpy.mockResolvedValueOnce(res(201, { sha256: "XYZ", name: "f", bytes: 3 }));
-		expect(await api.registerProjectArtifact("p", { agentId: "a1", path: "f" })).toMatchObject({
-			ok: false,
-			code: "bad-answer",
-		});
-		fetchSpy.mockResolvedValueOnce(res(413, { error: "artifact-too-large" }));
-		expect(await api.registerProjectArtifact("p", { agentId: "a1", path: "f" })).toEqual({
-			ok: false,
-			status: 413,
-			code: "artifact-too-large",
-		});
-	});
-
-	it("a body that fails mid-read is answered as a network error, never thrown", async () => {
-		const api = await loadApi();
-		fetchSpy.mockResolvedValueOnce({
-			status: 200,
-			ok: true,
-			arrayBuffer: async () => {
-				throw new TypeError("network error");
-			},
-			json: async () => null,
-		} as unknown as Response);
-		expect(await api.fetchProjectArtifactText("p", "a".repeat(64))).toEqual({
-			ok: false,
-			status: 200,
-			code: "network",
-		});
-	});
-});
-
-describe("D3: features.projectRelay, the collab body and the grant actions", () => {
-	const all = { projectChat: true, projectConversation: true, projectRelay: true };
-
-	it("needs projectRelay AND the conversation on; anything else is off", async () => {
-		const api = await loadApi();
-		expect(api.projectRelayEnabled()).toBe(false);
-		fetchSpy.mockResolvedValueOnce(res(200, { ...STATUS, features: all }));
-		await api.checkAuthStatus();
-		expect(api.projectRelayEnabled()).toBe(true);
-		for (const features of [
-			{ ...all, projectConversation: undefined },
-			{ ...all, projectRelay: "true" },
-			{ projectChat: true, projectConversation: true },
-			null,
-		]) {
-			fetchSpy.mockResolvedValueOnce(res(200, { ...STATUS, features }));
-			await api.checkAuthStatus();
-			expect(api.projectRelayEnabled()).toBe(false);
-		}
-	});
-
-	it("a refusal carries the answer's `detail` only when it is a string", async () => {
-		const api = await loadApi();
-		const body = {
-			clientMessageId: "c1",
-			text: "t",
-			to: ["a"],
-			collab: { mode: "ask" as const, with: "b", maxMessages: 2 },
-		};
-		fetchSpy.mockResolvedValueOnce(
-			res(409, { error: "collab-unavailable", detail: "same-session" }),
-		);
-		expect(await api.postProjectMessage("p1", body)).toEqual({
-			ok: false,
-			status: 409,
-			code: "collab-unavailable",
-			detail: "same-session",
-		});
-		expect(JSON.parse(fetchSpy.mock.calls[0]![1].body)).toEqual(body);
-		fetchSpy.mockResolvedValueOnce(
-			res(409, { error: "agent-in-collab", detail: { grantId: "c" } }),
-		);
-		expect(await api.postProjectMessage("p1", body)).toEqual({
-			ok: false,
-			status: 409,
-			code: "agent-in-collab",
-		});
-		fetchSpy.mockResolvedValueOnce(res(409, { error: "project-log-full" }));
-		expect(await api.postProjectMessage("p1", body)).toEqual({
-			ok: false,
-			status: 409,
-			code: "project-log-full",
-		});
-	});
-
-	it("pause / resume / revoke are one POST each, with no body, to the grant's own path", async () => {
-		const api = await loadApi();
-		for (const verb of ["pause", "resume", "revoke"] as const) {
-			fetchSpy.mockResolvedValueOnce(res(200, { grantId: "c-0123456789ab", state: "paused" }));
-			expect(await api.postGrantAction("p 1", "c-0123456789ab", verb)).toMatchObject({
-				ok: true,
-				body: { state: "paused" },
-			});
-			const [url, init] = fetchSpy.mock.calls.at(-1)!;
-			expect(String(url)).toMatch(
-				new RegExp(`/projects/p%201/conversation/grants/c-0123456789ab/${verb}$`),
-			);
-			expect(init.method).toBe("POST");
-			expect(init.body).toBeUndefined();
-		}
-		fetchSpy.mockResolvedValueOnce(res(200, { grantId: "c-0123456789ab", state: "revoked" }));
-		expect(await api.postGrantAction("p1", "c-0123456789ab", "revoke")).toMatchObject({
-			ok: false,
-			code: "bad-answer",
-		});
-		fetchSpy.mockResolvedValueOnce(res(409, { error: "grant-ended", detail: "budget" }));
-		expect(await api.postGrantAction("p1", "c-0123456789ab", "resume")).toMatchObject({
-			ok: false,
-			status: 409,
-			code: "grant-ended",
-		});
-	});
-});
-
-describe("§3.6: features.projectQueue, whenFree and the cancel", () => {
-	const all = { projectChat: true, projectConversation: true, projectQueue: true };
-
-	it("needs projectQueue AND the conversation on; an older backend leaves it off", async () => {
-		const api = await loadApi();
-		expect(api.projectQueueEnabled()).toBe(false);
-		fetchSpy.mockResolvedValueOnce(res(200, { ...STATUS, features: all }));
-		await api.checkAuthStatus();
-		expect(api.projectQueueEnabled()).toBe(true);
-		for (const features of [
-			{ ...all, projectConversation: undefined },
-			{ ...all, projectQueue: "true" },
-			{ projectChat: true, projectConversation: true, projectRelay: true },
-			null,
-		]) {
-			fetchSpy.mockResolvedValueOnce(res(200, { ...STATUS, features }));
-			await api.checkAuthStatus();
-			expect(api.projectQueueEnabled()).toBe(false);
-		}
-	});
-
-	it("whenFree travels in the body; the cancel is one POST with no body to the message's own path", async () => {
-		const api = await loadApi();
-		const body = { clientMessageId: "c1", text: "t", to: ["a"], whenFree: true as const };
-		fetchSpy.mockResolvedValueOnce(
-			res(202, { msgId: "m1", deliveries: [{ agentId: "a", state: "queued" }] }),
-		);
-		expect((await api.postProjectMessage("p1", body)).ok).toBe(true);
-		expect(JSON.parse(fetchSpy.mock.calls[0]![1].body)).toEqual(body);
-		fetchSpy.mockResolvedValueOnce(res(200, { msgId: "m1" }));
-		expect((await api.cancelQueuedProjectMessage("p 1", "m/1")).ok).toBe(true);
-		const [url, init] = fetchSpy.mock.calls[1]!;
-		expect(String(url)).toContain("/projects/p%201/conversation/messages/m%2F1/cancel");
-		expect(init.method).toBe("POST");
-		expect(init.body).toBeUndefined();
-		fetchSpy.mockResolvedValueOnce(res(409, { error: "queue-full" }));
-		expect(await api.postProjectMessage("p1", body)).toEqual({
-			ok: false,
-			status: 409,
-			code: "queue-full",
-		});
 	});
 });

@@ -147,7 +147,7 @@ test.describe("chat: rename and archive (v1.8 §6.2)", () => {
 		await expect(page.locator("#chat-list .chat-conv-row")).toHaveCount(2);
 	});
 
-	test("an archived conversation that is live again is surfaced in Active, marked, with Unarchive; the composer is unaffected", async ({
+	test("an archived conversation that is live again is surfaced in Active, marked, with Unarchive", async ({
 		app,
 		backend,
 		page,
@@ -160,9 +160,9 @@ test.describe("chat: rename and archive (v1.8 §6.2)", () => {
 			page.locator('.chat-filter-btn[data-filter="archived"] .chat-filter-live'),
 		).toHaveText("1 live");
 
-		// Archive changes nothing for the composer (§6.2).
+		// An archived conversation still opens, read-only.
 		await r.locator(".chat-conv-row").click();
-		await expect(page.locator(".chat-composer textarea")).toBeEnabled();
+		await expect(page.locator("#chat-thread .chat-readonly-note")).toBeVisible();
 		await app.escape().catch(() => undefined);
 		if (await page.locator("#chat-back-btn").isVisible())
 			await page.locator("#chat-back-btn").click();

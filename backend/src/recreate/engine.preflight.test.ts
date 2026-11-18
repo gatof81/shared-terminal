@@ -109,7 +109,7 @@ describe("preflight: terminal blockers end it before the expensive checks", () =
 		expect(h.docker.mutations()).toEqual([]);
 	});
 
-	it("eligible candidate (stopped, flag on, requested) ⇒ full preflight: layer, skills and CLI all checked", async () => {
+	it("eligible candidate (stopped, flag on, requested) ⇒ full preflight: layer and skills checked", async () => {
 		const h = await setup();
 		const seen = instrument(h, 20);
 		const before = stateOf(h);
@@ -125,13 +125,8 @@ describe("preflight: terminal blockers end it before the expensive checks", () =
 			blockers: [{ code: "layer-home", count: 1 }],
 		});
 		h.docker.changesOf.delete(O_ID);
-		// The CLI check still runs: an unreadable workspace CLI blocks (a newer
-		// stable release no longer does, owner 2026-11-10).
-		h.cli.version = null;
-		expect(await h.engine.preflight(SID)).toMatchObject({
-			recreatable: false,
-			blockers: [{ code: "control-marker-incompatible", detail: "unreadable" }],
-		});
+		// No rule on the workspace CLI's version any more: the candidate is recreatable.
+		expect(await h.engine.preflight(SID)).toMatchObject({ recreatable: true });
 	});
 
 	it("a fixable blocker (not-requested) is not terminal: the full list is still reported", async () => {

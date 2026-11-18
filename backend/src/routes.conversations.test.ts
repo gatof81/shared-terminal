@@ -309,35 +309,6 @@ describe("PATCH /api/sessions/:id/conversations/:cid", () => {
 		await start(undefined);
 		expect((await patchReq("s1", "c1", { title: "x" })).status).toBe(404);
 	});
-	it("archiving never changes composer eligibility: the composer sees cid/kind/pane only, same answer", async () => {
-		const availability = vi.fn(
-			async (_sid: string, items: Array<{ cid: string; kind: string; paneId: string | null }>) =>
-				new Map(items.map((i) => [i.cid, { canSendInput: true, composer: { blocked: false } }])),
-		);
-		const composer = {
-			availability,
-			noteCapture: vi.fn(),
-			lastCaptureEffective: vi.fn(() => true),
-		};
-		const summariesWithMeta = vi.fn(async () => ({
-			conversations: [
-				summary({ sessionId: "c1", paneId: "%0", archivedAt: "2026-11-03T10:00:00.000Z" }),
-				summary({ sessionId: "c2", paneId: "%1", archivedAt: null }),
-			],
-			meta: "ok",
-		}));
-		await start({ summariesWithMeta } as unknown as ConversationService, composer);
-		const body = await (await fetch(`${base}/api/sessions/s1/conversations?capture=0`)).json();
-		expect(availability.mock.calls[0][1]).toEqual([
-			{ cid: "c1", kind: "interactive", paneId: "%0" },
-			{ cid: "c2", kind: "interactive", paneId: "%1" },
-		]);
-		expect(body.conversations.map((c: { canSendInput: boolean }) => c.canSendInput)).toEqual([
-			true,
-			true,
-		]);
-		expect(body.conversations[0].archivedAt).not.toBeNull();
-	});
 });
 
 // ── 3.1 reads ───────────────────────────────────────────────────────────────

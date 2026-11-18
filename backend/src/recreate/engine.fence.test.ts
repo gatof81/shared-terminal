@@ -53,7 +53,7 @@ async function restart(h: H) {
 		lock,
 		capture: h.capture,
 		readWorkspaceSkill: async () => ({ kind: "absent" }),
-		readCliVersion: async () => "2.1.308",
+
 		diskFree: async () => h.disk.free,
 		backupFresh: async () => h.backup.fresh,
 		config: FAST,

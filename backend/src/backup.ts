@@ -63,12 +63,6 @@ import {
 } from "./conversation/revocation.js";
 import { d1Query, migrateDb } from "./db.js";
 import { logger } from "./logger.js";
-import {
-	backupProjects,
-	type ProjectBackupEntry,
-	preflightProjectsRestore,
-	restoreProjects,
-} from "./projects/conversation/backupProjects.js";
 import { CONTROL_DIR, fsyncDir } from "./recreateAttempt.js";
 import { decryptSecret, deriveSubkey, type EncryptedSecret } from "./secrets.js";
 
@@ -142,8 +136,12 @@ export interface BackupManifest {
 	workspaces: Record<string, WorkspaceEntry>;
 	/** `.conversations/REVOKED_ALL` existed: copied to `<backup>/REVOKED_ALL`. */
 	globalRevocation?: true;
-	/** `.projects/<pid>` logs and artifacts (PROJECT_CONVERSATION.md §8). Absent ⇔ none on disk. */
-	projects?: Record<string, ProjectBackupEntry>;
+	/**
+	 * Backups taken before the retired project conversation (D1–D3) carry
+	 * `<backup>/projects/<pid>.tar.gz` (plain tarballs of `.projects/<pid>`).
+	 * Never restored any more: a restore says where they are.
+	 */
+	projects?: Record<string, unknown>;
 	/** VAPID_PUBLIC_KEY when the backup was taken (public; absent = push not
 	 *  configured, or a backup older than #560). The subscriptions only work
 	 *  under the keypair they were created for: restore warns on a mismatch. */
@@ -310,19 +308,6 @@ export async function runBackup(outDir: string): Promise<BackupManifest> {
 		if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
 	}
 
-	// The project conversation logs (PROJECT_CONVERSATION.md §8): copied
-	// from a staging copy, never tarred live — see backupProjects.ts.
-	const projects = await backupProjects(
-		WORKSPACE_ROOT,
-		outDir,
-		(p) => secure(p, "file", perms),
-		logger,
-	);
-	if (Object.keys(projects).length > 0) {
-		await secure(path.join(outDir, "projects"), "dir", perms);
-		manifest.projects = projects;
-	}
-
 	// Manifest last: an interrupted run leaves a dir without manifest.json,
 	// which restore refuses — no half-backup can be replayed by accident.
 	await fs.writeFile(
@@ -443,10 +428,7 @@ async function readJsonl(dir: string, table: string): Promise<Record<string, unk
 		.map((l) => JSON.parse(l) as Record<string, unknown>);
 }
 
-export async function runRestore(
-	inDir: string,
-	opts: { force?: boolean; withoutProjects?: boolean } = {},
-): Promise<void> {
+export async function runRestore(inDir: string, opts: { force?: boolean } = {}): Promise<void> {
 	const manifestRaw = await fs.readFile(path.join(inDir, "manifest.json"), "utf-8").catch(() => {
 		throw new Error(
 			`${inDir} has no manifest.json — not a complete backup (interrupted run?); refusing`,
@@ -454,46 +436,18 @@ export async function runRestore(
 	});
 	const manifest = JSON.parse(manifestRaw) as BackupManifest;
 
-	// `.projects` needs the flag off and the backend's writer lock free, and
-	// its tarballs pass their allowlist here — all before the first write
-	// (migrateDb below is one). The lock is held until the restore ends.
-	// A refusal stops the WHOLE restore (§8): tables without the project
-	// logs they describe is a partial restore, and that only happens when
-	// the operator asks for it by name (--without-projects), never as the
-	// outcome of a run that then prints "complete".
-	// The backup's own files first (reads only, no lock taken yet): a damaged
-	// or tampered tarball or dump found half-way would leave tables restored
-	// and workspaces not — the same partial state, with no flag asking for it.
+	// The backup's own files first (reads only): a damaged or tampered
+	// tarball or dump found half-way would leave tables restored and
+	// workspaces not.
 	const workspaces = await preflightWorkspaces(inDir, manifest);
 	await preflightDump(inDir, manifest);
-	const skipped = opts.withoutProjects === true ? Object.keys(manifest.projects ?? {}).length : 0;
-	let projectsPlan: Awaited<ReturnType<typeof preflightProjectsRestore>> = null;
-	if (opts.withoutProjects !== true) {
-		try {
-			projectsPlan = await preflightProjectsRestore(inDir, manifest.projects, WORKSPACE_ROOT);
-		} catch (err) {
-			throw new Error(
-				`${(err as Error).message}. Nothing was restored. Fix that and rerun, or pass ` +
-					"--without-projects to restore the tables and workspaces alone",
-			);
-		}
-	}
-	try {
-		await restoreAll(inDir, manifest, workspaces, opts);
-		if (projectsPlan) {
-			await restoreProjects(inDir, manifest.createdAt, projectsPlan, WORKSPACE_ROOT, opts, logger);
-		}
-	} finally {
-		projectsPlan?.lock.release();
-	}
-	if (skipped > 0) {
+	await restoreAll(inDir, manifest, workspaces, opts);
+	const legacy = Object.keys(manifest.projects ?? {}).length;
+	if (legacy > 0)
 		logger.warn(
-			`[restore] PARTIAL from ${inDir} (backup of ${manifest.createdAt}): tables and workspaces restored; ` +
-				`.projects NOT restored (--without-projects, ${skipped} project(s) in the backup) — ` +
-				"the restored project rows have no conversation log until a full restore",
+			`[restore] ${legacy} project conversation log(s) of the retired D1–D3 are in ${path.join(inDir, "projects")} ` +
+				"(plain .tar.gz of .projects/<pid>); not restored — nothing reads them any more",
 		);
-		return;
-	}
 	logger.info(`[restore] complete from ${inDir} (backup of ${manifest.createdAt})`);
 }
 
@@ -1126,9 +1080,8 @@ async function publishNoClobber(file: string, bytes: string): Promise<boolean> {
 if (typeof require !== "undefined" && require.main === module) {
 	const [mode, dir, ...rest] = process.argv.slice(2);
 	const force = rest.includes("--force");
-	const withoutProjects = rest.includes("--without-projects");
 	const usage =
-		"usage: node dist/backup.js backup [outDir] | restore <inDir> [--force] [--without-projects] | harden [backupsDir] [--write]";
+		"usage: node dist/backup.js backup [outDir] | restore <inDir> [--force] | harden [backupsDir] [--write]";
 	const run = async (): Promise<void> => {
 		if (mode === "backup") {
 			const out =
@@ -1137,7 +1090,7 @@ if (typeof require !== "undefined" && require.main === module) {
 			await runBackup(out);
 		} else if (mode === "restore") {
 			if (!dir) throw new Error(usage);
-			await runRestore(dir, { force, withoutProjects });
+			await runRestore(dir, { force });
 		} else if (mode === "harden") {
 			// #562 — existing backups. Dry run unless --write; at most one dir.
 			const parsed = parseHardenArgs(process.argv.slice(3), path.join(WORKSPACE_ROOT, ".backups"));

@@ -5,7 +5,7 @@
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { v4 as uuidv4 } from "uuid";
-import { type RawData, WebSocket, type WebSocketServer } from "ws";
+import { WebSocket, type WebSocketServer } from "ws";
 import type { AcpWsHub } from "./acp/ws.js";
 import { verifyWsToken } from "./auth.js";
 import type { BootstrapBroadcaster, BootstrapMessage } from "./bootstrap.js";
@@ -13,8 +13,6 @@ import type { ConversationWsHub } from "./conversation/ws.js";
 import type { DockerManager } from "./dockerManager.js";
 import { logger } from "./logger.js";
 import { recordObserveEnd, recordObserveStart } from "./observeLog.js";
-import type { ProjectConversationApi } from "./projects/conversation/api.js";
-import type { ProjectWsHub } from "./projects/conversation/ws.js";
 import { getRequestId } from "./requestContext.js";
 import { TERMINAL_DIM_MAX } from "./routes.js";
 import { ForbiddenError, NotFoundError, type SessionManager } from "./sessionManager.js";
@@ -65,9 +63,6 @@ export function handleWsConnection(
 	idleSweeper?: { bump: (sessionId: string) => void },
 	// Phase 3.1 — `/ws/conversation/<sid>`; absent ⇒ that path is refused.
 	conversationWs?: ConversationWsHub,
-	// D1 — `/ws/project/<pid>` (PROJECT_CONVERSATION.md §5); absent ⇒ refused
-	// (and the upgrade filter does not even admit the path).
-	projectWs?: { api: ProjectConversationApi | null; hub: ProjectWsHub | null },
 	// Experimental ACP agents — `/ws/acp`; absent ⇒ refused (and not admitted by the filter).
 	acpWs?: AcpWsHub,
 ): void {
@@ -162,46 +157,6 @@ export function handleWsConnection(
 					return;
 				}
 				log.error(`[ws] conversation auth failed for ${sid}: ${(err as Error).message}`);
-				sendError(ws, "Internal error");
-				ws.close(1011, "Internal error");
-			},
-		);
-		return;
-	}
-
-	// D1 — `/ws/project/<projectId>`: the project conversation's events,
-	// owner only (a foreign or missing project is the same 1008).
-	const projectMatch = url.match(/\/ws\/project\/([^/?#]+)/);
-	if (projectMatch) {
-		const pid = projectMatch[1]!;
-		const api = projectWs?.api;
-		const hub = projectWs?.hub;
-		if (!api || !hub || api.store.unavailable) {
-			sendError(ws, "Project conversation unavailable");
-			ws.close(1011, "Project conversation unavailable");
-			return;
-		}
-		// The client subscribes on `open`; until the owner check answers, its
-		// frames are held here and handed to the hub in order.
-		const early: RawData[] = [];
-		const hold = (d: RawData) => {
-			if (early.length < 16) early.push(d);
-		};
-		ws.on("message", hold);
-		void api.owns(userId, pid).then(
-			(ok) => {
-				ws.off("message", hold);
-				if (ws.readyState !== WebSocket.OPEN) return;
-				if (!ok) {
-					sendError(ws, "Project not found");
-					ws.close(1008, "Not found");
-					return;
-				}
-				hub.serve(ws, pid, early);
-			},
-			(err) => {
-				ws.off("message", hold);
-				log.error(`[ws] project auth failed for ${pid}: ${(err as Error).message}`);
 				sendError(ws, "Internal error");
 				ws.close(1011, "Internal error");
 			},
