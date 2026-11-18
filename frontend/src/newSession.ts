@@ -4,8 +4,8 @@
  * (#195) and the templates page (#195). Extracted from main.ts (#312).
  *
  * Same TDZ-safe pattern as the other splits: DOM re-queried locally; the
- * main.ts imports (openSession / refreshSessions / renderSessionList /
- * showToast / sessions) are used only inside functions. The three modal
+ * main.ts imports (openSession / refreshSessions / addCreatedSession /
+ * showToast) are used only inside functions. The three modal
  * close functions are exported for main.ts's Escape handler.
  */
 
@@ -38,8 +38,8 @@ import {
 } from "./api.js";
 import { confirmDialog, createDialog } from "./components/dialog.js";
 import { parseDotEnv } from "./envParser.js";
-import { sessions, showToast } from "./main.js";
-import { openSession, refreshSessions, renderSessionList } from "./sessionCore.js";
+import { showToast } from "./main.js";
+import { addCreatedSession, openSession, refreshSessions } from "./sessionCore.js";
 
 // ── DOM (re-queried locally) — added below after tsc enumerates them ──────
 const newSessionBtn = document.getElementById("new-session-btn") as HTMLButtonElement;
@@ -1240,8 +1240,7 @@ newSessionForm.addEventListener("submit", async (e) => {
 		const session = await createSession(name, undefined, config, acpAgent);
 		// The sidebar files an agent session under its project from this list.
 		if (acpAgent) await acpListAgents().then(setAcpAgents, () => {});
-		sessions.unshift(session);
-		renderSessionList();
+		addCreatedSession(session);
 		if (session.bootstrapping) {
 			// PR 185b2b: postCreate is running asynchronously on the
 			// server. Switch the modal into live-tail mode and wait
