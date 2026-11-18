@@ -1,5 +1,7 @@
 # Conversación de proyecto por el Composer (D1–D3)
 
+> **Alcance (2026-11).** Este contrato describe la conversación de proyecto que entrega por el **Composer** (D1–D3). Sigue vigente mientras esté activa. Project Chat sobre ACP —mismo almacén de mensajes que el Chat individual de los agentes ACP— está en desarrollo ([#674](https://github.com/gatof81/shared-terminal/pull/674), [ACP_AGENTS.md §5](./ACP_AGENTS.md#5-chat-and-project-chat)) y está pensado para reemplazarla.
+
 Estado: **contrato vinculante, v0.3** (aprobado por el responsable el 2026-11-12), con las
 precisiones de v0.3.1 (D1-b) y v0.3.2 (D2, propuestas en su PR), y la enmienda **v0.3.3** (D2, fix F4)
 **propuesta y pendiente de aprobación del responsable**, y la enmienda **v0.4** (D3 mínimo: consulta

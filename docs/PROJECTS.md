@@ -1,5 +1,7 @@
 # Project & agent directory (P3a) — binding contract
 
+> **Scope (2026-11).** This contract covers the project directory and the Composer-bound agents (`agent_bindings`). ACP agents are a separate, experimental model (an agent attached to its own session, [ACP_AGENTS.md](./ACP_AGENTS.md)); how ACP agents join projects is in development ([#674](https://github.com/gatof81/shared-terminal/pull/674)) and not part of this contract.
+
 Status: **P3a**, behind `PROJECT_CHAT_ENABLED` (off by default). Design source: `docs/design/project-chat/`
 (PR #512) — 03-protocol §1/§2.1/§6.1, 14-agent-teams-research (AD1–AD12), 15-ux-alignment-and-contract
 (§3, amendments E-1…E-9, decisions D-UX0…D-UX10, approved 2026-11-07). Change this document before the

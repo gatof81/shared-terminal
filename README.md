@@ -1,195 +1,238 @@
 # Shared Terminal
 
-**Persistent, isolated Claude Code workspaces you can reach from any browser — your laptop, a tablet or your phone.**
+**A self-hosted web platform for running development environments and coding agents — reachable
+from any browser, running on your own server, never on your laptop.**
 
-Shared Terminal is a self-hosted service that gives each project its own Docker container with
-Claude Code, git and the usual dev tools, running inside tmux. Close the tab, lose Wi-Fi or switch
-devices: the session keeps running, and every browser tab or device that opens it attaches to the
-same terminal. Next to the terminal you can follow what Claude Code is doing as a readable
-conversation, send it a message, browse the workspace and review the git diff, all without touching
-the container. Sessions are stopped, restarted and recovered without losing the workspace, which
-lives on the host, not in the container.
+Shared Terminal gives every piece of work its own isolated Docker container with a persistent
+workspace. You open it from a browser — laptop, tablet or phone — and get a real terminal, a file
+browser, the Git diff and a chat with the agent working there. Close the tab or lose the
+connection: the container keeps running, and the next browser that opens it picks up exactly where
+things are. Agents keep working while you're away; their messages are stored, not lost with a
+browser tab.
 
 <p align="center">
   <img src="docs/images/readme/terminal-desktop.png" alt="A running session: sessions sidebar, the Terminal / Files / Git / Chat view tabs and a tmux terminal" width="820">
 </p>
 
-## What you can use today
+## Where it's going
 
-Everything below is implemented on `main` and included in the deployed backend. Some features are
-opt-in through configuration; those are marked.
+The target architecture is:
+
+**Web UI → shared messaging API → sessions whose agents are driven through ACP.**
+
+- **Docker is only the execution environment.** A session is a container plus a workspace; it
+  should not care which agent runs inside it, or which version.
+- **Agents are independent.** Each has its own context, repository and tools, and is addressed by
+  name (`@developer`, `@reviewer`).
+- **One durable messaging API** carries messages from you to an agent and between agents, from the
+  web UI or from a small CLI inside the container.
+- **[ACP](https://agentclientprotocol.com) (Agent Client Protocol)** drives the agent directly — no
+  screen-scraping of a terminal UI. ACP is provider-neutral: the aim is Claude, Codex, Pi, OpenCode
+  and others behind the same API.
+
+Today ACP is implemented and tested **with Claude only**, and it is experimental (off by default).
+Support for other agents and for running sessions on more than one host is **planned, not
+implemented**. See [Status](#status) for the exact line.
+
+## What you can do today
 
 **Sessions**
 
-- Create, stop, start, soft-delete (workspace kept, restartable) and hard-delete (workspace purged) sessions.
-- Per-session config at creation: env vars (secret values AES-256-GCM-encrypted at rest), git repo clone
-  (HTTPS/SSH, PAT or key), dotfiles repo, agent-config seed, git identity, `postCreate` / `postStart`
-  hooks with a live bootstrap log, CPU/memory caps.
-- Reusable **templates** (secrets are never stored in a template), **per-user quotas** (session count,
-  total CPU/RAM) and **idle auto-stop**.
+- Create, stop, start, soft-delete (workspace kept, restartable) and hard-delete (workspace purged)
+  sessions, each in its own container.
+- Per-session config at creation: env vars (secrets encrypted at rest), Git repo clone, dotfiles,
+  Git identity, `postCreate` / `postStart` hooks with a live bootstrap log, CPU/memory caps.
+- Templates, per-user quotas, idle auto-stop.
 
-**Terminal**
+**Terminal** — xterm.js attached to tmux in the container: several tabs per session, reconnect
+without gaps or duplicates, many browsers on the same tab, search, and a key bar on touch devices.
 
-- xterm.js attached to tmux in the container; several tabs per session, each its own tmux session.
-- Reconnect replays the current screen (colours and cursor) and then streams live output — no gaps,
-  no duplicates. Many browsers can watch and type into the same tab.
-- Search in the scrollback, adjustable font size, and a key bar (Esc, Tab, Ctrl, arrows…) on touch devices.
+**Files and Git** (read-only) — browse and preview the workspace (Markdown, code, images), download
+files; Git status, per-file diffs and recent commits. Git runs inside the container, never on the
+host.
 
-**Chat view** — the Claude Code conversation, live (opt-in: `CONVERSATION_ENABLED` plus per-session capture)
+**Chat** — talk to the agent of a session (see [Two kinds of sessions](#two-kinds-of-sessions)).
 
-- Hook-based conversation capture renders each Claude Code conversation as a thread: your prompts,
-  grouped tool calls, the final report, and subagents in their own panel.
-- Live updates over WebSocket, "Load earlier" paging, rename and archive, and a conversation switcher
-  (`Ctrl K`) across sessions.
-- Privacy by design: tool calls are summarised structurally (program, file path, URL host), never the
-  full command or tool output.
+**Projects** — group sessions into projects whose agents have a name, a role and a presence state.
 
-**Composer** — type to Claude Code from the Chat view (opt-in: `CONVERSATION_COMPOSER_ENABLED`)
-
-- Send a message to the interactive Claude Code CLI running in the session's terminal, with
-  explicit delivery states (delivered / unconfirmed / failed) and no automatic retries.
-- The Composer for CLI *background* sessions exists but is **experimental and off**
-  (`CONVERSATION_COMPOSER_BG_ENABLED`).
-
-**Workspace Explorer and Git Changes** (read-only)
-
-- **Files**: browse the workspace, preview text, rendered Markdown, syntax highlighting and images,
-  download files. Works on stopped sessions too; credential paths (`.env*`, `.ssh/`, `.git/`…) are refused.
-- **Git**: status, per-file unified diff and recent commits. Git runs inside the session container,
-  never on the host.
+**Also** — port exposure on per-session subdomains, an HTTP exec API for automation, an admin
+dashboard (live CPU/memory, force actions, quotas, read-only observe with an audit trail), backup &
+restore, and a phone-friendly layout.
 
 <p align="center">
-  <img src="docs/images/readme/chat-desktop.png" alt="Chat view: conversation list, a thread with the prompt, a grouped tool call and Claude's final report, and the Composer" width="49%">
+  <img src="docs/images/readme/chat-desktop.png" alt="Chat view: conversation list, a thread with the prompt, a grouped tool call and the agent's final report" width="49%">
   <img src="docs/images/readme/git-desktop.png" alt="Git Changes view: changed and untracked files, recent commits and a unified diff" width="49%">
 </p>
 
-**Phone-friendly**
+## Two kinds of sessions
 
-The same app on a phone: one pane at a time, a bottom navigation between the views and a key bar
-on the terminal.
+| | **Traditional session** | **ACP agent session** (experimental) |
+| --- | --- | --- |
+| What runs | tmux + whatever you start: a shell, Claude Code, any CLI | the same, **plus** an agent driven over ACP by Shared Terminal's runner |
+| Terminal / Files / Git | yes | yes |
+| Chat | Claude Code's conversation read from its hooks (capture), with the optional Composer to type into the CLI | the agent's message inbox: your messages, the agent's answers and live activity |
+| How messages reach the agent | keystrokes into the CLI in tmux (Composer) | the durable message API, one message at a time |
+| Agent ↔ agent | project conversation through the Composer (legacy) | `st send @name` from inside the container, same API |
 
-<p align="center">
-  <img src="docs/images/readme/terminal-mobile.png" alt="Terminal on a phone with the key bar" width="240">
-  <img src="docs/images/readme/chat-mobile.png" alt="Chat view on a phone" width="240">
-</p>
+ACP sessions are where the product is heading. Traditional sessions remain fully supported: tmux is
+still the place for shell work, Git and any CLI tool.
 
-**More**
+### Create a traditional session
 
-- **Port exposure** (opt-in: `PORT_PROXY_BASE_DOMAIN` + `COOKIE_DOMAIN`) — declare container ports and reach them at `p<port>-<session>.<your-domain>`,
-  private (your login) or public (webhooks, OAuth callbacks); editable while the session runs.
-- **HTTP exec API** — run commands in a session and stream NDJSON output, for automation
-  ([docs/EXEC_API.md](./docs/EXEC_API.md)).
-- **Admin** — cross-user session list with live CPU/memory, force stop/delete, live resource caps,
-  per-user quota overrides, invites, groups; admins and group leads can **observe** a session
-  read-only, and every cross-user attach is logged for the owner to see.
-- **Backup & restore** — `npm run backup` / `npm run restore` (D1 tables + workspaces), refuses to
-  restore with the wrong encryption key.
-- **Image pins** — every image a session container uses is pinned, so rebuilding the session image
-  can't delete it from under running sessions.
-- **UI shell v2** — a unified session bar and user menu; try it per browser with `?ui=v2`
-  (`?ui=v1` to go back), or make it the default with `UI_SHELL=v2`.
-- **Remote editing** — open a session in desktop VS Code via `code tunnel`
-  ([docs/REMOTE-EDITING.md](./docs/REMOTE-EDITING.md)).
+Click **New session**, pick a name and (optionally) a repository, env vars and resource caps. The
+session opens on the Terminal.
 
-## Projects & Agents — implemented, not yet available
+### Create an ACP agent session
 
-Group sessions into **projects** and give each one an **agent** with its own identity
-(`@handle`, role), a live presence state (Ready, Working, Needs you, Disconnected…) and one tap to its
-Chat or Terminal. An agent is not a session: it is *bound* to one, and the binding history is kept.
+With `ACP_AGENTS_ENABLED=true` on the backend and an adapter installed (see
+[docs/ACP_AGENTS.md](./docs/ACP_AGENTS.md#6-setup)), the New session form shows an **agent name**
+field. Give it a lowercase name such as `developer`; that is how you and other agents address it
+(`@developer`). The agent signs in the way Claude Code does in that session (its `~/.claude`
+login — run `claude` once in its Terminal and `/login` — or a `CLAUDE_CODE_OAUTH_TOKEN` secret env
+var); until then its Chat says it is waiting for login and your messages stay pending.
 
-<p align="center">
-  <img src="docs/images/readme/projects-desktop.png" alt="Projects view: a project with five agents, each with a presence state and Chat / Terminal buttons" width="820">
-  <br><sub>Preview with synthetic data — not yet enabled in production.</sub>
-</p>
+Over the API it is the same call with one extra field:
 
-The backend directory (D1 migration v19) and the frontend are merged, but the feature is off: it needs
-the backend that carries v19 deployed and `PROJECT_CHAT_ENABLED=true`. Until the backend reports
-`features.projectChat`, the UI stays hidden. Contract: [docs/PROJECTS.md](./docs/PROJECTS.md).
+```http
+POST /api/sessions
+{ "name": "dev", "acpAgent": { "name": "developer" } }
+```
+
+## Using the views
+
+- **Terminal** — tmux tabs in the container. Switching to another view never resizes or detaches it.
+- **Files** — the workspace tree; works on stopped sessions too. Credential paths (`.env*`, `.ssh/`,
+  `.git/`…) are refused.
+- **Git** — status, diffs and log of the repositories in the workspace (the session must be running).
+- **Chat** — in an ACP session, send a message; it is stored before the server answers, the agent
+  takes it when it is free, and you see what it is doing while it works. In a traditional session,
+  the Chat shows Claude Code's conversation when capture is enabled.
+
+## How agents talk to each other
+
+Inside an ACP agent's container, the `st` command uses the same message API you use from the web.
+The sender is the agent's own credential, never an argument:
+
+```bash
+st agents                         # who can I talk to?
+st send @reviewer "Please review the branch fix/login"
+st send @reviewer -f notes.md     # longer content from a file
+st list                           # my messages and their states
+st get 42                         # one message, with its result
+```
+
+A message from one agent to another is queued like any other. When the recipient finishes it, the
+**reply is written back automatically** to the sender. Every message has a state —
+`pending → running → done | failed | uncertain` — and a message whose run was interrupted becomes
+`uncertain`: it is **never resent automatically**; only you can requeue it (today through the API,
+`POST /api/acp/messages/:id/requeue`).
+
+**Chat vs Project Chat.** The Chat of a session is your one-to-one conversation with that agent.
+*Project Chat* — a shared channel where you and the project's ACP agents post, with mentions —
+is **in development** ([#674](https://github.com/gatof81/shared-terminal/pull/674)). Today's
+Projects view uses the older Composer-based project conversation.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-  subgraph Client
-    B["Browser SPA<br/>(Vite + xterm.js, served by Cloudflare Pages)"]
-  end
-  T["Cloudflare Tunnel"]
-  D1[("Cloudflare D1<br/>session metadata, config, users")]
+  B["Browser SPA<br/>(xterm.js, vanilla TS)"] -- "HTTPS / WSS" --> BE
   subgraph Host["Linux host"]
-    BE["Backend<br/>Express REST + ws WebSocket"]
-    PD["Port-exposure dispatcher<br/>(in the backend)"]
-    FS[("Host disk<br/>workspaces (bind mounts)<br/>conversation event logs")]
-    subgraph NET["Docker network sessions-net"]
-      C1["Session container<br/>tmux · Claude Code CLI · loopback hook relay"]
+    BE["Backend<br/>REST · WebSocket · message API"]
+    FS[("Host disk<br/>workspaces · ACP runtime (read-only)")]
+    subgraph NET["Docker network"]
+      C1["Session container<br/>tmux · tools · ACP runner + adapter"]
       C2["Session container …"]
     end
   end
-  B -- "HTTPS / WSS" --> T
-  T --> BE
-  T -- "per-port subdomains" --> PD
-  BE -- "HTTPS" --> D1
-  BE -- "docker exec / attach (tmux)" --> C1
-  PD -- "HTTP / WS by container name" --> C1
-  C1 -- "conversation hooks via relay" --> BE
-  BE --> FS
-  C1 -. "workspace bind mount" .- FS
+  D1[("Cloudflare D1<br/>sessions, config, users,<br/>agent messages")]
+  BE -- "docker exec / attach" --> C1
+  C1 -- "message API (claim, results, st send)" --> BE
+  BE --> D1
+  C1 -. "bind mounts" .- FS
 ```
 
-- **Backend** (`backend/src/`): stateless; all persistence is in D1 plus the host's workspace
-  directories. One container per session, attached through `docker exec … tmux`.
-- **Frontend** (`frontend/src/`): vanilla TypeScript, no framework.
-- **Session image** (`session-image/`): Ubuntu 24.04, Node 22, Claude Code CLI, GitHub CLI, tmux.
+- **Backend** (`backend/`): Express + WebSocket. Stateless: persistence is Cloudflare D1 plus the
+  workspaces on the host disk.
+- **Frontend** (`frontend/`): vanilla TypeScript SPA, deployed as static files (Cloudflare Pages).
+- **Session image** (`session-image/`): Ubuntu 24.04, Node 22, Git, GitHub CLI, tmux and the Claude
+  Code CLI for terminal use.
+- **ACP runtime** (`acp-runtime/`): the runner and the pinned agent adapters live in a host directory
+  mounted read-only into agent sessions — **not** in the image, so upgrading an adapter needs no
+  image rebuild.
 
-The deep dive (terminal data path, persistence, bootstrap, capture, composer, dispatcher) is in
-[CLAUDE.md](./CLAUDE.md).
+The developer deep dive is [CLAUDE.md](./CLAUDE.md).
 
-## Quick start
+## Installation
 
-Requirements: Linux with Docker, Node 22+, a Cloudflare account (D1, and Tunnel + Pages for
-production). Configuration lives in [`.env.example`](./.env.example); the full walkthrough
-(D1 provisioning, Tunnel, Pages, port exposure) is [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md).
+Requirements: a Linux host with Docker, Node 22+, and a Cloudflare account (D1; Tunnel and Pages
+for production). Configuration lives in [`.env.example`](./.env.example). The full walkthrough —
+D1, Tunnel, Pages, port exposure, backups — is [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md).
 
 ```bash
-# Session container image (required before creating a session)
+cp .env.example .env    # fill in the Cloudflare/D1 values, JWT_SECRET, SECRETS_ENCRYPTION_KEY
+
+# Session image (first install; later rebuilds go through scripts/build-session-image.sh)
 docker build -t shared-terminal-session ./session-image
 
-# Backend
+# Development
 cd backend && npm install && npm run dev      # http://localhost:3001
-
-# Frontend
 cd frontend && npm install && npm run dev     # http://localhost:5173
 
 # Production backend
 docker compose up -d --build
 ```
 
-Read [docs/SECURITY.md](./docs/SECURITY.md) before exposing the backend to the internet.
+To try ACP agents, follow [docs/ACP_AGENTS.md → Setup](./docs/ACP_AGENTS.md#6-setup). Read
+[docs/SECURITY.md](./docs/SECURITY.md) before exposing the backend to the internet.
+
+## Status
+
+**Implemented** (on `main`)
+
+- Sessions, terminal, Files, Git, templates, quotas, idle stop, ports, exec API, admin, backup &
+  restore.
+- Claude Code conversation capture and the Composer for traditional sessions (opt-in flags).
+- Projects directory and the Composer-based project conversation (opt-in flags).
+- **ACP agents — experimental, off by default** (`ACP_AGENTS_ENABLED`): durable message inbox, direct
+  ACP runner with Claude's adapter, per-agent Chat, `st` CLI, automatic replies between agents.
+
+**In development**
+
+- Project Chat on ACP: agents in projects, project-scoped messages, live updates
+  ([#674](https://github.com/gatof81/shared-terminal/pull/674)).
+- Interactive questions from an agent to you, and retiring the Composer.
+
+**Planned**
+
+- Agents other than Claude (Codex, Pi, OpenCode…) through ACP adapters.
+- A provider-neutral session image (no agent CLI baked in).
+- Sessions on more than one host.
+- Retiring conversation capture once ACP covers its uses.
+
+**Known limitations**
+
+- ACP is tested with Claude only and runs with permissions bypassed inside the container: the
+  container is the sandbox, the workspace is not protected from the agent.
+- An agent signals a long-running background process (e.g. a dev server) with a provisional text
+  marker; a structured signal is still to be designed.
+- Live activity (tool calls, partial text) is kept in memory: a backend restart loses it, messages
+  and results are kept.
+- One backend host; single-tenant network between session containers.
 
 ## Documentation
 
 | | |
 | --- | --- |
-| [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md) | Local setup, production, Cloudflare Tunnel, capture, backup & restore |
+| [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md) | Install, production, Cloudflare Tunnel, backup & restore |
+| [docs/ACP_AGENTS.md](./docs/ACP_AGENTS.md) | ACP agents: model, message API, runtime, operation |
 | [docs/SECURITY.md](./docs/SECURITY.md) | Threat model and recommended posture |
-| [docs/API.md](./docs/API.md) | REST endpoints, WebSocket channels, port dispatcher |
+| [docs/API.md](./docs/API.md) | REST endpoints and WebSocket channels |
 | [docs/EXEC_API.md](./docs/EXEC_API.md) | HTTP exec API contract |
-| [docs/CONVERSATION.md](./docs/CONVERSATION.md) | Conversation capture, Chat and Composer contract |
+| [docs/CONVERSATION.md](./docs/CONVERSATION.md) | Capture and Composer contract (traditional sessions) |
 | [docs/PROJECTS.md](./docs/PROJECTS.md) | Projects & agents directory contract |
-| [docs/SECRETS_ENCRYPTION_KEY.md](./docs/SECRETS_ENCRYPTION_KEY.md) | The secrets encryption key runbook |
-| [docs/design/](./docs/design/) | Design notes and proposals |
+| [docs/PROJECT_CONVERSATION.md](./docs/PROJECT_CONVERSATION.md) | Composer-based project conversation (legacy path) |
 | [CONTRIBUTING.md](./CONTRIBUTING.md) | Workflow, branches, code style |
-
-## Roadmap
-
-Planned / in design — **none of this is available yet**:
-
-- **Agent collaboration** — a Project Chat where agents of the same project talk to each other and
-  to you, with mentions that name their recipients explicitly.
-- **Tasks with explicit states** — work handed to an agent as a task you can track, not just a chat
-  message.
-- **Automation** — work that runs without someone at the keyboard.
-- **Per-project attention signal** — one cheap, honest "needs you" indicator per project in the
-  sidebar; design accepted, backend not implemented ([design](./docs/design/attention-signal.md)).
 
 ## License
 

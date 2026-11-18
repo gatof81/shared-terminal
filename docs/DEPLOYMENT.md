@@ -373,6 +373,7 @@ Each session runs in a Docker container based on `session-image/Dockerfile`:
 - **Terminal:** tmux, 50k scrollback, mouse support. No tmux session exists at container boot (PID 1 is a plain `tail -f /dev/null`) — each browser tab provisions its own tmux session on demand via `tmux new-session -A -s <tabId>` at WS attach
 - **User:** `developer` (UID 1000, unprivileged — no sudo, all Linux capabilities dropped, `no-new-privileges` set)
 - **Workspace:** `/home/developer/workspace` (bind-mounted from `<WORKSPACE_ROOT>/<sessionId>` on the host)
+- **ACP agent sessions** (experimental): the same image; the agent runtime (runner + pinned adapter) is not in it but mounted read-only at `/opt/st-acp` from `<WORKSPACE_ROOT>/.acp-runtime` — see [ACP_AGENTS.md](./ACP_AGENTS.md#2-runtime-independent-of-the-image)
 - **Resources:** Per-session caps come from `session_configs` (`cpu_limit` 0.25–8 cores, `mem_limit` 256 MiB–16 GiB, `idle_ttl_seconds` 60s–24h). Sessions created without explicit caps fall back to the `DEFAULT_NANO_CPUS` (2 cores) / `DEFAULT_MEMORY_BYTES` (2 GiB) constants in `dockerManager.ts`. Idle auto-stop is opt-in (omit `idleTtlSeconds` to disable).
 
 ## Conversation capture (Phase 3, `docs/CONVERSATION.md`)
@@ -1248,6 +1249,20 @@ the project conversation effective; otherwise the artifact routes are not mounte
 
 `npm run backup` already includes the artifacts. Rollback means unsetting the flag and restarting:
 stored artifacts and inbox copies stay where they are.
+
+## ACP agents (experimental, `docs/ACP_AGENTS.md`)
+
+Off by default (`ACP_AGENTS_ENABLED` unset; `docker-compose.yml` forwards the `ACP_*` variables with
+their defaults). Migration v21 (`acp_agents`, `agent_messages`) is additive and applied at boot
+whatever the flag says. With the flag on the backend mounts `/api/acp`, copies the runner files into
+`<WORKSPACE_ROOT>/.acp-runtime/st` at boot, mounts that directory read-only into agent sessions and
+supervises one runner per running agent. Adapters are installed per version into the same directory
+with `acp-runtime/install.sh` — no session-image rebuild. Runners reach the backend over
+`SESSIONS_NETWORK` at `ACP_BACKEND_URL` (default `http://st-backend:<PORT>`). Configuration table,
+install command, agent login and recovery behaviour: [ACP_AGENTS.md → Setup](./ACP_AGENTS.md#6-setup)
+and [→ Operation](./ACP_AGENTS.md#7-operation-and-recovery). `npm run backup` includes both tables.
+Rollback = unset the flag and restart; the tables stay, agent sessions keep working as ordinary
+sessions.
 
 ## Backup & restore (#240)
 
