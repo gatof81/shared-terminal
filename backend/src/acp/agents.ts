@@ -242,6 +242,16 @@ export class AcpAgents {
 		name: string,
 		opts: { model?: string; runtime?: string; projectId?: string | null } = {},
 	): Promise<AgentRow> {
+		// Messages are addressed by name and outlive a hard-deleted agent: what
+		// that agent left unfinished must not be picked up by a new agent that
+		// takes the name. Only rows of a name no agent holds (the INSERT below
+		// fails when one does).
+		await d1Query(
+			`UPDATE agent_messages SET state = 'failed', note = 'the agent it was addressed to was deleted', finished_at = ${NOW}
+			 WHERE owner_user_id = ?1 AND to_id = ?2 AND state IN ('pending', 'running')
+			 AND NOT EXISTS (SELECT 1 FROM acp_agents WHERE owner_user_id = ?1 AND name = ?2)`,
+			[ownerUserId, name],
+		);
 		const row = (
 			await d1Query<AgentRow>(
 				"INSERT INTO acp_agents (agent_id, session_id, owner_user_id, name, runtime, model, project_id) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *",
@@ -316,8 +326,11 @@ export class AcpAgents {
 		return r.results.length > 0;
 	}
 
+	// By session / by name always read D1: an agent row goes away with a hard
+	// delete of its session (cascade) and its name may be taken again by a new
+	// agent, so a cached row could name the wrong session. The cache (byId)
+	// serves only what is keyed by the immutable agent id (tokens, watchdog).
 	async bySession(sessionId: string): Promise<AgentRow | null> {
-		for (const a of this.byId.values()) if (a.session_id === sessionId) return a;
 		const r = await d1Query<AgentRow>("SELECT * FROM acp_agents WHERE session_id = ?", [sessionId]);
 		const row = r.results[0] ?? null;
 		if (row) this.byId.set(row.agent_id, row);
@@ -325,8 +338,6 @@ export class AcpAgents {
 	}
 
 	async byName(ownerUserId: string, name: string): Promise<AgentRow | null> {
-		for (const a of this.byId.values())
-			if (a.owner_user_id === ownerUserId && a.name === name) return a;
 		const r = await d1Query<AgentRow>(
 			"SELECT * FROM acp_agents WHERE owner_user_id = ? AND name = ?",
 			[ownerUserId, name],
@@ -341,6 +352,8 @@ export class AcpAgents {
 			"SELECT * FROM acp_agents WHERE owner_user_id = ? ORDER BY name",
 			[ownerUserId],
 		);
+		// The owner's agents as D1 has them now: rows of deleted sessions leave the cache.
+		for (const [id, a] of this.byId) if (a.owner_user_id === ownerUserId) this.byId.delete(id);
 		for (const row of r.results) this.byId.set(row.agent_id, row);
 		return r.results;
 	}

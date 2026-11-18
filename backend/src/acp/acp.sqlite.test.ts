@@ -392,6 +392,23 @@ describe("ACP messages: scope, replies, loop guard (v22)", () => {
 		);
 	});
 
+	it("a name freed by a hard delete and taken again names the NEW agent", async () => {
+		const fresh = "55555555-5555-4555-8555-555555555555";
+		db.prepare(
+			"INSERT INTO sessions (session_id, user_id, name, container_name, status) VALUES (?, ?, 'solo2', ?, 'running')",
+		).run(fresh, OWNER, `st-${fresh.slice(0, 12)}`);
+		await call(owner, "GET", "/agents"); // warms the cache with the old @solo
+		const left = await call(owner, "POST", "/messages", { to: "solo", body: "quedó sin hacer" });
+		db.prepare("DELETE FROM sessions WHERE session_id = ?").run(SID.solo); // cascade: the agent row goes
+		await acp.create(fresh, OWNER, "solo");
+		// What the deleted agent left pending is not inherited by the new one.
+		expect((await call(owner, "GET", `/messages/${left.body.id}`)).body.state).toBe("failed");
+		const sent = await call(owner, "POST", "/messages", { to: "solo", body: "¿quién sos?" });
+		expect(sent.status).toBe(201);
+		expect((await acp.byName(OWNER, "solo"))?.session_id).toBe(fresh);
+		expect(await acp.bySession(SID.solo)).toBeNull();
+	});
+
 	it("events go only to the owner of the row", () => {
 		expect(events.filter((e) => e.type === "message").every((e) => e.owner === OWNER)).toBe(true);
 	});
