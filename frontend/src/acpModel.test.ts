@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
 	activityRows,
 	agentStatus,
+	answerText,
 	authFromActivity,
 	groupThread,
 	parseMentions,
+	questionForm,
 	recipientsOf,
 	upsert,
 } from "./acpModel.js";
@@ -112,5 +114,70 @@ describe("activity", () => {
 		expect(agentStatus({ ...base, runnerSeenAt: null, authRequired: true }, now).label).toBe(
 			"esperando login",
 		);
+	});
+});
+
+describe("questions", () => {
+	// The form claude-agent-acp 0.108.0 builds from AskUserQuestion (one single-select question).
+	const ask = JSON.stringify({
+		mode: "form",
+		message: "¿Qué base de datos?",
+		requestedSchema: {
+			type: "object",
+			properties: {
+				question_0: {
+					type: "string",
+					title: "DB",
+					oneOf: [
+						{ const: "SQLite", title: "SQLite", description: "simple" },
+						{ const: "Postgres", title: "Postgres" },
+					],
+				},
+				question_0_custom: { type: "string", title: "Other" },
+				question_1: {
+					type: "array",
+					description: "Extras",
+					items: { anyOf: [{ const: "a", title: "A" }] },
+				},
+			},
+		},
+	});
+	it("reads choices with their 'Other' companion, multi-select and text", () => {
+		const f = questionForm(ask);
+		expect(f.message).toBe("¿Qué base de datos?");
+		expect(f.fields.map((x) => [x.key, x.kind, x.custom ?? null, x.options.length])).toEqual([
+			["question_0", "single", "question_0_custom", 2],
+			["question_1", "multi", null, 1],
+		]);
+		expect(questionForm("not json").fields).toEqual([]);
+	});
+	it("says the answer in words", () => {
+		const f = questionForm(ask);
+		expect(
+			answerText(
+				f,
+				JSON.stringify({
+					action: "accept",
+					content: { question_0: "SQLite", question_0_custom: "por ahora" },
+				}),
+			),
+		).toContain("SQLite — por ahora");
+		expect(answerText(f, JSON.stringify({ action: "decline" }))).toBe("(omitida)");
+		expect(answerText(f, null)).toBe("");
+	});
+	it("an agent waiting for the person says so", () => {
+		expect(
+			agentStatus(
+				{
+					name: "a",
+					sessionId: "s",
+					runtime: "r",
+					model: null,
+					runnerSeenAt: null,
+					waitingInput: true,
+				},
+				0,
+			).label,
+		).toBe("esperando tu respuesta");
 	});
 });

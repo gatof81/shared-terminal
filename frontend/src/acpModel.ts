@@ -127,6 +127,7 @@ export const RUNNER_FRESH_MS = 20_000;
 
 export function agentStatus(a: AcpAgentInfo, now: number, authRequired = false): AgentStatus {
 	if (authRequired || a.authRequired) return { label: "esperando login", tone: "warn" };
+	if (a.waitingInput) return { label: "esperando tu respuesta", tone: "warn" };
 	const seen = a.runnerSeenAt ? now - Date.parse(a.runnerSeenAt) : Number.POSITIVE_INFINITY;
 	const queued = a.pending ? ` · ${a.pending} en espera` : "";
 	if (a.running) return { label: `trabajando en #${a.running}${queued}`, tone: "busy" };
@@ -150,4 +151,103 @@ export function authFromActivity(events: readonly AcpActivity[], initial: boolea
 
 export function who(id: string): string {
 	return id === "owner" ? "Vos" : id === "system" ? "Shared Terminal" : `@${id}`;
+}
+
+// ── Questions (ACP form elicitation) ─────────────────────────────────────
+
+export interface QuestionField {
+	key: string;
+	label: string;
+	kind: "single" | "multi" | "text" | "boolean" | "number";
+	options: Array<{ value: string; label: string; description?: string }>;
+	/** `<key>_custom` companion of a choice: the free-text "other" answer. */
+	custom?: string;
+}
+
+export interface QuestionForm {
+	message: string;
+	fields: QuestionField[];
+}
+
+type Schema = { type?: string; title?: string; description?: string; [k: string]: unknown };
+type EnumOpt = { const?: unknown; title?: string; description?: string };
+
+/**
+ * The form of an elicitation request, as far as Shared Terminal renders it:
+ * single choice (`oneOf` / `enum`), multiple choice (array of `anyOf`/`enum`),
+ * text, boolean, number. Claude's AskUserQuestion pairs each choice
+ * `question_<n>` with a free-text `question_<n>_custom` ("Other"): that pair
+ * becomes one field. Anything unreadable degrades to a text field.
+ */
+export function questionForm(requestJson: string): QuestionForm {
+	let req: { message?: unknown; requestedSchema?: { properties?: Record<string, Schema> } } = {};
+	try {
+		req = JSON.parse(requestJson) as typeof req;
+	} catch {
+		/* empty form */
+	}
+	const props = req.requestedSchema?.properties ?? {};
+	const fields: QuestionField[] = [];
+	const keys = Object.keys(props);
+	for (const key of keys) {
+		const p = props[key] ?? {};
+		if (key.endsWith("_custom") && keys.includes(key.slice(0, -7))) continue;
+		const label = String(p.description ?? p.title ?? (keys.length === 1 ? "" : key));
+		const opts = (list: unknown): QuestionField["options"] =>
+			Array.isArray(list)
+				? list.map((o: EnumOpt | string) =>
+						typeof o === "string"
+							? { value: o, label: o }
+							: {
+									value: String(o.const ?? o.title ?? ""),
+									label: String(o.title ?? o.const ?? ""),
+									...(o.description ? { description: String(o.description) } : {}),
+								},
+					)
+				: [];
+		const items = (p.items ?? {}) as Schema;
+		let field: QuestionField;
+		if (p.type === "array")
+			field = {
+				key,
+				label,
+				kind: "multi",
+				options: opts(items.anyOf ?? items.oneOf ?? items.enum),
+			};
+		else if (Array.isArray(p.oneOf) || Array.isArray(p.enum))
+			field = { key, label, kind: "single", options: opts(p.oneOf ?? p.enum) };
+		else if (p.type === "boolean") field = { key, label, kind: "boolean", options: [] };
+		else if (p.type === "number" || p.type === "integer")
+			field = { key, label, kind: "number", options: [] };
+		else field = { key, label, kind: "text", options: [] };
+		if (keys.includes(`${key}_custom`)) field.custom = `${key}_custom`;
+		fields.push(field);
+	}
+	return { message: String(req.message ?? ""), fields };
+}
+
+/** The answer in words, for the thread and for "send as a message". */
+export function answerText(form: QuestionForm, answerJson: string | null): string {
+	if (!answerJson) return "";
+	let a: { action?: string; content?: Record<string, unknown> } = {};
+	try {
+		a = JSON.parse(answerJson) as typeof a;
+	} catch {
+		return "";
+	}
+	if (a.action !== "accept") return a.action === "decline" ? "(omitida)" : "(cancelada)";
+	const c = a.content ?? {};
+	const parts: string[] = [];
+	for (const f of form.fields) {
+		const v = c[f.key];
+		const custom = f.custom ? String(c[f.custom] ?? "").trim() : "";
+		const shown = [
+			Array.isArray(v) ? v.join(", ") : v === undefined || v === "" ? "" : String(v),
+			custom,
+		]
+			.filter(Boolean)
+			.join(" — ");
+		if (shown) parts.push(f.label && form.fields.length > 1 ? `${f.label}: ${shown}` : shown);
+	}
+	return parts.join("\n") || "(sin respuesta)";
 }

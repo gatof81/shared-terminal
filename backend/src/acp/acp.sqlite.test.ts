@@ -409,6 +409,87 @@ describe("ACP messages: scope, replies, loop guard (v22)", () => {
 		expect(await acp.bySession(SID.solo)).toBeNull();
 	});
 
+	it("questions: asked by the runner, answered once by the person only, delivered once; a restart orphans, never answers", async () => {
+		await call(owner, "POST", "/messages", {
+			to: "developer",
+			body: "decidí vos",
+			projectId: "p-1",
+		});
+		const m = await call(as("developer"), "POST", "/runner/claim");
+		const form = {
+			mode: "form",
+			message: "¿Base de datos?",
+			requestedSchema: { type: "object", properties: {} },
+		};
+		const q = await call(as("developer"), "POST", "/runner/questions", {
+			messageId: m.body.id,
+			request: form,
+		});
+		expect(q.status).toBe(201);
+		expect(q.body).toMatchObject({ state: "open", agent: "developer", message_id: m.body.id });
+		// Visible where the message is: Project Chat, and the agent shows as waiting.
+		const pf = await call(owner, "GET", "/projects/p-1/feed");
+		expect(pf.body.questions.map((x: { id: number }) => x.id)).toContain(q.body.id);
+		expect(pf.body.agents.find((a: { name: string }) => a.name === "developer").waitingInput).toBe(
+			true,
+		);
+		// Another agent cannot answer the person's question.
+		expect(
+			(
+				await call(as("arquitecto"), "POST", `/questions/${q.body.id}/answer`, {
+					action: "decline",
+				})
+			).status,
+		).toBe(403);
+		expect(
+			(await call({ user: OTHER }, "POST", `/questions/${q.body.id}/answer`, { action: "decline" }))
+				.status,
+		).toBe(404);
+		const a1 = await call(owner, "POST", `/questions/${q.body.id}/answer`, {
+			action: "accept",
+			content: { question_0: "SQLite" },
+		});
+		expect(a1.body.state).toBe("answered");
+		const a2 = await call(owner, "POST", `/questions/${q.body.id}/answer`, {
+			action: "accept",
+			content: {},
+		});
+		expect(a2.status).toBe(409);
+		const seen = await call(as("developer"), "GET", `/runner/questions/${q.body.id}`);
+		expect(JSON.parse(seen.body.answer)).toEqual({
+			action: "accept",
+			content: { question_0: "SQLite" },
+		});
+		expect(
+			(await call(as("developer"), "POST", `/runner/questions/${q.body.id}/delivered`)).body.state,
+		).toBe("delivered");
+		expect(
+			(await call(as("developer"), "POST", `/runner/questions/${q.body.id}/delivered`)).status,
+		).toBe(409);
+		// A second question left open when the runner restarts: orphaned, not answered.
+		const q2 = await call(as("developer"), "POST", "/runner/questions", {
+			messageId: m.body.id,
+			request: form,
+		});
+		const orphaned = await call(as("developer"), "POST", "/runner/questions-orphan", {
+			note: "reinicio",
+		});
+		expect(orphaned.body.map((x: { id: number; state: string }) => [x.id, x.state])).toEqual([
+			[q2.body.id, "orphaned"],
+		]);
+		expect(
+			(await call(owner, "POST", `/questions/${q2.body.id}/answer`, { action: "decline" })).body,
+		).toMatchObject({
+			error: "not-open",
+			state: "orphaned",
+		});
+		expect(events.some((e) => e.type === "question")).toBe(true);
+		await call(as("developer"), "POST", `/runner/messages/${m.body.id}/result`, {
+			state: "done",
+			text: ".",
+		});
+	});
+
 	it("events go only to the owner of the row", () => {
 		expect(events.filter((e) => e.type === "message").every((e) => e.owner === OWNER)).toBe(true);
 	});

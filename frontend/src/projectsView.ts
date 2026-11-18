@@ -50,8 +50,6 @@ import { confirmDialog, createDialog } from "./components/dialog.js";
 import { showToast } from "./components/toast.js";
 import { relativeDate } from "./format.js";
 import { sessions } from "./main.js";
-import { initPilotOptIn } from "./pilotModel.js";
-import { pilotPanel, resetPilot, suspendPilot } from "./pilotPanel.js";
 import {
 	clearProjects,
 	currentProject,
@@ -355,7 +353,6 @@ function hidePage(): void {
 	if (shown === null && pageEl?.hidden !== false) return;
 	shown = null;
 	suspendAcpProject();
-	suspendPilot();
 	suspendWorkspaces();
 	document.body.classList.remove("project-page-on");
 	if (pageEl) {
@@ -374,9 +371,7 @@ function leavePage(): void {
 	sync();
 }
 
-/** Pilot 1 (doc 18): the "Ask the agents" panel, opt-in per browser (`?pilot=1`). */
-let pilotOn = false;
-/** The re-rendered part of the page; the pilot panel sits beside it, never inside. */
+/** The re-rendered part of the page. */
 const contentHost = el("div", "pv-content");
 
 /** The v3 workspace owns the project page (not the agent page, not "Manage agents"). */
@@ -414,7 +409,6 @@ function renderPage(): void {
 	)?.dataset.key;
 	const scroll = pageEl.scrollTop;
 	if (acpProjectShown(shown)) {
-		suspendPilot();
 		suspendWorkspaces();
 		const pid = shown.projectId;
 		const name = projectName(pid);
@@ -439,7 +433,6 @@ function renderPage(): void {
 	// Projects v3: the workspace (Now · Threads · New task) is the project
 	// page; the P3a directory is its "Manage agents" panel.
 	if (v3Workspace(shown)) {
-		suspendPilot();
 		const name = projectName(shown.projectId);
 		setTitlePage(pageTitle(name, null));
 		const state = agentLists.get(shown.projectId);
@@ -475,22 +468,8 @@ function renderPage(): void {
 		});
 		content.prepend(back);
 	}
-	// The panel is kept as one element across polls (its draft, selection and
-	// focus live in it), so it is re-attached only when the page's shape
-	// changes — re-inserting it on every poll would blur the textarea.
-	const pilot =
-		pilotOn && shown.agentId === null && !projectConversationEnabled()
-			? pilotPanel(shown.projectId, agentLists.get(shown.projectId)?.data?.agents ?? null)
-			: null;
-	// Off screen (the agent page): its sockets close, its lanes stay.
-	if (!pilot) suspendPilot();
-	const shape = pilot ? [contentHost, pilot] : [contentHost];
-	if (
-		pageEl.childNodes.length !== shape.length ||
-		shape.some((n, i) => pageEl?.childNodes[i] !== n)
-	) {
-		pageEl.replaceChildren(...shape);
-	}
+	if (pageEl.childNodes.length !== 1 || pageEl.firstChild !== contentHost)
+		pageEl.replaceChildren(contentHost);
 	contentHost.replaceChildren(content);
 	pageEl.scrollTop = scroll;
 	if (focusKey !== undefined) {
@@ -1400,7 +1379,6 @@ function wire(): void {
  */
 export function startProjects(): void {
 	if (!projectChatEnabled()) return;
-	pilotOn = initPilotOptIn();
 	wire();
 	active = true;
 	// Held only while the address still names the page: a session link
@@ -1433,7 +1411,6 @@ export function resetProjects(): void {
 	openDialogs.clear();
 	clearProjects();
 	clearSidebarPresence();
-	resetPilot();
 	resetWorkspaces();
 	resetAcpProject();
 	projectsState = blank();

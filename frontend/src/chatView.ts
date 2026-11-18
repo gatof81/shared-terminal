@@ -32,6 +32,7 @@
 
 import { acpOwns } from "./acpChat.js";
 import {
+	acpAgentsEnabled,
 	type ConversationCapture,
 	type ConversationServerFrame,
 	type ConversationSocket,
@@ -2147,6 +2148,15 @@ function autosize(ta: HTMLTextAreaElement): void {
 }
 
 function composer(): HTMLElement {
+	// With ACP agents on, Composer is retired as a way to talk to a session:
+	// this Chat is the read-only history of a traditional session, which is
+	// worked with from its Terminal (an ACP agent session has its own Chat).
+	if (acpAgentsEnabled())
+		return el(
+			"div",
+			"chat-readonly-note",
+			"Historial de lectura. Esta sesión tradicional se usa desde su Terminal; para chatear con un agente, creá una sesión con agente ACP.",
+		);
 	const box = el("div", "chat-composer");
 	const c = selected();
 	const cid = selectedCid;
@@ -2292,6 +2302,7 @@ function composerStatus(
  * drop an in-progress IME composition while the person types.
  */
 function renderComposer(): void {
+	if (acpAgentsEnabled()) return;
 	const old = threadEl.querySelector<HTMLElement>(".chat-composer");
 	if (!old) return;
 	const cid = selectedCid;

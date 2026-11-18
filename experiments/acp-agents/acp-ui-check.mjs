@@ -126,6 +126,20 @@ try {
 	const codeShown = await post.locator(".acp-msg-body").textContent();
 	check("multi-line code kept as typed", codeShown.includes("```\nlínea 1\n  línea 2\n```"));
 
+	// ── 3b. A question from an agent, answered from Project Chat.
+	await input.fill(`@${ARQ} preguntá: ¿Qué framework de tests? | vitest | jest`);
+	await send.click();
+	const card = page.locator(".acp-project .acp-question-open");
+	await card.waitFor({ timeout: 60_000 }).catch(() => {});
+	check("the agent's question appears in Project Chat with its options", (await card.locator(".acp-option").count()) === 2);
+	check("…its message says it waits for me", (await page.locator(".acp-project .acp-badge-waiting").count()) >= 1);
+	await page.screenshot({ path: `${shots}/ui-3b-question.png` });
+	await card.locator(".acp-option", { hasText: "vitest" }).click();
+	await card.locator(".acp-question-send").click();
+	await page.waitForFunction(() => /Elegiste: vitest/.test(document.querySelector(".acp-project .acp-chat-thread")?.textContent ?? ""), null, { timeout: 60_000 }).catch(() => {});
+	check("answered from Chat; the agent continued with the answer", /Elegiste: vitest/.test(await page.locator(".acp-project .acp-chat-thread").textContent()));
+	check("…the question shows my answer, no input left", (await page.locator(".acp-project .acp-question-delivered").count()) >= 1 && (await page.locator(".acp-project .acp-question-open").count()) === 0);
+
 	// ── 4. Individual chat: direct and private.
 	await page.click(`.acp-agent-chip a:has-text("@${DEV}")`);
 	await page.waitForSelector("#acp-chat:not([hidden]) .acp-chat-header strong", { timeout: 20_000 });

@@ -170,6 +170,61 @@ function checkIdle() {
 	current.timer = setTimeout(() => current?.settle({ state: "done" }), IDLE_SETTLE_MS);
 }
 
+// ── Questions (ACP elicitation) ─────────────────────────────────────────
+// A question is a decision for the person, not a tool permission (those are
+// bypassed). It is registered in the backend (durable, shown in Chat), the
+// ACP request stays open here until the person answers; the answer is handed
+// back to that same request exactly once. URL-mode elicitations (OAuth of an
+// MCP server) are declined: the client declared only `form`.
+const asked = new Map(); // rpc id → question id
+async function ask(rpcId, params) {
+	if (params?.mode && params.mode !== "form") return write({ id: rpcId, result: { action: "decline" } });
+	const messageId = current?.msg.id ?? null;
+	const q = await api("POST", "/runner/questions", { messageId, request: params });
+	if (q.status !== 201) {
+		log(`question not registered (${q.status}); cancelling it`);
+		return write({ id: rpcId, result: { action: "cancel" } });
+	}
+	asked.set(rpcId, q.body.id);
+	record({ question: q.body.id });
+	emit({ kind: "question", questionId: q.body.id, state: "open" });
+	log(`question #${q.body.id} for message #${messageId}: waiting for the person`);
+	lastActivity = Date.now();
+	for (;;) {
+		await new Promise((ok) => setTimeout(ok, 1_500));
+		if (!asked.has(rpcId)) return; // withdrawn meanwhile
+		const cur = await api("GET", `/runner/questions/${q.body.id}`);
+		if (cur.status !== 200) continue;
+		if (cur.body.state === "answered") {
+			const answer = JSON.parse(cur.body.answer);
+			asked.delete(rpcId);
+			// Marked delivered before the write: the answer can reach the request
+			// at most once (a second runner never finds it answered). If this
+			// process dies between the two, the message itself becomes uncertain
+			// and the agent gets the recovery note; nothing is resent.
+			await api("POST", `/runner/questions/${q.body.id}/delivered`);
+			write({ id: rpcId, result: answer });
+			record({ answered: q.body.id, action: answer.action });
+			emit({ kind: "question", questionId: q.body.id, state: "delivered" });
+			lastActivity = Date.now();
+			log(`question #${q.body.id}: answer delivered (${answer.action})`);
+			return;
+		}
+		if (cur.body.state !== "open") {
+			asked.delete(rpcId);
+			return write({ id: rpcId, result: { action: "cancel" } });
+		}
+	}
+}
+function withdraw(rpcId) {
+	const qid = asked.get(rpcId);
+	if (qid === undefined) return;
+	asked.delete(rpcId);
+	void api("POST", `/runner/questions/${qid}/withdrawn`);
+	emit({ kind: "question", questionId: qid, state: "withdrawn" });
+	log(`question #${qid} withdrawn by the agent`);
+}
+
 // ── ACP connection: newline-delimited JSON-RPC over the adapter's stdio ──
 const adapter = spawn(env.ACP_AGENT_CMD, [], { stdio: ["pipe", "pipe", "inherit"] });
 let nextId = 0;
@@ -199,6 +254,9 @@ createInterface({ input: adapter.stdout }).on("line", (line) => {
 		record({ permission: m.params.toolCall?.title, chose: opt.kind });
 		return write({ id: m.id, result: { outcome: { outcome: "selected", optionId: opt.optionId } } });
 	}
+	if (m.method === "elicitation/create") return void ask(m.id, m.params);
+	// The adapter withdrew a request it sent (its turn ended or was cancelled).
+	if (m.method === "$/cancel_request") return void withdraw(m.params?.requestId ?? m.params?.id);
 	if (m.id !== undefined) write({ id: m.id, error: { code: -32601, message: `unsupported: ${m.method}` } });
 });
 adapter.on("exit", (code, signal) => {
@@ -212,7 +270,12 @@ adapter.on("exit", (code, signal) => {
 async function openSession() {
 	const init = await request("initialize", {
 		protocolVersion: 1,
-		clientCapabilities: { _meta: { jetbrains: { air: { version: 1, capabilities: ["asyncTasks"] } } } },
+		// elicitation.form: Claude's AskUserQuestion (and MCP form elicitations)
+		// arrive as `elicitation/create` requests that Shared Terminal shows in Chat.
+		clientCapabilities: {
+			elicitation: { form: {} },
+			_meta: { jetbrains: { air: { version: 1, capabilities: ["asyncTasks"] } } },
+		},
 	});
 	const air = init._meta?.jetbrains?.air?.capabilities ?? [];
 	if (!air.includes("asyncTasks")) throw new Error(`adapter does not offer asyncTasks (offers: ${air.join(",")})`);
@@ -367,6 +430,11 @@ async function main() {
 	log(`starting; adapter ${env.ACP_AGENT_CMD}, cwd ${CWD}, model ${env.ANTHROPIC_MODEL ?? "default"}`);
 	mkdirSync(CWD, { recursive: true });
 	const sessionId = await openSession();
+	// Questions of a previous run waited on ACP requests that died with it.
+	const orphaned = await api("POST", "/runner/questions-orphan", {
+		note: "el agente se reinició antes de recibir la respuesta: no se usó",
+	});
+	if (orphaned.body?.length) log(`${orphaned.body.length} question(s) of the previous run orphaned`);
 	const running = await api("GET", "/runner/running");
 	const interrupted = running.status === 200 ? { msg: running.body, note: await settleInterrupted(running.body) } : null;
 	// What the resume itself sets off (e.g. Claude Code's "didn't finish before
@@ -374,7 +442,7 @@ async function main() {
 	// turn of its own that only a prompt closes) shows up right after it.
 	await new Promise((ok) => setTimeout(ok, STARTUP_WINDOW_MS));
 	const orphanTurns = [...live].filter(([, t]) => t.taskType === "turn").map(([id]) => id);
-	if (interrupted?.note || orphanTurns.length) {
+	if (interrupted?.note || orphanTurns.length || orphaned.body?.length) {
 		// The controlled continuation: one message from Shared Terminal, sent now
 		// (not behind the idle gate — this prompt is what the adapter closes the
 		// orphan turn with). It asks for a report, never a redo.
@@ -382,6 +450,7 @@ async function main() {
 			"[st-recovery] El runner de Shared Terminal se reinició.",
 			interrupted?.note ? `Tu ejecución del mensaje #${interrupted.msg.id} quedó interrumpida (${interrupted.note}) y quedó registrada como incierta; no se va a reenviar.` : "",
 			orphanTurns.length ? "Hay una notificación de tareas en segundo plano interrumpidas." : "",
+			orphaned.body?.length ? "Habías hecho una pregunta a la persona que quedó sin respuesta entregada; si todavía necesitás esa decisión, volvé a preguntarla." : "",
 			"No repitas automáticamente comandos ni operaciones que puedan haber tenido efectos.",
 			"Revisá el estado actual sin modificarlo y respondé brevemente: qué quedó hecho, qué no, y qué recomendás.",
 		]

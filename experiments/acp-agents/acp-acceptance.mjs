@@ -211,6 +211,41 @@ async function main() {
 	const countAfter = Number(/sesión ACP: (\d+)/.exec(pp[1].result_text ?? "")?.[1] ?? 0);
 	check("ACP context kept across the container restart (same ACP session)", countAfter > countBefore, `${countBefore} → ${countAfter} prompts`);
 
+	// 6c. Questions (ACP elicitation): asked, visible after any "browser close", answered once, delivered once.
+	const openQ = async (msgId) =>
+		(await projectFeed(pid)).questions?.find((q) => q.message_id === msgId && q.state === "open");
+	const ask1 = await send(ARQ, "preguntá: ¿Qué base de datos usamos? | SQLite | Postgres", pid);
+	const q1 = await waitFor("question", () => openQ(ask1.id), 60_000);
+	check("the agent's question is registered and shown in Project Chat (open)", !!q1, q1 && `#${q1.id}`);
+	check("…the agent shows as waiting for the person", (await agents()).find((a) => a.name === ARQ)?.waitingInput === true);
+	check("…the message stays running while it waits", (await get(ask1.id)).state === "running");
+	await sleep(8_000); // nobody looking: the question just waits, durable
+	check("…still open after a while with no browser", (await openQ(ask1.id))?.id === q1?.id);
+	const byAgent = await fetch(`${ST}/api/acp/questions/${q1?.id}/answer`, { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer acp1.x.y" }, body: "{}" });
+	check("an agent's token cannot answer the person's question", byAgent.status === 401 || byAgent.status === 403, String(byAgent.status));
+	const ans = await api("POST", `/api/acp/questions/${q1?.id}/answer`, { action: "accept", content: { question_0: "Postgres" } });
+	const dup = await api("POST", `/api/acp/questions/${q1?.id}/answer`, { action: "accept", content: { question_0: "SQLite" } });
+	check("answered once; a second answer is refused", ans.status === 200 && dup.status === 409, `${ans.status} ${dup.status}`);
+	const a1 = await waitMsg(ask1.id);
+	check("the agent got the answer in the same turn and continued", a1.state === "done" && /Elegiste: Postgres/.test(a1.result_text ?? ""), short(a1.result_text));
+	const q1d = (await projectFeed(pid)).questions.find((q) => q.id === q1?.id);
+	check("…the question reads delivered", q1d?.state === "delivered");
+
+	// 6d. Restart during a question: no false answer, no duplicate run.
+	const ask2 = await send(ARQ, "preguntá: ¿Deployamos hoy? | sí | no", pid);
+	const q2 = await waitFor("question 2", () => openQ(ask2.id), 60_000);
+	await api("POST", `/api/sessions/${sids[ARQ]}/stop`);
+	await api("POST", `/api/sessions/${sids[ARQ]}/start`);
+	const u2 = await waitMsg(ask2.id, ["uncertain", "failed", "done"], 120_000);
+	check("the message interrupted during the question is uncertain, not done", u2.state === "uncertain", short(u2.note));
+	const q2o = await waitFor("orphaned", async () => (await projectFeed(pid)).questions.find((q) => q.id === q2?.id && q.state === "orphaned"), 60_000);
+	check("the question is marked 'not delivered' (orphaned), never answered", !!q2o, short(q2o?.note));
+	const late = await api("POST", `/api/acp/questions/${q2?.id}/answer`, { action: "accept", content: { question_0: "sí" } });
+	check("answering it afterwards is refused (nothing to deliver to)", late.status === 409, JSON.stringify(late.body));
+	await sleep(5_000);
+	const u2b = await get(ask2.id);
+	check("the interrupted message was not run again", u2b.state === "uncertain" && u2b.attempts === 1, `${u2b.state}/${u2b.attempts}`);
+
 	// 6b. Backend restart (RESTART_CMD): queued messages are D1 rows; runners retry until it is back.
 	if (process.env.RESTART_CMD) {
 		const busy = await send(DEV, "esperá 8", pid);

@@ -10,6 +10,9 @@
 //   consultá a @x: <texto>   → runs `st send @x "<texto>"`, ends the turn
 //   esperá <N>               → a tool call that takes N seconds
 //   segundo plano <N>        → an async task that ends N seconds after the turn
+//   preguntá: <q> | a | b    → asks the person (ACP elicitation/create, the form
+//                              claude-agent-acp makes of AskUserQuestion) and
+//                              continues with the answer
 //   anything else            → an echo of the first line
 // A reply from another agent ("Respuesta de @x a tu mensaje #n: …") is
 // acknowledged. Every answer carries how many prompts this ACP session has
@@ -34,6 +37,15 @@ const out = (m) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...m
 const update = (sessionId, u) => out({ method: "session/update", params: { sessionId, update: u } });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let tool = 0;
+let rpc = 0;
+const waiting = new Map();
+/** A request to the client (the runner); resolves with its result. */
+const ask = (method, params) =>
+	new Promise((resolve, reject) => {
+		const id = `ta-${++rpc}`;
+		waiting.set(id, { resolve, reject });
+		out({ id, method, params });
+	});
 
 async function prompt(sessionId, text) {
 	const s = sessions[sessionId];
@@ -68,6 +80,27 @@ async function prompt(sessionId, text) {
 			rawInput: { command: `st send @${m[1]} …` },
 		});
 		await say(`Le consulté a @${m[1]} (${result}). Sigo cuando responda. ${ctx}`);
+	} else if ((m = /pregunt[aá]:\s*([^|\n]+)((?:\|[^|\n]+)+)/i.exec(body))) {
+		const question = m[1].trim();
+		const options = m[2].split("|").map((o) => o.trim()).filter(Boolean);
+		const id = `t${++tool}`;
+		update(sessionId, { sessionUpdate: "tool_call", toolCallId: id, title: "AskUserQuestion", kind: "other", status: "pending" });
+		const res = await ask("elicitation/create", {
+			mode: "form",
+			sessionId,
+			toolCallId: id,
+			message: question,
+			requestedSchema: {
+				type: "object",
+				properties: {
+					question_0: { type: "string", oneOf: options.map((o) => ({ const: o, title: o })) },
+					question_0_custom: { type: "string", title: "Other", description: "Type your own answer (optional)." },
+				},
+			},
+		}).catch((err) => ({ action: "cancel", error: err.message }));
+		update(sessionId, { sessionUpdate: "tool_call_update", toolCallId: id, status: res.action === "accept" ? "completed" : "failed" });
+		const pick = res.action === "accept" ? res.content?.question_0_custom?.trim() || res.content?.question_0 : null;
+		await say(pick ? `Elegiste: ${pick}. Sigo con eso. ${ctx}` : `Sin respuesta (${res.action}); no elijo por vos. ${ctx}`);
 	} else if ((m = /esper[aá] (\d+)/i.exec(body))) {
 		const id = `t${++tool}`;
 		update(sessionId, { sessionUpdate: "tool_call", toolCallId: id, title: `sleep ${m[1]}`, kind: "execute", status: "in_progress" });
@@ -93,6 +126,11 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
 		return;
 	}
 	const { id, method, params } = msg;
+	if (!method && waiting.has(id)) {
+		const w = waiting.get(id);
+		waiting.delete(id);
+		return msg.error ? w.reject(new Error(msg.error.message)) : w.resolve(msg.result);
+	}
 	if (id === undefined || !method) return;
 	try {
 		let result;

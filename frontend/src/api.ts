@@ -2810,6 +2810,26 @@ export interface AcpAgentInfo {
 	running?: number | null;
 	pending?: number;
 	authRequired?: boolean;
+	/** An open question of this agent waits for the person. */
+	waitingInput?: boolean;
+}
+
+export type AcpQuestionState = "open" | "answered" | "delivered" | "withdrawn" | "orphaned";
+
+/** A question an agent asked (ACP form elicitation, e.g. Claude's AskUserQuestion). */
+export interface AcpQuestion {
+	id: number;
+	agent: string;
+	message_id: number | null;
+	/** JSON of the elicitation request: {message, requestedSchema, …}. */
+	request: string;
+	state: AcpQuestionState;
+	/** JSON of the answer: {action, content?}. */
+	answer: string | null;
+	created_at: string;
+	answered_at: string | null;
+	delivered_at: string | null;
+	note: string | null;
 }
 
 export interface AcpActivity {
@@ -2827,6 +2847,7 @@ export interface AcpFeed {
 	agents?: AcpAgentInfo[];
 	maxMessageBytes: number;
 	messages: AcpMessage[];
+	questions?: AcpQuestion[];
 	/** Retained live activity per agent name. */
 	activity: Record<string, AcpActivity[]>;
 	activitySeq: number;
@@ -2869,6 +2890,11 @@ export const acpSetProject = (name: string, projectId: string | null) =>
 		method: "PATCH",
 		body: JSON.stringify({ projectId }),
 	});
+export const acpAnswer = (
+	id: number,
+	body: { action: "accept" | "decline"; content?: Record<string, unknown> },
+) =>
+	acpJson<AcpQuestion>(`/questions/${id}/answer`, { method: "POST", body: JSON.stringify(body) });
 export const acpRuntimes = () => acpJson<{ default: string; available: string[] }>("/runtimes");
 
 /** `/ws/acp`: the owner's message rows and agent activity, live. */

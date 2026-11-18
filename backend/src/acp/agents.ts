@@ -139,9 +139,28 @@ export interface MessageRow {
 	client_id: string | null;
 }
 
+export type QuestionState = "open" | "answered" | "delivered" | "withdrawn" | "orphaned";
+
+export interface QuestionRow {
+	id: number;
+	owner_user_id: string;
+	agent: string;
+	message_id: number | null;
+	/** JSON: the ACP form elicitation as the adapter sent it ({message, requestedSchema, …}). */
+	request: string;
+	state: QuestionState;
+	/** JSON: the ACP elicitation response ({action, content?}). */
+	answer: string | null;
+	created_at: string;
+	answered_at: string | null;
+	delivered_at: string | null;
+	note: string | null;
+}
+
 /** What the live channel (/ws/acp) pushes to an owner's browsers. */
 export type AcpEvent =
 	| { type: "message"; message: MessageRow }
+	| { type: "question"; question: QuestionRow }
 	| { type: "activity"; agent: string; events: ActivityEvent[] }
 	| { type: "agents" };
 
@@ -572,6 +591,109 @@ export class AcpAgents {
 			[id, ownerUserId],
 		);
 		return this.published(r.results[0]);
+	}
+
+	// ── Questions (ACP elicitation, e.g. AskUserQuestion) ─────────────────
+	// Durable: a question survives the browser, the backend and the runner. The
+	// ACP request that waits for the answer lives only in the runner, so a
+	// runner restart orphans what it had not delivered — never answers it.
+
+	private publishedQuestion(row: QuestionRow | null | undefined): QuestionRow | null {
+		if (row) this.publish(row.owner_user_id, { type: "question", question: row });
+		return row ?? null;
+	}
+
+	async openQuestion(
+		agent: AgentRow,
+		messageId: number | null,
+		request: unknown,
+	): Promise<QuestionRow> {
+		const r = await d1Query<QuestionRow>(
+			"INSERT INTO agent_questions (owner_user_id, agent, message_id, request, state) VALUES (?, ?, ?, ?, 'open') RETURNING *",
+			[agent.owner_user_id, agent.name, messageId, JSON.stringify(request)],
+		);
+		return this.publishedQuestion(r.results[0]) as QuestionRow;
+	}
+
+	async question(ownerUserId: string, id: number): Promise<QuestionRow | null> {
+		const r = await d1Query<QuestionRow>(
+			"SELECT * FROM agent_questions WHERE owner_user_id = ? AND id = ?",
+			[ownerUserId, id],
+		);
+		return r.results[0] ?? null;
+	}
+
+	/** Questions of these messages, plus every still-open one of these agents. */
+	async questionsFor(
+		ownerUserId: string,
+		messageIds: number[],
+		agents: string[],
+	): Promise<QuestionRow[]> {
+		if (!messageIds.length && !agents.length) return [];
+		const r = await d1Query<QuestionRow>(
+			`SELECT * FROM agent_questions WHERE owner_user_id = ?1
+			 AND (message_id IN (SELECT value FROM json_each(?2)) OR (state = 'open' AND agent IN (SELECT value FROM json_each(?3))))
+			 ORDER BY id`,
+			[ownerUserId, JSON.stringify(messageIds), JSON.stringify(agents)],
+		);
+		return r.results;
+	}
+
+	/** The person's answer. One conditional UPDATE: only an open question takes one, once. */
+	async answerQuestion(
+		ownerUserId: string,
+		id: number,
+		response: unknown,
+	): Promise<QuestionRow | null> {
+		const r = await d1Query<QuestionRow>(
+			`UPDATE agent_questions SET state = 'answered', answer = ?, answered_at = ${NOW}
+			 WHERE owner_user_id = ? AND id = ? AND state = 'open' RETURNING *`,
+			[JSON.stringify(response), ownerUserId, id],
+		);
+		return this.publishedQuestion(r.results[0]);
+	}
+
+	async runnerQuestion(agent: AgentRow, id: number): Promise<QuestionRow | null> {
+		const r = await d1Query<QuestionRow>(
+			"SELECT * FROM agent_questions WHERE owner_user_id = ? AND agent = ? AND id = ?",
+			[agent.owner_user_id, agent.name, id],
+		);
+		return r.results[0] ?? null;
+	}
+
+	/** The runner handed the answer to the waiting ACP request (or the adapter withdrew it). */
+	async closeQuestion(
+		agent: AgentRow,
+		id: number,
+		to: "delivered" | "withdrawn",
+	): Promise<QuestionRow | null> {
+		const from = to === "delivered" ? "('answered')" : "('open', 'answered')";
+		const r = await d1Query<QuestionRow>(
+			`UPDATE agent_questions SET state = ?, delivered_at = ${NOW}
+			 WHERE owner_user_id = ? AND agent = ? AND id = ? AND state IN ${from} RETURNING *`,
+			[to, agent.owner_user_id, agent.name, id],
+		);
+		return this.publishedQuestion(r.results[0]);
+	}
+
+	/** Runner start: the ACP requests of its previous run are gone. Nothing becomes answered. */
+	async orphanQuestions(agent: AgentRow, note: string): Promise<QuestionRow[]> {
+		const r = await d1Query<QuestionRow>(
+			`UPDATE agent_questions SET state = 'orphaned', note = ?
+			 WHERE owner_user_id = ? AND agent = ? AND state IN ('open', 'answered') RETURNING *`,
+			[note, agent.owner_user_id, agent.name],
+		);
+		for (const q of r.results) this.publishedQuestion(q);
+		return r.results;
+	}
+
+	/** Agents (of this owner) waiting for the person right now. */
+	async waitingAgents(ownerUserId: string): Promise<Set<string>> {
+		const r = await d1Query<{ agent: string }>(
+			"SELECT DISTINCT agent FROM agent_questions WHERE owner_user_id = ? AND state = 'open'",
+			[ownerUserId],
+		);
+		return new Set(r.results.map((x) => x.agent));
 	}
 
 	// ── Activity (memory only) ─────────────────────────────────────────────

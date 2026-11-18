@@ -13,8 +13,10 @@ import { acpLiveUp, subscribeAcp } from "./acpLive.js";
 import {
 	ACTIVITY_STATE,
 	activityRows,
+	answerText,
 	authFromActivity,
 	groupThread,
+	questionForm,
 	recipientsOf,
 	STATE_LABEL,
 	type ThreadItem,
@@ -26,6 +28,8 @@ import {
 	type AcpAgentInfo,
 	type AcpFeed,
 	type AcpMessage,
+	type AcpQuestion,
+	acpAnswer,
 	acpFeed,
 	acpListAgents,
 	acpProjectFeed,
@@ -76,6 +80,9 @@ export class AcpThread {
 	private statusTimer: ReturnType<typeof setInterval> | null = null;
 	private agentsTimer: ReturnType<typeof setTimeout> | null = null;
 	private renderQueued = false;
+	private questions = new Map<number, AcpQuestion>();
+	/** Question cards kept across renders (keyed by id + state): typed answers and focus survive. */
+	private readonly cards = new Map<number, { state: string; el: HTMLElement }>();
 
 	/** Called after every change of agents / auth / project / error (headers use it). */
 	onState: (s: ThreadState) => void = () => {};
@@ -125,6 +132,8 @@ export class AcpThread {
 			this.activity.clear();
 			this.liveText.clear();
 			this.openDetails.clear();
+			this.questions.clear();
+			this.cards.clear();
 			this.agents.clear();
 			this.auth.clear();
 			this.project = null;
@@ -202,6 +211,7 @@ export class AcpThread {
 			for (const [name, evs] of Object.entries(feed.activity ?? {})) this.addActivity(name, evs);
 		}
 		if (feed.project) this.project = feed.project;
+		for (const q of feed.questions ?? []) this.questions.set(q.id, q);
 	}
 
 	private async loadEarlier(): Promise<void> {
@@ -246,6 +256,18 @@ export class AcpThread {
 				this.refreshAgentsSoon();
 				this.changed();
 				return;
+			case "question": {
+				const q = ev.question;
+				const src = this.source;
+				const inScope =
+					(q.message_id !== null && this.messages.some((m) => m.id === q.message_id)) ||
+					(src?.kind === "agent" && q.agent === src.name);
+				if (!inScope) return;
+				this.questions.set(q.id, q);
+				this.refreshAgentsSoon(0);
+				this.changed();
+				return;
+			}
 			case "activity":
 				if (!this.agents.has(ev.agent)) return;
 				this.addActivity(ev.agent, ev.events);
@@ -325,6 +347,9 @@ export class AcpThread {
 
 	render(): void {
 		const t = this.threadEl;
+		const focused = document.activeElement as HTMLElement | null;
+		const keepFocus =
+			focused && t.contains(focused) && focused.closest(".acp-question") ? focused : null;
 		const atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 60;
 		const prevHeight = t.scrollHeight;
 		const prevTop = t.scrollTop;
@@ -350,14 +375,28 @@ export class AcpThread {
 				),
 			);
 		for (const item of groupThread(this.messages)) nodes.push(this.itemEl(item));
+		// Questions whose message is not on this page (an older page, or none).
+		const shown = new Set(this.messages.map((m) => m.id));
+		for (const q of this.questions.values())
+			if ((q.message_id === null || !shown.has(q.message_id)) && q.state === "open")
+				nodes.push(this.questionEl(q));
 		t.replaceChildren(...nodes);
+		if (keepFocus?.isConnected) keepFocus.focus({ preventScroll: true });
 		if (atBottom) t.scrollTop = t.scrollHeight;
 		else if (prevTop < 5 && t.scrollHeight > prevHeight) t.scrollTop = t.scrollHeight - prevHeight;
 		else t.scrollTop = prevTop;
 		this.renderComposer();
 	}
 
+	private openQuestionOf(id: number): boolean {
+		for (const q of this.questions.values())
+			if (q.message_id === id && q.state === "open") return true;
+		return false;
+	}
+
 	private badge(m: AcpMessage): HTMLElement {
+		if (m.state === "running" && this.openQuestionOf(m.id))
+			return el("span", "acp-badge acp-badge-waiting", "esperando tu respuesta");
 		const waitingLogin =
 			this.auth.get(m.to_id) === true && (m.state === "pending" || m.state === "running");
 		return el(
@@ -428,6 +467,8 @@ export class AcpThread {
 	/** Live activity while running, the result, the note, the requeue decision. */
 	private outcome(m: AcpMessage): HTMLElement[] {
 		const out: HTMLElement[] = [];
+		for (const q of this.questions.values())
+			if (q.message_id === m.id) out.push(this.questionEl(q));
 		if (m.state === "running" || m.state === "pending") {
 			const rows = activityRows(this.activity.get(m.id) ?? []);
 			if (rows.length) {
@@ -479,6 +520,133 @@ export class AcpThread {
 			);
 		}
 		return out;
+	}
+
+	private questionEl(q: AcpQuestion): HTMLElement {
+		const cached = this.cards.get(q.id);
+		if (cached && cached.state === q.state) return cached.el;
+		const form = questionForm(q.request);
+		const card = el("section", `acp-question acp-question-${q.state}`);
+		card.setAttribute("aria-label", `Pregunta de @${q.agent}`);
+		card.append(el("div", "acp-question-head", `@${q.agent} pregunta`));
+		if (form.message) card.append(el("p", "acp-question-text", form.message));
+		if (q.state === "open") card.append(this.questionForm(q, form));
+		else {
+			const said = answerText(form, q.answer);
+			const line =
+				q.state === "answered"
+					? `Tu respuesta: ${said} · entregándola al agente…`
+					: q.state === "delivered"
+						? `Tu respuesta: ${said}`
+						: q.state === "withdrawn"
+							? "El agente retiró la pregunta (ya no la necesita)."
+							: `Sin entregar: ${q.note ?? "el agente se reinició"}.${said ? ` Tu respuesta (${said}) no se usó.` : ""}`;
+			card.append(el("div", "acp-question-state", line));
+			if (q.state === "orphaned") {
+				// Continue safely: the person decides whether the agent gets the decision
+				// again, as an ordinary message in its queue.
+				const again = el("button", "files-btn", "Enviar la decisión como mensaje");
+				again.type = "button";
+				again.addEventListener("click", () => {
+					const prefix = this.source?.kind === "project" ? `@${q.agent} ` : "";
+					this.input.value = `${prefix}Sobre tu pregunta «${form.message}»: ${said && !said.startsWith("(") ? said : ""}`;
+					this.input.focus();
+				});
+				card.append(again);
+			}
+		}
+		this.cards.set(q.id, { state: q.state, el: card });
+		return card;
+	}
+
+	private questionForm(q: AcpQuestion, form: ReturnType<typeof questionForm>): HTMLElement {
+		const f = el("form", "acp-question-form");
+		const read: Array<() => [string, unknown] | null> = [];
+		form.fields.forEach((field, i) => {
+			const box = el("fieldset", "acp-question-field");
+			if (field.label) box.append(el("legend", undefined, field.label));
+			const name = `q${q.id}-${i}`;
+			if (field.kind === "single" || field.kind === "multi") {
+				const inputs: HTMLInputElement[] = [];
+				for (const o of field.options) {
+					const lab = el("label", "acp-option");
+					const inp = el("input");
+					inp.type = field.kind === "single" ? "radio" : "checkbox";
+					inp.name = name;
+					inp.value = o.value;
+					inputs.push(inp);
+					lab.append(inp, el("span", undefined, o.label));
+					if (o.description) lab.append(el("small", undefined, ` — ${o.description}`));
+					box.append(lab);
+				}
+				read.push(() => {
+					const picked = inputs.filter((x) => x.checked).map((x) => x.value);
+					if (field.kind === "multi") return picked.length ? [field.key, picked] : null;
+					return picked[0] !== undefined ? [field.key, picked[0]] : null;
+				});
+			} else if (field.kind === "boolean") {
+				const lab = el("label", "acp-option");
+				const inp = el("input");
+				inp.type = "checkbox";
+				lab.append(inp, el("span", undefined, "Sí"));
+				box.append(lab);
+				read.push(() => [field.key, inp.checked]);
+			} else {
+				const inp = el("textarea", "acp-question-input");
+				inp.rows = 2;
+				inp.setAttribute("aria-label", field.label || form.message || "Respuesta");
+				box.append(inp);
+				read.push(() => {
+					const v = inp.value.trim();
+					if (!v) return null;
+					return [field.key, field.kind === "number" ? Number(v) : v];
+				});
+			}
+			if (field.custom) {
+				const other = el("input", "acp-question-other");
+				other.type = "text";
+				other.placeholder = "Otra respuesta o nota (opcional)";
+				other.setAttribute("aria-label", "Otra respuesta");
+				box.append(other);
+				const key = field.custom;
+				read.push(() => (other.value.trim() ? [key, other.value.trim()] : null));
+			}
+			f.append(box);
+		});
+		const actions = el("div", "acp-question-actions");
+		const send = el("button", "files-btn acp-question-send", "Responder");
+		send.type = "submit";
+		const skip = el("button", "files-btn", "Omitir");
+		skip.type = "button";
+		const status = el("span", "acp-chat-hint");
+		actions.append(send, skip, status);
+		f.append(actions);
+		const submit = (body: { action: "accept" | "decline"; content?: Record<string, unknown> }) => {
+			send.disabled = skip.disabled = true;
+			status.textContent = "Enviando…";
+			void acpAnswer(q.id, body)
+				.then((row) => {
+					this.questions.set(row.id, row);
+					this.changed();
+				})
+				.catch((err: Error & { status?: number }) => {
+					// 409: someone (another tab) answered first, or the agent restarted.
+					status.textContent =
+						err.status === 409
+							? "Ya no está abierta; se actualiza sola."
+							: `No se envió: ${err.message}`;
+					send.disabled = skip.disabled = err.status === 409;
+				});
+		};
+		f.addEventListener("submit", (e) => {
+			e.preventDefault();
+			const content = Object.fromEntries(
+				read.map((g) => g()).filter((x): x is [string, unknown] => x !== null),
+			);
+			submit({ action: "accept", content });
+		});
+		skip.addEventListener("click", () => submit({ action: "decline" }));
+		return f;
 	}
 
 	private renderComposer(): void {

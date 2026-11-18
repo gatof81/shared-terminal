@@ -863,7 +863,7 @@ export const MIGRATIONS: readonly Migration[] = [
 		// Additive like v21: columns NULL/0 on existing rows mean exactly what
 		// v21 did (no project, a person's message, no idempotency key).
 		version: 22,
-		description: "ACP agents in projects — message scope, hop depth, client ids",
+		description: "ACP agents in projects — message scope, hop depth, client ids; agent questions",
 		apply: async () => {
 			await addColumnIfMissing("acp_agents", "project_id TEXT");
 			await addColumnIfMissing("agent_messages", "project_id TEXT");
@@ -893,6 +893,27 @@ export const ACP_PROJECTS_DDL: readonly string[] = [
 	"CREATE INDEX IF NOT EXISTS idx_agent_messages_project ON agent_messages(owner_user_id, project_id, id)",
 	"CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_messages_client ON agent_messages(owner_user_id, client_id, to_id) WHERE client_id IS NOT NULL",
 	"CREATE INDEX IF NOT EXISTS idx_acp_agents_project ON acp_agents(owner_user_id, project_id)",
+	// A question an agent asks while working on a message (ACP `elicitation/create`,
+	// e.g. Claude's AskUserQuestion). `request` is the form as the adapter sent it;
+	// only the person answers (`answered`, one conditional UPDATE: a second answer
+	// finds nothing open). `delivered` = the runner handed it to the waiting ACP
+	// request. A runner restart loses that request: whatever was open or answered
+	// but not delivered becomes `orphaned` — never treated as answered.
+	`CREATE TABLE IF NOT EXISTS agent_questions (
+		id            INTEGER PRIMARY KEY AUTOINCREMENT,
+		owner_user_id TEXT NOT NULL,
+		agent         TEXT NOT NULL,
+		message_id    INTEGER,
+		request       TEXT NOT NULL,
+		state         TEXT NOT NULL CHECK (state IN ('open', 'answered', 'delivered', 'withdrawn', 'orphaned')),
+		answer        TEXT,
+		created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+		answered_at   TEXT,
+		delivered_at  TEXT,
+		note          TEXT
+	)`,
+	"CREATE INDEX IF NOT EXISTS idx_agent_questions_agent ON agent_questions(owner_user_id, agent, state)",
+	"CREATE INDEX IF NOT EXISTS idx_agent_questions_message ON agent_questions(owner_user_id, message_id)",
 	"DROP TRIGGER IF EXISTS trg_agent_message_reply",
 	`CREATE TRIGGER IF NOT EXISTS trg_agent_message_reply
 	AFTER UPDATE OF state ON agent_messages

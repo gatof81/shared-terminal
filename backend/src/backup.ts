@@ -131,6 +131,7 @@ export const TABLES: ReadonlyArray<{ name: string; orderBy: string; sinceSchema?
 	// message row is an INSERT, so the reply trigger (UPDATE OF state) never fires.
 	{ name: "acp_agents", orderBy: "agent_id", sinceSchema: 21 },
 	{ name: "agent_messages", orderBy: "id", sinceSchema: 21 },
+	{ name: "agent_questions", orderBy: "id", sinceSchema: 22 },
 ];
 
 export interface BackupManifest {

@@ -74,7 +74,8 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 				if (!res.headersSent) res.status(500).json({ error: "internal" });
 			});
 
-	const agentView = (a: AgentRow, loads: Map<string, AgentLoad>) => ({
+	const agentView = (a: AgentRow, loads: Map<string, AgentLoad>, waiting?: Set<string>) => ({
+		waitingInput: waiting?.has(a.name) ?? false,
 		name: a.name,
 		sessionId: a.session_id,
 		runtime: a.runtime,
@@ -96,8 +97,12 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 		"/agents",
 		wrap(async (_req, res) => {
 			const owner = ownerOf(caller(res));
-			const [rows, loads] = await Promise.all([acp.list(owner), acp.loads(owner)]);
-			res.json(rows.map((a) => agentView(a, loads)));
+			const [rows, loads, waiting] = await Promise.all([
+				acp.list(owner),
+				acp.loads(owner),
+				acp.waitingAgents(owner),
+			]);
+			res.json(rows.map((a) => agentView(a, loads, waiting)));
 		}),
 	);
 
@@ -237,12 +242,18 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 			if (!owner) return;
 			const agent = await acp.byName(owner, req.params.name);
 			if (!agent) return void res.status(404).json({ error: "not-found" });
-			const [messages, loads] = await Promise.all([
+			const [messages, loads, waiting] = await Promise.all([
 				acp.messages(owner, { agent: agent.name, before: beforeOf(req) }),
 				acp.loads(owner),
+				acp.waitingAgents(owner),
 			]);
 			res.json({
-				agent: agentView(agent, loads),
+				agent: agentView(agent, loads, waiting),
+				questions: await acp.questionsFor(
+					owner,
+					messages.map((m) => m.id),
+					[agent.name],
+				),
 				maxMessageBytes: acp.config.maxMessageBytes,
 				messages,
 				activity: { [agent.name]: acp.activitySince(agent.agent_id) },
@@ -261,15 +272,22 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 			const pid = req.params.pid;
 			const project = await acp.projectContext(owner, pid);
 			if (!project) return void res.status(404).json({ error: "project-not-found" });
-			const [all, loads, messages] = await Promise.all([
+			const [all, loads, messages, waiting] = await Promise.all([
 				acp.list(owner),
 				acp.loads(owner),
 				acp.messages(owner, { projectId: pid, before: beforeOf(req) }),
+				acp.waitingAgents(owner),
 			]);
 			const agents = all.filter((a) => a.project_id === pid);
 			res.json({
 				project: { id: pid, name: project.name },
-				agents: agents.map((a) => agentView(a, loads)),
+				agents: agents.map((a) => agentView(a, loads, waiting)),
+				// Only questions asked while working on a message of this project.
+				questions: await acp.questionsFor(
+					owner,
+					messages.map((m) => m.id),
+					[],
+				),
 				maxMessageBytes: acp.config.maxMessageBytes,
 				messages,
 				activity: Object.fromEntries(agents.map((a) => [a.name, acp.activitySince(a.agent_id)])),
@@ -285,6 +303,35 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 			if (!owner) return;
 			const msg = await acp.requeue(owner, Number(req.params.id));
 			msg ? res.json(msg) : res.status(409).json({ error: "not-uncertain" });
+		}),
+	);
+
+	// POST /questions/:id/answer {action: accept|decline|cancel, content?} — the
+	// person only (an agent's token is refused: a question to the person is never
+	// answered by another agent). A second answer finds nothing open: 409.
+	router.post(
+		"/questions/:id/answer",
+		wrap(async (req, res) => {
+			const owner = ownerOnly(res);
+			if (!owner) return;
+			const { action, content } = (req.body ?? {}) as { action?: unknown; content?: unknown };
+			if (action !== "accept" && action !== "decline" && action !== "cancel")
+				return void res.status(400).json({ error: "bad-action" });
+			if (
+				action === "accept" &&
+				(typeof content !== "object" || content === null || Array.isArray(content))
+			)
+				return void res.status(400).json({ error: "content must be an object" });
+			const q = await acp.answerQuestion(
+				owner,
+				Number(req.params.id),
+				action === "accept" ? { action, content } : { action },
+			);
+			if (q) return void res.json(q);
+			const cur = await acp.question(owner, Number(req.params.id));
+			cur
+				? res.status(409).json({ error: "not-open", state: cur.state })
+				: res.status(404).json({ error: "not-found" });
 		}),
 	);
 
@@ -354,6 +401,57 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 				String((req.body as { note?: unknown })?.note ?? "released"),
 			);
 			msg ? res.json(msg) : res.status(409).json({ error: "not-running" });
+		}),
+	);
+
+	// Questions from the runner's side: register one, wait for its answer, close it.
+	router.post(
+		"/runner/questions",
+		wrap(async (req, res) => {
+			const agent = agentOnly(res);
+			if (!agent) return;
+			const { messageId, request } = (req.body ?? {}) as { messageId?: unknown; request?: unknown };
+			if (typeof request !== "object" || request === null)
+				return void res.status(400).json({ error: "request must be an object" });
+			res
+				.status(201)
+				.json(
+					await acp.openQuestion(agent, typeof messageId === "number" ? messageId : null, request),
+				);
+		}),
+	);
+
+	router.get(
+		"/runner/questions/:id",
+		wrap(async (req, res) => {
+			const agent = agentOnly(res);
+			if (!agent) return;
+			const q = await acp.runnerQuestion(agent, Number(req.params.id));
+			q ? res.json(q) : res.status(404).json({ error: "not-found" });
+		}),
+	);
+
+	router.post(
+		"/runner/questions/:id/:to(delivered|withdrawn)",
+		wrap(async (req, res) => {
+			const agent = agentOnly(res);
+			if (!agent) return;
+			const q = await acp.closeQuestion(
+				agent,
+				Number(req.params.id),
+				req.params.to as "delivered" | "withdrawn",
+			);
+			q ? res.json(q) : res.status(409).json({ error: "not-closable" });
+		}),
+	);
+
+	router.post(
+		"/runner/questions-orphan",
+		wrap(async (req, res) => {
+			const agent = agentOnly(res);
+			if (!agent) return;
+			const note = String((req.body as { note?: unknown })?.note ?? "the agent restarted");
+			res.json(await acp.orphanQuestions(agent, note));
 		}),
 	);
 

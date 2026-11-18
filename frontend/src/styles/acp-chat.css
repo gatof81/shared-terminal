@@ -359,3 +359,72 @@
 	font-size: 0.75rem;
 	opacity: 0.7;
 }
+
+/* ── Questions from an agent (ACP form elicitation) ─────────────────────── */
+.acp-badge-waiting {
+	color: var(--c-warn);
+	font-weight: 600;
+}
+.acp-question {
+	margin-top: 8px;
+	padding: 8px 10px;
+	border: 1px solid var(--c-warn);
+	border-radius: 8px;
+	background: rgba(var(--c-warn-rgb), 0.06);
+}
+.acp-question-delivered,
+.acp-question-answered,
+.acp-question-withdrawn {
+	border-color: var(--c-border);
+	background: transparent;
+}
+.acp-question-head {
+	font-size: 0.78rem;
+	opacity: 0.85;
+}
+.acp-question-text {
+	margin: 4px 0 6px;
+	font-weight: 600;
+	white-space: pre-wrap;
+}
+.acp-question-field {
+	border: none;
+	margin: 0 0 6px;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+.acp-option {
+	display: flex;
+	align-items: baseline;
+	gap: 6px;
+	min-height: 1.9rem;
+	cursor: pointer;
+}
+.acp-question-input,
+.acp-question-other {
+	background: var(--c-surface);
+	color: var(--c-text);
+	border: 1px solid var(--c-border);
+	border-radius: 6px;
+	padding: 4px 8px;
+	font: inherit;
+	min-height: 2rem;
+}
+.acp-question-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	align-items: center;
+}
+.acp-question-state {
+	font-size: 0.85rem;
+	white-space: pre-wrap;
+}
+.chat-readonly-note {
+	padding: 10px 14px;
+	border-top: 1px solid var(--c-border);
+	font-size: 0.82rem;
+	color: var(--c-muted);
+}
