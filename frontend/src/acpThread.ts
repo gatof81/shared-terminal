@@ -81,8 +81,7 @@ export class AcpThread {
 	 * message's attachment path): the server replays a retry only when sender,
 	 * body and scope are identical, and refuses anything else as a reused id.
 	 */
-	private lastFailed: { text: string; clientId: string; bodies: Map<string, string> } | null =
-		null;
+	private lastFailed: { text: string; clientId: string; bodies: Map<string, string> } | null = null;
 	private unsubscribe: (() => void) | null = null;
 	private poll: ReturnType<typeof setInterval> | null = null;
 	private statusTimer: ReturnType<typeof setInterval> | null = null;
