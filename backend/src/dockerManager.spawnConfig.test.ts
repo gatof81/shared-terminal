@@ -911,6 +911,30 @@ describe("recreatePort().buildCreate (CONVERSATION.md §2.7.2 step 1)", () => {
 		expect(spawned.Labels).toBeUndefined();
 	});
 
+	it("an ACP agent session's N keeps the read-only runtime mount its spawn had", async () => {
+		const { dm, captured } = makeDmWithCreateCapture();
+		const acpBind = "/ws/.acp-runtime:/opt/st-acp:ro";
+		dm.setAgentHooks({ prepareSpawn: async () => ({ binds: [acpBind] }), onStarted: () => {} });
+		await dm.spawn("sess-1");
+		const spawned = captured.opts as { HostConfig: { Binds: string[] } };
+		expect(spawned.HostConfig.Binds).toContain(acpBind);
+		const built = (await dm.recreatePort().buildCreate("sess-1", spec)) as typeof spawned;
+		expect([...built.HostConfig.Binds].sort()).toEqual(
+			[...spawned.HostConfig.Binds, ...spec.binds].sort(),
+		);
+	});
+
+	it("an agent-hook failure fails the build instead of creating N without the runtime", async () => {
+		const { dm } = makeDmWithCreateCapture();
+		dm.setAgentHooks({
+			prepareSpawn: async () => {
+				throw new Error("D1 down");
+			},
+			onStarted: () => {},
+		});
+		await expect(dm.recreatePort().buildCreate("sess-1", spec)).rejects.toThrow("D1 down");
+	});
+
 	it("a D1 failure reading the config fails the build (no spawn-style fallback to defaults)", async () => {
 		const { dm } = makeDmWithCreateCapture();
 		dbStubs.d1Query.mockRejectedValue(new Error("D1 down"));

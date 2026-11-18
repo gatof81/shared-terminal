@@ -548,6 +548,251 @@ describe("ACP messages: scope, replies, loop guard (v22)", () => {
 		);
 	});
 
+	/** Claims and finishes everything queued for these agents (replies included). */
+	async function drain(...agents: string[]) {
+		for (let progress = true; progress; ) {
+			progress = false;
+			for (const n of agents) {
+				const x = await call(as(n), "POST", "/runner/claim");
+				if (x.status !== 200) continue;
+				progress = true;
+				await call(as(n), "POST", `/runner/messages/${x.body.id}/result`, {
+					state: "done",
+					text: ".",
+				});
+			}
+		}
+	}
+	const repliesTo = (id: number) =>
+		db.prepare("SELECT * FROM agent_messages WHERE reply_to = ? ORDER BY id").all(id) as Array<
+			Record<string, unknown>
+		>;
+
+	it("an agent's request that fails or is interrupted still answers its sender, once, correlated", async () => {
+		await drain("arquitecto", "developer");
+		await call(owner, "POST", "/messages", {
+			to: "arquitecto",
+			body: "coordiná",
+			projectId: "p-1",
+		});
+		const a = await call(as("arquitecto"), "POST", "/runner/claim");
+		const failing = await call(as("arquitecto"), "POST", "/messages", {
+			to: "developer",
+			body: "esto va a fallar",
+		});
+		const interrupted = await call(as("arquitecto"), "POST", "/messages", {
+			to: "developer",
+			body: "esto se interrumpe",
+		});
+		await call(as("arquitecto"), "POST", `/runner/messages/${a.body.id}/result`, {
+			state: "done",
+			text: ".",
+		});
+		const f = await call(as("developer"), "POST", "/runner/claim");
+		expect(f.body.id).toBe(failing.body.id);
+		const failed = { state: "failed", note: "prompt error: boom" };
+		expect(
+			(await call(as("developer"), "POST", `/runner/messages/${f.body.id}/result`, failed)).status,
+		).toBe(200);
+		// A runner that lost the answer posts the same result again: 409, no second notice.
+		expect(
+			(await call(as("developer"), "POST", `/runner/messages/${f.body.id}/result`, failed)).status,
+		).toBe(409);
+		const fr = repliesTo(failing.body.id);
+		expect(fr).toHaveLength(1);
+		expect(fr[0]).toMatchObject({
+			kind: "reply",
+			from_id: "developer",
+			to_id: "arquitecto",
+			state: "pending",
+			project_id: "p-1",
+			depth: 1,
+		});
+		expect(String(fr[0]!.body)).toContain("falló");
+		expect(String(fr[0]!.body)).toContain("boom");
+		expect(events.some((e) => e.type === "message" && e.id === fr[0]!.id)).toBe(true);
+
+		const u = await call(as("developer"), "POST", "/runner/claim");
+		expect(u.body.id).toBe(interrupted.body.id);
+		await call(as("developer"), "POST", `/runner/messages/${u.body.id}/result`, {
+			state: "uncertain",
+			note: "runner restarted",
+		});
+		const notice = repliesTo(interrupted.body.id);
+		expect(notice).toHaveLength(1);
+		// Informing is not retrying: the notice tells the requester not to repeat
+		// the request, and nothing re-sends it (still one request, still uncertain).
+		expect(String(notice[0]!.body)).toContain("No lo repitas ni lo reenvíes");
+		expect(
+			db
+				.prepare(
+					"SELECT COUNT(*) AS n FROM agent_messages WHERE from_id = 'arquitecto' AND to_id = 'developer' AND body = 'esto se interrumpe'",
+				)
+				.get(),
+		).toEqual({ n: 1 });
+		expect((await call(owner, "GET", `/messages/${interrupted.body.id}`)).body.state).toBe(
+			"uncertain",
+		);
+		// The person requeues it and it ends done: the real reply follows the notice.
+		expect((await call(owner, "POST", `/messages/${u.body.id}/requeue`)).status).toBe(200);
+		const again = await call(as("developer"), "POST", "/runner/claim");
+		expect(again.body.id).toBe(interrupted.body.id);
+		await call(as("developer"), "POST", `/runner/messages/${u.body.id}/result`, {
+			state: "done",
+			text: "hecho al fin",
+		});
+		const ur = repliesTo(interrupted.body.id);
+		expect(ur.map((r) => r.note)).toEqual(["unfinished:uncertain", null]);
+		expect(String(ur[1]!.body)).toContain("hecho al fin");
+		await drain("arquitecto", "developer");
+	});
+
+	it("a person's message that fails gets no reply row (the person sees its state)", async () => {
+		const m = await call(owner, "POST", "/messages", { to: "developer", body: "x" });
+		const c = await call(as("developer"), "POST", "/runner/claim");
+		expect(c.body.id).toBe(m.body.id);
+		await call(as("developer"), "POST", `/runner/messages/${c.body.id}/result`, {
+			state: "failed",
+		});
+		expect(repliesTo(m.body.id)).toHaveLength(0);
+	});
+
+	it("a question names a message only if it is the asking agent's running one", async () => {
+		const posted = await call(owner, "POST", "/messages", {
+			to: "developer",
+			body: "trabajo del proyecto",
+			projectId: "p-1",
+		});
+		// @solo (re-created above) is not in p-1 and is not running that message.
+		tokens.solo = acp.tokenFor((await acp.byName(OWNER, "solo"))!.agent_id);
+		const q = await call(as("solo"), "POST", "/runner/questions", {
+			messageId: posted.body.id,
+			request: { mode: "form", message: "¿colado?", requestedSchema: { type: "object" } },
+		});
+		expect(q.status).toBe(201);
+		expect(q.body.message_id).toBeNull();
+		const pf = await call(owner, "GET", "/projects/p-1/feed");
+		expect(pf.body.questions.map((x: { id: number }) => x.id)).not.toContain(q.body.id);
+		// Still shown where it belongs: the asking agent's own chat.
+		const sf = await call(owner, "GET", "/agents/solo/feed");
+		expect(sf.body.questions.map((x: { id: number }) => x.id)).toContain(q.body.id);
+		await call(as("solo"), "POST", `/runner/questions/${q.body.id}/withdrawn`);
+		await drain("developer");
+	});
+
+	it("a hard delete closes the agent's queue, tells agent senders, orphans its questions and drops its token", async () => {
+		const sid = "66666666-6666-4666-8666-666666666666";
+		db.prepare(
+			"INSERT INTO sessions (session_id, user_id, name, container_name, status) VALUES (?, ?, 'temp', ?, 'running')",
+		).run(sid, OWNER, `st-${sid.slice(0, 12)}`);
+		const temp = await acp.create(sid, OWNER, "temporal", { projectId: "p-1" });
+		tokens.temporal = acp.tokenFor(temp.agent_id);
+		const fromPerson = await call(owner, "POST", "/messages", { to: "temporal", body: "uno" });
+		await call(owner, "POST", "/messages", { to: "arquitecto", body: "pedile", projectId: "p-1" });
+		const a = await call(as("arquitecto"), "POST", "/runner/claim");
+		const fromAgent = await call(as("arquitecto"), "POST", "/messages", {
+			to: "temporal",
+			body: "dos",
+		});
+		await call(as("arquitecto"), "POST", `/runner/messages/${a.body.id}/result`, {
+			state: "done",
+			text: ".",
+		});
+		const running = await call(as("temporal"), "POST", "/runner/claim");
+		expect(running.body.id).toBe(fromPerson.body.id);
+		const q = await call(as("temporal"), "POST", "/runner/questions", {
+			messageId: running.body.id,
+			request: { mode: "form", message: "?", requestedSchema: { type: "object" } },
+		});
+		expect((await call(as("temporal"), "GET", "/agents")).status).toBe(200); // token cached
+
+		await acp.onPurged(sid);
+		db.prepare("DELETE FROM sessions WHERE session_id = ?").run(sid);
+
+		const state = (id: number) =>
+			(db.prepare("SELECT state FROM agent_messages WHERE id = ?").get(id) as { state: string })
+				.state;
+		expect(state(fromPerson.body.id)).toBe("failed");
+		expect(state(fromAgent.body.id)).toBe("failed");
+		expect(repliesTo(fromPerson.body.id)).toHaveLength(0);
+		expect(repliesTo(fromAgent.body.id)).toMatchObject([
+			{ to_id: "arquitecto", kind: "reply", note: "unfinished:failed", project_id: "p-1" },
+		]);
+		expect((await call(owner, "GET", "/agents/temporal/feed")).status).toBe(404);
+		expect(
+			(
+				db.prepare("SELECT state FROM agent_questions WHERE id = ?").get(q.body.id) as {
+					state: string;
+				}
+			).state,
+		).toBe("orphaned");
+		expect((await call(as("temporal"), "GET", "/agents")).status).toBe(401);
+		await drain("arquitecto");
+	});
+
+	it("recipients: only the caller owner's agents, in the project when posted there", async () => {
+		const unknown = await call(owner, "POST", "/messages", { to: "@nadie", body: "x" });
+		expect(unknown.status).toBe(400);
+		expect(unknown.body.error).toBe("unknown-recipient");
+		expect(unknown.body.agents).not.toContain("ajeno");
+		// Another owner's agent, the person and Shared Terminal are not recipients.
+		for (const to of ["ajeno", "owner", "system"]) {
+			expect((await call(owner, "POST", "/messages", { to, body: "x" })).status).toBe(400);
+			expect((await call(as("arquitecto"), "POST", "/messages", { to, body: "x" })).status).toBe(
+				400,
+			);
+		}
+		expect(
+			(await call(owner, "POST", "/messages", { to: "solo", body: "x", projectId: "p-1" })).body
+				.error,
+		).toBe("not-in-project");
+		expect(
+			(await call(owner, "POST", "/messages", { to: "developer", body: "x", projectId: "p-x" }))
+				.status,
+		).toBe(404);
+	});
+
+	it("clientId: concurrent retries are one row; a reused id with another sender, text or scope is 409, never someone else's row", async () => {
+		const send = {
+			to: "developer",
+			body: "una vez",
+			projectId: "p-1",
+			clientId: "cid-race-000001",
+		};
+		const all = await Promise.all([1, 2, 3].map(() => call(owner, "POST", "/messages", send)));
+		expect(all.map((r) => r.status).sort()).toEqual([200, 200, 201]);
+		expect(new Set(all.map((r) => r.body.id)).size).toBe(1);
+		const count = () =>
+			(
+				db
+					.prepare("SELECT COUNT(*) AS n FROM agent_messages WHERE client_id = ?")
+					.get(send.clientId) as { n: number }
+			).n;
+		expect(count()).toBe(1);
+		const otherText = await call(owner, "POST", "/messages", { ...send, body: "otra cosa" });
+		expect(otherText.status).toBe(409);
+		expect(otherText.body).toEqual({ error: "client-id-reused", id: all[0]!.body.id });
+		expect((await call(owner, "POST", "/messages", { ...send, projectId: undefined })).status).toBe(
+			409,
+		);
+		// An agent of the same owner reusing the person's id gets no replay of the person's row.
+		await call(owner, "POST", "/messages", { to: "arquitecto", body: "trabajá", projectId: "p-1" });
+		await drain("developer");
+		const a = await call(as("arquitecto"), "POST", "/runner/claim");
+		const byAgent = await call(as("arquitecto"), "POST", "/messages", {
+			to: "developer",
+			body: "una vez",
+			clientId: send.clientId,
+		});
+		expect(byAgent.status).toBe(409);
+		expect(count()).toBe(1);
+		await call(as("arquitecto"), "POST", `/runner/messages/${a.body.id}/result`, {
+			state: "done",
+			text: ".",
+		});
+		await drain("arquitecto", "developer");
+	});
+
 	it("events go only to the owner of the row", () => {
 		expect(events.filter((e) => e.type === "message").every((e) => e.owner === OWNER)).toBe(true);
 	});

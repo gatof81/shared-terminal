@@ -186,6 +186,13 @@ export interface ActivityEvent {
 	[key: string]: unknown;
 }
 
+/** A `clientId` already used for a different message to the same recipient. */
+export class ClientIdConflictError extends Error {
+	constructor(readonly existingId: number) {
+		super("clientId already used for a different message");
+	}
+}
+
 const NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 const ACTIVITY_MAX = 500;
 /** Agent → agent hops allowed below one person's message (ACP_MAX_DEPTH). */
@@ -272,13 +279,9 @@ export class AcpAgents {
 		// Messages are addressed by name and outlive a hard-deleted agent: what
 		// that agent left unfinished must not be picked up by a new agent that
 		// takes the name. Only rows of a name no agent holds (the INSERT below
-		// fails when one does).
-		await d1Query(
-			`UPDATE agent_messages SET state = 'failed', note = 'the agent it was addressed to was deleted', finished_at = ${NOW}
-			 WHERE owner_user_id = ?1 AND to_id = ?2 AND state IN ('pending', 'running')
-			 AND NOT EXISTS (SELECT 1 FROM acp_agents WHERE owner_user_id = ?1 AND name = ?2)`,
-			[ownerUserId, name],
-		);
+		// fails when one does). The hard delete itself closes them (onPurged);
+		// this catches a delete whose close failed.
+		await this.failInbox(ownerUserId, name, { onlyIfUnheld: true });
 		const row = (
 			await d1Query<AgentRow>(
 				"INSERT INTO acp_agents (agent_id, session_id, owner_user_id, name, runtime, model, project_id) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *",
@@ -450,8 +453,16 @@ export class AcpAgents {
 			"SELECT * FROM agent_messages WHERE owner_user_id = ? AND client_id = ? AND to_id = ?",
 			[m.ownerUserId, m.clientId ?? null, m.to],
 		);
-		if (!prior.results[0]) throw new Error("message insert returned nothing");
-		return { message: prior.results[0], replayed: true };
+		const p = prior.results[0];
+		if (!p) throw new Error("message insert returned nothing");
+		// A replay is the SAME send retried: same sender, text and scope. The key
+		// space is per owner, shared by the person and that owner's agents, so a
+		// reused id with anything else is refused rather than answered with
+		// someone else's row — which would report a new message as sent while
+		// dropping it. Exact comparison only: no similarity-based deduplication.
+		if (p.from_id !== m.from || p.body !== m.body || p.project_id !== (m.projectId ?? null))
+			throw new ClientIdConflictError(p.id);
+		return { message: p, replayed: true };
 	}
 
 	/**
@@ -583,7 +594,86 @@ export class AcpAgents {
 			).catch(() => null);
 			this.published(reply?.results[0]);
 		}
+		// Run whether or not the UPDATE matched: a runner that lost the answer
+		// re-posts the same result, finds the row already settled (409), and this
+		// still writes the notice a crash between the two statements left out.
+		if (s.state === "failed" || s.state === "uncertain")
+			await this.noticeUnfinished(agent.owner_user_id, id);
 		return row;
+	}
+
+	/**
+	 * The v22 trigger answers an agent's request only when it ends `done`. One
+	 * that ends `failed` or `uncertain` would leave its sender — told by the
+	 * protocol that the answer arrives by itself and not to wait for it — with
+	 * nothing, ever. This writes that answer: a `reply` correlated by
+	 * `reply_to`, in the request's scope and depth, at most once per request
+	 * and terminal state (an `uncertain` request the person requeues may still
+	 * end `done`, and then the trigger's real reply follows). A person's
+	 * message gets none: the person sees the state in Chat.
+	 *
+	 * The notice must not become a resend by other means: the requester is a
+	 * model that could simply ask again, repeating effects the interrupted run
+	 * may already have had. Shared Terminal itself never re-sends; the text
+	 * tells the agent not to either, and leaves the retry to the person
+	 * (requeue). A repeat the agent sends anyway is still bounded by depth.
+	 */
+	private async noticeUnfinished(ownerUserId: string, id: number): Promise<void> {
+		const r = await d1Query<MessageRow>(
+			`INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, reply_to, body, state, project_id, depth, note)
+			 SELECT m.owner_user_id, m.to_id, m.from_id, 'reply', m.id,
+				'Tu mensaje #' || m.id || ' a @' || m.to_id || ' no terminó: ' ||
+				CASE m.state WHEN 'failed' THEN 'falló' ELSE 'se interrumpió y su estado es incierto: pudo haber hecho parte del trabajo' END ||
+				COALESCE(' — ' || m.note, '') || '. No hay respuesta de @' || m.to_id || ' para ese pedido. ' ||
+				'No lo repitas ni lo reenvíes por tu cuenta: puede haber tenido efectos, y si se reintenta lo decide la persona. ' ||
+				'Decí en tu respuesta que ese pedido no terminó y seguí solo con lo que no dependa de él.',
+				'pending', m.project_id, m.depth, 'unfinished:' || m.state
+			 FROM agent_messages m
+			 WHERE m.owner_user_id = ?1 AND m.id = ?2 AND m.kind = 'request' AND m.state IN ('failed', 'uncertain')
+			 AND EXISTS (SELECT 1 FROM acp_agents a WHERE a.owner_user_id = m.owner_user_id AND a.name = m.from_id)
+			 AND NOT EXISTS (SELECT 1 FROM agent_messages x WHERE x.owner_user_id = m.owner_user_id
+				AND x.reply_to = m.id AND x.kind = 'reply' AND x.note = 'unfinished:' || m.state)
+			 RETURNING *`,
+			[ownerUserId, id],
+		);
+		this.published(r.results[0]);
+	}
+
+	/** Fails what is still pending or running for `name`, and tells agent senders. */
+	private async failInbox(
+		ownerUserId: string,
+		name: string,
+		opts: { onlyIfUnheld: boolean },
+	): Promise<void> {
+		const r = await d1Query<MessageRow>(
+			`UPDATE agent_messages SET state = 'failed', note = 'the agent it was addressed to was deleted', finished_at = ${NOW}
+			 WHERE owner_user_id = ?1 AND to_id = ?2 AND state IN ('pending', 'running')
+			 ${opts.onlyIfUnheld ? "AND NOT EXISTS (SELECT 1 FROM acp_agents WHERE owner_user_id = ?1 AND name = ?2)" : ""}
+			 RETURNING *`,
+			[ownerUserId, name],
+		);
+		for (const m of r.results) {
+			this.published(m);
+			if (m.kind === "request") await this.noticeUnfinished(ownerUserId, m.id);
+		}
+	}
+
+	/**
+	 * Hard delete of an agent's session (before its row goes, by cascade):
+	 * nothing will ever take what is queued for it, so it is closed now — not
+	 * left `pending`/`running` in Project Chat until the name is reused — its
+	 * open questions can no longer be delivered, and its cached row (which a
+	 * token verification would otherwise keep honouring) is dropped.
+	 */
+	async onPurged(sessionId: string): Promise<void> {
+		const agent = await this.bySession(sessionId);
+		if (!agent) return;
+		await this.failInbox(agent.owner_user_id, agent.name, { onlyIfUnheld: false });
+		await this.orphanQuestions(agent, "the agent was deleted");
+		this.byId.delete(agent.agent_id);
+		this.activity.delete(agent.agent_id);
+		this.loginMethods.delete(agent.agent_id);
+		this.publish(agent.owner_user_id, { type: "agents" });
 	}
 
 	/** The runner proved the prompt never left (adapter did not start): back to pending. */
@@ -619,8 +709,14 @@ export class AcpAgents {
 		messageId: number | null,
 		request: unknown,
 	): Promise<QuestionRow> {
+		// The message id decides where the question is shown (a project's chat
+		// shows the questions of its messages), so it is kept only when it names
+		// the message this agent is running — an id from the token holder alone
+		// could post a question into a project the agent is not in.
 		const r = await d1Query<QuestionRow>(
-			"INSERT INTO agent_questions (owner_user_id, agent, message_id, request, state) VALUES (?, ?, ?, ?, 'open') RETURNING *",
+			`INSERT INTO agent_questions (owner_user_id, agent, message_id, request, state)
+			 VALUES (?1, ?2, (SELECT id FROM agent_messages WHERE owner_user_id = ?1 AND to_id = ?2 AND id = ?3 AND state = 'running'), ?4, 'open')
+			 RETURNING *`,
 			[agent.owner_user_id, agent.name, messageId, JSON.stringify(request)],
 		);
 		return this.publishedQuestion(r.results[0]) as QuestionRow;
@@ -813,6 +909,7 @@ export class AcpAgents {
 				const agent = await this.bySession(sessionId);
 				return { binds: agent ? [`${this.config.runtimeDir}:${RUNTIME_MOUNT}:ro`] : [] };
 			},
+			onPurged: (sessionId) => this.onPurged(sessionId),
 			onStarted: (sessionId, containerId) => {
 				void this.ensureRunner(sessionId, containerId).catch((err) =>
 					logger.warn(`[acp] runner launch for ${sessionId} failed: ${(err as Error).message}`),

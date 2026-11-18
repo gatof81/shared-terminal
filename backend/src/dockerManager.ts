@@ -64,6 +64,8 @@ export interface ConversationLifecycleHooks {
 export interface AgentLifecycleHooks {
 	prepareSpawn(sessionId: string): Promise<{ binds: string[] }>;
 	onStarted(sessionId: string, containerId: string): void;
+	/** Hard delete, before the session row (and the agent row, by cascade) goes. */
+	onPurged?(sessionId: string): Promise<void>;
 }
 
 import { INGEST_TOKEN_ENV, MANAGED_MOUNT_TARGET } from "./conversation/activation.js";
@@ -1647,6 +1649,16 @@ export class DockerManager {
 		} catch (err) {
 			logger.error(`[docker] failed to purge control dir ${controlAbs}: ${(err as Error).message}`);
 			throw err;
+		}
+		// Best-effort: a failure leaves the agent's queue as it was (the next
+		// agent created under the same name still closes it), never blocks the
+		// delete.
+		if (this.agents?.onPurged) {
+			await this.agents.onPurged(sessionId).catch((err) => {
+				logger.warn(
+					`[docker] ACP agent cleanup for ${sessionId} failed: ${(err as Error).message}`,
+				);
+			});
 		}
 		// Phase 3 — the event log and the managed-settings dir live next
 		// to `.uploads` (out of the workspace) and follow the same
@@ -3447,12 +3459,17 @@ export class DockerManager {
 					config?.envVars && config.envVars.length > 0
 						? decryptStoredEntries(config.envVars)
 						: undefined;
+				// An ACP agent's N needs the same read-only runtime mount its O was
+				// spawned with: without it the runner can never start in N and the
+				// watchdog sees its restart loop "alive" forever. Unlike spawn, a
+				// failure here fails the build — strict preservation (D2).
+				const agentBinds = this.agents ? (await this.agents.prepareSpawn(sessionId)).binds : [];
 				return this.containerOptions(
 					sessionId,
 					meta,
 					config,
 					mergeEnvForSpawn(meta.envVars, decrypted),
-					{ env: spec.env, binds: spec.binds, imageId: spec.imageId },
+					{ env: spec.env, binds: [...spec.binds, ...agentBinds], imageId: spec.imageId },
 					path.join(WORKSPACE_ROOT, ".uploads", sessionId),
 					spec.name,
 					spec.labels,
