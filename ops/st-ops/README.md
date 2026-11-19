@@ -56,9 +56,10 @@ no tienen verbo.
 3. Orden, un solo uso y aprobación: `approve` se consume una vez; cada paso corre a lo sumo una vez (`mkdir`
    atómico antes de llamar al kit); un rechazo no consume el paso.
 4. `--exclude-message <id>` solo en `preflight` y `deploy` (01 y 04, los únicos pasos con gate), y solo si la identidad
-   tiene agente en `identities` y `bin/message-info.sh <id> <agente>` del kit (solo lectura, ya con el kit en el commit
-   firmado) sale con 0 y su última línea es `RESULT message-info OK rc=0`, que el kit da solo para un mensaje `running`
-   dirigido a ese agente, que existe. Cualquier otra respuesta ⇒ rechazo, sin consumir el paso.
+   tiene agente en `identities` y `bin/message-info.sh <id>` del kit (solo lectura, ya con el kit en el commit firmado)
+   responde con rc 0, última línea `RESULT message-info OK rc=0` y exactamente una línea de cada una de:
+   `MESSAGE_ID=<id>`, `TO=<ese agente>`, `STATE=running`, `AGENT_EXISTS=yes`, `OWNER_IS_TOKEN_OWNER=yes`. Cualquier
+   otra respuesta ⇒ rechazo, sin consumir el paso.
 
 El `LOG` de preflight se acepta solo si es `/root/st-deploy-r<RELEASE>-<sha7 del TARGET>-<UTC>`, un directorio (no un
 enlace) de root, y contiene los datos y el kit firmados; si no, el pedido se cierra.
@@ -114,6 +115,32 @@ operador: ssh st-ops approve <id> < request.txt.sig ; ssh st-ops step <id> backu
 
 **Revocación**: borrar la línea de `authorized_keys` (efecto en el siguiente login); `SIGNED_VERBS=off` (corta
 `approve`/`step` al instante); o `sudo bash ops/st-ops/uninstall.sh` (quita todo acceso, conserva `/var/lib/st-ops`).
+
+## Interfaz del kit
+
+Todo está en `lib/st-ops-lib.sh`, sección "The kit's interface". Los pasos corren como root desde `/root/st-deploy-kit`
+(`bash bin/0N-….sh`), con stdin `/dev/null`, `PATH` fijo y `LC_ALL=C`.
+
+| Paso | argv | Resultado |
+| --- | --- | --- |
+| preflight | `01-preflight.sh --release-file <requests/<id>/r<RELEASE>.conf> [--exclude-message <id>]` | `LOG=/root/st-deploy-r<RELEASE>-<sha7 TARGET>-<UTC>`; `release.conf` y `run.conf` (`KIT_HEAD=<sha40>`, `RELEASE_CONF_SHA256=<64 hex>`) |
+| backup | `02-backup.sh <LOG>` | línea `RESULT` |
+| offhost | `02b-offhost.sh --detach <LOG>` | `<LOG>/02b-offhost.result` |
+| rollback-proof | `03-rollback-proof.sh <LOG>` | línea `RESULT` |
+| deploy | `04-deploy.sh --detach <LOG> [--exclude-message <id>]` | `<LOG>/04-deploy.result` |
+| verify | `05-verify.sh <LOG>` | línea `RESULT` |
+| acceptance | `06-acp-acceptance.sh <LOG>` | línea `RESULT` |
+
+Contrastado con la sesión A (kits 9fd4f01, 17dd041 y aa87577):
+- Los argv de la tabla.
+- `--exclude-message` lo aceptan solo 01 y 04.
+- Formatos de `run.conf` y del nombre del LOG.
+- Un `.result` en OK tiene exactamente `RESULT=OK` y `RC=0`.
+- `--detach` se puede relanzar sobre el mismo LOG solo si el `.result` anterior fue `RESULT=BUSY` (el viejo pasa a `.result.busy-<fecha>`).
+- No hay modo "solo validar datos": la validación completa ocurre en 01.
+
+`message-info.sh <id>` sigue el contrato revisado en 17dd041. A declaró en aa87577 una forma alternativa,
+`message-info.sh <id> <agente>`, con exit 0 solo para un mensaje `running` a ese agente existente; todavía no está revisada.
 
 ## Límites conocidos
 
