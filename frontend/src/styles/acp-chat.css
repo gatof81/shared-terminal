@@ -37,6 +37,7 @@
 	font-size: 0.85rem;
 }
 .acp-project-select,
+.acp-model-select,
 .acp-add-select {
 	max-width: 100%;
 	min-height: 2rem;
@@ -45,6 +46,15 @@
 	border: 1px solid var(--c-border);
 	border-radius: 6px;
 	padding: 2px 6px;
+}
+/* The model's state is a note next to the select, not a line of the header. */
+.acp-model-state {
+	font-size: 0.78rem;
+	opacity: 0.75;
+}
+.acp-model-state.acp-model-failed {
+	color: var(--c-warn);
+	opacity: 1;
 }
 .acp-link {
 	color: var(--c-accent);
