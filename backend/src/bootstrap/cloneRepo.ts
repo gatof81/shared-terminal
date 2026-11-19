@@ -15,14 +15,35 @@
  *     is inert.
  *
  *   - `auth: "pat"` — HTTPS clone authenticated by a personal access
- *     token. The PAT NEVER appears in argv (process listings) or in
- *     the resulting `.git/config`. Implementation: write a small
- *     `GIT_ASKPASS` shim to `/tmp`, point `GIT_ASKPASS` at it, pass
- *     the PAT via env var (`ST_PAT`). Git invokes the askpass shim
- *     when it needs credentials; the shim prints them, git uses
- *     them, and the URL stored in `origin` is the public form. The
- *     askpass file is shredded on exit so a process snooping the
- *     filesystem after the clone finds nothing.
+ *     token. The PAT NEVER appears in argv (process listings), in the
+ *     resulting `.git/config` / `remote.origin.url`, or in the output
+ *     streamed to the modal. The clone itself authenticates through a
+ *     `GIT_ASKPASS` shim in `/tmp` that reads the PAT from env
+ *     (`ST_PAT`) and is shredded on exit.
+ *
+ *     The PAT DOES land on disk after the clone, on purpose — parity
+ *     with SSH, whose key persists "so the user can git pull / git
+ *     push later". Without it the clone works and every later `git
+ *     fetch`/`push` (terminal or agent) has no credentials:
+ *       • `<workspace>/.st/git-credentials` (0600, git's `store`
+ *         format, written by `git credential approve` so the token is
+ *         encoded by git itself). `.st/` self-ignores (`*`) and rides
+ *         the workspace: kept on soft delete, purged on hard delete —
+ *         same lifetime as `.st/ssh`. The clone's `.git/config` gets
+ *         `credential.https://<host>.helper = store --file=…`: scoped
+ *         to that host, holding a path, never the token.
+ *       • github.com only: `gh auth login --with-token` (PAT on
+ *         stdin) → `~/.config/gh/hosts.yml`, which the entrypoint
+ *         symlinks to `<workspace>/.config/gh` — NOT self-ignored, so
+ *         when the clone lands at the workspace root `/.config/gh/` is
+ *         added to the clone's `.git/info/exclude` (local, never
+ *         committed) to keep the token one `git add -A` further away.
+ *         No `gh auth setup-git`: git is already covered above, and
+ *         it would write `~/.gitconfig`, which lives in the container
+ *         layer.
+ *     Both are best-effort: the clone succeeded, so a failure here is
+ *     a warning in the bootstrap log, never a failed session (e.g. a
+ *     fine-grained token lacking a scope `gh` validates).
  *
  *   - `auth: "ssh"` — SSH clone with `git@host:path` URL. The user's
  *     private key is written to `~/.ssh/id_ed25519` (mode 0600), the
@@ -62,6 +83,10 @@ import { KNOWN_HOSTS_DEFAULT_BUNDLE } from "./knownHosts.js";
  * the spawn config.
  */
 const CONTAINER_WORKSPACE = "/home/developer/workspace";
+
+/** Where the PAT is kept for later `git fetch`/`push` (see the header):
+ *  under the workspace's self-ignored `.st/` state root (#377). */
+export const PAT_CREDENTIAL_FILE = `${CONTAINER_WORKSPACE}/.st/git-credentials`;
 
 /** Thrown when the auth blob is missing required fields at runtime
  *  (e.g. `repo.auth='pat'` but `auth.pat` not in the decrypted blob).
@@ -242,6 +267,8 @@ export function patEnv(
 		ST_REF: repo.ref ?? "",
 		ST_DEPTH: repo.depth != null ? String(repo.depth) : "",
 		ST_TARGET_ABS: resolveTargetAbsPath(repo.target),
+		ST_WORKSPACE_ROOT: CONTAINER_WORKSPACE,
+		ST_CRED_FILE: PAT_CREDENTIAL_FILE,
 	};
 }
 
@@ -311,6 +338,55 @@ done
 `;
 
 /**
+ * Appended to the PAT clone after the move: keeps the PAT for later
+ * `git fetch`/`push` and, on github.com, `gh` (see the file header for
+ * where it lands and why). Every step is best-effort — the clone already
+ * succeeded — and nothing here may print the token: `git credential
+ * approve` prints nothing, and `gh`'s output is shown with the token
+ * replaced. `set -e` does not apply inside an `if` condition, hence the
+ * explicit `&&` chain.
+ *
+ * Reads `ST_PAT`, `ST_URL`, `ST_TARGET_ABS`, `ST_CRED_FILE` and
+ * `ST_WORKSPACE_ROOT` from env (`patEnv`). Exported for the test that
+ * runs it against a real git repository with a stub `gh`.
+ */
+export const PAT_PERSIST_FRAGMENT = `ST_HOST="\${ST_URL#https://}"
+ST_HOST="\${ST_HOST%%/*}"
+persist_git_credential() {
+  local dir
+  dir="$(dirname "$ST_CRED_FILE")" &&
+  mkdir -p "$dir" &&
+  # The entrypoint gives .st/ its \`*\` .gitignore; never rely on it here.
+  { [ -e "$dir/.gitignore" ] || printf '*\\n' > "$dir/.gitignore"; } &&
+  ( umask 077 && : >> "$ST_CRED_FILE" ) &&
+  chmod 600 "$ST_CRED_FILE" &&
+  printf 'protocol=https\\nhost=%s\\nusername=oauth2\\npassword=%s\\n\\n' "$ST_HOST" "$ST_PAT" |
+    git -c credential.helper= -c "credential.helper=store --file=$ST_CRED_FILE" credential approve &&
+  git -C "$ST_TARGET_ABS" config "credential.https://$ST_HOST.helper" "store --file=$ST_CRED_FILE"
+}
+if persist_git_credential; then
+  printf 'saved the access token for git fetch/push to %s\\n' "$ST_HOST"
+else
+  printf 'warning: could not save the access token for later git fetch/push; the clone itself succeeded\\n' >&2
+fi
+if [ "$ST_HOST" = "github.com" ]; then
+  if [ "$ST_TARGET_ABS" = "$ST_WORKSPACE_ROOT" ]; then
+    # ~/.config/gh is <workspace>/.config/gh: inside this repo's tree.
+    mkdir -p "$ST_TARGET_ABS/.git/info" &&
+      printf '/.config/gh/\\n' >> "$ST_TARGET_ABS/.git/info/exclude" ||
+      printf 'warning: could not exclude .config/gh/ from the repository\\n' >&2
+  fi
+  if ! command -v gh >/dev/null 2>&1; then
+    printf 'warning: gh is not installed; gh stays logged out\\n' >&2
+  elif GH_OUT="$(printf '%s' "$ST_PAT" | gh auth login --hostname github.com --with-token --insecure-storage 2>&1)"; then
+    printf 'gh logged in to github.com with the access token\\n'
+  else
+    printf 'warning: gh auth login failed (gh stays logged out; git is unaffected): %s\\n' "\${GH_OUT//"$ST_PAT"/***}" >&2
+  fi
+fi
+`;
+
+/**
  * Bash script for PAT clone. All user-controlled values are read from
  * env vars and double-quoted at use, so shell-meta in any of them is
  * inert. The askpass file is shredded on exit (success OR fail) via
@@ -348,7 +424,7 @@ export GIT_ASKPASS="$ASKPASS_PATH"
 # remote that doesn't accept the PAT would block the bootstrap on
 # stdin. We want a clean non-zero exit code instead.
 export GIT_TERMINAL_PROMPT=0
-${CLONE_AND_MOVE_TAIL}# Defensive unset AFTER the clone (NOT before — git invokes the
+${CLONE_AND_MOVE_TAIL}${PAT_PERSIST_FRAGMENT}# Defensive unset AFTER the clone (NOT before — git invokes the
 # askpass shim as a child process which reads $ST_PAT from its
 # inherited env; unsetting before would break auth). PR #218 round
 # 2 NIT — symmetry with SSH script's pre-clone unset (which is safe

@@ -1,4 +1,15 @@
 import { spawnSync } from "node:child_process";
+import {
+	chmodSync,
+	existsSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Set the encryption key BEFORE importing the module — `decryptStoredAuth`
@@ -13,6 +24,7 @@ import {
 	CloneCredentialMissingError,
 	NOAUTH_CLONE_SCRIPT,
 	PAT_CLONE_SCRIPT,
+	PAT_PERSIST_FRAGMENT,
 	patEnv,
 	resolveTargetAbsPath,
 	runCloneRepo,
@@ -301,6 +313,8 @@ describe("runCloneRepo", () => {
 			ST_REF: "main",
 			ST_DEPTH: "1",
 			ST_TARGET_ABS: "/home/developer/workspace/frontend",
+			ST_WORKSPACE_ROOT: "/home/developer/workspace",
+			ST_CRED_FILE: "/home/developer/workspace/.st/git-credentials",
 		});
 	});
 
@@ -572,5 +586,115 @@ describe("runCloneRepo", () => {
 		expect(docker.streamExec).toHaveBeenCalledTimes(1);
 		const [, , passedCallback] = docker.streamExec.mock.calls[0]!;
 		expect(passedCallback).toBe(onOutput);
+	});
+});
+
+// ── PAT persistence (parity with SSH) ─────────────────────────────────────
+// The fragment runs for real: bash + the real git against a real repository,
+// with a stub `gh` on PATH that records its argv and stdin. Proves where the
+// token lands, that it never reaches argv, `.git/config` or the streamed
+// output, and that a gh failure is only a warning.
+describe("PAT_PERSIST_FRAGMENT", () => {
+	const PAT = "ghp_S3cr3t/with@odd:chars%";
+	let dir: string;
+	beforeEach(() => {
+		dir = mkdtempSync(path.join(tmpdir(), "pat-persist-"));
+		return () => rmSync(dir, { recursive: true, force: true });
+	});
+
+	function run(opts: { url: string; target?: string; ghExit?: number; noGh?: boolean }) {
+		const ws = path.join(dir, "ws");
+		const target = opts.target ? path.join(ws, opts.target) : ws;
+		spawnSync("git", ["init", "-q", target]);
+		const bin = path.join(dir, "bin");
+		spawnSync("mkdir", ["-p", bin, path.join(dir, "home")]);
+		if (!opts.noGh) {
+			// Echoes the token on failure, like a careless CLI might: the
+			// fragment must redact it.
+			writeFileSync(
+				path.join(bin, "gh"),
+				`#!/bin/sh\nprintf '%s\\n' "$*" > "${dir}/gh.args"\ncat > "${dir}/gh.stdin"\n` +
+					`[ "${opts.ghExit ?? 0}" = 0 ] || { echo "bad token $(cat "${dir}/gh.stdin")"; exit ${opts.ghExit}; }\n`,
+			);
+			chmodSync(path.join(bin, "gh"), 0o755);
+		}
+		const gitBin = path.dirname(
+			spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim(),
+		);
+		const env = {
+			PATH: `${bin}:${gitBin}:/usr/bin:/bin`,
+			HOME: path.join(dir, "home"),
+			GIT_CONFIG_NOSYSTEM: "1",
+			ST_PAT: PAT,
+			ST_URL: opts.url,
+			ST_TARGET_ABS: target,
+			ST_WORKSPACE_ROOT: ws,
+			ST_CRED_FILE: path.join(ws, ".st", "git-credentials"),
+		};
+		const r = spawnSync("bash", ["-c", `set -e\n${PAT_PERSIST_FRAGMENT}`], {
+			env,
+			encoding: "utf8",
+		});
+		const fill = spawnSync("git", ["-C", target, "credential", "fill"], {
+			env: { ...env, GIT_TERMINAL_PROMPT: "0" },
+			input: `protocol=https\nhost=${new URL(opts.url).host}\n\n`,
+			encoding: "utf8",
+		});
+		return { r, ws, target, env, fill };
+	}
+
+	it("github.com: git and gh get the token, never through argv, output or .git/config", () => {
+		const { r, ws, target, fill } = run({ url: "https://github.com/o/r.git" });
+		expect(r.status).toBe(0);
+		expect(r.stdout + r.stderr).not.toContain(PAT);
+		// git fetch/push later: the clone's helper finds it, scoped to the host.
+		expect(fill.stdout).toContain(`password=${PAT}`);
+		const cred = path.join(ws, ".st", "git-credentials");
+		expect(statSync(cred).mode & 0o777).toBe(0o600);
+		expect(readFileSync(path.join(ws, ".st", ".gitignore"), "utf8")).toBe("*\n");
+		const gitConfig = readFileSync(path.join(target, ".git", "config"), "utf8");
+		expect(gitConfig).toContain('[credential "https://github.com"]');
+		expect(gitConfig).not.toContain(PAT);
+		expect(gitConfig).not.toMatch(/^\s*\[credential\]/m); // no repo-wide helper
+		// gh: token on stdin only.
+		expect(readFileSync(path.join(dir, "gh.stdin"), "utf8")).toBe(PAT);
+		const args = readFileSync(path.join(dir, "gh.args"), "utf8");
+		expect(args).toContain("auth login --hostname github.com --with-token");
+		expect(args).not.toContain(PAT);
+		// The clone is the workspace root, where ~/.config/gh lands.
+		expect(readFileSync(path.join(target, ".git", "info", "exclude"), "utf8")).toContain(
+			"/.config/gh/",
+		);
+	});
+
+	it("a failing gh is a redacted warning, not a failed bootstrap", () => {
+		const { r, fill } = run({ url: "https://github.com/o/r.git", ghExit: 1 });
+		expect(r.status).toBe(0);
+		expect(r.stderr).toContain("warning: gh auth login failed");
+		expect(r.stderr).toContain("bad token ***");
+		expect(r.stdout + r.stderr).not.toContain(PAT);
+		expect(fill.stdout).toContain(`password=${PAT}`);
+	});
+
+	it("gh missing from the image is a warning too", () => {
+		const { r } = run({ url: "https://github.com/o/r.git", noGh: true });
+		expect(r.status).toBe(0);
+		expect(r.stderr).toContain("warning: gh is not installed");
+	});
+
+	it("another HTTPS host: git gets the token, gh is not called, nothing excluded", () => {
+		const { r, target, fill } = run({ url: "https://gitlab.example.com:8443/g/p.git" });
+		expect(r.status).toBe(0);
+		expect(fill.stdout).toContain(`password=${PAT}`);
+		expect(existsSync(path.join(dir, "gh.args"))).toBe(false);
+		const exclude = path.join(target, ".git", "info", "exclude");
+		expect(existsSync(exclude) ? readFileSync(exclude, "utf8") : "").not.toContain(".config/gh");
+	});
+
+	it("a clone in a subdirectory gets no exclude line (.config/gh is outside it)", () => {
+		const { r, target } = run({ url: "https://github.com/o/r.git", target: "app" });
+		expect(r.status).toBe(0);
+		const exclude = path.join(target, ".git", "info", "exclude");
+		expect(existsSync(exclude) ? readFileSync(exclude, "utf8") : "").not.toContain(".config/gh");
 	});
 });
