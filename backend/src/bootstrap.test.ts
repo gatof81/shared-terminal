@@ -85,6 +85,7 @@ import {
 	runAsyncBootstrap,
 	waitForRuntimeReady,
 } from "./bootstrap.js";
+import { holdUntilBootstrapped, isBootstrapPending, onBootstrapReleased } from "./bootstrapHold.js";
 import type { DockerManager } from "./dockerManager.js";
 import type { SessionManager } from "./sessionManager.js";
 
@@ -313,6 +314,47 @@ describe("runAsyncBootstrap", () => {
 		// markBootstrapped fired the UPDATE on session_configs.
 		expect(dbStubs.d1Query).toHaveBeenCalled();
 		expect(final).toEqual([{ type: "done", success: true }]);
+	});
+
+	// bootstrapHold.ts: an ACP runner held during the creation bootstrap is
+	// released only once postCreate has finished, and a failed bootstrap
+	// drops the hold without a release notification.
+	it("holds the session until postCreate is done, then notifies once", async () => {
+		const { sessions, docker, broadcaster, spies } = makeFakes();
+		const released = vi.fn();
+		const off = onBootstrapReleased(released);
+		let pendingDuringPostCreate: boolean | null = null;
+		spies.runPostCreate.mockImplementation(async () => {
+			pendingDuringPostCreate = isBootstrapPending("sess-1");
+			return { exitCode: 0 };
+		});
+		holdUntilBootstrapped("sess-1");
+		await runAsyncBootstrap(
+			"sess-1",
+			{ postCreateCmd: "npm install" },
+			{ sessions, docker, broadcaster },
+		);
+		off();
+		expect(pendingDuringPostCreate).toBe(true);
+		expect(isBootstrapPending("sess-1")).toBe(false);
+		expect(released).toHaveBeenCalledTimes(1);
+		expect(released).toHaveBeenCalledWith("sess-1");
+	});
+
+	it("a failed bootstrap drops the hold without notifying", async () => {
+		const { sessions, docker, broadcaster, spies } = makeFakes();
+		const released = vi.fn();
+		const off = onBootstrapReleased(released);
+		spies.runPostCreate.mockImplementation(async () => ({ exitCode: 1 }));
+		holdUntilBootstrapped("sess-1");
+		await runAsyncBootstrap(
+			"sess-1",
+			{ postCreateCmd: "false" },
+			{ sessions, docker, broadcaster },
+		);
+		off();
+		expect(isBootstrapPending("sess-1")).toBe(false);
+		expect(released).not.toHaveBeenCalled();
 	});
 
 	// P3a (PROJECTS.md §6): a hard delete may have terminated the row before

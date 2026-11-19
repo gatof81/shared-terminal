@@ -25,6 +25,7 @@ import { runDotfiles } from "./bootstrap/dotfiles.js";
 import { runGitIdentity } from "./bootstrap/gitIdentity.js";
 import { runPortReadinessProbes } from "./bootstrap/portReadiness.js";
 import { runWriteEnvFile } from "./bootstrap/writeEnvFile.js";
+import { releaseBootstrapHold } from "./bootstrapHold.js";
 import { d1Query } from "./db.js";
 import type { DockerManager } from "./dockerManager.js";
 import { logger } from "./logger.js";
@@ -351,6 +352,9 @@ export async function runAsyncBootstrap(
 	try {
 		await runBootstrapPipeline(sessionId, cfg, deps, abortController);
 	} finally {
+		// Any end other than the success release (a failed stage, an abort,
+		// a throw): drop the hold — a no-op when already released.
+		releaseBootstrapHold(sessionId, false);
 		settle();
 		inFlight.delete(sessionId);
 	}
@@ -778,6 +782,11 @@ async function runBootstrapPipeline(
 				"Hook ran successfully but the gate is unset — operator should manually update D1.",
 		);
 	}
+	// The workspace is complete (postCreate included): an ACP agent's runner
+	// may start now and see it whole (bootstrapHold.ts). Before postStart and
+	// the port probes on purpose — those start daemons, they don't shape what
+	// the agent reads when its session is created.
+	releaseBootstrapHold(sessionId, true);
 	if (cfg.postStartCmd) {
 		try {
 			await docker.runPostStart(sessionId, cfg.postStartCmd);

@@ -13,6 +13,7 @@ import { agentNameError } from "../acp/agents.js";
 import type { AuthedRequest } from "../auth.js";
 import { isUserAdmin, requireAuth } from "../auth.js";
 import { runAsyncBootstrap } from "../bootstrap.js";
+import { holdUntilBootstrapped, releaseBootstrapHold } from "../bootstrapHold.js";
 import { EnvVarValidationError, validateEnvVars } from "../envVarValidation.js";
 import { logger } from "../logger.js";
 import * as observeLog from "../observeLog.js";
@@ -429,6 +430,34 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 						projectId: acpAgentProject,
 					});
 				}
+				// Fire async bootstrap when ANY config-driven stage or hook
+				// is set. #191 PR 191b widened from `repo || postCreateCmd`
+				// to also include the three new lifecycle-hook fields.
+				const hasBootstrapConfig =
+					(validatedConfig?.repo !== null && validatedConfig?.repo !== undefined) ||
+					(validatedConfig?.gitIdentity !== null && validatedConfig?.gitIdentity !== undefined) ||
+					(validatedConfig?.dotfiles !== null && validatedConfig?.dotfiles !== undefined) ||
+					(validatedConfig?.agentSeed !== null && validatedConfig?.agentSeed !== undefined) ||
+					// #277 — writeEnvFile is another bootstrap stage that
+					// needs the config row fetched. Including it here
+					// triggers the async runner for "envVars-toggle-only"
+					// sessions and ensures the runner's `hasBootstrapConfig`
+					// gate doesn't skip the `getSessionConfig` D1 round-trip.
+					validatedConfig?.writeEnvFile === true ||
+					// #198 — same shape as the writeEnvFile precedent above:
+					// a session whose ONLY bootstrap-relevant config is a
+					// readiness-annotated port must still trigger the async
+					// runner (and its config load), or the probe stage would
+					// silently never run. Plain ports (no readiness) stay
+					// outside the gate — they're pure dispatcher metadata.
+					(validatedConfig?.ports ?? []).some((p) => p.readiness !== undefined);
+				// Taken BEFORE the spawn, whose `onStarted` would launch an ACP
+				// agent's runner at once: the runner waits until the bootstrap has
+				// finished (bootstrapHold.ts). Released by runAsyncBootstrap, or by
+				// the rollback in the catch below.
+				if (validatedConfig?.postCreateCmd || hasBootstrapConfig) {
+					holdUntilBootstrapped(meta.sessionId);
+				}
 				await docker.spawn(meta.sessionId);
 				const updated = await sessions.get(meta.sessionId);
 				if (!updated) {
@@ -458,27 +487,6 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 				// a no-op when `repo` is absent, so this widening is safe
 				// for the postCreate-only path and lets repo-only sessions
 				// (no hook, just a clone) get their async-bootstrap modal.
-				// Fire async bootstrap when ANY config-driven stage or hook
-				// is set. #191 PR 191b widened from `repo || postCreateCmd`
-				// to also include the three new lifecycle-hook fields.
-				const hasBootstrapConfig =
-					(validatedConfig?.repo !== null && validatedConfig?.repo !== undefined) ||
-					(validatedConfig?.gitIdentity !== null && validatedConfig?.gitIdentity !== undefined) ||
-					(validatedConfig?.dotfiles !== null && validatedConfig?.dotfiles !== undefined) ||
-					(validatedConfig?.agentSeed !== null && validatedConfig?.agentSeed !== undefined) ||
-					// #277 — writeEnvFile is another bootstrap stage that
-					// needs the config row fetched. Including it here
-					// triggers the async runner for "envVars-toggle-only"
-					// sessions and ensures the runner's `hasBootstrapConfig`
-					// gate doesn't skip the `getSessionConfig` D1 round-trip.
-					validatedConfig?.writeEnvFile === true ||
-					// #198 — same shape as the writeEnvFile precedent above:
-					// a session whose ONLY bootstrap-relevant config is a
-					// readiness-annotated port must still trigger the async
-					// runner (and its config load), or the probe stage would
-					// silently never run. Plain ports (no readiness) stay
-					// outside the gate — they're pure dispatcher metadata.
-					(validatedConfig?.ports ?? []).some((p) => p.readiness !== undefined);
 				if (validatedConfig?.postCreateCmd || hasBootstrapConfig) {
 					const cfg = {
 						postCreateCmd: validatedConfig?.postCreateCmd,
@@ -558,6 +566,7 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 					// chains, no ambiguity for future readers about whether
 					// meta could ever be null on these lines.
 					const rollbackId = meta.sessionId;
+					releaseBootstrapHold(rollbackId, false);
 					// Best-effort rollback. If deleteRow itself fails (D1 blip),
 					// the reconciler will eventually flip status to stopped but
 					// the row remains — we log loudly so an operator can clean

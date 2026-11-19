@@ -21,6 +21,7 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { isBootstrapPending } from "../bootstrapHold.js";
 import { d1Query } from "../db.js";
 import type { AgentLifecycleHooks, DockerManager } from "../dockerManager.js";
 import { logger } from "../logger.js";
@@ -981,6 +982,13 @@ export class AcpAgents {
 	 * exits (by design on an adapter crash) — the only supervision there is.
 	 */
 	async ensureRunner(sessionId: string, containerId: string): Promise<boolean> {
+		// The creation bootstrap is still shaping the workspace and ~/.claude;
+		// the session the runner creates would never see it (bootstrapHold.ts).
+		// `onBootstrapped` launches it once the bootstrap is done.
+		if (isBootstrapPending(sessionId)) {
+			logger.info(`[acp] runner for ${sessionId} waits for the session's bootstrap`);
+			return false;
+		}
 		const agent = await this.bySession(sessionId);
 		if (!agent) return false;
 		const runtimeRoot = `${RUNTIME_MOUNT}/${agent.runtime}`;
@@ -1066,6 +1074,7 @@ export class AcpAgents {
 
 	async checkRunner(agent: AgentRow): Promise<void> {
 		if (this.checking.has(agent.agent_id)) return; // single-flight per agent
+		if (isBootstrapPending(agent.session_id)) return; // not dead: not started yet
 		this.checking.add(agent.agent_id);
 		try {
 			const containerId = await this.docker.runningContainerId(
@@ -1089,6 +1098,12 @@ export class AcpAgents {
 		} finally {
 			this.checking.delete(agent.agent_id);
 		}
+	}
+
+	/** The session's creation bootstrap succeeded: launch its runner if it is an agent's (through the watchdog's probe, so never a twin). */
+	async onBootstrapped(sessionId: string): Promise<void> {
+		const agent = await this.bySession(sessionId);
+		if (agent) await this.checkRunner(agent);
 	}
 
 	/** Boot: running agent sessions get their runner back (a backend restart does not touch containers, but a host reboot does). */
