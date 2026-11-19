@@ -48,6 +48,18 @@ test.describe("ACP conversation", () => {
 			state: "done",
 			result_text: "Anotado.",
 		});
+		// A delivered reply whose consult is not in this thread (an older page,
+		// another scope): the only place to read it.
+		backend.addAcpMessage({
+			from_id: "dev",
+			to_id: "arq",
+			kind: "reply",
+			reply_to: 999,
+			body: "Los tests de sesión pasan; el de refresh sigue rojo.",
+			project_id: hz,
+			depth: 1,
+			state: "done",
+		});
 		const running = backend.addAcpMessage({
 			to_id: "dev",
 			body: "@dev implementá el callback",
@@ -130,6 +142,29 @@ test.describe("ACP conversation", () => {
 			thread.locator(".acp-msg-result, .acp-msg-body").filter({ hasText: said, visible: true }),
 		).toHaveCount(1);
 		await expect(thread.locator(".acp-handoff")).toHaveCount(1);
+
+		// An agent writing to another speaks with its own face (avatar + name in
+		// its colour) in a real bubble, its answer the next voice below it.
+		const consult = thread.locator("article.acp-consult", { hasText: "callback de OAuth" });
+		const author = consult.locator(".acp-bubble").first().locator(".acp-agent-id");
+		await expect(author).toHaveText(/@arq/);
+		await expect(author.locator(".acp-avatar")).toHaveText("A");
+		await expect(consult.locator(".acp-msg-to")).toHaveText(/@dev/);
+		const answerer = consult.locator(".acp-sub .acp-agent-id");
+		await expect(answerer).toHaveText(/@dev/);
+		const hueOf = (l: typeof author) =>
+			l.evaluate((e) => getComputedStyle(e).getPropertyValue("--acp-hue").trim());
+		expect(await hueOf(author)).not.toBe(await hueOf(answerer));
+		const said2 = (await consult.locator(".acp-bubble").first().boundingBox())!;
+		const ans2 = (await consult.locator(".acp-sub").boundingBox())!;
+		expect(Math.abs(ans2.x - said2.x)).toBeLessThan(2); // not indented under it
+
+		// A delivered reply without its consult in the thread is a bubble in the
+		// voice of the agent that answered.
+		const lone = thread.locator("article.acp-reply", { hasText: "el de refresh sigue rojo" });
+		await expect(lone).not.toHaveClass(/acp-handoff/);
+		await expect(lone.locator(".acp-bubble .acp-agent-id")).toHaveText(/@dev/);
+		await expect(lone.locator(".acp-msg-to")).toHaveText(/@arq/);
 
 		// Activity folded, its latest step named; a question inside its answer.
 		const work = thread.locator("article.acp-msg", { hasText: "implementá el callback" });

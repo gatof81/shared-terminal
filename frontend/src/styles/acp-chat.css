@@ -303,9 +303,8 @@
 	border: 1px solid var(--c-border);
 	border-bottom-left-radius: 4px;
 }
-/* A consult between agents and a Shared Terminal note are not the person's
-   voice: left, quieter, marked by a rule instead of a bubble. */
-.acp-consult > .acp-bubble:first-child,
+/* A Shared Terminal note is not a voice of the conversation: left, quieter,
+   marked by a rule instead of a bubble. */
 .acp-system > .acp-bubble:first-child {
 	background: transparent;
 	border: none;
@@ -313,15 +312,21 @@
 	border-radius: 0;
 	padding: 2px 10px;
 	font-size: 0.88rem;
-}
-.acp-system > .acp-bubble:first-child {
 	opacity: 0.8;
 }
-/* The answers of a consult sit under it, indented: they belong to it. */
-.acp-consult > .acp-sub,
 .acp-system > .acp-sub {
 	margin-left: 14px;
 }
+/* Every bubble an agent says — its answer, a message to another agent, a
+   reply delivered to it — carries its colour as a left accent, so agents
+   tell apart at a glance. Never the only sign: name and avatar head it. */
+.acp-voice {
+	border-left: 3px solid hsl(var(--acp-hue, 210) 50% 52%);
+}
+.acp-msg-to {
+	opacity: 0.7;
+}
+/* A delivered reply whose consult is in the thread repeats it: one quiet line. */
 .acp-handoff {
 	font-size: 0.82rem;
 	opacity: 0.85;
