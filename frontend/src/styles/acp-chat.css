@@ -456,6 +456,14 @@ pre.acp-msg-body {
 	flex-direction: column;
 	gap: 6px;
 }
+/* A read-only chat (an archived project): no message box, but its errors
+   ("Cargar anteriores" failed) still show. */
+.acp-chat-composer.acp-composer-off > :not(.acp-chat-error) {
+	display: none;
+}
+.acp-chat-composer.acp-composer-off:has(> .acp-chat-error[hidden]) {
+	display: none;
+}
 .acp-chat-input {
 	width: 100%;
 	background: var(--c-surface);

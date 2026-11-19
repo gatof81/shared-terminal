@@ -51,7 +51,14 @@ export interface ThreadState {
 	auth: Map<string, boolean>;
 	project: { id: string; name: string } | null;
 	error: string;
+	/** The last first-page read of this chat: none yet, answered, 404, or failed otherwise. */
+	feed: FeedStatus;
 }
+
+export type FeedStatus = "loading" | "ok" | "not-found" | "error";
+
+/** What the message box allows: write, shown but locked, or not shown at all. */
+export type ComposerMode = "on" | "disabled" | "off";
 
 export class AcpThread {
 	readonly root = el("div", "acp-thread");
@@ -74,6 +81,8 @@ export class AcpThread {
 	private readonly auth = new Map<string, boolean>();
 	private project: { id: string; name: string } | null = null;
 	private error = "";
+	private feed: FeedStatus = "loading";
+	private composerMode: ComposerMode = "on";
 	private sending = 0;
 	/**
 	 * Per chat (sourceKey), the last send that did not reach every recipient:
@@ -182,7 +191,25 @@ export class AcpThread {
 			auth: this.auth,
 			project: this.project,
 			error: this.error,
+			feed: this.feed,
 		};
+	}
+
+	/**
+	 * Lock or hide the message box (the project page keeps it locked until the
+	 * project is confirmed live). Nothing leaves while it is not "on" — not by
+	 * the button, Ctrl+Enter or a restored draft — and the draft stays in the
+	 * field. Errors (e.g. "Cargar anteriores") stay visible either way.
+	 */
+	setComposer(mode: ComposerMode): void {
+		if (mode === this.composerMode) return;
+		this.composerMode = mode;
+		this.renderComposer();
+	}
+
+	/** Read the current chat again (a "Reintentar"). */
+	retry(): void {
+		void this.reload();
 	}
 
 	/** Shows `source` (resets everything when it changes) and follows it live. */
@@ -212,6 +239,7 @@ export class AcpThread {
 			this.auth.clear();
 			this.project = null;
 			this.error = "";
+			this.feed = "loading";
 			this.offerUnsent();
 			this.threadEl.replaceChildren(el("div", "acp-chat-empty", "Cargando…"));
 			this.input.placeholder =
@@ -265,9 +293,11 @@ export class AcpThread {
 			this.applyFeed(feed, false);
 			this.replayLive(mark);
 			this.error = "";
+			this.feed = "ok";
 		} catch (err) {
 			if (gen !== this.gen) return;
 			const e = err as Error & { status?: number };
+			this.feed = e.status === 404 ? "not-found" : "error";
 			this.error =
 				e.status === 404
 					? src.kind === "agent"
@@ -890,11 +920,15 @@ export class AcpThread {
 		const shown = [this.error, u?.error ?? ""].filter(Boolean).join(" ");
 		this.errorEl.textContent = shown;
 		this.errorEl.hidden = shown === "";
-		this.recoverBtn.hidden = !u || u.restored;
+		this.recoverBtn.hidden = !u || u.restored || this.composerMode !== "on";
+		const writable = this.composerMode === "on";
+		this.input.disabled = !writable;
+		this.sendBtn.disabled = !writable;
+		this.composer.classList.toggle("acp-composer-off", this.composerMode === "off");
 		const src = this.source;
 		const names = [...this.agents.keys()];
 		this.mentionsEl.replaceChildren();
-		if (src?.kind === "project" && names.length > 1) {
+		if (writable && src?.kind === "project" && names.length > 1) {
 			for (const n of names) {
 				const b = el("button", "acp-mention", `@${n}`);
 				b.type = "button";
@@ -914,7 +948,8 @@ export class AcpThread {
 	private async send(): Promise<void> {
 		const src = this.source;
 		const text = this.input.value;
-		if (!src || text.trim() === "") return;
+		// Checked before the reservation below: a locked box keeps its draft.
+		if (this.composerMode !== "on" || !src || text.trim() === "") return;
 		// Reserve this send BEFORE any await: the text leaves the field and gets
 		// its client id now, so a second click (or Ctrl+Enter) on the same draft
 		// finds an empty field and sends nothing. A new message typed meanwhile is
@@ -940,6 +975,11 @@ export class AcpThread {
 		if (this.agents.size === 0) await this.reload();
 		if (!sameChat(this.source, src)) {
 			giveBack("No se envió: cambiaste de conversación antes de que cargara.");
+			return;
+		}
+		if (this.composerMode !== "on") {
+			giveBack("No se envió: este chat no admite mensajes ahora.");
+			this.changed();
 			return;
 		}
 		const names = [...this.agents.keys()];

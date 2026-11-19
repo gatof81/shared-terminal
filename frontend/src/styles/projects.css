@@ -358,6 +358,21 @@ body.project-page-on #actions-btn {
   outline: 2px solid var(--c-accent);
   outline-offset: 2px;
 }
+/* The project's state under its name: archived (read-only), not found, or
+   failed with a Reintentar. Its own line, never next to the tools. */
+.pv-status {
+  flex-basis: 100%;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  font-size: 0.9rem;
+  color: var(--c-text-2);
+}
+.pv-status-error {
+  color: var(--c-err);
+}
 .pv-tools {
   display: flex;
   align-items: center;

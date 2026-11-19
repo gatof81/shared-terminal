@@ -9,7 +9,7 @@
 
 import { agentStatus } from "./acpModel.js";
 import { setAcpAgents } from "./acpRegistry.js";
-import { AcpThread, type ThreadState } from "./acpThread.js";
+import { AcpThread, type FeedStatus, type ThreadState } from "./acpThread.js";
 import { type AcpAgentInfo, acpListAgents, acpSetProject } from "./api.js";
 import { confirmDialog } from "./components/dialog.js";
 import { showToast } from "./components/toast.js";
@@ -23,12 +23,49 @@ let headerEl: HTMLElement | null = null;
 let shownPid: string | null = null;
 let others: AcpAgentInfo[] = [];
 let state: ThreadState | null = null;
+/**
+ * What the page allows (projectsView decides, from the feed and the project
+ * list): `active` is the only mode with a message box and agent tools —
+ * fail-closed while loading, on an error, or for an archived project.
+ * `unavailable` (not found / failed) shows no thread at all.
+ */
+export type ProjectPageMode = "active" | "loading" | "archived" | "unavailable";
+let mode: ProjectPageMode = "loading";
+let feedListener: ((pid: string, feed: FeedStatus, name: string | null) => void) | null = null;
 root.setAttribute("role", "region");
 root.setAttribute("aria-labelledby", "pv-title");
 thread.onState = (s) => {
 	state = s;
 	renderBar();
+	if (shownPid) feedListener?.(shownPid, s.feed, s.project?.name ?? null);
 };
+
+/** projectsView: told of every change of the page's feed (status, project name). */
+export function onProjectFeed(
+	fn: (pid: string, feed: FeedStatus, name: string | null) => void,
+): void {
+	feedListener = fn;
+}
+
+export function setProjectPageMode(next: ProjectPageMode): void {
+	if (next === mode) return;
+	mode = next;
+	thread.setComposer(mode === "active" ? "on" : mode === "loading" ? "disabled" : "off");
+	thread.root.hidden = mode === "unavailable";
+	barEl.hidden = mode === "unavailable";
+	renderBar();
+}
+
+/** The page's feed as last known (a project shown again needs no new read). */
+export function projectFeed(pid: string): { feed: FeedStatus; name: string | null } {
+	if (shownPid !== pid || !state) return { feed: "loading", name: null };
+	return { feed: state.feed, name: state.project?.name ?? null };
+}
+
+/** "Reintentar": read the project's feed again. */
+export function retryProjectFeed(): void {
+	thread.retry();
+}
 
 /** ACP agents of the owner, by project (refreshed by the page and by changes). */
 let allAgents: AcpAgentInfo[] = [];
@@ -63,12 +100,17 @@ export function acpProjectPage(pid: string, header: HTMLElement): HTMLElement {
 	if (shownPid !== pid) {
 		shownPid = pid;
 		state = null;
+		mode = "loading";
+		thread.setComposer("disabled");
+		thread.root.hidden = false;
+		barEl.hidden = false;
 		void refreshAcpAgents().then(() => {
 			others = allAgents;
 			renderBar();
 		});
 	}
 	thread.open({ kind: "project", projectId: pid });
+	state = thread.state;
 	renderBar();
 	return root;
 }
@@ -106,8 +148,10 @@ function renderBar(): void {
 		a,
 		st: agentStatus(a, now, state?.auth.get(a.name) === true),
 	}));
+	const active = mode === "active";
 	const ck = JSON.stringify([
 		pid,
+		active,
 		statuses.map(({ a, st }) => [a.name, a.sessionId, st.label, st.tone]),
 	]);
 	if (ck !== chipsKey || !chipsEl) {
@@ -124,19 +168,26 @@ function renderBar(): void {
 			remove.title = `Quitar a @${a.name} del proyecto (conserva su sesión e historial)`;
 			remove.setAttribute("aria-label", remove.title);
 			remove.addEventListener("click", () => void removeAgent(pid, a));
-			li.append(link, el("span", `acp-status acp-status-${st.tone}`, st.label), remove);
+			li.append(link, el("span", `acp-status acp-status-${st.tone}`, st.label));
+			if (active) li.append(remove);
 			chipsEl.append(li);
 		}
 	}
 	const candidates = others.filter((a) => a.projectId !== pid);
-	const tk = JSON.stringify([pid, candidates.map((a) => [a.name, a.projectId ?? null])]);
+	const tk = JSON.stringify([pid, active, candidates.map((a) => [a.name, a.projectId ?? null])]);
 	if (tk !== toolsKey || !toolsEl) {
 		toolsKey = tk;
-		toolsEl = buildTools(pid, candidates);
+		// Agent tools write (join / leave / a new agent session): live project only.
+		toolsEl = active ? buildTools(pid, candidates) : el("div", "acp-project-tools");
 	}
-	helpEl.textContent = members.length
-		? "Empezá el mensaje con @agente (uno o varios): cada uno lo recibe en su cola y responde acá. Pueden consultarse entre ellos (st send); esas consultas también aparecen acá."
-		: "Este proyecto todavía no tiene agentes ACP. Creá una sesión con agente o agregá una existente.";
+	helpEl.textContent =
+		mode === "archived"
+			? "Proyecto archivado: su historial se lee acá. Sus agentes siguen en sus sesiones y en su chat individual."
+			: !active
+				? ""
+				: members.length
+					? "Empezá el mensaje con @agente (uno o varios): cada uno lo recibe en su cola y responde acá. Pueden consultarse entre ellos (st send); esas consultas también aparecen acá."
+					: "Este proyecto todavía no tiene agentes ACP. Creá una sesión con agente o agregá una existente.";
 	syncChildren(barEl, [chipsEl, toolsEl, helpEl]);
 }
 
@@ -172,6 +223,7 @@ function buildTools(pid: string, candidates: AcpAgentInfo[]): HTMLElement {
 }
 
 async function addAgent(pid: string, name: string): Promise<void> {
+	if (mode !== "active" || shownPid !== pid) return;
 	try {
 		await acpSetProject(name, pid);
 		await refreshAcpAgents();
@@ -190,7 +242,8 @@ async function removeAgent(pid: string, a: AcpAgentInfo): Promise<void> {
 			"Su sesión, su contexto ACP y sus mensajes se conservan. Deja de recibir mensajes de este Project Chat.",
 		confirmLabel: "Quitar",
 	}).catch(() => false);
-	if (!ok) return;
+	// The page may have changed state while the dialog was open.
+	if (!ok || mode !== "active" || shownPid !== pid) return;
 	try {
 		await acpSetProject(a.name, null);
 		await refreshAcpAgents();
