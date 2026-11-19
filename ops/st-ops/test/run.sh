@@ -69,6 +69,7 @@ T=$T
 n=$1
 echo "\$n \$*" >>"\$T/kit.log"
 $2
+if [[ -e \$T/busy-\${n%%-*} ]]; then rm "\$T/busy-\${n%%-*}"; echo "RESULT \${n%.sh} BUSY rc=3"; exit 3; fi
 if [[ -e \$T/fail-\${n%%-*} ]]; then echo "RESULT \${n%.sh} FAIL rc=1"; exit 1; fi
 if [[ -e \$T/noresult-\${n%%-*} ]]; then echo "something went wrong"; exit 0; fi
 echo "RESULT \${n%.sh} OK rc=0"
@@ -86,8 +87,9 @@ printf "KIT_HEAD=%s\nRELEASE_CONF_SHA256=%s\nHOST_CONF_SHA256=x\n" "$(git rev-pa
 echo "LOG=$log"'
 detached='
 if [[ $1 == --detach ]]; then
-	r=OK; [[ -e $T/fail-${n%%-*} ]] && r=FAIL
-	printf "STEP=%s\nRESULT=%s\nRC=%s\nFINISHED=now\nLAST=x\n" "${n%.sh}" "$r" "$([[ $r == OK ]] && echo 0 || echo 1)" >"$2/${n%.sh}.result"
+	r=OK rc=0; [[ -e $T/fail-${n%%-*} ]] && r=FAIL rc=1
+	[[ -e $T/busy-${n%%-*} ]] && { rm "$T/busy-${n%%-*}"; r=BUSY rc=3; }
+	printf "STEP=%s\nRESULT=%s\nRC=%s\nFINISHED=now\nLAST=x\n" "${n%.sh}" "$r" "$rc" >"$2/${n%.sh}.result"
 	echo "RESULT ${n%.sh} OK rc=0"; exit 0
 fi'
 kit_script 02-backup.sh ''
@@ -109,6 +111,7 @@ REPO_URL=https://github.com/example/shared-terminal.git
 REQUIRED_WORKFLOW=.github/workflows/ci.yml
 REQUIRED_CHECKS="Backend (tsc + vitest)|Frontend (tsc + vite build)"
 REQUEST_TTL=7200
+APPROVAL_TTL=21600
 SIGNED_VERBS=$1
 EOF
 }
@@ -190,6 +193,9 @@ ci_fixture success success
 expect_rc 2 "propose: no TARGET" st qa propose <<<"FROM=$base"
 expect_rc 2 "propose: two TARGET lines" st qa propose < <(release "$base" "$two"; echo "TARGET=$two")
 expect_rc 2 "propose: control bytes" st qa propose < <(release "$base" "$two"; printf 'X=\033[1m\n')
+expect_out "non-ASCII or control byte at line 8" "control byte line"
+expect_rc 2 "propose: UTF-8" st qa propose < <(release "$base" "$two"; echo 'PAGES_TEXT=Proyecto archivado · solo lectura')
+expect_out "non-ASCII or control byte at line 8 \(release data is ASCII\)" "non-ASCII line"
 expect_rc 2 "propose: oversized" st qa propose < <(release "$base" "$two"; head -c 17000 /dev/zero | tr '\0' a)
 expect_rc 2 "propose: P_DIST_FILE elsewhere" propose "$base" "$three" /etc/shadow
 expect_out "ERROR data: P_DIST_FILE" "P_DIST_FILE refused"
@@ -211,6 +217,7 @@ expect_out "^compare: https://github.com/example/shared-terminal/compare/$base..
 expect_out "^  [0-9a-f]+ three \?\[31mred\?$" "text: commit subjects printable-only"
 expect_out "^  ci: run 10 of .github/workflows/ci.yml: completed/success$" "text: CI run"
 expect_out "^runs-as: root \(kit" "text: runs-as"
+expect_out "^approval-valid-for: 21600s$" "text: approval window"
 expect_out "^  IMAGE_NOTE=plain value$" "text: the data itself"
 [[ $(stat -c %a "$ST_OPS_STATE/requests/$id/release.conf") == 600 ]] && ok || ko "release.conf is 0600"
 expect_rc 2 "one active request at a time" propose "$base" "$two"
@@ -222,7 +229,13 @@ text "$id"; sign "$T/owner" "$T/req.txt"
 expect_rc 2 "stage 1: approve refused" st qa approve "$id" <"$T/req.txt.sig"
 expect_out "ERROR disabled" "disabled"
 expect_rc 2 "stage 1: step refused" st qa step "$id" backup
-expect_rc 0 "stage 1: preflight allowed" st qa preflight "$id"
+touch "$T/busy-01"
+expect_rc 3 "preflight BUSY exits 3" st qa preflight "$id"
+expect_out "answered BUSY" "busy note"
+expect_rc 0 "BUSY keeps the request active" st qa result "$id"
+expect_out "^state: active$" "active after BUSY"
+expect_out "^step preflight: NONE$" "BUSY preflight is not consumed"
+expect_rc 0 "stage 1: preflight allowed (after BUSY)" st qa preflight "$id"
 conf on
 
 # ── Signatures ──
@@ -241,6 +254,7 @@ expect_rc 2 "signature in another namespace" st qa approve "$id" <"$T/req.txt.si
 sed 's/IMAGE_NOTE=plain value/IMAGE_NOTE=evil/' "$T/req.txt" >"$T/req2.txt"; sign "$T/owner" "$T/req2.txt"
 expect_rc 2 "signature over other bytes" st qa approve "$id" <"$T/req2.txt.sig"
 echo garbage | st qa approve "$id" >"$T/out" 2>&1; [[ $? == 2 ]] && ok || ko "garbage signature"
+[[ -z $(find "$ST_OPS_STATE" -name 'sig*' -o -name '*.candidate') ]] && ok || ko "rejected approvals leave no temp file"
 # Another request's signature: propose B, sign it, cancel it; its signature must not approve A (and vice versa).
 idA=$id
 expect_rc 0 "approve OK" approve "$idA"
@@ -253,11 +267,20 @@ expect_out "ERROR order" "out of order"
 expect_rc 2 "unknown step" st qa step "$idA" mint-ui-token
 expect_rc 2 "07 by its number" st qa step "$idA" 07-mint-ui-token
 expect_rc 2 "verify before deploy" st qa verify "$idA"
+touch "$T/busy-02"
+expect_rc 3 "backup BUSY" st qa step "$idA" backup
+expect_rc 2 "offhost refused after a BUSY backup" st qa step "$idA" offhost
 expect_rc 0 "backup" st qa step "$idA" backup
 expect_out "^RESULT 02-backup OK rc=0$" "backup's RESULT"
 grep -q "^02-backup.sh $T/root/st-deploy-r7-" "$T/kit.log" && ok || ko "backup gets the LOG"
 expect_rc 2 "backup runs once" st qa step "$idA" backup
-expect_rc 0 "offhost (detached)" st qa step "$idA" offhost
+touch "$T/busy-02b"
+expect_rc 0 "offhost launched, then BUSY in its .result" st qa step "$idA" offhost
+expect_rc 0 "result" st qa result "$idA"
+expect_out "^step offhost: BUSY$" "detached BUSY"
+expect_out "^state: active$" "detached BUSY keeps the request"
+expect_rc 2 "rollback-proof refused after a BUSY offhost" st qa step "$idA" rollback-proof
+expect_rc 0 "offhost (detached), relaunched after BUSY" st qa step "$idA" offhost
 grep -q "^02b-offhost.sh --detach $T/root/" "$T/kit.log" && ok || ko "offhost gets --detach LOG"
 expect_rc 0 "result of a detached step" st qa result "$idA" offhost
 expect_out "^RESULT=OK$" "result shows the .result"
@@ -296,6 +319,12 @@ expect_rc 2 "exclude: a step that takes none" st qa step "$idA" acceptance 4242
 grep -q "^04-deploy" "$T/kit.log" && ko "deploy ran during refusals" || ok
 expect_rc 0 "deploy with its own running message excluded" st qa step "$idA" deploy 4242
 grep -qx "04-deploy.sh --detach $log --exclude-message 4242" "$T/kit.log" && ok || ko "deploy argv: $(grep 04- "$T/kit.log")"
+expect_rc 2 "acceptance before verify" st qa step "$idA" acceptance
+expect_out "verify has not finished OK" "verify first"
+touch "$T/fail-05"
+expect_rc 1 "verify FAIL" st qa verify "$idA"
+rm "$T/fail-05"
+expect_rc 2 "acceptance after a failed verify" st qa step "$idA" acceptance
 expect_rc 0 "verify after deploy" st qa verify "$idA"
 expect_out "^RESULT 05-verify OK rc=0$" "verify output"
 expect_rc 0 "acceptance" st qa step "$idA" acceptance
@@ -364,6 +393,20 @@ expect_rc 2 "approve a cancelled request" st qa approve "$idB" <"$T/reqB.txt.sig
 echo $(($(date -u +%s) + $(cat "$T/tick") + 7300)) >"$T/now"
 expect_rc 2 "expired" approve "$idC"
 expect_out "expired" "expired"
+rm "$T/now"
+# An approval lapses: no writing step after APPROVAL_TTL, and the request stops blocking new ones.
+st qa cancel "$idC" >/dev/null 2>&1
+expect_rc 0 "propose D" propose "$base" "$two"
+idD=$(new_id)
+st qa preflight "$idD" >/dev/null 2>&1
+expect_rc 0 "approve D" approve "$idD"
+expect_rc 0 "backup D" st qa step "$idD" backup
+echo $(($(date -u +%s) + $(cat "$T/tick") + 21700)) >"$T/now"
+expect_rc 2 "a lapsed approval runs nothing" st qa step "$idD" offhost
+expect_out "approval lapsed|expired \(approval\)" "lapsed"
+expect_rc 0 "result D" st qa result "$idD"
+expect_out "^state: expired \(approval\)$" "lapsed state"
+expect_rc 0 "a lapsed request no longer blocks" propose "$base" "$two"
 rm "$T/now"
 
 # ── install.sh grants nothing (static) ──

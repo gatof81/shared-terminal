@@ -34,7 +34,7 @@ is_msg_id() { [[ $1 =~ ^[0-9]{1,12}$ ]]; }
 load_conf() {
 	local f="$ST_OPS_ETC/st-ops.conf" k v
 	[[ -f $f ]] || die conf "missing $f"
-	REPO_URL='' REQUIRED_WORKFLOW='' REQUIRED_CHECKS='' REQUEST_TTL='' SIGNED_VERBS='' COMPOSE_PROJECT=''
+	REPO_URL='' REQUIRED_WORKFLOW='' REQUIRED_CHECKS='' REQUEST_TTL='' APPROVAL_TTL='' SIGNED_VERBS='' COMPOSE_PROJECT=''
 	while IFS='=' read -r k v; do
 		[[ -z $k || $k == \#* ]] && continue
 		v=${v#\"}; v=${v%\"}
@@ -43,12 +43,13 @@ load_conf() {
 		REQUIRED_WORKFLOW) [[ $v =~ ^\.github/workflows/[A-Za-z0-9._-]+\.ya?ml$ ]] || die conf "REQUIRED_WORKFLOW"; REQUIRED_WORKFLOW=$v ;;
 		REQUIRED_CHECKS) REQUIRED_CHECKS=$v ;;
 		REQUEST_TTL) [[ $v =~ ^[0-9]{2,6}$ ]] || die conf "REQUEST_TTL"; REQUEST_TTL=$v ;;
+		APPROVAL_TTL) [[ $v =~ ^[0-9]{2,6}$ ]] || die conf "APPROVAL_TTL"; APPROVAL_TTL=$v ;;
 		SIGNED_VERBS) [[ $v == on || $v == off ]] || die conf "SIGNED_VERBS"; SIGNED_VERBS=$v ;;
 		COMPOSE_PROJECT) [[ $v =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]] || die conf "COMPOSE_PROJECT"; COMPOSE_PROJECT=$v ;;
 		*) die conf "unknown key $k" ;;
 		esac
 	done <"$f"
-	[[ -n $REPO_URL && -n $REQUIRED_WORKFLOW && -n $REQUIRED_CHECKS && -n $REQUEST_TTL && -n $SIGNED_VERBS ]] || die conf "incomplete"
+	[[ -n $REPO_URL && -n $REQUIRED_WORKFLOW && -n $REQUIRED_CHECKS && -n $REQUEST_TTL && -n $APPROVAL_TTL && -n $SIGNED_VERBS ]] || die conf "incomplete"
 }
 
 # identities: `<name> <SHA256:fingerprint> [<agent>]` per line. A key that is not listed gets nothing, even if sshd
@@ -222,9 +223,11 @@ request_expired() {
 	(($(now_epoch) >= exp))
 }
 
-# OK, FAIL, RUNNING (started, outcome not known yet — or never, if it was killed) or NONE.
+# OK, FAIL, BUSY (the kit changed nothing: the same step may run again), RUNNING (started, outcome not known yet —
+# or never, if it was killed: never retried) or NONE. `verify` is repeatable: its last run counts.
 step_outcome() { # $1 = request dir, $2 = step
 	local d=$1 rec res
+	if [[ $2 == verify ]]; then cat "$d/steps/verify" 2>/dev/null || echo NONE; return 0; fi
 	[[ -d $d/steps/$2.started ]] || { echo NONE; return 0; }
 	rec=$(cat "$d/steps/$2" 2>/dev/null || true)
 	case $rec in
@@ -233,10 +236,34 @@ step_outcome() { # $1 = request dir, $2 = step
 		res="$(<"$d/log")/$(step_result_name "$2").result"
 		if [[ ! -f $res ]]; then echo RUNNING
 		elif grep -qx 'RESULT=OK' "$res" && grep -qx 'RC=0' "$res"; then echo OK
+		elif grep -qx 'RESULT=BUSY' "$res"; then echo BUSY
 		else echo FAIL; fi ;;
 	'') echo RUNNING ;;
 	*) echo FAIL ;;
 	esac
+}
+
+# A BUSY step is set back to "not run", its output kept aside: BUSY means the kit's gate changed nothing.
+forget_busy() { # $1 = request dir, $2 = step
+	mv "$1/steps/$2.out" "$1/steps/$2.busy-$(now_epoch).out" 2>/dev/null || true
+	rm -f "$1/steps/$2"
+	rmdir "$1/steps/$2.started"
+}
+
+approval_expired() { # $1 = request dir. The owner's approval holds for the signed `approval-valid-for` only.
+	local at ttl
+	[[ -e $1/approved ]] || return 1
+	[[ -f $1/approved/at ]] || return 0
+	at=$(<"$1/approved/at")
+	ttl=$(request_field "$1/request.txt" approval-valid-for) || return 0
+	[[ $at =~ ^[0-9]+$ && $ttl =~ ^[0-9]+s$ ]] || return 0
+	(($(now_epoch) >= at + ${ttl%s}))
+}
+
+any_running() { # $1 = request dir
+	local s
+	for s in preflight "${STEP_ORDER[@]}"; do [[ $(step_outcome "$1" "$s") == RUNNING ]] && return 0; done
+	return 1
 }
 
 # A request ends on its first failed step or its last OK one. Detached outcomes are only seen when read, so every
@@ -256,6 +283,9 @@ request_state() { # $1 = request dir
 	if [[ -e $1/cancelled ]]; then echo cancelled
 	elif [[ -e $1/closed ]]; then echo "closed $(<"$1/closed")"
 	elif [[ ! -e $1/approved ]] && request_expired "$1/request.txt"; then echo expired
+	# An approved request left halfway stops blocking once its approval lapsed — unless a step's outcome is still
+	# unknown: that one waits for root.
+	elif approval_expired "$1" && ! any_running "$1"; then echo "expired (approval)"
 	else echo active; fi
 }
 
@@ -297,29 +327,38 @@ frozen_ok() { # $1 = LOG, $2 = signed sha256, $3 = signed kit-head
 		[[ -f $1/run.conf && $(grep -cx "KIT_HEAD=$3" "$1/run.conf") == 1 && $(grep -cx "RELEASE_CONF_SHA256=$2" "$1/run.conf") == 1 ]]
 }
 
-# Runs one kit step: its output goes to the caller as it comes (and to steps/<step>.out), the verb's exit code is
-# the kit's. SIGHUP is ignored so a dropped SSH connection does not kill a backup halfway; tee -p keeps the file.
-run_step() { # $1 = request dir, $2 = step, rest = extra args
-	local d=$1 s=$2 rc last
+run_kit() { # $1 = request dir, $2 = step, rest = extra args; sets STEP_RC and KIT_OUTCOME (OK|BUSY|FAIL)
+	local d=$1 s=$2 last
 	shift 2
 	step_argv "$s" "$d" || die usage "unknown step"
-	mkdir "$d/steps/$s.started" || die order "$s already ran for this request"
 	trap '' HUP
 	set +e
 	(cd "$ST_OPS_KIT" && "${STEP_ARGV[@]}" "$@" </dev/null 2>&1) | tee -p "$d/steps/$s.out"
-	rc=${PIPESTATUS[0]}
+	STEP_RC=${PIPESTATUS[0]}
 	set -e
 	last=$(tail -n 1 "$d/steps/$s.out")
 	if [[ ! $last =~ ^RESULT\ [^\ ]+\ (OK|FAIL|USAGE|BUSY)\ rc=[0-9]+$ ]]; then
-		echo "st-ops: RESULT $s FAIL rc=$rc (the kit printed no RESULT line)"
-		((rc != 0)) || rc=1
+		echo "st-ops: RESULT $s FAIL rc=$STEP_RC (the kit printed no RESULT line)"
+		((STEP_RC != 0)) || STEP_RC=1
 	fi
-	if ((rc == 0)) && [[ $last =~ \ OK\ rc=0$ ]]; then
-		if [[ $STEP_DETACHED == *" $s "* ]]; then echo LAUNCHED >"$d/steps/$s"; else echo OK >"$d/steps/$s"; fi
-	else
-		echo "FAIL rc=$rc" >"$d/steps/$s"
-	fi
-	STEP_RC=$rc
+	if ((STEP_RC == 0)) && [[ $last =~ \ OK\ rc=0$ ]]; then KIT_OUTCOME=OK
+	elif ((STEP_RC == 3)) && [[ $last =~ \ BUSY\ rc=3$ ]]; then KIT_OUTCOME=BUSY
+	else KIT_OUTCOME=FAIL; fi
+}
+
+# Runs one kit step at most once (a BUSY answer excepted): its output goes to the caller as it comes (and to
+# steps/<step>.out), the verb's exit code is the kit's. SIGHUP is ignored so a dropped SSH connection does not kill
+# a backup halfway (the kit inherits the ignored signal); tee -p keeps the file.
+run_step() { # $1 = request dir, $2 = step, rest = extra args
+	local d=$1 s=$2
+	shift 2
+	mkdir "$d/steps/$s.started" || die order "$s already ran for this request"
+	run_kit "$d" "$s" "$@"
+	case $KIT_OUTCOME in
+	OK) if [[ $STEP_DETACHED == *" $s "* ]]; then echo LAUNCHED >"$d/steps/$s"; else echo OK >"$d/steps/$s"; fi ;;
+	BUSY) forget_busy "$d" "$s"; echo "st-ops: $s answered BUSY (nothing changed): run it again later" ;;
+	*) echo "FAIL rc=$STEP_RC" >"$d/steps/$s" ;;
+	esac
 }
 
 with_lock() {
@@ -338,7 +377,7 @@ st-ops verbs:
   preflight <id> [<message id>]       kit 01 with the request's data; records its LOG
   approve <id>                        the owner's signature on stdin; enables the writing steps of <id>
   step <id> <step> [<message id>]     next step, in order: backup offhost rollback-proof deploy acceptance
-  verify <id>                         kit 05 (read-only), after deploy OK
+  verify <id>                         kit 05 (read-only), after deploy OK; repeatable, required before acceptance
   result <id> [<step>]                state of a request; the .result of a detached step
   cancel <id>                         withdraw a request before any writing step
 TXT
@@ -369,7 +408,9 @@ verb_propose() {
 	head -c 16385 >"$tmp"
 	n=$(wc -c <"$tmp")
 	((n > 0 && n <= 16384)) || { rm -f "$tmp"; die data "release data must be 1..16384 bytes"; }
-	[[ -z $(LC_ALL=C tr -d '\n[:print:]' <"$tmp") ]] || { rm -f "$tmp"; die data "control bytes in the release data"; }
+	# ASCII only: no control bytes, no bidi or look-alike characters in a text the owner signs.
+	n=$(LC_ALL=C grep -nm1 '[^[:print:]]' "$tmp" | cut -d: -f1 || true)
+	[[ -z $n ]] || { rm -f "$tmp"; die data "non-ASCII or control byte at line $n (release data is ASCII)"; }
 	rel=$(data_value "$tmp" RELEASE '^[1-9][0-9]{0,3}$') || { rm -f "$tmp"; die data "need exactly one RELEASE=<1-9999>"; }
 	from=$(data_value "$tmp" FROM '^[0-9a-f]{40}$') || { rm -f "$tmp"; die data "need exactly one FROM=<40 hex>"; }
 	target=$(data_value "$tmp" TARGET '^[0-9a-f]{40}$') || { rm -f "$tmp"; die data "need exactly one TARGET=<40 hex>"; }
@@ -408,6 +449,7 @@ verb_propose() {
 		echo "runs-as: root (kit $ST_OPS_KIT at kit-head: preflight backup offhost rollback-proof deploy verify acceptance)"
 		echo "release-conf:"
 		sed 's/^/  /' "$d/release.conf"
+		echo "approval-valid-for: ${APPROVAL_TTL}s"
 		echo "created: $(date -u -d "@$now" +%FT%TZ)"
 		echo "expires: $(date -u -d "@$exp" +%FT%TZ)"
 		echo "expires-epoch: $exp"
@@ -436,7 +478,7 @@ verb_preflight() {
 	exclude_args preflight "${2:-}"
 	assert_signed_inputs "$D"
 	run_step "$D" preflight "${EXCLUDE[@]}"
-	[[ $(<"$D/steps/preflight") == OK ]] || return "$STEP_RC"
+	[[ $KIT_OUTCOME == OK ]] || return "$STEP_RC"
 	local target
 	target=$(request_field "$D/request.txt" target)
 	rel=$(request_field "$D/request.txt" release)
@@ -461,17 +503,18 @@ verb_approve() {
 	[[ $SIGNED_VERBS == on ]] || die disabled "signed verbs are off on this host (install stage 1)"
 	local sig
 	is_request_id "$1" || die usage "invalid request id"
-	sig=$(mktemp "$ST_OPS_STATE/sig.XXXXXX")
 	# An SSH signature is ~300 bytes armoured; anything much larger is not one.
-	head -c 4096 >"$sig"
+	sig=$(head -c 4096)
 	with_lock
 	open_request "$1"
-	[[ -e $D/approved ]] && { rm -f "$sig"; die request "already approved (an approval is used once)"; }
-	verify_signature "$D/request.txt" "$sig" || { rm -f "$sig"; die signature "not signed by the owner for this exact request"; }
+	[[ -e $D/approved ]] && die request "already approved (an approval is used once)"
+	printf '%s\n' "$sig" >"$D/sig.candidate"
+	verify_signature "$D/request.txt" "$D/sig.candidate" || { rm -f "$D/sig.candidate"; die signature "not signed by the owner for this exact request"; }
 	assert_signed_inputs "$D"
-	mv "$sig" "$D/request.txt.sig"
+	mv "$D/sig.candidate" "$D/request.txt.sig"
 	mkdir "$D/approved"
-	echo "approved $1: next step is backup"
+	now_epoch >"$D/approved/at"
+	echo "approved $1 for $(request_field "$D/request.txt" approval-valid-for): next step is backup"
 }
 
 verb_step() {
@@ -483,8 +526,15 @@ verb_step() {
 	for ((i = 0; i < ${#STEP_ORDER[@]}; i++)); do [[ ${STEP_ORDER[i]} == "$s" ]] && break; prev=${STEP_ORDER[i]}; done
 	((i < ${#STEP_ORDER[@]})) || die usage "unknown step (steps: ${STEP_ORDER[*]})"
 	[[ -e $D/approved ]] || die approval "request not approved by the owner"
+	approval_expired "$D" && die approval "the owner's approval lapsed: propose a new request"
+	# 05 compares against 01's snapshots and 06 creates test data: verify must pass between deploy and acceptance.
+	[[ $s == acceptance ]] && prev=verify
 	[[ $(step_outcome "$D" "$prev") == OK ]] || die order "$prev has not finished OK"
-	[[ $(step_outcome "$D" "$s") == NONE ]] || die order "$s already ran for this request"
+	case $(step_outcome "$D" "$s") in
+	NONE) ;;
+	BUSY) forget_busy "$D" "$s" ;;
+	*) die order "$s already ran for this request" ;;
+	esac
 	exclude_args "$s" "$msg"
 	assert_signed_inputs "$D"
 	run_step "$D" "$s" "${EXCLUDE[@]}"
@@ -499,9 +549,9 @@ verb_verify() {
 	[[ -f $D/request.txt ]] || die request "no such request"
 	[[ $(step_outcome "$D" deploy) == OK ]] || die order "deploy has not finished OK"
 	assert_signed_inputs "$D"
-	step_argv verify "$D"
-	trap '' HUP
-	(cd "$ST_OPS_KIT" && "${STEP_ARGV[@]}" </dev/null 2>&1)
+	run_kit "$D" verify
+	if [[ $KIT_OUTCOME == OK ]]; then echo OK >"$D/steps/verify"; else echo "FAIL rc=$STEP_RC" >"$D/steps/verify"; fi
+	return "$STEP_RC"
 }
 
 verb_result() {
@@ -512,7 +562,7 @@ verb_result() {
 	echo "state: $(request_state "$d")"
 	echo "approved: $([[ -e $d/approved ]] && echo yes || echo no)"
 	[[ -f $d/log ]] && echo "log: $(<"$d/log")"
-	for s in preflight "${STEP_ORDER[@]}"; do echo "step $s: $(step_outcome "$d" "$s")"; done
+	for s in preflight backup offhost rollback-proof deploy verify acceptance; do echo "step $s: $(step_outcome "$d" "$s")"; done
 	if (($# == 2)); then
 		[[ $STEP_DETACHED == *" $2 "* ]] || die usage "only a detached step has a .result: $STEP_DETACHED"
 		[[ -f $d/log && -f $(<"$d/log")/$(step_result_name "$2").result ]] || die result "no .result yet"

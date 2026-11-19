@@ -35,12 +35,15 @@ operador ──ssh st-ops──▶ sshd (Match User st-ops: ForceCommand, sin TT
 | `preflight <id> [<mensaje>]` | `01 --release-file <ruta absoluta de esos datos>`, una vez; registra su `LOG` | no |
 | `approve <id>` (stdin: la firma) | firma del owner sobre los bytes exactos, sin vencer, una sola vez | **sí** |
 | `step <id> <paso> [<mensaje>]` | el siguiente paso, en orden y una vez: `backup` (02), `offhost` (02b `--detach`), `rollback-proof` (03), `deploy` (04 `--detach`), `acceptance` (06) | tras `approve` |
-| `verify <id>` | 05 (solo lectura), después de `deploy` OK | no |
+| `verify <id>` | 05 (solo lectura), después de `deploy` OK; repetible (vale el último), obligatorio antes de `acceptance` | no |
 | `result <id> [<paso>]` | estado del pedido y de cada paso; el `.result` de un paso desacoplado | no |
 | `cancel <id>` | retira un pedido antes de cualquier paso que escribe | no |
 
-Un pedido activo a la vez. Termina con su primer paso fallido (`closed failed <paso>`) o con `acceptance` OK
-(`closed done`); un paso desacoplado se juzga por su `<LOG>/<nombre>.result` (`RESULT=OK` y `RC=0`). La salida de
+Un pedido activo a la vez. Termina con su primer paso fallido (`closed failed <paso>`), con `acceptance` OK
+(`closed done`) o cuando vence su aprobación (`expired (approval)`, salvo que un paso siga en `RUNNING`); un paso
+desacoplado se juzga por su `<LOG>/<nombre>.result` (`RESULT=OK` y `RC=0`). **BUSY** (exit 3, `RESULT … BUSY`, o
+`RESULT=BUSY` en el `.result`) significa "el gate del kit no cambió nada": el paso no se consume y se puede volver a
+pedir (su salida queda en `steps/<paso>.busy-<epoch>.out`). Un resultado desconocido nunca se reintenta. La salida de
 cada paso llega tal cual (más la línea `RESULT`) y el código de salida del verbo es el del kit; un paso sin línea
 `RESULT` es FAIL. `07-mint-ui-token.sh`, rollback, `.env`, flags, imagen de sesión, recreaciones y cambios del kit
 no tienen verbo.
@@ -79,10 +82,13 @@ ci:
 runs-as: root (kit /root/st-deploy-kit at kit-head: preflight backup offhost rollback-proof deploy verify acceptance)
 release-conf:
   <los datos, línea por línea>
+approval-valid-for: 21600s
 created: … / expires: … / expires-epoch: …
 ```
 
-Todo texto del operador (asuntos de commits, datos) va indentado: nunca puede ser una línea `clave: `. El CI se
+Todo texto del operador (asuntos de commits, datos) va indentado: nunca puede ser una línea `clave: `. Los datos
+de una release son **ASCII** (sin bytes de control ni caracteres bidi o parecidos en un texto que se firma):
+`propose` rechaza otro byte indicando la línea. El CI se
 lee como en #517: solo la corrida `push` de `ci.yml` en `main` para ese SHA y los check-runs de **su** suite (el
 nombre de un check-run no es identidad: cualquier workflow con `checks: write` puede publicar uno).
 
@@ -112,12 +118,14 @@ operador: ssh st-ops approve <id> < request.txt.sig ; ssh st-ops step <id> backu
 - **La firma es el único control que el operador no puede producir.** El operador escribe el código, puede
   mergearlo (actúa en GitHub como el owner) y redacta los datos; el kit corre como root. Antes de firmar: leer el
   `compare` y los datos del texto.
-- El vencimiento se comprueba al aprobar; un pedido aprobado sigue válido mientras sus pasos avancen. Uno que queda
-  a medias (nadie sigue, o un paso que murió sin registrar su resultado: estado `RUNNING`) bloquea nuevos pedidos
-  hasta que root lo revise y lo cierre a mano (`echo "<motivo>" > /var/lib/st-ops/requests/<id>/closed`): st-ops
-  nunca reintenta un paso de resultado incierto.
-- Un corte de SSH no mata un paso (SIGHUP ignorado, la salida sigue en `requests/<id>/steps/<paso>.out`), pero
-  un reinicio del host sí: queda `RUNNING`.
+- Un pedido se aprueba antes de `expires` y sus pasos que escriben corren dentro de `approval-valid-for` desde la
+  aprobación (`APPROVAL_TTL`). Un paso que murió sin registrar su resultado (`RUNNING`) bloquea nuevos pedidos
+  aunque la aprobación venza, hasta que root lo revise y lo cierre a mano
+  (`echo "<motivo>" > /var/lib/st-ops/requests/<id>/closed`): st-ops nunca reintenta un resultado incierto.
+- Un corte de SSH no mata un paso: `st-ops-root` ignora SIGHUP y el kit lo hereda **ignorado** (una señal ignorada
+  al entrar a bash no se puede re-atrapar, así que el `trap … HUP` del kit no actúa); la salida sigue en
+  `requests/<id>/steps/<paso>.out`. Un reinicio del host sí lo mata: queda `RUNNING`.
+- El kit hereda `LC_ALL=C` y el `PATH` fijo de `st-ops-root`.
 - La integridad del kit (repo limpio + `SHA256SUMS`) la verifica cada script del kit; st-ops solo ata el commit.
 - `from="172.20.0.0/16"` admite cualquier contenedor de `sessions-net`: identifica la clave, no la IP.
 
