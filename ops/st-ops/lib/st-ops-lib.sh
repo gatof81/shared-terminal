@@ -196,22 +196,16 @@ exclude_args() { # $1 = step, $2 = message id or ''
 	EXCLUDE=(--exclude-message "$2")
 }
 
-# Whether ACP message $1 (a validated integer) is `running`, addressed to agent $2, which exists, and owned by the
-# kit's token owner. The dispatcher has no D1 access by design: it asks the kit's read-only `message-info.sh` and
-# believes only an exact answer (contract of kit 17dd041) — anything else (rc ≠ 0, a missing or repeated key, another RESULT) is a refusal.
+# Whether ACP message $1 (a validated integer) is `running`, addressed to agent $2 (validated name), which exists.
+# The dispatcher has no D1 access by design: the kit's read-only `message-info.sh <id> <agent>` answers exit 0 only in
+# that case. Only exit 0 with its own OK RESULT line counts; anything else is a refusal.
 message_is_own_running() {
 	local out rc
 	set +e
-	out=$(cd "$ST_OPS_KIT" && bash bin/message-info.sh "$1" </dev/null 2>/dev/null)
+	out=$(cd "$ST_OPS_KIT" && bash bin/message-info.sh "$1" "$2" </dev/null 2>/dev/null)
 	rc=$?
 	set -e
-	[[ $rc == 0 && $(tail -n 1 <<<"$out") == "RESULT message-info OK rc=0" ]] || return 1
-	[[ $(kv_field "$out" MESSAGE_ID) == "$1" && $(kv_field "$out" TO) == "$2" && $(kv_field "$out" STATE) == running &&
-		$(kv_field "$out" AGENT_EXISTS) == yes && $(kv_field "$out" OWNER_IS_TOKEN_OWNER) == yes ]]
-}
-kv_field() { # $1 = text, $2 = key. Exactly one line `KEY=value`; prints value.
-	[[ $(grep -c "^$2=" <<<"$1") == 1 ]] || return 1
-	grep "^$2=" <<<"$1" | sed "s/^$2=//"
+	[[ $rc == 0 && $(tail -n 1 <<<"$out") == "RESULT message-info OK rc=0" ]]
 }
 
 # ── Requests ─────────────────────────────────────────────────────────────

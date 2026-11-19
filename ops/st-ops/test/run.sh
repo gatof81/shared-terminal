@@ -106,18 +106,20 @@ kit_script 04-deploy.sh "$detached"
 kit_script 05-verify.sh ''
 kit_script 06-acp-acceptance.sh ''
 kit_script 07-mint-ui-token.sh 'touch "$T/07-ran"'
-# message-info.sh answers from $T/msg/<id> (its stdout) and $T/msg/<id>.rc; no file = not found.
+# message-info.sh <id> <agent>, as the real one: exit 0 only for a running message to an existing <agent>.
+# $T/msg/<id> = "<to> <state> <agent exists>"; $T/msg/<id>.raw replaces the whole answer (malformed output, rc 0).
 cat >"$ST_OPS_KIT/bin/message-info.sh" <<EOF
 #!/bin/bash
 echo "message-info.sh \$*" >>"$T/kit.log"
-[[ -f $T/msg/\$1 ]] || { echo "RESULT message-info FAIL rc=1"; exit 1; }
-cat "$T/msg/\$1"; exit "\$(cat "$T/msg/\$1.rc" 2>/dev/null || echo 0)"
+[[ \$# == 2 && \$2 =~ ^[a-z][a-z0-9-]{1,31}\$ ]] || { echo "RESULT message-info USAGE rc=2"; exit 2; }
+[[ -f $T/msg/\$1.raw ]] && { cat "$T/msg/\$1.raw"; exit "\$(cat "$T/msg/\$1.rc" 2>/dev/null || echo 0)"; }
+read -r to state exists <"$T/msg/\$1" 2>/dev/null
+echo "MESSAGE_ID=\$1"; echo "TO=\$to"; echo "STATE=\$state"
+if [[ \$to == "\$2" && \$state == running && \$exists == yes ]]; then echo "RESULT message-info OK rc=0"; exit 0; fi
+echo "RESULT message-info FAIL rc=1"; exit 1
 EOF
 mkdir -p "$T/msg"
-msg() { # $1 = id, $2 = TO, $3 = STATE, $4 = AGENT_EXISTS, $5 = OWNER_IS_TOKEN_OWNER
-	printf 'MESSAGE_ID=%s\nTO=%s\nFROM=architect\nKIND=request\nSTATE=%s\nAGENT_EXISTS=%s\nOWNER_IS_TOKEN_OWNER=%s\nOPEN=yes\nRESULT message-info OK rc=0\n' "$@" >"$T/msg/$1"
-	rm -f "$T/msg/$1.rc"
-}
+msg() { echo "$2 $3 $4" >"$T/msg/$1"; rm -f "$T/msg/$1.raw" "$T/msg/$1.rc"; } # $1 = id, $2 = to, $3 = state, $4 = agent exists
 git -C "$ST_OPS_KIT" init -q && git -C "$ST_OPS_KIT" add -A && git -C "$ST_OPS_KIT" -c user.name=t -c user.email=t@t commit -q -m kit
 kit_move() { git -C "$ST_OPS_KIT" -c user.name=t -c user.email=t@t commit -q --allow-empty -m moved; }
 
@@ -327,33 +329,30 @@ expect_rc 0 "rollback-proof" st qa step "$idA" rollback-proof
 # ── --exclude-message ──
 expect_rc 2 "exclude: another agent's message" st qa step "$idA" deploy 4242
 expect_out "ERROR message" "not proven"
-msg 4242 arq running yes yes
+msg 4242 arq running yes
 expect_rc 2 "exclude: a running message to ANOTHER agent" st qa step "$idA" deploy 4242
 expect_out "ERROR message" "another agent"
 expect_rc 2 "exclude: identity without agent" st ops2 step "$idA" deploy 4242
 expect_out "has no agent" "no agent"
 expect_rc 2 "exclude: not a message id" st qa step "$idA" deploy abc
 # Each of these must be refused by the real message_is_own_running.
-msg 4242 qa pending yes yes
+msg 4242 qa pending yes
 expect_rc 2 "exclude: own message, pending" st qa step "$idA" deploy 4242
-msg 4242 qa running no yes
+msg 4242 qa running no
 expect_rc 2 "exclude: agent deleted" st qa step "$idA" deploy 4242
-msg 4242 qa running yes no
-expect_rc 2 "exclude: another owner's token" st qa step "$idA" deploy 4242
-msg 4242 qa running yes yes; echo 1 >"$T/msg/4242.rc"
-expect_rc 2 "exclude: rc != 0" st qa step "$idA" deploy 4242
-msg 4242 qa running yes yes; echo "trailing noise" >>"$T/msg/4242"
-expect_rc 2 "exclude: last line not RESULT" st qa step "$idA" deploy 4242
-msg 4242 qa running yes yes; sed -i '2a TO=qa' "$T/msg/4242"
-expect_rc 2 "exclude: TO repeated" st qa step "$idA" deploy 4242
-msg 4242 qa running yes yes; sed -i 's/^MESSAGE_ID=.*/MESSAGE_ID=1/' "$T/msg/4242"
-expect_rc 2 "exclude: answer about another message" st qa step "$idA" deploy 4242
-msg 4242 qa running yes yes; sed -i 's/^TO=qa/TO=qa2/' "$T/msg/4242"
-expect_rc 2 "exclude: TO only prefixed by the agent" st qa step "$idA" deploy 4242
-expect_out "ERROR message" "refused as message"
-msg 4242 qa running yes yes
+msg 4242 qa running yes; printf 'MESSAGE_ID=4242\nRESULT message-info OK rc=0\nnoise\n' >"$T/msg/4242.raw"
+expect_rc 2 "exclude: rc 0 but the last line is not the OK RESULT" st qa step "$idA" deploy 4242
+printf 'RESULT message-info OK rc=0\n' >"$T/msg/4242.raw"; echo 1 >"$T/msg/4242.rc"
+expect_rc 2 "exclude: an OK line with rc 1" st qa step "$idA" deploy 4242
+rm "$T/msg/4242.rc"
+msg 4242 qa running yes
 expect_rc 2 "exclude: qa's running message asked by the arq identity" st arq step "$idA" deploy 4242
-msg 4242 qa running yes yes
+grep -qx "message-info.sh 4242 arq" "$T/kit.log" && ok || ko "message-info asked about the caller's agent"
+printf 'RESULT message-info FAIL rc=1\n' >"$T/msg/4242.raw"
+expect_rc 2 "exclude: rc 0 with a FAIL RESULT" st qa step "$idA" deploy 4242
+expect_out "ERROR message" "refused as message"
+grep -qx "message-info.sh 4242 qa" "$T/kit.log" && ok || ko "message-info gets <id> <agent>"
+msg 4242 qa running yes
 expect_rc 2 "exclude: a step that takes none" st qa step "$idA" acceptance 4242
 grep -q "^04-deploy" "$T/kit.log" && ko "deploy ran during refusals" || ok
 expect_rc 0 "deploy with its own running message excluded" st qa step "$idA" deploy 4242
@@ -415,7 +414,7 @@ expect_rc 0 "propose" propose "$base" "$two"
 id=$(new_id)
 expect_rc 2 "preflight: another agent's message" st qa preflight "$id" 77
 expect_out "ERROR message" "preflight exclusion unproven"
-msg 77 qa running yes yes
+msg 77 qa running yes
 expect_rc 0 "preflight with its own running message excluded" st qa preflight "$id" 77
 grep -qx "01-preflight.sh --release-file $ST_OPS_STATE/requests/$id/r7.conf --exclude-message 77" "$T/kit.log" && ok || ko "01 exclude argv"
 st qa cancel "$id" >/dev/null 2>&1
