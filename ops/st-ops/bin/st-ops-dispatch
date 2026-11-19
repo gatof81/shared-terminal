@@ -1,0 +1,24 @@
+#!/bin/bash
+# st-ops-dispatch — the only program the st-ops account can run (sshd ForceCommand).
+# It does no work itself: it splits the requested command into words, refuses anything that is not a short plain
+# token, identifies the key that authenticated, and hands both to the single root program sudoers allows.
+# st-ops-root re-validates every word; this filter exists so no shell metacharacter ever reaches sudo's argv.
+set -euo pipefail
+umask 077
+deny() { echo "ERROR denied: $1" >&2; exit 2; }
+cmd=${SSH_ORIGINAL_COMMAND:-help}
+(( ${#cmd} <= 200 )) || deny "command too long"
+# `read -a` splits on whitespace without globbing or expansion.
+read -r -a words <<<"$cmd"
+(( ${#words[@]} >= 1 && ${#words[@]} <= 4 )) || deny "1 to 4 words"
+for w in "${words[@]}"; do
+	[[ $w =~ ^[A-Za-z0-9._:-]{1,80}$ ]] || deny "invalid word"
+done
+auth=${SSH_USER_AUTH:-}
+[[ -n $auth && -r $auth ]] || deny "no authentication info (ExposeAuthInfo)"
+# The first publickey line is the key sshd accepted.
+key=$(awk '$1 == "publickey" { print $2 " " $3; exit }' "$auth")
+[[ -n $key ]] || deny "not a publickey login"
+fp=$(ssh-keygen -lf - <<<"$key" | awk '{ print $2 }')
+[[ $fp =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] || deny "fingerprint"
+exec sudo -n /usr/local/lib/st-ops/st-ops-root "$fp" "${words[@]}"
