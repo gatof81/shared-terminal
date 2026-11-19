@@ -1,6 +1,6 @@
 /**
  * routes/projects.ts — projects (projects/directory.ts): create, list,
- * archive. Mounted only with PROJECT_CHAT_ENABLED on: off ⇒ the paths do not
+ * rename, archive. Mounted only with PROJECT_CHAT_ENABLED on: off ⇒ the paths do not
  * exist (404, not 401 — `requireAuth` is per route). Owner-only; a foreign or
  * missing project is the same 404.
  */
@@ -44,6 +44,16 @@ export function registerProjectRoutes(router: Router, ctx: RouteContext): void {
 			res.json(await projects.listProjects(userId));
 		} catch (err) {
 			sendError(res, err, "list projects");
+		}
+	});
+
+	router.patch("/projects/:pid", requireAuth, projectIp, async (req: Request, res: Response) => {
+		const { userId } = req as AuthedRequest;
+		res.setHeader("Cache-Control", "no-store");
+		try {
+			res.json(await projects.renameProject(userId, req.params.pid, req.body));
+		} catch (err) {
+			sendError(res, err, "rename project");
 		}
 	});
 

@@ -111,6 +111,7 @@ Contract: [CONVERSATION.md](./CONVERSATION.md) (§6). There is no write path int
 | ------ | ---- | ----------- |
 | POST   | /api/projects | `{name, clientRequestId}` — idempotent create (409 `project-limit`, 503 `outcome-unknown`: retry with the same id) |
 | GET    | /api/projects | Live projects with `agentCount` |
+| PATCH  | /api/projects/:pid | `{name}` — rename a live project (same rules as create; archived or foreign ⇒ 404); returns the project with `agentCount`. Agents and messages reference the id, so nothing else changes |
 | DELETE | /api/projects/:pid | Archive (its agents leave it) |
 
 See [PROJECTS.md](./PROJECTS.md).
