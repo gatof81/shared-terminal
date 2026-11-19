@@ -87,6 +87,7 @@ try {
 	}
 	const arq = await createAgent(ARQ, { new: `Proyecto UI ${P}` });
 	const pid = arq?.projectId;
+	var runProject = pid; // archived at the end (var: read outside this block)
 	check("UI: '+ Proyecto nuevo…' created the project and put the agent in it", !!pid);
 	const dev = await createAgent(DEV, { id: pid });
 	check("UI: second agent joined the existing project", dev?.projectId === pid);
@@ -109,7 +110,7 @@ try {
 	await send.click();
 	await page.waitForFunction(() => /Recibí la respuesta de @/.test(document.querySelector(".acp-project .acp-chat-thread")?.textContent ?? ""), null, { timeout: 60_000 }).catch(() => {});
 	const text = await page.locator(".acp-project .acp-chat-thread").textContent();
-	check("agent consulted the other (st send) and the consult is visible in Project Chat", text.includes(`@${ARQ} → @${DEV} (consulta)`));
+	check("agent consulted the other (st send) and the consult is visible in Project Chat", text.includes(`@${ARQ} consulta a @${DEV}`));
 	check("a mention inside the text did not make @dev a recipient", !text.includes("error: st: 400"));
 	check("the answer came back to the first agent, shown in Project Chat", /recibe la respuesta de @/.test(text) && /Recibí la respuesta de @/.test(text));
 	await page.screenshot({ path: `${shots}/ui-2-project-chat.png` });
@@ -232,6 +233,11 @@ if (process.env.KEEP !== "1")
 		const d = await json(page, `/api/sessions/${sid}?hard=true`, { method: "DELETE" });
 		check(`cleanup: session ${sid.slice(0, 8)} removed`, d.status < 300, String(d.status));
 	}
+// The run's project: archived, or every run leaves one more "Proyecto UI …" in the sidebar.
+if (process.env.KEEP !== "1" && typeof runProject !== "undefined" && runProject) {
+	const a = await json(page, `/api/projects/${runProject}`, { method: "DELETE" });
+	check("cleanup: test project archived", a.status < 300, String(a.status));
+}
 await browser.close();
 console.log(failures ? `${failures} FAILED` : "ALL PASS");
 process.exit(failures ? 1 : 0);

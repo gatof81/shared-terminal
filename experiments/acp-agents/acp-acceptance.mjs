@@ -284,6 +284,15 @@ async function main() {
 		check("the running message and the queue survived the backend restart, each once", after.every((m) => m.state === "done" && m.attempts === 1), after.map((m) => `${m.state}/${m.attempts}`).join(" "));
 	}
 
+	// 6c. Model (#683): the owner changes @dev's model; the runner switches the live ACP session while
+	// idle (session/set_config_option) and the next message runs on it — same ACP session, nothing restarted.
+	const sw = await api("PATCH", `/api/acp/agents/${DEV}`, { model: "claude-opus-5-5" });
+	check("model change accepted and stored", sw.status === 200 && sw.body?.model === "claude-opus-5-5", JSON.stringify(sw.body?.model));
+	const onOpus = await waitMsg((await send(DEV, "¿qué modelo usás?", pid)).id);
+	check("the next message runs on the new model", onOpus.state === "done" && /modelo claude-opus-5-5\)/.test(onOpus.result_text ?? ""), short(onOpus.result_text));
+	const applied = (await agents()).find((a) => a.name === DEV)?.modelApplied;
+	check("the runner reports the switch as applied, no error", applied?.requested === "claude-opus-5-5" && !applied?.error, JSON.stringify(applied));
+
 	// 7. Terminal, Files and Git of the same agent session still answer.
 	const sid = sids[DEV];
 	check("Files: list answers", (await api("GET", `/api/sessions/${sid}/fs/list?path=`)).status === 200);
@@ -295,6 +304,11 @@ async function main() {
 		for (const s of created.sessions) {
 			const d = await api("DELETE", `/api/sessions/${s}?hard=true`);
 			check(`test session ${s.slice(0, 8)} removed`, d.status < 300, String(d.status));
+		}
+		// Archive the test project: earlier runs left one "Aceptación ACP …" per run in the sidebar.
+		if (created.project) {
+			const a = await api("DELETE", `/api/projects/${created.project}`);
+			check("test project archived", a.status < 300, String(a.status));
 		}
 	} else console.log(`kept: project ${pid}, sessions ${created.sessions.join(" ")}`);
 }
