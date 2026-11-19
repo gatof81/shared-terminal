@@ -6,6 +6,7 @@ import {
 	readFileSync,
 	rmSync,
 	statSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -618,11 +619,16 @@ describe("PAT_PERSIST_FRAGMENT", () => {
 			);
 			chmodSync(path.join(bin, "gh"), 0o755);
 		}
-		const gitBin = path.dirname(
-			spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim(),
-		);
+		// PATH holds ONLY this dir: the tools the fragment needs, linked in, and
+		// the stub gh — never a real gh from the host (CI runners have one).
+		for (const tool of ["bash", "git", "dirname", "mkdir", "chmod", "cat", "sh"]) {
+			const real = spawnSync("sh", ["-c", `command -v ${tool}`], {
+				encoding: "utf8",
+			}).stdout.trim();
+			symlinkSync(real, path.join(bin, tool));
+		}
 		const env = {
-			PATH: `${bin}:${gitBin}:/usr/bin:/bin`,
+			PATH: bin,
 			HOME: path.join(dir, "home"),
 			GIT_CONFIG_NOSYSTEM: "1",
 			ST_PAT: PAT,
