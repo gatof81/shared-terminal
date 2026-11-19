@@ -422,12 +422,10 @@ pre.acp-msg-body {
 	border-color: transparent;
 	padding: 0;
 	opacity: 0.6;
+	color: var(--c-ok);
 }
 .acp-badge-running {
 	color: var(--c-accent);
-}
-.acp-badge-done {
-	color: var(--c-ok);
 }
 .acp-details {
 	margin-top: 2px;
