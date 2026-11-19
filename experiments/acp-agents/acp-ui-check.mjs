@@ -110,7 +110,9 @@ try {
 	await send.click();
 	await page.waitForFunction(() => /Recibí la respuesta de @/.test(document.querySelector(".acp-project .acp-chat-thread")?.textContent ?? ""), null, { timeout: 60_000 }).catch(() => {});
 	const text = await page.locator(".acp-project .acp-chat-thread").textContent();
-	check("agent consulted the other (st send) and the consult is visible in Project Chat", text.includes(`@${ARQ} consulta a @${DEV}`));
+	// Since #691 a consult is a bubble in its author's voice: "[A] @arq → @dev".
+	const consults = await page.locator(".acp-project .acp-chat-thread article.acp-consult .acp-msg-head").allTextContents();
+	check("agent consulted the other (st send) and the consult is visible in Project Chat", consults.some((h) => h.includes(`@${ARQ}`) && h.includes(`→ @${DEV}`)), consults.join(" | "));
 	check("a mention inside the text did not make @dev a recipient", !text.includes("error: st: 400"));
 	check("the answer came back to the first agent, shown in Project Chat", /recibe la respuesta de @/.test(text) && /Recibí la respuesta de @/.test(text));
 	await page.screenshot({ path: `${shots}/ui-2-project-chat.png` });
