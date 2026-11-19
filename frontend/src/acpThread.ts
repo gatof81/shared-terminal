@@ -593,23 +593,20 @@ export class AcpThread {
 		const said = el("div", `acp-bubble ${mine ? "acp-out" : "acp-in"}`);
 		const head = el("div", "acp-msg-head");
 		const to = ms.map((m) => who(m.to_id)).join(", ");
-		// In an agent's own chat its name on the person's bubble is noise; in a
-		// project, a consult or a note it says who was addressed.
-		const showTo = !mine || this.source?.kind === "project" || ms.length > 1;
-		head.append(
-			el(
-				"span",
-				"acp-msg-who",
-				mine
-					? showTo
-						? `Para ${to}`
-						: ""
-					: sys
-						? `Shared Terminal → ${to}`
-						: `${who(first.from_id)} consulta a ${to}`,
-			),
-			el("span", "acp-msg-time", `${time(first.created_at)}${this.scopeTag(first)}`),
-		);
+		if (mine || sys) {
+			// In an agent's own chat its name on the person's bubble is noise; in
+			// a project, or for a note, it says who was addressed.
+			const showTo = !mine || this.source?.kind === "project" || ms.length > 1;
+			head.append(
+				el("span", "acp-msg-who", mine ? (showTo ? `Para ${to}` : "") : `Shared Terminal → ${to}`),
+			);
+		} else {
+			// One agent writing to another speaks with its own face, like an
+			// answer does: the author's identity, the addressee discreet.
+			agentVoice(said, first.from_id);
+			head.append(agentId(first.from_id), el("span", "acp-msg-to", `→ ${to}`));
+		}
+		head.append(el("span", "acp-msg-time", `${time(first.created_at)}${this.scopeTag(first)}`));
 		said.append(head);
 		said.append(mine ? el("pre", "acp-msg-body", first.body) : agentText(first.body));
 		art.append(said);
@@ -620,10 +617,9 @@ export class AcpThread {
 	/** The recipient's side of a message: its name, a discreet state, what it said. */
 	private answerEl(m: AcpMessage): HTMLElement {
 		const sub = el("div", `acp-sub acp-bubble acp-in acp-${m.state}`);
+		agentVoice(sub, m.to_id);
 		const head = el("div", "acp-msg-head");
-		const name = el("span", "acp-msg-who acp-agent-id");
-		name.append(el("span", "acp-avatar", m.to_id.slice(0, 1).toUpperCase()), `@${m.to_id}`);
-		name.style.setProperty("--acp-hue", String(hue(m.to_id)));
+		const name = agentId(m.to_id);
 		const meta = el("span", "acp-msg-time", `#${m.id}`);
 		meta.title = `Mensaje #${m.id}${m.finished_at ? ` · terminó ${time(m.finished_at)}` : ""}`;
 		head.append(name, this.badge(m), meta);
@@ -633,28 +629,39 @@ export class AcpThread {
 
 	// The reply an agent RECEIVES to its consult repeats, word for word, the
 	// answer already shown under the consult. When that consult is in the
-	// thread, the delivery is one line (the text one click away); otherwise
-	// (an older page, another scope) it is the only place to read it.
+	// thread, the delivery is one discreet line (the text one click away);
+	// otherwise (an older page, another scope) it is the only place to read
+	// it, so it is a bubble in the voice of the agent that answered.
 	private handoffEl(m: AcpMessage): HTMLElement {
-		const art = el("article", `acp-msg acp-handoff acp-reply`);
-		art.dataset.state = m.state;
 		const shown = m.reply_to !== null && this.messages.some((x) => x.id === m.reply_to);
-		const head = el("div", "acp-msg-head");
-		head.append(
-			el(
-				"span",
-				"acp-msg-who",
-				`↳ ${who(m.to_id)} recibe la respuesta de ${who(m.from_id)} a #${m.reply_to}`,
-			),
-			this.badge(m),
-		);
-		art.append(head);
-		art.append(
-			shown
-				? this.collapsible(`b${m.id}`, "Ver el texto entregado", agentText(m.body))
-				: agentText(m.body),
-		);
-		art.append(...this.outcome(m));
+		const art = el("article", "acp-msg acp-reply");
+		art.dataset.state = m.state;
+		if (shown) {
+			const line = el("div", "acp-handoff");
+			line.append(
+				el(
+					"div",
+					"acp-msg-head",
+					`↳ ${who(m.to_id)} recibe la respuesta de ${who(m.from_id)} a #${m.reply_to}`,
+				),
+				this.collapsible(`b${m.id}`, "Ver el texto entregado", agentText(m.body)),
+			);
+			art.append(line);
+		} else {
+			const said = el("div", "acp-bubble acp-in");
+			agentVoice(said, m.from_id);
+			const head = el("div", "acp-msg-head");
+			head.append(
+				agentId(m.from_id),
+				el("span", "acp-msg-to", `→ ${who(m.to_id)} · respuesta a #${m.reply_to}`),
+			);
+			said.append(head, agentText(m.body));
+			art.append(said);
+		}
+		// What the recipient makes of the reply is its own voice (m.to_id), in
+		// its own answer bubble — never inside the folded line or the bubble of
+		// the agent that answered.
+		art.append(this.answerEl(m));
 		return art;
 	}
 
@@ -1016,6 +1023,20 @@ function hue(name: string): number {
 	let h = 0;
 	for (const c of name) h = (h * 31 + c.charCodeAt(0)) % 360;
 	return h;
+}
+
+/** An agent's name with its avatar, in its colour: the same face wherever it speaks. */
+function agentId(name: string): HTMLElement {
+	const id = el("span", "acp-msg-who acp-agent-id");
+	id.append(el("span", "acp-avatar", name.slice(0, 1).toUpperCase()), `@${name}`);
+	id.style.setProperty("--acp-hue", String(hue(name)));
+	return id;
+}
+
+/** Marks a bubble as said by that agent (its colour accent, see .acp-voice). */
+function agentVoice(bubble: HTMLElement, name: string): void {
+	bubble.classList.add("acp-voice");
+	bubble.style.setProperty("--acp-hue", String(hue(name)));
 }
 
 function sourceKey(src: ThreadSource): string {
