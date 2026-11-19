@@ -247,6 +247,8 @@ jobs:
         run: >-
           shellcheck -x ops/lib/checks.sh ops/test/checks.test.sh
           ops/backup/st-backup-nas.sh ops/test/retention.test.sh ops/test/backup-nas.test.sh
+          ops/st-ops/bin/st-ops-dispatch ops/st-ops/bin/st-ops-root ops/st-ops/lib/st-ops-lib.sh
+          ops/st-ops/install.sh ops/st-ops/uninstall.sh ops/st-ops/test/run.sh
 
       - name: tests
         run: |
@@ -254,3 +256,5 @@ jobs:
           bash ops/test/retention.test.sh
           # A local directory stands in for the NAS: rsync is the transport either way.
           bash ops/test/backup-nas.test.sh
+          # st-ops: real ssh-keygen signatures and git repos, a fake kit, GitHub's API stubbed.
+          bash ops/st-ops/test/run.sh
