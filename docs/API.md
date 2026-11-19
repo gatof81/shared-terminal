@@ -22,6 +22,7 @@ Auth is via the httpOnly cookie `st_token` set by `POST /api/auth/login` and `PO
 | DELETE | /api/sessions/:id?hard=true   | Hard delete (also purge workspace dir + drop the D1 row)        |
 | POST   | /api/sessions/:id/stop        | Stop container (workspace preserved)                            |
 | POST   | /api/sessions/:id/start       | Restart or respawn stopped container                            |
+| PATCH  | /api/sessions/:id             | Metadata: `{name?, externalRef?}` — rename / set or clear the external ref |
 | PATCH  | /api/sessions/:id/env         | Update environment variables                                    |
 | GET    | /api/sessions/:id/ports       | Get the declared exposed-port set + `allowPrivilegedPorts`      |
 | PATCH  | /api/sessions/:id/ports       | Live-edit the exposed-port set (applied without a recycle)      |
@@ -41,6 +42,20 @@ Auth is via the httpOnly cookie `st_token` set by `POST /api/auth/login` and `PO
 | POST   | /api/sessions/:id/exec/:execId/kill | Kill the exec's process group (race-free, idempotent)     |
 
 `POST /api/sessions` accepts a typed `body.config` mirroring `SessionConfigSchema` in `backend/src/sessionConfig.ts`: `envVars` (typed entries with `plain` / `secret` discriminator), `repo` + `auth`, `ports[]` + `allowPrivilegedPorts`, `gitIdentity`, `dotfiles`, `agentSeed`, `postCreateCmd`, `postStartCmd`, `cpuLimit`, `memLimit`, `idleTtlSeconds`. Every field is optional; a bare `POST` (no `config`) creates a default session. With `ACP_AGENTS_ENABLED`, a top-level `acpAgent: {name, model?, runtime?, projectId?}` makes the session an ACP agent session (without the flag the field is refused with 400 `acp-agents-disabled`) — see [ACP_AGENTS.md](./ACP_AGENTS.md).
+
+**What can change on an existing session.** Its id, container name (`st-<sid[:12]>`) and workspace path derive from the id, so none of these edits touches them:
+
+| Edit | Route | Takes effect |
+| ---- | ----- | ------------ |
+| Name | `PATCH /api/sessions/:id {name}` | At once. Same rules as create (trimmed, 1–64 characters, not unique); operate tier (owner or admin). An ACP agent's `@name` is a separate identity and does not change |
+| External ref | `PATCH /api/sessions/:id {externalRef}` | At once (`null` clears) |
+| Exposed ports | `PATCH /api/sessions/:id/ports` | At once on a running session (a new port `< 1024` needs `allowPrivilegedPorts` from create) |
+| CPU / memory caps | `PATCH /api/admin/sessions/:id/resources` (admin) | At once (`docker update`) |
+| ACP agent: project, model | `PATCH /api/acp/agents/:name` | At once; the model is switched by the runner while the agent is idle |
+| Environment variables | `PATCH /api/sessions/:id/env` | Stored at once; a container gets its environment when it is **created**, so a running or stopped container keeps the old one until it is recreated |
+| Image, repository, auth, hooks, dotfiles, agent seed, capture | — | Fixed at creation; changing them means recreating the container or a new session |
+
+A `PATCH /api/sessions/:id` carrying both fields writes them in one statement; an invalid field fails the whole request with 400 and writes nothing, and an unknown key is a 400 too.
 
 The Git routes are strictly read-only (no stage / commit / checkout / push exists) and run git **inside the session container**, so they answer `409 {code:"session-not-running"}` for a stopped session. `status` returns `{repo:false, candidates:[…]}` (top-level dirs holding a `.git`) when `dir` isn't a repository, otherwise `{repo:true, root, branch, detached, head, upstream, ahead, behind, changes[], truncated}` where each change is `{area: staged|unstaged|untracked|conflict, status, xy, path, oldPath, additions, deletions, binary, restricted}`. `area` on `diff` selects index-vs-HEAD (`staged`), worktree-vs-index (`unstaged`/`conflict`) or worktree-vs-`/dev/null` (`untracked`); `dir` must be the `root` reported by `status`; `oldPath` is only a hint that lets git detect a rename — the names git itself reports are what is checked and diffed. Errors carry `code`: `timeout` (504), `unsafe-repository` (409, git's `safe.directory` refusal), `git-failed` (502), `outside-workspace` (403, `dir` reaches a repository through a symlink or a redirected worktree), `restricted` (403, a path git resolved for this diff is on the credential denylist), `not-a-single-file` (400, the pathspec is a directory or matches several entries). Concurrency: at most 2 git requests in flight per user and 8 per process (429 + `Retry-After`), a slot being held until the git process has ended — not until the client disconnects.
 

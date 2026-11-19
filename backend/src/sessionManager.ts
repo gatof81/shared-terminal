@@ -564,12 +564,28 @@ export class SessionManager {
 		return result.results.map(rowToMeta);
 	}
 
-	/** #418 — set or clear (null) the opaque external reference. The value
-	 *  is validated at the route boundary (≤128 chars); the manager stores
-	 *  it verbatim. Ownership/operate authorization is the caller's job. */
-	async updateExternalRef(sessionId: string, externalRef: string | null): Promise<void> {
-		await d1Query("UPDATE sessions SET external_ref = ? WHERE session_id = ?", [
-			externalRef,
+	/** PATCH /sessions/:id — set or clear (null) the opaque external
+	 *  reference (#418) and/or rename. Values are validated at the route
+	 *  boundary; the manager stores them verbatim. ONE statement, so a PATCH
+	 *  carrying both fields lands both or neither. Ownership/operate
+	 *  authorization is the caller's job. */
+	async updateMeta(
+		sessionId: string,
+		patch: { externalRef?: string | null; name?: string },
+	): Promise<void> {
+		const sets: string[] = [];
+		const params: (string | null)[] = [];
+		if (patch.externalRef !== undefined) {
+			sets.push("external_ref = ?");
+			params.push(patch.externalRef);
+		}
+		if (patch.name !== undefined) {
+			sets.push("name = ?");
+			params.push(patch.name);
+		}
+		if (sets.length === 0) return;
+		await d1Query(`UPDATE sessions SET ${sets.join(", ")} WHERE session_id = ?`, [
+			...params,
 			sessionId,
 		]);
 	}

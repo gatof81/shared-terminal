@@ -68,6 +68,22 @@ import {
 // upset xterm/tmux. See #149.
 const SESSION_NAME_MAX_LEN = 64;
 
+/** The trimmed name to persist, or the 400 message. Shared by create and
+ *  rename so the two can never accept different names. */
+function cleanSessionName(value: unknown): { name: string } | { error: string } {
+	// Trim and reject whitespace-only (#307): "   " is truthy and would render
+	// blank in the sidebar. Mirrors the trim-then-check convention used for
+	// group / template names.
+	const trimmed = typeof value === "string" ? value.trim() : "";
+	if (!trimmed) return { error: "body.name is required" };
+	// The 100KB express.json body limit is the only upstream bound otherwise —
+	// a 50KB name would land in D1 verbatim and ride out on every list
+	// response. 64 matches USERNAME_MAX_LEN and the tab-label cap. See #149.
+	if (trimmed.length > SESSION_NAME_MAX_LEN)
+		return { error: `body.name must be at most ${SESSION_NAME_MAX_LEN} characters` };
+	return { name: trimmed };
+}
+
 // #418 — opaque external reference (e.g. an Agent Hub project binding).
 // 128 (not 64) because refs are machine-composed ("hub:project:<uuid>"
 // runs ~50 chars before any qualifier); still bounded at the request
@@ -117,32 +133,13 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			externalRef?: unknown;
 			ownerUserId?: unknown;
 		};
-		if (!name || typeof name !== "string") {
-			res.status(400).json({ error: "body.name is required" });
+		// The trimmed value is what gets persisted (see sessions.create below).
+		const cleaned = cleanSessionName(name);
+		if ("error" in cleaned) {
+			res.status(400).json({ error: cleaned.error });
 			return;
 		}
-		// Trim and reject whitespace-only (#307): "   " is truthy so it slips
-		// past the guard above and would render blank in the sidebar. Mirrors
-		// the trim-then-check convention used for group / template names. The
-		// trimmed value is what gets persisted (see sessions.create below).
-		const trimmedName = name.trim();
-		if (!trimmedName) {
-			res.status(400).json({ error: "body.name is required" });
-			return;
-		}
-		// Cap session name at the request boundary. The 100KB express.json
-		// body limit is the only upstream bound otherwise — a 50KB name
-		// would land in D1 verbatim and ride out on every list response.
-		// 64 matches USERNAME_MAX_LEN and the tab-label cap; same shape of
-		// "user-controlled string with no other natural limit" → same cap.
-		// The empty-string case is already handled by the trim guard above;
-		// only the upper bound needs to be checked here. See #149.
-		if (trimmedName.length > SESSION_NAME_MAX_LEN) {
-			res
-				.status(400)
-				.json({ error: `body.name must be at most ${SESSION_NAME_MAX_LEN} characters` });
-			return;
-		}
+		const trimmedName = cleaned.name;
 		// Numeric dimensions: integer + sane range. xterm uses these to drive
 		// PTY size, and tmux can be unhappy with extreme values; also keeps
 		// nonsense like cols: -1 / cols: 1e9 out of the row.
@@ -1028,27 +1025,42 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 		}
 	});
 
-	// PATCH /sessions/:id — mutable session metadata (#418). The only
-	// field today is `externalRef` (set with a string, clear with null);
-	// unknown keys 400 rather than silently no-op, so a client that
-	// PATCHes a field this route doesn't handle yet (e.g. `name`) learns
-	// immediately instead of concluding the write "succeeded".
+	// PATCH /sessions/:id — mutable session metadata: `externalRef` (#418;
+	// set with a string, clear with null) and `name` (a rename). Unknown keys
+	// 400 rather than silently no-op, so a client that PATCHes a field this
+	// route doesn't handle learns immediately instead of concluding the write
+	// "succeeded". Pure metadata: the container is named after the session id
+	// (`st-<sid[:12]>`) and the workspace after the id too, so a rename touches
+	// no Docker object, no file, and not the ACP agent's @name (acp_agents.name,
+	// its own identity).
 	router.patch("/sessions/:id", async (req: Request, res: Response) => {
 		const { userId } = req as AuthedRequest;
 		const body = (req.body ?? {}) as Record<string, unknown>;
-		if (!("externalRef" in body)) {
-			res.status(400).json({ error: "body.externalRef is required" });
+		if (!("externalRef" in body) && !("name" in body)) {
+			res.status(400).json({ error: "body.externalRef or body.name is required" });
 			return;
 		}
-		const unknownKey = Object.keys(body).find((k) => k !== "externalRef");
+		const unknownKey = Object.keys(body).find((k) => k !== "externalRef" && k !== "name");
 		if (unknownKey !== undefined) {
 			res.status(400).json({ error: `body.${unknownKey} is not a patchable field` });
 			return;
 		}
-		const refErr = externalRefError(body.externalRef);
-		if (refErr !== null) {
-			res.status(400).json({ error: refErr });
-			return;
+		const patch: { externalRef?: string | null; name?: string } = {};
+		if ("externalRef" in body) {
+			const refErr = externalRefError(body.externalRef);
+			if (refErr !== null) {
+				res.status(400).json({ error: refErr });
+				return;
+			}
+			patch.externalRef = body.externalRef as string | null;
+		}
+		if ("name" in body) {
+			const cleaned = cleanSessionName(body.name);
+			if ("error" in cleaned) {
+				res.status(400).json({ error: cleaned.error });
+				return;
+			}
+			patch.name = cleaned.name;
 		}
 		try {
 			// #admin-operate: writing metadata is the operate tier, same as
@@ -1057,7 +1069,7 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			// idle bump when the caller isn't the owner (#300 principle).
 			const meta = await sessions.assertCanOperate(req.params.id, userId);
 			if (meta.userId !== userId) res.locals.skipIdleBump = true;
-			await sessions.updateExternalRef(req.params.id, body.externalRef as string | null);
+			await sessions.updateMeta(req.params.id, patch);
 			const updated = await sessions.get(req.params.id);
 			if (!updated) {
 				// Race: deleted between assertCanOperate and get. See

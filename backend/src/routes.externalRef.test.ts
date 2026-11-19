@@ -1,8 +1,8 @@
 /**
  * routes.externalRef.test.ts — opaque session external_ref (#418).
  *
- * Pins the contract: PATCH /sessions/:id sets/clears the ref at the
- * operate tier, both list endpoints serialize it and filter by exact
+ * Pins the contract: PATCH /sessions/:id sets/clears the ref (and renames)
+ * at the operate tier, both list endpoints serialize it and filter by exact
  * match in SQL (before the admin LIMIT), and the SessionManager query
  * shapes parameterize the value rather than interpolating it.
  *
@@ -137,48 +137,48 @@ function patchRef(id: string, body: unknown): Promise<Response> {
 describe("PATCH /sessions/:id — externalRef (#418)", () => {
 	function makePatchFakes(meta: SessionMeta) {
 		let stored = meta;
-		const updateExternalRef = vi.fn(async (_sid: string, ref: string | null) => {
-			stored = { ...stored, externalRef: ref };
-		});
+		const updateMeta = vi.fn(
+			async (_sid: string, patch: { externalRef?: string | null; name?: string }) => {
+				stored = { ...stored, ...patch };
+			},
+		);
 		const sessions = {
 			assertCanOperate: vi.fn(async () => meta),
-			updateExternalRef,
+			updateMeta,
 			get: vi.fn(async () => stored),
 		} as unknown as SessionManager;
-		return { sessions, updateExternalRef };
+		return { sessions, updateMeta };
 	}
 
 	it("sets the ref for the owner and returns the updated meta", async () => {
-		const { sessions, updateExternalRef } = makePatchFakes(fakeMeta());
+		const { sessions, updateMeta } = makePatchFakes(fakeMeta());
 		await spinUp(sessions);
 
 		const res = await patchRef("s1", { externalRef: "hub:project:42" });
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as { externalRef: string | null };
 		expect(body.externalRef).toBe("hub:project:42");
-		expect(updateExternalRef).toHaveBeenCalledWith("s1", "hub:project:42");
+		expect(updateMeta).toHaveBeenCalledWith("s1", { externalRef: "hub:project:42" });
 	});
 
 	it("clears the ref with null", async () => {
-		const { sessions, updateExternalRef } = makePatchFakes(
-			fakeMeta({ externalRef: "hub:project:42" }),
-		);
+		const { sessions, updateMeta } = makePatchFakes(fakeMeta({ externalRef: "hub:project:42" }));
 		await spinUp(sessions);
 
 		const res = await patchRef("s1", { externalRef: null });
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as { externalRef: string | null };
 		expect(body.externalRef).toBeNull();
-		expect(updateExternalRef).toHaveBeenCalledWith("s1", null);
+		expect(updateMeta).toHaveBeenCalledWith("s1", { externalRef: null });
 	});
 
 	it("400s a missing field, unknown keys, and invalid values without writing", async () => {
-		const { sessions, updateExternalRef } = makePatchFakes(fakeMeta());
+		const { sessions, updateMeta } = makePatchFakes(fakeMeta());
 		await spinUp(sessions);
 
 		for (const body of [
 			{},
-			{ externalRef: "x", name: "sneaky-rename" },
+			{ externalRef: "x", owner: "sneaky" },
 			{ externalRef: "" },
 			{ externalRef: "x".repeat(129) },
 			{ externalRef: 42 },
@@ -186,7 +186,7 @@ describe("PATCH /sessions/:id — externalRef (#418)", () => {
 			const res = await patchRef("s1", body);
 			expect(res.status).toBe(400);
 		}
-		expect(updateExternalRef).not.toHaveBeenCalled();
+		expect(updateMeta).not.toHaveBeenCalled();
 	});
 
 	it("accepts exactly 128 chars (boundary)", async () => {
@@ -203,7 +203,7 @@ describe("PATCH /sessions/:id — externalRef (#418)", () => {
 			assertCanOperate: vi.fn(async () => {
 				throw new ForbiddenError();
 			}),
-			updateExternalRef: vi.fn(),
+			updateMeta: vi.fn(),
 		} as unknown as SessionManager;
 		await spinUp(sessions);
 
@@ -329,7 +329,7 @@ describe("SessionManager — externalRef query shapes (#418)", () => {
 		expect(params).toEqual(["u1"]);
 	});
 
-	it("persists externalRef on create and via updateExternalRef", async () => {
+	it("persists externalRef on create and via updateMeta", async () => {
 		dbStubs.d1Query.mockResolvedValueOnce({
 			results: [],
 			success: true,
@@ -367,9 +367,99 @@ describe("SessionManager — externalRef query shapes (#418)", () => {
 		expect(insertCall[0]).toContain("external_ref");
 		expect(insertCall[1]).toContain("ref-1");
 
-		await mgr.updateExternalRef("sid", null);
+		await mgr.updateMeta("sid", { externalRef: null });
 		const [sql, params] = lastQuery();
-		expect(sql).toContain("UPDATE sessions SET external_ref = ?");
+		expect(sql).toContain("UPDATE sessions SET external_ref = ? WHERE session_id = ?");
 		expect(params).toEqual([null, "sid"]);
+	});
+
+	it("updateMeta writes a rename, alone or with the ref, in ONE statement", async () => {
+		const mgr = new SessionManager();
+		dbStubs.d1Query.mockClear();
+		await mgr.updateMeta("sid", { name: "renamed" });
+		expect(lastQuery()).toEqual([
+			"UPDATE sessions SET name = ? WHERE session_id = ?",
+			["renamed", "sid"],
+		]);
+		dbStubs.d1Query.mockClear();
+		await mgr.updateMeta("sid", { externalRef: "r", name: "both" });
+		expect(dbStubs.d1Query).toHaveBeenCalledTimes(1);
+		expect(lastQuery()).toEqual([
+			"UPDATE sessions SET external_ref = ?, name = ? WHERE session_id = ?",
+			["r", "both", "sid"],
+		]);
+	});
+});
+
+describe("PATCH /sessions/:id — name (rename)", () => {
+	function fakes(meta: SessionMeta) {
+		let stored = meta;
+		const updateMeta = vi.fn(
+			async (_sid: string, patch: { externalRef?: string | null; name?: string }) => {
+				stored = { ...stored, ...patch };
+			},
+		);
+		const sessions = {
+			assertCanOperate: vi.fn(async () => meta),
+			updateMeta,
+			get: vi.fn(async () => stored),
+		} as unknown as SessionManager;
+		return { sessions, updateMeta };
+	}
+
+	it("renames with the trimmed name and keeps id, container and ref", async () => {
+		const { sessions, updateMeta } = fakes(fakeMeta({ externalRef: "hub:1" }));
+		await spinUp(sessions);
+		const res = await patchRef("s1", { name: "  nuevo nombre  " });
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as { sessionId: string; name: string; externalRef: string };
+		expect(body).toMatchObject({ sessionId: "s1", name: "nuevo nombre", externalRef: "hub:1" });
+		expect(updateMeta).toHaveBeenCalledWith("s1", { name: "nuevo nombre" });
+	});
+
+	it("takes name and externalRef together", async () => {
+		const { sessions, updateMeta } = fakes(fakeMeta());
+		await spinUp(sessions);
+		const res = await patchRef("s1", { name: "b", externalRef: null });
+		expect(res.status).toBe(200);
+		expect(updateMeta).toHaveBeenCalledWith("s1", { name: "b", externalRef: null });
+	});
+
+	it("400s the names create refuses, and a bad field next to a good one, without writing", async () => {
+		const { sessions, updateMeta } = fakes(fakeMeta());
+		await spinUp(sessions);
+		for (const body of [
+			{ name: "" },
+			{ name: "   " },
+			{ name: null },
+			{ name: 42 },
+			{ name: "x".repeat(65) },
+			{ name: "ok", externalRef: "" },
+			{ name: "", externalRef: "ok" },
+		]) {
+			const res = await patchRef("s1", body);
+			expect(res.status, JSON.stringify(body)).toBe(400);
+		}
+		expect(updateMeta).not.toHaveBeenCalled();
+	});
+
+	it("accepts exactly 64 characters (boundary, same as create)", async () => {
+		const { sessions } = fakes(fakeMeta());
+		await spinUp(sessions);
+		const res = await patchRef("s1", { name: "n".repeat(64) });
+		expect(res.status).toBe(200);
+	});
+
+	it("403s a non-admin non-owner (operate tier)", async () => {
+		const sessions = {
+			assertCanOperate: vi.fn(async () => {
+				throw new ForbiddenError();
+			}),
+			updateMeta: vi.fn(),
+		} as unknown as SessionManager;
+		await spinUp(sessions);
+		const res = await patchRef("s1", { name: "x" });
+		expect(res.status).toBe(403);
+		expect(sessions.updateMeta).not.toHaveBeenCalled();
 	});
 });
