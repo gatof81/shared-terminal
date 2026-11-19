@@ -146,29 +146,53 @@ sys.exit(0 if ok else 1)
 # before installing (README → "Para contrastar con el kit real"). 07-mint-ui-token.sh is deliberately absent: no
 # name resolves to it.
 
-REL_FROM_KEY=FROM
-REL_TARGET_KEY=TARGET
+# Release data keys st-ops reads (by regex, never evaluated; the kit validates the whole file in 01).
+# P_DIST_FILE: 01 prints the line count and sha256 of that file, so it may only name a kit LOG's dist list.
+P_DIST_FILE_RE='^/root/st-deploy-r[0-9]+-[0-9a-f]{7}-[0-9]{8}T[0-9]{6}Z/new-image-dist-all\.txt$'
 STEP_ORDER=(backup offhost rollback-proof deploy acceptance)
 STEP_DETACHED=" offhost deploy "   # write <LOG>/<result name>.result; their OK is read from there
-STEP_EXCLUDABLE=" deploy "         # accept --exclude-message <id>
+STEP_EXCLUDABLE=" preflight deploy "   # accept --exclude-message <id>
 
-# Sets STEP_ARGV for step $1 of request dir $2 (whose `log` file names the preflight's LOG).
+# Sets STEP_ARGV for step $1 of request dir $2 (whose `log` file names the preflight's LOG). Run as the kit's own
+# usage shows (`bash bin/0N-….sh …`, from the kit's directory). The data stays in OUR request dir: st-ops never
+# writes into the kit; `--release-file` is the 01 option session A adds for that (01 checks owner and mode).
 step_argv() {
 	local log=''
 	[[ -f $2/log ]] && log=$(<"$2/log")
 	case $1 in
-	preflight) STEP_ARGV=("$ST_OPS_KIT/bin/01-preflight.sh" "$2/release.conf") ;;
-	backup) STEP_ARGV=("$ST_OPS_KIT/bin/02-backup.sh" "$log") ;;
-	offhost) STEP_ARGV=("$ST_OPS_KIT/bin/02b-offhost.sh" --detach "$log") ;;
-	rollback-proof) STEP_ARGV=("$ST_OPS_KIT/bin/03-rollback-proof.sh" "$log") ;;
-	deploy) STEP_ARGV=("$ST_OPS_KIT/bin/04-deploy.sh" --detach "$log") ;;
-	verify) STEP_ARGV=("$ST_OPS_KIT/bin/05-verify.sh" "$log") ;;
-	acceptance) STEP_ARGV=("$ST_OPS_KIT/bin/06-acp-acceptance.sh" "$log") ;;
+	preflight) STEP_ARGV=(bash bin/01-preflight.sh --release-file "$2/release.conf") ;;
+	backup) STEP_ARGV=(bash bin/02-backup.sh "$log") ;;
+	offhost) STEP_ARGV=(bash bin/02b-offhost.sh --detach "$log") ;;
+	rollback-proof) STEP_ARGV=(bash bin/03-rollback-proof.sh "$log") ;;
+	deploy) STEP_ARGV=(bash bin/04-deploy.sh --detach "$log") ;;
+	verify) STEP_ARGV=(bash bin/05-verify.sh "$log") ;;
+	acceptance) STEP_ARGV=(bash bin/06-acp-acceptance.sh "$log") ;;
 	*) return 1 ;;
 	esac
 }
 # <LOG>/<name>.result of a detached step.
 step_result_name() { case $1 in offhost) echo 02b-offhost ;; deploy) echo 04-deploy ;; esac; }
+
+# One `KEY=value` line of the release data matching regex $3, printed; a missing or repeated key fails.
+data_value() { # $1 = file, $2 = key, $3 = value regex
+	local v
+	[[ $(grep -c "^$2=" "$1") == 1 ]] || return 1
+	v=$(grep "^$2=" "$1")
+	v=${v#*=}
+	[[ $v =~ $3 ]] && printf '%s' "$v"
+}
+
+# The exclusion the caller asked for, as argv (EXCLUDE), only if step $1 takes one and message $2 is provably the
+# caller's own agent's running message.
+exclude_args() { # $1 = step, $2 = message id or ''
+	EXCLUDE=()
+	[[ -n $2 ]] || return 0
+	[[ $STEP_EXCLUDABLE == *" $1 "* ]] || die usage "$1 takes no message id"
+	is_msg_id "$2" || die usage "invalid message id"
+	[[ -n $ST_OPS_AGENT ]] || die message "identity $ST_OPS_IDENT has no agent"
+	message_is_own_running "$2" "$ST_OPS_AGENT" || die message "message $2 is not proven to be a running message to $ST_OPS_AGENT"
+	EXCLUDE=(--exclude-message "$2")
+}
 
 # Whether ACP message $1 is `running` and addressed to agent $2. The dispatcher has no D1 access by design: this
 # needs a read-only lookup script from the kit, which does not exist yet. Unprovable ⇒ false ⇒ the flag is refused.
@@ -270,7 +294,7 @@ assert_signed_inputs() { # $1 = request dir
 # names the signed kit commit.
 frozen_ok() { # $1 = LOG, $2 = signed sha256, $3 = signed kit-head
 	[[ -f $1/release.conf && $(sha256sum <"$1/release.conf" | cut -d' ' -f1) == "$2" ]] &&
-		[[ -f $1/run.conf && $(grep -cx "KIT_HEAD=$3" "$1/run.conf") == 1 ]]
+		[[ -f $1/run.conf && $(grep -cx "KIT_HEAD=$3" "$1/run.conf") == 1 && $(grep -cx "RELEASE_CONF_SHA256=$2" "$1/run.conf") == 1 ]]
 }
 
 # Runs one kit step: its output goes to the caller as it comes (and to steps/<step>.out), the verb's exit code is
@@ -282,7 +306,7 @@ run_step() { # $1 = request dir, $2 = step, rest = extra args
 	mkdir "$d/steps/$s.started" || die order "$s already ran for this request"
 	trap '' HUP
 	set +e
-	(cd / && "${STEP_ARGV[@]}" "$@" </dev/null 2>&1) | tee -p "$d/steps/$s.out"
+	(cd "$ST_OPS_KIT" && "${STEP_ARGV[@]}" "$@" </dev/null 2>&1) | tee -p "$d/steps/$s.out"
 	rc=${PIPESTATUS[0]}
 	set -e
 	last=$(tail -n 1 "$d/steps/$s.out")
@@ -311,7 +335,7 @@ st-ops verbs:
   help | status                       read-only
   propose                             new request; release data on stdin; prints the text the owner signs
   request-text <id>                   the exact bytes to sign (save as request.txt)
-  preflight <id>                      kit 01 with the request's data; records its LOG
+  preflight <id> [<message id>]       kit 01 with the request's data; records its LOG
   approve <id>                        the owner's signature on stdin; enables the writing steps of <id>
   step <id> <step> [<message id>]     next step, in order: backup offhost rollback-proof deploy acceptance
   verify <id>                         kit 05 (read-only), after deploy OK
@@ -337,7 +361,7 @@ verb_status() {
 
 verb_propose() {
 	(($# == 0)) || die usage "propose   (release data on stdin)"
-	local tmp from target sum head ci now exp id d n line
+	local tmp from target rel sum head ci now exp id d n line
 	with_lock
 	id=$(active_request) && die pending "request $id is active (cancel it or finish it first)"
 	mkdir -p "$ST_OPS_STATE/requests"
@@ -346,11 +370,10 @@ verb_propose() {
 	n=$(wc -c <"$tmp")
 	((n > 0 && n <= 16384)) || { rm -f "$tmp"; die data "release data must be 1..16384 bytes"; }
 	[[ -z $(LC_ALL=C tr -d '\n[:print:]' <"$tmp") ]] || { rm -f "$tmp"; die data "control bytes in the release data"; }
-	# Read, never evaluated: exactly one `KEY=<40 hex>` line each.
-	from=$(grep -E "^$REL_FROM_KEY=" "$tmp" || true)
-	target=$(grep -E "^$REL_TARGET_KEY=" "$tmp" || true)
-	from=${from#*=} target=${target#*=}
-	is_sha "$from" && is_sha "$target" || { rm -f "$tmp"; die data "need exactly one $REL_FROM_KEY= and one $REL_TARGET_KEY= line, 40-hex each"; }
+	rel=$(data_value "$tmp" RELEASE '^[1-9][0-9]{0,3}$') || { rm -f "$tmp"; die data "need exactly one RELEASE=<1-9999>"; }
+	from=$(data_value "$tmp" FROM '^[0-9a-f]{40}$') || { rm -f "$tmp"; die data "need exactly one FROM=<40 hex>"; }
+	target=$(data_value "$tmp" TARGET '^[0-9a-f]{40}$') || { rm -f "$tmp"; die data "need exactly one TARGET=<40 hex>"; }
+	data_value "$tmp" P_DIST_FILE "$P_DIST_FILE_RE" >/dev/null || { rm -f "$tmp"; die data "P_DIST_FILE must be one line naming <kit LOG>/new-image-dist-all.txt"; }
 	sum=$(sha256sum <"$tmp" | cut -d' ' -f1)
 	head=$(kit_head) && is_sha "$head" || { rm -f "$tmp"; die kit "cannot read the kit's commit"; }
 	mirror_fetch
@@ -371,6 +394,7 @@ verb_propose() {
 		echo "id: $id"
 		echo "host: $(hostname)"
 		echo "requested-by: $ST_OPS_IDENT"
+		echo "release: r$rel"
 		echo "release-conf-sha256: $sum"
 		echo "from: $from"
 		echo "target: $target"
@@ -405,19 +429,21 @@ verb_request_text() {
 }
 
 verb_preflight() {
-	(($# == 1)) || die usage "preflight <id>"
-	local log
+	(($# == 1 || $# == 2)) || die usage "preflight <id> [<message id>]"
+	local log rel
 	with_lock
 	open_request "$1"
+	exclude_args preflight "${2:-}"
 	assert_signed_inputs "$D"
-	run_step "$D" preflight
+	run_step "$D" preflight "${EXCLUDE[@]}"
 	[[ $(<"$D/steps/preflight") == OK ]] || return "$STEP_RC"
 	local target
 	target=$(request_field "$D/request.txt" target)
+	rel=$(request_field "$D/request.txt" release)
 	log=$(grep -E '^LOG=' "$D/steps/preflight.out" | tail -1 || true)
 	log=${log#LOG=}
 	# The LOG must be the kit's own new directory for THIS target, owned by us (root), holding the signed data.
-	if [[ ${log%/*} == "$ST_OPS_LOG_BASE" && ${log##*/} =~ ^st-deploy-r[0-9]+-${target:0:7}-[0-9]{8}T[0-9]{6}Z$ &&
+	if [[ ${log%/*} == "$ST_OPS_LOG_BASE" && ${log##*/} =~ ^st-deploy-${rel}-${target:0:7}-[0-9]{8}T[0-9]{6}Z$ &&
 		-d $log && ! -L $log && $(stat -c %u "$log") == "$EUID" ]] &&
 		frozen_ok "$log" "$(request_field "$D/request.txt" release-conf-sha256)" "$(request_field "$D/request.txt" kit-head)"; then
 		echo "$log" >"$D/log"
@@ -459,16 +485,9 @@ verb_step() {
 	[[ -e $D/approved ]] || die approval "request not approved by the owner"
 	[[ $(step_outcome "$D" "$prev") == OK ]] || die order "$prev has not finished OK"
 	[[ $(step_outcome "$D" "$s") == NONE ]] || die order "$s already ran for this request"
-	local extra=()
-	if [[ -n $msg ]]; then
-		[[ $STEP_EXCLUDABLE == *" $s "* ]] || die usage "$s takes no message id"
-		is_msg_id "$msg" || die usage "invalid message id"
-		[[ -n $ST_OPS_AGENT ]] || die message "identity $ST_OPS_IDENT has no agent"
-		message_is_own_running "$msg" "$ST_OPS_AGENT" || die message "message $msg is not proven to be a running message to $ST_OPS_AGENT"
-		extra=(--exclude-message "$msg")
-	fi
+	exclude_args "$s" "$msg"
 	assert_signed_inputs "$D"
-	run_step "$D" "$s" "${extra[@]}"
+	run_step "$D" "$s" "${EXCLUDE[@]}"
 	settle "$D"
 	return "$STEP_RC"
 }
@@ -482,7 +501,7 @@ verb_verify() {
 	assert_signed_inputs "$D"
 	step_argv verify "$D"
 	trap '' HUP
-	(cd / && "${STEP_ARGV[@]}" </dev/null 2>&1)
+	(cd "$ST_OPS_KIT" && "${STEP_ARGV[@]}" </dev/null 2>&1)
 }
 
 verb_result() {

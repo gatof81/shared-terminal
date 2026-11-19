@@ -30,9 +30,9 @@ operador ──ssh st-ops──▶ sshd (Match User st-ops: ForceCommand, sin TT
 | Verbo | Efecto | Firma |
 | --- | --- | --- |
 | `help`, `status` | commit del kit, `app` desplegado, último pedido y su estado | no |
-| `propose` (stdin: datos de la release, ≤ 16 KiB, sin bytes de control salvo `\n`) | UN pedido: guarda los datos (0600), lee `FROM=`/`TARGET=` (sha40, sin evaluar), TARGET en la cadena first-parent de `main` y descendiente de FROM, CI verde; imprime el texto a firmar | no |
+| `propose` (stdin: datos de la release, ≤ 16 KiB, sin bytes de control salvo `\n`) | UN pedido: guarda los datos en `requests/<id>/release.conf` (0600; nunca en el kit), lee por regex y sin evaluar `RELEASE` (1-4 dígitos), `FROM`/`TARGET` (sha40) y `P_DIST_FILE` (solo `<LOG del kit>/new-image-dist-all.txt`), una línea cada una; TARGET en la cadena first-parent de `main` y descendiente de FROM, CI verde; imprime el texto a firmar | no |
 | `request-text <id>` | los bytes exactos del pedido | no |
-| `preflight <id>` | 01 con esos datos, una vez; registra su `LOG` | no |
+| `preflight <id> [<mensaje>]` | `01 --release-file <ruta absoluta de esos datos>`, una vez; registra su `LOG` | no |
 | `approve <id>` (stdin: la firma) | firma del owner sobre los bytes exactos, sin vencer, una sola vez | **sí** |
 | `step <id> <paso> [<mensaje>]` | el siguiente paso, en orden y una vez: `backup` (02), `offhost` (02b `--detach`), `rollback-proof` (03), `deploy` (04 `--detach`), `acceptance` (06) | tras `approve` |
 | `verify <id>` | 05 (solo lectura), después de `deploy` OK | no |
@@ -49,13 +49,13 @@ no tienen verbo.
 
 1. `git -C /root/st-deploy-kit rev-parse HEAD` == `kit-head` firmado (la ruta es una constante de `st-ops-root`).
 2. sha256 de los datos guardados == `release-conf-sha256` firmado; y, una vez que preflight los congeló, también
-   `<LOG>/release.conf` y que `<LOG>/run.conf` diga `KIT_HEAD=<kit-head>`.
+   `<LOG>/release.conf` y que `<LOG>/run.conf` diga `KIT_HEAD=<kit-head>` y `RELEASE_CONF_SHA256=<el firmado>`.
 3. Orden, un solo uso y aprobación: `approve` se consume una vez; cada paso corre a lo sumo una vez (`mkdir`
    atómico antes de llamar al kit); un rechazo no consume el paso.
-4. `--exclude-message <id>` solo en `deploy`, solo si la identidad tiene agente en `identities` y el mensaje es
+4. `--exclude-message <id>` solo en `preflight` y `deploy`, solo si la identidad tiene agente en `identities` y el mensaje es
    `running` y dirigido a ese agente. **Hoy no se puede comprobar** (ver abajo) ⇒ se rechaza siempre.
 
-El `LOG` de preflight se acepta solo si es `/root/st-deploy-r<N>-<sha7 del TARGET>-<UTC>`, un directorio (no un
+El `LOG` de preflight se acepta solo si es `/root/st-deploy-r<RELEASE>-<sha7 del TARGET>-<UTC>`, un directorio (no un
 enlace) de root, y contiene los datos y el kit firmados; si no, el pedido se cierra.
 
 ## Texto que se firma
@@ -65,6 +65,7 @@ st-ops kit request v1
 id: 20261119T120000Z-0123456789ab
 host: vm100
 requested-by: qa
+release: r13
 release-conf-sha256: <sha256 de los datos>
 from: <sha40>
 target: <sha40>
@@ -86,7 +87,7 @@ lee como en #517: solo la corrida `push` de `ci.yml` en `main` para ese SHA y lo
 nombre de un check-run no es identidad: cualquier workflow con `checks: write` puede publicar uno).
 
 ```
-operador: ssh st-ops propose < r12.conf ; ssh st-ops request-text <id> > request.txt ; ssh st-ops preflight <id>
+operador: ssh st-ops propose < r13.conf ; ssh st-ops request-text <id> > request.txt ; ssh st-ops preflight <id>
 owner:    ssh-keygen -Y sign -f <clave personal> -n st-ops-deploy@shared-terminal request.txt
 operador: ssh st-ops approve <id> < request.txt.sig ; ssh st-ops step <id> backup ; … ; ssh st-ops result <id>
 ```

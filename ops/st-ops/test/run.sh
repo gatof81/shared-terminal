@@ -76,10 +76,13 @@ EOF
 	chmod +x "$ST_OPS_KIT/bin/$1"
 }
 kit_script 01-preflight.sh '
-t=$(grep -E "^TARGET=" "$1" | cut -d= -f2)
-log=$T/root/st-deploy-r7-${t:0:7}-$(date -u +%Y%m%dT%H%M%SZ)
+[[ $1 == --release-file && $2 == /* ]] || { echo "RESULT 01-preflight USAGE rc=2"; exit 2; }
+t=$(grep -E "^TARGET=" "$2" | cut -d= -f2); r=$(grep -E "^RELEASE=" "$2" | cut -d= -f2)
+[[ -e $T/badrel ]] && r=99
+log=$T/root/st-deploy-r$r-${t:0:7}-$(date -u +%Y%m%dT%H%M%SZ)
 [[ -e $T/badlog ]] && log=$T/elsewhere
-mkdir -p "$log"; cp "$1" "$log/release.conf"; echo "KIT_HEAD=$(git -C "$T/kit" rev-parse HEAD)" >"$log/run.conf"
+mkdir -p "$log"; cp "$2" "$log/release.conf"
+printf "KIT_HEAD=%s\nRELEASE_CONF_SHA256=%s\nHOST_CONF_SHA256=x\n" "$(git rev-parse HEAD)" "$([[ -e $T/badsum ]] && echo 0 || sha256sum <"$2" | cut -d" " -f1)" >"$log/run.conf"
 echo "LOG=$log"'
 detached='
 if [[ $1 == --detach ]]; then
@@ -154,8 +157,9 @@ st() {
 		st_ops_main "$(fp "$who")" "$@"
 	)
 }
-release() { printf '# r7\nFROM=%s\nTARGET=%s\nIMAGE_NOTE=plain value\n' "$1" "$2"; }
-propose() { release "$1" "$2" | st qa propose; }
+DIST=/root/st-deploy-r12-0123abc-20261118T101010Z/new-image-dist-all.txt
+release() { printf '# r7\n\nRELEASE=7\nFROM=%s\nTARGET=%s\nP_DIST_FILE=%s\nIMAGE_NOTE=plain value\n' "$1" "$2" "${3:-$DIST}"; }
+propose() { release "$@" | st qa propose; }
 new_id() { grep -oE '^id: .*' "$T/out" | sed 's/^id: //'; }
 text() { st qa request-text "$1" >"$T/req.txt"; }
 approve() { text "$1"; sign "$T/owner" "$T/req.txt"; st qa approve "$1" <"$T/req.txt.sig"; }
@@ -187,10 +191,20 @@ expect_rc 2 "propose: no TARGET" st qa propose <<<"FROM=$base"
 expect_rc 2 "propose: two TARGET lines" st qa propose < <(release "$base" "$two"; echo "TARGET=$two")
 expect_rc 2 "propose: control bytes" st qa propose < <(release "$base" "$two"; printf 'X=\033[1m\n')
 expect_rc 2 "propose: oversized" st qa propose < <(release "$base" "$two"; head -c 17000 /dev/zero | tr '\0' a)
+expect_rc 2 "propose: P_DIST_FILE elsewhere" propose "$base" "$three" /etc/shadow
+expect_out "ERROR data: P_DIST_FILE" "P_DIST_FILE refused"
+expect_rc 2 "propose: P_DIST_FILE under a fake LOG name" propose "$base" "$three" /root/st-deploy-r1-0123abc-20261118T101010Z/../../etc/x/new-image-dist-all.txt
+expect_rc 2 "propose: no P_DIST_FILE" st qa propose < <(release "$base" "$three" | grep -v P_DIST)
+expect_rc 2 "propose: two P_DIST_FILE" st qa propose < <(release "$base" "$three"; echo "P_DIST_FILE=$DIST")
+expect_rc 2 "propose: no RELEASE" st qa propose < <(release "$base" "$three" | grep -v RELEASE)
+expect_rc 2 "propose: RELEASE 0013" st qa propose < <(release "$base" "$three" | sed 's/^RELEASE=7/RELEASE=0013/')
+expect_rc 2 "propose: two RELEASE" st qa propose < <(release "$base" "$three"; echo RELEASE=8)
+expect_rc 2 "propose: two FROM" st qa propose < <(release "$base" "$three"; echo "FROM=$base")
 [[ -z $(ls "$ST_OPS_STATE/requests" 2>/dev/null) ]] && ok || ko "refused proposals leave no request"
 expect_rc 0 "propose OK" propose "$base" "$three"
 id=$(new_id)
 expect_out "^requested-by: qa$" "text: requester"
+expect_out "^release: r7$" "text: release"
 expect_out "^release-conf-sha256: $(release "$base" "$three" | sha256sum | cut -d' ' -f1)$" "text: data hash"
 expect_out "^kit-head: $(git -C "$ST_OPS_KIT" rev-parse HEAD)$" "text: kit head"
 expect_out "^compare: https://github.com/example/shared-terminal/compare/$base...$three$" "text: compare"
@@ -213,6 +227,8 @@ conf on
 
 # ── Signatures ──
 expect_out "^LOG=$T/root/st-deploy-r7-" "preflight prints the LOG"
+grep -qx "01-preflight.sh --release-file $ST_OPS_STATE/requests/$id/release.conf" "$T/kit.log" && ok || ko "01 argv: $(grep 01- "$T/kit.log")"
+[[ -z $(git -C "$ST_OPS_KIT" status --porcelain) ]] && ok || ko "st-ops wrote into the kit"
 expect_out "^RESULT 01-preflight OK rc=0$" "preflight passes the RESULT line"
 expect_rc 2 "preflight runs once" st qa preflight "$id"
 expect_rc 2 "step before approve" st qa step "$id" backup
@@ -317,6 +333,24 @@ id=$(new_id)
 touch "$T/badlog"
 expect_rc 1 "preflight LOG outside the kit's place" st qa preflight "$id"
 rm "$T/badlog"
+expect_rc 0 "propose" propose "$base" "$two"
+id=$(new_id)
+touch "$T/badsum"
+expect_rc 1 "preflight run.conf with another data hash" st qa preflight "$id"
+rm "$T/badsum"
+expect_rc 0 "propose" propose "$base" "$two"
+id=$(new_id)
+touch "$T/badrel"
+expect_rc 1 "preflight LOG of another release" st qa preflight "$id"
+rm "$T/badrel"
+expect_rc 0 "propose" propose "$base" "$two"
+id=$(new_id)
+expect_rc 2 "preflight: another agent's message" st qa preflight "$id" 77
+expect_out "ERROR message" "preflight exclusion unproven"
+echo "77 qa" >"$T/running-messages"
+expect_rc 0 "preflight with its own running message excluded" st qa preflight "$id" 77
+grep -qx "01-preflight.sh --release-file $ST_OPS_STATE/requests/$id/release.conf --exclude-message 77" "$T/kit.log" && ok || ko "01 exclude argv"
+st qa cancel "$id" >/dev/null 2>&1
 
 # ── Expiry, cancel, another request's signature ──
 expect_rc 0 "propose" propose "$base" "$two"
