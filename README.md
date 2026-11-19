@@ -30,9 +30,9 @@ server, not in a browser tab.
 
 ## What you can do
 
-**Sessions** — create, stop, start, soft-delete (workspace kept) and hard-delete; per-session repo
-clone, env vars (secrets encrypted at rest), dotfiles, lifecycle hooks and CPU/memory caps;
-templates, per-user quotas, idle auto-stop.
+**Sessions** — create, stop, start, rename in place (API), soft-delete (workspace kept) and
+hard-delete; per-session repo clone, env vars (secrets encrypted at rest), dotfiles, lifecycle hooks
+and CPU/memory caps; templates, per-user quotas, idle auto-stop.
 
 **Terminal** — xterm.js attached to tmux in the container: several tabs, reconnect without gaps or
 duplicates, many browsers on the same tab, search, a key bar on touch devices.
@@ -42,10 +42,13 @@ files; Git status, per-file diffs and recent commits, run inside the container.
 
 **Chat with an agent** — send a message; it is stored before the server answers, the agent takes it
 when it is free, and you follow what it does live. When the agent needs a decision it asks you in
-the Chat. If it isn't logged in, *Conectar cuenta* opens its login in a Terminal tab.
+the Chat. If it isn't logged in, *Conectar cuenta* opens its login in a Terminal tab. Each agent
+runs on the model you pick (Sonnet 5.5 by default, Opus 5.5 or Fable 5.2) and you can change it
+while it works: the switch applies from its next message, nothing restarts.
 
 **Project Chat** — group agents into a project and talk to them in one channel: `@mention` the ones
-you want; their consults to each other appear there too.
+you want; their consults to each other appear there too, each agent with its own avatar and colour.
+Rename a project from its page; archiving moves its agents out and keeps its history readable.
 
 **Also** — per-session port exposure on subdomains, an HTTP exec API, an admin dashboard (live
 CPU/memory, force actions, quotas, read-only observe with an audit trail), backup & restore, and a
@@ -72,13 +75,13 @@ Terminal.
 ### Create an agent session
 
 With ACP enabled on the backend (see [Installation](#installation)), the New session form also
-asks for an **agent name** (lowercase, e.g. `developer`), and optionally a project and a runtime. Log
-the agent in once: *Conectar cuenta* in its Chat, or `claude` → `/login` in its Terminal. Over the
-API:
+asks for an **agent name** (lowercase, e.g. `developer`), and optionally a project, a runtime and a
+model. Log the agent in once: *Conectar cuenta* in its Chat, or `claude` → `/login` in its Terminal.
+Over the API:
 
 ```http
 POST /api/sessions
-{ "name": "dev", "acpAgent": { "name": "developer", "projectId": "<optional>" } }
+{ "name": "dev", "acpAgent": { "name": "developer", "projectId": "<optional>", "model": "claude-opus-5-5" } }
 ```
 
 ## How agents talk to each other
@@ -166,12 +169,13 @@ Read [docs/SECURITY.md](./docs/SECURITY.md) before exposing the backend to the i
 **Implemented**
 
 - Sessions, terminal, Files, Git, templates, quotas, idle stop, ports, exec API, admin, backup &
-  restore.
+  restore; sessions and projects renamed without recreating anything.
 - ACP agents with Claude:
   - durable message API, one message at a time;
   - individual Chat and Project Chat, with a live channel;
   - agent ↔ agent messages through `st`, with automatic replies and a loop guard;
   - questions to you from Chat, and login from Chat or Terminal;
+  - a model per agent, changed live;
   - recovery without resending after a restart.
 - Conversation capture for traditional sessions, as read-only history (opt-in).
 
