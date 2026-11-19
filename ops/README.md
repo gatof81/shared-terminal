@@ -45,11 +45,17 @@ if one is configured. `adopt <name>` publishes a backup that already exists loca
 bring the mirror's old directories under the marker). The config file (`/etc/st-backup-nas.conf`)
 holds every host-specific value; the script's header lists the keys.
 
+## `st-ops/` — the restricted account that runs the deploy kit
+
+`st-ops/` lets an operator session run the host's deploy kit (`/root/st-deploy-kit`) over SSH without root, the
+docker group or another session's key; every writing step needs the owner's signature. See `st-ops/README.md`.
+
 ## Run the tests
 
 ```bash
 bash ops/test/checks.test.sh   # no network, no Docker (a stub stands in for `docker`)
 bash ops/test/retention.test.sh
 bash ops/test/backup-nas.test.sh   # needs rsync; a local directory stands in for the NAS
+bash ops/st-ops/test/run.sh        # needs ssh-keygen, git, python3
 shellcheck -x ops/lib/checks.sh ops/test/checks.test.sh ops/backup/st-backup-nas.sh ops/test/*.test.sh
 ```
