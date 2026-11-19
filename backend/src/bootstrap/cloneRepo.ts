@@ -354,6 +354,9 @@ export const PAT_PERSIST_FRAGMENT = `ST_HOST="\${ST_URL#https://}"
 ST_HOST="\${ST_HOST%%/*}"
 persist_git_credential() {
   local dir
+  # git's credential protocol is line-based: a CR/LF inside the token
+  # would inject fields (another host, another username).
+  case "$ST_PAT" in *$'\\n'*|*$'\\r'*) return 1 ;; esac
   dir="$(dirname "$ST_CRED_FILE")" &&
   mkdir -p "$dir" &&
   # The entrypoint gives .st/ its \`*\` .gitignore; never rely on it here.
