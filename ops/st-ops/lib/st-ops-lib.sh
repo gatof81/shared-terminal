@@ -156,12 +156,13 @@ STEP_EXCLUDABLE=" preflight deploy "   # accept --exclude-message <id>
 
 # Sets STEP_ARGV for step $1 of request dir $2 (whose `log` file names the preflight's LOG). Run as the kit's own
 # usage shows (`bash bin/0N-….sh …`, from the kit's directory). The data stays in OUR request dir: st-ops never
-# writes into the kit; `--release-file` is the 01 option session A adds for that (01 checks owner and mode).
+# writes into the kit. `--release-file` wants an absolute path to a root-owned, not group/other-writable
+# `r<RELEASE>.conf` in a directory of the same kind (the request dir: 0700 under a 0700 state dir).
 step_argv() {
 	local log=''
 	[[ -f $2/log ]] && log=$(<"$2/log")
 	case $1 in
-	preflight) STEP_ARGV=(bash bin/01-preflight.sh --release-file "$2/release.conf") ;;
+	preflight) STEP_ARGV=(bash bin/01-preflight.sh --release-file "$(data_file "$2")") ;;
 	backup) STEP_ARGV=(bash bin/02-backup.sh "$log") ;;
 	offhost) STEP_ARGV=(bash bin/02b-offhost.sh --detach "$log") ;;
 	rollback-proof) STEP_ARGV=(bash bin/03-rollback-proof.sh "$log") ;;
@@ -195,15 +196,31 @@ exclude_args() { # $1 = step, $2 = message id or ''
 	EXCLUDE=(--exclude-message "$2")
 }
 
-# Whether ACP message $1 is `running` and addressed to agent $2. The dispatcher has no D1 access by design: this
-# needs a read-only lookup script from the kit, which does not exist yet. Unprovable ⇒ false ⇒ the flag is refused.
-message_is_own_running() { return 1; }
+# Whether ACP message $1 (a validated integer) is `running`, addressed to agent $2, which exists, and owned by the
+# kit's token owner. The dispatcher has no D1 access by design: it asks the kit's read-only `message-info.sh` and
+# believes only an exact answer — anything else (rc ≠ 0, a missing or repeated key, another RESULT) is a refusal.
+message_is_own_running() {
+	local out rc
+	set +e
+	out=$(cd "$ST_OPS_KIT" && bash bin/message-info.sh "$1" </dev/null 2>/dev/null)
+	rc=$?
+	set -e
+	[[ $rc == 0 && $(tail -n 1 <<<"$out") == "RESULT message-info OK rc=0" ]] || return 1
+	[[ $(kv_field "$out" MESSAGE_ID) == "$1" && $(kv_field "$out" TO) == "$2" && $(kv_field "$out" STATE) == running &&
+		$(kv_field "$out" AGENT_EXISTS) == yes && $(kv_field "$out" OWNER_IS_TOKEN_OWNER) == yes ]]
+}
+kv_field() { # $1 = text, $2 = key. Exactly one line `KEY=value`; prints value.
+	[[ $(grep -c "^$2=" <<<"$1") == 1 ]] || return 1
+	grep "^$2=" <<<"$1" | sed "s/^$2=//"
+}
 
 # ── Requests ─────────────────────────────────────────────────────────────
 
 SIGN_NAMESPACE="st-ops-deploy@shared-terminal"
 
 request_dir() { echo "$ST_OPS_STATE/requests/$1"; }
+# The data as the kit wants it: `r<RELEASE>.conf`, the name 01 checks against the RELEASE inside.
+data_file() { echo "$1/$(request_field "$1/request.txt" release).conf"; }
 
 request_field() { # $1 = request file, $2 = key. Exactly one line `key: value`.
 	[[ $(grep -cE "^$2: " "$1") == 1 ]] || return 1
@@ -315,7 +332,7 @@ assert_signed_inputs() { # $1 = request dir
 	sum=$(request_field "$d/request.txt" release-conf-sha256)
 	head=$(request_field "$d/request.txt" kit-head)
 	[[ $(kit_head) == "$head" ]] || die kit "the kit is not at the signed commit $head"
-	[[ $(sha256sum <"$d/release.conf" | cut -d' ' -f1) == "$sum" ]] || die data "the release data differs from the signed one"
+	[[ -f $(data_file "$d") && $(sha256sum <"$(data_file "$d")" | cut -d' ' -f1) == "$sum" ]] || die data "the release data differs from the signed one"
 	[[ -f $d/log ]] || return 0
 	log=$(<"$d/log")
 	frozen_ok "$log" "$sum" "$head" || die data "$log does not hold the signed data and kit commit"
@@ -428,8 +445,9 @@ verb_propose() {
 	id="$(date -u -d "@$now" +%Y%m%dT%H%M%SZ)-${target:0:12}"
 	d=$(request_dir "$id")
 	mkdir "$d" "$d/steps" || { rm -f "$tmp"; die busy "request id $id exists"; }
-	mv "$tmp" "$d/release.conf"
-	chmod 0600 "$d/release.conf"
+	chmod 0700 "$d"
+	mv "$tmp" "$d/r$rel.conf"
+	chmod 0600 "$d/r$rel.conf"
 	{
 		echo "st-ops kit request v1"
 		echo "id: $id"
@@ -448,7 +466,7 @@ verb_propose() {
 		while IFS= read -r line; do echo "  $line"; done <<<"$ci"
 		echo "runs-as: root (kit $ST_OPS_KIT at kit-head: preflight backup offhost rollback-proof deploy verify acceptance)"
 		echo "release-conf:"
-		sed 's/^/  /' "$d/release.conf"
+		sed 's/^/  /' "$d/r$rel.conf"
 		echo "approval-valid-for: ${APPROVAL_TTL}s"
 		echo "created: $(date -u -d "@$now" +%FT%TZ)"
 		echo "expires: $(date -u -d "@$exp" +%FT%TZ)"
@@ -475,8 +493,8 @@ verb_preflight() {
 	local log rel
 	with_lock
 	open_request "$1"
-	exclude_args preflight "${2:-}"
 	assert_signed_inputs "$D"
+	exclude_args preflight "${2:-}"
 	run_step "$D" preflight "${EXCLUDE[@]}"
 	[[ $KIT_OUTCOME == OK ]] || return "$STEP_RC"
 	local target
@@ -535,8 +553,8 @@ verb_step() {
 	BUSY) forget_busy "$D" "$s" ;;
 	*) die order "$s already ran for this request" ;;
 	esac
-	exclude_args "$s" "$msg"
 	assert_signed_inputs "$D"
+	exclude_args "$s" "$msg"
 	run_step "$D" "$s" "${EXCLUDE[@]}"
 	settle "$D"
 	return "$STEP_RC"

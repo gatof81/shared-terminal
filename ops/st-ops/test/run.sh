@@ -79,6 +79,9 @@ EOF
 kit_script 01-preflight.sh '
 [[ $1 == --release-file && $2 == /* ]] || { echo "RESULT 01-preflight USAGE rc=2"; exit 2; }
 t=$(grep -E "^TARGET=" "$2" | cut -d= -f2); r=$(grep -E "^RELEASE=" "$2" | cut -d= -f2)
+# What the real 01 checks of --release-file: name r<RELEASE>.conf, file and dir ours, not g/o-writable, no symlink.
+[[ ${2##*/} == "r$r.conf" && ! -L $2 && ! -L ${2%/*} && $(stat -c %u "$2") == $(id -u) && $(stat -c %u "${2%/*}") == $(id -u) &&
+	$(( 0$(stat -c %a "$2") & 022 )) == 0 && $(( 0$(stat -c %a "${2%/*}") & 022 )) == 0 ]] || { echo "RESULT 01-preflight USAGE rc=2"; exit 2; }
 [[ -e $T/badrel ]] && r=99
 log=$T/root/st-deploy-r$r-${t:0:7}-$(date -u +%Y%m%dT%H%M%SZ)
 [[ -e $T/badlog ]] && log=$T/elsewhere
@@ -99,6 +102,18 @@ kit_script 04-deploy.sh "$detached"
 kit_script 05-verify.sh ''
 kit_script 06-acp-acceptance.sh ''
 kit_script 07-mint-ui-token.sh 'touch "$T/07-ran"'
+# message-info.sh answers from $T/msg/<id> (its stdout) and $T/msg/<id>.rc; no file = not found.
+cat >"$ST_OPS_KIT/bin/message-info.sh" <<EOF
+#!/bin/bash
+echo "message-info.sh \$*" >>"$T/kit.log"
+[[ -f $T/msg/\$1 ]] || { echo "RESULT message-info FAIL rc=1"; exit 1; }
+cat "$T/msg/\$1"; exit "\$(cat "$T/msg/\$1.rc" 2>/dev/null || echo 0)"
+EOF
+mkdir -p "$T/msg"
+msg() { # $1 = id, $2 = TO, $3 = STATE, $4 = AGENT_EXISTS, $5 = OWNER_IS_TOKEN_OWNER
+	printf 'MESSAGE_ID=%s\nTO=%s\nFROM=architect\nKIND=request\nSTATE=%s\nAGENT_EXISTS=%s\nOWNER_IS_TOKEN_OWNER=%s\nOPEN=yes\nRESULT message-info OK rc=0\n' "$@" >"$T/msg/$1"
+	rm -f "$T/msg/$1.rc"
+}
 git -C "$ST_OPS_KIT" init -q && git -C "$ST_OPS_KIT" add -A && git -C "$ST_OPS_KIT" -c user.name=t -c user.email=t@t commit -q -m kit
 kit_move() { git -C "$ST_OPS_KIT" -c user.name=t -c user.email=t@t commit -q --allow-empty -m moved; }
 
@@ -156,7 +171,6 @@ st() {
 		# A clock one second ahead per call: request ids (second resolution) never collide here.
 		tick=$(($(cat "$T/tick" 2>/dev/null || echo 0) + 1)); echo "$tick" >"$T/tick"
 		now_epoch() { if [[ -f $T/now ]]; then cat "$T/now"; else echo $(($(date -u +%s) + tick)); fi; }
-		message_is_own_running() { grep -qx "$1 $2" "$T/running-messages" 2>/dev/null; }
 		st_ops_main "$(fp "$who")" "$@"
 	)
 }
@@ -219,7 +233,8 @@ expect_out "^  ci: run 10 of .github/workflows/ci.yml: completed/success$" "text
 expect_out "^runs-as: root \(kit" "text: runs-as"
 expect_out "^approval-valid-for: 21600s$" "text: approval window"
 expect_out "^  IMAGE_NOTE=plain value$" "text: the data itself"
-[[ $(stat -c %a "$ST_OPS_STATE/requests/$id/release.conf") == 600 ]] && ok || ko "release.conf is 0600"
+[[ $(stat -c %a "$ST_OPS_STATE/requests/$id/r7.conf") == 600 ]] && ok || ko "r7.conf is 0600"
+[[ $(stat -c %a "$ST_OPS_STATE/requests/$id") == 700 ]] && ok || ko "request dir is 0700"
 expect_rc 2 "one active request at a time" propose "$base" "$two"
 expect_out "ERROR pending" "pending"
 
@@ -240,7 +255,7 @@ conf on
 
 # ── Signatures ──
 expect_out "^LOG=$T/root/st-deploy-r7-" "preflight prints the LOG"
-grep -qx "01-preflight.sh --release-file $ST_OPS_STATE/requests/$id/release.conf" "$T/kit.log" && ok || ko "01 argv: $(grep 01- "$T/kit.log")"
+grep -qx "01-preflight.sh --release-file $ST_OPS_STATE/requests/$id/r7.conf" "$T/kit.log" && ok || ko "01 argv: $(grep 01- "$T/kit.log")"
 [[ -z $(git -C "$ST_OPS_KIT" status --porcelain) ]] && ok || ko "st-ops wrote into the kit"
 expect_out "^RESULT 01-preflight OK rc=0$" "preflight passes the RESULT line"
 expect_rc 2 "preflight runs once" st qa preflight "$id"
@@ -287,11 +302,11 @@ expect_out "^RESULT=OK$" "result shows the .result"
 expect_out "^step offhost: OK$" "result: offhost OK"
 expect_rc 2 "cancel after a writing step" st qa cancel "$idA"
 # Data changed after the signature (the copy st-ops keeps).
-cp "$ST_OPS_STATE/requests/$idA/release.conf" "$T/keep"
-echo "EXTRA=1" >>"$ST_OPS_STATE/requests/$idA/release.conf"
+cp "$ST_OPS_STATE/requests/$idA/r7.conf" "$T/keep"
+echo "EXTRA=1" >>"$ST_OPS_STATE/requests/$idA/r7.conf"
 expect_rc 2 "data changed after signing" st qa step "$idA" rollback-proof
 expect_out "ERROR data" "data"
-cp "$T/keep" "$ST_OPS_STATE/requests/$idA/release.conf"
+cp "$T/keep" "$ST_OPS_STATE/requests/$idA/r7.conf"
 # …and the LOG's frozen copy, which the later steps read.
 log=$(cat "$ST_OPS_STATE/requests/$idA/log")
 echo "EXTRA=1" >>"$log/release.conf"
@@ -308,13 +323,31 @@ expect_rc 0 "rollback-proof" st qa step "$idA" rollback-proof
 # ── --exclude-message ──
 expect_rc 2 "exclude: another agent's message" st qa step "$idA" deploy 4242
 expect_out "ERROR message" "not proven"
-echo "4242 arq" >"$T/running-messages"
+msg 4242 arq running yes yes
 expect_rc 2 "exclude: a running message to ANOTHER agent" st qa step "$idA" deploy 4242
 expect_out "ERROR message" "another agent"
 expect_rc 2 "exclude: identity without agent" st ops2 step "$idA" deploy 4242
 expect_out "has no agent" "no agent"
 expect_rc 2 "exclude: not a message id" st qa step "$idA" deploy abc
-echo "4242 qa" >"$T/running-messages"
+# Each of these must be refused by the real message_is_own_running.
+msg 4242 qa pending yes yes
+expect_rc 2 "exclude: own message, pending" st qa step "$idA" deploy 4242
+msg 4242 qa running no yes
+expect_rc 2 "exclude: agent deleted" st qa step "$idA" deploy 4242
+msg 4242 qa running yes no
+expect_rc 2 "exclude: another owner's token" st qa step "$idA" deploy 4242
+msg 4242 qa running yes yes; echo 1 >"$T/msg/4242.rc"
+expect_rc 2 "exclude: rc != 0" st qa step "$idA" deploy 4242
+msg 4242 qa running yes yes; echo "trailing noise" >>"$T/msg/4242"
+expect_rc 2 "exclude: last line not RESULT" st qa step "$idA" deploy 4242
+msg 4242 qa running yes yes; sed -i '2a TO=qa' "$T/msg/4242"
+expect_rc 2 "exclude: TO repeated" st qa step "$idA" deploy 4242
+msg 4242 qa running yes yes; sed -i 's/^MESSAGE_ID=.*/MESSAGE_ID=1/' "$T/msg/4242"
+expect_rc 2 "exclude: answer about another message" st qa step "$idA" deploy 4242
+msg 4242 qa running yes yes; sed -i 's/^TO=qa/TO=qa2/' "$T/msg/4242"
+expect_rc 2 "exclude: TO only prefixed by the agent" st qa step "$idA" deploy 4242
+expect_out "ERROR message" "refused as message"
+msg 4242 qa running yes yes
 expect_rc 2 "exclude: a step that takes none" st qa step "$idA" acceptance 4242
 grep -q "^04-deploy" "$T/kit.log" && ko "deploy ran during refusals" || ok
 expect_rc 0 "deploy with its own running message excluded" st qa step "$idA" deploy 4242
@@ -376,9 +409,9 @@ expect_rc 0 "propose" propose "$base" "$two"
 id=$(new_id)
 expect_rc 2 "preflight: another agent's message" st qa preflight "$id" 77
 expect_out "ERROR message" "preflight exclusion unproven"
-echo "77 qa" >"$T/running-messages"
+msg 77 qa running yes yes
 expect_rc 0 "preflight with its own running message excluded" st qa preflight "$id" 77
-grep -qx "01-preflight.sh --release-file $ST_OPS_STATE/requests/$id/release.conf --exclude-message 77" "$T/kit.log" && ok || ko "01 exclude argv"
+grep -qx "01-preflight.sh --release-file $ST_OPS_STATE/requests/$id/r7.conf --exclude-message 77" "$T/kit.log" && ok || ko "01 exclude argv"
 st qa cancel "$id" >/dev/null 2>&1
 
 # ── Expiry, cancel, another request's signature ──

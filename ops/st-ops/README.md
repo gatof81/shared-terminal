@@ -30,7 +30,7 @@ operador ──ssh st-ops──▶ sshd (Match User st-ops: ForceCommand, sin TT
 | Verbo | Efecto | Firma |
 | --- | --- | --- |
 | `help`, `status` | commit del kit, `app` desplegado, último pedido y su estado | no |
-| `propose` (stdin: datos de la release, ≤ 16 KiB, sin bytes de control salvo `\n`) | UN pedido: guarda los datos en `requests/<id>/release.conf` (0600; nunca en el kit), lee por regex y sin evaluar `RELEASE` (1-4 dígitos), `FROM`/`TARGET` (sha40) y `P_DIST_FILE` (solo `<LOG del kit>/new-image-dist-all.txt`), una línea cada una; TARGET en la cadena first-parent de `main` y descendiente de FROM, CI verde; imprime el texto a firmar | no |
+| `propose` (stdin: datos de la release, ≤ 16 KiB, sin bytes de control salvo `\n`) | UN pedido: guarda los datos en `requests/<id>/r<RELEASE>.conf` (archivo 0600, directorio 0700, de root; nunca en el kit), lee por regex y sin evaluar `RELEASE` (1-4 dígitos), `FROM`/`TARGET` (sha40) y `P_DIST_FILE` (solo `<LOG del kit>/new-image-dist-all.txt`), una línea cada una; TARGET en la cadena first-parent de `main` y descendiente de FROM, CI verde; imprime el texto a firmar | no |
 | `request-text <id>` | los bytes exactos del pedido | no |
 | `preflight <id> [<mensaje>]` | `01 --release-file <ruta absoluta de esos datos>`, una vez; registra su `LOG` | no |
 | `approve <id>` (stdin: la firma) | firma del owner sobre los bytes exactos, sin vencer, una sola vez | **sí** |
@@ -55,8 +55,11 @@ no tienen verbo.
    `<LOG>/release.conf` y que `<LOG>/run.conf` diga `KIT_HEAD=<kit-head>` y `RELEASE_CONF_SHA256=<el firmado>`.
 3. Orden, un solo uso y aprobación: `approve` se consume una vez; cada paso corre a lo sumo una vez (`mkdir`
    atómico antes de llamar al kit); un rechazo no consume el paso.
-4. `--exclude-message <id>` solo en `preflight` y `deploy`, solo si la identidad tiene agente en `identities` y el mensaje es
-   `running` y dirigido a ese agente. **Hoy no se puede comprobar** (ver abajo) ⇒ se rechaza siempre.
+4. `--exclude-message <id>` solo en `preflight` y `deploy`, y solo si la identidad tiene agente en `identities`. Además,
+   `bin/message-info.sh <id>` del kit (solo lectura, ya con el kit en el commit firmado) tiene que responder con rc 0, última
+   línea `RESULT message-info OK rc=0` y exactamente una línea de cada una de estas:
+   `MESSAGE_ID=<id>`, `TO=<ese agente>`, `STATE=running`, `AGENT_EXISTS=yes` y `OWNER_IS_TOKEN_OWNER=yes`. Cualquier
+   otra respuesta ⇒ rechazo, sin consumir el paso.
 
 El `LOG` de preflight se acepta solo si es `/root/st-deploy-r<RELEASE>-<sha7 del TARGET>-<UTC>`, un directorio (no un
 enlace) de root, y contiene los datos y el kit firmados; si no, el pedido se cierra.
