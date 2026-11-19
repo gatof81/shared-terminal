@@ -731,8 +731,9 @@ export class MockBackend {
 				await json(404, { error: "agent-not-found" });
 				return true;
 			}
-			const b = JSON.parse(req.postData() ?? "{}") as { projectId?: string | null };
-			a.projectId = b.projectId ?? null;
+			const b = JSON.parse(req.postData() ?? "{}") as { projectId?: string | null; model?: string };
+			if ("projectId" in b) a.projectId = b.projectId ?? null;
+			if (typeof b.model === "string") a.model = b.model;
 			await json(200, a);
 			return true;
 		}

@@ -91,7 +91,7 @@ async function api(method, path, body) {
 				signal: AbortSignal.timeout(API_TIMEOUT_MS),
 			});
 			const text = await res.text();
-			return { status: res.status, body: text ? JSON.parse(text) : null };
+			return { status: res.status, body: text ? JSON.parse(text) : null, model: res.headers.get("x-st-model") };
 		} catch (err) {
 			log(`backend unreachable (${err.cause?.code ?? err.message}); retrying`);
 			await new Promise((ok) => setTimeout(ok, 2_000));
@@ -326,6 +326,49 @@ async function openSession() {
 	return sessionId;
 }
 
+// ── Model ─────────────────────────────────────────────────────────────────
+// The model is chosen in Shared Terminal and can change while the agent lives.
+// The backend sends the requested one with every claim; the runner switches the
+// live ACP session with the adapter's own `session/set_config_option` (configId
+// "model") while it is idle — so a message in progress finishes on the model it
+// started with, and the next one starts on the new one. The first claim after
+// every (re)start applies it again: on a resume the adapter would otherwise go
+// back to the launch-time ANTHROPIC_MODEL. No process is restarted and the ACP
+// session (context, history) is kept. A refused switch is reported and not
+// retried until a different model is requested.
+let modelTried = null;
+// "claude-fable-5-2" vs a row "fable Fable 5.2 · …": same family and version.
+function sameModel(requested, row) {
+	const m = /^(?:claude-)?([a-z]+)-(\d+)-(\d+)/.exec(requested);
+	if (!m) return true; // not a family-version id: nothing to compare
+	const text = row.toLowerCase();
+	return text.includes(m[1]) && text.includes(`${m[2]}.${m[3]}`);
+}
+async function applyModel(sessionId, model) {
+	if (!model || model === modelTried) return;
+	modelTried = model;
+	try {
+		const r = await request("session/set_config_option", { sessionId, configId: "model", value: model });
+		const opt = (r?.configOptions ?? []).find((o) => o.id === "model");
+		const value = typeof opt?.currentValue === "string" ? opt.currentValue : null;
+		const chosen = (opt?.options ?? []).find((o) => o.value === value);
+		const current = chosen?.name ?? value;
+		// The adapter resolves an id loosely (claude-opus-5-5 → its "opus" row): a
+		// request it does not know could land on another model without an error.
+		// Accept only a row that names the same family and version.
+		const mismatch = chosen && !sameModel(model, `${chosen.value} ${chosen.name ?? ""} ${chosen.description ?? ""}`);
+		log(`model → ${model} (adapter reports ${current ?? "nothing"}${mismatch ? ", NOT the requested one" : ""})`);
+		await api("POST", "/runner/model", {
+			requested: model,
+			current,
+			...(mismatch ? { error: `el adaptador eligió ${current} en lugar de ${model}` } : {}),
+		});
+	} catch (err) {
+		log(`model ${model} refused by the adapter: ${err.message}`);
+		await api("POST", "/runner/model", { requested: model, current: null, error: String(err.message).slice(0, 300) });
+	}
+}
+
 // ── One message ───────────────────────────────────────────────────────────
 function run(sessionId, msg) {
 	return new Promise((resolve) => {
@@ -528,6 +571,8 @@ async function main() {
 			continue;
 		}
 		const r = await api("POST", "/runner/claim");
+		// Idle here, by construction: switch before the claimed message starts.
+		await applyModel(sessionId, r.model);
 		if (r.status === 200) await run(sessionId, r.body);
 		else if (r.status === 409) {
 			// Something of ours is `running` while we run nothing: our claim

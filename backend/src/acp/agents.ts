@@ -186,6 +186,17 @@ export interface ActivityEvent {
 	[key: string]: unknown;
 }
 
+/** What a runner reported after asking its adapter for a model. */
+export interface ModelApplied {
+	/** The model id the runner asked for. */
+	requested: string;
+	/** The adapter's current model after the switch (its own id), null if it did not say. */
+	current: string | null;
+	/** Why the switch failed, if it did (the agent keeps its previous model). */
+	error: string | null;
+	at: string;
+}
+
 /** A `clientId` already used for a different message to the same recipient. */
 export class ClientIdConflictError extends Error {
 	constructor(readonly existingId: number) {
@@ -336,6 +347,50 @@ export class AcpAgents {
 			);
 		}
 		return row;
+	}
+
+	/**
+	 * Changes the model the agent's runner asks its adapter for. Nothing is
+	 * restarted here: the runner reads the requested model with every claim and
+	 * switches the live ACP session (`session/set_config_option`) while it is
+	 * idle — a message being worked on finishes on the model it started with —
+	 * and re-applies it after every adapter (re)start, so a resume never goes
+	 * back to the launch-time ANTHROPIC_MODEL. What the adapter confirmed comes
+	 * back through `setModelApplied`.
+	 */
+	async setModel(ownerUserId: string, name: string, model: string): Promise<AgentRow | null> {
+		const r = await d1Query<AgentRow>(
+			"UPDATE acp_agents SET model = ? WHERE owner_user_id = ? AND name = ? RETURNING *",
+			[model, ownerUserId, name],
+		);
+		const row = r.results[0] ?? null;
+		if (row) {
+			this.byId.set(row.agent_id, row);
+			this.publish(ownerUserId, { type: "agents" });
+			logger.info(`[acp] @${name} model → ${model} (applied by its runner when idle)`);
+		}
+		return row;
+	}
+
+	/** The model the runner's adapter reports after its last switch (memory only, like activity). */
+	private readonly modelApplied = new Map<string, ModelApplied>();
+
+	setModelApplied(agent: AgentRow, body: unknown): void {
+		const b = (body ?? {}) as { requested?: unknown; current?: unknown; error?: unknown };
+		const str = (v: unknown, max: number) => (typeof v === "string" && v.length <= max ? v : null);
+		const requested = str(b.requested, 80);
+		if (requested === null) return;
+		this.modelApplied.set(agent.agent_id, {
+			requested,
+			current: str(b.current, 120),
+			error: str(b.error, 300),
+			at: new Date().toISOString(),
+		});
+		this.publish(agent.owner_user_id, { type: "agents" });
+	}
+
+	modelAppliedOf(agentId: string): ModelApplied | null {
+		return this.modelApplied.get(agentId) ?? null;
 	}
 
 	/** Running message and queue length per agent name (one query). */
@@ -673,6 +728,7 @@ export class AcpAgents {
 		this.byId.delete(agent.agent_id);
 		this.activity.delete(agent.agent_id);
 		this.loginMethods.delete(agent.agent_id);
+		this.modelApplied.delete(agent.agent_id);
 		this.publish(agent.owner_user_id, { type: "agents" });
 	}
 

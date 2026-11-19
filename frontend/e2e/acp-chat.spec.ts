@@ -99,3 +99,62 @@ test.describe("ACP chat", () => {
 		expect(backend.acpMessages.at(-1)).toMatchObject({ to_id: "dev", project_id: PROJECT_IDS.hz });
 	});
 });
+
+test.describe("ACP model", () => {
+	test.beforeEach(({ backend }) => backend.enableAcp());
+
+	test("creating an agent with Opus sends its model id; Sonnet stays the default", async ({
+		page,
+		app,
+		backend,
+	}) => {
+		const created: Array<Record<string, unknown>> = [];
+		backend.override = async (method, path, route) => {
+			if (method !== "POST" || path !== "/sessions") return false;
+			created.push(JSON.parse(route.request().postData() ?? "{}"));
+			await route.fulfill({
+				status: 400,
+				contentType: "application/json",
+				body: '{"error":"stop here"}',
+			});
+			return true;
+		};
+		await app.login("alice");
+		await app.openSidebar();
+		await page.click("#new-session-btn");
+		await page.fill("#new-session-input", "arquitectura");
+		await page.fill("#new-session-acp-agent", "architect");
+		const model = page.locator("#new-session-acp-model");
+		await expect(model).toBeVisible();
+		await expect(model).toHaveValue("claude-sonnet-5-5");
+		expect(await model.locator("option").allTextContents()).toEqual([
+			"Claude Sonnet 5.5",
+			"Claude Opus 5.5",
+			"Claude Fable 5.2",
+		]);
+		await model.selectOption({ label: "Claude Opus 5.5" });
+		await page.click("#new-session-submit");
+		await expect.poll(() => created.length).toBe(1);
+		expect(created[0]?.acpAgent).toMatchObject({ name: "architect", model: "claude-opus-5-5" });
+	});
+
+	test("an existing agent's model changes from its chat, and reads pending until applied", async ({
+		page,
+		app,
+		backend,
+	}) => {
+		await app.login("alice", chatOf(PROJECT_SESSION_IDS.scratch));
+		const select = page.locator("#acp-chat .acp-model-select");
+		await expect(select).toHaveValue("");
+		await select.selectOption({ label: "Claude Opus 5.5" });
+		await page.locator("#acp-chat .acp-chat-model button", { hasText: "Cambiar modelo" }).click();
+		await expect(page.locator("#acp-chat .acp-model-state")).toContainText(
+			"Se aplica cuando @solo esté libre",
+		);
+		await expect(select).toHaveValue("claude-opus-5-5");
+		expect(backend.acpAgents.find((a) => a.name === "solo")?.model).toBe("claude-opus-5-5");
+		expect(
+			backend.requests.filter((r) => r.method === "PATCH" && r.path === "/acp/agents/solo"),
+		).toHaveLength(1);
+	});
+});

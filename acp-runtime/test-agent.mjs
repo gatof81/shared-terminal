@@ -16,8 +16,8 @@
 //   anything else            → an echo of the first line
 // A reply from another agent ("Respuesta de @x a tu mensaje #n: …") is
 // acknowledged. Every answer carries how many prompts this ACP session has
-// seen — the session (and that count) survives runner and container restarts,
-// which is what the tests check context continuity with.
+// seen and the session's model — the session (count and model) survives runner
+// and container restarts, which is what the tests check continuity with.
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -70,7 +70,7 @@ async function prompt(sessionId, text) {
 		await sleep(150);
 		update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: t.slice(half) } });
 	};
-	const ctx = `(sesión ACP: ${s.prompts} mensajes)`;
+	const ctx = `(sesión ACP: ${s.prompts} mensajes · modelo ${s.model ?? process.env.ANTHROPIC_MODEL ?? "default"})`;
 	let m;
 	if (/^\[st-recovery\]/.test(header) || /^\[st-recovery\]/.test(body) || header.includes("de @system")) {
 		await say(`Reporte de @${ME}: no repetí nada; el mensaje interrumpido quedó sin rehacer. ${ctx}`);
@@ -168,6 +168,14 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
 			if (!sessions[params.sessionId]) throw Object.assign(new Error("unknown session"), { code: -32002 });
 			result = {};
 		} else if (method === "session/set_mode") result = {};
+		else if (method === "session/set_config_option" && params.configId === "model") {
+			// Like claude-agent-acp: the session's model, kept with the session
+			// (it survives a resume), reported back as the option's current value.
+			if (!sessions[params.sessionId]) throw Object.assign(new Error("unknown session"), { code: -32002 });
+			sessions[params.sessionId].model = String(params.value);
+			save();
+			result = { configOptions: [{ id: "model", type: "select", currentValue: String(params.value), options: [] }] };
+		}
 		else if (method === "session/prompt" && existsSync(`${DIR}/require-auth`) && !existsSync(CREDS))
 			throw Object.assign(new Error("Authentication required"), { code: -32000 });
 		else if (method === "session/prompt") result = await prompt(params.sessionId, params.prompt.map((b) => b.text ?? "").join("\n"));
