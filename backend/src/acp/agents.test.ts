@@ -1,6 +1,11 @@
 // The runner watchdog: it acts on the runner loop's real liveness, never on
 // silence, launches only what is proven dead, and never twice at once.
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	holdUntilBootstrapped,
+	onBootstrapReleased,
+	releaseBootstrapHold,
+} from "../bootstrapHold.js";
 
 const row = {
 	agent_id: "11111111-2222-3333-4444-555555555555",
@@ -112,5 +117,43 @@ describe("ACP runner watchdog", () => {
 		await Promise.all([a, b]);
 		expect(calls.probes).toBe(1);
 		expect(calls.launches).toHaveLength(1);
+	});
+});
+
+// bootstrapHold.ts: the runner of a session whose creation bootstrap is
+// still running is not launched by any path; it starts when the bootstrap
+// ends. A session without a hold (no bootstrap, a restart) starts at once.
+describe("ACP runner and the creation bootstrap", () => {
+	beforeEach(() => vi.clearAllMocks());
+
+	it("no path launches the runner while the bootstrap holds the session", async () => {
+		const { acp, calls } = await make({ running: "c1", probe: { exitCode: 1 } });
+		holdUntilBootstrapped(row.session_id);
+		try {
+			acp.hooks().onStarted(row.session_id, "c1");
+			expect(await acp.ensureRunner(row.session_id, "c1")).toBe(false);
+			await acp.watchdogTick();
+			await acp.ensureAllRunning();
+			expect(calls.probes).toBe(0);
+			expect(calls.launches).toHaveLength(0);
+		} finally {
+			releaseBootstrapHold(row.session_id, false);
+		}
+	});
+
+	it("the bootstrap's end launches it (through the probe: never a twin)", async () => {
+		const { acp, calls } = await make({ running: "c1", probe: { exitCode: 1 } });
+		holdUntilBootstrapped(row.session_id);
+		const off = onBootstrapReleased((sid) => void acp.onBootstrapped(sid));
+		releaseBootstrapHold(row.session_id, true);
+		off();
+		await vi.waitFor(() => expect(calls.launches).toHaveLength(1));
+		expect(calls.probes).toBe(1);
+	});
+
+	it("without a hold (no bootstrap, a container restart) onStarted launches at once", async () => {
+		const { acp, calls } = await make({ running: "c1", probe: { exitCode: 1 } });
+		acp.hooks().onStarted(row.session_id, "c1");
+		await vi.waitFor(() => expect(calls.launches).toHaveLength(1));
 	});
 });

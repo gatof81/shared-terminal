@@ -22,6 +22,7 @@ import {
 } from "./auth.js";
 import { BellSweeper } from "./bellSweeper.js";
 import { BootstrapBroadcaster, drainInFlightBootstraps } from "./bootstrap.js";
+import { onBootstrapReleased } from "./bootstrapHold.js";
 import { parseAllowUsers } from "./conversation/allowUsers.js";
 import { ATTESTATION_KEY_INFO } from "./conversation/captureAttestation.js";
 import { IngestOriginVerifier } from "./conversation/ingestOrigin.js";
@@ -144,6 +145,16 @@ const acpAgents = acpAgentsEnabled(process.env.ACP_AGENTS_ENABLED)
 	: undefined;
 if (acpAgents) {
 	docker.setAgentHooks(acpAgents.hooks());
+	// A runner held back during a creation bootstrap starts when it ends.
+	onBootstrapReleased((sessionId) => {
+		void acpAgents
+			.onBootstrapped(sessionId)
+			.catch((err) =>
+				logger.warn(
+					`[acp] runner launch after bootstrap of ${sessionId} failed: ${(err as Error).message}`,
+				),
+			);
+	});
 	logger.info("[server] ACP agents ENABLED (experimental)");
 }
 // 3.0d — durable recreation records and the fail-closed
