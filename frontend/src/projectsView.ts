@@ -102,7 +102,7 @@ function evaluate(): void {
 	let next: PageState;
 	if (feedStatus === "loading") next = "loading";
 	else if (feedStatus === "not-found") next = "missing";
-	else if (feedStatus === "error") next = "error";
+	else if (feedStatus === "error" || feedStatus === "stale") next = "error";
 	else if (projectName(pid) !== null) next = "active";
 	else if (absentConfirmed === pid) next = "archived";
 	else if (confirmFailed) next = "error";
@@ -111,8 +111,12 @@ function evaluate(): void {
 		void confirmAbsence(pid);
 	}
 	pageState = next;
-	// The history stays readable when only the list check failed.
-	setProjectPageMode(next === "error" && feedStatus === "ok" ? "loading" : MODE[next]);
+	// The history stays readable (box locked) when it was read once and only a
+	// re-read or the list check failed; only a project never read is hidden.
+	const readable = feedStatus === "ok" || feedStatus === "stale";
+	setProjectPageMode(
+		next === "error" && readable ? (absentConfirmed === pid ? "archived" : "loading") : MODE[next],
+	);
 	renderPage();
 }
 
@@ -299,7 +303,9 @@ function statusNote(st: PageState): HTMLElement | null {
 	p.append(
 		feedStatus === "ok"
 			? "No se pudo confirmar el estado del proyecto. "
-			: "No se pudo cargar el proyecto. ",
+			: feedStatus === "stale"
+				? "No se pudo actualizar el proyecto. "
+				: "No se pudo cargar el proyecto. ",
 		button("Reintentar", "pv-btn", retryPage),
 	);
 	return p;

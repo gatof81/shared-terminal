@@ -51,11 +51,15 @@ export interface ThreadState {
 	auth: Map<string, boolean>;
 	project: { id: string; name: string } | null;
 	error: string;
-	/** The last first-page read of this chat: none yet, answered, 404, or failed otherwise. */
+	/**
+	 * This chat's first-page reads: none answered yet, answered, 404, failed
+	 * before any good read (`error`) or failed after one (`stale`: what is
+	 * shown is still that chat's history, just not refreshed).
+	 */
 	feed: FeedStatus;
 }
 
-export type FeedStatus = "loading" | "ok" | "not-found" | "error";
+export type FeedStatus = "loading" | "ok" | "not-found" | "error" | "stale";
 
 /** What the message box allows: write, shown but locked, or not shown at all. */
 export type ComposerMode = "on" | "disabled" | "off";
@@ -82,6 +86,8 @@ export class AcpThread {
 	private project: { id: string; name: string } | null = null;
 	private error = "";
 	private feed: FeedStatus = "loading";
+	/** A first page of the current chat was read at least once. */
+	private readOnce = false;
 	private composerMode: ComposerMode = "on";
 	private sending = 0;
 	/**
@@ -240,6 +246,7 @@ export class AcpThread {
 			this.project = null;
 			this.error = "";
 			this.feed = "loading";
+			this.readOnce = false;
 			this.offerUnsent();
 			this.threadEl.replaceChildren(el("div", "acp-chat-empty", "Cargando…"));
 			this.input.placeholder =
@@ -294,10 +301,13 @@ export class AcpThread {
 			this.replayLive(mark);
 			this.error = "";
 			this.feed = "ok";
+			this.readOnce = true;
 		} catch (err) {
 			if (gen !== this.gen) return;
 			const e = err as Error & { status?: number };
-			this.feed = e.status === 404 ? "not-found" : "error";
+			// A re-read that fails (a reconnect, the fallback poll, a flaky
+			// link) must not take away a history already read: `stale`.
+			this.feed = e.status === 404 ? "not-found" : this.readOnce ? "stale" : "error";
 			this.error =
 				e.status === 404
 					? src.kind === "agent"

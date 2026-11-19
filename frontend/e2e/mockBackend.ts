@@ -548,6 +548,11 @@ export class MockBackend {
 		return row;
 	}
 
+	/** Close every open `/ws/acp` socket (the client reconnects and re-reads its page). */
+	dropAcpSockets(): void {
+		for (const s of this.acpSockets) void s.close();
+	}
+
 	/** Deliver one live `/ws/acp` frame (a message row, activity, agents) to every open socket. */
 	pushAcp(frame: Record<string, unknown>): void {
 		for (const s of this.acpSockets) s.send(JSON.stringify(frame));

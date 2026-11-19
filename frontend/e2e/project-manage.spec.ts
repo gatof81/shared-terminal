@@ -98,6 +98,29 @@ test.describe("project management", () => {
 		await expect(page.locator(".acp-project .acp-chat-input")).toBeHidden();
 	});
 
+	test("a re-read that fails keeps the history on screen, the box locked, and Reintentar recovers", async ({
+		page,
+		app,
+		backend,
+	}) => {
+		await app.login("alice", `#/projects/${HZ}`);
+		const said = page.locator(".acp-project .acp-msg", { hasText: "Con OAuth y PKCE." });
+		await expect(said).toBeVisible();
+		await expect(page.locator(".acp-project .acp-chat-input")).toBeEnabled();
+		// The live socket drops; its reconnect re-reads the feed, which now fails.
+		backend.projectFeedFailure = 503;
+		backend.dropAcpSockets();
+		const status = page.locator(".pv-status-error");
+		await expect(status).toContainText("No se pudo actualizar el proyecto.");
+		await expect(said).toBeVisible();
+		await expect(page.locator(".acp-project .acp-chat-input")).toBeDisabled();
+		await expect(page.getByRole("button", { name: "Archivar" })).toHaveCount(0);
+		backend.projectFeedFailure = 0;
+		await status.getByRole("button", { name: "Reintentar" }).click();
+		await expect(page.locator(".acp-project .acp-chat-input")).toBeEnabled();
+		await expect(status).toHaveCount(0);
+	});
+
 	test("a failed feed is an error with Reintentar — never 'archived' or 'not found'", async ({
 		page,
 		app,
