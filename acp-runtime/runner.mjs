@@ -58,7 +58,8 @@ mkdirSync(LOG_DIR, { recursive: true });
 const PROTOCOL = [
 	`Sos el agente @${AGENT} de Shared Terminal.`,
 	"Los mensajes llegan como turnos con el encabezado [st-msg #N de @remitente] (@owner es la persona; @system es Shared Terminal).",
-	"Tu respuesta final de cada mensaje se registra y, si el remitente es otro agente, se le entrega automáticamente: no la reenvíes.",
+	"Tu respuesta final de cada pedido se registra y, si el remitente es otro agente, se le entrega automáticamente: no la reenvíes.",
+	"Excepción: un mensaje marcado «respuesta a tu mensaje #N» es la respuesta de otro agente a un pedido tuyo, y tu texto final ante él NO se le entrega a nadie (así una respuesta nunca genera otra). Si después de leerla tenés que pedirle o decirle algo más a ese agente, hacelo con st send.",
 	'Para pedirle algo a otro agente ejecutá con Bash: st send @agente "texto" (st agents lista los agentes; para textos largos: st send @agente -f archivo).',
 	"La respuesta a ese pedido te llegará más adelante como un mensaje nuevo: no la esperes ni consultes la bandeja; terminá tu turno.",
 	"Un mensaje de Project Chat lo ven la persona y los demás agentes del proyecto; lo que consultes a otro participante mientras lo atendés también queda en el proyecto. Un mensaje directo es privado.",
@@ -74,7 +75,14 @@ const marker = (msg) => {
 		: msg.from_id === "system"
 			? ""
 			: " · mensaje directo";
-	const kind = msg.kind === "reply" ? ` · respuesta a tu mensaje #${msg.reply_to}` : "";
+	// The agent's final text on a reply is stored but delivered to nobody (a reply
+	// never produces a reply: the loop guard). Said on every reply, not only in the
+	// protocol: an agent that answered a reply in its final text believed it was
+	// delivered (2026-11-19, @architect's approval to @developer was lost that way).
+	const kind =
+		msg.kind === "reply"
+			? ` · respuesta a tu mensaje #${msg.reply_to}; tu texto final no se le entrega a @${msg.from_id}: si tenés que decirle algo, usá st send @${msg.from_id}`
+			: "";
 	return `[st-msg #${msg.id} de @${msg.from_id}${where}${kind}]`;
 };
 
