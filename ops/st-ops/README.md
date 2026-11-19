@@ -55,11 +55,10 @@ no tienen verbo.
    `<LOG>/release.conf` y que `<LOG>/run.conf` diga `KIT_HEAD=<kit-head>` y `RELEASE_CONF_SHA256=<el firmado>`.
 3. Orden, un solo uso y aprobación: `approve` se consume una vez; cada paso corre a lo sumo una vez (`mkdir`
    atómico antes de llamar al kit); un rechazo no consume el paso.
-4. `--exclude-message <id>` solo en `preflight` y `deploy`, y solo si la identidad tiene agente en `identities`. Además,
-   `bin/message-info.sh <id>` del kit (solo lectura, ya con el kit en el commit firmado) tiene que responder con rc 0, última
-   línea `RESULT message-info OK rc=0` y exactamente una línea de cada una de estas:
-   `MESSAGE_ID=<id>`, `TO=<ese agente>`, `STATE=running`, `AGENT_EXISTS=yes` y `OWNER_IS_TOKEN_OWNER=yes`. Cualquier
-   otra respuesta ⇒ rechazo, sin consumir el paso.
+4. `--exclude-message <id>` solo en `preflight` y `deploy` (01 y 04, los únicos pasos con gate), y solo si la identidad
+   tiene agente en `identities` y `bin/message-info.sh <id> <agente>` del kit (solo lectura, ya con el kit en el commit
+   firmado) sale con 0 y su última línea es `RESULT message-info OK rc=0`, que el kit da solo para un mensaje `running`
+   dirigido a ese agente, que existe. Cualquier otra respuesta ⇒ rechazo, sin consumir el paso.
 
 El `LOG` de preflight se acepta solo si es `/root/st-deploy-r<RELEASE>-<sha7 del TARGET>-<UTC>`, un directorio (no un
 enlace) de root, y contiene los datos y el kit firmados; si no, el pedido se cierra.
@@ -130,6 +129,8 @@ operador: ssh st-ops approve <id> < request.txt.sig ; ssh st-ops step <id> backu
   `requests/<id>/steps/<paso>.out`. Un reinicio del host sí lo mata: queda `RUNNING`.
 - El kit hereda `LC_ALL=C` y el `PATH` fijo de `st-ops-root`.
 - La integridad del kit (repo limpio + `SHA256SUMS`) la verifica cada script del kit; st-ops solo ata el commit.
+- El kit no tiene un modo "solo validar datos": `propose` lee solo `RELEASE`, `FROM`, `TARGET` y `P_DIST_FILE`, y la
+  validación completa de los datos ocurre en `preflight` (01). Un dato inválido cierra el pedido allí.
 - `from="172.20.0.0/16"` admite cualquier contenedor de `sessions-net`: identifica la clave, no la IP.
 
 ## Tests
