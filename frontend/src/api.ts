@@ -418,6 +418,19 @@ export function createProject(
 	);
 }
 
+/** Rename a live project (`PATCH /projects/:pid {name}`): the updated summary. */
+export function renameProject(
+	projectId: string,
+	name: string,
+): Promise<ProjectAnswer<ProjectSummary>> {
+	return projectRequest(
+		`/projects/${encodeURIComponent(projectId)}`,
+		{ method: "PATCH", body: JSON.stringify({ name }) },
+		(b): b is ProjectSummary =>
+			isObj(b) && typeof b.projectId === "string" && typeof b.name === "string",
+	);
+}
+
 /** Archive: the project leaves every list; its agents leave it. */
 export function archiveProject(projectId: string): Promise<ProjectAnswer<null>> {
 	return projectRequest(

@@ -91,6 +91,40 @@ describe("project requests", () => {
 		});
 	});
 
+	it("rename is one PATCH {name}: the summary on 200; 400 / 404 / no answer are errors", async () => {
+		const api = await loadApi();
+		const summary = {
+			projectId: "p 1",
+			name: "Nuevo",
+			createdAt: "2026-11-19T00:00:00Z",
+			agentCount: 2,
+		};
+		fetchSpy.mockResolvedValueOnce(res(200, summary));
+		expect(await api.renameProject("p 1", "Nuevo")).toEqual({
+			ok: true,
+			status: 200,
+			body: summary,
+		});
+		const [url, init] = fetchSpy.mock.calls[0]!;
+		expect(String(url)).toMatch(/\/api\/projects\/p%201$/);
+		expect(init.method).toBe("PATCH");
+		expect(JSON.parse(init.body)).toEqual({ name: "Nuevo" });
+		fetchSpy.mockResolvedValueOnce(res(400, { error: "invalid-name" }));
+		expect(await api.renameProject("p 1", "")).toEqual({
+			ok: false,
+			status: 400,
+			code: "invalid-name",
+		});
+		fetchSpy.mockResolvedValueOnce(res(404, { error: "project-not-found" }));
+		expect(await api.renameProject("p 1", "X")).toEqual({
+			ok: false,
+			status: 404,
+			code: "project-not-found",
+		});
+		fetchSpy.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+		expect(await api.renameProject("p 1", "X")).toEqual({ ok: false, status: 0, code: "network" });
+	});
+
 	it("archive is one DELETE; 204 is success", async () => {
 		const api = await loadApi();
 		fetchSpy.mockResolvedValueOnce(res(204, null));

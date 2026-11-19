@@ -186,6 +186,8 @@ export interface MockProject {
 	ownerUserId: string;
 	name: string;
 	createdAt: string;
+	/** Archived like the backend: out of the list, its feed still answers. */
+	archivedAt?: string | null;
 }
 
 function seedSessions(): MockSession[] {
@@ -459,6 +461,8 @@ export class MockBackend {
 	/** PROJECT_CHAT_ENABLED: `features.projectChat` + the /projects routes. */
 	projectChat = false;
 	projects: MockProject[] = [];
+	/** A status (e.g. 500) the project feed answers instead of the feed (0: normal). */
+	projectFeedFailure = 0;
 	/** Idempotency records, by `${owner}\n${clientRequestId}`. */
 	private creations = new Map<string, { hash: string; id: string }>();
 	private seq = 100;
@@ -544,6 +548,11 @@ export class MockBackend {
 		return row;
 	}
 
+	/** Close every open `/ws/acp` socket (the client reconnects and re-reads its page). */
+	dropAcpSockets(): void {
+		for (const s of this.acpSockets) void s.close();
+	}
+
 	/** Deliver one live `/ws/acp` frame (a message row, activity, agents) to every open socket. */
 	pushAcp(frame: Record<string, unknown>): void {
 		for (const s of this.acpSockets) s.send(JSON.stringify(frame));
@@ -608,7 +617,7 @@ export class MockBackend {
 			await json(404, { error: `No mock for ${method} ${path}` });
 			return true;
 		}
-		const mine = () => this.projects.filter((p) => p.ownerUserId === me.userId);
+		const mine = () => this.projects.filter((p) => p.ownerUserId === me.userId && !p.archivedAt);
 		if (path === "/projects" && method === "GET") {
 			await json(200, {
 				projects: mine().map((p) => this.projectSummary(p)),
@@ -642,14 +651,31 @@ export class MockBackend {
 			await json(201, { ...this.projectSummary(p), replayed: false });
 			return true;
 		}
-		const del = /^\/projects\/([^/]+)$/.exec(path);
-		if (del && method === "DELETE") {
-			const before = this.projects.length;
-			this.projects = this.projects.filter(
-				(p) => !(p.projectId === decodeURIComponent(del[1]!) && p.ownerUserId === me.userId),
-			);
-			if (this.projects.length === before) await json(404, { error: "project-not-found" });
-			else await route.fulfill({ status: 204 });
+		const one = /^\/projects\/([^/]+)$/.exec(path);
+		const live = one ? mine().find((p) => p.projectId === decodeURIComponent(one[1]!)) : undefined;
+		if (one && method === "DELETE") {
+			// Archive (backend: archived_at set, the row stays, its agents leave it).
+			if (!live) await json(404, { error: "project-not-found" });
+			else {
+				live.archivedAt = iso(0);
+				for (const a of this.acpAgents) if (a.projectId === live.projectId) a.projectId = null;
+				await route.fulfill({ status: 204 });
+			}
+			return true;
+		}
+		if (one && method === "PATCH") {
+			const body = (req.postDataJSON() ?? {}) as { name?: unknown };
+			const name = typeof body.name === "string" ? body.name.trim() : "";
+			if (name === "" || [...name].length > 80) {
+				await json(400, { error: "invalid-name" });
+				return true;
+			}
+			if (!live) {
+				await json(404, { error: "project-not-found" });
+				return true;
+			}
+			live.name = name;
+			await json(200, this.projectSummary(live));
 			return true;
 		}
 		await json(404, { error: `No mock for ${method} ${path}` });
@@ -691,6 +717,10 @@ export class MockBackend {
 		const pfeed = /^\/acp\/projects\/([^/]+)\/feed$/.exec(path);
 		if (pfeed && method === "GET") {
 			const pid = decodeURIComponent(pfeed[1]!);
+			if (this.projectFeedFailure) {
+				await json(this.projectFeedFailure, { error: "internal" });
+				return true;
+			}
 			const p = this.projects.find((x) => x.projectId === pid);
 			if (!p) {
 				await json(404, { error: "project-not-found" });
