@@ -272,6 +272,45 @@ export class ProjectDirectory {
 	}
 
 	/**
+	 * Rename a live project: ONE statement, owner-only, archived or foreign ⇒
+	 * the same 404. The id is what agents (`acp_agents.project_id`) and
+	 * messages (their scope) reference, so nothing else moves. Setting a name
+	 * is idempotent: after a lost answer the client simply repeats it.
+	 */
+	async renameProject(
+		ownerId: string,
+		projectId: string,
+		rawBody: unknown,
+	): Promise<ProjectSummary> {
+		const b = requireObject(rawBody);
+		const extra = Object.keys(b).find((k) => k !== "name");
+		if (extra !== undefined)
+			throw new ProjectError(400, "invalid-body", `${extra} is not an editable field`);
+		const name = cleanName(b.name);
+		if (!isDirectoryId(projectId)) throw new ProjectError(404, "project-not-found");
+		const r = await d1Query<{
+			project_id: string;
+			name: string;
+			created_at: string;
+			agent_count: number;
+		}>(
+			`UPDATE projects SET name = ?
+			 WHERE project_id = ? AND owner_user_id = ? AND archived_at IS NULL
+			 RETURNING project_id, name, created_at,
+			   (SELECT COUNT(*) FROM acp_agents a WHERE a.project_id = projects.project_id) AS agent_count`,
+			[name, projectId, ownerId],
+		);
+		const row = r.results[0];
+		if (!row) throw new ProjectError(404, "project-not-found");
+		return {
+			projectId: row.project_id,
+			name: row.name,
+			createdAt: iso(row.created_at, "projects.created_at"),
+			agentCount: row.agent_count,
+		};
+	}
+
+	/**
 	 * Archive: the project leaves every list; its row stays (its id is still in
 	 * old messages' scope). Its agents leave it first, so nothing keeps posting
 	 * to a project nobody sees. Idempotent.

@@ -3,7 +3,7 @@
  * SQLite; `fetch` to the D1 endpoint is answered by an in-memory database),
  * through the real migrations and router: create (idempotent by
  * clientRequestId, per-owner limit), list (ACP agent counts, archived hidden),
- * archive (its agents leave it), owner-only.
+ * rename, archive (its agents leave it), owner-only.
  */
 
 import type http from "node:http";
@@ -165,5 +165,73 @@ describe("projects (ACP)", () => {
 			project_id: null,
 		});
 		expect((await call(OWNER, "DELETE", `/projects/${p.projectId}`)).status).toBe(404);
+	});
+
+	it("rename: one live project, same name rules, owner-only; the id, its agents and messages stay", async () => {
+		const p = (await call(OWNER, "POST", "/projects", { name: "Viejo", clientRequestId: id(20) }))
+			.body;
+		db.prepare(
+			"INSERT INTO sessions (session_id, user_id, name, container_name, status) VALUES ('s-2', ?, 's', 'st-s2', 'running')",
+		).run(OWNER);
+		db.prepare(
+			"INSERT INTO acp_agents (agent_id, session_id, owner_user_id, name, runtime, project_id) VALUES ('a-2', 's-2', ?, 'arq', 'rt', ?)",
+		).run(OWNER, p.projectId);
+		db.prepare(
+			"INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, body, state, project_id) VALUES (?, 'owner', 'arq', 'request', 'hola', 'done', ?)",
+		).run(OWNER, p.projectId);
+
+		const r = await call(OWNER, "PATCH", `/projects/${p.projectId}`, { name: "  Nuevo  " });
+		expect(r.status).toBe(200);
+		expect(r.body).toEqual({
+			projectId: p.projectId,
+			name: "Nuevo",
+			createdAt: p.createdAt,
+			agentCount: 1,
+		});
+		expect(
+			(await call(OWNER, "GET", "/projects")).body.projects.find(
+				(x: { projectId: string }) => x.projectId === p.projectId,
+			).name,
+		).toBe("Nuevo");
+		expect(db.prepare("SELECT project_id FROM acp_agents WHERE agent_id = 'a-2'").get()).toEqual({
+			project_id: p.projectId,
+		});
+		expect(
+			db.prepare("SELECT COUNT(*) AS n FROM agent_messages WHERE project_id = ?").get(p.projectId),
+		).toEqual({ n: 1 });
+		// Repeating it (a lost answer) changes nothing.
+		expect((await call(OWNER, "PATCH", `/projects/${p.projectId}`, { name: "Nuevo" })).status).toBe(
+			200,
+		);
+		// A replay of the creation still finds the project (by request hash, not by name).
+		expect(
+			(await call(OWNER, "POST", "/projects", { name: "Viejo", clientRequestId: id(20) })).body,
+		).toMatchObject({ projectId: p.projectId, replayed: true });
+
+		for (const body of [
+			{ name: "" },
+			{ name: "   " },
+			{ name: 7 },
+			{ name: "x".repeat(81) },
+			{ name: "a\u0007b" },
+			{ name: "ok", archived: true },
+			[],
+		]) {
+			const bad = await call(OWNER, "PATCH", `/projects/${p.projectId}`, body);
+			expect(bad.status, JSON.stringify(body)).toBe(400);
+		}
+		expect((await call(OTHER, "PATCH", `/projects/${p.projectId}`, { name: "ajeno" })).status).toBe(
+			404,
+		);
+		expect((await call(OWNER, "PATCH", "/projects/not-an-id", { name: "x" })).status).toBe(404);
+		expect((await call(null, "PATCH", `/projects/${p.projectId}`, { name: "x" })).status).toBe(401);
+		expect(db.prepare("SELECT name FROM projects WHERE project_id = ?").get(p.projectId)).toEqual({
+			name: "Nuevo",
+		});
+
+		expect((await call(OWNER, "DELETE", `/projects/${p.projectId}`)).status).toBe(204);
+		expect(
+			(await call(OWNER, "PATCH", `/projects/${p.projectId}`, { name: "Archivado" })).status,
+		).toBe(404);
 	});
 });
