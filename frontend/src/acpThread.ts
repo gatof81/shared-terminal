@@ -634,34 +634,34 @@ export class AcpThread {
 	// it, so it is a bubble in the voice of the agent that answered.
 	private handoffEl(m: AcpMessage): HTMLElement {
 		const shown = m.reply_to !== null && this.messages.some((x) => x.id === m.reply_to);
-		const art = el("article", `acp-msg acp-reply${shown ? " acp-handoff" : ""}`);
+		const art = el("article", "acp-msg acp-reply");
 		art.dataset.state = m.state;
-		const head = el("div", "acp-msg-head");
 		if (shown) {
-			head.append(
+			const line = el("div", "acp-handoff");
+			line.append(
 				el(
-					"span",
-					"acp-msg-who",
+					"div",
+					"acp-msg-head",
 					`↳ ${who(m.to_id)} recibe la respuesta de ${who(m.from_id)} a #${m.reply_to}`,
 				),
-				this.badge(m),
-			);
-			art.append(
-				head,
 				this.collapsible(`b${m.id}`, "Ver el texto entregado", agentText(m.body)),
-				...this.outcome(m),
 			);
-			return art;
+			art.append(line);
+		} else {
+			const said = el("div", "acp-bubble acp-in");
+			agentVoice(said, m.from_id);
+			const head = el("div", "acp-msg-head");
+			head.append(
+				agentId(m.from_id),
+				el("span", "acp-msg-to", `→ ${who(m.to_id)} · respuesta a #${m.reply_to}`),
+			);
+			said.append(head, agentText(m.body));
+			art.append(said);
 		}
-		const said = el("div", "acp-bubble acp-in");
-		agentVoice(said, m.from_id);
-		head.append(
-			agentId(m.from_id),
-			el("span", "acp-msg-to", `→ ${who(m.to_id)} · respuesta a #${m.reply_to}`),
-			this.badge(m),
-		);
-		said.append(head, agentText(m.body), ...this.outcome(m));
-		art.append(said);
+		// What the recipient makes of the reply is its own voice (m.to_id), in
+		// its own answer bubble — never inside the folded line or the bubble of
+		// the agent that answered.
+		art.append(this.answerEl(m));
 		return art;
 	}
 

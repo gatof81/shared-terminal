@@ -59,6 +59,7 @@ test.describe("ACP conversation", () => {
 			project_id: hz,
 			depth: 1,
 			state: "done",
+			result_text: "Entonces miro el refresh antes de cerrar.",
 		});
 		const running = backend.addAcpMessage({
 			to_id: "dev",
@@ -163,8 +164,19 @@ test.describe("ACP conversation", () => {
 		// voice of the agent that answered.
 		const lone = thread.locator("article.acp-reply", { hasText: "el de refresh sigue rojo" });
 		await expect(lone).not.toHaveClass(/acp-handoff/);
-		await expect(lone.locator(".acp-bubble .acp-agent-id")).toHaveText(/@dev/);
+		const replier = lone.locator(".acp-bubble:not(.acp-sub) .acp-agent-id");
+		await expect(replier).toHaveText(/@dev/);
 		await expect(lone.locator(".acp-msg-to")).toHaveText(/@arq/);
+		// What the recipient answers to a delivered reply is said in ITS voice,
+		// in its own bubble: the folded line and the replier's bubble hold none.
+		for (const reply of [lone, thread.locator("article.acp-reply", { hasText: "Anotado." })]) {
+			const own = reply.locator(".acp-sub");
+			await expect(own.locator(".acp-agent-id")).toHaveText(/@arq/);
+			await expect(own.locator(".acp-msg-result")).toBeVisible();
+			expect(await hueOf(own.locator(".acp-agent-id"))).toBe(await hueOf(author));
+		}
+		await expect(thread.locator(".acp-handoff .acp-msg-result")).toHaveCount(0);
+		await expect(lone.locator(".acp-bubble:not(.acp-sub) .acp-msg-result")).toHaveCount(0);
 
 		// Activity folded, its latest step named; a question inside its answer.
 		const work = thread.locator("article.acp-msg", { hasText: "implementá el callback" });
