@@ -468,6 +468,10 @@ export class MockBackend {
 	acp = false;
 	acpAgents: MockAcpAgent[] = [];
 	acpMessages: MockAcpMessage[] = [];
+	/** Open/answered questions the feeds return (AcpQuestion rows). */
+	acpQuestions: Array<Record<string, unknown>> = [];
+	/** Activity events per message id the feeds return. */
+	acpActivity: Record<string, Array<Record<string, unknown>>> = {};
 	acpSockets: WebSocketRoute[] = [];
 	private acpSeq = 0;
 
@@ -678,8 +682,8 @@ export class MockBackend {
 				agent: a,
 				maxMessageBytes: 262144,
 				messages: page(this.acpMessages.filter((m) => m.to_id === a.name || m.from_id === a.name)),
-				questions: [],
-				activity: {},
+				questions: this.acpQuestions.filter((q) => q.agent === a.name),
+				activity: this.acpActivity,
 				activitySeq: 0,
 			});
 			return true;
@@ -697,8 +701,8 @@ export class MockBackend {
 				agents: this.acpAgents.filter((a) => a.projectId === pid),
 				maxMessageBytes: 262144,
 				messages: page(this.acpMessages.filter((m) => m.project_id === pid)),
-				questions: [],
-				activity: {},
+				questions: this.acpQuestions,
+				activity: this.acpActivity,
 				activitySeq: 0,
 			});
 			return true;

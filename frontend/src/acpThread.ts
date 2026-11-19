@@ -531,7 +531,10 @@ export class AcpThread {
 					? activityRows(this.activity.get(m.id) ?? [])
 					: null,
 				m.state === "running" ? (this.liveText.get(m.id) ?? "") : null,
+				m.finished_at,
+				m.kind === "reply" && this.messages.some((x) => x.id === m.reply_to),
 			]),
+			this.source?.kind ?? null,
 		]);
 	}
 
@@ -569,42 +572,88 @@ export class AcpThread {
 		return d;
 	}
 
+	// A thread item is one TURN of the conversation (`article.acp-msg`, the keyed
+	// element): what was said (the person's text on the right, an agent's consult
+	// or a Shared Terminal note on the left), then one answer bubble per
+	// recipient (`.acp-sub`) on the left, under the agent's name. The answer is
+	// the message's own outcome (result, questions, live text), so the
+	// correlation is structural: an answer always sits right under what it
+	// answers, whatever arrives later in the thread.
 	private itemEl(item: ThreadItem): HTMLElement {
-		if (item.kind === "post") {
-			const first = item.messages[0]!;
-			const art = el("article", "acp-msg acp-mine");
-			const head = el("div", "acp-msg-head");
-			head.append(
-				el("span", "acp-msg-who", `Vos → ${item.messages.map((m) => `@${m.to_id}`).join(", ")}`),
-				el("span", "acp-msg-time", time(first.created_at)),
-			);
-			art.append(head, el("pre", "acp-msg-body", item.body));
-			for (const m of item.messages) {
-				const sub = el("div", "acp-sub");
-				const sh = el("div", "acp-msg-head");
-				sh.append(el("span", "acp-msg-who", `#${m.id} @${m.to_id}`), this.badge(m));
-				sub.append(sh, ...this.outcome(m));
-				art.append(sub);
-			}
-			return art;
-		}
-		const m = item.message;
-		const mine = m.from_id === "owner";
+		const ms = item.kind === "post" ? item.messages : [item.message];
+		const first = ms[0]!;
+		if (first.kind === "reply") return this.handoffEl(first);
+		const mine = first.from_id === "owner";
+		const sys = first.from_id === "system";
 		const art = el(
 			"article",
-			`acp-msg acp-${m.state}${mine ? " acp-mine" : ""}${m.kind === "reply" ? " acp-reply" : ""}`,
+			`acp-msg acp-turn ${mine ? "acp-mine" : sys ? "acp-system" : "acp-consult"}`,
 		);
+		art.dataset.state = first.state;
+		const said = el("div", `acp-bubble ${mine ? "acp-out" : "acp-in"}`);
 		const head = el("div", "acp-msg-head");
-		const label =
-			m.kind === "reply"
-				? `#${m.id} ${who(m.to_id)} recibe la respuesta de ${who(m.from_id)} a #${m.reply_to}`
-				: `#${m.id} ${who(m.from_id)} → ${who(m.to_id)}${m.from_id !== "owner" && m.from_id !== "system" ? " (consulta)" : ""}`;
-		head.append(el("span", "acp-msg-who", `${label}${this.scopeTag(m)}`), this.badge(m));
+		const to = ms.map((m) => who(m.to_id)).join(", ");
+		// In an agent's own chat its name on the person's bubble is noise; in a
+		// project, a consult or a note it says who was addressed.
+		const showTo = !mine || this.source?.kind === "project" || ms.length > 1;
+		head.append(
+			el(
+				"span",
+				"acp-msg-who",
+				mine
+					? showTo
+						? `Para ${to}`
+						: ""
+					: sys
+						? `Shared Terminal → ${to}`
+						: `${who(first.from_id)} consulta a ${to}`,
+			),
+			el("span", "acp-msg-time", `${time(first.created_at)}${this.scopeTag(first)}`),
+		);
+		said.append(head);
+		said.append(mine ? el("pre", "acp-msg-body", first.body) : agentText(first.body));
+		art.append(said);
+		for (const m of ms) art.append(this.answerEl(m));
+		return art;
+	}
+
+	/** The recipient's side of a message: its name, a discreet state, what it said. */
+	private answerEl(m: AcpMessage): HTMLElement {
+		const sub = el("div", `acp-sub acp-bubble acp-in acp-${m.state}`);
+		const head = el("div", "acp-msg-head");
+		const name = el("span", "acp-msg-who acp-agent-id");
+		name.append(el("span", "acp-avatar", m.to_id.slice(0, 1).toUpperCase()), `@${m.to_id}`);
+		name.style.setProperty("--acp-hue", String(hue(m.to_id)));
+		const meta = el("span", "acp-msg-time", `#${m.id}`);
+		meta.title = `Mensaje #${m.id}${m.finished_at ? ` · terminó ${time(m.finished_at)}` : ""}`;
+		head.append(name, this.badge(m), meta);
+		sub.append(head, ...this.outcome(m));
+		return sub;
+	}
+
+	// The reply an agent RECEIVES to its consult repeats, word for word, the
+	// answer already shown under the consult. When that consult is in the
+	// thread, the delivery is one line (the text one click away); otherwise
+	// (an older page, another scope) it is the only place to read it.
+	private handoffEl(m: AcpMessage): HTMLElement {
+		const art = el("article", `acp-msg acp-handoff acp-reply`);
+		art.dataset.state = m.state;
+		const shown = m.reply_to !== null && this.messages.some((x) => x.id === m.reply_to);
+		const head = el("div", "acp-msg-head");
+		head.append(
+			el(
+				"span",
+				"acp-msg-who",
+				`↳ ${who(m.to_id)} recibe la respuesta de ${who(m.from_id)} a #${m.reply_to}`,
+			),
+			this.badge(m),
+		);
 		art.append(head);
-		// A reply repeats the answer already shown under its request: kept folded.
-		if (m.kind === "reply")
-			art.append(this.collapsible(`b${m.id}`, "Ver la respuesta entregada", agentText(m.body)));
-		else art.append(mine ? el("pre", "acp-msg-body", m.body) : agentText(m.body));
+		art.append(
+			shown
+				? this.collapsible(`b${m.id}`, "Ver el texto entregado", agentText(m.body))
+				: agentText(m.body),
+		);
 		art.append(...this.outcome(m));
 		return art;
 	}
@@ -617,6 +666,8 @@ export class AcpThread {
 		if (m.state === "running" || m.state === "pending") {
 			const rows = activityRows(this.activity.get(m.id) ?? []);
 			if (rows.length) {
+				// Technical activity is folded: one line says what is going on now;
+				// the list opens on demand (and stays open across live updates).
 				const ul = el("ul", "acp-activity");
 				for (const r of rows)
 					ul.append(
@@ -626,10 +677,25 @@ export class AcpThread {
 							`${r.label || "herramienta"}${r.detail ? ` · ${r.detail}` : ""} — ${ACTIVITY_STATE[r.state] ?? r.state ?? "…"}`,
 						),
 					);
-				out.push(ul);
+				const last = rows[rows.length - 1]!;
+				out.push(
+					this.collapsible(
+						`a${m.id}`,
+						`Actividad (${rows.length}) · ${last.label || "herramienta"}`,
+						ul,
+					),
+				);
 			}
 			const live = this.liveText.get(m.id);
 			if (live && m.state === "running") out.push(el("pre", "acp-msg-result acp-live", live));
+			else if (!rows.length && !m.result_text && !this.openQuestionOf(m.id))
+				out.push(
+					el(
+						"div",
+						"acp-typing",
+						m.state === "pending" ? "En cola: lo toma cuando termine lo anterior." : "Trabajando…",
+					),
+				);
 		}
 		if (m.result_text) {
 			const res = el("div", "acp-msg-result");
@@ -943,6 +1009,13 @@ function time(iso: string): string {
 	return Number.isNaN(d.getTime())
 		? ""
 		: d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+}
+
+/** A stable hue per agent name, so each agent keeps its colour across chats. */
+function hue(name: string): number {
+	let h = 0;
+	for (const c of name) h = (h * 31 + c.charCodeAt(0)) % 360;
+	return h;
 }
 
 function sourceKey(src: ThreadSource): string {
