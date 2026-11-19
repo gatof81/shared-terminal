@@ -603,7 +603,13 @@ describe("PAT_PERSIST_FRAGMENT", () => {
 		return () => rmSync(dir, { recursive: true, force: true });
 	});
 
-	function run(opts: { url: string; target?: string; ghExit?: number; noGh?: boolean }) {
+	function run(opts: {
+		url: string;
+		target?: string;
+		ghExit?: number;
+		noGh?: boolean;
+		pat?: string;
+	}) {
 		const ws = path.join(dir, "ws");
 		const target = opts.target ? path.join(ws, opts.target) : ws;
 		spawnSync("git", ["init", "-q", target]);
@@ -631,7 +637,7 @@ describe("PAT_PERSIST_FRAGMENT", () => {
 			PATH: bin,
 			HOME: path.join(dir, "home"),
 			GIT_CONFIG_NOSYSTEM: "1",
-			ST_PAT: PAT,
+			ST_PAT: opts.pat ?? PAT,
 			ST_URL: opts.url,
 			ST_TARGET_ABS: target,
 			ST_WORKSPACE_ROOT: ws,
@@ -680,6 +686,16 @@ describe("PAT_PERSIST_FRAGMENT", () => {
 		expect(r.stderr).toContain("bad token ***");
 		expect(r.stdout + r.stderr).not.toContain(PAT);
 		expect(fill.stdout).toContain(`password=${PAT}`);
+	});
+
+	it("a token with a line break is not saved for git (it would inject credential fields)", () => {
+		const { r, fill } = run({
+			url: "https://gitlab.example.com/g/p.git",
+			pat: "tok\nhost=evil.example",
+		});
+		expect(r.status).toBe(0);
+		expect(r.stderr).toContain("warning: could not save the access token");
+		expect(fill.stdout).not.toContain("password=");
 	});
 
 	it("gh missing from the image is a warning too", () => {
