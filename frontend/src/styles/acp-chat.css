@@ -14,7 +14,10 @@
    Its minimum is the composer plus a readable strip of thread (the wrap's
    min-height, below): with a panel open on a short screen it is the panel
    that gives way and scrolls inside, never the message box. */
-.acp-thread {
+/* :not([hidden]) — a page that is not found or failed hides its thread
+   (acpProjectChat setProjectPageMode); a bare display rule would beat the
+   attribute and show an empty thread under the error. */
+.acp-thread:not([hidden]) {
 	flex: 1;
 	min-height: auto;
 	display: flex;

@@ -128,6 +128,12 @@ export class AcpThread {
 	private readonly auth = new Map<string, boolean>();
 	private project: { id: string; name: string } | null = null;
 	private error = "";
+	/**
+	 * `error` is the feed's own read failure (not an earlier page or a send).
+	 * Project Chat's page header already says it, with Reintentar
+	 * (projectsView statusNote): the message box does not repeat it there.
+	 */
+	private errorIsFeed = false;
 	private feed: FeedStatus = "loading";
 	/** A first page of the current chat was read at least once. */
 	private readOnce = false;
@@ -374,6 +380,7 @@ export class AcpThread {
 			this.auth.clear();
 			this.project = null;
 			this.error = "";
+			this.errorIsFeed = false;
 			this.feed = "loading";
 			this.readOnce = false;
 			this.atBottom = true;
@@ -433,6 +440,7 @@ export class AcpThread {
 			this.applyFeed(feed, false);
 			this.replayLive(mark);
 			this.error = "";
+			this.errorIsFeed = false;
 			this.feed = "ok";
 			this.readOnce = true;
 			if (this.placePending) {
@@ -450,12 +458,14 @@ export class AcpThread {
 			// A re-read that fails (a reconnect, the fallback poll, a flaky
 			// link) must not take away a history already read: `stale`.
 			this.feed = e.status === 404 ? "not-found" : this.readOnce ? "stale" : "error";
+			this.errorIsFeed = true;
 			this.error =
 				e.status === 404
 					? src.kind === "agent"
 						? "Este agente ya no existe."
 						: "Proyecto no encontrado."
-					: `No se pudo actualizar: ${e.message}`;
+					: // Fixed text: the server's message is a code ("internal"), not words for a person.
+						"No se pudo actualizar el chat.";
 		}
 		this.changed();
 	}
@@ -502,6 +512,7 @@ export class AcpThread {
 		} catch (err) {
 			if (gen !== this.gen) return;
 			this.error = `No se pudieron cargar los anteriores: ${(err as Error).message}`;
+			this.errorIsFeed = false;
 		}
 		this.changed();
 	}
@@ -1033,6 +1044,7 @@ export class AcpThread {
 						if (gen !== this.gen) return;
 						again.disabled = false;
 						this.error = (err as Error).message;
+						this.errorIsFeed = false;
 						this.changed();
 					});
 			});
@@ -1189,7 +1201,8 @@ export class AcpThread {
 
 	private renderComposer(): void {
 		const u = this.source ? this.unsent.get(sourceKey(this.source)) : undefined;
-		const shown = [this.error, u?.error ?? ""].filter(Boolean).join(" ");
+		const own = this.errorIsFeed && this.source?.kind === "project" ? "" : this.error;
+		const shown = [own, u?.error ?? ""].filter(Boolean).join(" ");
 		this.errorEl.textContent = shown;
 		this.errorEl.hidden = shown === "";
 		this.recoverBtn.hidden = !u || u.restored || this.composerMode !== "on";

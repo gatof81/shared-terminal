@@ -143,14 +143,10 @@ html[data-shell="v2"] .chat-float {
 }
 
 @media (max-width: 768px) {
-  /* The bar and the tab strip are never hidden behind a drawer: a view
-     switch changes nothing in the terminal's box (zero resize). */
-  html[data-shell="v2"] main:not(.chrome-open) #terminal-toolbar {
-    display: flex !important;
-  }
-  html[data-shell="v2"] main:not(.chrome-open) #terminal-tabs {
-    display: flex !important;
-  }
+  /* The bar and the tab strip are never hidden behind a drawer (mobile.css
+     scopes that rule to v1): a view switch changes nothing in the
+     terminal's box (zero resize). Their visibility is the inline one
+     sessionCore sets — none without a session, as on desktop. */
   html[data-shell="v2"] #terminal-toolbar {
     padding: 0.35rem 0.5rem;
     gap: 0.4rem;

@@ -118,6 +118,11 @@ test.describe("project management", () => {
 		const status = page.locator(".pv-status-error");
 		await expect(status).toContainText("No se pudo actualizar el proyecto.");
 		await expect(said).toBeVisible();
+		// The header says it, once: the message box does not repeat it (with the server's code).
+		await expect(page.locator(".acp-project .acp-chat-error")).toBeHidden();
+		await expect(
+			page.locator(".acp-project").getByText(/No se pudo actualizar (el chat|:)/),
+		).toBeHidden();
 		await expect(page.locator(".acp-project .acp-chat-input")).toBeDisabled();
 		await expect(page.getByRole("button", { name: "Acciones del proyecto" })).toHaveCount(0);
 		backend.projectFeedFailure = 0;
@@ -138,6 +143,12 @@ test.describe("project management", () => {
 		await expect(page.locator(".pv-status-archived")).toHaveCount(0);
 		await expect(page.getByRole("button", { name: "Acciones del proyecto" })).toHaveCount(0);
 		await expect(page.locator(".acp-project .acp-chat-input")).toBeHidden();
+		// One message: no thread under it — not its "no messages yet" (unknown, the
+		// feed never answered) nor its own copy of the error with the server's code.
+		await expect(page.locator(".acp-project .acp-thread")).toBeHidden();
+		const project = page.locator(".acp-project");
+		await expect(project.getByText(/Sin mensajes/)).toBeHidden();
+		await expect(project.getByText(/internal/)).toBeHidden();
 		backend.projectFeedFailure = 0;
 		await status.getByRole("button", { name: "Reintentar" }).click();
 		await expect(page.locator(".acp-project .acp-chat-input")).toBeEnabled();
