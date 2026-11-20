@@ -160,6 +160,7 @@ export interface MockAcpAgent {
 	authRequired?: boolean;
 	loginMethods?: Array<{ id: string; name: string; description: string }>;
 	waitingInput?: boolean;
+	modelApplied?: { requested: string; current: string | null; error: string | null } | null;
 }
 
 export interface MockAcpMessage {

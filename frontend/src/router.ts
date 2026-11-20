@@ -136,6 +136,31 @@ export function sameProjectRoute(a: ProjectRoute | null, b: ProjectRoute | null)
 	return a.projectId === b.projectId;
 }
 
+/**
+ * A fragment that is one of the app's own addresses — a session (with its
+ * view and detail) or a project page — in its canonical form, else null.
+ * For links in untrusted text (an agent's answer): what the link carries is
+ * re-written by these parsers, never the text as written.
+ */
+export function appRouteHash(hash: string): string | null {
+	try {
+		const r = parseRoute(hash);
+		// A "." or ".." step in a detail (written or encoded) is no address:
+		// a link from untrusted text must not name paths outside the
+		// workspace, even though the server would refuse them.
+		// (Git's detail is "<area>:<path>": the path starts after the area.)
+		const path = r?.view === "git" ? r.detail?.replace(/^[^:/]*:/, "") : r?.detail;
+		if (path?.split("/").some((seg) => seg === "." || seg === "..")) return null;
+		if (r) return routeHash(r);
+		const p = parseProjectRoute(hash);
+		return p ? projectRouteHash(p) : null;
+	} catch {
+		// encodeURIComponent throws on a lone surrogate (possible in text that
+		// was never UTF-8): such a destination is no address.
+		return null;
+	}
+}
+
 export function readProjectRoute(): ProjectRoute | null {
 	return parseProjectRoute(window.location.hash);
 }
