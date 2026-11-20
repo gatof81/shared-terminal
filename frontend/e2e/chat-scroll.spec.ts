@@ -48,6 +48,10 @@ const scrollBy = (t: Locator, top: number) =>
 		el.style.scrollBehavior = "";
 	}, top);
 
+/** Its entry transition (fade + 8 px) over: measured where it rests. */
+const settled = (btn: Locator) =>
+	btn.evaluate((e) => Promise.all(e.getAnimations().map((a) => a.finished)));
+
 /** The row keeps its place: ±1 px of rounding. */
 async function stays(t: Locator, text: string, top: number, what: string): Promise<void> {
 	await expect.poll(() => rowTop(t, text), what).toBeGreaterThanOrEqual(top - 1);
@@ -221,6 +225,14 @@ test.describe("chat scroll: ACP chats", () => {
 		await expect(btn).toBeVisible();
 		await expect(btn).toHaveAccessibleName("Ir al final");
 		await expect(btn.locator(".chat-end-count")).toBeHidden();
+		// The arrow alone: a 36-px circle, centred on the thread, 12 px above the message box.
+		await settled(btn);
+		const solo = (await btn.boundingBox())!;
+		expect([Math.round(solo.width), Math.round(solo.height)]).toEqual([36, 36]);
+		const composer = (await page.locator("#acp-chat .acp-chat-composer").boundingBox())!;
+		expect(Math.round(composer.y - (solo.y + solo.height))).toBe(12);
+		const col = (await t.boundingBox())!;
+		expect(Math.abs(solo.x + solo.width / 2 - (col.x + col.width / 2))).toBeLessThanOrEqual(1);
 		// Back near the end (but not at it): still up — no blinking around the threshold.
 		await scrollBy(t, -150);
 		await page.waitForTimeout(100);
@@ -249,10 +261,27 @@ test.describe("chat scroll: ACP chats", () => {
 			"2 mensajes nuevos más abajo",
 		);
 
-		// A 44-px target.
+		// A 32-px pill with a 44-px target: 5 px outside its edges is still the button.
+		await settled(btn);
 		const box = (await btn.boundingBox())!;
-		expect(box.height).toBeGreaterThanOrEqual(44);
-		expect(box.width).toBeGreaterThanOrEqual(44);
+		expect(Math.round(box.height)).toBe(32);
+		const hits = await page.evaluate(
+			({ x, y, w, h }) =>
+				[
+					[x + w / 2, y - 5],
+					[x + w / 2, y + h + 5],
+					[x - 5, y + h / 2],
+					[x + w + 5, y + h / 2],
+				].map(([px, py]) => document.elementFromPoint(px!, py!)?.classList.contains("chat-end")),
+			{ x: box.x, y: box.y, w: box.width, h: box.height },
+		);
+		expect(hits).toEqual([true, true, true, true]);
+		const target = await btn.evaluate((e) => {
+			const c = getComputedStyle(e, "::before");
+			return [Math.round(Number.parseFloat(c.width)), Math.round(Number.parseFloat(c.height))];
+		});
+		expect(target[1]).toBe(44);
+		expect(target[0]).toBeGreaterThanOrEqual(44);
 		await input.focus();
 		await btn.click();
 		await expect(btn).toBeHidden();

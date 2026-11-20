@@ -1492,9 +1492,12 @@ function renderThread(opts: { stick: boolean; restore?: boolean; toEnd?: boolean
 				updateFloat();
 			}).observe(sc);
 		}
-		threadEl.appendChild(scroller);
+		// The end button sits over the scroller's bottom edge, so it rides on
+		// whatever is under the thread (the read-only note), at any height.
+		const wrap = el("div", "chat-scroll-wrap");
 		endBtn.reset();
-		threadEl.appendChild(endBtn.el);
+		wrap.append(scroller, endBtn.el);
+		threadEl.appendChild(wrap);
 		threadEl.appendChild(readOnlyNote());
 	}
 	syncOffline();

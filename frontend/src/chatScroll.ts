@@ -135,7 +135,9 @@ export class ChatEndButton {
 
 	private paint(): void {
 		this.el.hidden = !this.shown;
-		const words = this.text ?? (this.count > 0 ? String(this.count) : "");
+		const words = this.text ?? (this.count > 99 ? "99+" : this.count > 0 ? String(this.count) : "");
+		// The arrow alone: a 36-px circle (chat.css).
+		this.el.classList.toggle("solo", words === "");
 		if (this.countEl.textContent !== words) this.countEl.textContent = words;
 		this.countEl.hidden = words === "";
 		const name = this.text ?? this.opts.name(this.count);

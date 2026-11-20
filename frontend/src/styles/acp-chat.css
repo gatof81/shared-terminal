@@ -858,9 +858,6 @@ pre.acp-msg-body {
 	display: flex;
 	flex-direction: column;
 }
-.acp-new-pill {
-	bottom: 0.75rem;
-}
 /* After the rules above, which it overrides on a phone. */
 @media (max-width: 640px) {
 	/* Header controls: 44-px touch targets. */
