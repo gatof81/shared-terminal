@@ -1093,3 +1093,16 @@ pre.acp-msg-body {
 		margin-right: var(--chat-gutter);
 	}
 }
+
+/* UX iter3 E: on an agent's session the session bar is the agent's header
+   (sessionCore paintBarIdentity; "Ajustes" in its ⋯), so this row goes.
+   A phone in shell v1 keeps it: its bar lives in the chrome drawer, and
+   without the row the agent's state would not show until it is opened. */
+html[data-shell="v2"] .acp-chat-header {
+  display: none;
+}
+@media (min-width: 769px) {
+  .acp-chat-header {
+    display: none;
+  }
+}

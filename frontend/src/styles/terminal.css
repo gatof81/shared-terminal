@@ -29,12 +29,73 @@
   color: var(--c-text);
   font-weight: 500;
   flex: 0 1 auto;
-  /* 0, not a floor in ch: a floor also WIDENS a name shorter than it
-     ("docs" moved everything after it). The agent link below gives way first
-     (shrink 1000 : 1), so the name is the last text to be cut. */
+  /* At least 8 characters show before anything else gives way, but never
+     more than the name has: a plain floor in ch also WIDENS a shorter name
+     ("docs" moved everything after it). --name-ch is the name's length
+     (sessionCore.nameFloor). The subtitle gives way first (1000 : 1). */
+  min-width: min(8ch, var(--name-ch, 0ch));
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* An agent's session (UX iter3 E): "@agent" in its colour, its state as
+   the chip, then "sesión X · proyecto ↗" — on wide screens only, and the
+   first text to give way. One line, the same height as any session's bar. */
+#terminal-toolbar.bar-agent #terminal-session-name {
+  color: hsl(var(--acp-hue, 210) 55% 62%);
+  font-weight: 600;
+}
+#terminal-session-sub {
+  flex: 0 1000 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  font-size: 12px;
+  color: var(--c-muted);
+}
+#terminal-session-sub[hidden] {
+  display: none;
+}
+/* Underlined: inside a line of text a link is not told by colour alone. */
+#terminal-session-sub a {
+  color: var(--c-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+#terminal-session-sub a:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+@media (max-width: 1099px) {
+  #terminal-session-sub {
+    display: none;
+  }
+}
+/* What the agent's settings need from the person (a model pending or
+   refused, a login missing), on the ⋯ that now opens them. */
+.bar-menu-flag {
+  margin-left: 2px;
+  font-weight: 700;
+  color: var(--c-warn);
+}
+/* Shell v1: the ⋯ (an agent's session only) is the bar's last control. */
+html:not([data-shell="v2"]) #session-menu-btn {
+  order: 10;
+}
+
+/* The overlays' own bars (Files, Git, the capture Chat): one look — 36 px,
+   a soft line under them, the refresh as an icon button on the right. */
+#terminal-area #files-header,
+#terminal-area #git-header,
+#terminal-area #chat-header {
+  min-height: 36px;
+  padding-top: 0;
+  padding-bottom: 0;
+  border-bottom-color: var(--c-border-soft);
+}
+#files-refresh-btn,
+#git-refresh-btn,
+#chat-refresh-btn {
+  margin-left: auto;
 }
 @media (max-width: 768px) {
   /* The v1 phone bar scrolls sideways (mobile.css): squeezing the name

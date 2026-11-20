@@ -226,6 +226,8 @@
             <span>Session:</span>
             <span id="terminal-session-name"></span>
             <span id="terminal-status-badge"></span>
+            <!-- An agent's session (UX iter3 E): "sesión X · proyecto ↗", wide screens only. -->
+            <span id="terminal-session-sub" hidden></span>
             <!-- Workspace Explorer: Terminal ⇄ Files. Files is an overlay
                  above the terminal panes (filesView.ts) so switching never
                  resizes, detaches or disposes the terminal. -->
@@ -256,6 +258,7 @@
                  observers / terminate / delete) as one menu in the bar. -->
             <button
               id="session-menu-btn"
+              class="btn btn-icon sm"
               type="button"
               title="Session actions"
               aria-label="Session actions"
@@ -374,7 +377,7 @@
               <nav id="files-breadcrumbs" aria-label="Current path"></nav>
               <button
                 id="files-refresh-btn"
-                class="files-btn"
+                class="btn btn-icon sm"
                 type="button"
                 title="Refresh"
                 aria-label="Refresh file tree and preview"
@@ -399,7 +402,7 @@
               <div id="git-summary" aria-live="polite"></div>
               <button
                 id="git-refresh-btn"
-                class="files-btn"
+                class="btn btn-icon sm"
                 type="button"
                 title="Refresh"
                 aria-label="Refresh git status"
@@ -433,7 +436,7 @@
               <div id="chat-summary"></div>
               <button
                 id="chat-refresh-btn"
-                class="files-btn"
+                class="btn btn-icon sm"
                 type="button"
                 title="Refresh"
                 aria-label="Refresh conversations"

@@ -10,7 +10,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { test as base, expect, type Page } from "@playwright/test";
+import { test as base, expect, type Locator, type Page } from "@playwright/test";
 import { MockBackend, SESSION_IDS, type USERS } from "./mockBackend.js";
 
 /** The seed data is stamped around 2026-10-31T10:00Z; the page's clock sits 30 min later. */
@@ -159,11 +159,32 @@ export class App {
 		return this.page.locator("main").evaluate((el) => el.classList.contains("sidebar-open"));
 	}
 
-	/** Select a session from the sidebar and wait for it to become active. */
+	/**
+	 * Select a session from the sidebar and wait for it to become active (the
+	 * bar names it; an agent's session shows "@agent" there, the session's
+	 * name being its `data-session-name`).
+	 */
 	async openSession(name: string): Promise<void> {
 		await this.openSidebar();
 		await this.sessionRow(name).click();
-		await expect(this.page.locator("#terminal-session-name")).toHaveText(name);
+		await expect(this.page.locator("#terminal-toolbar")).toHaveAttribute("data-session-name", name);
+	}
+
+	/**
+	 * An ACP agent's settings panel: from the bar's ⋯ ("Ajustes del agente",
+	 * UX iter3 E), or from the agent's own row where it shows (a phone in shell
+	 * v1). Returns the control that opened it (Escape gives the focus back to it).
+	 */
+	async openAgentSettings(): Promise<Locator> {
+		const own = this.page.locator("#acp-chat .acp-settings-btn");
+		if (await own.isVisible()) {
+			await own.click();
+			return own;
+		}
+		const more = this.page.locator("#session-menu-btn");
+		await more.click();
+		await this.page.getByRole("menuitem", { name: /^Ajustes del agente/ }).click();
+		return more;
 	}
 
 	/** Wait until the active session's terminal has attached and painted the mock's prompt. */

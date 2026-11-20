@@ -120,10 +120,10 @@ test.describe("accessibility — axe on the main views", () => {
 		solo.model = "claude-opus-5-5";
 		solo.modelApplied = { requested: "claude-opus-5-5", current: null, error: "no disponible" };
 		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
-		await expect(page.locator("#acp-chat .acp-settings-btn")).toBeVisible();
+		await expect(page.locator("#acp-chat .acp-chat-thread")).toBeVisible();
 		// The whole page: the threads' text passes too (#380).
 		await expectClean(page, "ACP chat, settings closed");
-		await page.locator("#acp-chat .acp-settings-btn").click();
+		await app.openAgentSettings();
 		await expect(page.locator("#acp-chat .acp-model-select")).toBeVisible();
 		await expectClean(page, "ACP chat, settings open");
 		await page.goto(`/#/projects/${PROJECT_IDS.hz}`);

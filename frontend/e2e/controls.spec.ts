@@ -36,8 +36,12 @@ test.describe("base controls", () => {
 		page,
 	}, info) => {
 		backend.enableAcp();
+		backend.acpAgents.find((a) => a.name === "solo")!.authRequired = true;
 		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
-		const settings = page.locator("#acp-chat .acp-settings-btn");
+		// "Abrir Terminal" of the login notice: a .btn.sm in every shell and width.
+		const settings = page.locator("#acp-chat .acp-login-actions .btn", {
+			hasText: "Abrir Terminal",
+		});
 		await expect(settings).toHaveClass(/\bbtn sm\b/);
 		const h = Math.round((await settings.boundingBox())!.height);
 		if (info.project.use.hasTouch) expect(h).toBeGreaterThanOrEqual(44);

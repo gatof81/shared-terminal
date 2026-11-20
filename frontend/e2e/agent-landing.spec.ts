@@ -126,7 +126,10 @@ test.describe("an agent's session lands on its Chat", () => {
 		await page.fill("#new-session-input", "nuevo-agente");
 		await page.fill("#new-session-acp-agent", "nuevo");
 		await page.click("#new-session-submit");
-		await expect(page.locator("#terminal-session-name")).toHaveText("nuevo-agente");
+		await expect(page.locator("#terminal-toolbar")).toHaveAttribute(
+			"data-session-name",
+			"nuevo-agente",
+		);
 		await app.expectView("chat");
 		await expect(page.locator("#acp-chat .acp-chat-title")).toContainText("@nuevo");
 		expect(SESSION_IDS.running).not.toBe(sid);
