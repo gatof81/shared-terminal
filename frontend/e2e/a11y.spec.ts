@@ -82,25 +82,142 @@ test.describe("accessibility — axe on the main views", () => {
 		solo.modelApplied = { requested: "claude-opus-5-5", current: null, error: "no disponible" };
 		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
 		await expect(page.locator("#acp-chat .acp-settings-btn")).toBeVisible();
-		// The headers and their panels (the thread's own badges are not part of this change).
-		const chat = [
-			"#acp-chat .acp-chat-header",
-			"#acp-chat .acp-settings",
-			"#acp-chat .acp-chat-composer",
-		];
-		await expectClean(page, "ACP chat, settings closed", chat);
+		// The whole page: the threads' text passes too (#380).
+		await expectClean(page, "ACP chat, settings closed");
 		await page.locator("#acp-chat .acp-settings-btn").click();
 		await expect(page.locator("#acp-chat .acp-model-select")).toBeVisible();
-		await expectClean(page, "ACP chat, settings open", chat);
+		await expectClean(page, "ACP chat, settings open");
 		await page.goto(`/#/projects/${PROJECT_IDS.hz}`);
 		await page.getByRole("button", { name: "Acciones del proyecto" }).click();
 		await page.getByRole("menuitem", { name: "Administrar agentes" }).click();
 		await expect(page.locator("#project-view .acp-agents-panel")).toBeVisible();
-		await expectClean(page, "Project Chat, manage panel open", [
-			"#project-view .pv-header",
-			"#project-view .acp-project-agents",
-			"#project-view .acp-agents-panel",
-			"#project-view .acp-chat-composer",
-		]);
+		await expectClean(page, "Project Chat, manage panel open");
+	});
+
+	test("ACP threads, every kind of row, on the whole page (no exclusions)", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.enableAcp();
+		const hz = PROJECT_IDS.hz;
+		// The project's thread: a post to two agents, a consult and its delivered
+		// reply, a reply whose consult is elsewhere, work with activity, a question,
+		// a queued message.
+		backend.addAcpMessage({
+			to_id: "arq",
+			body: "@arq @dev ¿cómo encaramos el login?",
+			client_id: "p1",
+			project_id: hz,
+			state: "done",
+			result_text: "Propongo **OAuth**.",
+		});
+		backend.addAcpMessage({
+			to_id: "dev",
+			body: "@arq @dev ¿cómo encaramos el login?",
+			client_id: "p1",
+			project_id: hz,
+			state: "done",
+			result_text: "Falta el callback.",
+		});
+		const consult = backend.addAcpMessage({
+			from_id: "arq",
+			to_id: "dev",
+			body: "¿El callback está?",
+			project_id: hz,
+			depth: 1,
+			state: "done",
+			result_text: "Todavía no.",
+		});
+		backend.addAcpMessage({
+			from_id: "dev",
+			to_id: "arq",
+			kind: "reply",
+			reply_to: consult.id,
+			body: "Todavía no.",
+			project_id: hz,
+			depth: 1,
+			state: "done",
+			result_text: "Anotado.",
+		});
+		backend.addAcpMessage({
+			from_id: "dev",
+			to_id: "arq",
+			kind: "reply",
+			reply_to: 999,
+			body: "El refresh sigue rojo.",
+			project_id: hz,
+			depth: 1,
+			state: "done",
+			result_text: "Lo miro.",
+		});
+		const running = backend.addAcpMessage({
+			to_id: "dev",
+			body: "@dev implementá el callback",
+			project_id: hz,
+			state: "running",
+		});
+		backend.acpActivity = {
+			dev: [
+				{
+					seq: 1,
+					at: "2026-10-31T10:29:00Z",
+					messageId: running.id,
+					kind: "tool",
+					toolCallId: "t1",
+					title: "Read",
+					detail: "auth/session.ts",
+					status: "completed",
+				},
+			],
+		};
+		const asking = backend.addAcpMessage({
+			to_id: "arq",
+			body: "@arq elegí el proveedor",
+			project_id: hz,
+			state: "running",
+		});
+		backend.acpQuestions = [
+			{
+				id: 1,
+				agent: "arq",
+				message_id: asking.id,
+				request: JSON.stringify({
+					message: "¿Qué proveedor?",
+					requestedSchema: {
+						type: "object",
+						properties: { p: { type: "string", title: "Proveedor", enum: ["GitHub", "Google"] } },
+						required: ["p"],
+					},
+				}),
+				state: "open",
+				answer: null,
+				created_at: "2026-10-31T10:29:30Z",
+				answered_at: null,
+				delivered_at: null,
+				note: null,
+			},
+		];
+		backend.addAcpMessage({ to_id: "dev", body: "@dev después los tests", project_id: hz });
+		// A direct chat: done, uncertain (with its note and Volver a encolar), failed, queued.
+		backend.addAcpMessage({
+			to_id: "solo",
+			body: "Interrumpido",
+			state: "uncertain",
+			note: "El runner se reinició.",
+		});
+		backend.addAcpMessage({
+			to_id: "solo",
+			body: "Falló",
+			state: "failed",
+			note: "Error del adaptador.",
+		});
+		backend.addAcpMessage({ to_id: "solo", body: "En cola" });
+		await app.login("alice", `#/projects/${hz}`);
+		await expect(page.locator("#project-view .acp-question-open")).toBeVisible();
+		await expectClean(page, "Project Chat thread");
+		await page.goto(`/#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
+		await expect(page.locator("#acp-chat .acp-msg", { hasText: "Interrumpido" })).toBeVisible();
+		await expectClean(page, "individual chat thread");
 	});
 });

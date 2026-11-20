@@ -69,6 +69,32 @@ test.describe("ACP chat", () => {
 		expect(backend.acpAgents.find((a) => a.name === "solo")?.projectId).toBe(PROJECT_IDS.hz);
 	});
 
+	test("a link to a place of the app in an answer navigates there, in the same tab", async ({
+		page,
+		app,
+		backend,
+	}) => {
+		backend.addAcpMessage({
+			to_id: "solo",
+			body: "¿dónde lo veo?",
+			state: "done",
+			result_text: `Mirá [el proyecto](#/projects/${PROJECT_IDS.hz}) o [afuera](https://example.com).`,
+		});
+		await app.login("alice", chatOf(PROJECT_SESSION_IDS.scratch));
+		const answer = page.locator("#acp-chat .acp-msg-result", { hasText: "Mirá" });
+		const internal = answer.getByRole("link", { name: "el proyecto" });
+		await expect(internal).toHaveAttribute("href", `#/projects/${PROJECT_IDS.hz}`);
+		await expect(internal).not.toHaveAttribute("target", /.+/);
+		const external = answer.getByRole("link", { name: "afuera" });
+		await expect(external).toHaveAttribute("target", "_blank");
+		await expect(external).toHaveAttribute("rel", "noopener noreferrer nofollow");
+		const pages = page.context().pages().length;
+		await internal.click();
+		await expect(page.locator("#pv-title")).toHaveText("Educación HZ");
+		expect(page.url()).toContain(`#/projects/${PROJECT_IDS.hz}`);
+		expect(page.context().pages()).toHaveLength(pages);
+	});
+
 	test("a draft stays with its agent", async ({ page, app }) => {
 		await app.login("alice", chatOf(PROJECT_SESSION_IDS.scratch));
 		const input = page.locator("#acp-chat .acp-chat-input");

@@ -25,10 +25,17 @@ import { highlightCode, languageForFence } from "./highlight.js";
 export interface MarkdownOptions {
 	/** Called for workspace-relative links (`./docs/setup.md`). */
 	onRelativeLink?: (href: string) => void;
+	/**
+	 * The app's own routes (`#/sessions/<id>…`, `#/projects/<pid>…`): given a
+	 * fragment, its canonical hash when it IS one of them, else null. Without
+	 * it (the Files preview) every fragment is an in-document anchor.
+	 */
+	appRoute?: (hash: string) => string | null;
 }
 
 export type HrefKind =
 	| { kind: "external"; href: string }
+	| { kind: "app"; href: string }
 	| { kind: "anchor"; slug: string }
 	| { kind: "relative"; href: string }
 	| { kind: "blocked" };
@@ -41,11 +48,17 @@ const SAFE_SCHEMES = new Set(["http:", "https:", "mailto:"]);
  * them when parsing a URL — `java\tscript:` and ` javascript:` are both
  * live javascript: URLs to the browser.
  */
-export function classifyHref(raw: string): HrefKind {
+export function classifyHref(raw: string, appRoute?: MarkdownOptions["appRoute"]): HrefKind {
 	// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping control chars IS the point
 	const href = raw.replace(/[\u0000-\u0020\u007f]+/g, "");
 	if (href === "") return { kind: "blocked" };
-	if (href.startsWith("#")) return { kind: "anchor", slug: slugify(decodeSafe(href.slice(1))) };
+	if (href.startsWith("#")) {
+		// An address of the app itself: re-written canonically by the app's own
+		// parser (never the text as the model wrote it), navigated in place.
+		const route = appRoute?.(href) ?? null;
+		if (route !== null) return { kind: "app", href: route };
+		return { kind: "anchor", slug: slugify(decodeSafe(href.slice(1))) };
+	}
 	const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(href);
 	if (scheme) {
 		return SAFE_SCHEMES.has(`${(scheme[1] as string).toLowerCase()}:`)
@@ -290,7 +303,7 @@ function parseLinkTarget(
 }
 
 function renderLink(text: Node[], rawHref: string, opts: MarkdownOptions): Node {
-	const target = classifyHref(rawHref);
+	const target = classifyHref(rawHref, opts.appRoute);
 	if (target.kind === "blocked") {
 		// Keep the visible text; drop the dangerous target entirely.
 		const span = el("span", "md-link-blocked");
@@ -315,6 +328,9 @@ function renderLink(text: Node[], rawHref: string, opts: MarkdownOptions): Node 
 		// noopener: no window.opener handle back into the app.
 		// noreferrer: don't leak the app URL (which carries a session id).
 		a.rel = "noopener noreferrer nofollow";
+	} else if (target.kind === "app") {
+		// Same tab: the hash change is the app's router's (hashchange).
+		a.href = target.href;
 	} else if (target.kind === "anchor") {
 		// Never let a fragment reach location.hash — the app's deep-link
 		// router (#/sessions/<id>) owns it. Scroll within the preview.

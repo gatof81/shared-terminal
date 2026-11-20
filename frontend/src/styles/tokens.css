@@ -38,6 +38,8 @@
   --c-accent-bg: rgba(88, 166, 255, 0.12);
   --c-ok: #3fb950;
   --c-ok-strong: #2ea043;
+  /* A quiet --c-ok for secondary text ("hecho" in the ACP chat): ≥ 4.5:1 on the surfaces. */
+  --c-ok-muted: #61a873;
   --c-ok-bg: #238636;
   --c-warn: #e3b341;
   --c-warn-strong: #9e6a03;
