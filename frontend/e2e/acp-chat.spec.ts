@@ -148,6 +148,27 @@ test.describe("ACP chat", () => {
 		);
 	});
 
+	test("Back after a link to ANOTHER agent's chat puts this chat where it was being read", async ({
+		page,
+		app,
+		backend,
+	}) => {
+		// The same chat view, another source: the thread is emptied and read again on Back.
+		longThread(backend, "solo", chatOf(PROJECT_SESSION_IDS.architect));
+		await app.login("alice", chatOf(PROJECT_SESSION_IDS.scratch));
+		const thread = "#acp-chat .acp-chat-thread";
+		const link = page.locator(thread).getByRole("link", { name: "el destino" });
+		await link.scrollIntoViewIfNeeded();
+		const before = await placeOf(page, thread, "Respuesta 15:");
+		await link.click();
+		await expect(page.locator(thread).getByText("@arq revisá el diseño")).toBeVisible();
+		await page.goBack();
+		await expect(link).toBeInViewport();
+		expect(Math.abs((await placeOf(page, thread, "Respuesta 15:")) - before)).toBeLessThanOrEqual(
+			2,
+		);
+	});
+
 	test("Back after a followed link puts Project Chat where it was being read", async ({
 		page,
 		app,

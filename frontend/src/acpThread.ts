@@ -407,6 +407,10 @@ export class AcpThread {
 			this.readOnce = true;
 			if (this.placePending) {
 				this.placePending = false;
+				// The rows first: the render `applyFeed` asked for waits for the
+				// next frame, and the anchor's row must be on the page now (a
+				// return from ANOTHER chat left this one with only "Cargando…").
+				this.render();
 				this.restorePlace();
 			}
 		} catch (err) {

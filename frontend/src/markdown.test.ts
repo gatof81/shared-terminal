@@ -252,23 +252,35 @@ describe("links in an agent's answer (appRoute: router.appRouteHash)", () => {
 			if (k.kind === "app") expect(k.href.startsWith("#/")).toBe(true);
 		}
 	});
-	it("'..' and %2e%2e in a detail stay inside that session's view", () => {
+	it("'.' / '..' steps in a detail, written or encoded, are no link", () => {
 		for (const h of [
 			"#/sessions/abc/files/../../etc/passwd",
-			"#/sessions/abc/files/%2e%2e/%2e%2e/x",
+			"#/sessions/abc/files/%2e%2e/%2e%2e/etc/passwd",
 			"#/sessions/abc/files/..%2f..%2fx",
-		]) {
-			const k = kind(h);
-			expect(k.kind, h).toBe("app");
-			const r = parseRoute((k as { href: string }).href)!;
-			expect(r.sessionId).toBe("abc");
-			expect(r.view).toBe("files");
-			// Kept as the detail, decoded once (the server validates the path).
-			expect(r.detail).toBe(parseRoute(h)!.detail);
-		}
+			"#/sessions/abc/files/./a.md",
+			"#/sessions/abc/files/a/%2E/b",
+			"#/sessions/abc/git/staged:../x",
+		])
+			expect(kind(h), h).toEqual({ kind: "blocked" });
+		// Dots inside a name are fine.
+		expect(kind("#/sessions/abc/files/a..b/.env.example").kind).toBe("app");
 		// ".." where the view goes: not a view, no link.
 		expect(kind("#/sessions/abc/../def/chat")).toEqual({ kind: "blocked" });
 		expect(kind("#/sessions/abc/%2e%2e/files")).toEqual({ kind: "blocked" });
+	});
+	it("an external link keeps its inner spaces, encoded", () => {
+		expect(kind("https://ejemplo.com/a b")).toEqual({
+			kind: "external",
+			href: "https://ejemplo.com/a%20b",
+		});
+		expect(kind("  https://ejemplo.com/x  ")).toEqual({
+			kind: "external",
+			href: "https://ejemplo.com/x",
+		});
+		const [a] = renderInline("[x](<https://ejemplo.com/a b>)") as HTMLAnchorElement[];
+		expect(a!.getAttribute("href")).toBe("https://ejemplo.com/a%20b");
+		// A space inside a scheme still cannot hide one.
+		expect(kind("java script:alert(1)")).toEqual({ kind: "blocked" });
 	});
 	it("an app link is written so the router reads back exactly what it names", () => {
 		const details = [
