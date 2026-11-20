@@ -1,7 +1,8 @@
 # Renovación UI/UX — auditoría y propuesta (2026-11-13)
 
-Estado: **propuesta, pendiente de visto bueno del owner** para los cambios estructurales
-(sidebar en árbol, base en shell v2). Las correcciones no disruptivas avanzan por PR propios.
+Estado: **dirección aprobada por el owner (2026-11-14)**. El rediseño se construye sobre
+**shell v2**; la activación global de `UI_SHELL` todavía no está autorizada — ver
+[`shell-v2-activation.md`](./shell-v2-activation.md) (criterios de aceptación y rollback).
 
 - [`proposal.html`](./proposal.html) — el entregable: hallazgos con evidencia, **prototipo
   navegable** (desktop y mobile; sidebar A/B/C), sistema visual, plan por PR, límites con D3.
@@ -36,9 +37,22 @@ espaciado 2/4/6/8/12/16/24/32; radios 4/6/10; controles 24/28/36 px con área t�
 estado de sesión por **forma + color**, estado de Claude como texto aparte, y «Te necesita»
 solo con evidencia fresca del hook (regla vigente de presencia).
 
-## Estado (2026-11-13)
+## Decisiones del owner (2026-11-14)
 
-Mergeados: #639 (B1, A1, A3), #640 (sidebar en árbol, N1–N3). En curso: #641 (drawer y toasts en el teléfono).
+1. **Shell v2 es la base** de las vistas y componentes nuevos. No se invierte trabajo considerable
+   en v1. `UI_SHELL` en VM100 no cambia hasta validar v2 en desktop y en iPhone con `?ui=v2`.
+2. **Presencia de Claude en el sidebar**: sí, compacta, con las lecturas existentes — cada 30 s,
+   solo proyectos expandidos y página visible, sin lecturas duplicadas, «desconocido» cuando la
+   evidencia venció, estado por forma o texto además de color.
+3. **#616** sigue abierto hasta una validación real en iOS.
+4. Los cambios estructurales de navegación global necesitan validación visual del owner antes de
+   activarse para todos.
+
+## Estado (2026-11-14)
+
+Mergeados: #638 (esta auditoría), #639 (B1, A1, A3), #640 (sidebar en árbol, N1–N3), #641
+(drawer y toasts en el teléfono). En curso: #642 (presencia en el sidebar), accesibilidad
+A2/A4 con barrido axe en CI, sistema visual (superficies por rol, escala tipográfica, radios).
 
 ## Plan
 
@@ -52,8 +66,10 @@ Mergeados: #639 (B1, A1, A3), #640 (sidebar en árbol, N1–N3). En curso: #641 
 
 ## Límites con D3 (Claude B)
 
-B: `teamView.ts`, `teamModel.ts`, `teamLog.ts`, la parte de proyectos de `api.ts` y del mock.
-A: shell, sidebar, vistas de sesión, `tokens.css`, iconos, resto de `styles/`.
-Compartido: `team.css` (solo cambio mecánico a tokens, en una ventana acordada).
-Reservado para D3, sin implementar: acciones del hilo («Detener relevos»), tarjetas nuevas de
-«For you», pantalla de aprobación.
+Actualizado 2026-11-14 (diseño de D3, #643 §8.2 y §12.8): **B no toca archivos del frontend**.
+A es dueño de todo `frontend/`, incluida la presentación de Project Chat (`team.css`,
+`teamView.ts`); la lógica de `teamModel.ts` no se cambia sin acordarlo en el PR de B.
+Para D3, A **solo diseña el espacio visual** (tarjeta de colaboración, tarjeta de alcance al
+autorizar, estados de entrega, Pausar / Reanudar / Detener, entradas nuevas de «Para vos»); la
+implementación espera el contrato de `GET …/grants/:id` y los eventos de D3 ya mergeados. No se
+inventan campos ni APIs.
