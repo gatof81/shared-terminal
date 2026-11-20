@@ -49,7 +49,14 @@ test.describe("new agent form", () => {
 	});
 
 	async function openFromProjectChat(page: import("@playwright/test").Page): Promise<void> {
-		await page.getByRole("button", { name: "+ Nueva sesión con agente" }).click();
+		const create = page.getByRole("button", { name: "+ Nueva sesión con agente" });
+		// The button lives in "Administrar agentes" (closed on a project with
+		// agents): opened from the project's ⋯ menu first, unless it already is.
+		if (!(await create.isVisible())) {
+			await page.getByRole("button", { name: "Acciones del proyecto" }).click();
+			await page.getByRole("menuitem", { name: "Administrar agentes" }).click();
+		}
+		await create.click();
 		await expect(page.locator("#new-session-modal-title")).toBeVisible();
 	}
 

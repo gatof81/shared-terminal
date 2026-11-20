@@ -25,10 +25,17 @@ import { highlightCode, languageForFence } from "./highlight.js";
 export interface MarkdownOptions {
 	/** Called for workspace-relative links (`./docs/setup.md`). */
 	onRelativeLink?: (href: string) => void;
+	/**
+	 * The app's own routes (`#/sessions/<id>…`, `#/projects/<pid>…`): given a
+	 * fragment, its canonical hash when it IS one of them, else null. Without
+	 * it (the Files preview) every fragment is an in-document anchor.
+	 */
+	appRoute?: (hash: string) => string | null;
 }
 
 export type HrefKind =
 	| { kind: "external"; href: string }
+	| { kind: "app"; href: string }
 	| { kind: "anchor"; slug: string }
 	| { kind: "relative"; href: string }
 	| { kind: "blocked" };
@@ -41,20 +48,45 @@ const SAFE_SCHEMES = new Set(["http:", "https:", "mailto:"]);
  * them when parsing a URL — `java\tscript:` and ` javascript:` are both
  * live javascript: URLs to the browser.
  */
-export function classifyHref(raw: string): HrefKind {
+export function classifyHref(raw: string, appRoute?: MarkdownOptions["appRoute"]): HrefKind {
+	// An address of the app itself: the destination EXACTLY as written,
+	// starting with "#/" — never after the stripping below, which would eat
+	// the spaces of a file name and make an app address out of " #/x" or
+	// "#\t/x". It is re-written canonically by the app's own parser (never the
+	// text as the model wrote it) and navigated in place; a "#/" the router
+	// does not recognise (or with a malformed %) is no link at all.
+	if (appRoute && raw.startsWith("#/")) {
+		const route = appRoute(raw);
+		return route !== null ? { kind: "app", href: route } : { kind: "blocked" };
+	}
+	// The scheme is judged with every space and control char removed
+	// (`probe`): browsers ignore them when parsing a URL — `java\tscript:` and
+	// ` javascript:` are both live javascript: URLs to the browser. An
+	// external link keeps its inner spaces, encoded (`a b` → `a%20b`): the
+	// address written, not another one.
 	// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping control chars IS the point
-	const href = raw.replace(/[\u0000-\u0020\u007f]+/g, "");
+	const kept = raw.replace(/[\u0000-\u001f\u007f]+/g, "").trim();
+	const probe = kept.replace(/ +/g, "");
+	const href = probe;
 	if (href === "") return { kind: "blocked" };
-	if (href.startsWith("#")) return { kind: "anchor", slug: slugify(decodeSafe(href.slice(1))) };
+	if (href.startsWith("#")) {
+		// Only "#/" after stripping: an app address in disguise, not an anchor.
+		if (appRoute && href.startsWith("#/")) return { kind: "blocked" };
+		return { kind: "anchor", slug: slugify(decodeSafe(href.slice(1))) };
+	}
 	const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(href);
 	if (scheme) {
 		return SAFE_SCHEMES.has(`${(scheme[1] as string).toLowerCase()}:`)
-			? { kind: "external", href }
+			? { kind: "external", href: kept.replace(/ /g, "%20") }
 			: { kind: "blocked" };
 	}
 	// Protocol-relative `//host/x` would navigate off-site with whatever
 	// scheme the app runs on — treat it as external only if it's http(s).
-	if (href.startsWith("//")) return { kind: "external", href: `https:${href}` };
+	if (href.startsWith("//"))
+		return { kind: "external", href: `https:${kept.replace(/ /g, "%20")}` };
+	// Browsers read a backslash as a slash in a URL: `/\host` and `\\host`
+	// are `//host` to them, not a workspace path.
+	if (/^[\\/]{2}/.test(href)) return { kind: "blocked" };
 	return { kind: "relative", href };
 }
 
@@ -290,7 +322,7 @@ function parseLinkTarget(
 }
 
 function renderLink(text: Node[], rawHref: string, opts: MarkdownOptions): Node {
-	const target = classifyHref(rawHref);
+	const target = classifyHref(rawHref, opts.appRoute);
 	if (target.kind === "blocked") {
 		// Keep the visible text; drop the dangerous target entirely.
 		const span = el("span", "md-link-blocked");
@@ -315,6 +347,9 @@ function renderLink(text: Node[], rawHref: string, opts: MarkdownOptions): Node 
 		// noopener: no window.opener handle back into the app.
 		// noreferrer: don't leak the app URL (which carries a session id).
 		a.rel = "noopener noreferrer nofollow";
+	} else if (target.kind === "app") {
+		// Same tab: the hash change is the app's router's (hashchange).
+		a.href = target.href;
 	} else if (target.kind === "anchor") {
 		// Never let a fragment reach location.hash — the app's deep-link
 		// router (#/sessions/<id>) owns it. Scroll within the preview.

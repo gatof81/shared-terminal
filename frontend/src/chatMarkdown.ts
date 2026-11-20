@@ -6,6 +6,7 @@
 import { copyText } from "./clipboard.js";
 import { showCopySuccessToast, showToast } from "./main.js";
 import { renderMarkdown } from "./markdown.js";
+import { appRouteHash } from "./router.js";
 import { button, el } from "./ui.js";
 
 export function copyButton(label: string, text: () => string, title?: string): HTMLButtonElement {
@@ -23,9 +24,13 @@ export function copyButton(label: string, text: () => string, title?: string): H
 	return b;
 }
 
-/** Rendered Markdown with a Copy button on every code block. */
+/**
+ * Rendered Markdown with a Copy button on every code block. A link to a place
+ * of the app (router.appRouteHash) navigates there; agent text is untrusted,
+ * so anything else keeps markdown.ts's rules.
+ */
 export function markdownBlock(text: string): HTMLElement {
-	const md = renderMarkdown(text);
+	const md = renderMarkdown(text, { appRoute: appRouteHash });
 	md.classList.add("chat-md");
 	for (const pre of [...md.querySelectorAll<HTMLElement>("pre.md-pre")]) {
 		const wrap = el("div", "chat-pre");

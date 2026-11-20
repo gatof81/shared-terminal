@@ -13,12 +13,17 @@ import { acpLiveUp, subscribeAcp } from "./acpLive.js";
 import {
 	ACTIVITY_STATE,
 	activityRows,
+	agentStatus,
 	answerText,
+	applyEdits,
 	authFromActivity,
 	groupThread,
+	mapThroughEdits,
 	questionForm,
+	recipientRow,
 	recipientsOf,
 	STATE_LABEL,
+	setRecipient,
 	type ThreadItem,
 	upsert,
 	who,
@@ -68,12 +73,49 @@ export class AcpThread {
 	readonly root = el("div", "acp-thread");
 	private readonly threadEl = el("div", "acp-chat-thread");
 	private readonly composer = el("form", "acp-chat-composer");
-	private readonly mentionsEl = el("div", "acp-mentions");
 	readonly input = el("textarea", "acp-chat-input");
-	private readonly sendBtn = el("button", "files-btn acp-chat-send", "Enviar");
+	/** Inside the field's right edge (an arrow): see the constructor. */
+	private readonly sendBtn = el("button", "acp-chat-send");
+	/** Project Chat with more than one agent: "+" opens the recipients menu. */
+	private readonly pickBtn = el("button", "acp-pick-btn", "+");
+	/** The menu's box (positioned over the thread): a note, then the menu itself. */
+	private readonly pickMenu = el("div", "acp-pick-menu");
+	private readonly pickList = el("div", "acp-pick-list");
+	/** Why nobody is checked: an unknown leading mention (recipientsOf's error). */
+	private readonly pickNote = el("p", "acp-pick-note");
+	/** Read by a screen reader: "Enviando…", then "Enviado a @a, @b" (not the queue line). */
+	private readonly sendStatus = el("div", "visually-hidden");
 	private readonly hint = el("div", "acp-chat-hint");
+	/**
+	 * "↓ N novedades": rows that arrived, or got their answer, below a reader
+	 * who is further up. Each row counts once (a Set of ids).
+	 */
+	private readonly newPill = el("button", "chat-float acp-new-pill");
+	/** Says it to a screen reader too (the pill itself appears and goes). */
+	private readonly newAnnounce = el("div", "visually-hidden");
+	private readonly newIds = new Set<number>();
+	/** Highest message id the last render showed (new ones are above it). */
+	private shownMax = 0;
+	/**
+	 * Per row shown, its outcome as last rendered: a final state and whether
+	 * it has an answer. A change there is news; live activity and the partial
+	 * text of a running message are not (they would make the pill blink).
+	 */
+	private readonly shownOutcome = new Map<number, string>();
+	/**
+	 * Whether the reader is at the end of the thread, kept by scroll events.
+	 * The thread's height also changes WITHOUT a scroll event (the keyboard,
+	 * the field growing, a rotation): the last scroll's answer is the truth
+	 * then, a geometry read after the shrink would not be.
+	 */
+	private atBottom = true;
+	/** The thread's clientHeight when last seen by a scroll / resize observation. */
+	private box = 0;
 
 	private source: ThreadSource | null = null;
+	/** A chat was (re)opened: its reading place is put back once its feed is read. */
+	private placePending = false;
+	private anchorFrame = 0;
 	private gen = 0;
 	private messages: AcpMessage[] = [];
 	private hasEarlier = false;
@@ -152,9 +194,15 @@ export class AcpThread {
 	onState: (s: ThreadState) => void = () => {};
 
 	constructor() {
-		this.input.rows = 4;
+		// One row; CSS sets the resting height (one line on a phone, two on a
+		// desktop) and fitInput() grows it with the text up to a cap.
+		this.input.rows = 1;
 		this.input.setAttribute("aria-label", "Mensaje");
 		this.sendBtn.type = "submit";
+		this.sendBtn.setAttribute("aria-label", "Enviar");
+		this.sendBtn.title = "Enviar (Ctrl+Enter)";
+		this.sendBtn.append(sendIcon());
+		this.buildPicker();
 		const actions = el("div", "acp-chat-actions");
 		this.recoverBtn.type = "button";
 		this.recoverBtn.hidden = true;
@@ -167,26 +215,105 @@ export class AcpThread {
 			this.input.focus();
 			this.changed();
 		});
-		actions.append(this.hint, this.recoverBtn, this.sendBtn);
+		actions.append(this.hint, this.recoverBtn);
+		const row = el("div", "acp-chat-row");
+		// The arrow sits inside the field's frame, bottom right (it stays there
+		// as the field grows); the field's padding keeps the text clear of it.
+		const field = el("div", "acp-chat-field");
+		field.append(this.input, this.sendBtn);
+		row.append(this.pickBtn, field, this.pickMenu);
 		// Errors sit by the field, not at the top of the thread: a refused send
 		// must be seen where the person is looking, however long the thread.
 		this.errorEl.setAttribute("role", "alert");
 		this.errorEl.hidden = true;
-		this.composer.append(this.errorEl, this.mentionsEl, this.input, actions);
+		this.sendStatus.setAttribute("role", "status");
+		this.sendStatus.setAttribute("aria-live", "polite");
+		this.composer.append(this.errorEl, actions, row, this.sendStatus);
+		// A tap on Enviar, a mention or "↓ N nuevos" must not take the focus from the field:
+		// on a phone that blur closes the keyboard, the layout grows back (the
+		// bottom bar returns) and the button moves away under the finger before
+		// the tap lands. Keyboard activation does not go through these events.
+		for (const b of [this.sendBtn, this.pickBtn, this.pickMenu, this.newPill])
+			for (const type of ["pointerdown", "mousedown"] as const)
+				b.addEventListener(type, (e) => {
+					if (document.activeElement === this.input) e.preventDefault();
+				});
+		this.input.addEventListener("input", () => {
+			this.fitInput();
+			this.renderHint();
+			this.syncSendBtn();
+			// What is written by hand shows in the menu as it is typed.
+			if (this.pickOpen) this.renderPicker();
+		});
+		this.newPill.type = "button";
+		this.newPill.hidden = true;
+		this.newPill.addEventListener("click", () => this.scrollToEnd());
+		this.newAnnounce.setAttribute("role", "status");
+		this.newAnnounce.setAttribute("aria-live", "polite");
+		const wrap = el("div", "acp-thread-wrap");
+		wrap.append(this.threadEl, this.newPill, this.newAnnounce);
+		this.threadEl.addEventListener(
+			"scroll",
+			() => {
+				const t = this.threadEl;
+				// Hidden (the chat's overlay closed: a link followed, another
+				// view): a scroll of a box with no height says nothing about the reader.
+				if (t.clientHeight === 0) return;
+				// The box changed since the last look (keyboard, the field growing,
+				// a rotation): this scroll is the layout's, not the reader's — a
+				// reader at the end is pinned there, not reclassified as "above".
+				if (t.clientHeight !== this.box) {
+					this.box = t.clientHeight;
+					if (this.atBottom) {
+						t.scrollTop = t.scrollHeight;
+						return;
+					}
+				}
+				this.atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 60;
+				if (this.atBottom) this.clearNew();
+				if (!this.anchorFrame)
+					this.anchorFrame = requestAnimationFrame(() => {
+						this.anchorFrame = 0;
+						this.noteAnchor();
+					});
+			},
+			{ passive: true },
+		);
+		// The thread's box changes without a scroll event too: a reader at the
+		// end stays at the end; one reading further up keeps scrollTop, i.e.
+		// the same text in view.
+		if (typeof ResizeObserver !== "undefined")
+			new ResizeObserver(() => {
+				const t = this.threadEl;
+				const wasHidden = this.box === 0;
+				this.box = t.clientHeight;
+				if (t.clientHeight === 0) return;
+				// Shown again (Back from a followed link to the same chat): the
+				// box was rebuilt, its scroll offset is not to be trusted.
+				if (wasHidden && !this.placePending) this.restorePlace();
+				else if (this.atBottom) t.scrollTop = t.scrollHeight;
+			}).observe(this.threadEl);
+		// The field's cap depends on the visible height (keyboard, rotation).
+		window.visualViewport?.addEventListener("resize", () => this.fitInput());
+		window.addEventListener("resize", () => this.fitInput());
 		this.moreBtn.type = "button";
 		this.moreBtn.addEventListener("click", () => {
 			this.moreBtn.disabled = true;
 			void this.loadEarlier();
 		});
-		this.root.append(this.threadEl, this.composer);
+		this.root.append(wrap, this.composer);
+		// send() empties the field before its first await; the field goes back
+		// to its resting height now, not when the network answers.
 		this.composer.addEventListener("submit", (e) => {
 			e.preventDefault();
 			void this.send();
+			this.fitInput();
 		});
 		this.input.addEventListener("keydown", (e) => {
 			if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
 				e.preventDefault();
 				void this.send();
+				this.fitInput();
 			}
 		});
 	}
@@ -228,6 +355,7 @@ export class AcpThread {
 				: source.projectId === (this.source as { projectId: string }).projectId);
 		if (!same) {
 			this.gen++;
+			this.closePicker(false);
 			if (this.source) this.saveDraft(this.source, this.input.value);
 			this.source = source;
 			this.input.value = this.drafts.get(sourceKey(source)) ?? "";
@@ -247,12 +375,15 @@ export class AcpThread {
 			this.error = "";
 			this.feed = "loading";
 			this.readOnce = false;
+			this.atBottom = true;
+			// Put back where this chat was being read, once its feed is in.
+			this.placePending = true;
+			this.shownMax = 0;
+			this.shownOutcome.clear();
+			this.clearNew();
 			this.offerUnsent();
 			this.threadEl.replaceChildren(el("div", "acp-chat-empty", "Cargando…"));
-			this.input.placeholder =
-				source.kind === "agent"
-					? `Escribile a @${source.name}. Ctrl+Enter envía. Podés seguir enviando mientras trabaja.`
-					: "Empezá con el agente (@nombre) al que va dirigido. Ctrl+Enter envía. Los mensajes se encolan si está ocupado.";
+			this.setPlaceholder();
 		}
 		if (!this.unsubscribe) this.unsubscribe = subscribeAcp((ev) => this.onLive(ev));
 		// Runner liveness and queue sizes are not pushed: re-read every 15 s while shown.
@@ -274,6 +405,7 @@ export class AcpThread {
 
 	/** Stops following (the DOM and state stay for a quick return). */
 	close(): void {
+		this.closePicker(false);
 		this.unsubscribe?.();
 		this.unsubscribe = null;
 		this.stopPoll();
@@ -302,8 +434,17 @@ export class AcpThread {
 			this.error = "";
 			this.feed = "ok";
 			this.readOnce = true;
+			if (this.placePending) {
+				this.placePending = false;
+				// The rows first: the render `applyFeed` asked for waits for the
+				// next frame, and the anchor's row must be on the page now (a
+				// return from ANOTHER chat left this one with only "Cargando…").
+				this.render();
+				this.restorePlace();
+			}
 		} catch (err) {
 			if (gen !== this.gen) return;
+			this.placePending = false;
 			const e = err as Error & { status?: number };
 			// A re-read that fails (a reconnect, the fallback poll, a flaky
 			// link) must not take away a history already read: `stale`.
@@ -504,7 +645,7 @@ export class AcpThread {
 		const focused = document.activeElement as HTMLElement | null;
 		const keepFocus =
 			focused && t.contains(focused) && focused.closest(".acp-question") ? focused : null;
-		const atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 60;
+		const atBottom = this.atBottom;
 		const prevHeight = t.scrollHeight;
 		const prevTop = t.scrollTop;
 		const nodes: HTMLElement[] = [];
@@ -530,6 +671,8 @@ export class AcpThread {
 				this.items.set(key, cached);
 			}
 			used.add(key);
+			// The reading anchor's handle (noteAnchor / restorePlace).
+			cached.el.dataset.anchor = key;
 			nodes.push(cached.el);
 		}
 		for (const key of [...this.items.keys()]) if (!used.has(key)) this.items.delete(key);
@@ -540,11 +683,125 @@ export class AcpThread {
 				nodes.push(this.questionEl(q));
 		syncChildren(t, nodes);
 		if (keepFocus?.isConnected) keepFocus.focus({ preventScroll: true });
-		if (atBottom || this.toBottom) t.scrollTop = t.scrollHeight;
+		const end = atBottom || this.toBottom;
+		if (end) t.scrollTop = t.scrollHeight;
 		else if (prevTop < 5 && t.scrollHeight > prevHeight) t.scrollTop = t.scrollHeight - prevHeight;
 		else t.scrollTop = prevTop;
 		this.toBottom = false;
+		// News below a reader who is further up: a new row (an id above what
+		// was shown — an earlier page has lower ids), or a row already shown
+		// that got its answer or finished.
+		const before = this.newIds.size;
+		for (const m of this.messages) {
+			const outcome = `${FINAL.has(m.state) ? m.state : ""}|${m.result_text ? "r" : ""}`;
+			const prev = this.shownOutcome.get(m.id);
+			if (!end && this.shownMax > 0) {
+				if (prev === undefined ? m.id > this.shownMax : prev !== outcome && outcome !== "|")
+					this.newIds.add(m.id);
+			}
+			this.shownOutcome.set(m.id, outcome);
+		}
+		if (end) {
+			this.atBottom = true;
+			this.clearNew();
+		}
+		this.shownMax = Math.max(this.shownMax, this.messages.at(-1)?.id ?? 0);
+		this.renderPill();
+		if (this.newIds.size > before) this.newAnnounce.textContent = `${this.pillText()} más abajo`;
 		this.renderComposer();
+	}
+
+	private pillText(): string {
+		const n = this.newIds.size;
+		return `${n} ${n === 1 ? "novedad" : "novedades"}`;
+	}
+
+	private renderPill(): void {
+		this.newPill.hidden = this.newIds.size === 0;
+		this.newPill.textContent = `↓ ${this.pillText()}`;
+	}
+
+	private clearNew(): void {
+		if (this.newIds.size === 0 && this.newPill.hidden) return;
+		this.newIds.clear();
+		this.renderPill();
+	}
+
+	/**
+	 * Remembers where this chat is being read, by its first row in view and
+	 * that row's offset — never by distance to the end, which new rows below
+	 * change (the capture Chat's read anchor, chatView.ts). A reader at the
+	 * end has no anchor: they come back to the end.
+	 */
+	private noteAnchor(): void {
+		const t = this.threadEl;
+		if (!this.source || this.placePending || this.feed === "loading" || t.clientHeight === 0)
+			return;
+		const key = sourceKey(this.source);
+		if (this.atBottom) {
+			readingPlaces.delete(key);
+			return;
+		}
+		const top = t.getBoundingClientRect().top;
+		for (const c of t.children) {
+			const anchor = (c as HTMLElement).dataset?.anchor;
+			if (!anchor) continue;
+			const r = c.getBoundingClientRect();
+			if (r.bottom <= top) continue;
+			readingPlaces.set(key, { anchor, offset: r.top - top });
+			return;
+		}
+	}
+
+	/** Back to this chat's anchor; with none (or its row no longer shown), the end. */
+	private restorePlace(): void {
+		const t = this.threadEl;
+		const place = this.source ? readingPlaces.get(sourceKey(this.source)) : undefined;
+		const row = place
+			? [...t.children].find((c) => (c as HTMLElement).dataset?.anchor === place.anchor)
+			: undefined;
+		if (!place || !row) {
+			this.scrollToEnd();
+			return;
+		}
+		this.box = t.clientHeight;
+		t.scrollTop += row.getBoundingClientRect().top - t.getBoundingClientRect().top - place.offset;
+		this.atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 60;
+	}
+
+	private scrollToEnd(): void {
+		this.atBottom = true;
+		this.threadEl.scrollTop = this.threadEl.scrollHeight;
+		this.clearNew();
+	}
+
+	/**
+	 * The field grows with its text up to 6 lines or 40% of the visible
+	 * height (whichever is smaller), then scrolls inside; emptied, it is back
+	 * to its resting height (CSS min-height: one line on a phone, two on a
+	 * desktop).
+	 */
+	private fitInput(): void {
+		const i = this.input;
+		if (!i.isConnected) return;
+		this.setPlaceholder();
+		// Empty: the resting height. Chromium counts a placeholder's wrapped
+		// lines in scrollHeight, so measuring would grow the field for it.
+		if (i.value === "") {
+			i.style.height = "";
+			i.style.overflowY = "";
+			return;
+		}
+		const cs = getComputedStyle(i);
+		const line = Number.parseFloat(cs.lineHeight) || 20;
+		const border = Number.parseFloat(cs.borderTopWidth) + Number.parseFloat(cs.borderBottomWidth);
+		const frame = Number.parseFloat(cs.paddingTop) + Number.parseFloat(cs.paddingBottom) + border;
+		const visible = window.visualViewport?.height ?? window.innerHeight;
+		const cap = Math.max(line + frame, Math.min(6 * line + frame, visible * 0.4));
+		i.style.height = "auto";
+		const want = i.scrollHeight + border;
+		i.style.height = `${Math.min(want, cap)}px`;
+		i.style.overflowY = want > cap + 1 ? "auto" : "hidden";
 	}
 
 	/** Everything an item shows: equal ⇒ the element on screen is still right. */
@@ -816,6 +1073,7 @@ export class AcpThread {
 					const prefix = this.source?.kind === "project" ? `@${q.agent} ` : "";
 					this.input.value = `${prefix}Sobre tu pregunta «${form.message}»: ${said && !said.startsWith("(") ? said : ""}`;
 					this.input.focus();
+					this.fitInput();
 				});
 				card.append(again);
 			}
@@ -933,24 +1191,231 @@ export class AcpThread {
 		this.recoverBtn.hidden = !u || u.restored || this.composerMode !== "on";
 		const writable = this.composerMode === "on";
 		this.input.disabled = !writable;
-		this.sendBtn.disabled = !writable;
+		this.syncSendBtn();
 		this.composer.classList.toggle("acp-composer-off", this.composerMode === "off");
-		const src = this.source;
-		const names = [...this.agents.keys()];
-		this.mentionsEl.replaceChildren();
-		if (writable && src?.kind === "project" && names.length > 1) {
-			for (const n of names) {
-				const b = el("button", "acp-mention", `@${n}`);
-				b.type = "button";
-				b.title = `Mencionar a @${n}`;
-				b.addEventListener("click", () => insertMention(this.input, n));
-				this.mentionsEl.append(b);
+		const picks = writable && this.source?.kind === "project" && this.agents.size > 1;
+		this.pickBtn.hidden = !picks;
+		if (!picks) this.closePicker(false);
+		else if (this.pickOpen) this.renderPicker();
+		this.renderHint();
+		this.fitInput();
+	}
+
+	/** The arrow: off when nothing can be sent (still on while another send is out). */
+	private syncSendBtn(): void {
+		this.sendBtn.disabled = this.composerMode !== "on" || this.input.value.trim() === "";
+	}
+
+	// ── Recipients menu ("+") ───────────────────────────────────────────
+	//
+	// Edits ONLY the leading @mentions of the text (acpModel.setRecipient):
+	// what it shows checked is always recipientsOf(text).to. A small menu of
+	// its own, not openActionMenu (a modal that takes the focus): opened by a
+	// tap while typing, it must leave the focus — and a phone's keyboard —
+	// in the field.
+
+	private pickOpen = false;
+	/** "+" activated from the keyboard (Enter / Space on it): the focus goes into the menu. */
+	private pickByKey = false;
+
+	private buildPicker(): void {
+		const id = `acp-pick-${++pickerSeq}`;
+		this.pickList.id = id;
+		this.pickList.setAttribute("role", "menu");
+		this.pickList.setAttribute("aria-label", "Destinatarios");
+		this.pickNote.id = `${id}-note`;
+		this.pickNote.hidden = true;
+		this.pickMenu.append(this.pickNote, this.pickList);
+		this.pickMenu.hidden = true;
+		// Not from the click's `detail`: a real touch tap arrives with detail 0
+		// too, and moving the focus off the field closes a phone's keyboard.
+		this.pickBtn.addEventListener("keydown", (e) => {
+			if (e.key === "Enter" || e.key === " ") this.pickByKey = true;
+		});
+		this.pickBtn.addEventListener("pointerdown", () => {
+			this.pickByKey = false;
+		});
+		this.pickBtn.type = "button";
+		this.pickBtn.hidden = true;
+		this.pickBtn.setAttribute("aria-label", "Elegir destinatarios");
+		this.pickBtn.title = "Elegir destinatarios";
+		this.pickBtn.setAttribute("aria-haspopup", "menu");
+		this.pickBtn.setAttribute("aria-expanded", "false");
+		this.pickBtn.setAttribute("aria-controls", id);
+		this.pickBtn.addEventListener("click", () => {
+			const byKey = this.pickByKey;
+			this.pickByKey = false;
+			if (this.pickOpen) {
+				this.closePicker(false);
+				return;
 			}
-		}
-		this.mentionsEl.hidden = this.mentionsEl.childElementCount === 0;
+			this.pickOpen = true;
+			this.pickMenu.hidden = false;
+			this.pickBtn.setAttribute("aria-expanded", "true");
+			this.renderPicker();
+			// From the keyboard the focus goes into the menu; a tap or a click
+			// leaves it where it was (the field, with its keyboard).
+			if (byKey) this.pickRows()[0]?.focus();
+		});
+		this.pickMenu.addEventListener("keydown", (e) => {
+			const rows = this.pickRows();
+			const i = rows.indexOf(document.activeElement as HTMLElement);
+			let next = -1;
+			if (e.key === "ArrowDown") next = (i + 1) % rows.length;
+			else if (e.key === "ArrowUp") next = (i - 1 + rows.length) % rows.length;
+			else if (e.key === "Home") next = 0;
+			else if (e.key === "End") next = rows.length - 1;
+			else if (e.key === "Escape") {
+				e.preventDefault();
+				e.stopPropagation();
+				this.closePicker(true);
+				return;
+			} else if (e.key === "Tab") {
+				this.closePicker(false);
+				return;
+			}
+			if (next < 0 || rows.length === 0) return;
+			e.preventDefault();
+			rows[next]!.focus();
+		});
+		// Escape while typing with the menu open closes the menu (only).
+		this.input.addEventListener("keydown", (e) => {
+			if (e.key !== "Escape" || !this.pickOpen) return;
+			e.preventDefault();
+			e.stopPropagation();
+			this.closePicker(true);
+		});
+		// A tap or click anywhere else closes it.
+		document.addEventListener(
+			"pointerdown",
+			(e) => {
+				if (!this.pickOpen) return;
+				const t = e.target as Node;
+				if (this.pickMenu.contains(t) || this.pickBtn.contains(t)) return;
+				this.closePicker(false);
+			},
+			true,
+		);
+	}
+
+	private pickRows(): HTMLElement[] {
+		return [...this.pickList.querySelectorAll<HTMLElement>("[role=menuitemcheckbox]")];
+	}
+
+	private closePicker(focusField: boolean): void {
+		if (!this.pickOpen) return;
+		this.pickOpen = false;
+		this.pickMenu.hidden = true;
+		this.pickBtn.setAttribute("aria-expanded", "false");
+		if (focusField) this.input.focus();
+	}
+
+	private renderPicker(): void {
+		const names = [...this.agents.keys()];
+		const text = this.input.value;
+		const focused = (document.activeElement as HTMLElement | null)?.dataset?.agent;
+		const now = Date.now();
+		const rows = names.map((n) => {
+			const { checked, implicit } = recipientRow(text, names, n);
+			const a = this.agents.get(n)!;
+			const st = agentStatus(a, now, this.auth.get(n) === true);
+			const b = el("button", `acp-pick-row${checked ? " checked" : ""}`);
+			b.type = "button";
+			b.tabIndex = -1;
+			b.dataset.agent = n;
+			b.setAttribute("role", "menuitemcheckbox");
+			b.setAttribute("aria-checked", String(checked));
+			const mark = el("span", "acp-pick-mark", checked ? "✓" : "");
+			mark.setAttribute("aria-hidden", "true");
+			const info = el("span", "acp-pick-info");
+			info.append(agentAvatar(n), el("span", `acp-pick-state acp-status-${st.tone}`, st.label));
+			if (implicit) {
+				// Checked by a mention inside the message: only editing the text unchecks it.
+				info.append(el("span", "acp-pick-why", "mencionado en el mensaje"));
+				b.setAttribute("aria-disabled", "true");
+			}
+			b.append(mark, info);
+			b.addEventListener("click", () => this.toggleRecipient(n));
+			return b;
+		});
+		this.pickList.replaceChildren(...rows);
+		// A leading mention that is no agent: nobody is checked and nothing
+		// would be sent — said here, not only when sending.
+		const r = recipientsOf(text, names);
+		const unknownLead = r.error !== null && /^\s*@[A-Za-z0-9_-]/.test(text);
+		this.pickNote.hidden = !unknownLead;
+		this.pickNote.textContent = unknownLead ? (r.error ?? "") : "";
+		if (unknownLead) this.pickList.setAttribute("aria-describedby", this.pickNote.id);
+		else this.pickList.removeAttribute("aria-describedby");
+		if (focused) rows.find((r) => r.dataset.agent === focused)?.focus();
+	}
+
+	/** Checks / unchecks `name` by editing the leading mentions; the caret keeps its place. */
+	private toggleRecipient(name: string): void {
+		const names = [...this.agents.keys()];
+		const i = this.input;
+		const text = i.value;
+		const row = recipientRow(text, names, name);
+		const edits = setRecipient(text, names, name, !row.checked);
+		if (edits.length === 0) return;
+		const [a, b, dir] = [i.selectionStart, i.selectionEnd, i.selectionDirection];
+		i.value = applyEdits(text, edits);
+		i.setSelectionRange(mapThroughEdits(a, edits), mapThroughEdits(b, edits), dir ?? "none");
+		this.fitInput();
+		this.renderHint();
+		this.syncSendBtn();
+		this.renderPicker();
+	}
+
+	/**
+	 * Who reads what is written here (a direct message is private; in a
+	 * project, start with the agent): the headers no longer say it. The full
+	 * text where the field rests on two wide lines; on a phone the field is
+	 * one line, so only what fits in it — the privacy first, since a long
+	 * name cuts the end off.
+	 */
+	private setPlaceholder(): void {
+		const src = this.source;
+		if (!src) return;
+		const narrow = window.matchMedia?.("(max-width: 640px)").matches === true;
+		// 320–360 px: "+" and the arrow leave the field ~180 px of text.
+		const tiny = window.matchMedia?.("(max-width: 360px)").matches === true;
+		const text =
+			src.kind === "agent"
+				? narrow
+					? `Privado · a @${src.name}`
+					: `Mensaje directo a @${src.name} (privado). Ctrl+Enter envía; podés seguir enviando mientras trabaja.`
+				: tiny
+					? "Con @agente…"
+					: narrow
+						? "Empezá con @agente…"
+						: "Empezá con @agente (uno o varios): cada uno lo recibe en su cola y responde acá. Ctrl+Enter envía.";
+		if (this.input.placeholder !== text) this.input.placeholder = text;
+	}
+
+	/**
+	 * Shown only when there is something to say: this chat's queue, and the
+	 * size limit once the text gets near it (past it, it goes as an attachment).
+	 */
+	private renderHint(): void {
 		const queued = this.messages.filter((m) => m.state === "pending").length;
 		const running = this.messages.filter((m) => m.state === "running").length;
-		this.hint.textContent = `${running ? `${running} en curso · ` : ""}${queued ? `${queued} en espera · ` : ""}límite ${Math.round(this.maxBytes / 1024)} KiB (más grande: adjunto)`;
+		const parts: string[] = [];
+		if (this.sending) parts.push(this.sending > 1 ? `Enviando (${this.sending})…` : "Enviando…");
+		if (running) parts.push(`${running} en curso`);
+		if (queued) parts.push(`${queued} en espera`);
+		// UTF-8 takes at most 3 bytes per UTF-16 unit: below that bound nothing
+		// can be near the limit, and typing does not encode the text each key.
+		const text = this.input.value;
+		if (text.length * 3 >= this.maxBytes * 0.8) {
+			const bytes = new TextEncoder().encode(text).length;
+			const kib = (n: number) => `${Math.ceil(n / 1024)} KiB`;
+			if (bytes > this.maxBytes)
+				parts.push(`${kib(bytes)}: supera ${kib(this.maxBytes)}, se envía como adjunto`);
+			else if (bytes >= this.maxBytes * 0.8) parts.push(`${kib(bytes)} de ${kib(this.maxBytes)}`);
+		}
+		this.hint.textContent = parts.join(" · ");
+		this.hint.hidden = parts.length === 0;
 	}
 
 	// ── Sending ─────────────────────────────────────────────────────────
@@ -971,6 +1436,8 @@ export class AcpThread {
 		const clientId = retry?.clientId ?? crypto.randomUUID();
 		const bodies = retry?.bodies ?? new Map<string, string>();
 		this.input.value = "";
+		this.syncSendBtn();
+		this.closePicker(false);
 		this.drafts.delete(sourceKey(src));
 		// A send that did not go out gives its text back to ITS chat: into the
 		// field if that chat is on screen and the field is empty; otherwise it
@@ -1001,7 +1468,8 @@ export class AcpThread {
 		}
 		this.toBottom = true;
 		this.sending++;
-		this.sendBtn.textContent = this.sending > 1 ? `Enviando (${this.sending})…` : "Enviando…";
+		this.renderHint();
+		this.sendStatus.textContent = this.sending > 1 ? `Enviando (${this.sending})…` : "Enviando…";
 		const failed: string[] = [];
 		try {
 			const tooBig = new TextEncoder().encode(text).length > this.maxBytes;
@@ -1030,35 +1498,44 @@ export class AcpThread {
 			}
 			// The person may have moved to another chat meanwhile: nothing of this
 			// send is shown there; it is kept for THIS chat (giveBack).
-			if (failed.length)
+			if (failed.length) {
+				// The error (role=alert, next to the field) says it.
+				this.sendStatus.textContent = "";
 				giveBack(
 					`No se envió a ${failed.join("; ")}. Enviar el mismo texto de nuevo no duplica a quienes ya lo recibieron.`,
 				);
-			else {
+			} else {
 				// Sent: its failure record (if this was its retry, or it was taken
 				// back into the field) is done; an unsent text not yet taken back stays offered.
 				const u = this.unsent.get(key);
 				if (u && (u.clientId === clientId || u.restored)) this.unsent.delete(key);
+				this.sendStatus.textContent = `Enviado a ${to.to.map((n) => `@${n}`).join(", ")}`;
 			}
 		} finally {
 			this.sending--;
-			this.sendBtn.textContent = this.sending > 0 ? `Enviando (${this.sending})…` : "Enviar";
+			this.renderHint();
 			this.refreshAgentsSoon(0);
 			this.changed();
 		}
 	}
 }
 
-function insertMention(input: HTMLTextAreaElement, name: string): void {
-	const start = input.selectionStart ?? input.value.length;
-	const end = input.selectionEnd ?? start;
-	const before = input.value.slice(0, start);
-	const pad = before === "" || /\s$/.test(before) ? "" : " ";
-	const ins = `${pad}@${name} `;
-	input.value = before + ins + input.value.slice(end);
-	const at = start + ins.length;
-	input.setSelectionRange(at, at);
-	input.focus();
+/** States in which a message is over: reaching one is news for the pill. */
+const FINAL = new Set(["done", "failed", "uncertain"]);
+
+let pickerSeq = 0;
+
+/** The send arrow (decorative: the button carries aria-label "Enviar"). */
+function sendIcon(): SVGElement {
+	const ns = "http://www.w3.org/2000/svg";
+	const svg = document.createElementNS(ns, "svg");
+	svg.setAttribute("viewBox", "0 0 24 24");
+	svg.setAttribute("aria-hidden", "true");
+	svg.setAttribute("focusable", "false");
+	const path = document.createElementNS(ns, "path");
+	path.setAttribute("d", "M5 12h12M12 6l6 6-6 6");
+	svg.append(path);
+	return svg;
 }
 
 function time(iso: string): string {
@@ -1076,6 +1553,16 @@ function hue(name: string): number {
 }
 
 /** An agent's name with its avatar, in its colour: the same face wherever it speaks. */
+/** An agent's avatar + @name, in its colour (also the Project Chat header's). */
+export function agentAvatar(name: string): HTMLElement {
+	return agentId(name);
+}
+
+/** The hue of an agent's colour (avatars elsewhere: the header's group). */
+export function agentHue(name: string): number {
+	return hue(name);
+}
+
 function agentId(name: string): HTMLElement {
 	const id = el("span", "acp-msg-who acp-agent-id");
 	id.append(el("span", "acp-avatar", name.slice(0, 1).toUpperCase()), `@${name}`);
@@ -1088,6 +1575,12 @@ function agentVoice(bubble: HTMLElement, name: string): void {
 	bubble.classList.add("acp-voice");
 	bubble.style.setProperty("--acp-hue", String(hue(name)));
 }
+
+/**
+ * Where each chat was being read (by sourceKey), kept while the page lives:
+ * the first row in view and its offset from the thread's top.
+ */
+const readingPlaces = new Map<string, { anchor: string; offset: number }>();
 
 function sourceKey(src: ThreadSource): string {
 	return src.kind === "agent" ? `a:${src.name}` : `p:${src.projectId}`;
