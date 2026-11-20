@@ -165,13 +165,22 @@ describe("activity", () => {
 		]);
 		// A runner not connected yet on a session that just started: starting,
 		// then — past the grace — "sin señal".
-		expect(sidebarAgentStatus({ runnerSeenAt: null }, now, 30_000).word).toBe("iniciando");
-		expect(sidebarAgentStatus({ runnerSeenAt: null }, now, 200_000).word).toBe("sin señal");
+		expect(sidebarAgentStatus({ runnerSeenAt: null }, now, now - 30_000).word).toBe("iniciando");
+		expect(sidebarAgentStatus({ runnerSeenAt: null }, now, now - 200_000).word).toBe("sin señal");
 		expect(sidebarAgentStatus({ runnerSeenAt: null }, now).word).toBe("sin señal");
-		// A runner that did report and then went quiet is not "starting".
-		expect(sidebarAgentStatus({ runnerSeenAt: "2026-11-18T09:58:00Z" }, now, 30_000).word).toBe(
-			"sin señal",
-		);
+		// A restart seen by this page: the backend still has the previous run's
+		// seenAt (before the start) — the new runner has not reported yet.
+		const stale = "2026-11-18T09:58:00Z";
+		expect(sidebarAgentStatus({ runnerSeenAt: stale }, now, now - 30_000).word).toBe("iniciando");
+		expect(sidebarAgentStatus({ runnerSeenAt: stale }, now, now - 200_000).word).toBe("sin señal");
+		// A restart this page did not see (no start): no grace.
+		expect(sidebarAgentStatus({ runnerSeenAt: stale }, now).word).toBe("sin señal");
+		// A runner that did report after the start and then went quiet is not "starting".
+		expect(
+			sidebarAgentStatus({ runnerSeenAt: stale }, now, Date.parse("2026-11-18T09:57:30Z")).word,
+		).toBe("sin señal");
+		// A fresh report after the start: the ordinary state.
+		expect(sidebarAgentStatus({ runnerSeenAt: fresh }, now, now - 30_000).word).toBe("libre");
 		// Queued but idle: still the "libre" word, the queue in the full label.
 		expect(short({ runnerSeenAt: fresh, pending: 2 })).toEqual([
 			"libre",

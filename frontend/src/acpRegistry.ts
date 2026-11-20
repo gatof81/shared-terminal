@@ -38,6 +38,15 @@ let bySession = new Map<string, AcpSessionEntry>();
 let loaded = false;
 /** When (client clock) the list was last read: runner liveness is judged as of then. */
 let readAt = 0;
+/**
+ * Stale marks, counted (never timed: two moments can share a clock reading).
+ * An event the registry cannot patch right bumps `staleSeq`; a read takes the
+ * value current when it STARTS as its ticket, and `freshThrough` is the
+ * highest ticket a read landed with — so "a read that began after the event
+ * has landed" is `freshThrough >= the event's mark`, whoever made the read.
+ */
+let staleSeq = 0;
+let freshThrough = 0;
 
 function entry(a: AcpAgentRowLike): AcpSessionEntry {
 	return {
@@ -55,7 +64,12 @@ function announce(type: "st:acp-agents" | "st:acp-status"): void {
 	if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent(type));
 }
 
-export function setAcpAgents(list: ReadonlyArray<AcpAgentRowLike>): void {
+/**
+ * `ticket`: `acpReadTicket()` taken just before the request was sent; omitted,
+ * the read refreshes the entries but proves nothing about later events.
+ */
+export function setAcpAgents(list: ReadonlyArray<AcpAgentRowLike>, ticket?: number): void {
+	if (ticket !== undefined) freshThrough = Math.max(freshThrough, ticket);
 	const next = new Map(list.map((a) => [a.sessionId, entry(a)]));
 	const sameMembers =
 		next.size === bySession.size &&
@@ -102,6 +116,21 @@ export function acpEntryByName(name: string): AcpSessionEntry | null {
 	return null;
 }
 
+/** Something happened that only a new read can show: its mark. */
+export function markAcpStale(): number {
+	return ++staleSeq;
+}
+
+/** Taken by a reader right before it sends the request (see setAcpAgents). */
+export function acpReadTicket(): number {
+	return staleSeq;
+}
+
+/** The highest stale mark a read that started after it has already answered. */
+export function acpFreshThrough(): number {
+	return freshThrough;
+}
+
 /** The client time of the last read (0: never). */
 export function acpAgentsReadAt(): number {
 	return readAt;
@@ -112,4 +141,6 @@ export function resetAcpAgents(): void {
 	bySession = new Map();
 	loaded = false;
 	readAt = 0;
+	staleSeq = 0;
+	freshThrough = 0;
 }

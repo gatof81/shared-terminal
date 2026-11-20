@@ -9,11 +9,15 @@
 //   right, cause no read: a message going `running` (the agent works on it)
 //   or final (it no longer does), a question opening (it waits for you),
 //   activity (runner liveness, login). The period confirms them.
-// - A read (debounced, ≥ 3 s, skipped if the registry is fresher than that)
-//   follows only what a patch cannot resolve: a question that is answered,
-//   withdrawn or orphaned (does the agent still wait? another question of
-//   it may be open), an `agents` frame (someone joined, left, changed model
-//   or login state), and a (re)connect of the socket (events were missed).
+// - A read (debounced 3 s: a burst costs one) follows only what a patch
+//   cannot resolve: a question that is answered, withdrawn or orphaned (does
+//   the agent still wait? another question of it may be open), an `agents`
+//   frame (someone joined, left, changed model or login state), and a
+//   (re)connect of the socket (events were missed). Such a request is met
+//   only by a read that STARTED after the event — any reader's (the
+//   registry's stale marks, acpRegistry.ts); a read already in flight when
+//   it came, or one that failed, does not count: it is awaited or retried,
+//   never dropped.
 // - Tab hidden: nothing; what was due is read when it shows again.
 
 import { subscribeAcp } from "./acpLive.js";
@@ -22,6 +26,9 @@ import {
 	acpAgentsLoaded,
 	acpAgentsReadAt,
 	acpEntryByName,
+	acpFreshThrough,
+	acpReadTicket,
+	markAcpStale,
 	patchAcpAgent,
 	setAcpAgents,
 } from "./acpRegistry.js";
@@ -38,6 +45,8 @@ let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 /** A read was due while the tab was hidden: done when it shows. */
 let dirty = false;
 let inFlight: Promise<void> | null = null;
+/** The registry ticket the read in flight was sent with (acpRegistry.ts). */
+let inFlightTicket = 0;
 /** When this module last asked (a failed read must not make the period retry at once). */
 let lastAttempt = 0;
 
@@ -48,9 +57,15 @@ let lastAttempt = 0;
  * retried in the background (5 s, doubling, up to 60 s).
  */
 export function readAcpAgents(): Promise<void> {
-	if (!inFlight) lastAttempt = Date.now();
-	inFlight ??= acpListAgents()
-		.then(setAcpAgents, () => retryLater())
+	if (inFlight) return inFlight;
+	lastAttempt = Date.now();
+	const ticket = acpReadTicket();
+	inFlightTicket = ticket;
+	inFlight = acpListAgents()
+		.then(
+			(list) => setAcpAgents(list, ticket),
+			() => retryLater(),
+		)
 		.finally(() => {
 			inFlight = null;
 		});
@@ -111,14 +126,61 @@ function armPeriod(): void {
 	);
 }
 
+/** The stale mark the pending re-read must cover (0: none pending). */
+let wanted = 0;
+let staleRetryMs = DEBOUNCE_MS;
+
 function readSoon(): void {
+	wanted = markAcpStale();
+	armStale(DEBOUNCE_MS);
+}
+
+function armStale(ms: number): void {
 	if (debounceTimer) return;
 	debounceTimer = setTimeout(() => {
 		debounceTimer = null;
-		// Another reader just refreshed it: that read already says it.
-		if (age() < DEBOUNCE_MS) return;
-		readIfVisible();
-	}, DEBOUNCE_MS);
+		readStale();
+	}, ms);
+}
+
+function readStale(): void {
+	if (!started || wanted === 0) return;
+	// A read that began after the event already answered (this feed's or a
+	// chat's): it says what the event changed.
+	if (acpFreshThrough() >= wanted) {
+		wanted = 0;
+		staleRetryMs = DEBOUNCE_MS;
+		return;
+	}
+	// One in flight: begun after the event, it is the read wanted (judged
+	// when it lands, a failure backs off); begun before, one more follows it.
+	if (inFlight) {
+		const covers = inFlightTicket >= wanted;
+		void inFlight.finally(covers ? afterStaleRead : readStale);
+		return;
+	}
+	if (!isLoggedIn() || !acpAgentsEnabled()) {
+		stopAcpStatusFeed();
+		return;
+	}
+	if (document.hidden) {
+		// Read when the tab shows (that read starts after the event).
+		dirty = true;
+		return;
+	}
+	void readAcpAgents().then(afterStaleRead);
+}
+
+function afterStaleRead(): void {
+	if (wanted === 0 || acpFreshThrough() >= wanted) {
+		wanted = 0;
+		staleRetryMs = DEBOUNCE_MS;
+		return;
+	}
+	if (!started) return;
+	// It failed: tried again, backing off up to the period.
+	staleRetryMs = Math.min(PERIOD_MS, staleRetryMs * 2);
+	armStale(staleRetryMs);
 }
 
 /** Started by the sidebar once it lists sessions with the ACP feature on; idempotent. */
@@ -172,6 +234,8 @@ export function stopAcpStatusFeed(): void {
 	periodTimer = null;
 	if (debounceTimer) clearTimeout(debounceTimer);
 	debounceTimer = null;
+	wanted = 0;
+	staleRetryMs = DEBOUNCE_MS;
 	dirty = false;
 }
 
@@ -183,6 +247,10 @@ if (typeof document !== "undefined")
 			if (isLoggedIn() && acpAgentsEnabled() && !acpAgentsLoaded()) void readAcpAgents();
 		}
 		if (!started) return;
-		if (dirty || age() >= PERIOD_MS) readIfVisible();
+		// A pending re-read (awaited or retried until met) covers a due period too.
+		if (wanted !== 0 && acpFreshThrough() < wanted) {
+			dirty = false;
+			readStale();
+		} else if (dirty || age() >= PERIOD_MS) readIfVisible();
 		armPeriod();
 	});

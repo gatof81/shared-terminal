@@ -215,21 +215,26 @@ export interface SidebarAgentStatus extends AgentStatus {
 export const RUNNER_START_GRACE_MS = 180_000;
 
 /**
- * `startedAgoMs`: how long ago the session (re)started, when known. A runner
- * that never reported (runnerSeenAt null) on a session that just started is
- * starting, not lost.
+ * `startedAt`: when (client clock) the session was seen to (re)start, if this
+ * page saw it — its creation, or a status turning `running`. A runner that has
+ * not reported SINCE that start is starting, not lost, for the grace period:
+ * never reported (runnerSeenAt null), or last seen before the start — the
+ * backend keeps the previous run's `runnerSeenAt` across a restart. A restart
+ * this page did not see has no start, so it gets no grace ("sin señal" until
+ * the runner reports).
  */
 export function sidebarAgentStatus(
 	a: AgentStatusInput,
 	now: number,
-	startedAgoMs?: number,
+	startedAt?: number,
 ): SidebarAgentStatus {
 	const st = agentStatus(a, now);
+	const seen = a.runnerSeenAt ? Date.parse(a.runnerSeenAt) : Number.NaN;
 	if (
 		st.tone === "off" &&
-		!a.runnerSeenAt &&
-		startedAgoMs !== undefined &&
-		startedAgoMs < RUNNER_START_GRACE_MS
+		startedAt !== undefined &&
+		now - startedAt < RUNNER_START_GRACE_MS &&
+		(Number.isNaN(seen) || seen < startedAt)
 	)
 		return {
 			label: "iniciando (el runner todavía no se conectó)",

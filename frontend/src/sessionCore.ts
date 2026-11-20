@@ -497,7 +497,7 @@ function paintAgentStatus(): void {
 		const a = acpEntry(sid);
 		const select = row.querySelector<HTMLElement>(".session-select");
 		if (!span || !a || !select) continue;
-		const st = sidebarAgentStatus(a, now, startedAgo(sid));
+		const st = sidebarAgentStatus(a, now, startedAt(sid));
 		span.className = `session-agent-status tone-${st.tone}${st.asks ? " asks" : ""}`;
 		span.lastChild!.textContent = st.word;
 		select.dataset.agentLabel = st.label;
@@ -553,11 +553,12 @@ function noteStarts(): void {
 		lastStatus.set(s.sessionId, s.status);
 	}
 }
-function startedAgo(sessionId: string): number | undefined {
+/** The session's latest start this page knows of: its creation or a status turning `running`. */
+function startedAt(sessionId: string): number | undefined {
 	const s = sessions.find((x) => x.sessionId === sessionId);
 	const created = s ? Date.parse(s.createdAt) : Number.NaN;
 	const at = Math.max(startedSeenAt.get(sessionId) ?? 0, Number.isNaN(created) ? 0 : created);
-	return at > 0 ? Date.now() - at : undefined;
+	return at > 0 ? at : undefined;
 }
 
 /**
