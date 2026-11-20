@@ -95,10 +95,13 @@ export function projectHasAcpAgents(pid: string): boolean | null {
 export function acpProjectPage(pid: string, header: HTMLElement): HTMLElement {
 	if (headerEl !== header) {
 		headerEl = header;
-		root.replaceChildren(header, barEl, thread.root);
+		// The panel is a sibling of the agents row: on a short screen it is
+		// the one part that gives way to the thread's minimum (acp-chat.css).
+		root.replaceChildren(header, barEl, panelEl, thread.root);
 	}
 	if (shownPid !== pid) {
 		shownPid = pid;
+		panelOpen = null;
 		state = null;
 		mode = "loading";
 		thread.setComposer("disabled");
@@ -130,14 +133,62 @@ export function resetAcpProject(): void {
 
 // ── Agents bar ───────────────────────────────────────────────────────────
 
-// Rebuilt on every thread change (activity, the 15 s status poll): each part
-// only when what it shows changed, so an agent picked in "Agregar agente
-// existente…" (not added yet) or the focus on a chip's × survives.
+// Two parts: the agents on ONE line (name + state, scrolls sideways), and the
+// "Administrar agentes" panel (remove, add an existing one, a new agent
+// session, the help), closed by default — open when the project has no
+// agents yet, the only useful thing to do there. Rebuilt on every thread
+// change (activity, the 15 s status poll): each part only when what it shows
+// changed, and the panel is hidden, never removed, so an agent picked in
+// "Agregar agente existente…" (not added yet) or the focus on a Quitar
+// survives, with the panel closed and reopened too.
 let chipsEl: HTMLElement | null = null;
 let chipsKey = "";
+let manageEl: HTMLElement | null = null;
+let manageKey = "";
 let toolsEl: HTMLElement | null = null;
 let toolsKey = "";
 const helpEl = el("p", "acp-project-help");
+const archivedEl = el("p", "acp-project-help acp-project-archived");
+const panelEl = el("div", "acp-agents-panel");
+panelEl.id = "acp-agents-panel";
+panelEl.setAttribute("role", "region");
+panelEl.setAttribute("aria-label", "Administrar agentes");
+panelEl.hidden = true;
+const panelHead = el("div", "acp-agents-panel-head");
+const panelClose = el("button", "pv-close acp-agents-panel-close", "×");
+panelClose.type = "button";
+panelClose.setAttribute("aria-label", "Cerrar Administrar agentes");
+panelClose.title = "Cerrar";
+panelHead.append(el("strong", undefined, "Administrar agentes"), panelClose);
+const panelBody = el("div", "acp-agents-panel-body");
+panelEl.append(panelHead, panelBody);
+/** null: not chosen on this page yet (open iff the project has no agents). */
+let panelOpen: boolean | null = null;
+/** Where the focus goes back when the panel closes (the ⋯ that opened it). */
+let panelOpener: HTMLElement | null = null;
+panelClose.addEventListener("click", () => closeAgentsPanel());
+panelEl.addEventListener("keydown", (e) => {
+	if (e.key !== "Escape") return;
+	e.preventDefault();
+	e.stopPropagation();
+	closeAgentsPanel();
+});
+
+function closeAgentsPanel(): void {
+	panelOpen = false;
+	renderBar();
+	const back = panelOpener?.isConnected ? panelOpener : document.getElementById("pv-title");
+	back?.focus();
+}
+
+/** "Administrar agentes" from the project's ⋯ menu: open it, focus inside. */
+export function openAgentsPanel(opener: HTMLElement): void {
+	if (mode !== "active") return;
+	panelOpener = opener;
+	panelOpen = true;
+	renderBar();
+	panelEl.querySelector<HTMLElement>("select, button:not(.acp-agents-panel-close), a")?.focus();
+}
 
 function renderBar(): void {
 	const pid = shownPid;
@@ -163,15 +214,26 @@ function renderBar(): void {
 			const link = el("a", "acp-agent-name", `@${a.name}`);
 			link.href = routeHash({ sessionId: a.sessionId, view: "chat", detail: null });
 			link.title = "Abrir su sesión (Chat individual, Terminal, Files, Git)";
-			const remove = el("button", "acp-chip-remove", "×");
-			remove.type = "button";
-			remove.title = `Quitar a @${a.name} del proyecto (conserva su sesión e historial)`;
-			remove.setAttribute("aria-label", remove.title);
-			remove.addEventListener("click", () => void removeAgent(pid, a));
 			li.append(link, el("span", `acp-status acp-status-${st.tone}`, st.label));
-			if (active) li.append(remove);
 			chipsEl.append(li);
 		}
+	}
+	const mk = JSON.stringify([pid, active, members.map((a) => a.name)]);
+	if (mk !== manageKey || !manageEl) {
+		manageKey = mk;
+		manageEl = el("ul", "acp-manage-list");
+		manageEl.setAttribute("aria-label", "Quitar agentes del proyecto");
+		if (active)
+			for (const a of members) {
+				const li = el("li", "acp-manage-item");
+				const remove = el("button", "files-btn acp-agent-remove", "Quitar");
+				remove.type = "button";
+				remove.title = `Quitar a @${a.name} del proyecto (conserva su sesión e historial)`;
+				remove.setAttribute("aria-label", `Quitar a @${a.name} del proyecto`);
+				remove.addEventListener("click", () => void removeAgent(pid, a));
+				li.append(el("span", "acp-agent-name", `@${a.name}`), remove);
+				manageEl.append(li);
+			}
 	}
 	const candidates = others.filter((a) => a.projectId !== pid);
 	const tk = JSON.stringify([pid, active, candidates.map((a) => [a.name, a.projectId ?? null])]);
@@ -180,16 +242,37 @@ function renderBar(): void {
 		// Agent tools write (join / leave / a new agent session): live project only.
 		toolsEl = active ? buildTools(pid, candidates) : el("div", "acp-project-tools");
 	}
-	helpEl.textContent =
-		mode === "archived"
-			? "Proyecto archivado: su historial se lee acá. Sus agentes siguen en sus sesiones y en su chat individual."
-			: !active
-				? ""
-				: members.length
-					? "Empezá el mensaje con @agente (uno o varios): cada uno lo recibe en su cola y responde acá. Pueden consultarse entre ellos (st send); esas consultas también aparecen acá."
-					: "Este proyecto todavía no tiene agentes ACP. Creá una sesión con agente o agregá una existente.";
-	syncChildren(barEl, [chipsEl, toolsEl, helpEl]);
+	helpEl.textContent = !active
+		? ""
+		: members.length
+			? "Empezá el mensaje con @agente (uno o varios): cada uno lo recibe en su cola y responde acá. Pueden consultarse entre ellos (st send); esas consultas también aparecen acá."
+			: "Este proyecto todavía no tiene agentes ACP. Creá una sesión con agente o agregá una existente.";
+	syncChildren(panelBody, [manageEl, toolsEl, helpEl]);
+	// The panel holds write tools: a live project only (fail-closed).
+	const open = active && (panelOpen ?? (state !== null && members.length === 0));
+	panelEl.hidden = !open;
+	const parts: HTMLElement[] = [chipsEl];
+	if (mode === "archived") {
+		archivedEl.textContent =
+			"Su historial se lee acá. Sus agentes siguen en sus sesiones y en su chat individual.";
+		parts.push(archivedEl);
+	}
+	syncChildren(barEl, parts);
+	markChipEdges();
 }
+
+/** A faded edge on the side of the agents row that has more off screen (acp-chat.css). */
+function markChipEdges(): void {
+	const c = chipsEl;
+	if (!c) return;
+	const max = c.scrollWidth - c.clientWidth;
+	c.classList.toggle("more-left", max > 1 && c.scrollLeft > 1);
+	c.classList.toggle("more-right", max > 1 && c.scrollLeft < max - 1);
+}
+// The row scrolls sideways (scroll does not bubble: captured here) and its
+// width changes with the screen.
+barEl.addEventListener("scroll", markChipEdges, { capture: true, passive: true });
+window.addEventListener("resize", markChipEdges);
 
 function buildTools(pid: string, candidates: AcpAgentInfo[]): HTMLElement {
 	const tools = el("div", "acp-project-tools");

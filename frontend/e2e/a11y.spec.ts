@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import type { Page } from "@playwright/test";
 import { expect, test } from "./fixtures.js";
-import { PROJECT_IDS, SESSION_IDS } from "./mockBackend.js";
+import { PROJECT_IDS, PROJECT_SESSION_IDS, SESSION_IDS } from "./mockBackend.js";
 
 /**
  * Accessibility sweep (UX audit A1–A4): axe-core over the main views, in
@@ -20,11 +20,11 @@ interface Violation {
 	nodes: string[];
 }
 
-async function violations(page: Page): Promise<Violation[]> {
+async function violations(page: Page, include?: string[]): Promise<Violation[]> {
 	await page.evaluate(AXE);
-	return page.evaluate(async () => {
+	return page.evaluate(async (inc) => {
 		// biome-ignore lint/suspicious/noExplicitAny: axe is injected as a page global.
-		const res = await (window as any).axe.run(document, {
+		const res = await (window as any).axe.run(inc ? { include: inc.map((x) => [x]) } : document, {
 			runOnly: ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"],
 		});
 		// biome-ignore lint/suspicious/noExplicitAny: axe's result shape.
@@ -34,11 +34,11 @@ async function violations(page: Page): Promise<Violation[]> {
 			// biome-ignore lint/suspicious/noExplicitAny: axe's result shape.
 			nodes: v.nodes.map((n: any) => n.target.join(" ")),
 		}));
-	});
+	}, include);
 }
 
-async function expectClean(page: Page, view: string): Promise<void> {
-	const bad = (await violations(page)).filter(
+async function expectClean(page: Page, view: string, include?: string[]): Promise<void> {
+	const bad = (await violations(page, include)).filter(
 		(v) => v.impact === "critical" || v.impact === "serious",
 	);
 	expect(bad, `axe on ${view}`).toEqual([]);
@@ -68,5 +68,39 @@ test.describe("accessibility — axe on the main views", () => {
 		await app.openSidebar();
 		await expect(app.sessionRow("hz-architect")).toBeVisible();
 		await expectClean(page, "sidebar");
+	});
+
+	test("ACP chats: settings and the manage panel open, a refused model flagged", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.enableAcp();
+		const solo = backend.acpAgents.find((a) => a.name === "solo")!;
+		solo.projectId = PROJECT_IDS.hz;
+		solo.model = "claude-opus-5-5";
+		solo.modelApplied = { requested: "claude-opus-5-5", current: null, error: "no disponible" };
+		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
+		await expect(page.locator("#acp-chat .acp-settings-btn")).toBeVisible();
+		// The headers and their panels (the thread's own badges are not part of this change).
+		const chat = [
+			"#acp-chat .acp-chat-header",
+			"#acp-chat .acp-settings",
+			"#acp-chat .acp-chat-composer",
+		];
+		await expectClean(page, "ACP chat, settings closed", chat);
+		await page.locator("#acp-chat .acp-settings-btn").click();
+		await expect(page.locator("#acp-chat .acp-model-select")).toBeVisible();
+		await expectClean(page, "ACP chat, settings open", chat);
+		await page.goto(`/#/projects/${PROJECT_IDS.hz}`);
+		await page.getByRole("button", { name: "Acciones del proyecto" }).click();
+		await page.getByRole("menuitem", { name: "Administrar agentes" }).click();
+		await expect(page.locator("#project-view .acp-agents-panel")).toBeVisible();
+		await expectClean(page, "Project Chat, manage panel open", [
+			"#project-view .pv-header",
+			"#project-view .acp-project-agents",
+			"#project-view .acp-agents-panel",
+			"#project-view .acp-chat-composer",
+		]);
 	});
 });
