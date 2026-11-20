@@ -220,12 +220,16 @@ window.visualViewport?.addEventListener("resize", () => {
 	if (listOpen) placeList();
 });
 
-/** Agents whose running message was looked for and not found (the id), said in their row. */
-const notFound = new Map<string, number>();
+/**
+ * Agents whose running message was looked for and not shown, said in their
+ * row: not in this chat ("missing"), or still further back after the pages
+ * one search loads ("earlier", with "Seguir buscando").
+ */
+const notFound = new Map<string, { id: number; why: "missing" | "earlier" }>();
 
 /**
  * The thread at the message an agent works on (AcpThread.revealMessage: it
- * loads back up to 3 pages). A phone closes the list first — the thread is
+ * loads back up to 3 pages per search). A phone closes the list first — the thread is
  * under it; not found, the row says so (and a phone shows the list again).
  */
 async function goToRunning(name: string, id: number, chip: HTMLElement): Promise<void> {
@@ -238,7 +242,8 @@ async function goToRunning(name: string, id: number, chip: HTMLElement): Promise
 	}
 	const found = await thread.revealMessage(id);
 	chip.removeAttribute("aria-busy");
-	if (found) {
+	if (found === "shown") {
+		refocusAgent = null;
 		notFound.delete(name);
 		if (listOpen) {
 			listOpen = false;
@@ -247,12 +252,30 @@ async function goToRunning(name: string, id: number, chip: HTMLElement): Promise
 		return;
 	}
 	// Never in silence: the list stays (or opens again) with the row saying so.
-	notFound.set(name, id);
+	notFound.set(name, { id, why: found });
 	listOpen = true;
 	renderBar();
+	// Re-renders replace the control that had the focus (this one and any
+	// later one, e.g. when the loaded pages change the rows' targets): the
+	// row's next step takes it, never <body> (refocusRow, in renderBar).
+	refocusAgent = name;
+	refocusRow();
+}
+
+/** The agent whose row gets the focus back after a search that did not show the message. */
+let refocusAgent: string | null = null;
+function refocusRow(): void {
+	if (!refocusAgent || !listOpen) return;
+	const a = document.activeElement;
+	if (a && a !== document.body && a.isConnected) return;
+	const row = [...listBody.querySelectorAll<HTMLElement>(".acp-agents-list-item")].find(
+		(li) => li.dataset.agent === refocusAgent,
+	);
+	row?.querySelector<HTMLElement>(".acp-agents-list-more, button.acp-agents-list-state")?.focus();
 }
 
 function closeList(): void {
+	refocusAgent = null;
 	listOpen = false;
 	renderBar();
 	groupBtn.focus();
@@ -325,7 +348,7 @@ function renderBar(): void {
 		pid,
 		active,
 		statuses.map(({ a, st }) => [a.name, a.sessionId, st.label, st.tone, target(a)]),
-		[...notFound],
+		[...notFound].map(([n, f]) => [n, f.id, f.why]),
 	]);
 	// Who needs the person first (a question, a login), then who works, then the rest.
 	const rank = (tone: string) => (tone === "warn" ? 0 : tone === "busy" ? 1 : 2);
@@ -349,6 +372,7 @@ function renderBar(): void {
 		// and "›"; otherwise a bare chip, not focusable.
 		const items = ordered.map(({ a, st }) => {
 			const li = el("li", "acp-agents-list-item");
+			li.dataset.agent = a.name;
 			li.style.setProperty("--acp-hue", String(agentHue(a.name)));
 			const face = el("span", "acp-avatar acp-agents-list-face", a.name.slice(0, 1).toUpperCase());
 			face.setAttribute("aria-hidden", "true");
@@ -379,17 +403,27 @@ function renderBar(): void {
 			li.append(face, name, state, link);
 			// Looked for and not found: said even now that it reads as not this
 			// chat's (all its pages loaded), and until the agent moves on.
-			if (typeof a.running === "number" && notFound.get(a.name) === a.running)
-				li.append(
-					el(
-						"p",
-						"acp-agents-list-note",
-						`No se encontró el mensaje #${a.running} en este Project Chat.`,
-					),
+			const miss = notFound.get(a.name);
+			if (typeof a.running === "number" && miss?.id === a.running) {
+				const note = el(
+					"p",
+					"acp-agents-list-note",
+					miss.why === "earlier"
+						? `El mensaje #${a.running} está más atrás en el historial.`
+						: `No se encontró el mensaje #${a.running} en este Project Chat.`,
 				);
+				if (miss.why === "earlier" && id !== null) {
+					const more = el("button", "btn sm acp-agents-list-more", "Seguir buscando");
+					more.type = "button";
+					more.addEventListener("click", () => void goToRunning(a.name, id, more));
+					note.append(" ", more);
+				}
+				li.append(note);
+			}
 			return li;
 		});
 		listBody.replaceChildren(...items);
+		refocusRow();
 	}
 	listEl.hidden = !listOpen;
 	listScrim.hidden = !listOpen;

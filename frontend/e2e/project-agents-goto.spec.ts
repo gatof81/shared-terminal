@@ -115,6 +115,41 @@ test.describe("Project Chat: to an agent's running message", () => {
 		await expect(page.locator(`${THREAD} [data-ids~="${running}"]`)).toBeInViewport();
 	});
 
+	test("a message further back than one search loads: said as such, and 'Seguir buscando' reaches it", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		// Page 5 of 100-message pages: the first search loads 3 earlier
+		// pages (400 rows) and the message is still further back.
+		let running = 0;
+		for (let i = 1; i <= 430; i++) {
+			const m = backend.addAcpMessage({
+				to_id: "arq",
+				body: `@arq tema ${i}`,
+				state: i === 6 ? "running" : "done",
+				result_text: i === 6 ? null : `Tema ${i} resuelto.`,
+				project_id: PROJECT_IDS.hz,
+			});
+			if (i === 6) running = m.id;
+		}
+		backend.acpAgents.find((a) => a.name === "arq")!.running = running;
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		await expect(page.locator(THREAD)).toContainText("Tema 430 resuelto.");
+		const list = await openList(page);
+		const go = list.getByRole("button", { name: /^Ir al mensaje en curso de @arq/ });
+		await go.click();
+		const note = list.locator(".acp-agents-list-note");
+		await expect(note).toContainText(`El mensaje #${running} está más atrás en el historial.`);
+		await expect(note).not.toContainText("No se encontró");
+		const more = note.getByRole("button", { name: "Seguir buscando" });
+		// The focus stays in the row (on its state), not lost to <body>.
+		await expect(go).toBeFocused();
+		await more.click();
+		await expect(page.locator(`${THREAD} [data-ids~="${running}"]`)).toBeInViewport();
+		await expect(list.locator(".acp-agents-list-note")).toHaveCount(0);
+	});
+
 	test("a message that is not this chat's: the state stays text; one not found is said in the row", async ({
 		app,
 		backend,
@@ -140,7 +175,9 @@ test.describe("Project Chat: to an agent's running message", () => {
 		await expect(page.locator(THREAD)).toContainText("Tema 110 resuelto.");
 		const list = await openList(page);
 		const devRow = list.locator(".acp-agents-list-item", { hasText: "@dev" });
-		await expect(devRow.locator(".acp-agents-list-state")).toHaveText(`trabajando en #${direct.id}`);
+		await expect(devRow.locator(".acp-agents-list-state")).toHaveText(
+			`trabajando en #${direct.id}`,
+		);
 		await expect(devRow.locator("button.acp-agents-list-state")).toHaveCount(0);
 		await list.getByRole("button", { name: /^Ir al mensaje en curso de @arq/ }).click();
 		await expect(page.locator("#acp-agents-list .acp-agents-list-note")).toContainText(
