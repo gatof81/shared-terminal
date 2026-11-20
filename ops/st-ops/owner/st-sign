@@ -1,0 +1,72 @@
+#!/bin/bash
+# st-sign — firma un pedido de st-ops en la Mac del owner, sólo si es exactamente el que se revisó.
+#
+# Uso:  st-sign <request.txt> <sha256 que reportó el operador>
+#
+# 1. Compara el sha256 del archivo con el que se pasa (si difiere, no firma).
+# 2. Comprueba el formato (primera línea "st-ops kit request v1") y que no esté vencido.
+# 3. Muestra el pedido COMPLETO (commits, CI, compare, datos de la release) y un resumen, y pide confirmar
+#    escribiendo "firmar": lo que se firma es el contenido, el sha sólo prueba que la bajada no lo alteró.
+# 4. Firma con ~/.ssh/st-ops-sign en el namespace de st-ops y verifica la firma
+#    contra la propia clave pública, igual que lo hará el despachador.
+# Nunca toca la red ni sube nada: el .sig queda al lado del request.txt.
+set -euo pipefail
+
+KEY=${ST_SIGN_KEY:-$HOME/.ssh/st-ops-sign}
+NS=st-ops-deploy@shared-terminal
+
+die() { echo "st-sign: $*" >&2; exit 1; }
+
+[ $# = 2 ] || die "uso: st-sign <request.txt> <sha256>"
+REQ=$1
+WANT=$(printf '%s' "$2" | tr 'A-F' 'a-f')
+[[ $WANT =~ ^[0-9a-f]{64}$ ]] || die "el sha256 tiene que ser 64 caracteres hex"
+if [ ! -f "$REQ" ] || [ -L "$REQ" ]; then die "$REQ no es un archivo"; fi
+if [ ! -f "$KEY" ] || [ ! -f "$KEY.pub" ]; then die "no encuentro la clave $KEY (y $KEY.pub)"; fi
+[ ! -e "$REQ.sig" ] || die "$REQ.sig ya existe: borralo o movelo si querés firmar de nuevo"
+
+GOT=$(shasum -a 256 "$REQ" | cut -d' ' -f1)
+if [ "$GOT" != "$WANT" ]; then
+	echo "  esperado: $WANT" >&2
+	echo "  archivo:  $GOT" >&2
+	die "el sha256 NO coincide: no firmo (bajá de nuevo request.txt desde Files, no lo copies del chat)"
+fi
+
+[ "$(head -n1 "$REQ")" = "st-ops kit request v1" ] || die "la primera línea no es 'st-ops kit request v1'"
+
+field() { grep -m1 -E "^$1: " "$REQ" | cut -d' ' -f2- || true; }
+EXP=$(field expires-epoch)
+[[ $EXP =~ ^[0-9]+$ ]] || die "el pedido no tiene expires-epoch"
+NOW=$(date +%s)
+[ "$NOW" -lt "$EXP" ] || die "el pedido venció ($(field expires)): hay que hacer un propose nuevo"
+LEFT=$(((EXP - NOW) / 60))
+
+# The sha only proves the download is the operator's text; what is signed is the CONTENT, so show all of it.
+# cat -v makes any control byte visible (st-ops refuses them, so one here means the file is not st-ops's).
+echo "──────────────────── pedido completo ────────────────────"
+cat -v "$REQ"
+echo "─────────────────────────────────────────────────────────"
+echo
+echo "  sha256       $GOT  (coincide)"
+for k in requested-by release from target kit-head compare expires; do
+	printf '  %-12s %s\n' "$k" "$(field "$k")"
+done
+echo "  quedan       ${LEFT} min para aprobar"
+echo
+echo "  Comprobá: target = el commit que querés desplegar, kit-head = el kit instalado,"
+echo "  los commits y el CI de arriba, y los datos de release-conf. Abrí el compare si hay dudas."
+echo
+read -r -p "Escribí 'firmar' para firmar: " ok
+[ "$ok" = firmar ] || die "no firmé nada"
+
+ssh-keygen -Y sign -q -f "$KEY" -n "$NS" "$REQ"
+
+AS=$(mktemp)
+trap 'rm -f "$AS"' EXIT
+echo "owner namespaces=\"$NS\" $(cut -d' ' -f1,2 "$KEY.pub")" >"$AS"
+ssh-keygen -Y verify -f "$AS" -I owner -n "$NS" -s "$REQ.sig" <"$REQ" >/dev/null 2>&1 ||
+	{ rm -f "$REQ.sig"; die "la firma no verificó: la borré, no la subas"; }
+
+echo
+echo "  ok: firmado y verificado → $REQ.sig"
+echo "  Subí ese archivo a la sesión del operador."

@@ -249,6 +249,7 @@ jobs:
           ops/backup/st-backup-nas.sh ops/test/retention.test.sh ops/test/backup-nas.test.sh
           ops/st-ops/bin/st-ops-dispatch ops/st-ops/bin/st-ops-root ops/st-ops/lib/st-ops-lib.sh
           ops/st-ops/install.sh ops/st-ops/uninstall.sh ops/st-ops/test/run.sh
+          ops/st-ops/owner/st-sign ops/st-ops/test/st-sign.test.sh
 
       - name: tests
         run: |
@@ -258,3 +259,5 @@ jobs:
           bash ops/test/backup-nas.test.sh
           # st-ops: real ssh-keygen signatures and git repos, a fake kit, GitHub's API stubbed.
           bash ops/st-ops/test/run.sh
+          # The owner's signing helper: a throwaway key, real ssh-keygen.
+          bash ops/st-ops/test/st-sign.test.sh
