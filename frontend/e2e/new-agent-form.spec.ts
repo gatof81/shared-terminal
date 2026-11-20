@@ -206,6 +206,8 @@ test.describe("new agent form", () => {
 					.click();
 			else await page.locator("#new-session-modal .modal-close").click();
 			await expect(page.locator("#new-session-modal-title")).toBeHidden();
+			// The opener lives in "Administrar agentes": still there, shown, and focused.
+			await expect(opener, `after ${close}`).toBeVisible();
 			await expect(opener, `after ${close}`).toBeFocused();
 		}
 		// The opener left the page while the dialog was open: the project's title.
