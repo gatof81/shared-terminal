@@ -158,3 +158,95 @@ test.describe("ACP model", () => {
 		).toHaveLength(1);
 	});
 });
+
+// The message box and the thread's scroll (shared by the individual chat and
+// Project Chat): what a phone leaves for reading, and a reader's place.
+test.describe("ACP chat composer and scroll", () => {
+	test.beforeEach(({ backend }) => {
+		backend.enableAcp();
+		for (let i = 0; i < 14; i++)
+			backend.addAcpMessage({
+				to_id: "solo",
+				body: `Relleno ${i}`,
+				state: "done",
+				result_text: `Hecho ${i}.\n\nUna segunda línea para que el hilo ocupe lugar.`,
+			});
+	});
+
+	test("one row at rest on a phone, grows with the text up to a cap, back to one row after sending", async ({
+		page,
+		app,
+	}, info) => {
+		test.skip(!info.project.use.isMobile, "phone layout");
+		await app.login("alice", chatOf(PROJECT_SESSION_IDS.scratch));
+		const input = page.locator("#acp-chat .acp-chat-input");
+		const send = page.locator("#acp-chat .acp-chat-send");
+		const height = async (l: typeof input) => Math.round((await l.boundingBox())!.height);
+		await expect(input).toBeVisible();
+		// One row: the field and Enviar side by side, 44 px; no hint row at rest.
+		expect(await height(input)).toBeLessThanOrEqual(46);
+		expect(await height(send)).toBeGreaterThanOrEqual(44);
+		expect(Math.abs((await input.boundingBox())!.y - (await send.boundingBox())!.y)).toBeLessThan(
+			2,
+		);
+		await expect(page.locator("#acp-chat .acp-chat-hint")).toBeHidden();
+		expect(await height(page.locator("#acp-chat .acp-chat-composer"))).toBeLessThanOrEqual(64);
+
+		await input.fill("uno\ndos\ntres");
+		const three = await height(input);
+		expect(three).toBeGreaterThan(70);
+		await input.fill(Array.from({ length: 20 }, (_, i) => `línea ${i}`).join("\n"));
+		const capped = await height(input);
+		// 6 lines of 16 px × 1.4 plus padding, well under 20 lines.
+		expect(capped).toBeLessThanOrEqual(160);
+		expect(await input.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
+
+		// A tap on Enviar keeps the focus in the field (no blur closing the keyboard).
+		await send.tap();
+		await expect(input).toHaveValue("");
+		await expect(input).toBeFocused();
+		await expect.poll(() => height(input)).toBeLessThanOrEqual(46);
+	});
+
+	test("a reader at the end stays there when the thread shrinks; one further up keeps their place and gets a pill", async ({
+		page,
+		app,
+		backend,
+	}) => {
+		await app.login("alice", chatOf(PROJECT_SESSION_IDS.scratch));
+		const thread = page.locator("#acp-chat .acp-chat-thread");
+		const input = page.locator("#acp-chat .acp-chat-input");
+		await expect(thread).toContainText("Hecho 13.");
+		const gap = () =>
+			thread.evaluate((el) => Math.round(el.scrollHeight - el.clientHeight - el.scrollTop));
+		await expect.poll(gap).toBeLessThan(4);
+		// The field grows (no scroll event on the thread): still at the end.
+		await input.fill(Array.from({ length: 8 }, (_, i) => `l${i}`).join("\n"));
+		await expect.poll(gap, "the field grew, the end stays in view").toBeLessThan(4);
+		const vp = page.viewportSize()!;
+		await page.setViewportSize({ width: vp.width, height: Math.round(vp.height * 0.6) });
+		await expect.poll(gap, "a shorter screen, the end stays in view").toBeLessThan(4);
+		await page.setViewportSize(vp);
+		await expect.poll(gap).toBeLessThan(4);
+
+		// Reading further up: a new message does not move the reader.
+		await thread.evaluate((el) => {
+			el.scrollTop = 40;
+			el.dispatchEvent(new Event("scroll"));
+		});
+		const pill = page.locator("#acp-chat .acp-new-pill");
+		await expect(pill).toBeHidden();
+		const row = backend.addAcpMessage({
+			to_id: "solo",
+			from_id: "arq",
+			body: "Llegó mientras leías",
+		});
+		backend.pushAcp({ type: "message", message: row });
+		await expect(thread).toContainText("Llegó mientras leías");
+		await expect(pill).toHaveText("↓ 1 nuevo");
+		expect(await thread.evaluate((el) => el.scrollTop)).toBe(40);
+		await pill.click();
+		await expect.poll(gap).toBeLessThan(4);
+		await expect(pill).toBeHidden();
+	});
+});

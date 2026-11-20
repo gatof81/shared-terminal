@@ -67,3 +67,18 @@
     display: none;
   }
 }
+/* Typing in an overlay on a touch screen (its soft keyboard up): the
+   keyboard already covers this strip, so the nav takes no room and the
+   overlay reaches the bottom; both come back when the field loses the
+   focus. The focus is the signal, not data-kb (main.ts): Android's
+   resizes-content shrinks both viewports, so data-kb never shows there,
+   and on iOS the keyboard only rises for a focused field anyway. The
+   terminal's box depends on neither: the nav and the overlays are absolute. */
+@media (max-width: 768px) and (pointer: coarse) {
+  #terminal-area.view-nav-on:has(:is(#files-view, #git-view, #chat-view) :is(textarea, input[type="text"], input[type="search"]):focus) #view-nav {
+    display: none;
+  }
+  #terminal-area.view-nav-on:has(:is(#files-view, #git-view, #chat-view) :is(textarea, input[type="text"], input[type="search"]):focus) :is(#files-view, #git-view, #chat-view) {
+    bottom: 0;
+  }
+}

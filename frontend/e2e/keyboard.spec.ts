@@ -1,4 +1,5 @@
 import { expect, test } from "./fixtures.js";
+import { PROJECT_IDS, PROJECT_SESSION_IDS } from "./mockBackend.js";
 
 /**
  * The mobile soft keyboard, as far as Chromium can reproduce it. Playwright
@@ -268,5 +269,45 @@ test.describe("soft keyboard (simulated visual viewport)", () => {
 		await page.waitForTimeout(400);
 		expect(resizes() - r0, "one sync, not a cascade").toBe(1);
 		expect(backend.terminalSockets, "no new socket").toHaveLength(1);
+	});
+
+	test("the bottom view nav takes no room while the keyboard is up, and comes back after", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		test.skip(app.shell === "v2", "shell v2 has no bottom view nav");
+		backend.enableAcp();
+		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
+		const nav = page.locator("#view-nav");
+		const composer = page.locator("#acp-chat .acp-chat-composer");
+		await expect(nav).toBeVisible();
+		const viewport = page.viewportSize()!;
+		const navTop = (await nav.boundingBox())!.y;
+		expect(
+			(await composer.boundingBox())!.y + (await composer.boundingBox())!.height,
+		).toBeLessThanOrEqual(navTop + 1);
+		// Typing: the field holds the focus and the keyboard is up.
+		await page.locator("#acp-chat .acp-chat-input").focus();
+		await keyboard(page, viewport.height - 380, 0);
+		await expect(nav).toBeHidden();
+		// The chat reaches the bottom of the (shrunk) app: the field sits right above the keyboard.
+		const box = (await composer.boundingBox())!;
+		expect(Math.round(box.y + box.height)).toBeGreaterThanOrEqual(viewport.height - 380 - 2);
+		await page.locator("#acp-chat .acp-chat-input").blur();
+		await keyboard(page, viewport.height, 0);
+		await expect(nav).toBeVisible();
+
+		// The project page is not a session overlay: no nav there, keyboard or not.
+		await page.evaluate((h) => {
+			location.hash = h;
+		}, `#/projects/${PROJECT_IDS.hz}`);
+		const pcomp = page.locator("#project-view .acp-chat-composer");
+		await expect(pcomp).toBeVisible();
+		await expect(nav).toBeHidden();
+		await keyboard(page, viewport.height - 380, 0);
+		const pbox = (await pcomp.boundingBox())!;
+		expect(pbox.y + pbox.height).toBeLessThanOrEqual(viewport.height - 380 + 1);
+		await keyboard(page, viewport.height, 0);
 	});
 });

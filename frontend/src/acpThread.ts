@@ -72,6 +72,20 @@ export class AcpThread {
 	readonly input = el("textarea", "acp-chat-input");
 	private readonly sendBtn = el("button", "files-btn acp-chat-send", "Enviar");
 	private readonly hint = el("div", "acp-chat-hint");
+	/** "↓ N nuevos": messages that arrived below a reader who is further up. */
+	private readonly newPill = el("button", "chat-float acp-new-pill");
+	private readonly newIds = new Set<number>();
+	/** Highest message id the last render showed (new ones are above it). */
+	private shownMax = 0;
+	/**
+	 * Whether the reader is at the end of the thread, kept by scroll events.
+	 * The thread's height also changes WITHOUT a scroll event (the keyboard,
+	 * the field growing, a rotation): the last scroll's answer is the truth
+	 * then, a geometry read after the shrink would not be.
+	 */
+	private atBottom = true;
+	/** The thread's clientHeight when last seen by a scroll / resize observation. */
+	private box = 0;
 
 	private source: ThreadSource | null = null;
 	private gen = 0;
@@ -152,7 +166,9 @@ export class AcpThread {
 	onState: (s: ThreadState) => void = () => {};
 
 	constructor() {
-		this.input.rows = 4;
+		// One row; CSS sets the resting height (one line on a phone, two on a
+		// desktop) and fitInput() grows it with the text up to a cap.
+		this.input.rows = 1;
 		this.input.setAttribute("aria-label", "Mensaje");
 		this.sendBtn.type = "submit";
 		const actions = el("div", "acp-chat-actions");
@@ -167,26 +183,81 @@ export class AcpThread {
 			this.input.focus();
 			this.changed();
 		});
-		actions.append(this.hint, this.recoverBtn, this.sendBtn);
+		actions.append(this.hint, this.recoverBtn);
+		const row = el("div", "acp-chat-row");
+		row.append(this.input, this.sendBtn);
 		// Errors sit by the field, not at the top of the thread: a refused send
 		// must be seen where the person is looking, however long the thread.
 		this.errorEl.setAttribute("role", "alert");
 		this.errorEl.hidden = true;
-		this.composer.append(this.errorEl, this.mentionsEl, this.input, actions);
+		this.composer.append(this.errorEl, this.mentionsEl, actions, row);
+		// A tap on Enviar, a mention or "↓ N nuevos" must not take the focus from the field:
+		// on a phone that blur closes the keyboard, the layout grows back (the
+		// bottom bar returns) and the button moves away under the finger before
+		// the tap lands. Keyboard activation does not go through these events.
+		for (const b of [this.sendBtn, this.mentionsEl, this.newPill])
+			for (const type of ["pointerdown", "mousedown"] as const)
+				b.addEventListener(type, (e) => {
+					if (document.activeElement === this.input) e.preventDefault();
+				});
+		this.input.addEventListener("input", () => {
+			this.fitInput();
+			this.renderHint();
+		});
+		this.newPill.type = "button";
+		this.newPill.hidden = true;
+		this.newPill.addEventListener("click", () => this.scrollToEnd());
+		const wrap = el("div", "acp-thread-wrap");
+		wrap.append(this.threadEl, this.newPill);
+		this.threadEl.addEventListener(
+			"scroll",
+			() => {
+				const t = this.threadEl;
+				// The box changed since the last look (keyboard, the field growing,
+				// a rotation): this scroll is the layout's, not the reader's — a
+				// reader at the end is pinned there, not reclassified as "above".
+				if (t.clientHeight !== this.box) {
+					this.box = t.clientHeight;
+					if (this.atBottom) {
+						t.scrollTop = t.scrollHeight;
+						return;
+					}
+				}
+				this.atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 60;
+				if (this.atBottom) this.clearNew();
+			},
+			{ passive: true },
+		);
+		// The thread's box changes without a scroll event too: a reader at the
+		// end stays at the end; one reading further up keeps scrollTop, i.e.
+		// the same text in view.
+		if (typeof ResizeObserver !== "undefined")
+			new ResizeObserver(() => {
+				const t = this.threadEl;
+				this.box = t.clientHeight;
+				if (this.atBottom) t.scrollTop = t.scrollHeight;
+			}).observe(this.threadEl);
+		// The field's cap depends on the visible height (keyboard, rotation).
+		window.visualViewport?.addEventListener("resize", () => this.fitInput());
+		window.addEventListener("resize", () => this.fitInput());
 		this.moreBtn.type = "button";
 		this.moreBtn.addEventListener("click", () => {
 			this.moreBtn.disabled = true;
 			void this.loadEarlier();
 		});
-		this.root.append(this.threadEl, this.composer);
+		this.root.append(wrap, this.composer);
+		// send() empties the field before its first await; the field goes back
+		// to its resting height now, not when the network answers.
 		this.composer.addEventListener("submit", (e) => {
 			e.preventDefault();
 			void this.send();
+			this.fitInput();
 		});
 		this.input.addEventListener("keydown", (e) => {
 			if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
 				e.preventDefault();
 				void this.send();
+				this.fitInput();
 			}
 		});
 	}
@@ -247,12 +318,12 @@ export class AcpThread {
 			this.error = "";
 			this.feed = "loading";
 			this.readOnce = false;
+			this.atBottom = true;
+			this.shownMax = 0;
+			this.clearNew();
 			this.offerUnsent();
 			this.threadEl.replaceChildren(el("div", "acp-chat-empty", "Cargando…"));
-			this.input.placeholder =
-				source.kind === "agent"
-					? `Escribile a @${source.name}. Ctrl+Enter envía. Podés seguir enviando mientras trabaja.`
-					: "Empezá con el agente (@nombre) al que va dirigido. Ctrl+Enter envía. Los mensajes se encolan si está ocupado.";
+			this.setPlaceholder();
 		}
 		if (!this.unsubscribe) this.unsubscribe = subscribeAcp((ev) => this.onLive(ev));
 		// Runner liveness and queue sizes are not pushed: re-read every 15 s while shown.
@@ -504,7 +575,7 @@ export class AcpThread {
 		const focused = document.activeElement as HTMLElement | null;
 		const keepFocus =
 			focused && t.contains(focused) && focused.closest(".acp-question") ? focused : null;
-		const atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 60;
+		const atBottom = this.atBottom;
 		const prevHeight = t.scrollHeight;
 		const prevTop = t.scrollTop;
 		const nodes: HTMLElement[] = [];
@@ -540,11 +611,68 @@ export class AcpThread {
 				nodes.push(this.questionEl(q));
 		syncChildren(t, nodes);
 		if (keepFocus?.isConnected) keepFocus.focus({ preventScroll: true });
-		if (atBottom || this.toBottom) t.scrollTop = t.scrollHeight;
+		const end = atBottom || this.toBottom;
+		if (end) t.scrollTop = t.scrollHeight;
 		else if (prevTop < 5 && t.scrollHeight > prevHeight) t.scrollTop = t.scrollHeight - prevHeight;
 		else t.scrollTop = prevTop;
 		this.toBottom = false;
+		// New messages (ids above what was shown; an earlier page has lower
+		// ids) that landed below a reader who is further up.
+		if (end) {
+			this.atBottom = true;
+			this.clearNew();
+		} else if (this.shownMax > 0)
+			for (const m of this.messages) if (m.id > this.shownMax) this.newIds.add(m.id);
+		this.shownMax = Math.max(this.shownMax, this.messages.at(-1)?.id ?? 0);
+		this.renderPill();
 		this.renderComposer();
+	}
+
+	private renderPill(): void {
+		const n = this.newIds.size;
+		this.newPill.hidden = n === 0;
+		this.newPill.textContent = `↓ ${n} ${n === 1 ? "nuevo" : "nuevos"}`;
+	}
+
+	private clearNew(): void {
+		if (this.newIds.size === 0 && this.newPill.hidden) return;
+		this.newIds.clear();
+		this.renderPill();
+	}
+
+	private scrollToEnd(): void {
+		this.atBottom = true;
+		this.threadEl.scrollTop = this.threadEl.scrollHeight;
+		this.clearNew();
+	}
+
+	/**
+	 * The field grows with its text up to 6 lines or 40% of the visible
+	 * height (whichever is smaller), then scrolls inside; emptied, it is back
+	 * to its resting height (CSS min-height: one line on a phone, two on a
+	 * desktop).
+	 */
+	private fitInput(): void {
+		const i = this.input;
+		if (!i.isConnected) return;
+		this.setPlaceholder();
+		// Empty: the resting height. Chromium counts a placeholder's wrapped
+		// lines in scrollHeight, so measuring would grow the field for it.
+		if (i.value === "") {
+			i.style.height = "";
+			i.style.overflowY = "";
+			return;
+		}
+		const cs = getComputedStyle(i);
+		const line = Number.parseFloat(cs.lineHeight) || 20;
+		const border = Number.parseFloat(cs.borderTopWidth) + Number.parseFloat(cs.borderBottomWidth);
+		const frame = Number.parseFloat(cs.paddingTop) + Number.parseFloat(cs.paddingBottom) + border;
+		const visible = window.visualViewport?.height ?? window.innerHeight;
+		const cap = Math.max(line + frame, Math.min(6 * line + frame, visible * 0.4));
+		i.style.height = "auto";
+		const want = i.scrollHeight + border;
+		i.style.height = `${Math.min(want, cap)}px`;
+		i.style.overflowY = want > cap + 1 ? "auto" : "hidden";
 	}
 
 	/** Everything an item shows: equal ⇒ the element on screen is still right. */
@@ -816,6 +944,7 @@ export class AcpThread {
 					const prefix = this.source?.kind === "project" ? `@${q.agent} ` : "";
 					this.input.value = `${prefix}Sobre tu pregunta «${form.message}»: ${said && !said.startsWith("(") ? said : ""}`;
 					this.input.focus();
+					this.fitInput();
 				});
 				card.append(again);
 			}
@@ -948,9 +1077,51 @@ export class AcpThread {
 			}
 		}
 		this.mentionsEl.hidden = this.mentionsEl.childElementCount === 0;
+		this.renderHint();
+		this.fitInput();
+	}
+
+	/**
+	 * The full instructions where the field rests on two wide lines; on a
+	 * phone the field is one line, so only what fits in it.
+	 */
+	private setPlaceholder(): void {
+		const src = this.source;
+		if (!src) return;
+		const narrow = window.matchMedia?.("(max-width: 640px)").matches === true;
+		const text =
+			src.kind === "agent"
+				? narrow
+					? `Mensaje para @${src.name}`
+					: `Escribile a @${src.name}. Ctrl+Enter envía. Podés seguir enviando mientras trabaja.`
+				: narrow
+					? "@agente y tu mensaje"
+					: "Empezá con el agente (@nombre) al que va dirigido. Ctrl+Enter envía. Los mensajes se encolan si está ocupado.";
+		if (this.input.placeholder !== text) this.input.placeholder = text;
+	}
+
+	/**
+	 * Shown only when there is something to say: this chat's queue, and the
+	 * size limit once the text gets near it (past it, it goes as an attachment).
+	 */
+	private renderHint(): void {
 		const queued = this.messages.filter((m) => m.state === "pending").length;
 		const running = this.messages.filter((m) => m.state === "running").length;
-		this.hint.textContent = `${running ? `${running} en curso · ` : ""}${queued ? `${queued} en espera · ` : ""}límite ${Math.round(this.maxBytes / 1024)} KiB (más grande: adjunto)`;
+		const parts: string[] = [];
+		if (running) parts.push(`${running} en curso`);
+		if (queued) parts.push(`${queued} en espera`);
+		// UTF-8 takes at most 3 bytes per UTF-16 unit: below that bound nothing
+		// can be near the limit, and typing does not encode the text each key.
+		const text = this.input.value;
+		if (text.length * 3 >= this.maxBytes * 0.8) {
+			const bytes = new TextEncoder().encode(text).length;
+			const kib = (n: number) => `${Math.ceil(n / 1024)} KiB`;
+			if (bytes > this.maxBytes)
+				parts.push(`${kib(bytes)}: supera ${kib(this.maxBytes)}, se envía como adjunto`);
+			else if (bytes >= this.maxBytes * 0.8) parts.push(`${kib(bytes)} de ${kib(this.maxBytes)}`);
+		}
+		this.hint.textContent = parts.join(" · ");
+		this.hint.hidden = parts.length === 0;
 	}
 
 	// ── Sending ─────────────────────────────────────────────────────────
