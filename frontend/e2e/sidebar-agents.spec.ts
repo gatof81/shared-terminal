@@ -6,9 +6,11 @@ const FRESH = "2026-10-31T10:29:58Z";
 /**
  * The sidebar says which sessions are agents and what each one is doing
  * (acpModel.sidebarAgentStatus over the registry, acpStatusFeed.ts keeping it
- * current): "@name" and a mark + word, the full label in the tooltip and the
- * accessible name; the two states that ask something of the person show on
- * the project's heading too, folded or not. Traditional rows are unchanged.
+ * current): in the tree an agent's row is its face, "@name" and ONE chip —
+ * the agent's state word — with the session's name and the full label in the
+ * tooltip and the accessible name; the two states that ask something of the
+ * person show on the project's heading too ("●N"), folded or not.
+ * Traditional rows are unchanged.
  */
 test.describe("sidebar: agents and their state", () => {
 	test.beforeEach(({ backend }) => {
@@ -41,15 +43,22 @@ test.describe("sidebar: agents and their state", () => {
 		await expect(state("scratch")).toHaveText("te espera");
 		await expect(state("scratch")).toHaveClass(/asks/);
 		await expect(state("hz-dev-2")).not.toHaveClass(/asks/);
-		// The full label: tooltip and accessible name, which starts with the row's words.
+		// The full label: tooltip and accessible name, which starts with the
+		// row's words; the session's name is said there, not shown.
 		const select = app.sessionRow("hz-dev-2").locator(".session-select");
-		await expect(select).toHaveAttribute("title", /Agente: trabajando en #12/);
+		await expect(select).toHaveAttribute("title", /^hz-dev-2\n[\s\S]*Agente: trabajando en #12/);
 		await expect(select).toHaveAttribute(
 			"aria-label",
-			/^hz-dev-2 @dev trabajando, session running, agente: trabajando en #12$/,
+			/^@dev trabajando, session hz-dev-2 running, agente: trabajando en #12$/,
 		);
-		for (const name of ["hz-architect", "hz-dev-2", "hz-design", "scratch"])
-			await expect(app.sessionRow(name).locator(".session-agent-line")).toBeVisible();
+		await expect(app.sessionRow("hz-dev-2").locator(".session-name")).toHaveText("@dev");
+		// One indicator per agent row: its face and the agent's chip, no session dot.
+		for (const name of ["hz-architect", "hz-dev-2", "hz-design", "scratch"]) {
+			const row = app.sessionRow(name);
+			await expect(row.locator(".session-avatar")).toBeVisible();
+			await expect(row.locator(".session-agent-status")).toHaveClass(/\bchip\b/);
+			await expect(row.locator(".session-dot")).toHaveCount(0);
+		}
 		// Traditional: no agent part, the same name as before.
 		await expect(app.sessionRow("my-project").locator(".session-agent-line")).toHaveCount(0);
 		await expect(app.sessionRow("my-project").locator(".session-select")).toHaveAttribute(
@@ -82,7 +91,8 @@ test.describe("sidebar: agents and their state", () => {
 		await head.locator(".sgroup-toggle").click();
 		await expect(app.sessionRow("hz-architect")).toBeHidden();
 		const flag = head.locator(".sgroup-asks");
-		await expect(flag).toHaveText(/^te espera/);
+		// How many wait, then who (for a screen reader, through aria-describedby).
+		await expect(flag).toHaveText(/^●2 — 2 agentes te esperan: .*@arq: esperando tu respuesta/);
 		// The folded heading's controls say it to a screen reader (Tab through headings).
 		for (const control of [head.locator(".sgroup-toggle"), head.locator("a.sgroup-title")])
 			await expect(control).toHaveAccessibleDescription(

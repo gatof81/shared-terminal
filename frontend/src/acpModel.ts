@@ -475,3 +475,13 @@ export function answerText(form: QuestionForm, answerJson: string | null): strin
 	}
 	return parts.join("\n") || "(sin respuesta)";
 }
+
+/**
+ * A stable hue per agent name, so each agent keeps its colour wherever it
+ * shows (its chats, the Project Chat header, the sidebar): `--acp-hue`.
+ */
+export function agentHue(name: string): number {
+	let h = 0;
+	for (const c of name) h = (h * 31 + c.charCodeAt(0)) % 360;
+	return h;
+}
