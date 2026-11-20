@@ -912,13 +912,22 @@ function readAgents(): Promise<void> {
 	return agentsRead;
 }
 function retryAgentsLater(): void {
-	if (agentsRetry) return;
+	if (agentsRetry || agentsRetryOnShow) return;
 	agentsRetry = setTimeout(() => {
 		agentsRetry = null;
-		if (isLoggedIn() && acpAgentsEnabled() && !acpAgentsLoaded()) void readAgents();
+		if (!isLoggedIn() || !acpAgentsEnabled() || acpAgentsLoaded()) return;
+		// A hidden tab reads nothing: one read when it shows again.
+		if (document.hidden) agentsRetryOnShow = true;
+		else void readAgents();
 	}, agentsRetryMs);
 	agentsRetryMs = Math.min(60_000, agentsRetryMs * 2);
 }
+let agentsRetryOnShow = false;
+document.addEventListener("visibilitychange", () => {
+	if (document.hidden || !agentsRetryOnShow) return;
+	agentsRetryOnShow = false;
+	if (isLoggedIn() && acpAgentsEnabled() && !acpAgentsLoaded()) void readAgents();
+});
 /**
  * A selection already waited for the list in this page load and it was not
  * there (late or failed): later selections never wait — they take "not an
