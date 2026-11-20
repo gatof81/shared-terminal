@@ -110,6 +110,23 @@ test.describe("shell v2", () => {
 		await expect(page.locator("#tab-tools #font-size-btn")).toBeVisible();
 	});
 
+	test("no session open: neither the bar nor the terminal's tools show, then both appear with one", async ({
+		app,
+		page,
+	}) => {
+		// On a phone the bar and strip were forced visible (no drawer in v2),
+		// which left ⎕ / Aa 14 floating over the empty state.
+		await app.login("alice");
+		await expect(page.locator("#empty-state")).toBeVisible();
+		await expect(page.locator("#terminal-tabs")).toBeHidden();
+		await expect(page.locator("#tab-tools #font-size-btn")).toBeHidden();
+		await expect(page.locator("#terminal-toolbar")).toBeHidden();
+		await app.openSession("my-project");
+		await app.expectTerminalReady();
+		await expect(page.locator("#terminal-toolbar")).toBeVisible();
+		await expect(page.locator("#tab-tools #font-size-btn")).toBeVisible();
+	});
+
 	test("desktop: the header cluster is one user menu with the role's entries", async ({
 		app,
 		page,

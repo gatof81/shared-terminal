@@ -105,8 +105,12 @@
      the full viewport. The desktop inline `display: flex/none` set
      by main.ts toolbar/tabs visibility logic is preserved when the
      drawer is open — we just gate it behind .chrome-open. */
-  main:not(.chrome-open) #terminal-toolbar,
-  main:not(.chrome-open) #terminal-tabs {
+  /* Shell v1 only: v2 has no chrome drawer, so its bar and tab strip
+     follow the same inline visibility as desktop (updateToolbar /
+     renderTabBar) — forcing them visible there showed the terminal's
+     tools with no session open. */
+  html:not([data-shell="v2"]) main:not(.chrome-open) #terminal-toolbar,
+  html:not([data-shell="v2"]) main:not(.chrome-open) #terminal-tabs {
     display: none !important;
   }
 
