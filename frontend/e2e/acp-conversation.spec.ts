@@ -129,10 +129,17 @@ test.describe("ACP conversation", () => {
 		const thread = page.locator(".acp-project .acp-chat-thread");
 		const post = thread.locator("article.acp-msg", { hasText: "¿cómo encaramos el login?" });
 		await expect(post.locator(".acp-sub")).toHaveCount(2);
-		const box = (await thread.boundingBox())!;
+		// The thread's reading column: its content box (on a wide screen the
+		// padding centres a --chat-col column in the full-width scroll box).
+		const box = await thread.evaluate((e) => {
+			const r = e.getBoundingClientRect();
+			const cs = getComputedStyle(e);
+			const l = r.x + Number.parseFloat(cs.paddingLeft);
+			return { x: l, width: r.right - Number.parseFloat(cs.paddingRight) - l };
+		});
 		const out = (await post.locator(".acp-out").boundingBox())!;
 		const answer = (await post.locator(".acp-sub").first().boundingBox())!;
-		// Right edge vs left edge of the thread (its padding aside).
+		// Right edge vs left edge of the column.
 		expect(box.x + box.width - (out.x + out.width)).toBeLessThan(40);
 		expect(answer.x - box.x).toBeLessThan(40);
 		await expect(post.locator(".acp-sub").first().locator(".acp-agent-id")).toHaveText(/@arq/);

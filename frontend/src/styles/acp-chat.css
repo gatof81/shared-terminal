@@ -411,11 +411,6 @@
 	align-items: center;
 	gap: 6px;
 }
-.acp-project .acp-thread {
-	border: 1px solid var(--c-border);
-	border-top: none;
-	border-radius: 0 0 8px 8px;
-}
 
 @media (max-width: 640px) {
 	.acp-chat-header,
@@ -432,11 +427,6 @@
 	}
 	.acp-chat-thread {
 		gap: 14px;
-	}
-	.acp-project .acp-thread {
-		border-left: none;
-		border-right: none;
-		border-radius: 0;
 	}
 	/* The thread is what matters on a phone: the agents bar stays compact. */
 	.acp-project .pv-title {
@@ -1015,4 +1005,40 @@ pre.acp-msg-body {
 	display: flex;
 	flex-wrap: wrap;
 	gap: 8px;
+}
+
+/* ── One reading column for both chats (above a phone's width) ────────── */
+/* The individual chat and Project Chat read in the same centred column
+   (--chat-col): on a wide screen a request (right) and its answer (left)
+   no longer sit a screen apart, and Project Chat is no longer a box in an
+   empty page. Only the content is inset — the bars, their lines and the
+   scroll boxes stay full width, so the wheel and the scrollbar work
+   anywhere over the chat. Padding moves no scroll position: acpThread.ts's
+   scroll logic is untouched. Percentages are of each box's parent, which
+   is the full chat width for every box listed here. */
+@media (min-width: 641px) {
+	.acp-chat,
+	.acp-project {
+		--chat-gutter: max(14px, calc((100% - var(--chat-col)) / 2));
+	}
+	.acp-chat-header,
+	.acp-settings:not([hidden]),
+	.acp-chat-notice:not([hidden]),
+	.acp-chat-thread,
+	.acp-chat-composer,
+	.acp-project .pv-header,
+	.acp-project .acp-project-agents {
+		padding-left: var(--chat-gutter);
+		padding-right: var(--chat-gutter);
+	}
+	.pv-page.acp-project {
+		max-width: none;
+		padding-left: 0;
+		padding-right: 0;
+	}
+	.acp-project .acp-agents-panel:not([hidden]),
+	.acp-project .acp-agents-list:not([hidden]) {
+		margin-left: var(--chat-gutter);
+		margin-right: var(--chat-gutter);
+	}
 }

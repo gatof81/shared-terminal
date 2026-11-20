@@ -212,6 +212,51 @@ test.describe("ACP chat", () => {
 		).toBeLessThan(60);
 	});
 
+	test("on a wide screen both chats read in the same centred column, the message box with them", async ({
+		page,
+		app,
+	}) => {
+		test.skip(app.mobile, "the column applies above a phone's width");
+		await page.setViewportSize({ width: 1920, height: 1080 });
+		const column = async (root: string) => {
+			await expect(page.locator(`${root} .acp-chat-thread .acp-msg`).first()).toBeVisible();
+			return page.evaluate((r) => {
+				const box = (sel: string) => document.querySelector(`${r} ${sel}`)!.getBoundingClientRect();
+				const inner = (sel: string) => {
+					const e = document.querySelector(`${r} ${sel}`)!;
+					const b = e.getBoundingClientRect();
+					const cs = getComputedStyle(e);
+					return {
+						left: b.left + Number.parseFloat(cs.paddingLeft),
+						right: b.right - Number.parseFloat(cs.paddingRight),
+					};
+				};
+				const out = box(".acp-out");
+				const reply = box(".acp-in, .acp-sub");
+				return {
+					thread: inner(".acp-chat-thread"),
+					composer: inner(".acp-chat-composer"),
+					spread: Math.round(out.right - reply.left),
+				};
+			}, root);
+		};
+		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
+		const solo = await column("#acp-chat");
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/chat`);
+		const project = await column(".acp-project");
+		const colPx = 56 * 16;
+		for (const c of [solo, project]) {
+			// A request and its answer at most a column apart (was 1632 px on the solo chat).
+			expect(c.spread).toBeLessThanOrEqual(colPx);
+			expect(Math.round(c.thread.right - c.thread.left)).toBe(colPx);
+			// The message box sits in the same column as the thread.
+			expect(Math.abs(c.composer.left - c.thread.left)).toBeLessThan(1);
+			expect(Math.abs(c.composer.right - c.thread.right)).toBeLessThan(1);
+		}
+		// And the same column in both chats.
+		expect(Math.abs(solo.thread.left - project.thread.left)).toBeLessThan(1);
+	});
+
 	test("a re-read that fails keeps the history and says so in words, not the server's code", async ({
 		page,
 		app,
