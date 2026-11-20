@@ -145,7 +145,6 @@ export class AcpThread {
 	 */
 	private placePending = false;
 	private placeFromHistory = false;
-	private anchorFrame = 0;
 	private gen = 0;
 	private messages: AcpMessage[] = [];
 	private hasEarlier = false;
@@ -308,11 +307,10 @@ export class AcpThread {
 				this.atBottom = away < END_SLACK;
 				if (this.atBottom) this.clearNew();
 				else this.renderPill();
-				if (!this.anchorFrame)
-					this.anchorFrame = requestAnimationFrame(() => {
-						this.anchorFrame = 0;
-						this.noteAnchor();
-					});
+				// At once, not on the next frame: a link followed right after the
+				// scroll hides the thread before that frame, and Back would find no
+				// place to return to (a one-row binary search: cheap per event).
+				this.noteAnchor();
 			},
 			{ passive: true },
 		);
@@ -449,6 +447,14 @@ export class AcpThread {
 
 	/** Stops following (the DOM and state stay for a quick return). */
 	close(): void {
+		// The place being read, from the geometry as it is now (the last scroll
+		// event may not have been dispatched yet), while the thread still shows:
+		// what Back returns to.
+		const t = this.threadEl;
+		if (t.clientHeight > 0 && !this.placePending && !this.endBtn.jumping) {
+			this.atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < END_SLACK;
+			this.noteAnchor();
+		}
 		this.closePicker(false);
 		this.unsubscribe?.();
 		this.unsubscribe = null;
@@ -1585,8 +1591,9 @@ export class AcpThread {
 						this.noteLive({ row });
 						this.messages = upsert(this.messages, row);
 					}
-				} catch {
-					failed.push(`@${name}`);
+				} catch (err) {
+					const why = SEND_REFUSED.get((err as { code?: string }).code ?? "");
+					failed.push(why ? `@${name} (${why})` : `@${name}`);
 				}
 			}
 			// The person may have moved to another chat meanwhile: nothing of this
@@ -1612,6 +1619,17 @@ export class AcpThread {
 		}
 	}
 }
+
+/**
+ * The refusals a person can act on, in fixed words (never the server's own
+ * text): retrying the same send would fail the same way, so they say why.
+ * Any other failure is just "No se envió a @x." — a retry may well work.
+ */
+const SEND_REFUSED = new Map([
+	["not-in-project", "ya no está en este proyecto"],
+	["unknown-recipient", "ese agente ya no existe"],
+	["project-not-found", "el proyecto ya no existe"],
+]);
 
 /** States in which a message is over: reaching one is news for the pill. */
 const FINAL = new Set(["done", "failed", "uncertain"]);

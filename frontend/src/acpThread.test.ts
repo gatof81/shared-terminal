@@ -247,6 +247,22 @@ describe("a send that fails while the person is elsewhere", () => {
 	const recoverBtn = (t: InstanceType<typeof AcpThread>) =>
 		t.root.querySelector<HTMLButtonElement>(".acp-recover")!;
 
+	it("a refusal the person can act on says why, in fixed words; any other stays plain", async () => {
+		api.acpFeed.mockResolvedValue(feed({ agent: agent("solo") }));
+		let fail = pendingSend();
+		const t = mount();
+		await sendInSolo(t, "importante");
+		fail(Object.assign(new Error("bad"), { status: 400, code: "not-in-project" }));
+		await settle();
+		expect(errorText(t)).toBe("No se envió a @solo (ya no está en este proyecto).");
+		t.input.value = "";
+		fail = pendingSend();
+		await sendInSolo(t, "otro");
+		fail(Object.assign(new Error("internal"), { status: 500, code: "internal" }));
+		await settle();
+		expect(errorText(t)).toBe("No se envió a @solo.");
+	});
+
 	it("A → B: nothing of A shows in B; back in A, the text and the error are there", async () => {
 		api.acpFeed.mockResolvedValue(feed({ agent: agent("solo") }));
 		const fail = pendingSend();
