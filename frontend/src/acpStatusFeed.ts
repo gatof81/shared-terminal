@@ -60,13 +60,18 @@ export function readAcpAgents(): Promise<void> {
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
 let retryMs = 5_000;
 function retryLater(): void {
-	if (retryTimer || acpAgentsLoaded()) return;
+	if (retryTimer || retryOnShow || acpAgentsLoaded()) return;
 	retryTimer = setTimeout(() => {
 		retryTimer = null;
-		if (isLoggedIn() && acpAgentsEnabled() && !acpAgentsLoaded()) void readAcpAgents();
+		if (!isLoggedIn() || !acpAgentsEnabled() || acpAgentsLoaded()) return;
+		// A hidden tab reads nothing: one read when it shows again.
+		if (document.hidden) retryOnShow = true;
+		else void readAcpAgents();
 	}, retryMs);
 	retryMs = Math.min(60_000, retryMs * 2);
 }
+/** A retry fell due while the tab was hidden. */
+let retryOnShow = false;
 
 /** How long ago the registry was last refreshed by any reader (or last asked for, here). */
 function age(): number {
@@ -172,7 +177,12 @@ export function stopAcpStatusFeed(): void {
 
 if (typeof document !== "undefined")
 	document.addEventListener("visibilitychange", () => {
-		if (!started || document.hidden) return;
+		if (document.hidden) return;
+		if (retryOnShow) {
+			retryOnShow = false;
+			if (isLoggedIn() && acpAgentsEnabled() && !acpAgentsLoaded()) void readAcpAgents();
+		}
+		if (!started) return;
 		if (dirty || age() >= PERIOD_MS) readIfVisible();
 		armPeriod();
 	});
