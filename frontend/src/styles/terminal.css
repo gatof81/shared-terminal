@@ -44,32 +44,7 @@
     max-width: 60vw;
   }
 }
-#terminal-status-badge {
-  padding: 1px 8px;
-  border-radius: 10px;
-  font-size: 0.7rem;
-  font-weight: 600;
-  text-transform: uppercase;
-}
-#terminal-status-badge.running {
-  background: rgba(var(--c-ok-rgb), 0.2);
-  color: var(--c-ok);
-}
-#terminal-status-badge.stopped {
-  background: rgba(var(--c-warn-rgb), 0.2);
-  color: var(--c-warn);
-}
-#terminal-status-badge.disconnected {
-  background: rgba(var(--c-muted-rgb), 0.2);
-  color: var(--c-muted);
-}
-/* Synthetic frontend-only state while the WS auto-reconnect loop is
-   retrying (#356) — amber like `stopped` (transient, not an error),
-   distinct from the grey terminal `disconnected` state. */
-#terminal-status-badge.reconnecting {
-  background: rgba(var(--c-warn-rgb), 0.2);
-  color: var(--c-warn);
-}
+/* The session's state: a .chip (base.css; sessionCore.setStatusBadge picks the tone). */
 #font-size-btn {
   margin-left: auto;
   background: transparent;

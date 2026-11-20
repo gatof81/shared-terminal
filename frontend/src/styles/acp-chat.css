@@ -432,7 +432,6 @@
 	.acp-project .pv-title {
 		font-size: 1rem;
 	}
-	.acp-project-tools .files-btn,
 	.acp-add-select {
 		font-size: 0.78rem;
 		min-height: 44px;
@@ -960,8 +959,7 @@ pre.acp-msg-body {
 		line-height: 44px;
 	}
 	.acp-settings .acp-project-select,
-	.acp-settings .acp-model-select,
-	.acp-settings .files-btn {
+	.acp-settings .acp-model-select {
 		min-height: 44px;
 	}
 	.acp-chat-header {
@@ -973,9 +971,6 @@ pre.acp-msg-body {
 	}
 	.acp-notice-short {
 		display: inline;
-	}
-	.acp-login-actions .files-btn {
-		min-height: 44px;
 	}
 	.acp-chat-composer {
 		padding-top: 8px;
