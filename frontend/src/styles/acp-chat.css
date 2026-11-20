@@ -166,29 +166,6 @@
 .acp-more {
 	align-self: center;
 }
-/* One line whatever the number of agents: it scrolls sideways, never wraps. */
-.acp-mentions:not([hidden]) {
-	display: flex;
-	flex-wrap: nowrap;
-	gap: 6px;
-	overflow-x: auto;
-	scrollbar-width: none;
-}
-.acp-mentions::-webkit-scrollbar {
-	display: none;
-}
-.acp-mention {
-	flex: none;
-	white-space: nowrap;
-	font-size: 0.8rem;
-	border: 1px solid var(--c-border);
-	border-radius: 12px;
-	padding: 2px 10px;
-	background: transparent;
-	color: inherit;
-	cursor: pointer;
-	min-height: 1.9rem;
-}
 .acp-act-failed {
 	color: var(--c-err);
 }
@@ -380,9 +357,6 @@
 	.acp-project-agents {
 		gap: 4px;
 		padding: 4px 0;
-	}
-	.acp-mention {
-		font-size: 0.75rem;
 	}
 }
 .acp-chat-header {
@@ -614,9 +588,17 @@ pre.acp-msg-body {
 /* The field and Enviar share one row; the field grows with its text
    (AcpThread.fitInput sets its height, up to a cap), so no manual resize. */
 .acp-chat-row {
+	position: relative;
 	display: flex;
 	align-items: flex-end;
-	gap: 8px;
+	gap: 6px;
+}
+/* The field's frame holds the send arrow, bottom right; the text keeps clear of it. */
+.acp-chat-field {
+	position: relative;
+	flex: 1;
+	min-width: 0;
+	display: flex;
 }
 .acp-chat-input {
 	flex: 1;
@@ -635,9 +617,127 @@ pre.acp-msg-body {
 	font-size: 0.85rem;
 	box-sizing: border-box;
 }
+/* After the field's own padding rules (the phone's included): more specific. */
+.acp-chat-field > .acp-chat-input {
+	padding-right: 46px;
+}
 .acp-chat-send {
+	position: absolute;
+	right: 1px;
+	bottom: 1px;
+	width: 40px;
+	height: 40px;
+	display: grid;
+	place-items: center;
+	padding: 0;
+	border: 0;
+	border-radius: 5px;
+	background: transparent;
+	color: var(--c-accent);
+	cursor: pointer;
+}
+.acp-chat-send svg {
+	width: 20px;
+	height: 20px;
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 2.2;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+.acp-chat-send:disabled {
+	color: var(--c-muted);
+	cursor: default;
+}
+.acp-chat-send:not(:disabled):hover {
+	background: var(--c-surface-2);
+}
+/* "+": the recipients menu (Project Chat with more than one agent). */
+.acp-pick-btn {
 	flex: none;
-	white-space: nowrap;
+	width: 40px;
+	height: 40px;
+	padding: 0;
+	border: 1px solid var(--c-border);
+	border-radius: 6px;
+	background: transparent;
+	color: var(--c-text);
+	font-size: 1.35rem;
+	line-height: 1;
+	cursor: pointer;
+}
+.acp-pick-btn[hidden] {
+	display: none;
+}
+.acp-pick-btn[aria-expanded="true"] {
+	background: var(--c-surface-2);
+}
+/* Opens upward from "+", over the thread; as tall as the visible height allows. */
+.acp-pick-menu {
+	position: absolute;
+	left: 0;
+	bottom: calc(100% + 6px);
+	z-index: 30;
+	width: min(22rem, 100%);
+	max-height: calc(var(--app-vh, 100dvh) * 0.45 - 4rem);
+	min-height: 44px;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	box-sizing: border-box;
+	padding: 4px;
+	background: var(--c-surface);
+	border: 1px solid var(--c-border);
+	border-radius: 8px;
+	box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+}
+.acp-pick-menu[hidden] {
+	display: none;
+}
+.acp-pick-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	width: 100%;
+	min-height: 44px;
+	padding: 4px 8px 4px 4px;
+	border: 0;
+	border-radius: 6px;
+	background: transparent;
+	color: var(--c-text);
+	text-align: left;
+	font: inherit;
+	font-size: 0.85rem;
+	cursor: pointer;
+}
+.acp-pick-row:hover,
+.acp-pick-row:focus-visible {
+	background: var(--c-surface-2);
+}
+.acp-pick-row[aria-disabled="true"] {
+	cursor: default;
+}
+.acp-pick-mark {
+	flex: none;
+	width: 1.3em;
+	text-align: center;
+	color: var(--c-ok);
+	font-weight: 700;
+}
+.acp-pick-info {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0 8px;
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+.acp-pick-state,
+.acp-pick-why {
+	font-size: 0.75rem;
+}
+.acp-pick-why {
+	color: var(--c-muted);
+	font-style: italic;
 }
 /* The queue / size note and "Recuperar…": a row only when one of them shows. */
 .acp-chat-actions {
@@ -721,9 +821,17 @@ pre.acp-msg-body {
 		padding: 10px;
 		font-size: 16px; /* no iOS zoom on focus */
 	}
+	/* 44 px to the touch: the whole corner of the field (it is transparent,
+	   the field's border still shows). */
 	.acp-chat-send {
-		min-height: 44px;
-		min-width: 4.5rem;
+		right: 0;
+		bottom: 0;
+		width: 44px;
+		height: 44px;
+	}
+	.acp-pick-btn {
+		width: 44px;
+		height: 44px;
 	}
 }
 .acp-chat-hint {

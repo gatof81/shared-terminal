@@ -93,6 +93,114 @@ export function recipientsOf(
 	};
 }
 
+// ── Recipients picked from a menu (Project Chat's "+") ─────────────────────
+//
+// The recipients ARE the leading mentions of the text (recipientsOf): the
+// menu only edits that leading group, so what is sent is exactly what the
+// person could have typed, and drafts, the unsent message and retries carry
+// the recipients with the text. Every edit is a list of splices, so the
+// field's caret and selection can be carried across them (mapThroughEdits).
+
+/** Replace `text[start, end)` with `insert`. */
+export interface TextEdit {
+	start: number;
+	end: number;
+	insert: string;
+}
+
+const LEAD_RE = /^\s*((?:@[A-Za-z0-9_-]+[\s,;:.!?]*)+)/;
+const LEAD_TOKEN_RE = /@([A-Za-z0-9_-]+)([\s,;:.!?]*)/g;
+
+/** The leading mentions: each `@name` with where it and its separators end. */
+function leadTokens(
+	text: string,
+): Array<{ name: string; start: number; end: number; sepEnd: number }> {
+	const m = LEAD_RE.exec(text);
+	if (!m) return [];
+	const from = m[0].length - m[1]!.length;
+	const out = [];
+	for (const t of m[1]!.matchAll(LEAD_TOKEN_RE)) {
+		const start = from + t.index!;
+		const end = start + 1 + t[1]!.length;
+		out.push({ name: t[1]!, start, end, sepEnd: end + t[2]!.length });
+	}
+	return out;
+}
+
+export function applyEdits(text: string, edits: readonly TextEdit[]): string {
+	let out = text;
+	for (const e of edits) out = out.slice(0, e.start) + e.insert + out.slice(e.end);
+	return out;
+}
+
+/** Where a caret at `pos` is after the edits (inside a removed span: at its end). */
+export function mapThroughEdits(pos: number, edits: readonly TextEdit[]): number {
+	let p = pos;
+	for (const e of edits) {
+		if (p >= e.end) p += e.insert.length - (e.end - e.start);
+		else if (p > e.start) p = e.start + e.insert.length;
+	}
+	return p;
+}
+
+/**
+ * The menu's row for agent `name`: checked iff it is a recipient of the
+ * text as it is (recipientsOf — never another source); `implicit` when it
+ * is one only because the text mentions it once inside (no leading group),
+ * which unchecking cannot change without editing the message's body.
+ */
+export function recipientRow(
+	text: string,
+	names: readonly string[],
+	name: string,
+): { checked: boolean; implicit: boolean } {
+	const checked = recipientsOf(text, names).to.includes(name);
+	return { checked, implicit: checked && leadTokens(text).length === 0 };
+}
+
+/**
+ * The edits that make `name` a recipient (`on`) or not, touching only the
+ * leading group. On: added after the last leading mention (`@a, @b: x` →
+ * `@a, @b @c: x`); without a leading group, the recipients the text already
+ * has (an implicit one) are written out with it, so checking someone never
+ * takes the message from whoever was getting it. A leading mention that is
+ * not an agent stays (its error too). Off: every leading `@name` goes, with
+ * its separator (the last one keeps the group's closing separator); an
+ * implicit recipient cannot be unchecked: no edit.
+ */
+export function setRecipient(
+	text: string,
+	names: readonly string[],
+	name: string,
+	on: boolean,
+): TextEdit[] {
+	const lead = leadTokens(text);
+	if (on) {
+		if (lead.some((t) => t.name === name)) return [];
+		if (lead.length > 0) {
+			const last = lead[lead.length - 1]!;
+			return [{ start: last.end, end: last.end, insert: ` @${name}` }];
+		}
+		const now = recipientsOf(text, names).to.filter((n) => n !== name);
+		const at = text.length - text.trimStart().length;
+		const group = [...now, name].map((n) => `@${n}`).join(" ");
+		return [{ start: at, end: at, insert: `${group} ` }];
+	}
+	const edits: TextEdit[] = [];
+	// Right to left: each splice leaves the earlier offsets valid.
+	for (let i = lead.length - 1; i >= 0; i--) {
+		const t = lead[i]!;
+		if (t.name !== name) continue;
+		const isLast = i === lead.length - 1 || lead.slice(i + 1).every((x) => x.name === name);
+		const prev = lead[i - 1];
+		if (isLast && prev && prev.name !== name)
+			// `@a, @b: x` without @b → `@a: x` (the group's closing separator kept).
+			edits.push({ start: prev.end, end: t.end, insert: "" });
+		else edits.push({ start: t.start, end: t.sepEnd, insert: "" });
+	}
+	return edits;
+}
+
 /** Insert or replace by id, keeping id order. */
 export function upsert(list: AcpMessage[], m: AcpMessage): AcpMessage[] {
 	const i = list.findIndex((x) => x.id === m.id);
