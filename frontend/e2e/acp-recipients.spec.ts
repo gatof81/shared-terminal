@@ -32,6 +32,10 @@ test.describe("Project Chat: recipients menu", () => {
 		);
 		await page.getByRole("button", { name: "Enviar" }).click();
 		await expect(menu).toBeHidden();
+		// Said to a screen reader (the hint line is not live: its queue counts would be read too).
+		await expect(page.locator("#project-view .acp-chat-composer [role=status]")).toHaveText(
+			"Enviado a @arq, @dev",
+		);
 		await expect
 			.poll(() => backend.acpMessages.filter((m) => m.body === "@arq @dev hola equipo").length)
 			.toBe(2);
@@ -79,6 +83,17 @@ test.describe("Project Chat: recipients menu", () => {
 		await input.fill("@devv hola");
 		await expect(row("arq")).toHaveAttribute("aria-checked", "false");
 		await expect(row("dev")).toHaveAttribute("aria-checked", "false");
+		// …and the menu says why, before any send.
+		const note = page.locator("#project-view .acp-pick-note");
+		await expect(note).toContainText("@devv no es un agente");
+		await row("dev").click();
+		await expect(input).toHaveValue("@devv @dev hola");
+		await expect(note).toBeVisible();
+		await expect(page.getByRole("menu", { name: "Destinatarios" })).toHaveAccessibleDescription(
+			/@devv no es un agente/,
+		);
+		await input.fill("@dev hola");
+		await expect(note).toBeHidden();
 	});
 
 	test("from the keyboard: arrows, Space, Escape back to the field", async ({ page, app }) => {
@@ -115,7 +130,15 @@ test.describe("Project Chat: recipients menu", () => {
 		await input.tap();
 		await input.fill("hola");
 		await expect(input).toBeFocused();
-		await page.getByRole("button", { name: "Elegir destinatarios" }).tap();
+		// A touch tap whose click arrives with detail 0, like a keyboard
+		// activation's (measured on Chromium touch; this harness's taps say 1):
+		// a pointer went down first, so it is not the keyboard.
+		const plus = page.getByRole("button", { name: "Elegir destinatarios" });
+		await plus.dispatchEvent("pointerdown", { pointerType: "touch", isPrimary: true });
+		await plus.dispatchEvent("click", { detail: 0 });
+		await expect(page.getByRole("menu", { name: "Destinatarios" })).toBeVisible();
+		// The tap opened it; the focus did not move into it.
+		await expect(input).toBeFocused();
 		const row = page.getByRole("menuitemcheckbox", { name: /@arq/ });
 		await row.tap();
 		await expect(input).toBeFocused();

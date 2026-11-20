@@ -786,6 +786,14 @@ pre.acp-msg-body {
 .acp-pick-menu[hidden] {
 	display: none;
 }
+.acp-pick-note {
+	margin: 4px 6px 6px;
+	font-size: 0.78rem;
+	color: var(--c-warn);
+}
+.acp-pick-note[hidden] {
+	display: none;
+}
 .acp-pick-row {
 	display: flex;
 	align-items: center;
