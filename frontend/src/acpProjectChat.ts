@@ -100,10 +100,14 @@ export function projectHasAcpAgents(pid: string): boolean | null {
  */
 export function acpProjectPage(pid: string, header: HTMLElement): HTMLElement {
 	if (headerEl !== header) {
-		headerEl = header;
+		// Only the header is swapped once the page is built: taking the
+		// thread out of the document and back (replaceChildren) resets its
+		// scroll to the top — a long history opened at its oldest message.
+		if (headerEl?.parentElement === root) headerEl.replaceWith(header);
 		// The panel is a sibling of the agents row: on a short screen it is
 		// the one part that gives way to the thread's minimum (acp-chat.css).
-		root.replaceChildren(header, barEl, listEl, panelEl, thread.root);
+		else root.replaceChildren(header, barEl, listEl, panelEl, thread.root);
+		headerEl = header;
 		// The agents' group sits in the header's row, before ⋯ and ×.
 		header.querySelector(".pv-tools")?.prepend(groupBtn);
 		const title = header.querySelector<HTMLElement>(".pv-title");

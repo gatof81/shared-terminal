@@ -465,6 +465,39 @@ test.describe("ACP chat headers", () => {
 		).toBeGreaterThanOrEqual(90);
 	});
 
+	test("Project Chat with a long history opens at its end, entered directly and coming back", async ({
+		page,
+		app,
+		backend,
+	}) => {
+		for (let i = 0; i < 28; i++)
+			backend.addAcpMessage({
+				to_id: "arq",
+				body: `@arq pregunta ${i}`,
+				state: "done",
+				result_text: `Respuesta ${i}.\n\nUna línea más.\n\nY otra.`,
+				project_id: PROJECT_IDS.hz,
+			});
+		await page.setViewportSize({ width: 390, height: 844 });
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		const thread = page.locator("#project-view .acp-chat-thread");
+		await expect(thread).toContainText("Respuesta 27.");
+		const gap = () =>
+			thread.evaluate((el) => Math.round(el.scrollHeight - el.clientHeight - el.scrollTop));
+		// The header is rebuilt once the project's name is read: the thread must stay put.
+		await page.waitForTimeout(500);
+		expect(await gap()).toBeLessThan(60);
+		await page.evaluate(
+			(h) => (location.hash = h),
+			`#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`,
+		);
+		await expect(page.locator("#acp-chat .acp-chat-input")).toBeVisible();
+		await page.goBack();
+		await expect(thread).toBeVisible();
+		await page.waitForTimeout(500);
+		expect(await gap()).toBeLessThan(60);
+	});
+
 	test("the agents' group: 3 avatars on a phone, '+N'; an agent waiting in the '+N' is still marked and said; the list opens its chat", async ({
 		page,
 		app,
