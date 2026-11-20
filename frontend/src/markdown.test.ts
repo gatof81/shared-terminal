@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { classifyHref, renderInline, renderMarkdown, slugify } from "./markdown.js";
+import { appRouteHash } from "./router.js";
 
 function render(src: string, opts = {}) {
 	const root = renderMarkdown(src, opts);
@@ -168,6 +169,61 @@ describe("renderMarkdown — structure", () => {
 		const nodes = renderInline("see https://example.com/x.");
 		const a = nodes.find((n) => n instanceof HTMLAnchorElement) as HTMLAnchorElement;
 		expect(a.getAttribute("href")).toBe("https://example.com/x");
+	});
+});
+
+describe("links in an agent's answer (appRoute: router.appRouteHash)", () => {
+	const kind = (href: string) => classifyHref(href, appRouteHash);
+	it("the app's own addresses navigate in place, in their canonical form", () => {
+		expect(kind("#/sessions/abc")).toEqual({ kind: "app", href: "#/sessions/abc" });
+		expect(kind("#/sessions/abc/chat")).toEqual({ kind: "app", href: "#/sessions/abc/chat" });
+		expect(kind("#/sessions/abc/files/src/a%20b.ts")).toEqual({
+			kind: "app",
+			href: "#/sessions/abc/files/src/a%20b.ts",
+		});
+		expect(kind("#/projects/p-1")).toEqual({ kind: "app", href: "#/projects/p-1" });
+		// Control characters are stripped first, as for every href.
+		expect(kind(" #/projects/p-1\t")).toEqual({ kind: "app", href: "#/projects/p-1" });
+		// Markup in an id cannot come back out: the href is re-encoded.
+		expect(kind('#/sessions/a"><img>')).toEqual({
+			kind: "app",
+			href: "#/sessions/a%22%3E%3Cimg%3E",
+		});
+	});
+	it("other fragments stay in-document anchors", () => {
+		expect(kind("#Intro").kind).toBe("anchor");
+		expect(kind("#/sessions/abc/nope").kind).toBe("anchor"); // not a view
+		expect(kind("#/sessions/%zz").kind).toBe("anchor"); // malformed
+		expect(kind("#/other/x").kind).toBe("anchor");
+	});
+	it("external http(s) as today; any other scheme blocked", () => {
+		expect(kind("https://example.com/x")).toEqual({
+			kind: "external",
+			href: "https://example.com/x",
+		});
+		expect(kind("//cdn.example/x")).toEqual({ kind: "external", href: "https://cdn.example/x" });
+		for (const bad of [
+			"javascript:alert(1)",
+			" java\tscript:alert(1)",
+			"data:text/html,<b>x</b>",
+			"vbscript:x",
+			"file:///etc/passwd",
+		])
+			expect(kind(bad)).toEqual({ kind: "blocked" });
+	});
+	it("renders an app link as a same-tab link; without the option it is an anchor", () => {
+		const [a] = renderInline("[ver](#/sessions/abc/chat)", {
+			appRoute: appRouteHash,
+		}) as HTMLAnchorElement[];
+		expect(a!.getAttribute("href")).toBe("#/sessions/abc/chat");
+		expect(a!.target).toBe("");
+		const [plain] = renderInline("[ver](#/sessions/abc/chat)") as HTMLAnchorElement[];
+		expect(plain!.getAttribute("href")).toBe("#");
+		const [ext] = renderInline("[x](https://example.com)", {
+			appRoute: appRouteHash,
+		}) as HTMLAnchorElement[];
+		expect(ext!.target).toBe("_blank");
+		expect(ext!.rel).toBe("noopener noreferrer nofollow");
 	});
 });
 

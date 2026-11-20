@@ -136,6 +136,19 @@ export function sameProjectRoute(a: ProjectRoute | null, b: ProjectRoute | null)
 	return a.projectId === b.projectId;
 }
 
+/**
+ * A fragment that is one of the app's own addresses — a session (with its
+ * view and detail) or a project page — in its canonical form, else null.
+ * For links in untrusted text (an agent's answer): what the link carries is
+ * re-written by these parsers, never the text as written.
+ */
+export function appRouteHash(hash: string): string | null {
+	const r = parseRoute(hash);
+	if (r) return routeHash(r);
+	const p = parseProjectRoute(hash);
+	return p ? projectRouteHash(p) : null;
+}
+
 export function readProjectRoute(): ProjectRoute | null {
 	return parseProjectRoute(window.location.hash);
 }
