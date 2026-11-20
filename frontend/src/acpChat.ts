@@ -47,7 +47,7 @@ const headerEl = el("div", "acp-chat-header");
 const titleEl = el("div", "acp-chat-title");
 const nameEl = el("strong", "acp-chat-name");
 const statusEl = el("span", "acp-status");
-const settingsBtn = el("button", "files-btn acp-settings-btn");
+const settingsBtn = el("button", "btn sm acp-settings-btn");
 settingsBtn.type = "button";
 settingsBtn.setAttribute("aria-expanded", "false");
 settingsBtn.setAttribute("aria-controls", "acp-settings");
@@ -247,7 +247,7 @@ function renderHeader(s: ThreadState): void {
 		// The adapter's own login methods: each opens a terminal tab of this
 		// session running the official `claude auth login` flow.
 		for (const m of a.loginMethods ?? []) {
-			const b = el("button", "files-btn primary", `Conectar cuenta · ${m.name}`);
+			const b = el("button", "btn sm primary", `Conectar cuenta · ${m.name}`);
 			b.type = "button";
 			b.title = m.description || m.name;
 			b.addEventListener("click", () => {
@@ -263,7 +263,7 @@ function renderHeader(s: ThreadState): void {
 			});
 			actions.append(b);
 		}
-		const open = el("button", "files-btn", "Abrir Terminal");
+		const open = el("button", "btn sm", "Abrir Terminal");
 		open.type = "button";
 		open.title =
 			"También podés ejecutar `claude auth login` (o `claude` y /login) en la Terminal de esta sesión.";
@@ -288,7 +288,7 @@ function modelRow(a: AcpAgentInfo): HTMLElement {
 	if (!a.model) select.append(new Option("Por defecto", ""));
 	select.value = a.model ?? "";
 	// Saved by an explicit button, never on `change` alone (keyboard type-ahead fires it).
-	const save = el("button", "files-btn", "Cambiar modelo");
+	const save = el("button", "btn sm", "Cambiar modelo");
 	save.type = "button";
 	save.hidden = true;
 	select.addEventListener(
@@ -338,7 +338,7 @@ function projectRow(a: AcpAgentInfo): HTMLElement {
 		select.append(new Option("(proyecto)", a.projectId));
 	select.value = a.projectId ?? "";
 	// Saved by an explicit button, never on `change` alone (keyboard type-ahead fires it).
-	const save = el("button", "files-btn", "Guardar");
+	const save = el("button", "btn sm", "Guardar");
 	save.type = "button";
 	save.hidden = true;
 	select.addEventListener("change", () => (save.hidden = select.value === (a.projectId ?? "")));

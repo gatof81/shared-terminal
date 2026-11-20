@@ -186,7 +186,7 @@ export class AcpThread {
 			restored: boolean;
 		}
 	>();
-	private readonly recoverBtn = el("button", "files-btn acp-recover", "Recuperar el texto");
+	private readonly recoverBtn = el("button", "btn sm acp-recover", "Recuperar el texto");
 	private unsubscribe: (() => void) | null = null;
 	private poll: ReturnType<typeof setInterval> | null = null;
 	private statusTimer: ReturnType<typeof setInterval> | null = null;
@@ -204,7 +204,7 @@ export class AcpThread {
 	private readonly items = new Map<string, { sig: string; el: HTMLElement }>();
 	private readonly errorEl = el("div", "acp-chat-error");
 	private readonly emptyEl = el("div", "acp-chat-empty");
-	private readonly moreBtn = el("button", "files-btn acp-more", "Cargar anteriores");
+	private readonly moreBtn = el("button", "btn sm acp-more", "Cargar anteriores");
 	/** Unsent text per chat (agent or project): a draft never follows the person into another chat. */
 	private readonly drafts = new Map<string, string>();
 	/** The person just sent: show the bottom of the thread whatever the scroll position. */
@@ -1080,7 +1080,7 @@ export class AcpThread {
 		if (m.note && (m.state === "uncertain" || m.state === "failed"))
 			out.push(el("div", "acp-msg-note", m.note));
 		if (m.state === "uncertain") {
-			const again = el("button", "files-btn", "Volver a encolar");
+			const again = el("button", "btn sm", "Volver a encolar");
 			again.type = "button";
 			again.title =
 				"La ejecución se interrumpió y no se repite sola: puede haber tenido efectos. Reencolar es decisión tuya.";
@@ -1139,7 +1139,7 @@ export class AcpThread {
 			if (q.state === "orphaned") {
 				// Continue safely: the person decides whether the agent gets the decision
 				// again, as an ordinary message in its queue.
-				const again = el("button", "files-btn", "Enviar la decisión como mensaje");
+				const again = el("button", "btn sm", "Enviar la decisión como mensaje");
 				again.type = "button";
 				again.addEventListener("click", () => {
 					const prefix = this.source?.kind === "project" ? `@${q.agent} ` : "";
@@ -1209,9 +1209,9 @@ export class AcpThread {
 			f.append(box);
 		});
 		const actions = el("div", "acp-question-actions");
-		const send = el("button", "files-btn acp-question-send", "Responder");
+		const send = el("button", "btn sm acp-question-send", "Responder");
 		send.type = "submit";
-		const skip = el("button", "files-btn", "Omitir");
+		const skip = el("button", "btn sm", "Omitir");
 		skip.type = "button";
 		const status = el("span", "acp-chat-hint");
 		actions.append(send, skip, status);

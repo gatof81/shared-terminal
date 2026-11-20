@@ -110,6 +110,21 @@ const showTerminatedToggle = document.getElementById("show-terminated-toggle") a
 const terminalToolbar = document.getElementById("terminal-toolbar")!;
 const terminalSessionName = document.getElementById("terminal-session-name")!;
 const terminalStatusBadge = document.getElementById("terminal-status-badge")!;
+
+/**
+ * The session's state in the bar: a chip (base.css) with the word as the
+ * server says it. Amber is for what needs the person, so a stopped or
+ * disconnected session is the hollow grey of "not running", not a warning.
+ */
+const BADGE_TONE = new Map([
+	["running", "ok"],
+	["reconnecting", "busy"],
+	["failed", "err"],
+]);
+function setStatusBadge(state: string): void {
+	terminalStatusBadge.textContent = state;
+	terminalStatusBadge.className = `chip tone-${BADGE_TONE.get(state) ?? "off"} ${state}`;
+}
 const terminalTabs = document.getElementById("terminal-tabs")!;
 const tabStrip = document.getElementById("tab-strip") ?? terminalTabs;
 const terminalContainer = document.getElementById("terminal-container")!;
@@ -1393,8 +1408,7 @@ export function updateToolbar() {
 		s.status === "running" && disconnectedTabId !== null && currentActiveTabId === null
 			? "disconnected"
 			: s.status;
-	terminalStatusBadge.textContent = badge;
-	terminalStatusBadge.className = badge;
+	setStatusBadge(badge);
 	// Refresh the mobile header context pill — its label tracks the
 	// active session/tab, and visibility flips on/off here.
 	updateChromeToggle();
@@ -1705,8 +1719,7 @@ function openTab(tabId: string) {
 						// in place. Only the active tab may repaint the shared
 						// badge (same rule as the backend-status path below).
 						if (tabId !== currentActiveTabId) return;
-						terminalStatusBadge.textContent = "reconnecting";
-						terminalStatusBadge.className = "reconnecting";
+						setStatusBadge("reconnecting");
 						return;
 					}
 

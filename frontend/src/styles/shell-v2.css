@@ -150,27 +150,12 @@ html[data-shell="v2"] #terminal-area.view-nav-on #chat-view {
     overflow: visible;
   }
   html[data-shell="v2"] #terminal-status-badge {
-    /* The dot says it; the word is in the ⋯ menu's state line. */
+    /* The chip's dot says it; the word is in the ⋯ menu's state line. */
     font-size: 0;
-    width: 8px;
-    height: 8px;
+    gap: 0;
     padding: 0;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-  html[data-shell="v2"] #terminal-status-badge.running {
-    background: var(--c-ok);
-  }
-  html[data-shell="v2"] #terminal-status-badge.stopped,
-  html[data-shell="v2"] #terminal-status-badge.reconnecting {
-    background: var(--c-warn);
-  }
-  html[data-shell="v2"] #terminal-status-badge.disconnected {
-    background: var(--c-muted);
-  }
-  html[data-shell="v2"] #terminal-status-badge.terminated,
-  html[data-shell="v2"] #terminal-status-badge.failed {
-    background: var(--c-err);
+    height: auto;
+    background: none;
   }
   html[data-shell="v2"] #view-switch {
     margin-left: auto;

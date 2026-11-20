@@ -304,7 +304,7 @@ function renderBar(): void {
 		if (active)
 			for (const a of members) {
 				const li = el("li", "acp-manage-item");
-				const remove = el("button", "files-btn acp-agent-remove", "Quitar");
+				const remove = el("button", "btn sm acp-agent-remove", "Quitar");
 				remove.type = "button";
 				remove.title = `Quitar a @${a.name} del proyecto (conserva su sesión e historial)`;
 				remove.setAttribute("aria-label", `Quitar a @${a.name} del proyecto`);
@@ -389,7 +389,7 @@ function buildTools(pid: string, candidates: AcpAgentInfo[]): HTMLElement {
 			);
 		// An explicit button: a <select> alone would act on its `change`, which
 		// keyboard type-ahead fires while it has the focus (typing "@…" picked an agent).
-		const add = el("button", "files-btn", "Agregar");
+		const add = el("button", "btn sm", "Agregar");
 		add.type = "button";
 		add.disabled = true;
 		select.addEventListener("change", () => (add.disabled = select.value === ""));
@@ -399,7 +399,7 @@ function buildTools(pid: string, candidates: AcpAgentInfo[]): HTMLElement {
 		});
 		tools.append(select, add);
 	}
-	const create = el("button", "files-btn", "+ Nueva sesión con agente");
+	const create = el("button", "btn sm", "+ Nueva sesión con agente");
 	create.type = "button";
 	create.addEventListener("click", () =>
 		// The button itself: the dialog gives the focus back to it on close.
