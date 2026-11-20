@@ -59,8 +59,15 @@ export function classifyHref(raw: string, appRoute?: MarkdownOptions["appRoute"]
 		const route = appRoute(raw);
 		return route !== null ? { kind: "app", href: route } : { kind: "blocked" };
 	}
+	// The scheme is judged with every space and control char removed
+	// (`probe`): browsers ignore them when parsing a URL — `java\tscript:` and
+	// ` javascript:` are both live javascript: URLs to the browser. An
+	// external link keeps its inner spaces, encoded (`a b` → `a%20b`): the
+	// address written, not another one.
 	// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping control chars IS the point
-	const href = raw.replace(/[\u0000-\u0020\u007f]+/g, "");
+	const kept = raw.replace(/[\u0000-\u001f\u007f]+/g, "").trim();
+	const probe = kept.replace(/ +/g, "");
+	const href = probe;
 	if (href === "") return { kind: "blocked" };
 	if (href.startsWith("#")) {
 		// Only "#/" after stripping: an app address in disguise, not an anchor.
@@ -70,12 +77,13 @@ export function classifyHref(raw: string, appRoute?: MarkdownOptions["appRoute"]
 	const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(href);
 	if (scheme) {
 		return SAFE_SCHEMES.has(`${(scheme[1] as string).toLowerCase()}:`)
-			? { kind: "external", href }
+			? { kind: "external", href: kept.replace(/ /g, "%20") }
 			: { kind: "blocked" };
 	}
 	// Protocol-relative `//host/x` would navigate off-site with whatever
 	// scheme the app runs on — treat it as external only if it's http(s).
-	if (href.startsWith("//")) return { kind: "external", href: `https:${href}` };
+	if (href.startsWith("//"))
+		return { kind: "external", href: `https:${kept.replace(/ /g, "%20")}` };
 	// Browsers read a backslash as a slash in a URL: `/\host` and `\\host`
 	// are `//host` to them, not a workspace path.
 	if (/^[\\/]{2}/.test(href)) return { kind: "blocked" };

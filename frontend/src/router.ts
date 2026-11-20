@@ -145,6 +145,12 @@ export function sameProjectRoute(a: ProjectRoute | null, b: ProjectRoute | null)
 export function appRouteHash(hash: string): string | null {
 	try {
 		const r = parseRoute(hash);
+		// A "." or ".." step in a detail (written or encoded) is no address:
+		// a link from untrusted text must not name paths outside the
+		// workspace, even though the server would refuse them.
+		// (Git's detail is "<area>:<path>": the path starts after the area.)
+		const path = r?.view === "git" ? r.detail?.replace(/^[^:/]*:/, "") : r?.detail;
+		if (path?.split("/").some((seg) => seg === "." || seg === "..")) return null;
 		if (r) return routeHash(r);
 		const p = parseProjectRoute(hash);
 		return p ? projectRouteHash(p) : null;
