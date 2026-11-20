@@ -788,8 +788,10 @@ body.project-page-on #actions-btn {
   > * {
   opacity: 1;
 }
+/* A touch screen has no hover: every row's actions always show (the same
+   selector as the rule above, or that one's :not() outweighs this). */
 @media (pointer: coarse) {
-  .sidebar-tree .session-list-grouped .session-actions > * {
+  .sidebar-tree .session-list-grouped .session-actions > :not(.start) {
     opacity: 1;
   }
 }
