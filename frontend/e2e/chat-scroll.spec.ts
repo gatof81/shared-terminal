@@ -197,7 +197,13 @@ test.describe("chat scroll: ACP chats", () => {
 		// it in first), the earlier page: the first row read stays where it is.
 		await scrollBy(t, 0);
 		const first = await rowTop(t, "pregunta 12");
-		await t.getByRole("button", { name: "Cargar anteriores" }).click();
+		// By keyboard: a click may find the button under a transient toast (the
+		// terminal's "GPU rendering unavailable" on a loaded runner shows under
+		// the bar, over the thread's top) and Playwright then scrolls the thread
+		// to retry — moving the reader before the page lands, which the thread
+		// then rightly keeps.
+		await t.getByRole("button", { name: "Cargar anteriores" }).focus();
+		await page.keyboard.press("Enter");
 		await expect(t).toContainText("pregunta 11");
 		await stays(t, "pregunta 12", first, "an earlier page");
 	});
