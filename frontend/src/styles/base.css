@@ -92,6 +92,10 @@ html[data-kb="open"] body {
   flex-shrink: 0;
   cursor: pointer;
 }
+/* `hidden` still hides a .btn (the display above beats the UA's rule). */
+.btn[hidden] {
+  display: none;
+}
 .btn.sm {
   height: 28px;
   padding: 0 10px;
