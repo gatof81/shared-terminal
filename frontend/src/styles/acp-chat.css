@@ -320,31 +320,58 @@
 	padding: 0;
 	display: flex;
 	flex-direction: column;
-	gap: 2px;
 }
+/* One row per agent, every row 64 px (8 + the name's 20 + 4 + the chip's
+   24 + 8): the face and "Abrir su chat" across both lines, the name on one
+   line (an ellipsis, the whole one in its tooltip), the state under it. */
 .acp-agents-list-item {
-	display: flex;
-	flex-wrap: wrap;
+	display: grid;
+	grid-template-columns: 24px minmax(0, 1fr) auto;
+	grid-template-rows: 20px 24px;
+	column-gap: 10px;
+	row-gap: 4px;
 	align-items: center;
-	gap: 2px 10px;
-	min-height: 44px;
-	padding: 2px 0;
+	padding: 8px 0;
 	border-bottom: 1px solid var(--c-border-soft);
 }
-.acp-agents-list-who {
-	overflow-wrap: anywhere;
-	min-width: 0;
+.acp-agents-list-item:last-child {
+	border-bottom: 0;
 }
-.acp-agents-list-item .acp-status {
-	font-size: 0.8rem;
+.acp-agents-list-face {
+	grid-column: 1;
+	grid-row: 1 / span 2;
+	width: 24px;
+	height: 24px;
+	font-size: 12px;
+	font-weight: 700;
+}
+.acp-agents-list-name {
+	grid-column: 2;
+	grid-row: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 14px;
+	font-weight: 600;
+	line-height: 20px;
+	color: hsl(var(--acp-hue, 210) 55% 62%);
+}
+.acp-agents-list-state {
+	grid-column: 2;
+	grid-row: 2;
+	justify-self: start;
 }
 .acp-agents-list-link {
-	margin-left: auto;
-	display: inline-flex;
-	align-items: center;
-	min-height: 44px;
-	color: var(--c-accent);
-	font-size: 0.8rem;
+	grid-column: 3;
+	grid-row: 1 / span 2;
+	text-decoration: none;
+}
+.acp-agents-list-note {
+	grid-column: 2 / -1;
+	margin: 4px 0 0;
+	font-size: 0.78rem;
+	color: var(--c-warn);
 }
 .acp-agent-name {
 	font-weight: 600;
@@ -1108,4 +1135,101 @@ html[data-shell="v2"] .acp-chat-header {
   .acp-chat-header {
     display: none;
   }
+}
+
+/* "Agentes del proyecto": a state that goes to the agent's message is a
+   chip with its fill and "›" (one that does not is .bare, not focusable);
+   a 44-px target to the touch that stays clear of "Abrir su chat". */
+.acp-agents-list-goto {
+	position: relative;
+	border: 0;
+	font-family: inherit;
+	cursor: pointer;
+}
+.acp-agents-list-goto:hover {
+	background: color-mix(in srgb, var(--chip) 24%, transparent);
+}
+.acp-agents-list-goto:focus-visible {
+	outline: 2px solid var(--c-accent);
+	outline-offset: 2px;
+}
+.acp-agents-list-goto-mark {
+	font-size: 12px;
+}
+.acp-agents-list-goto::after {
+	content: "";
+	position: absolute;
+	inset: -12px -8px;
+}
+.acp-agents-list-goto[aria-busy="true"]::before {
+	width: 14px;
+	height: 14px;
+	box-sizing: border-box;
+	border-radius: 50%;
+	background: none;
+	border: 2px solid rgba(255, 255, 255, 0.25);
+	border-top-color: var(--c-accent);
+	animation: btn-spin 0.8s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+	.acp-agents-list-goto[aria-busy="true"]::before {
+		animation: none;
+	}
+}
+/* Its own fixed head, a line under it: the rows scroll under, cleanly. */
+.acp-agents-list .acp-agents-panel-head {
+	min-height: 44px;
+	padding-bottom: 0;
+	border-bottom: 1px solid var(--c-border-soft);
+}
+.acp-agents-list-scrim[hidden] {
+	display: none;
+}
+/* A phone: OVER the thread (acpProjectChat.placeList sets its top and
+   height), never pushing it; the scrim under it takes a tap outside. */
+@media (max-width: 640px) {
+	.pv-page.acp-project {
+		position: relative;
+	}
+	.acp-project .acp-agents-list:not([hidden]) {
+		position: absolute;
+		left: 8px;
+		right: 8px;
+		z-index: 20;
+		margin: 0;
+		border-radius: var(--radius-m);
+		box-shadow: 0 6px 16px rgba(1, 4, 9, 0.55);
+	}
+	.acp-agents-list-scrim:not([hidden]) {
+		position: absolute;
+		inset: 0;
+		z-index: 19;
+	}
+}
+/* The message gone to: a 2-px ring and a tint, held 1200 ms then faded in
+   600 ms (acpThread.flash); with reduced motion, no transition at all.
+   Shadow and background only: nothing in the layout moves. */
+.acp-msg-flash {
+	border-radius: 10px;
+	background: var(--c-accent-bg);
+	box-shadow: 0 0 0 2px var(--c-accent);
+}
+.acp-msg-flash.acp-msg-flash-warn {
+	background: rgba(var(--c-warn-rgb), 0.12);
+	box-shadow: 0 0 0 2px var(--c-warn);
+}
+.acp-msg-flash.acp-msg-flash-out {
+	background: transparent;
+	box-shadow: 0 0 0 2px transparent;
+	transition:
+		background 600ms ease-out,
+		box-shadow 600ms ease-out;
+}
+.acp-msg-flash:focus {
+	outline: none;
+}
+@media (prefers-reduced-motion: reduce) {
+	.acp-msg-flash.acp-msg-flash-out {
+		transition: none;
+	}
 }

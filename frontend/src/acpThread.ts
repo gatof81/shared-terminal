@@ -20,6 +20,7 @@ import {
 	authFromActivity,
 	groupThread,
 	mapThroughEdits,
+	messagePlace,
 	questionForm,
 	recipientRow,
 	recipientsOf,
@@ -137,6 +138,13 @@ export class AcpThread {
 	private atBottom = true;
 	/** The thread's clientHeight when last seen by a scroll / resize observation. */
 	private box = 0;
+	/**
+	 * Where the thread was last pinned to its end. A render may run between
+	 * a scroll and its event (the event comes with the next frame): a thread
+	 * well above this, in a box of the same height, was scrolled up by the
+	 * reader, whatever `atBottom` still says.
+	 */
+	private pinnedTop = 0;
 
 	private source: ThreadSource | null = null;
 	/**
@@ -294,6 +302,7 @@ export class AcpThread {
 					this.box = t.clientHeight;
 					if (this.atBottom) {
 						t.scrollTop = t.scrollHeight;
+						this.pinnedTop = t.scrollTop;
 						return;
 					}
 				}
@@ -329,7 +338,10 @@ export class AcpThread {
 				if (wasHidden && !this.placePending) {
 					if (fromHistory()) this.restorePlace();
 					else this.scrollToEnd();
-				} else if (this.atBottom) t.scrollTop = t.scrollHeight;
+				} else if (this.atBottom) {
+					t.scrollTop = t.scrollHeight;
+					this.pinnedTop = t.scrollTop;
+				}
 				this.renderPill();
 			}).observe(this.threadEl);
 		// The field's cap depends on the visible height (keyboard, rotation).
@@ -377,6 +389,65 @@ export class AcpThread {
 		if (mode === this.composerMode) return;
 		this.composerMode = mode;
 		this.renderComposer();
+	}
+
+	/** Where message `id` stands in this chat: shown, on an earlier page, or not here. */
+	placeOf(id: number): "shown" | "earlier" | "elsewhere" {
+		return messagePlace(
+			id,
+			this.messages.map((m) => m.id),
+			this.hasEarlier,
+		);
+	}
+
+	/**
+	 * Puts message `id` in view near the thread's top, flashes its row and
+	 * gives it the focus. On an earlier page not loaded yet, loads back with
+	 * "Cargar anteriores" — at most 3 pages. False: not found (the caller
+	 * says so). The reader is then away from the end like any reader who
+	 * scrolled there: "Ir al final" shows, and news does not move them.
+	 */
+	async revealMessage(id: number): Promise<boolean> {
+		const gen = this.gen;
+		for (let pages = 0; ; pages++) {
+			if (gen !== this.gen) return false;
+			this.render();
+			const row = this.threadEl.querySelector<HTMLElement>(`[data-ids~="${id}"]`);
+			if (row) {
+				this.goToRow(row);
+				return true;
+			}
+			if (this.placeOf(id) !== "earlier" || pages >= 3) return false;
+			await this.loadEarlier();
+		}
+	}
+
+	private goToRow(row: HTMLElement): void {
+		const t = this.threadEl;
+		const anchor = row.dataset.anchor;
+		if (!anchor) return;
+		// "esperando tu respuesta": the destination is the open question's card.
+		const card = row.querySelector<HTMLElement>(".acp-question-open");
+		const target = card ?? row;
+		// Its top at a quarter of the thread's height (context above it); the
+		// last rows stay where the end lets them.
+		const lead = target.getBoundingClientRect().top - row.getBoundingClientRect().top;
+		this.putRow({ anchor, offset: Math.round(t.clientHeight * 0.25) - lead });
+		this.box = t.clientHeight;
+		this.atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < END_SLACK;
+		this.noteAnchor();
+		this.renderPill();
+		const ids = row.dataset.ids ?? "";
+		this.newAnnounce.textContent = card ? "Pregunta" : `Mensaje #${ids.split(" ")[0]}`;
+		if (card)
+			card
+				.querySelector<HTMLElement>("input, textarea, select, button")
+				?.focus({ preventScroll: true });
+		else {
+			row.tabIndex = -1;
+			row.focus({ preventScroll: true });
+		}
+		flash(target, card !== null);
 	}
 
 	/** Read the current chat again (a "Reintentar"). */
@@ -704,6 +775,15 @@ export class AcpThread {
 		const focused = document.activeElement as HTMLElement | null;
 		const keepFocus =
 			focused && t.contains(focused) && focused.closest(".acp-question") ? focused : null;
+		if (
+			this.atBottom &&
+			// "Ir al final" scrolling smoothly is on its way down, not the reader up.
+			!this.endBtn.jumping &&
+			t.clientHeight > 0 &&
+			t.clientHeight === this.box &&
+			t.scrollTop < this.pinnedTop - END_SLACK
+		)
+			this.atBottom = false;
 		const atBottom = this.atBottom;
 		const prevTop = t.scrollTop;
 		// A reader further up keeps the row they are looking at where it is,
@@ -733,8 +813,12 @@ export class AcpThread {
 				this.items.set(key, cached);
 			}
 			used.add(key);
-			// The reading anchor's handle (noteAnchor / restorePlace).
+			// The reading anchor's handle (noteAnchor / restorePlace), and the
+			// messages the row shows (revealMessage finds a message's row by them).
 			cached.el.dataset.anchor = key;
+			cached.el.dataset.ids = (item.kind === "post" ? item.messages : [item.message])
+				.map((m) => m.id)
+				.join(" ");
 			nodes.push(cached.el);
 		}
 		for (const key of [...this.items.keys()]) if (!used.has(key)) this.items.delete(key);
@@ -746,8 +830,10 @@ export class AcpThread {
 		syncChildren(t, nodes);
 		if (keepFocus?.isConnected) keepFocus.focus({ preventScroll: true });
 		const end = atBottom || this.toBottom;
-		if (end) t.scrollTop = t.scrollHeight;
-		else if (!keep || !this.putRow(keep)) t.scrollTop = prevTop;
+		if (end) {
+			t.scrollTop = t.scrollHeight;
+			this.pinnedTop = t.scrollTop;
+		} else if (!keep || !this.putRow(keep)) t.scrollTop = prevTop;
 		this.toBottom = false;
 		// News below a reader who is further up: a new row (an id above what
 		// was shown — an earlier page has lower ids), or a row already shown
@@ -838,6 +924,7 @@ export class AcpThread {
 		const t = this.threadEl;
 		this.atBottom = true;
 		t.scrollTop = t.scrollHeight;
+		this.pinnedTop = t.scrollTop;
 		// The box it was placed in, now: the scroll handler takes a scroll in a
 		// box of another height for the layout's and pins the end. Left to the
 		// ResizeObserver's first frame, a reader scrolling at once was pulled back.
@@ -1630,6 +1717,28 @@ const SEND_REFUSED = new Map([
 	["unknown-recipient", "ese agente ya no existe"],
 	["project-not-found", "el proyecto ya no existe"],
 ]);
+
+/**
+ * A brief highlight on what was gone to: a 2-px ring and a tint, held
+ * 1200 ms then faded in 600 ms (acp-chat.css); with reduced motion, no
+ * transition: held 1500 ms and removed at once. Never moves the layout.
+ */
+function flash(target: HTMLElement, question: boolean): void {
+	const still = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
+	target.classList.remove("acp-msg-flash", "acp-msg-flash-out", "acp-msg-flash-warn");
+	target.classList.add("acp-msg-flash");
+	if (question) target.classList.add("acp-msg-flash-warn");
+	const clear = () =>
+		target.classList.remove("acp-msg-flash", "acp-msg-flash-out", "acp-msg-flash-warn");
+	if (still) {
+		setTimeout(clear, 1500);
+		return;
+	}
+	setTimeout(() => {
+		target.classList.add("acp-msg-flash-out");
+		setTimeout(clear, 600);
+	}, 1200);
+}
 
 /** States in which a message is over: reaching one is news for the pill. */
 const FINAL = new Set(["done", "failed", "uncertain"]);
