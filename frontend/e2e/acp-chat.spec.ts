@@ -69,6 +69,149 @@ test.describe("ACP chat", () => {
 		expect(backend.acpAgents.find((a) => a.name === "solo")?.projectId).toBe(PROJECT_IDS.hz);
 	});
 
+	test("a link to a place of the app in an answer navigates there, in the same tab", async ({
+		page,
+		app,
+		backend,
+	}) => {
+		backend.addAcpMessage({
+			to_id: "solo",
+			body: "¿dónde lo veo?",
+			state: "done",
+			result_text: `Mirá [el proyecto](#/projects/${PROJECT_IDS.hz}) o [afuera](https://example.com).`,
+		});
+		await app.login("alice", chatOf(PROJECT_SESSION_IDS.scratch));
+		const answer = page.locator("#acp-chat .acp-msg-result", { hasText: "Mirá" });
+		const internal = answer.getByRole("link", { name: "el proyecto" });
+		await expect(internal).toHaveAttribute("href", `#/projects/${PROJECT_IDS.hz}`);
+		await expect(internal).not.toHaveAttribute("target", /.+/);
+		const external = answer.getByRole("link", { name: "afuera" });
+		await expect(external).toHaveAttribute("target", "_blank");
+		await expect(external).toHaveAttribute("rel", "noopener noreferrer nofollow");
+		const pages = page.context().pages().length;
+		await internal.click();
+		await expect(page.locator("#pv-title")).toHaveText("Educación HZ");
+		expect(page.url()).toContain(`#/projects/${PROJECT_IDS.hz}`);
+		expect(page.context().pages()).toHaveLength(pages);
+	});
+
+	// Back after following a link: the chat is where it was being read.
+	const longThread = (
+		backend: {
+			addAcpMessage: (m: Record<string, unknown> & { to_id: string; body: string }) => unknown;
+		},
+		to: string,
+		link: string,
+		project?: string,
+	) => {
+		for (let i = 1; i <= 30; i++)
+			backend.addAcpMessage({
+				to_id: to,
+				body: `pregunta ${i}`,
+				state: "done",
+				result_text:
+					i === 15
+						? `Respuesta 15: mirá [el destino](${link}).`
+						: `Respuesta ${i}.\n\nUna línea más para que ocupe lugar.\n\nY otra.`,
+				...(project ? { project_id: project } : {}),
+			});
+	};
+	const placeOf = (page: import("@playwright/test").Page, thread: string, text: string) =>
+		page.evaluate(
+			([thread, text]) => {
+				const t = document.querySelector<HTMLElement>(thread)!;
+				const row = [...t.querySelectorAll<HTMLElement>("[data-anchor]")].find((r) =>
+					r.textContent?.includes(text),
+				)!;
+				return Math.round(row.getBoundingClientRect().top - t.getBoundingClientRect().top);
+			},
+			[thread, text] as const,
+		);
+
+	test("Back after a followed link puts the agent's chat where it was being read", async ({
+		page,
+		app,
+		backend,
+	}) => {
+		longThread(backend, "solo", `#/projects/${PROJECT_IDS.hz}`);
+		await app.login("alice", chatOf(PROJECT_SESSION_IDS.scratch));
+		const thread = "#acp-chat .acp-chat-thread";
+		const link = page.locator(thread).getByRole("link", { name: "el destino" });
+		await link.scrollIntoViewIfNeeded();
+		const before = await placeOf(page, thread, "Respuesta 15:");
+		await link.click();
+		await expect(page.locator("#pv-title")).toHaveText("Educación HZ");
+		await page.goBack();
+		await expect(link).toBeInViewport();
+		expect(Math.abs((await placeOf(page, thread, "Respuesta 15:")) - before)).toBeLessThanOrEqual(
+			2,
+		);
+	});
+
+	test("Back after a link to ANOTHER agent's chat puts this chat where it was being read", async ({
+		page,
+		app,
+		backend,
+	}) => {
+		// The same chat view, another source: the thread is emptied and read again on Back.
+		longThread(backend, "solo", chatOf(PROJECT_SESSION_IDS.architect));
+		await app.login("alice", chatOf(PROJECT_SESSION_IDS.scratch));
+		const thread = "#acp-chat .acp-chat-thread";
+		const link = page.locator(thread).getByRole("link", { name: "el destino" });
+		await link.scrollIntoViewIfNeeded();
+		const before = await placeOf(page, thread, "Respuesta 15:");
+		await link.click();
+		await expect(page.locator(thread).getByText("@arq revisá el diseño")).toBeVisible();
+		await page.goBack();
+		await expect(link).toBeInViewport();
+		expect(Math.abs((await placeOf(page, thread, "Respuesta 15:")) - before)).toBeLessThanOrEqual(
+			2,
+		);
+	});
+
+	test("Back after a followed link puts Project Chat where it was being read", async ({
+		page,
+		app,
+		backend,
+	}) => {
+		longThread(backend, "arq", chatOf(PROJECT_SESSION_IDS.scratch), PROJECT_IDS.hz);
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		const thread = "#project-view .acp-chat-thread";
+		const link = page.locator(thread).getByRole("link", { name: "el destino" });
+		await link.scrollIntoViewIfNeeded();
+		const before = await placeOf(page, thread, "Respuesta 15:");
+		await link.click();
+		await expect(page.locator("#acp-chat")).toBeVisible();
+		await page.goBack();
+		await expect(link).toBeInViewport();
+		expect(Math.abs((await placeOf(page, thread, "Respuesta 15:")) - before)).toBeLessThanOrEqual(
+			2,
+		);
+	});
+
+	test("a reader at the end comes back to the end", async ({ page, app, backend }) => {
+		longThread(backend, "solo", `#/projects/${PROJECT_IDS.hz}`);
+		backend.addAcpMessage({
+			to_id: "solo",
+			body: "última",
+			state: "done",
+			result_text: `Al final: [ir](#/projects/${PROJECT_IDS.hz}).`,
+		});
+		await app.login("alice", chatOf(PROJECT_SESSION_IDS.scratch));
+		const link = page.locator("#acp-chat .acp-chat-thread").getByRole("link", { name: "ir" });
+		await expect(link).toBeInViewport();
+		await link.click();
+		await expect(page.locator("#pv-title")).toHaveText("Educación HZ");
+		await page.goBack();
+		await expect(link).toBeInViewport();
+		expect(
+			await page.evaluate(() => {
+				const t = document.querySelector<HTMLElement>("#acp-chat .acp-chat-thread")!;
+				return t.scrollHeight - t.scrollTop - t.clientHeight;
+			}),
+		).toBeLessThan(60);
+	});
+
 	test("a draft stays with its agent", async ({ page, app }) => {
 		await app.login("alice", chatOf(PROJECT_SESSION_IDS.scratch));
 		const input = page.locator("#acp-chat .acp-chat-input");

@@ -99,6 +99,9 @@ export class AcpThread {
 	private box = 0;
 
 	private source: ThreadSource | null = null;
+	/** A chat was (re)opened: its reading place is put back once its feed is read. */
+	private placePending = false;
+	private anchorFrame = 0;
 	private gen = 0;
 	private messages: AcpMessage[] = [];
 	private hasEarlier = false;
@@ -226,6 +229,9 @@ export class AcpThread {
 			"scroll",
 			() => {
 				const t = this.threadEl;
+				// Hidden (the chat's overlay closed: a link followed, another
+				// view): a scroll of a box with no height says nothing about the reader.
+				if (t.clientHeight === 0) return;
 				// The box changed since the last look (keyboard, the field growing,
 				// a rotation): this scroll is the layout's, not the reader's — a
 				// reader at the end is pinned there, not reclassified as "above".
@@ -238,6 +244,11 @@ export class AcpThread {
 				}
 				this.atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 60;
 				if (this.atBottom) this.clearNew();
+				if (!this.anchorFrame)
+					this.anchorFrame = requestAnimationFrame(() => {
+						this.anchorFrame = 0;
+						this.noteAnchor();
+					});
 			},
 			{ passive: true },
 		);
@@ -247,8 +258,13 @@ export class AcpThread {
 		if (typeof ResizeObserver !== "undefined")
 			new ResizeObserver(() => {
 				const t = this.threadEl;
+				const wasHidden = this.box === 0;
 				this.box = t.clientHeight;
-				if (this.atBottom) t.scrollTop = t.scrollHeight;
+				if (t.clientHeight === 0) return;
+				// Shown again (Back from a followed link to the same chat): the
+				// box was rebuilt, its scroll offset is not to be trusted.
+				if (wasHidden && !this.placePending) this.restorePlace();
+				else if (this.atBottom) t.scrollTop = t.scrollHeight;
 			}).observe(this.threadEl);
 		// The field's cap depends on the visible height (keyboard, rotation).
 		window.visualViewport?.addEventListener("resize", () => this.fitInput());
@@ -332,6 +348,8 @@ export class AcpThread {
 			this.feed = "loading";
 			this.readOnce = false;
 			this.atBottom = true;
+			// Put back where this chat was being read, once its feed is in.
+			this.placePending = true;
 			this.shownMax = 0;
 			this.shownOutcome.clear();
 			this.clearNew();
@@ -387,8 +405,17 @@ export class AcpThread {
 			this.error = "";
 			this.feed = "ok";
 			this.readOnce = true;
+			if (this.placePending) {
+				this.placePending = false;
+				// The rows first: the render `applyFeed` asked for waits for the
+				// next frame, and the anchor's row must be on the page now (a
+				// return from ANOTHER chat left this one with only "Cargando…").
+				this.render();
+				this.restorePlace();
+			}
 		} catch (err) {
 			if (gen !== this.gen) return;
+			this.placePending = false;
 			const e = err as Error & { status?: number };
 			// A re-read that fails (a reconnect, the fallback poll, a flaky
 			// link) must not take away a history already read: `stale`.
@@ -615,6 +642,8 @@ export class AcpThread {
 				this.items.set(key, cached);
 			}
 			used.add(key);
+			// The reading anchor's handle (noteAnchor / restorePlace).
+			cached.el.dataset.anchor = key;
 			nodes.push(cached.el);
 		}
 		for (const key of [...this.items.keys()]) if (!used.has(key)) this.items.delete(key);
@@ -667,6 +696,48 @@ export class AcpThread {
 		if (this.newIds.size === 0 && this.newPill.hidden) return;
 		this.newIds.clear();
 		this.renderPill();
+	}
+
+	/**
+	 * Remembers where this chat is being read, by its first row in view and
+	 * that row's offset — never by distance to the end, which new rows below
+	 * change (the capture Chat's read anchor, chatView.ts). A reader at the
+	 * end has no anchor: they come back to the end.
+	 */
+	private noteAnchor(): void {
+		const t = this.threadEl;
+		if (!this.source || this.placePending || this.feed === "loading" || t.clientHeight === 0)
+			return;
+		const key = sourceKey(this.source);
+		if (this.atBottom) {
+			readingPlaces.delete(key);
+			return;
+		}
+		const top = t.getBoundingClientRect().top;
+		for (const c of t.children) {
+			const anchor = (c as HTMLElement).dataset?.anchor;
+			if (!anchor) continue;
+			const r = c.getBoundingClientRect();
+			if (r.bottom <= top) continue;
+			readingPlaces.set(key, { anchor, offset: r.top - top });
+			return;
+		}
+	}
+
+	/** Back to this chat's anchor; with none (or its row no longer shown), the end. */
+	private restorePlace(): void {
+		const t = this.threadEl;
+		const place = this.source ? readingPlaces.get(sourceKey(this.source)) : undefined;
+		const row = place
+			? [...t.children].find((c) => (c as HTMLElement).dataset?.anchor === place.anchor)
+			: undefined;
+		if (!place || !row) {
+			this.scrollToEnd();
+			return;
+		}
+		this.box = t.clientHeight;
+		t.scrollTop += row.getBoundingClientRect().top - t.getBoundingClientRect().top - place.offset;
+		this.atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 60;
 	}
 
 	private scrollToEnd(): void {
@@ -1294,6 +1365,12 @@ function agentVoice(bubble: HTMLElement, name: string): void {
 	bubble.classList.add("acp-voice");
 	bubble.style.setProperty("--acp-hue", String(hue(name)));
 }
+
+/**
+ * Where each chat was being read (by sourceKey), kept while the page lives:
+ * the first row in view and its offset from the thread's top.
+ */
+const readingPlaces = new Map<string, { anchor: string; offset: number }>();
 
 function sourceKey(src: ThreadSource): string {
 	return src.kind === "agent" ? `a:${src.name}` : `p:${src.projectId}`;
