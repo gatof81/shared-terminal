@@ -403,21 +403,25 @@ export class AcpThread {
 	/**
 	 * Puts message `id` in view near the thread's top, flashes its row and
 	 * gives it the focus. On an earlier page not loaded yet, loads back with
-	 * "Cargar anteriores" — at most 3 pages. False: not found (the caller
-	 * says so). The reader is then away from the end like any reader who
+	 * "Cargar anteriores" — at most 3 pages per call, so one tap never loads
+	 * an unbounded history. "shown": in view; "earlier": still further back
+	 * after those pages (another call goes on); "missing": not in this chat,
+	 * or the load stopped (the caller says so). The reader is then away from the end like any reader who
 	 * scrolled there: "Ir al final" shows, and news does not move them.
 	 */
-	async revealMessage(id: number): Promise<boolean> {
+	async revealMessage(id: number): Promise<"shown" | "earlier" | "missing"> {
 		const gen = this.gen;
 		for (let pages = 0; ; pages++) {
-			if (gen !== this.gen) return false;
+			if (gen !== this.gen) return "missing";
 			this.render();
 			const row = this.threadEl.querySelector<HTMLElement>(`[data-ids~="${id}"]`);
 			if (row) {
 				this.goToRow(row);
-				return true;
+				return "shown";
 			}
-			if (this.placeOf(id) !== "earlier" || pages >= 3) return false;
+			if (this.placeOf(id) !== "earlier") return "missing";
+			// Known to be further back: said as such, never as "not found".
+			if (pages >= 3) return "earlier";
 			await this.loadEarlier();
 		}
 	}

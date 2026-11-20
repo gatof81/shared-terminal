@@ -373,6 +373,10 @@
 	font-size: 0.78rem;
 	color: var(--c-warn);
 }
+.acp-agents-list-more {
+	margin-left: 4px;
+	vertical-align: middle;
+}
 .acp-agent-name {
 	font-weight: 600;
 	color: inherit;
