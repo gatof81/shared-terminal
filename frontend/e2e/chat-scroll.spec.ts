@@ -293,6 +293,39 @@ test.describe("chat scroll: ACP chats", () => {
 	});
 });
 
+test.describe("chat scroll: a link followed in the same instant as a scroll", () => {
+	test("Back still puts Project Chat at the row being read", async ({ app, backend, page }) => {
+		backend.enableAcp();
+		for (let i = 1; i <= 30; i++)
+			backend.addAcpMessage({
+				to_id: "arq",
+				body: `@arq tema ${i}`,
+				state: "done",
+				result_text:
+					i === 15
+						? `Tema 15: mirá [el chat](#/sessions/${PROJECT_SESSION_IDS.scratch}/chat).`
+						: `Tema ${i} resuelto.\n\nCon otra línea.`,
+				project_id: PROJECT_IDS.hz,
+			});
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		const t = page.locator(PROJECT);
+		await expect(t).toContainText("Tema 30 resuelto.");
+		// Scrolled to the link's row and the link followed in ONE task: no
+		// scroll event, no frame in between (a slow machine, a fast hand).
+		const before = await t.evaluate((el) => {
+			const row = [...el.children].find((c) => c.textContent?.includes("Tema 15:")) as HTMLElement;
+			el.scrollTop += row.getBoundingClientRect().top - el.getBoundingClientRect().top - 30;
+			const top = Math.round(row.getBoundingClientRect().top - el.getBoundingClientRect().top);
+			row.querySelector("a")!.click();
+			return top;
+		});
+		await expect(page.locator("#acp-chat")).toBeVisible();
+		await page.goBack();
+		await expect(t).toBeVisible();
+		await stays(t, "Tema 15:", before, "Back after a link followed at once");
+	});
+});
+
 test.describe("chat scroll: a reader who scrolls at once", () => {
 	test("a scroll right after the chat opens is the reader's: it stays, and the button shows", async ({
 		app,
