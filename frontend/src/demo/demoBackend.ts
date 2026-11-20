@@ -346,6 +346,74 @@ for (let i = 0; i < 24; i++)
 		null,
 	);
 
+// A second project: seven agents, long names (a ~40-character project, a
+// 30-character agent), one waiting for an answer that falls in the
+// header's "+N" (ordered after the first three only by its rank), one
+// needing a login.
+const proj2 = "6b1f2c3d-0000-4000-8000-000000000002";
+backend.projects.push({
+	projectId: proj2,
+	ownerUserId: "u-alice",
+	name: "Migración de la plataforma de evaluaciones",
+	createdAt: nowIso(),
+});
+const SEVEN = [
+	"coordinador",
+	"backend",
+	"frontend",
+	"especialista-en-accesibilidad",
+	"qa",
+	"datos",
+	"infra",
+];
+SEVEN.forEach((name, i) => {
+	const sessionId = `5e7e0000-0000-4000-8000-0000000000${String(10 + i)}`;
+	backend.sessions.push({
+		sessionId,
+		ownerUserId: "u-alice",
+		name: `plat-${name}`,
+		status: "running",
+		tabs: [{ tabId: "tab-1", label: "Tab 1", createdAt: Date.now() }],
+		createdAt: nowIso(),
+	});
+	backend.acpAgents.push({ ...backend.acpAgents[0]!, name, sessionId, projectId: proj2 });
+});
+// Waiting for you: the LAST of the seven (it is still shown first, by rank).
+Object.assign(backend.acpAgents.find((a) => a.name === "infra")!, { waitingInput: true });
+// Needs a login.
+Object.assign(backend.acpAgents.find((a) => a.name === "datos")!, { authRequired: true });
+for (let i = 0; i < 12; i++)
+	add(
+		SEVEN[i % SEVEN.length]!,
+		`@${SEVEN[i % SEVEN.length]} ${ASKS[i % ASKS.length]!.replace(/^@\w+ /, "")}`,
+		ANSWERS[i % ANSWERS.length]!,
+		proj2,
+	);
+const infraAsk = add("infra", "@infra ¿subimos la réplica hoy?", null, proj2);
+infraAsk.state = "running";
+backend.acpAgents.find((a) => a.name === "infra")!.running = infraAsk.id;
+backend.acpQuestions.push({
+	id: 2,
+	agent: "infra",
+	message_id: infraAsk.id,
+	request: JSON.stringify({
+		message: "¿Cuándo subimos la réplica de lectura?",
+		requestedSchema: {
+			type: "object",
+			properties: {
+				cuando: { type: "string", title: "Cuándo", enum: ["Hoy", "Mañana", "La semana que viene"] },
+			},
+			required: ["cuando"],
+		},
+	}),
+	state: "open",
+	answer: null,
+	created_at: nowIso(),
+	answered_at: null,
+	delivered_at: null,
+	note: null,
+});
+
 // Recent timestamps, oldest first, a couple of minutes apart.
 const n = backend.acpMessages.length;
 backend.acpMessages.forEach((m, i) => {
@@ -403,7 +471,7 @@ backend.override = async (method, path, route) => {
 		}, 1_200);
 		return false;
 	}
-	// Answering @dis's question.
+	// Answering a question (@dis's, @infra's).
 	const ans = /^\/acp\/questions\/(\d+)\/answer$/.exec(path);
 	if (ans && method === "POST") {
 		const q = backend.acpQuestions.find((x) => x.id === Number(ans[1]));
@@ -413,14 +481,15 @@ backend.override = async (method, path, route) => {
 		}
 		Object.assign(q, { state: "answered", answer: req.postData(), answered_at: nowIso() });
 		backend.pushAcp({ type: "question", question: q });
-		const dis = backend.acpAgents.find((a) => a.name === "dis")!;
-		Object.assign(dis, { waitingInput: false });
+		const who = backend.acpAgents.find((a) => a.name === q.agent)!;
+		Object.assign(who, { waitingInput: false });
 		setTimeout(() => {
-			backend.updateAcpMessage(asking.id, {
-				state: "done",
-				result_text: "Gracias, uso esa paleta para los avatares.",
-			});
-			dis.running = null;
+			if (typeof q.message_id === "number")
+				backend.updateAcpMessage(q.message_id, {
+					state: "done",
+					result_text: "Gracias, sigo con esa decisión.",
+				});
+			who.running = null;
 			backend.pushAcp({ type: "agents" });
 		}, 2_000);
 		await json(200, q);
