@@ -257,6 +257,7 @@ function hidePage(): void {
 		pageEl.replaceChildren();
 	}
 	setTitlePage(null);
+	headerTitle(null);
 	renderSection();
 }
 
@@ -282,7 +283,7 @@ function header(pid: string, name: string | null, st: PageState): HTMLElement {
 	if (st === "active") {
 		const menu = button(
 			"⋯",
-			"pv-btn pv-menu-btn",
+			"btn btn-icon sm pv-menu-btn",
 			() =>
 				openActionMenu({
 					title: name ?? "Proyecto",
@@ -296,10 +297,13 @@ function header(pid: string, name: string | null, st: PageState): HTMLElement {
 							kind: "danger",
 							hint: "No se puede deshacer desde la app; el historial sigue legible.",
 						},
+						// A v2 phone: the page's header is the app's bar, without × (UX iter3 D).
+						...(barIsHeader() ? [{ id: "close", label: "Cerrar" }] : []),
 					],
 					onPick: (id) => {
 						if (id === "rename") void renameFlow(pid, name ?? "");
 						else if (id === "archive") void archiveFlow(pid, name ?? "este proyecto");
+						else if (id === "close") leavePage();
 						else openAgentsPanel(menu);
 					},
 				}),
@@ -308,13 +312,43 @@ function header(pid: string, name: string | null, st: PageState): HTMLElement {
 		menu.setAttribute("aria-haspopup", "menu");
 		tools.append(menu);
 	}
-	const close = button("×", "pv-close", leavePage, "Cerrar el proyecto");
+	const close = button("×", "btn btn-icon sm pv-close", leavePage, "Cerrar el proyecto");
 	tools.append(close);
 	h.append(title, tools);
 	const note = statusNote(st);
 	if (note) h.append(note);
 	headerFor = { key, el: h };
 	return h;
+}
+
+/**
+ * Shell v2 on a phone (the merged bar): the project page's header row IS the
+ * app's bar (projects.css) — its ⋯ then also closes the page.
+ */
+function barIsHeader(): boolean {
+	return (
+		document.documentElement.dataset.shell === "v2" &&
+		document.documentElement.dataset.bar === "merged" &&
+		window.matchMedia("(max-width: 768px)").matches
+	);
+}
+
+/**
+ * A v1 phone: the app's header names the project shown (its own pill, the
+ * session's context, is hidden under a project page).
+ */
+function headerTitle(name: string | null): void {
+	const header = document.querySelector("header");
+	if (!header) return;
+	let t = document.getElementById("header-project-title");
+	if (!t) {
+		t = el("span", "header-project-title");
+		t.id = "header-project-title";
+		t.setAttribute("aria-hidden", "true");
+		document.getElementById("chrome-toggle")?.after(t);
+	}
+	t.textContent = name ?? "";
+	t.hidden = name === null;
 }
 
 function statusNote(st: PageState): HTMLElement | null {
@@ -340,6 +374,7 @@ function renderPage(): void {
 	// The live list's name first (a rename lands there); the feed's for an archived one.
 	const name = projectName(shown) ?? (pageState === "missing" ? null : feedName);
 	setTitlePage(name ?? "Proyecto");
+	headerTitle(name ?? "Proyecto");
 	const page = acpProjectPage(shown, header(shown, name, pageState));
 	if (pageEl.childNodes.length !== 1 || pageEl.firstChild !== page) pageEl.replaceChildren(page);
 }
