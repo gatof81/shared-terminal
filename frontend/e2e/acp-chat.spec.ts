@@ -196,9 +196,10 @@ test.describe("ACP chat headers", () => {
 		await expect(page.locator("#acp-chat .acp-chat-projlink")).toHaveText(
 			"Abrir Project Chat: Educación HZ",
 		);
+		// The privacy first on a phone (a long name cuts the end off).
 		await expect(page.locator("#acp-chat .acp-chat-input")).toHaveAttribute(
 			"placeholder",
-			/^Mensaje directo a @solo \(privado\)/,
+			info.project.use.isMobile ? "Privado · a @solo" : /^Mensaje directo a @solo \(privado\)/,
 		);
 		// The failure is on the closed panel's button: visibly and by name.
 		await expect(settings).toHaveAccessibleName("Ajustes (el modelo no se aplicó)");
@@ -257,6 +258,71 @@ test.describe("ACP chat headers", () => {
 		await expect(panel).toBeVisible();
 		await expect(panel.getByRole("button", { name: "+ Nueva sesión con agente" })).toBeVisible();
 		await expect(panel).toContainText("todavía no tiene agentes");
+	});
+
+	test("on a short screen an open panel scrolls inside: the message box stays on screen, the thread keeps a strip", async ({
+		page,
+		app,
+		backend,
+	}) => {
+		const vp = page.viewportSize()!;
+		await page.setViewportSize({ width: Math.min(vp.width, 390), height: 450 });
+		const inView = async (sel: string) => {
+			const b = (await page.locator(sel).boundingBox())!;
+			return b.y >= 0 && b.y + b.height <= 451;
+		};
+		// Project Chat with "Administrar agentes" open.
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		await page.getByRole("button", { name: "Acciones del proyecto" }).click();
+		await page.getByRole("menuitem", { name: "Administrar agentes" }).click();
+		const panel = page.locator("#project-view .acp-agents-panel");
+		await expect(panel).toBeVisible();
+		expect(await inView("#project-view .acp-chat-composer"), "composer on screen").toBe(true);
+		expect(await panel.evaluate((e) => e.scrollHeight > e.clientHeight + 1), "panel scrolls").toBe(
+			true,
+		);
+		expect(await panel.evaluate((e) => getComputedStyle(e).overflowY)).toBe("auto");
+		const strip = (await page.locator("#project-view .acp-chat-thread").boundingBox())!.height;
+		expect(strip, "a readable strip of thread").toBeGreaterThanOrEqual(90);
+		// Ajustes of an agent's chat, the same way.
+		const solo = backend.acpAgents.find((a) => a.name === "solo")!;
+		solo.projectId = PROJECT_IDS.hz;
+		await page.evaluate((h) => {
+			location.hash = h;
+		}, chatOf(PROJECT_SESSION_IDS.scratch));
+		await page.locator("#acp-chat .acp-settings-btn").click();
+		await expect(page.locator("#acp-chat .acp-settings")).toContainText(
+			"Mensajes directos: privados entre vos y @solo",
+		);
+		expect(await inView("#acp-chat .acp-chat-composer"), "composer on screen").toBe(true);
+		expect(
+			(await page.locator("#acp-chat .acp-chat-thread").boundingBox())!.height,
+		).toBeGreaterThanOrEqual(90);
+	});
+
+	test("the agents row fades on the side that has more off screen", async ({
+		page,
+		app,
+		backend,
+	}) => {
+		const base = backend.acpAgents.find((a) => a.name === "dev")!;
+		for (let i = 0; i < 6; i++)
+			backend.acpAgents.push({
+				...base,
+				name: `agente-largo-${i}`,
+				sessionId: `${base.sessionId}-${i}`,
+			});
+		await page.setViewportSize({ width: 390, height: 844 });
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		const row = page.locator("#project-view .acp-agent-chips");
+		await expect(row.locator(".acp-agent-chip")).toHaveCount(8);
+		await expect(row).toHaveClass(/more-right/);
+		await expect(row).not.toHaveClass(/more-left/);
+		await row.evaluate((e) => {
+			e.scrollLeft = e.scrollWidth;
+		});
+		await expect(row).toHaveClass(/more-left/);
+		await expect(row).not.toHaveClass(/more-right/);
 	});
 });
 

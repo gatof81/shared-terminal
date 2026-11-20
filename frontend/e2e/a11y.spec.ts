@@ -83,7 +83,11 @@ test.describe("accessibility — axe on the main views", () => {
 		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
 		await expect(page.locator("#acp-chat .acp-settings-btn")).toBeVisible();
 		// The headers and their panels (the thread's own badges are not part of this change).
-		const chat = ["#acp-chat .acp-chat-header", "#acp-chat .acp-chat-composer"];
+		const chat = [
+			"#acp-chat .acp-chat-header",
+			"#acp-chat .acp-settings",
+			"#acp-chat .acp-chat-composer",
+		];
 		await expectClean(page, "ACP chat, settings closed", chat);
 		await page.locator("#acp-chat .acp-settings-btn").click();
 		await expect(page.locator("#acp-chat .acp-model-select")).toBeVisible();
@@ -95,6 +99,7 @@ test.describe("accessibility — axe on the main views", () => {
 		await expectClean(page, "Project Chat, manage panel open", [
 			"#project-view .pv-header",
 			"#project-view .acp-project-agents",
+			"#project-view .acp-agents-panel",
 			"#project-view .acp-chat-composer",
 		]);
 	});
