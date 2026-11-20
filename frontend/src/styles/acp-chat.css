@@ -99,12 +99,20 @@
 .acp-more {
 	align-self: center;
 }
+/* One line whatever the number of agents: it scrolls sideways, never wraps. */
 .acp-mentions:not([hidden]) {
 	display: flex;
-	flex-wrap: wrap;
+	flex-wrap: nowrap;
 	gap: 6px;
+	overflow-x: auto;
+	scrollbar-width: none;
+}
+.acp-mentions::-webkit-scrollbar {
+	display: none;
 }
 .acp-mention {
+	flex: none;
+	white-space: nowrap;
 	font-size: 0.8rem;
 	border: 1px solid var(--c-border);
 	border-radius: 12px;
@@ -199,10 +207,6 @@
 		padding-left: 10px;
 		padding-right: 10px;
 	}
-	.acp-chat-input {
-		min-height: 56px;
-		font-size: 16px; /* no iOS zoom on focus */
-	}
 	pre.acp-msg-body {
 		max-height: 50vh;
 	}
@@ -216,10 +220,6 @@
 		border-left: none;
 		border-right: none;
 		border-radius: 0;
-	}
-	.acp-chat-send {
-		min-height: 2.75rem;
-		min-width: 5.5rem;
 	}
 	/* The thread is what matters on a phone: the agents bar stays compact. */
 	.acp-project-help {
@@ -464,24 +464,83 @@ pre.acp-msg-body {
 .acp-chat-composer.acp-composer-off:has(> .acp-chat-error[hidden]) {
 	display: none;
 }
+/* The field and Enviar share one row; the field grows with its text
+   (AcpThread.fitInput sets its height, up to a cap), so no manual resize. */
+.acp-chat-row {
+	display: flex;
+	align-items: flex-end;
+	gap: 8px;
+}
 .acp-chat-input {
-	width: 100%;
+	flex: 1;
+	min-width: 0;
 	background: var(--c-surface);
 	color: var(--c-text);
 	border: 1px solid var(--c-border);
 	border-radius: 6px;
 	padding: 6px 8px;
-	resize: vertical;
-	min-height: 70px;
+	resize: none;
+	overflow-y: hidden;
+	line-height: 1.4;
+	/* Two lines at rest on a desktop. */
+	min-height: calc(2 * 1.4em + 14px);
 	font-family: var(--font-mono, ui-monospace, monospace);
 	font-size: 0.85rem;
 	box-sizing: border-box;
 }
+.acp-chat-send {
+	flex: none;
+	white-space: nowrap;
+}
+/* The queue / size note and "Recuperar…": a row only when one of them shows. */
 .acp-chat-actions {
 	display: flex;
-	justify-content: space-between;
+	flex-wrap: wrap;
 	align-items: center;
-	gap: 8px;
+	gap: 4px 8px;
+}
+.acp-chat-actions:not(:has(> :not([hidden]))) {
+	display: none;
+}
+.acp-chat-hint[hidden] {
+	display: none;
+}
+/* The thread and its "↓ N nuevos" pill (the capture Chat's .chat-float). */
+.acp-thread-wrap {
+	flex: 1;
+	min-height: 0;
+	position: relative;
+	display: flex;
+	flex-direction: column;
+}
+.acp-new-pill {
+	bottom: 0.75rem;
+}
+/* A 44-px touch target around the small pill: a transparent extension of
+   the button (a tap on it is a tap on the pill); what is seen stays the same. */
+@media (pointer: coarse) {
+	.acp-new-pill::before {
+		content: "";
+		position: absolute;
+		inset: -9px -6px;
+	}
+}
+/* After the rules above, which it overrides on a phone. */
+@media (max-width: 640px) {
+	.acp-chat-composer {
+		padding-top: 8px;
+		padding-bottom: 8px;
+	}
+	/* One line at rest: 44 px, a touch target as tall as Enviar. */
+	.acp-chat-input {
+		min-height: 44px;
+		padding: 10px;
+		font-size: 16px; /* no iOS zoom on focus */
+	}
+	.acp-chat-send {
+		min-height: 44px;
+		min-width: 4.5rem;
+	}
 }
 .acp-chat-hint {
 	font-size: 0.75rem;
