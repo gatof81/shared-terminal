@@ -63,7 +63,7 @@ test.describe("base controls", () => {
 		await page.keyboard.press("Shift+Tab");
 		await page.keyboard.press("Tab");
 		await expect(settings).toBeFocused();
-		// 2 px of accent (the chat view's own rule sets the offset to 1 px there).
+		// 2 px of accent, 2 px off the edge — inside #chat-view too.
 		const ring = await settings.evaluate((e) => {
 			const c = getComputedStyle(e);
 			const probe = document.createElement("i");
@@ -71,8 +71,8 @@ test.describe("base controls", () => {
 			document.body.append(probe);
 			const accent = getComputedStyle(probe).color;
 			probe.remove();
-			return `${c.outlineStyle} ${c.outlineWidth} ${c.outlineColor === accent}`;
+			return `${c.outlineStyle} ${c.outlineWidth} ${c.outlineOffset} ${c.outlineColor === accent}`;
 		});
-		expect(ring).toBe("solid 2px true");
+		expect(ring).toBe("solid 2px 2px true");
 	});
 });
