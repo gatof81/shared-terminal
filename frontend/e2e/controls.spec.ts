@@ -7,6 +7,23 @@ import { PROJECT_SESSION_IDS } from "./mockBackend.js";
  * state and to the ACP chats' buttons.
  */
 test.describe("base controls", () => {
+	test("a .btn with `hidden` is hidden (the model's save button until another model is picked)", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.enableAcp();
+		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
+		await page.locator("#acp-chat .acp-settings-btn").click();
+		const select = page.locator("#acp-chat .acp-model-select");
+		await expect(select).toBeVisible();
+		const save = page.locator("#acp-chat .btn", { hasText: "Cambiar modelo" });
+		await expect(save).toHaveCount(1);
+		await expect(save).toBeHidden();
+		await select.selectOption({ index: 1 });
+		await expect(save).toBeVisible();
+	});
+
 	test("the session's state is a chip: a filled dot when running, a hollow one when stopped", async ({
 		app,
 		page,
