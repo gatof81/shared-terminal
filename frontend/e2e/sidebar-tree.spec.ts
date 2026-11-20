@@ -96,6 +96,14 @@ test.describe("sidebar tree on a phone", () => {
 		await expect(app.sessionRow("hz-design")).toBeVisible();
 		for (const name of ["hz-architect", "my-project"])
 			expect(Math.round((await app.sessionRow(name).boundingBox())!.height)).toBe(48);
+		// No hover on a touch screen: every row's ⋯ shows, not only the selected one's.
+		for (const name of ["hz-architect", "my-project"])
+			expect(
+				await app
+					.sessionRow(name)
+					.locator(".session-menu-btn")
+					.evaluate((e) => getComputedStyle(e).opacity),
+			).toBe("1");
 		const vw = page.viewportSize()!.width;
 		const drawer = (await page.locator("#sidebar").boundingBox())!;
 		expect(vw - (drawer.x + drawer.width)).toBeGreaterThanOrEqual(44);
