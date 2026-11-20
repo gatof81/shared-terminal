@@ -40,6 +40,10 @@
 /* An agent's session (UX iter3 E): "@agent" in its colour, its state as
    the chip, then "sesión X · proyecto ↗" — on wide screens only, and the
    first text to give way. One line, the same height as any session's bar. */
+/* "Session:" names a session; an agent's bar names the agent. */
+#terminal-toolbar.bar-agent > span:first-child {
+  display: none;
+}
 #terminal-toolbar.bar-agent #terminal-session-name {
   color: hsl(var(--acp-hue, 210) 55% 62%);
   font-weight: 600;
