@@ -1,0 +1,45 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="tokens.css"><link rel="stylesheet" href="proposal.css">
+<style>
+body{overflow:auto;padding:20px} h2{font-size:13px;color:var(--c-muted);text-transform:uppercase;letter-spacing:.06em;margin:22px 0 8px}
+.grid{display:grid;grid-template-columns:110px repeat(6,auto);gap:10px 14px;align-items:center;justify-content:start}
+.grid > .h{font-size:11px;color:var(--c-faint)} .line{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.menu{width:240px;background:var(--c-surface);border:1px solid var(--c-border);border-radius:var(--radius-m);box-shadow:0 8px 24px rgba(1,4,9,.6);padding:4px}
+.menu .mi{display:flex;flex-direction:column;padding:7px 10px;border-radius:var(--radius-s)} .menu .mi small{color:var(--c-muted);font-size:11.5px}
+.menu .mi.hl{background:var(--c-accent-bg)} .menu .mi.dz{color:var(--c-err)} .menu hr{border:0;border-top:1px solid var(--c-border-soft);margin:4px 0}
+.dlg{width:min(100%,32rem);background:var(--c-surface);border:1px solid var(--c-border);border-radius:var(--radius-l);box-shadow:0 16px 40px rgba(1,4,9,.7)}
+.dlg header{display:flex;align-items:center;height:48px;padding:0 8px 0 18px;font-weight:600;font-size:15px} .dlg header span{flex:1}
+.dlg .bd{padding:4px 18px 16px;display:flex;flex-direction:column;gap:6px} .dlg label{font-size:12.5px;color:var(--c-text-2)}
+.dlg footer{display:flex;justify-content:flex-end;gap:8px;padding:12px 18px;border-top:1px solid var(--c-border-soft)}
+.sheet{width:100%;background:var(--c-surface);border:1px solid var(--c-border);border-radius:var(--radius-l) var(--radius-l) 0 0;padding:6px 6px 10px}
+.sheet .mi{min-height:48px;justify-content:center}
+@media (max-width:600px){.grid{grid-template-columns:110px auto} .grid .wide{display:none} .line .input,.line .select{width:100%}}
+</style></head><body class="${''}">
+<script>if (matchMedia("(max-width:600px)").matches) document.documentElement.classList.add("coarse");</script>
+<h2>Botones · 2 alturas en desktop (28 / 32), 44 con puntero táctil</h2>
+<div class="grid">
+ <span class="h"></span><span class="h">reposo</span><span class="h wide">hover</span><span class="h wide">focus</span><span class="h wide">activo</span><span class="h wide">deshabilitado</span><span class="h wide">cargando</span>
+ <span>Primario</span><button class="btn primary">Crear sesión</button><button class="btn primary is-hover wide">Crear sesión</button><button class="btn primary is-focus wide">Crear sesión</button><button class="btn primary is-active wide">Crear sesión</button><button class="btn primary wide" disabled>Crear sesión</button><button class="btn primary wide"><span class="spin"></span>Creando…</button>
+ <span>Secundario</span><button class="btn">Cancelar</button><button class="btn is-hover wide">Cancelar</button><button class="btn is-focus wide">Cancelar</button><button class="btn is-active wide">Cancelar</button><button class="btn wide" disabled>Cancelar</button><button class="btn wide"><span class="spin"></span>Guardando…</button>
+ <span>Secundario sm</span><button class="btn sm">Reintentar</button><button class="btn sm is-hover wide">Reintentar</button><button class="btn sm is-focus wide">Reintentar</button><button class="btn sm is-active wide">Reintentar</button><button class="btn sm wide" disabled>Reintentar</button><button class="btn sm wide"><span class="spin"></span>Reintentando</button>
+ <span>Destructivo</span><button class="btn danger">Archivar</button><button class="btn danger is-hover wide">Archivar</button><button class="btn danger is-focus wide">Archivar</button><button class="btn danger solid wide">Borrar definitivamente</button><button class="btn danger wide" disabled>Archivar</button><span class="wide"></span>
+ <span>Icono sm</span><button class="btn icon sm" aria-label="Más">⋯</button><button class="btn icon sm is-hover wide">⋯</button><button class="btn icon sm is-focus wide">⋯</button><button class="btn icon sm outlined wide">↻</button><button class="btn icon sm wide" disabled>×</button><span class="wide"></span>
+</div>
+<h2>Inputs y selects</h2>
+<div class="line"><input class="input" placeholder="Nombre de la sesión"><input class="input is-focus" value="hz-architect"><input class="input is-error" value="puerto 99999"><select class="select"><option>Claude Sonnet 5.5</option></select></div>
+<h2>Chip de estado · un vocabulario (punto + palabra)</h2>
+<div class="line">
+ <span class="chip tone-ok"><span class="dot"></span>libre</span><span class="chip tone-busy"><span class="dot"></span>trabajando</span><span class="chip tone-warn"><span class="dot"></span>te espera</span><span class="chip tone-warn"><span class="dot"></span>login</span><span class="chip tone-off"><span class="dot"></span>sin señal</span><span class="chip tone-off"><span class="dot"></span>iniciando</span><span class="chip tone-err"><span class="dot"></span>error</span>
+</div>
+<div class="line" style="margin-top:8px">
+ <span class="chip tone-ok"><span class="dot"></span>en marcha</span><span class="chip tone-off"><span class="dot"></span>detenida</span><span class="chip tone-off" style="opacity:.7"><span class="dot"></span>terminada</span><span class="chip tone-err"><span class="dot"></span>falló</span><span class="chip tone-busy"><span class="dot"></span>desconectada</span>
+ <span style="color:var(--c-faint);font-size:12px">· en filas: variante «bare» (sin fondo) · en headers: con fondo</span>
+</div>
+<h2>Tabs de vista</h2>
+<div class="line"><div class="tabs"><button class="on">›_ Terminal</button><button>▤ Files</button><button>⑂ Git</button><button>▭ Chat</button></div><div class="tabs icons"><button>›_</button><button class="on">▤</button><button>⑂</button><button>▭</button></div></div>
+<h2>Menú (popover en desktop · hoja en teléfono) y diálogo</h2>
+<div class="line" style="align-items:flex-start">
+ <div class="menu"><div class="mi hl">Ajustes del agente<small>Modelo y proyecto</small></div><div class="mi">Puertos expuestos…</div><div class="mi">Observadores…</div><hr><div class="mi">Detener sesión<small>Los archivos se conservan</small></div><div class="mi dz">Terminar sesión</div></div>
+ <div class="dlg"><header><span>Nuevo proyecto</span><button class="btn icon sm" aria-label="Cerrar">×</button></header><div class="bd"><label>Nombre</label><input class="input is-focus" value="Portal docentes"></div><footer><button class="btn">Cancelar</button><button class="btn primary">Crear</button></footer></div>
+</div>
+</body></html>

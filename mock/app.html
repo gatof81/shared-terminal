@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Maqueta iter3 — Shared Terminal</title>
+<link rel="stylesheet" href="tokens.css" />
+<link rel="stylesheet" href="proposal.css" />
+</head>
+<body>
+<div id="root"></div>
+<script>
+// Maqueta estática: parámetros por URL.
+//   view = project | acp | terminal | files | git | capture
+//   sb   = a | b              (alternativa de sidebar en desktop)
+//   drawer = 1                (mobile: drawer abierto)
+//   comp = empty | text | multi | sending | error | disabled | focus
+//   pill = 0 | 3 | arrow      (botón ir al final)
+//   coarse = 1                (puntero táctil: áreas de 44 px)
+const q = new URLSearchParams(location.search);
+const view = q.get("view") || "acp";
+const sb = q.get("sb") || "a";
+const drawer = q.get("drawer") === "1";
+const comp = q.get("comp") || "empty";
+const pill = q.get("pill") || "0";
+const long = q.get("long") === "1";
+const PNAME = long ? "Plataforma de evaluación docente — segunda etapa" : "Educación HZ";
+const ANAME = long ? "arquitecto-principal" : "solo";
+const SNAME = long ? "migracion-base-de-datos-produccion-2026" : "my-project";
+const mobile = matchMedia("(max-width: 768px)").matches;
+const coarse = q.get("coarse") === "1" || mobile;
+if (coarse) document.documentElement.classList.add("coarse");
+if (drawer) document.documentElement.classList.add("drawer-open");
+
+const HUES = { arq: "#c2703d", dev: "#a2405a", solo: "#2a8a7e", qa: "#7d5bbe", ux: "#3b7dd8" };
+const av = (n) => `<span class="av" style="background:${HUES[n] || "#555"}">${n[0].toUpperCase()}</span>`;
+const chip = (tone, word, bare = true) => `<span class="chip ${bare ? "bare" : ""} tone-${tone}"><span class="dot"></span>${word}</span>`;
+const more = `<button class="btn icon sm more" aria-label="Acciones">⋯</button>`;
+
+// ── 1. Sidebar ───────────────────────────────────────────────
+function agentRow(n, tone, word, sel = false) {
+	return `<div class="row child ${sel ? "sel" : ""}" title="sesión hz-${n}">${av(n)}<span class="lbl handle">@${n}</span><span class="trail">${chip(tone, word)}${mobile ? more : ""}</span></div>`;
+}
+function sessionRow(name, tone, word, sel = false, extra = "") {
+	return `<div class="row ${sel ? "sel" : ""}"><span class="session-dot tone-${tone}"><span class="dot" style="display:block"></span></span><span class="lbl">${name}</span><span class="trail">${word ? `<span class="chip bare tone-off" style="font-weight:400">${word}</span>` : ""}${extra}${more}</span></div>`;
+}
+function sidebarA() {
+	const selAcp = view === "acp", selProj = view === "project", selSess = !selAcp && !selProj;
+	return `
+	${mobile ? `<div class="goto" style="margin:0 4px;height:44px;font-size:15px">⌕ Ir a proyecto, agente o sesión…</div>` : ""}
+	<div class="side-actions"><button class="btn primary ${mobile ? "" : "sm"}">+ Nueva sesión</button></div>
+	<section>
+		<div class="sec-head"><span>Proyectos</span><span class="sp"></span><button class="btn icon sm" aria-label="Nuevo proyecto">+</button></div>
+		<div class="rows">
+			<div class="row proj ${selProj ? "sel" : ""}"><span class="chev">▾</span><span class="lbl">Educación HZ</span><span class="trail"><span class="badge-warn">● 1</span>${more}</span></div>
+			${agentRow("arq", "warn", "te espera")}
+			${agentRow("dev", "busy", "trabajando")}
+			${agentRow("qa", "ok", "libre")}
+			<div class="row proj"><span class="chev">▸</span><span class="lbl">Portal docentes</span><span class="trail"><span class="count">3</span>${more}</span></div>
+		</div>
+	</section>
+	<section>
+		<div class="sec-head"><span>Agentes sin proyecto</span></div>
+		<div class="rows">${agentRow("solo", "off", "sin señal", selAcp)}</div>
+	</section>
+	<section>
+		<div class="sec-head"><span>Sesiones</span><span class="sp"></span><button class="btn icon sm" aria-label="Filtros y actualizar">⋯</button></div>
+		<div class="rows">
+			${sessionRow("my-project", "ok", "", selSess)}
+			${sessionRow("hz-design", "ok", "")}
+			${sessionRow("docs", "off", "detenida", false, `<button class="btn icon sm" aria-label="Iniciar" style="color:var(--c-ok)">▶</button>`)}
+		</div>
+	</section>`;
+}
+function sidebarB() {
+	return `
+	<div class="side-actions"><button class="btn primary sm">+ Nueva sesión</button><button class="btn sm">+ Proyecto</button></div>
+	<div class="seg"><button class="on">Agentes <span class="badge-warn">1</span></button><button>Sesiones <span class="count">3</span></button></div>
+	<section>
+		<div class="sec-head sticky-proj"><span>Educación HZ</span><span class="sp"></span><span class="count">Project Chat ›</span></div>
+		<div class="rows">
+			${agentRow("arq", "warn", "te espera").replace("child", "")}
+			${agentRow("dev", "busy", "trabajando").replace("child", "")}
+			${agentRow("qa", "ok", "libre").replace("child", "")}
+		</div>
+	</section>
+	<section>
+		<div class="sec-head"><span>Portal docentes</span><span class="sp"></span><span class="count">Project Chat ›</span></div>
+		<div class="rows">${agentRow("ux", "ok", "libre").replace("child", "")}</div>
+	</section>
+	<section>
+		<div class="sec-head"><span>Sin proyecto</span></div>
+		<div class="rows">${agentRow("solo", "off", "sin señal", view === "acp").replace("child", "")}</div>
+	</section>
+	<p class="empty-note">Las sesiones de terminal están en «Sesiones».</p>`;
+}
+
+// ── 2. Barra de contexto (una por vista, alto fijo 40 px) ─────
+const viewTabs = (on, icons) => `<div class="tabs ${icons ? "icons" : ""}">${[["terminal", "›_", "Terminal"], ["files", "▤", "Files"], ["git", "⑂", "Git"], ["chat", "▭", "Chat"]].map(([k, i, l]) => `<button class="${k === on ? "on" : ""}">${i}${icons ? "" : " " + l}</button>`).join("")}</div>`;
+function bar() {
+	const icons = mobile || innerWidth < 1100;
+	if (view === "project")
+		return `<div class="bar">${mobile ? `<button class="btn icon" aria-label="Menú">☰</button>` : ""}<div class="ident"><span class="title" title="${PNAME}">${PNAME}</span></div>
+			<span class="group-av">${av("arq")}${av("dev")}${av("qa")}<span class="badge-warn" style="margin-left:6px">1</span></span>
+			<span class="sp"></span><div class="acts">${more.replace("more", "")}${mobile ? "" : `<button class="btn icon sm" aria-label="Cerrar el proyecto">×</button>`}</div></div>`;
+	if (view === "acp")
+		return `<div class="bar">${mobile ? `<button class="btn icon" aria-label="Menú">☰</button>` : ""}<div class="ident">${av("solo")}<span class="title agent" style="--agent-hue:${HUES.solo}" title="@${ANAME}">@${ANAME}</span>${chip("off", "sin señal", false)}</div>
+			${mobile ? "" : `<span class="sub">sesión scratch · <a href="#">sin proyecto</a></span>`}
+			<span class="sp"></span>${viewTabs("chat", icons)}<div class="acts">${more.replace("more", "")}</div></div>`;
+	const name = SNAME;
+	const on = view === "capture" ? "chat" : view;
+	return `<div class="bar">${mobile ? `<button class="btn icon" aria-label="Menú">☰</button>` : ""}<div class="ident"><span class="title" title="${name}">${name}</span>${chip("ok", "en marcha", false)}</div>
+		<span class="sp"></span>${viewTabs(on, icons)}<div class="acts">${more.replace("more", "")}</div></div>`;
+}
+function subbar() {
+	if (view === "files") return `<div class="subbar"><span>workspace</span><span style="color:var(--c-muted)">/ src</span><span class="sp"></span><button class="btn icon sm" aria-label="Actualizar">↻</button></div>`;
+	if (view === "git") return `<div class="subbar"><span>⎇ main</span>${chip("off", "2 cambios", false)}<span class="sp"></span><button class="btn icon sm" aria-label="Actualizar">↻</button></div>`;
+	if (view === "capture") return `<div class="subbar"><span>Conversaciones</span>${chip("ok", "1 en vivo", false)}<span class="sp"></span><button class="btn icon sm" aria-label="Actualizar">↻</button></div>`;
+	if (view === "terminal") return `<div class="subbar" style="height:32px"><span class="btn sm" style="height:26px">Tab 1 ×</span><span class="btn sm" style="height:26px;opacity:.7">Tab 2</span><span class="sp"></span><button class="btn icon sm">⌕</button><button class="btn sm">Aa 14</button></div>`;
+	return "";
+}
+
+// ── 3 + 4. Hilo, composer y botón ir al final ───────────────
+function thread() {
+	const out = (t) => `<div class="msg-out"><div class="msg-head" style="justify-content:flex-end">10:02 · directo</div>${t}</div>`;
+	const inn = (n, t, st = "hecho") => `<div class="msg-in" style="--hue:${HUES[n]}"><div class="msg-head">${av(n)}<span class="who">@${n}</span>${chip(st === "hecho" ? "ok" : "busy", st)}</div>${t}</div>`;
+	let h = "";
+	for (let i = 0; i < 6; i++) h += out(`Pedido ${i}: revisá el módulo ${i} y contame qué cambiarías`) + inn(view === "project" ? (i % 2 ? "dev" : "arq") : "solo", `El módulo ${i} está bien; cambiaría dos nombres y agregaría un test que cubra el caso del reintento.`);
+	return h;
+}
+function composer() {
+	const plus = view === "project";
+	const cls = ["composer", plus ? "" : "no-plus", comp === "error" ? "is-error" : "", comp === "disabled" ? "is-disabled" : "", comp === "focus" || comp === "text" || comp === "multi" ? "is-focus" : "", ["text", "multi", "sending"].includes(comp) ? "has-text" : "", comp === "sending" ? "is-sending" : ""].join(" ");
+	const val = comp === "text" ? (plus ? "@arq @dev revisen el login" : "Revisá el login") : comp === "multi" ? (plus ? "@arq @dev revisen esto:\n" : "") + Array.from({ length: 11 }, (_, i) => `línea ${i + 1} del mensaje`).join("\n") : comp === "error" ? "" : "";
+	const ph = comp === "disabled" ? "Proyecto archivado · solo lectura" : plus ? "Mensaje…" : "Mensaje a @solo (privado)…";
+	const toLine = plus ? `<div class="to-line">${comp === "text" || comp === "multi" ? "Para <b>@arq</b> · <b>@dev</b>" : comp === "disabled" ? "&nbsp;" : mobile ? "Empezá con @agente" : "Empezá con @agente para elegir a quién va · Ctrl+Enter envía"}</div>` : "";
+	const send = comp === "disabled" ? "" : `<button class="cbtn send" aria-label="Enviar"><i>${comp === "sending" ? `<span class="spin"></span>` : "↑"}</i></button>`;
+	const pl = plus && comp !== "disabled" ? `<button class="cbtn plus" aria-label="Elegir destinatarios"><i>+</i></button>` : plus ? "<span></span>" : "";
+	const pillHtml = pill === "0" ? "" : pill === "arrow" ? `<button class="to-end solo" aria-label="Ir al final"><span class="arr">↓</span></button>` : `<button class="to-end" aria-label="${pill} mensajes nuevos, ir al final"><span class="arr">↓</span><span class="n">${pill}</span></button>`;
+	return `<div class="composer-wrap"><div class="composer-anchor">${pillHtml}${toLine}<div class="${cls}">${pl}<textarea rows="1" ${comp === "disabled" ? "disabled" : ""} placeholder="${ph}">${val}</textarea>${send}</div>
+		${comp === "error" ? `<div class="c-error">No se envió a @solo. <button class="btn sm">Recuperar el texto</button></div>` : ""}</div></div>`;
+}
+function content() {
+	if (["project", "acp", "capture"].includes(view) && !(view === "capture"))
+		return `<div class="chatpane"><div class="thread" id="th">${thread()}</div>${composer()}</div>`;
+	if (view === "capture") return `<div style="display:grid;grid-template-rows:auto 1fr">${subbar()}<div style="display:grid;place-items:center;color:var(--c-muted)">Elegí una conversación para leerla.</div></div>`;
+	return `<div style="display:grid;grid-template-rows:auto 1fr;min-height:0">${subbar()}<div style="background:#0b0f14;font:13px var(--font-mono);padding:8px;color:var(--c-text-2)">${view === "terminal" ? "Welcome to my-project (tab-1)<br>$ " : view === "files" ? "README.md<br>package.json<br>src/" : "M auth.ts<br>U new.ts"}</div></div>`;
+}
+
+// ── Header global ──────────────────────────────────────────
+function topBar() {
+	if (mobile) {
+		// v2 en teléfono: la barra de contexto ES el header (una fila, 47 px).
+		return `<header class="top">${bar().replace('<div class="bar">', "").replace(/<\/div>$/, "")}<span class="avatar-me">A</span></header>`;
+	}
+	return `<header class="top"><button class="btn icon" aria-label="Menú">☰</button><span class="brand">Shared Terminal</span><span class="goto">⌕ Ir a… <kbd>Ctrl K</kbd></span><span style="flex:1"></span><span class="avatar-me">A</span></header>`;
+}
+document.getElementById("root").innerHTML = `<div class="app">${topBar()}<div class="body"><aside class="side">${sb === "b" ? sidebarB() : sidebarA()}</aside><div class="scrim"></div>
+	<main class="main" style="${mobile ? "grid-template-rows:1fr" : ""}">${mobile ? "" : bar()}${content()}</main></div></div>`;
+const th = document.getElementById("th");
+if (th) th.scrollTop = pill === "0" ? th.scrollHeight : th.scrollHeight / 3;
+const ta = document.querySelector(".composer textarea");
+if (ta) { ta.style.height = "auto"; ta.style.height = Math.min(ta.scrollHeight, parseFloat(getComputedStyle(ta).maxHeight)) + "px"; if (comp === "multi") ta.scrollTop = ta.scrollHeight; }
+</script>
+</body>
+</html>
