@@ -32,6 +32,11 @@ export interface ChatEndButtonOptions {
 	onJump?: () => boolean;
 	/** Called once the jump starts: the thread clears its count and marks the reader at the end. */
 	onJumped: () => void;
+	/**
+	 * What the button must never cover (an open question's options): it rises
+	 * above them, or — with no room left above — does not show.
+	 */
+	avoid?: () => Iterable<Element>;
 }
 
 export class ChatEndButton {
@@ -135,6 +140,8 @@ export class ChatEndButton {
 
 	private paint(): void {
 		this.el.hidden = !this.shown;
+		this.el.style.bottom = "";
+		if (this.shown) this.clear();
 		const words = this.text ?? (this.count > 99 ? "99+" : this.count > 0 ? String(this.count) : "");
 		// The arrow alone: a 36-px circle (chat.css).
 		this.el.classList.toggle("solo", words === "");
@@ -143,7 +150,52 @@ export class ChatEndButton {
 		const name = this.text ?? this.opts.name(this.count);
 		if (this.el.getAttribute("aria-label") !== name) this.el.setAttribute("aria-label", name);
 	}
+
+	/**
+	 * Keeps the button clear of what it must not cover (`avoid`): measured
+	 * against where it rests (not its box, which moves while it fades in), it
+	 * rises above the first card it would overlap; with no room left under
+	 * the thread's top it hides — the card is then most of the view, and the
+	 * reader is next to it anyway.
+	 */
+	private clear(): void {
+		const b = this.el;
+		const sc = this.opts.scroller();
+		const parent = b.offsetParent as HTMLElement | null;
+		if (!this.opts.avoid || !sc || !parent) return;
+		const box = sc.getBoundingClientRect();
+		const pr = parent.getBoundingClientRect();
+		const w = b.offsetWidth;
+		const h = b.offsetHeight;
+		const left = pr.left + pr.width / 2 - w / 2 - REACH;
+		const right = left + w + 2 * REACH;
+		const cards = [...this.opts.avoid()]
+			.map((a) => a.getBoundingClientRect())
+			.filter((r) => r.bottom > box.top && r.top < box.bottom && r.right > left && r.left < right);
+		let bottom = REST;
+		for (let moved = true; moved; ) {
+			moved = false;
+			const top = pr.bottom - bottom - h - REACH;
+			const low = pr.bottom - bottom + REACH;
+			for (const r of cards)
+				if (r.bottom > top && r.top < low) {
+					bottom = pr.bottom - r.top + REST;
+					moved = true;
+				}
+		}
+		if (bottom === REST) return;
+		if (pr.bottom - bottom - h - REACH < box.top) {
+			b.hidden = true;
+			return;
+		}
+		b.style.bottom = `${bottom}px`;
+	}
 }
+
+/** Where it rests: 12 px above what is under the thread (chat.css). */
+const REST = 12;
+/** Its 44-px touch target reaches this far past the visible pill. */
+const REACH = 7;
 
 const STOP_EVENTS = ["wheel", "touchstart", "pointerdown", "keydown"] as const;
 
