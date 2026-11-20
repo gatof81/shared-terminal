@@ -91,6 +91,11 @@ html:not([data-shell="v2"]) #session-menu-btn {
   html:not([data-shell="v2"]) #session-menu-btn {
     height: 22px;
   }
+  /* Shell v2 (the ⋯ on every session): as tall as its tabs, so the bar
+     keeps its 40 px. */
+  html[data-shell="v2"] #session-menu-btn {
+    height: 26px;
+  }
 }
 
 /* The overlays' own bars (Files, Git, the capture Chat): one look — 36 px,
