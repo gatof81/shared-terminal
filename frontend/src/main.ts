@@ -5,6 +5,10 @@
  * and terminal panel lifecycle.
  */
 
+// DEMO BRANCH ONLY (preview/mobile-chat-demo, never merged): an in-page
+// backend — fetch and WebSocket answered by the e2e mock, no network.
+import "./demo/demoBackend.js";
+
 // Side-effect import: Vite bundles and injects this stylesheet. Kept as the
 // first import so rules land in the document before any module-side DOM
 // manipulation, minimising FOUC.
