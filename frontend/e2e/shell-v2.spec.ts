@@ -125,6 +125,18 @@ test.describe("shell v2", () => {
 		await app.expectTerminalReady();
 		await expect(page.locator("#terminal-toolbar")).toBeVisible();
 		await expect(page.locator("#tab-tools #font-size-btn")).toBeVisible();
+		// A stopped session has no terminal: the bar stays (view tabs, ⋯), the
+		// strip with the terminal's tools does not — on a phone as on desktop —
+		// and Start is reachable.
+		await app.openSession("docs");
+		await app.switchView("terminal");
+		await expect(page.locator("#terminal-toolbar")).toBeVisible();
+		await expect(page.locator("#session-menu-btn")).toBeVisible();
+		await expect(page.locator("#terminal-tabs")).toBeHidden();
+		await expect(page.locator("#terminal-state")).toContainText("stopped");
+		await expect(
+			page.locator("#terminal-state").getByRole("button", { name: "Start session" }),
+		).toBeEnabled();
 	});
 
 	test("desktop: the header cluster is one user menu with the role's entries", async ({
