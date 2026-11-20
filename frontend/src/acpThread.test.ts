@@ -215,7 +215,8 @@ describe("leaving and coming back", () => {
 		await flush();
 		await flush();
 		expect(t.input.value).toBe("importante");
-		expect(t.root.querySelector(".acp-chat-error")?.textContent).toContain("503");
+		// Fixed words: who it did not reach, never the server's answer.
+		expect(t.root.querySelector(".acp-chat-error")?.textContent).toBe("No se envió a @solo.");
 	});
 });
 
@@ -259,7 +260,7 @@ describe("a send that fails while the person is elsewhere", () => {
 		t.open({ kind: "agent", name: "solo" });
 		await settle();
 		expect(t.input.value).toBe("importante");
-		expect(errorText(t)).toContain("503");
+		expect(errorText(t)).toBe("No se envió a @solo.");
 	});
 
 	it("over another draft of A the text is offered, never written over it", async () => {

@@ -76,11 +76,24 @@ export class AcpThread {
 	readonly root = el("div", "acp-thread");
 	private readonly threadEl = el("div", "acp-chat-thread");
 	private readonly composer = el("form", "acp-chat-composer");
+	/**
+	 * The message box: ONE surface (border, radius, the focus ring) laid out
+	 * as a grid `[+] [field] [arrow]`, aligned at the bottom — the buttons
+	 * stay by the last line, where the caret is, at any height (acp-chat.css).
+	 */
+	private readonly surface = el("div", "acp-chat-field");
 	readonly input = el("textarea", "acp-chat-input");
-	/** Inside the field's right edge (an arrow): see the constructor. */
-	private readonly sendBtn = el("button", "acp-chat-send");
+	/** The arrow, the surface's last cell; a spinner while a send is out and the field is empty. */
+	private readonly sendBtn = el("button", "acp-chat-send acp-cbtn");
 	/** Project Chat with more than one agent: "+" opens the recipients menu. */
-	private readonly pickBtn = el("button", "acp-pick-btn", "+");
+	private readonly pickBtn = el("button", "acp-pick-btn acp-cbtn");
+	/**
+	 * One line above the surface, only when it has something to say: who a
+	 * Project Chat message goes to ("Para @a · @b": what recipientsOf will
+	 * send — the leading mentions may be out of view in a long text) and the
+	 * notices (sending, the queue, the size). Never two rows.
+	 */
+	private readonly toLine = el("div", "acp-chat-hint");
 	/** The menu's box (positioned over the thread): a note, then the menu itself. */
 	private readonly pickMenu = el("div", "acp-pick-menu");
 	private readonly pickList = el("div", "acp-pick-list");
@@ -88,7 +101,6 @@ export class AcpThread {
 	private readonly pickNote = el("p", "acp-pick-note");
 	/** Read by a screen reader: "Enviando…", then "Enviado a @a, @b" (not the queue line). */
 	private readonly sendStatus = el("div", "visually-hidden");
-	private readonly hint = el("div", "acp-chat-hint");
 	/**
 	 * "Ir al final" (chatScroll.ts), with the count of `newIds`: rows that
 	 * arrived, or got their answer, below a reader who is further up. Each
@@ -173,11 +185,7 @@ export class AcpThread {
 			restored: boolean;
 		}
 	>();
-	private readonly recoverBtn = el(
-		"button",
-		"files-btn acp-recover",
-		"Recuperar el texto no enviado",
-	);
+	private readonly recoverBtn = el("button", "files-btn acp-recover", "Recuperar el texto");
 	private unsubscribe: (() => void) | null = null;
 	private poll: ReturnType<typeof setInterval> | null = null;
 	private statusTimer: ReturnType<typeof setInterval> | null = null;
@@ -215,16 +223,17 @@ export class AcpThread {
 	onState: (s: ThreadState) => void = () => {};
 
 	constructor() {
-		// One row; CSS sets the resting height (one line on a phone, two on a
-		// desktop) and fitInput() grows it with the text up to a cap.
+		// One line at rest (CSS); fitInput() grows it with the text up to a cap.
 		this.input.rows = 1;
 		this.input.setAttribute("aria-label", "Mensaje");
 		this.sendBtn.type = "submit";
 		this.sendBtn.setAttribute("aria-label", "Enviar");
 		this.sendBtn.title = "Enviar (Ctrl+Enter)";
-		this.sendBtn.append(sendIcon());
+		// Each button is its 44-px cell; what is seen is a 30-px circle inside.
+		this.sendBtn.append(el("span", "acp-cbtn-face"));
+		this.sendBtn.firstElementChild!.append(sendIcon(), el("span", "acp-send-spin"));
+		this.pickBtn.append(el("span", "acp-cbtn-face", "+"));
 		this.buildPicker();
-		const actions = el("div", "acp-chat-actions");
 		this.recoverBtn.type = "button";
 		this.recoverBtn.hidden = true;
 		this.recoverBtn.addEventListener("click", () => {
@@ -236,20 +245,19 @@ export class AcpThread {
 			this.input.focus();
 			this.changed();
 		});
-		actions.append(this.hint, this.recoverBtn);
-		const row = el("div", "acp-chat-row");
-		// The arrow sits inside the field's frame, bottom right (it stays there
-		// as the field grows); the field's padding keeps the text clear of it.
-		const field = el("div", "acp-chat-field");
-		field.append(this.input, this.sendBtn);
-		row.append(this.pickBtn, field, this.pickMenu);
+		this.toLine.hidden = true;
+		// The menu opens upward from the surface (positioned on it, out of the grid).
+		this.surface.append(this.pickBtn, this.input, this.sendBtn, this.pickMenu);
 		// Errors sit by the field, not at the top of the thread: a refused send
 		// must be seen where the person is looking, however long the thread.
+		// Under the surface, with "Recuperar el texto" next to the words.
 		this.errorEl.setAttribute("role", "alert");
 		this.errorEl.hidden = true;
+		const errorLine = el("div", "acp-chat-actions");
+		errorLine.append(this.errorEl, this.recoverBtn);
 		this.sendStatus.setAttribute("role", "status");
 		this.sendStatus.setAttribute("aria-live", "polite");
-		this.composer.append(this.errorEl, actions, row, this.sendStatus);
+		this.composer.append(this.toLine, this.surface, errorLine, this.sendStatus);
 		// A tap on Enviar, a mention or "↓ N nuevos" must not take the focus from the field:
 		// on a phone that blur closes the keyboard, the layout grows back (the
 		// bottom bar returns) and the button moves away under the finger before
@@ -537,9 +545,9 @@ export class AcpThread {
 			if (gen !== this.gen) return;
 			this.applyFeed(feed, true);
 			this.replayLive(mark);
-		} catch (err) {
+		} catch {
 			if (gen !== this.gen) return;
-			this.error = `No se pudieron cargar los anteriores: ${(err as Error).message}`;
+			this.error = "No se pudieron cargar los anteriores.";
 			this.errorIsFeed = false;
 		}
 		this.changed();
@@ -825,10 +833,10 @@ export class AcpThread {
 	}
 
 	/**
-	 * The field grows with its text up to 6 lines or 40% of the visible
-	 * height (whichever is smaller), then scrolls inside; emptied, it is back
-	 * to its resting height (CSS min-height: one line on a phone, two on a
-	 * desktop).
+	 * The field grows with its text — up to 8 lines on a desktop, up to 30 %
+	 * of the visible height on a phone (the keyboard shrinks it) — then
+	 * scrolls inside; emptied, it is back to its resting line. Only the field
+	 * grows: the buttons sit at the bottom of the surface's grid.
 	 */
 	private fitInput(): void {
 		const i = this.input;
@@ -846,7 +854,9 @@ export class AcpThread {
 		const border = Number.parseFloat(cs.borderTopWidth) + Number.parseFloat(cs.borderBottomWidth);
 		const frame = Number.parseFloat(cs.paddingTop) + Number.parseFloat(cs.paddingBottom) + border;
 		const visible = window.visualViewport?.height ?? window.innerHeight;
-		const cap = Math.max(line + frame, Math.min(6 * line + frame, visible * 0.4));
+		const phone = window.matchMedia?.("(max-width: 640px)").matches === true;
+		const lines = 8 * line + frame;
+		const cap = Math.max(line + frame, phone ? Math.min(lines, visible * 0.3) : lines);
 		i.style.height = "auto";
 		const want = i.scrollHeight + border;
 		i.style.height = `${Math.min(want, cap)}px`;
@@ -1246,6 +1256,10 @@ export class AcpThread {
 		this.composer.classList.toggle("acp-composer-off", this.composerMode === "off");
 		const picks = writable && this.source?.kind === "project" && this.agents.size > 1;
 		this.pickBtn.hidden = !picks;
+		// The surface's states (acp-chat.css): no "+" column, a refused send, locked.
+		this.surface.classList.toggle("no-plus", !picks);
+		this.surface.classList.toggle("is-error", Boolean(u?.error));
+		this.surface.classList.toggle("is-disabled", !writable);
 		if (!picks) this.closePicker(false);
 		else if (this.pickOpen) this.renderPicker();
 		this.renderHint();
@@ -1254,7 +1268,9 @@ export class AcpThread {
 
 	/** The arrow: off when nothing can be sent (still on while another send is out). */
 	private syncSendBtn(): void {
-		this.sendBtn.disabled = this.composerMode !== "on" || this.input.value.trim() === "";
+		const empty = this.input.value.trim() === "";
+		this.sendBtn.disabled = this.composerMode !== "on" || empty;
+		this.surface.classList.toggle("has-text", !empty);
 	}
 
 	// ── Recipients menu ("+") ───────────────────────────────────────────
@@ -1431,26 +1447,43 @@ export class AcpThread {
 		const narrow = window.matchMedia?.("(max-width: 640px)").matches === true;
 		// 320–360 px: "+" and the arrow leave the field ~180 px of text.
 		const tiny = window.matchMedia?.("(max-width: 360px)").matches === true;
+		// One line at rest everywhere: what does not fit is cut (CSS ellipsis).
 		const text =
-			src.kind === "agent"
-				? narrow
-					? `Privado · a @${src.name}`
-					: `Mensaje directo a @${src.name} (privado). Ctrl+Enter envía; podés seguir enviando mientras trabaja.`
-				: tiny
-					? "Con @agente…"
-					: narrow
-						? "Empezá con @agente…"
-						: "Empezá con @agente (uno o varios): cada uno lo recibe en su cola y responde acá. Ctrl+Enter envía.";
+			this.composerMode === "disabled"
+				? "Cargando el proyecto…"
+				: src.kind === "agent"
+					? narrow
+						? `Privado · a @${src.name}`
+						: `Mensaje privado a @${src.name} · Ctrl+Enter envía`
+					: tiny
+						? "Con @agente…"
+						: narrow
+							? "Empezá con @agente…"
+							: "Empezá con @agente (uno o varios) · Ctrl+Enter envía";
 		if (this.input.placeholder !== text) this.input.placeholder = text;
 	}
 
 	/**
-	 * Shown only when there is something to say: this chat's queue, and the
-	 * size limit once the text gets near it (past it, it goes as an attachment).
+	 * The line above the surface, only when there is something to say: in
+	 * Project Chat who the text goes to (recipientsOf: exactly what a send
+	 * would do), then the notices: sending,
+	 * this chat's queue, and the size limit once the text gets near it (past
+	 * it, it goes as an attachment). Read-only: the text stays the source.
 	 */
 	private renderHint(): void {
 		const queued = this.messages.filter((m) => m.state === "pending").length;
 		const running = this.messages.filter((m) => m.state === "running").length;
+		const line: Array<string | HTMLElement> = [];
+		if (this.source?.kind === "project" && this.composerMode === "on") {
+			const to = recipientsOf(this.input.value, [...this.agents.keys()]).to;
+			if (to.length) {
+				line.push("Para ");
+				for (const [i, n] of to.entries()) {
+					if (i) line.push(" · ");
+					line.push(el("b", "", `@${n}`));
+				}
+			}
+		}
 		const parts: string[] = [];
 		if (this.sending) parts.push(this.sending > 1 ? `Enviando (${this.sending})…` : "Enviando…");
 		if (running) parts.push(`${running} en curso`);
@@ -1465,8 +1498,10 @@ export class AcpThread {
 				parts.push(`${kib(bytes)}: supera ${kib(this.maxBytes)}, se envía como adjunto`);
 			else if (bytes >= this.maxBytes * 0.8) parts.push(`${kib(bytes)} de ${kib(this.maxBytes)}`);
 		}
-		this.hint.textContent = parts.join(" · ");
-		this.hint.hidden = parts.length === 0;
+		if (parts.length) line.push(line.length ? ` — ${parts.join(" · ")}` : parts.join(" · "));
+		this.toLine.replaceChildren(...line);
+		this.toLine.hidden = line.length === 0;
+		this.surface.classList.toggle("is-sending", this.sending > 0);
 	}
 
 	// ── Sending ─────────────────────────────────────────────────────────
@@ -1543,8 +1578,8 @@ export class AcpThread {
 						this.noteLive({ row });
 						this.messages = upsert(this.messages, row);
 					}
-				} catch (err) {
-					failed.push(`@${name}: ${(err as Error).message}`);
+				} catch {
+					failed.push(`@${name}`);
 				}
 			}
 			// The person may have moved to another chat meanwhile: nothing of this
@@ -1552,9 +1587,9 @@ export class AcpThread {
 			if (failed.length) {
 				// The error (role=alert, next to the field) says it.
 				this.sendStatus.textContent = "";
-				giveBack(
-					`No se envió a ${failed.join("; ")}. Enviar el mismo texto de nuevo no duplica a quienes ya lo recibieron.`,
-				);
+				// Fixed words, never the server's code; sending the same text again
+				// keeps its client id, so whoever already got it does not get it twice.
+				giveBack(`No se envió a ${failed.join(", ")}.`);
 			} else {
 				// Sent: its failure record (if this was its retry, or it was taken
 				// back into the field) is done; an unsent text not yet taken back stays offered.

@@ -656,107 +656,178 @@ pre.acp-msg-body {
 	padding: 10px 14px;
 	display: flex;
 	flex-direction: column;
-	gap: 6px;
+	gap: 4px;
 }
 /* A read-only chat (an archived project): no message box, but its errors
    ("Cargar anteriores" failed) still show. */
-.acp-chat-composer.acp-composer-off > :not(.acp-chat-error) {
+.acp-chat-composer.acp-composer-off > :not(.acp-chat-actions) {
 	display: none;
 }
-.acp-chat-composer.acp-composer-off:has(> .acp-chat-error[hidden]) {
+.acp-chat-composer.acp-composer-off:has(.acp-chat-error[hidden]) {
 	display: none;
 }
-/* The UA's placeholder grey measured 3.75:1 on the field: the muted text colour. */
+/* The message box (UX iter3 §3): ONE surface — the border, the radius and
+   the focus ring are its own — laid out as a grid `[+] [field] [arrow]`,
+   aligned at the bottom: as the field grows, the buttons stay by its last
+   line. No offsets: each button is its 44-px cell and centres its circle. */
+.acp-chat-field {
+	position: relative;
+	display: grid;
+	grid-template-columns: auto minmax(0, 1fr) auto;
+	align-items: end;
+	box-sizing: border-box;
+	min-height: 44px;
+	background: var(--c-surface);
+	border: 1px solid var(--c-border);
+	border-radius: var(--radius-m);
+}
+/* No "+" (the individual chat, one agent): the field starts 12 px in. */
+.acp-chat-field.no-plus {
+	grid-template-columns: minmax(0, 1fr) auto;
+	padding-left: 12px;
+}
+.acp-chat-field:focus-within {
+	border-color: var(--c-accent);
+	box-shadow: 0 0 0 3px var(--c-accent-bg);
+}
+.acp-chat-field.is-error {
+	border-color: var(--c-err);
+}
+.acp-chat-field.is-disabled {
+	background: var(--c-surface-2);
+	border-color: var(--c-border-soft);
+}
+.acp-chat-field.is-disabled .acp-cbtn {
+	visibility: hidden;
+}
+.acp-chat-input {
+	display: block;
+	width: 100%;
+	min-width: 0;
+	box-sizing: border-box;
+	/* One line at rest: 42 px inside the 1-px border = a 44-px surface. */
+	min-height: 42px;
+	padding: 10px 0;
+	margin: 0;
+	border: 0;
+	/* The focus is drawn on the surface (:focus-within), never here. */
+	outline: none;
+	background: transparent;
+	color: var(--c-text);
+	font: 15px/22px var(--font-ui);
+	resize: none;
+	overflow-y: hidden;
+}
+/* The UA's placeholder grey measured 3.75:1 on the field: the muted text
+   colour. One line: what does not fit is cut. */
 .acp-chat-input::placeholder {
 	color: var(--c-muted);
 	opacity: 1;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
 }
-/* The field and Enviar share one row; the field grows with its text
-   (AcpThread.fitInput sets its height, up to a cap), so no manual resize. */
-.acp-chat-row {
+.acp-chat-input:disabled {
+	cursor: default;
+}
+/* "+" and the arrow: a 44-px wide cell, as tall as the surface's inside
+   (a 1-px band of the 44 is the border, the target still covers it), with
+   a 30-px circle. */
+.acp-cbtn {
+	flex: none;
 	position: relative;
-	display: flex;
-	align-items: flex-end;
-	gap: 6px;
-}
-/* The field's frame holds the send arrow, bottom right; the text keeps clear of it. */
-.acp-chat-field {
-	position: relative;
-	flex: 1;
-	min-width: 0;
-	display: flex;
-}
-.acp-chat-input {
-	flex: 1;
-	min-width: 0;
-	background: var(--c-surface);
-	color: var(--c-text);
-	border: 1px solid var(--c-border);
-	border-radius: 6px;
-	padding: 6px 8px;
-	resize: none;
-	overflow-y: hidden;
-	line-height: 1.4;
-	/* Two lines at rest on a desktop. */
-	min-height: calc(2 * 1.4em + 14px);
-	font-family: var(--font-mono, ui-monospace, monospace);
-	font-size: 0.85rem;
-	box-sizing: border-box;
-}
-/* After the field's own padding rules (the phone's included): more specific. */
-.acp-chat-field > .acp-chat-input {
-	padding-right: 46px;
-}
-.acp-chat-send {
-	position: absolute;
-	right: 1px;
-	bottom: 1px;
-	width: 40px;
-	height: 40px;
+	width: 44px;
+	height: 42px;
 	display: grid;
 	place-items: center;
 	padding: 0;
 	border: 0;
-	border-radius: 5px;
 	background: transparent;
-	color: var(--c-accent);
-	cursor: pointer;
-}
-.acp-chat-send svg {
-	width: 20px;
-	height: 20px;
-	fill: none;
-	stroke: currentColor;
-	stroke-width: 2.2;
-	stroke-linecap: round;
-	stroke-linejoin: round;
-}
-.acp-chat-send:disabled {
 	color: var(--c-muted);
-	cursor: default;
-}
-.acp-chat-send:not(:disabled):hover {
-	background: var(--c-surface-2);
-}
-/* "+": the recipients menu (Project Chat with more than one agent). */
-.acp-pick-btn {
-	flex: none;
-	width: 40px;
-	height: 40px;
-	padding: 0;
-	border: 1px solid var(--c-border);
-	border-radius: 6px;
-	background: transparent;
-	color: var(--c-text);
-	font-size: 1.35rem;
-	line-height: 1;
 	cursor: pointer;
+}
+.acp-cbtn::before {
+	content: "";
+	position: absolute;
+	inset: -1px 0;
+}
+.acp-cbtn-face {
+	width: 30px;
+	height: 30px;
+	box-sizing: border-box;
+	border-radius: 50%;
+	display: grid;
+	place-items: center;
+	font-size: 18px;
+	line-height: 1;
+}
+.acp-cbtn:focus-visible {
+	outline: none;
+}
+.acp-cbtn:focus-visible .acp-cbtn-face {
+	outline: 2px solid var(--c-accent);
+	outline-offset: 2px;
+}
+.acp-pick-btn .acp-cbtn-face {
+	border: 1px solid var(--c-border);
+	color: var(--c-text);
+}
+.acp-pick-btn:hover .acp-cbtn-face,
+.acp-pick-btn[aria-expanded="true"] .acp-cbtn-face {
+	background: var(--c-surface-2);
 }
 .acp-pick-btn[hidden] {
 	display: none;
 }
-.acp-pick-btn[aria-expanded="true"] {
+/* The arrow: off (still focusable — Enviar with nothing to send does
+   nothing) until there is text; in accent then. */
+.acp-chat-send .acp-cbtn-face {
 	background: var(--c-surface-2);
+	color: var(--c-faint, var(--c-muted));
+}
+.acp-chat-field.has-text .acp-chat-send .acp-cbtn-face {
+	background: var(--c-accent-strong);
+	color: var(--c-white);
+}
+.acp-chat-send:disabled {
+	cursor: default;
+}
+.acp-chat-send svg {
+	width: 16px;
+	height: 16px;
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 2.4;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+/* A send out and the field empty: a spinner in the arrow. With new text
+   the arrow is back (another send can leave meanwhile, as always). */
+.acp-send-spin {
+	display: none;
+	width: 14px;
+	height: 14px;
+	box-sizing: border-box;
+	border-radius: 50%;
+	border: 2px solid rgba(255, 255, 255, 0.25);
+	border-top-color: var(--c-accent);
+	animation: acp-spin 0.8s linear infinite;
+}
+.acp-chat-field.is-sending:not(.has-text) .acp-send-spin {
+	display: block;
+}
+.acp-chat-field.is-sending:not(.has-text) .acp-chat-send svg {
+	display: none;
+}
+@keyframes acp-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+@media (prefers-reduced-motion: reduce) {
+	.acp-send-spin {
+		animation: none;
+	}
 }
 /* Opens upward from "+", over the thread; as tall as the visible height allows. */
 .acp-pick-menu {
@@ -833,15 +904,34 @@ pre.acp-msg-body {
 	color: var(--c-muted);
 	font-style: italic;
 }
-/* The queue / size note and "Recuperar…": a row only when one of them shows. */
+/* Under the surface: a refused send's fixed words and "Recuperar el texto". */
 .acp-chat-actions {
 	display: flex;
 	flex-wrap: wrap;
 	align-items: center;
 	gap: 4px 8px;
+	padding: 2px 4px 0;
 }
 .acp-chat-actions:not(:has(> :not([hidden]))) {
 	display: none;
+}
+.acp-chat-actions .acp-chat-error {
+	font-size: 12.5px;
+}
+/* Above the surface, only when it says something: "Para @a · @b", the notices. */
+.acp-chat-hint {
+	min-height: 18px;
+	padding: 0 4px;
+	font-size: 12px;
+	line-height: 18px;
+	color: var(--c-muted);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.acp-chat-hint b {
+	color: var(--c-text);
+	font-weight: 600;
 }
 .acp-chat-hint[hidden] {
 	display: none;
@@ -891,34 +981,12 @@ pre.acp-msg-body {
 		padding-top: 8px;
 		padding-bottom: 8px;
 	}
-	/* The field is one line: so is its placeholder (cut with an ellipsis). */
-	.acp-chat-input::placeholder {
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-	/* One line at rest: 44 px, a touch target as tall as Enviar. */
-	.acp-chat-input {
-		min-height: 44px;
-		padding: 10px;
-		font-size: 16px; /* no iOS zoom on focus */
-	}
-	/* 44 px to the touch: the whole corner of the field (it is transparent,
-	   the field's border still shows). */
-	.acp-chat-send {
-		right: 0;
-		bottom: 0;
-		width: 44px;
-		height: 44px;
-	}
-	.acp-pick-btn {
-		width: 44px;
-		height: 44px;
-	}
 }
-.acp-chat-hint {
-	font-size: 0.75rem;
-	opacity: 0.7;
+/* 16 px on a touch screen: iOS zooms into a smaller field on focus. */
+@media (pointer: coarse) {
+	.acp-chat-input {
+		font-size: 16px;
+	}
 }
 
 /* ── Questions from an agent (ACP form elicitation) ─────────────────────── */
