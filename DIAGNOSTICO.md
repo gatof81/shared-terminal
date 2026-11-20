@@ -101,6 +101,8 @@
 23. En desktop, «+» y la flecha miden 40×40, ⋯ mide 44×32 y × 32×33. Se suma al punto 12 (escala de botones).
 24. **Sin validar en ningún lado:** Safari/WebKit e iPhone real (riesgo principal: que tocar «+» o Enviar cierre el teclado de iOS) y un lector de pantalla real.
 
+25. Un proyecto archivado sin mensajes dice «Sin mensajes… Mencioná a un agente para empezar», pero es de solo lectura y no se puede escribir. El estado vacío tendría que decir que el proyecto está archivado y no tiene historial. Lo encontré verificando el #708.
+
 ## Propuesta de las 5 mejoras (a acordar con @architect)
 
 | # | Mejora | Tamaño | Quién |
