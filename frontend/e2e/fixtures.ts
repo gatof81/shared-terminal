@@ -127,10 +127,21 @@ export class App {
 		await this.page.click("#auth-submit");
 	}
 
+	/**
+	 * A session's row by the session's name: shown on a session's row; on an
+	 * agent's row (the tree, UX iter3 §1) the row shows "@agent" and the
+	 * session's name is its `data-session-name` (tooltip, accessible name).
+	 */
 	sessionRow(name: string) {
-		return this.page.locator("#session-list .session-item", {
-			has: this.page.locator(".session-name", { hasText: new RegExp(`^${name}$`) }),
-		});
+		return this.page
+			.locator("#session-list .session-item", {
+				has: this.page.locator(".session-name", { hasText: new RegExp(`^${name}$`) }),
+			})
+			.or(
+				this.page.locator("#session-list .session-item", {
+					has: this.page.locator(`.session-select[data-session-name="${name}"]`),
+				}),
+			);
 	}
 
 	async openSidebar(): Promise<void> {

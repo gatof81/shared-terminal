@@ -13,6 +13,7 @@ import { acpLiveUp, subscribeAcp } from "./acpLive.js";
 import {
 	ACTIVITY_STATE,
 	activityRows,
+	agentHue,
 	agentStatus,
 	answerText,
 	applyEdits,
@@ -1631,35 +1632,25 @@ function time(iso: string): string {
 		: d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 }
 
-/** A stable hue per agent name, so each agent keeps its colour across chats. */
-function hue(name: string): number {
-	let h = 0;
-	for (const c of name) h = (h * 31 + c.charCodeAt(0)) % 360;
-	return h;
-}
-
-/** An agent's name with its avatar, in its colour: the same face wherever it speaks. */
 /** An agent's avatar + @name, in its colour (also the Project Chat header's). */
 export function agentAvatar(name: string): HTMLElement {
 	return agentId(name);
 }
 
 /** The hue of an agent's colour (avatars elsewhere: the header's group). */
-export function agentHue(name: string): number {
-	return hue(name);
-}
+export { agentHue };
 
 function agentId(name: string): HTMLElement {
 	const id = el("span", "acp-msg-who acp-agent-id");
 	id.append(el("span", "acp-avatar", name.slice(0, 1).toUpperCase()), `@${name}`);
-	id.style.setProperty("--acp-hue", String(hue(name)));
+	id.style.setProperty("--acp-hue", String(agentHue(name)));
 	return id;
 }
 
 /** Marks a bubble as said by that agent (its colour accent, see .acp-voice). */
 function agentVoice(bubble: HTMLElement, name: string): void {
 	bubble.classList.add("acp-voice");
-	bubble.style.setProperty("--acp-hue", String(hue(name)));
+	bubble.style.setProperty("--acp-hue", String(agentHue(name)));
 }
 
 /**

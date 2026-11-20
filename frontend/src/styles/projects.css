@@ -27,25 +27,7 @@
   letter-spacing: 0.05em;
   color: var(--c-muted);
 }
-#new-project-btn {
-  background: transparent;
-  border: 1px solid var(--c-border);
-  border-radius: var(--radius-s);
-  color: var(--c-muted);
-  font-size: 0.9rem;
-  line-height: 1;
-  min-width: 1.8rem;
-  min-height: 1.8rem;
-  cursor: pointer;
-}
-#new-project-btn:hover:not(:disabled) {
-  border-color: var(--c-accent);
-  color: var(--c-accent);
-}
-#new-project-btn:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
+/* #new-project-btn: .btn.btn-icon.sm (base.css). */
 .project-item {
   display: flex;
   align-items: baseline;
@@ -228,34 +210,6 @@ button.sgroup-title:focus-visible {
     flex-direction: row;
     gap: 0.4rem;
   }
-}
-/* With the tree, "Projects [+]" titles the sidebar: the "Sessions" title
-   under it would name the same list twice, so that bar keeps only its
-   controls (refresh, show terminated). */
-#project-section:not([hidden]) {
-  border-bottom: 0;
-  padding-bottom: 0;
-}
-#project-section:not([hidden]) ~ #sidebar-header {
-  padding-block: 0.25rem;
-  border-bottom: 0;
-}
-#project-section:not([hidden]) ~ #sidebar-header h2 {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-}
-#project-section:not([hidden]) ~ #sidebar-header #show-terminated-label {
-  margin-left: auto;
-  order: -1;
-}
-#project-section:not([hidden]) ~ #sidebar-header #sidebar-refresh-btn {
-  margin-left: 0;
-}
-#project-section:not([hidden]) ~ #sidebar-actions #new-session-btn {
-  margin-block: 0.4rem 0.5rem;
 }
 .session-list-grouped .session-name {
   font-family: var(--font-mono);
@@ -618,12 +572,13 @@ body.project-page-on #actions-btn {
   #project-section:not([hidden]) #project-section-header {
     padding-block: 0.25rem 0;
   }
-  #project-section:not([hidden]) ~ #sidebar-actions {
+  #sidebar.sidebar-tree #sidebar-actions {
     display: flex;
+    flex-direction: row;
     gap: 0.5rem;
-    padding: 0.25rem 0.75rem 0.5rem;
+    padding: 0.5rem 0.75rem 0.25rem;
   }
-  #project-section:not([hidden]) ~ #sidebar-actions #sidebar-switcher-btn {
+  #sidebar.sidebar-tree #sidebar-actions #sidebar-switcher-btn {
     flex: 1;
     min-width: 0;
     margin: 0;
@@ -631,8 +586,9 @@ body.project-page-on #actions-btn {
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  #project-section:not([hidden]) ~ #sidebar-actions #new-session-btn {
+  #sidebar.sidebar-tree #sidebar-actions #new-session-btn {
     flex-shrink: 0;
+    width: auto;
     margin: 0;
     min-height: 2.75rem;
     white-space: nowrap;
@@ -667,4 +623,188 @@ body.project-page-on #actions-btn {
 
 .pv-content {
   min-width: 0;
+}
+
+/* ── Sidebar tree, UX iter3 §1 (alternative A) ─────────────────
+   #sidebar.sidebar-tree (sessionCore.placeSidebarActions): "+ New session"
+   first, then Projects (each folds; its agents under it), then the agents
+   without a project, then the sessions worked from their Terminal — whose
+   ⋯ holds "Show terminated" and Refresh, so the old bar above the list
+   goes. Rows are one line; an agent's row is its face, "@name" and ONE
+   chip (base.css) with its state; a session's row its dot and its name. */
+#sidebar.sidebar-tree #sidebar-header {
+  display: none;
+}
+@media (min-width: 769px) {
+  #sidebar.sidebar-tree #sidebar-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 12px 4px;
+  }
+}
+#sidebar.sidebar-tree #new-session-btn {
+  margin: 0;
+  width: 100%;
+  border: 1px solid var(--c-ok-strong);
+  border-radius: var(--radius-s);
+  font-size: 12.5px;
+  text-align: center;
+}
+#sidebar.sidebar-tree #project-section {
+  border-bottom: 0;
+  padding: 0 0.5rem;
+}
+/* The section headings: Projects [+], Agentes sin proyecto, Sessions [⋯]. */
+#sidebar.sidebar-tree #project-section-header,
+.ssection-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  padding: 8px 4px 0 8px;
+}
+#sidebar.sidebar-tree #project-section-header h2,
+.ssection-head h3 {
+  flex: 1;
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--c-muted);
+}
+.ssection {
+  margin-top: 10px;
+}
+.ssection-rows {
+  display: flex;
+  flex-direction: column;
+}
+/* Rows: 32 px, one line; the name gives way (ellipsis), never the chip. */
+.sidebar-tree .session-list-grouped .session-item {
+  position: relative;
+  flex-wrap: nowrap;
+  min-height: 32px;
+  padding: 0 4px 0 8px;
+  margin-bottom: 1px;
+  gap: 8px;
+  border-radius: var(--radius-s);
+  color: var(--c-text-2);
+}
+.sidebar-tree .session-list-grouped .session-item:has(.session-last-conv) {
+  flex-wrap: wrap;
+}
+.sidebar-tree .session-list-grouped .session-item:hover {
+  background: var(--c-surface-2);
+}
+.sidebar-tree .session-list-grouped .session-select {
+  min-height: 32px;
+  gap: 8px;
+}
+.sidebar-tree .session-list-grouped .session-name-col {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+.sidebar-tree .session-list-grouped .session-name {
+  flex: 0 1 auto;
+}
+.sidebar-tree .session-list-grouped .session-meta {
+  flex: 0 0 auto;
+  flex-direction: row;
+  gap: 0.4rem;
+}
+/* The agent is addressed by its name: it reads as the row's name. */
+.sidebar-tree .session-list-grouped .session-agent-tag {
+  max-width: none;
+  font-family: inherit;
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--c-text);
+}
+.session-avatar {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  font-size: 11px;
+  font-weight: 700;
+}
+.session-avatar::before {
+  content: attr(data-initial);
+}
+.sidebar-tree .session-list-grouped .session-agent-status.chip,
+.sidebar-tree .session-list-grouped .session-state.chip {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--chip);
+}
+/* What needs the person (a question, a login) stands out. */
+.sidebar-tree .session-list-grouped .session-agent-status.asks {
+  font-weight: 600;
+}
+/* Selection: the accent background and a 3-px bar on the left. */
+.sidebar-tree .session-list-grouped .session-item.active,
+.sidebar-tree .sgroup-head:has(a[aria-current="page"]) {
+  position: relative;
+  background: var(--c-accent-bg);
+}
+.sidebar-tree .session-list-grouped .session-item.active .session-name,
+.sidebar-tree .sgroup-head:has(a[aria-current="page"]) .sgroup-name {
+  color: var(--c-white);
+}
+.sidebar-tree .session-list-grouped .session-item.active::before,
+.sidebar-tree .sgroup-head:has(a[aria-current="page"])::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--c-accent);
+}
+.sidebar-tree .sgroup-title.project-item[aria-current="page"] {
+  color: var(--c-white);
+}
+.sidebar-tree .sgroup-head {
+  position: relative;
+  min-height: 32px;
+}
+/* A stopped session is not running, not a warning: the hollow grey dot. */
+.sidebar-tree .session-list-grouped .session-dot.stopped {
+  border-color: var(--c-muted);
+}
+/* The row's ⋯ (and ⏸): on hover, focus or the selected row; a start (▶)
+   is the row's next step and always shows. */
+.sidebar-tree .session-list-grouped .session-actions {
+  opacity: 1;
+}
+.sidebar-tree .session-list-grouped .session-actions > :not(.start) {
+  opacity: 0;
+}
+.sidebar-tree .session-list-grouped .session-item:is(:hover, :focus-within, .active)
+  .session-actions
+  > * {
+  opacity: 1;
+}
+@media (pointer: coarse) {
+  .sidebar-tree .session-list-grouped .session-actions > * {
+    opacity: 1;
+  }
+}
+/* A folded (or not) project with agents waiting: "●N" instead of the count. */
+.sgroup-head:has(.sgroup-asks) .sgroup-count {
+  display: none;
+}
+.sidebar-tree .sgroup-asks {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  margin-right: 4px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(var(--c-warn-rgb), 0.16);
+  font-size: 11px;
 }

@@ -9,7 +9,7 @@
  * used only inside functions, so the circular import is TDZ-safe.
  */
 
-import { sidebarAgentStatus } from "./acpModel.js";
+import { agentHue, sidebarAgentStatus } from "./acpModel.js";
 import { acpAgentsLoaded, acpAgentsReadAt, acpEntry, isAcpAgentSession } from "./acpRegistry.js";
 import { readAcpAgents, startAcpStatusFeed } from "./acpStatusFeed.js";
 import { openObserversModalFor } from "./admin.js";
@@ -106,6 +106,10 @@ import {
 
 // ── DOM (re-queried locally) ─────────────────────────────────────────────
 const sessionList = document.getElementById("session-list")!;
+const sidebarEl = document.getElementById("sidebar");
+const sidebarRefreshBtn = document.getElementById(
+	"sidebar-refresh-btn",
+) as HTMLButtonElement | null;
 const showTerminatedToggle = document.getElementById("show-terminated-toggle") as HTMLInputElement;
 const terminalToolbar = document.getElementById("terminal-toolbar")!;
 const terminalSessionName = document.getElementById("terminal-session-name")!;
@@ -470,10 +474,16 @@ export function renderSessionList() {
 		active instanceof HTMLElement && sessionList.contains(active)
 			? active.closest<HTMLElement>(".sgroup-head")?.parentElement?.dataset.group
 			: undefined;
+	const focusedSectionMenu =
+		active instanceof HTMLElement &&
+		sessionList.contains(active) &&
+		active.matches(".ssection-menu");
 	sessionList.replaceChildren();
-	// The compact phone rows (sidebar-sessions.css) belong to the grouped
-	// list only: with the project feature off the sidebar is exactly as before.
+	// The tree (UX iter3 §1: projects → agents without a project → sessions)
+	// belongs to the grouped list only: with the project feature off the
+	// sidebar is exactly as before.
 	sessionList.classList.toggle("session-list-grouped", projectChatEnabled());
+	placeSidebarActions(projectChatEnabled());
 	if (projectChatEnabled()) renderGroupedSessions();
 	else for (const s of sessions) sessionList.appendChild(buildSessionItem(s));
 	if (focusedId !== undefined) {
@@ -488,6 +498,8 @@ export function renderSessionList() {
 				`.sgroup[data-group="${CSS.escape(focusedGroup)}"] .sgroup-head [data-role="${CSS.escape(focusedRole)}"]`,
 			)
 			?.focus();
+	} else if (focusedSectionMenu) {
+		sessionList.querySelector<HTMLElement>(".ssection-menu")?.focus();
 	}
 	paintAgentStatus();
 	// Agents' states keep current without any chat open (acpStatusFeed.ts).
@@ -495,6 +507,26 @@ export function renderSessionList() {
 	// Sidebar observables (#394) dedupe against THIS list, so re-render
 	// them whenever it changes.
 	renderSidebarObservables();
+}
+
+/**
+ * The tree puts the one primary action ("+ New session") first, above
+ * "Projects"; the flat list keeps it under its "Sessions" bar, as before.
+ * The node moves (not CSS `order`), so the Tab order is the order on screen.
+ */
+function placeSidebarActions(tree: boolean): void {
+	if (!sidebarEl) return;
+	sidebarEl.classList.toggle("sidebar-tree", tree);
+	const actions = document.getElementById("sidebar-actions");
+	const first = document.getElementById("project-section");
+	const header = document.getElementById("sidebar-header");
+	const newSession = document.getElementById("new-session-btn");
+	newSession?.classList.toggle("btn", tree);
+	newSession?.classList.toggle("primary", tree);
+	newSession?.classList.toggle("sm", tree);
+	if (!actions || !first || !header) return;
+	if (tree && actions.nextElementSibling !== first) first.before(actions);
+	else if (!tree && header.nextElementSibling !== actions) header.after(actions);
 }
 
 /**
@@ -513,8 +545,8 @@ function paintAgentStatus(): void {
 		const select = row.querySelector<HTMLElement>(".session-select");
 		if (!span || !a || !select) continue;
 		const st = sidebarAgentStatus(a, now, startedAt(sid));
-		span.className = `session-agent-status tone-${st.tone}${st.asks ? " asks" : ""}`;
-		span.lastChild!.textContent = st.word;
+		span.className = `session-agent-status chip bare tone-${st.tone}${st.asks ? " asks" : ""}`;
+		span.textContent = st.word;
 		select.dataset.agentLabel = st.label;
 		labelSessionRow(select);
 		if (st.asks) {
@@ -540,7 +572,8 @@ function paintAgentStatus(): void {
 			flag.id = `sgroup-asks-${group.replace(/[^a-zA-Z0-9-]/g, "_")}`;
 			head.querySelector(".sgroup-count")?.before(flag);
 		}
-		flag.textContent = "te espera";
+		// "●N": how many agents of the group wait (the who, in words, below).
+		flag.textContent = `●${who.length}`;
 		const text = `${who.length === 1 ? "Un agente te espera" : `${who.length} agentes te esperan`}: ${who.join(", ")}`;
 		flag.title = text;
 		// Read through aria-describedby: its visible word plus who waits.
@@ -590,9 +623,11 @@ function labelSessionRow(select: HTMLElement): void {
 		.trim();
 	const status = select.dataset.status ?? "";
 	const agent = select.dataset.agentLabel ? `, agente: ${select.dataset.agentLabel}` : "";
+	// An agent's row shows "@name"; its session's name is said here (and in the tooltip).
+	const session = select.dataset.sessionName ? ` ${select.dataset.sessionName}` : "";
 	select.setAttribute(
 		"aria-label",
-		`${words}, session ${status}${status === "failed" ? " — view the bootstrap log" : ""}${agent}`,
+		`${words}, session${session} ${status}${status === "failed" ? " — view the bootstrap log" : ""}${agent}`,
 	);
 	const base = select.dataset.baseTitle ?? "";
 	const tip = [base, select.dataset.agentLabel ? `Agente: ${select.dataset.agentLabel}` : ""]
@@ -633,18 +668,104 @@ function renderGroupedSessions(): void {
 			}),
 		);
 	}
-	if (loose.length > 0) {
+	// Then the agents that take part in no project, then the sessions worked
+	// from their Terminal: two sections, never one mixed "Sin proyecto".
+	const agents = loose.filter((s) => acpEntry(s.sessionId) !== null);
+	const plain = loose.filter((s) => acpEntry(s.sessionId) === null);
+	if (agents.length > 0)
 		sessionList.appendChild(
-			buildGroup({
-				key: "~unassigned",
-				title: "Sin proyecto",
-				project: null,
-				cls: "sgroup-unassigned",
-				tooltip: "Sesiones que no participan en ningún proyecto.",
-				rows: loose.map((s) => buildSessionItem(s)),
+			buildSection({
+				key: "agents",
+				title: "Agentes sin proyecto",
+				rows: agents.map((s) => buildSessionItem(s)),
 			}),
 		);
+	sessionList.appendChild(
+		buildSection({
+			key: "sessions",
+			title: "Sessions",
+			menu: true,
+			rows: plain.map((s) => buildSessionItem(s)),
+			empty: "No sessions shown.",
+		}),
+	);
+}
+
+/**
+ * A section of the tree under its small heading: the agents without a
+ * project, the sessions. Not foldable (the projects are). "Sessions" carries
+ * a ⋯ with what used to sit above the whole list: "Show terminated" and
+ * Refresh (the original controls stay in #sidebar-header, the flat list's).
+ */
+function buildSection(sec: {
+	key: string;
+	title: string;
+	rows: HTMLElement[];
+	menu?: boolean;
+	empty?: string;
+}): HTMLElement {
+	const section = document.createElement("section");
+	section.className = `ssection ssection-${sec.key}`;
+	section.dataset.section = sec.key;
+	const id = `ssection-title-${sec.key}`;
+	section.setAttribute("aria-labelledby", id);
+	const head = document.createElement("div");
+	head.className = "ssection-head";
+	const title = document.createElement("h3");
+	title.id = id;
+	title.textContent = sec.title;
+	head.appendChild(title);
+	if (sec.menu) {
+		const more = document.createElement("button");
+		more.type = "button";
+		more.className = "btn btn-icon sm ssection-menu";
+		more.textContent = "⋯";
+		more.title = "Sessions: show terminated, refresh";
+		more.setAttribute("aria-label", "Sessions options");
+		more.setAttribute("aria-haspopup", "menu");
+		more.addEventListener("click", () => openSessionsMenu(more));
+		head.appendChild(more);
 	}
+	section.appendChild(head);
+	const rows = document.createElement("div");
+	rows.className = "ssection-rows";
+	if (sec.rows.length === 0 && sec.empty) {
+		const empty = document.createElement("p");
+		empty.className = "sgroup-empty";
+		empty.textContent = sec.empty;
+		rows.appendChild(empty);
+	}
+	for (const r of sec.rows) rows.appendChild(r);
+	section.appendChild(rows);
+	return section;
+}
+
+/** The "Sessions" ⋯: the list's own options, through the original controls. */
+function openSessionsMenu(opener: HTMLElement): void {
+	const showing = showTerminatedToggle.checked;
+	openActionMenu({
+		title: "Sessions",
+		opener,
+		items: [
+			{
+				id: "terminated",
+				label: showing ? "Hide terminated" : "Show terminated",
+				hint: "Include terminated sessions so you can restore them",
+			},
+			{
+				id: "refresh",
+				label: "Refresh",
+				hint: "Refresh sessions and live usage",
+				enabled: sidebarRefreshBtn?.disabled !== true,
+			},
+		],
+		onPick: (id) => {
+			if (id === "terminated") {
+				showTerminatedToggle.checked = !showing;
+				showTerminatedToggle.dispatchEvent(new Event("change"));
+			} else sidebarRefreshBtn?.click();
+		},
+	});
 }
 
 // ── Sidebar tree: collapsible groups ────────────────────────────────────────
@@ -831,24 +952,45 @@ function buildSessionItem(s: SessionInfo): HTMLElement {
 	select.dataset.role = "select";
 	select.setAttribute("aria-current", String(s.sessionId === activeSessionId));
 
-	const dot = document.createElement("span");
-	dot.className = `session-dot ${s.status}`;
-	dot.setAttribute("aria-hidden", "true");
-	select.appendChild(dot);
+	// The tree (project feature on) names an ACP agent's row by the agent:
+	// its face and "@name" (the same identity as in its chats), ONE indicator
+	// — the agent's state — and the session's name in the tooltip and the
+	// accessible name. Any other row: the session's status dot and its name.
+	const tree = projectChatEnabled();
+	const acp = acpEntry(s.sessionId);
+	const agentRow = tree && acp !== null;
+	if (agentRow) {
+		const face = document.createElement("span");
+		face.className = "acp-avatar session-avatar";
+		// The initial is drawn by CSS (attr()): as text it would be a word of
+		// the row's visible label that the accessible name does not start
+		// with (WCAG 2.5.3, axe label-content-name-mismatch).
+		face.dataset.initial = acp.name.slice(0, 1).toUpperCase();
+		face.style.setProperty("--acp-hue", String(agentHue(acp.name)));
+		face.setAttribute("aria-hidden", "true");
+		select.appendChild(face);
+		item.classList.add("session-agent-item");
+		select.dataset.sessionName = s.name;
+		select.title = s.name;
+	} else {
+		const dot = document.createElement("span");
+		dot.className = `session-dot ${s.status}`;
+		dot.setAttribute("aria-hidden", "true");
+		select.appendChild(dot);
+	}
 
 	const nameCol = document.createElement("span");
 	nameCol.className = "session-name-col";
 	const name = document.createElement("span");
-	name.className = "session-name";
-	name.textContent = s.name;
+	name.className = agentRow ? "session-name session-agent-tag" : "session-name";
+	name.textContent = agentRow ? `@${acp.name}` : s.name;
 	nameCol.appendChild(name);
 	const meta = document.createElement("span");
 	meta.className = "session-meta";
-	// The tree (project feature on) names a row by its session and its agent;
-	// CPU / memory are infrastructure detail there — in the row's tooltip, and
-	// on the row only when memory runs hot (UX audit N2: they took two of
-	// each row's three lines and pushed the agent out of the phone's row).
-	const tree = projectChatEnabled();
+	// CPU / memory are infrastructure detail in the tree — in the row's
+	// tooltip, and on the row only when memory runs hot (UX audit N2: they
+	// took two of each row's three lines and pushed the agent out of the
+	// phone's row).
 	if (tree && s.status === "running" && s.usage) {
 		const usage = `CPU ${formatCpuCores(s.usage.cpuPercent / 100)} cores (${formatCpuPercent(s.usage.cpuPercent)}) · Mem ${formatBytes(s.usage.memBytes)} (${s.usage.memPercent.toFixed(0)}%)`;
 		select.title = `${s.name}\n${usage}`;
@@ -877,8 +1019,11 @@ function buildSessionItem(s: SessionInfo): HTMLElement {
 	} else if (s.status !== "running") {
 		// The dot's colour alone told stopped / terminated / failed apart.
 		// The row's aria-label already says it: this line is for the eye.
+		// An agent's row has no dot: the word is its one indicator, a chip.
 		const state = document.createElement("span");
-		state.className = `session-usage session-state ${s.status}`;
+		state.className = agentRow
+			? `session-state ${s.status} chip bare tone-${s.status === "failed" ? "err" : "off"}`
+			: `session-usage session-state ${s.status}`;
 		state.setAttribute("aria-hidden", "true");
 		state.textContent =
 			s.status === "stopped"
@@ -890,11 +1035,17 @@ function buildSessionItem(s: SessionInfo): HTMLElement {
 						: s.status;
 		meta.appendChild(state);
 	}
-	// An ACP agent's session: its name, as the agent is addressed, and — while
-	// its container runs — the agent's state (paintAgentStatus fills it). A
-	// stopped one says "Stopped" above: "runner sin señal" would be noise.
-	const acp = acpEntry(s.sessionId);
-	if (acp) {
+	// The tree's agent row: while its container runs, the agent's state as a
+	// chip (paintAgentStatus fills it); a stopped one says "Stopped" above —
+	// "runner sin señal" would be noise.
+	if (agentRow && s.status === "running") {
+		const st = document.createElement("span");
+		st.className = "session-agent-status chip bare";
+		meta.appendChild(st);
+	}
+	// The flat list (no project feature) with an ACP agent's session: its name,
+	// as the agent is addressed, and — while its container runs — its state.
+	if (acp && !agentRow) {
 		const line = document.createElement("span");
 		line.className = "session-agent-line";
 		const tag = document.createElement("span");
