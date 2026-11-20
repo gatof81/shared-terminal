@@ -171,6 +171,11 @@
   font-size: 0.78rem;
   min-height: 1.1em;
 }
+/* Basics' name fields (newSession.ts validateBasics): no reserved line until
+   there is something to say. */
+.session-field > .modal-field-error:empty {
+  display: none;
+}
 .modal-hint-inline {
   color: var(--c-muted);
   font-size: 0.75rem;

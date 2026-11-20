@@ -20,11 +20,11 @@ interface Violation {
 	nodes: string[];
 }
 
-async function violations(page: Page): Promise<Violation[]> {
+async function violations(page: Page, include?: string[]): Promise<Violation[]> {
 	await page.evaluate(AXE);
-	return page.evaluate(async () => {
+	return page.evaluate(async (inc) => {
 		// biome-ignore lint/suspicious/noExplicitAny: axe is injected as a page global.
-		const res = await (window as any).axe.run(document, {
+		const res = await (window as any).axe.run(inc ? { include: inc.map((x) => [x]) } : document, {
 			runOnly: ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"],
 		});
 		// biome-ignore lint/suspicious/noExplicitAny: axe's result shape.
@@ -34,11 +34,11 @@ async function violations(page: Page): Promise<Violation[]> {
 			// biome-ignore lint/suspicious/noExplicitAny: axe's result shape.
 			nodes: v.nodes.map((n: any) => n.target.join(" ")),
 		}));
-	});
+	}, include);
 }
 
-async function expectClean(page: Page, view: string): Promise<void> {
-	const bad = (await violations(page)).filter(
+async function expectClean(page: Page, view: string, include?: string[]): Promise<void> {
+	const bad = (await violations(page, include)).filter(
 		(v) => v.impact === "critical" || v.impact === "serious",
 	);
 	expect(bad, `axe on ${view}`).toEqual([]);
@@ -68,5 +68,17 @@ test.describe("accessibility — axe on the main views", () => {
 		await app.openSidebar();
 		await expect(app.sessionRow("hz-architect")).toBeVisible();
 		await expectClean(page, "sidebar");
+	});
+
+	test("the new-agent dialog with its field errors", async ({ app, backend, page }) => {
+		backend.enableAcp();
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		await page.getByRole("button", { name: "+ Nueva sesión con agente" }).click();
+		await page.fill("#new-session-acp-agent", "Dev_1");
+		await page.locator("#new-session-input").fill("");
+		await page.click("#new-session-submit");
+		await expect(page.locator("#new-session-acp-agent-error")).not.toHaveText("");
+		// The dialog only (the page behind has its own sweep).
+		await expectClean(page, "new agent dialog", ["#new-session-modal .modal-card"]);
 	});
 });
