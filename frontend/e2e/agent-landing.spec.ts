@@ -132,3 +132,58 @@ test.describe("an agent's session lands on its Chat", () => {
 		expect(SESSION_IDS.running).not.toBe(sid);
 	});
 });
+
+/**
+ * The agents list is read when the session list first loads, so a selection
+ * normally finds it there and waits for nothing; a list that is slow or never
+ * answers costs one bounded wait per page load, never one per selection.
+ * The witness (shell v1): while a landing waits, a stopped session shows the
+ * Terminal view's "stopped" panel; without a wait it goes straight to Files.
+ */
+test.describe("the agents list never makes every selection wait", () => {
+	test.use({ landing: "none" });
+	test.skip(({ shell }) => shell !== "v1", "v1: a traditional session's own flow is the witness");
+	test.beforeEach(async ({ backend, page }) => {
+		backend.enableAcp();
+		await page.addInitScript(() => {
+			const w = window as unknown as { __stoppedPanel: boolean };
+			w.__stoppedPanel = false;
+			// Sampled per frame: only what was actually painted counts.
+			const tick = () => {
+				const p = document.getElementById("terminal-state");
+				const files = document.getElementById("files-view");
+				if (p && !p.hidden && files?.hidden && p.textContent?.includes("stopped"))
+					w.__stoppedPanel = true;
+				requestAnimationFrame(tick);
+			};
+			requestAnimationFrame(tick);
+		});
+	});
+	const stoppedPanelSeen = (page: import("@playwright/test").Page) =>
+		page.evaluate(() => (window as unknown as { __stoppedPanel: boolean }).__stoppedPanel);
+
+	test("a list that answers: the first selection does not wait", async ({ app, backend, page }) => {
+		backend.acpAgentsDelayMs = 50;
+		await app.login("alice");
+		await app.openSidebar();
+		await expect(app.sessionRow("docs")).toBeVisible();
+		await page.waitForTimeout(300); // the read at load has answered
+		await app.openSession("docs");
+		await app.expectView("files");
+		expect(await stoppedPanelSeen(page), "straight to Files").toBe(false);
+	});
+
+	test("a list that never answers: one wait, then the next selection lands at once", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.acpAgentsDelayMs = 600_000;
+		await app.login("alice");
+		await app.openSession("my-project");
+		await app.expectTerminalReady();
+		await app.openSession("docs");
+		await app.expectView("files");
+		expect(await stoppedPanelSeen(page), "the second selection did not wait").toBe(false);
+	});
+});

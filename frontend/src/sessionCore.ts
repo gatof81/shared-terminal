@@ -9,7 +9,7 @@
  * used only inside functions, so the circular import is TDZ-safe.
  */
 
-import { acpEntry, isAcpAgentSession, setAcpAgents } from "./acpRegistry.js";
+import { acpAgentsLoaded, acpEntry, isAcpAgentSession, setAcpAgents } from "./acpRegistry.js";
 import { openObserversModalFor } from "./admin.js";
 import {
 	acpAgentsEnabled,
@@ -370,6 +370,9 @@ export async function refreshSessions() {
 		if (gen !== listGen || !isLoggedIn()) return;
 		const firstLoad = !listLoaded;
 		listLoaded = true;
+		// Who is an agent decides where a selected session lands: read it now,
+		// so it is known before the first click (no wait in the normal case).
+		if (firstLoad && acpAgentsEnabled() && !acpAgentsLoaded()) void readAgents();
 		setServerReachable(true);
 		setSessions(list);
 		console.debug(
@@ -887,17 +890,41 @@ function agentKnown(sessionId: string): boolean | null {
 	return acpAgentsEnabled() ? isAcpAgentSession(sessionId) : false;
 }
 
-// The one read of the agents list a landing may wait on (acpRegistry is
-// otherwise filled by the ACP chats): shared by overlapping selections.
+// How long a selection may wait for the agents list. It is read when the
+// session list first loads (refreshSessions), so normally it is in before
+// the first click and nothing waits; this only covers a click in the first
+// instants after load. A read is one request with three D1 queries in
+// parallel — about one D1 round trip — so 500 ms covers it with margin,
+// while a slow or failing list costs at most half a second, once.
+const LANDING_AGENTS_WAIT_MS = 500;
+// The one read of the agents list (acpRegistry is otherwise filled by the
+// ACP chats): shared by overlapping callers. A failure is retried in the
+// background (5 s, doubling, up to 60 s) until one answers.
 let agentsRead: Promise<void> | null = null;
+let agentsRetry: ReturnType<typeof setTimeout> | null = null;
+let agentsRetryMs = 5_000;
 function readAgents(): Promise<void> {
 	agentsRead ??= acpListAgents()
-		.then(setAcpAgents, () => {})
+		.then(setAcpAgents, () => retryAgentsLater())
 		.finally(() => {
 			agentsRead = null;
 		});
 	return agentsRead;
 }
+function retryAgentsLater(): void {
+	if (agentsRetry) return;
+	agentsRetry = setTimeout(() => {
+		agentsRetry = null;
+		if (isLoggedIn() && acpAgentsEnabled() && !acpAgentsLoaded()) void readAgents();
+	}, agentsRetryMs);
+	agentsRetryMs = Math.min(60_000, agentsRetryMs * 2);
+}
+/**
+ * A selection already waited for the list in this page load and it was not
+ * there (late or failed): later selections never wait — they take "not an
+ * agent" at once while the read goes on, and use it once it lands.
+ */
+let agentsWaitSpent = false;
 
 /** The landing from what is known now; null = shell v1's own flow (a traditional session). */
 function landingNow(sessionId: string, running: boolean): View | null {
@@ -917,10 +944,17 @@ function landingNow(sessionId: string, running: boolean): View | null {
  */
 function decideLanding(sessionId: string, running: boolean): View | null | Promise<View | null> {
 	const v2 = currentShell() === "v2";
-	const agent = agentKnown(sessionId);
+	let agent = agentKnown(sessionId);
+	// The one wait of this page load was spent: decided without the list.
+	if (agent === null && agentsWaitSpent) agent = false;
 	if (!landsByPolicy(v2 ? "v2" : "v1", agent)) return null;
 	const reads: Promise<unknown>[] = [];
-	if (agent === null) reads.push(readAgents());
+	if (agent === null)
+		reads.push(
+			Promise.race([readAgents(), sleep(LANDING_AGENTS_WAIT_MS)]).then(() => {
+				if (!acpAgentsLoaded()) agentsWaitSpent = true;
+			}),
+		);
 	// The history answer matters only for a v2 session that is not known to
 	// be an agent's and has nothing remembered.
 	if (
@@ -930,15 +964,21 @@ function decideLanding(sessionId: string, running: boolean): View | null | Promi
 		readHistoryHint(sessionId) === null
 	)
 		reads.push(
-			fetchConversations(sessionId, { capture: false })
-				.then((d) => writeHistoryHint(sessionId, d.conversations.length > 0))
-				.catch(() => null),
+			Promise.race([
+				fetchConversations(sessionId, { capture: false })
+					.then((d) => writeHistoryHint(sessionId, d.conversations.length > 0))
+					.catch(() => null),
+				sleep(LANDING_HISTORY_WAIT_MS),
+			]),
 		);
 	if (reads.length === 0) return landingNow(sessionId, running);
-	const wait = new Promise<null>((resolve) =>
-		setTimeout(() => resolve(null), LANDING_HISTORY_WAIT_MS),
-	);
-	return Promise.race([Promise.all(reads), wait]).then(() => landingNow(sessionId, running));
+	// Each read carries its own bound (the agents' above, the history's here);
+	// the landing is decided once both are in or timed out.
+	return Promise.all(reads).then(() => landingNow(sessionId, running));
+}
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export async function openSession(
