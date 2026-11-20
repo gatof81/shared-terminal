@@ -23,6 +23,7 @@ import {
 	upsert,
 	who,
 } from "./acpModel.js";
+import { setAcpAgents } from "./acpRegistry.js";
 import {
 	type AcpActivity,
 	type AcpAgentInfo,
@@ -457,6 +458,8 @@ export class AcpThread {
 			const src = this.source;
 			void acpListAgents()
 				.then((all) => {
+					// Every read of the list keeps the one registry current (sidebar).
+					setAcpAgents(all);
 					if (gen !== this.gen || !src) return;
 					const mine =
 						src.kind === "agent"

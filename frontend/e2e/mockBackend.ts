@@ -159,6 +159,7 @@ export interface MockAcpAgent {
 	pending: number;
 	authRequired?: boolean;
 	loginMethods?: Array<{ id: string; name: string; description: string }>;
+	waitingInput?: boolean;
 }
 
 export interface MockAcpMessage {

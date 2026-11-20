@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import type { Page } from "@playwright/test";
 import { expect, test } from "./fixtures.js";
-import { PROJECT_IDS, SESSION_IDS } from "./mockBackend.js";
+import { PROJECT_IDS, PROJECT_SESSION_IDS, SESSION_IDS } from "./mockBackend.js";
 
 /**
  * Accessibility sweep (UX audit A1–A4): axe-core over the main views, in
@@ -20,11 +20,11 @@ interface Violation {
 	nodes: string[];
 }
 
-async function violations(page: Page): Promise<Violation[]> {
+async function violations(page: Page, include?: string[]): Promise<Violation[]> {
 	await page.evaluate(AXE);
-	return page.evaluate(async () => {
+	return page.evaluate(async (inc) => {
 		// biome-ignore lint/suspicious/noExplicitAny: axe is injected as a page global.
-		const res = await (window as any).axe.run(document, {
+		const res = await (window as any).axe.run(inc ? { include: inc.map((x) => [x]) } : document, {
 			runOnly: ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"],
 		});
 		// biome-ignore lint/suspicious/noExplicitAny: axe's result shape.
@@ -34,11 +34,11 @@ async function violations(page: Page): Promise<Violation[]> {
 			// biome-ignore lint/suspicious/noExplicitAny: axe's result shape.
 			nodes: v.nodes.map((n: any) => n.target.join(" ")),
 		}));
-	});
+	}, include);
 }
 
-async function expectClean(page: Page, view: string): Promise<void> {
-	const bad = (await violations(page)).filter(
+async function expectClean(page: Page, view: string, include?: string[]): Promise<void> {
+	const bad = (await violations(page, include)).filter(
 		(v) => v.impact === "critical" || v.impact === "serious",
 	);
 	expect(bad, `axe on ${view}`).toEqual([]);
@@ -68,5 +68,30 @@ test.describe("accessibility — axe on the main views", () => {
 		await app.openSidebar();
 		await expect(app.sessionRow("hz-architect")).toBeVisible();
 		await expectClean(page, "sidebar");
+	});
+
+	test("sidebar with agents: free, working, waiting for you, login", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.enableAcp();
+		const set = (name: string, p: Record<string, unknown>) =>
+			Object.assign(backend.acpAgents.find((a) => a.name === name)!, p);
+		set("arq", { runnerSeenAt: "2026-10-31T10:29:58Z" });
+		set("dev", { runnerSeenAt: "2026-10-31T10:29:58Z", running: 12 });
+		set("solo", { runnerSeenAt: "2026-10-31T10:29:58Z", waitingInput: true });
+		backend.acpAgents.push({
+			...backend.acpAgents[0]!,
+			name: "dis",
+			sessionId: PROJECT_SESSION_IDS.designer,
+			authRequired: true,
+		});
+		await app.login("alice");
+		await app.openSidebar();
+		await expect(app.sessionRow("scratch").locator(".session-agent-status")).toHaveText(
+			"te espera",
+		);
+		await expectClean(page, "sidebar with agents", ["#session-list"]);
 	});
 });

@@ -277,12 +277,69 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* An ACP agent's session: "@name" and the agent's state (sessionCore.ts
+   paintAgentStatus) on one line, at every size. The state is a coloured mark
+   AND a word — never the colour alone; the full label is in the tooltip and
+   the row's accessible name. The two states that ask something of the
+   person (a question, a login) stand out. */
+.session-agent-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+}
 .session-agent-tag {
-  display: none;
-  font-size: 0.66rem;
+  font-size: 0.7rem;
   color: var(--c-accent);
   flex-shrink: 0;
-  max-width: 60%;
+  max-width: 9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.session-agent-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex-shrink: 0;
+  font-size: 0.7rem;
+  color: var(--c-muted);
+}
+.session-agent-mark {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.session-agent-status.tone-ok {
+  color: var(--c-ok);
+}
+.session-agent-status.tone-busy {
+  color: var(--c-accent);
+}
+.session-agent-status.tone-off .session-agent-mark {
+  background: transparent;
+  border: 1px solid currentColor;
+}
+.session-agent-status.asks {
+  color: var(--c-warn);
+  font-weight: 700;
+}
+.session-agent-status.asks .session-agent-mark {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+/* On a group's heading: an agent of the group waits for the person (seen
+   with the group folded too). */
+.sgroup-asks {
+  flex-shrink: 0;
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--c-warn);
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  padding: 0 0.4rem;
+  white-space: nowrap;
 }
 
 /* ── Phones: one row per session (owner review 2026-11-13: the sidebar
@@ -308,9 +365,6 @@
     display: none;
   }
   .session-list-grouped .session-usage-compact {
-    display: inline;
-  }
-  .session-list-grouped .session-agent-tag {
     display: inline;
   }
 }

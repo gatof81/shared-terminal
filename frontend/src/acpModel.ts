@@ -177,7 +177,10 @@ export interface AgentStatus {
 /** A runner polls for work every ~2 s while idle and reports activity while busy. */
 export const RUNNER_FRESH_MS = 20_000;
 
-export function agentStatus(a: AcpAgentInfo, now: number, authRequired = false): AgentStatus {
+/** The fields agentStatus reads (a full /api/acp/agents row, or the registry's entry). */
+export type AgentStatusInput = Pick<AcpAgentInfo, "runnerSeenAt"> & Partial<AcpAgentInfo>;
+
+export function agentStatus(a: AgentStatusInput, now: number, authRequired = false): AgentStatus {
 	if (authRequired || a.authRequired) return { label: "esperando login", tone: "warn" };
 	if (a.waitingInput) return { label: "esperando tu respuesta", tone: "warn" };
 	const seen = a.runnerSeenAt ? now - Date.parse(a.runnerSeenAt) : Number.POSITIVE_INFINITY;
@@ -189,6 +192,32 @@ export function agentStatus(a: AcpAgentInfo, now: number, authRequired = false):
 			tone: "off",
 		};
 	return { label: a.pending ? `${a.pending} en espera` : "libre", tone: "ok" };
+}
+
+/**
+ * The sidebar's short form of agentStatus: one word next to a coloured mark,
+ * the full label for the tooltip and the accessible name, and whether it
+ * asks something of the person (a question, a login) — those two stand out,
+ * up to the project's heading.
+ */
+export interface SidebarAgentStatus extends AgentStatus {
+	word: string;
+	asks: boolean;
+}
+
+export function sidebarAgentStatus(a: AgentStatusInput, now: number): SidebarAgentStatus {
+	const st = agentStatus(a, now);
+	const word =
+		st.label === "esperando login"
+			? "login"
+			: st.label === "esperando tu respuesta"
+				? "te espera"
+				: st.tone === "busy"
+					? "trabajando"
+					: st.tone === "off"
+						? "sin señal"
+						: "libre";
+	return { ...st, word, asks: st.tone === "warn" };
 }
 
 /** Login state of an agent from its activity: the last `auth` or answered turn wins. */

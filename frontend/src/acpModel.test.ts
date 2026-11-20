@@ -10,6 +10,7 @@ import {
 	parseMentions,
 	questionForm,
 	recipientsOf,
+	sidebarAgentStatus,
 	upsert,
 } from "./acpModel.js";
 import type { AcpActivity, AcpMessage } from "./api.js";
@@ -129,6 +130,46 @@ describe("activity", () => {
 		expect(agentStatus({ ...base, runnerSeenAt: null, authRequired: true }, now).label).toBe(
 			"esperando login",
 		);
+	});
+	it("the sidebar's short form: the same states, one word each; the two that ask stand out", () => {
+		const now = Date.parse("2026-11-18T10:00:00Z");
+		const fresh = "2026-11-18T09:59:58Z";
+		const short = (a: Parameters<typeof sidebarAgentStatus>[0]) => {
+			const st = sidebarAgentStatus(a, now);
+			return [st.word, st.tone, st.asks, st.label];
+		};
+		expect(short({ runnerSeenAt: fresh })).toEqual(["libre", "ok", false, "libre"]);
+		expect(short({ runnerSeenAt: fresh, running: 7 })).toEqual([
+			"trabajando",
+			"busy",
+			false,
+			"trabajando en #7",
+		]);
+		expect(short({ runnerSeenAt: fresh, running: 7, waitingInput: true })).toEqual([
+			"te espera",
+			"warn",
+			true,
+			"esperando tu respuesta",
+		]);
+		expect(short({ runnerSeenAt: null, authRequired: true })).toEqual([
+			"login",
+			"warn",
+			true,
+			"esperando login",
+		]);
+		expect(short({ runnerSeenAt: "2026-11-18T09:58:00Z" })).toEqual([
+			"sin señal",
+			"off",
+			false,
+			"runner sin señal",
+		]);
+		// Queued but idle: still the "libre" word, the queue in the full label.
+		expect(short({ runnerSeenAt: fresh, pending: 2 })).toEqual([
+			"libre",
+			"ok",
+			false,
+			"2 en espera",
+		]);
 	});
 });
 
