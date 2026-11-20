@@ -78,7 +78,13 @@ export class AcpThread {
 	private readonly sendBtn = el("button", "acp-chat-send");
 	/** Project Chat with more than one agent: "+" opens the recipients menu. */
 	private readonly pickBtn = el("button", "acp-pick-btn", "+");
+	/** The menu's box (positioned over the thread): a note, then the menu itself. */
 	private readonly pickMenu = el("div", "acp-pick-menu");
+	private readonly pickList = el("div", "acp-pick-list");
+	/** Why nobody is checked: an unknown leading mention (recipientsOf's error). */
+	private readonly pickNote = el("p", "acp-pick-note");
+	/** Read by a screen reader: "Enviando…", then "Enviado a @a, @b" (not the queue line). */
+	private readonly sendStatus = el("div", "visually-hidden");
 	private readonly hint = el("div", "acp-chat-hint");
 	/**
 	 * "↓ N novedades": rows that arrived, or got their answer, below a reader
@@ -220,7 +226,9 @@ export class AcpThread {
 		// must be seen where the person is looking, however long the thread.
 		this.errorEl.setAttribute("role", "alert");
 		this.errorEl.hidden = true;
-		this.composer.append(this.errorEl, actions, row);
+		this.sendStatus.setAttribute("role", "status");
+		this.sendStatus.setAttribute("aria-live", "polite");
+		this.composer.append(this.errorEl, actions, row, this.sendStatus);
 		// A tap on Enviar, a mention or "↓ N nuevos" must not take the focus from the field:
 		// on a phone that blur closes the keyboard, the layout grows back (the
 		// bottom bar returns) and the button moves away under the finger before
@@ -1207,13 +1215,26 @@ export class AcpThread {
 	// in the field.
 
 	private pickOpen = false;
+	/** "+" activated from the keyboard (Enter / Space on it): the focus goes into the menu. */
+	private pickByKey = false;
 
 	private buildPicker(): void {
 		const id = `acp-pick-${++pickerSeq}`;
-		this.pickMenu.id = id;
-		this.pickMenu.setAttribute("role", "menu");
-		this.pickMenu.setAttribute("aria-label", "Destinatarios");
+		this.pickList.id = id;
+		this.pickList.setAttribute("role", "menu");
+		this.pickList.setAttribute("aria-label", "Destinatarios");
+		this.pickNote.id = `${id}-note`;
+		this.pickNote.hidden = true;
+		this.pickMenu.append(this.pickNote, this.pickList);
 		this.pickMenu.hidden = true;
+		// Not from the click's `detail`: a real touch tap arrives with detail 0
+		// too, and moving the focus off the field closes a phone's keyboard.
+		this.pickBtn.addEventListener("keydown", (e) => {
+			if (e.key === "Enter" || e.key === " ") this.pickByKey = true;
+		});
+		this.pickBtn.addEventListener("pointerdown", () => {
+			this.pickByKey = false;
+		});
 		this.pickBtn.type = "button";
 		this.pickBtn.hidden = true;
 		this.pickBtn.setAttribute("aria-label", "Elegir destinatarios");
@@ -1221,7 +1242,9 @@ export class AcpThread {
 		this.pickBtn.setAttribute("aria-haspopup", "menu");
 		this.pickBtn.setAttribute("aria-expanded", "false");
 		this.pickBtn.setAttribute("aria-controls", id);
-		this.pickBtn.addEventListener("click", (e) => {
+		this.pickBtn.addEventListener("click", () => {
+			const byKey = this.pickByKey;
+			this.pickByKey = false;
 			if (this.pickOpen) {
 				this.closePicker(false);
 				return;
@@ -1230,9 +1253,9 @@ export class AcpThread {
 			this.pickMenu.hidden = false;
 			this.pickBtn.setAttribute("aria-expanded", "true");
 			this.renderPicker();
-			// From the keyboard (no pointer: detail 0) the focus goes into the
-			// menu; a tap leaves it where it was (the field, with its keyboard).
-			if (e.detail === 0) this.pickRows()[0]?.focus();
+			// From the keyboard the focus goes into the menu; a tap or a click
+			// leaves it where it was (the field, with its keyboard).
+			if (byKey) this.pickRows()[0]?.focus();
 		});
 		this.pickMenu.addEventListener("keydown", (e) => {
 			const rows = this.pickRows();
@@ -1276,7 +1299,7 @@ export class AcpThread {
 	}
 
 	private pickRows(): HTMLElement[] {
-		return [...this.pickMenu.querySelectorAll<HTMLElement>("[role=menuitemcheckbox]")];
+		return [...this.pickList.querySelectorAll<HTMLElement>("[role=menuitemcheckbox]")];
 	}
 
 	private closePicker(focusField: boolean): void {
@@ -1315,7 +1338,15 @@ export class AcpThread {
 			b.addEventListener("click", () => this.toggleRecipient(n));
 			return b;
 		});
-		this.pickMenu.replaceChildren(...rows);
+		this.pickList.replaceChildren(...rows);
+		// A leading mention that is no agent: nobody is checked and nothing
+		// would be sent — said here, not only when sending.
+		const r = recipientsOf(text, names);
+		const unknownLead = r.error !== null && /^\s*@[A-Za-z0-9_-]/.test(text);
+		this.pickNote.hidden = !unknownLead;
+		this.pickNote.textContent = unknownLead ? (r.error ?? "") : "";
+		if (unknownLead) this.pickList.setAttribute("aria-describedby", this.pickNote.id);
+		else this.pickList.removeAttribute("aria-describedby");
 		if (focused) rows.find((r) => r.dataset.agent === focused)?.focus();
 	}
 
@@ -1438,6 +1469,7 @@ export class AcpThread {
 		this.toBottom = true;
 		this.sending++;
 		this.renderHint();
+		this.sendStatus.textContent = this.sending > 1 ? `Enviando (${this.sending})…` : "Enviando…";
 		const failed: string[] = [];
 		try {
 			const tooBig = new TextEncoder().encode(text).length > this.maxBytes;
@@ -1466,15 +1498,18 @@ export class AcpThread {
 			}
 			// The person may have moved to another chat meanwhile: nothing of this
 			// send is shown there; it is kept for THIS chat (giveBack).
-			if (failed.length)
+			if (failed.length) {
+				// The error (role=alert, next to the field) says it.
+				this.sendStatus.textContent = "";
 				giveBack(
 					`No se envió a ${failed.join("; ")}. Enviar el mismo texto de nuevo no duplica a quienes ya lo recibieron.`,
 				);
-			else {
+			} else {
 				// Sent: its failure record (if this was its retry, or it was taken
 				// back into the field) is done; an unsent text not yet taken back stays offered.
 				const u = this.unsent.get(key);
 				if (u && (u.clientId === clientId || u.restored)) this.unsent.delete(key);
+				this.sendStatus.textContent = `Enviado a ${to.to.map((n) => `@${n}`).join(", ")}`;
 			}
 		} finally {
 			this.sending--;
