@@ -20,6 +20,7 @@ import {
 	authFromActivity,
 	groupThread,
 	mapThroughEdits,
+	messagePlace,
 	questionForm,
 	recipientRow,
 	recipientsOf,
@@ -390,6 +391,69 @@ export class AcpThread {
 		this.renderComposer();
 	}
 
+	/** Where message `id` stands in this chat: shown, on an earlier page, or not here. */
+	placeOf(id: number): "shown" | "earlier" | "elsewhere" {
+		return messagePlace(
+			id,
+			this.messages.map((m) => m.id),
+			this.hasEarlier,
+		);
+	}
+
+	/**
+	 * Puts message `id` in view near the thread's top, flashes its row and
+	 * gives it the focus. On an earlier page not loaded yet, loads back with
+	 * "Cargar anteriores" — at most 3 pages per call, so one tap never loads
+	 * an unbounded history. "shown": in view; "earlier": still further back
+	 * after those pages (another call goes on); "missing": not in this chat,
+	 * or the load stopped (the caller says so). The reader is then away from the end like any reader who
+	 * scrolled there: "Ir al final" shows, and news does not move them.
+	 */
+	async revealMessage(id: number): Promise<"shown" | "earlier" | "missing"> {
+		const gen = this.gen;
+		for (let pages = 0; ; pages++) {
+			if (gen !== this.gen) return "missing";
+			this.render();
+			const row = this.threadEl.querySelector<HTMLElement>(`[data-ids~="${id}"]`);
+			if (row) {
+				this.goToRow(row);
+				return "shown";
+			}
+			if (this.placeOf(id) !== "earlier") return "missing";
+			// Known to be further back: said as such, never as "not found".
+			if (pages >= 3) return "earlier";
+			await this.loadEarlier();
+		}
+	}
+
+	private goToRow(row: HTMLElement): void {
+		const t = this.threadEl;
+		const anchor = row.dataset.anchor;
+		if (!anchor) return;
+		// "esperando tu respuesta": the destination is the open question's card.
+		const card = row.querySelector<HTMLElement>(".acp-question-open");
+		const target = card ?? row;
+		// Its top at a quarter of the thread's height (context above it); the
+		// last rows stay where the end lets them.
+		const lead = target.getBoundingClientRect().top - row.getBoundingClientRect().top;
+		this.putRow({ anchor, offset: Math.round(t.clientHeight * 0.25) - lead });
+		this.box = t.clientHeight;
+		this.atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < END_SLACK;
+		this.noteAnchor();
+		this.renderPill();
+		const ids = row.dataset.ids ?? "";
+		this.newAnnounce.textContent = card ? "Pregunta" : `Mensaje #${ids.split(" ")[0]}`;
+		if (card)
+			card
+				.querySelector<HTMLElement>("input, textarea, select, button")
+				?.focus({ preventScroll: true });
+		else {
+			row.tabIndex = -1;
+			row.focus({ preventScroll: true });
+		}
+		flash(target, card !== null);
+	}
+
 	/** Read the current chat again (a "Reintentar"). */
 	retry(): void {
 		void this.reload();
@@ -753,8 +817,12 @@ export class AcpThread {
 				this.items.set(key, cached);
 			}
 			used.add(key);
-			// The reading anchor's handle (noteAnchor / restorePlace).
+			// The reading anchor's handle (noteAnchor / restorePlace), and the
+			// messages the row shows (revealMessage finds a message's row by them).
 			cached.el.dataset.anchor = key;
+			cached.el.dataset.ids = (item.kind === "post" ? item.messages : [item.message])
+				.map((m) => m.id)
+				.join(" ");
 			nodes.push(cached.el);
 		}
 		for (const key of [...this.items.keys()]) if (!used.has(key)) this.items.delete(key);
@@ -1653,6 +1721,28 @@ const SEND_REFUSED = new Map([
 	["unknown-recipient", "ese agente ya no existe"],
 	["project-not-found", "el proyecto ya no existe"],
 ]);
+
+/**
+ * A brief highlight on what was gone to: a 2-px ring and a tint, held
+ * 1200 ms then faded in 600 ms (acp-chat.css); with reduced motion, no
+ * transition: held 1500 ms and removed at once. Never moves the layout.
+ */
+function flash(target: HTMLElement, question: boolean): void {
+	const still = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
+	target.classList.remove("acp-msg-flash", "acp-msg-flash-out", "acp-msg-flash-warn");
+	target.classList.add("acp-msg-flash");
+	if (question) target.classList.add("acp-msg-flash-warn");
+	const clear = () =>
+		target.classList.remove("acp-msg-flash", "acp-msg-flash-out", "acp-msg-flash-warn");
+	if (still) {
+		setTimeout(clear, 1500);
+		return;
+	}
+	setTimeout(() => {
+		target.classList.add("acp-msg-flash-out");
+		setTimeout(clear, 600);
+	}, 1200);
+}
 
 /** States in which a message is over: reaching one is news for the pill. */
 const FINAL = new Set(["done", "failed", "uncertain"]);

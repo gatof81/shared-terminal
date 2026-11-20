@@ -7,6 +7,7 @@ import {
 	authFromActivity,
 	groupThread,
 	mapThroughEdits,
+	messagePlace,
 	modelLabel,
 	modelState,
 	parseMentions,
@@ -387,5 +388,26 @@ describe("recipients from the menu: the leading mentions of the text", () => {
 		// Empty field: the caret goes after the inserted mention.
 		const e0 = setRecipient("", names, "arq", true);
 		expect(mapThroughEdits(0, e0)).toBe("@arq ".length);
+	});
+});
+
+describe("messagePlace: where an agent's running message stands in a chat", () => {
+	const shown = [40, 41, 45, 50];
+	it("in the feed: shown", () => {
+		expect(messagePlace(45, shown, true)).toBe("shown");
+		expect(messagePlace(45, shown, false)).toBe("shown");
+	});
+	it("older than the oldest shown, with earlier pages left: on an earlier page", () => {
+		expect(messagePlace(12, shown, true)).toBe("earlier");
+	});
+	it("older, but no earlier page: not in this chat", () => {
+		expect(messagePlace(12, shown, false)).toBe("elsewhere");
+	});
+	it("within the shown range or newer but not shown (another scope, a direct message): not here", () => {
+		expect(messagePlace(43, shown, true)).toBe("elsewhere");
+		expect(messagePlace(60, shown, true)).toBe("elsewhere");
+	});
+	it("an empty chat has nothing to look in", () => {
+		expect(messagePlace(5, [], true)).toBe("elsewhere");
 	});
 });
