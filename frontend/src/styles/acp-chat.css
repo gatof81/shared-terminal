@@ -24,7 +24,8 @@
    follows the soft keyboard; dvh, then vh, where it is not set), and they
    shrink further and scroll inside when the thread needs its minimum. */
 .acp-settings,
-.acp-agents-panel {
+.acp-agents-panel,
+.acp-agents-list {
 	flex: 0 1 auto;
 	max-height: 40vh;
 	max-height: calc(var(--app-vh, 100dvh) * 0.4);
@@ -183,11 +184,16 @@
 }
 .acp-project .pv-header {
 	flex: none;
+	/* The line the chips row used to draw under the header. */
+	padding-bottom: 6px;
+	border-bottom: 1px solid var(--c-border);
 }
 /* Row 1: the title (one line, cut with an ellipsis), ⋯ and ×. A zero basis
    keeps the tools on the title's line however long the name is. */
 .acp-project .pv-title {
 	flex: 1 1 0;
+	/* ~8 characters of the name stay, whatever the group beside it takes. */
+	min-width: 8ch;
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
@@ -197,6 +203,9 @@
 	justify-content: center;
 	font-size: 1rem;
 }
+.acp-project-agents[hidden] {
+	display: none;
+}
 .acp-project-agents {
 	flex: none;
 	display: flex;
@@ -205,46 +214,136 @@
 	padding: 8px 0;
 	border-bottom: 1px solid var(--c-border);
 }
-/* Row 2: the agents on one line (name + state); it scrolls sideways. A
-   faded edge says there is more on that side (acpProjectChat.ts sets
-   more-left / more-right from the scroll position). */
-.acp-agent-chips.more-right {
-	-webkit-mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent);
-	mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent);
-}
-.acp-agent-chips.more-left {
-	-webkit-mask-image: linear-gradient(to right, transparent, #000 40px);
-	mask-image: linear-gradient(to right, transparent, #000 40px);
-}
-.acp-agent-chips.more-left.more-right {
-	-webkit-mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 40px), transparent);
-	mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 40px), transparent);
-}
-.acp-agent-chips {
-	flex: none;
-	display: flex;
-	flex-wrap: nowrap;
-	overflow-x: auto;
-	scrollbar-width: none;
+/* The agents' group in the header's row: stacked avatars, each with a
+   state dot (colour AND, for the ones that need you, the counted mark). */
+.acp-agents-group {
+	display: inline-flex;
+	align-items: center;
 	gap: 6px;
+	min-height: 2.75rem;
+	padding: 0 8px 0 6px;
+	border: 1px solid var(--c-border);
+	border-radius: 22px;
+	background: transparent;
+	color: var(--c-text);
+	cursor: pointer;
+	flex: none;
+}
+.acp-agents-group[hidden] {
+	display: none;
+}
+.acp-agents-group[aria-expanded="true"] {
+	background: var(--c-surface-2);
+}
+.acp-agents-group:focus-visible {
+	outline: 2px solid var(--c-accent);
+	outline-offset: 2px;
+}
+.acp-group-avatars {
+	display: inline-flex;
+}
+.acp-group-avatar {
+	position: relative;
+	width: 1.75rem;
+	height: 1.75rem;
+	font-size: 0.8rem;
+	box-shadow: 0 0 0 2px var(--c-bg);
+}
+.acp-group-avatar + .acp-group-avatar {
+	margin-left: -4px;
+}
+.acp-group-dot {
+	position: absolute;
+	right: -2px;
+	bottom: -2px;
+	width: 9px;
+	height: 9px;
+	border-radius: 50%;
+	box-shadow: 0 0 0 2px var(--c-bg);
+	background: var(--c-muted);
+}
+.acp-dot-ok {
+	background: var(--c-ok);
+}
+.acp-dot-busy {
+	background: var(--c-accent);
+}
+.acp-dot-warn {
+	background: var(--c-warn);
+}
+.acp-group-more {
+	font-size: 0.8rem;
+	color: var(--c-text-2);
+}
+.acp-group-alert {
+	font-size: 0.75rem;
+	font-weight: 700;
+	padding: 1px 6px;
+	border-radius: 10px;
+	background: var(--c-warn);
+	color: var(--c-bg);
+}
+/* The full list (under the header, the "Administrar agentes" panel's mechanics). */
+/* A phone: title (≥ 8 characters), the group, ⋯ and × share 288 px at 320. */
+@media (max-width: 640px) {
+	.acp-project .pv-header {
+		column-gap: 6px;
+	}
+	.acp-project .pv-tools {
+		gap: 4px;
+	}
+	.acp-agents-group {
+		gap: 3px;
+		padding: 0 6px 0 4px;
+		min-height: 44px;
+	}
+	.acp-group-avatar {
+		width: 1.4rem;
+		height: 1.4rem;
+		font-size: 0.7rem;
+	}
+	.acp-group-avatar + .acp-group-avatar {
+		margin-left: -4px;
+	}
+	.acp-group-more {
+		font-size: 0.72rem;
+	}
+	.acp-group-alert {
+		padding: 1px 5px;
+		font-size: 0.7rem;
+	}
+}
+.acp-agents-list-body {
 	list-style: none;
 	margin: 0;
 	padding: 0;
-}
-.acp-agent-chips::-webkit-scrollbar {
-	display: none;
-}
-.acp-agent-chip {
-	flex: none;
-	white-space: nowrap;
 	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+.acp-agents-list-item {
+	display: flex;
+	flex-wrap: wrap;
 	align-items: center;
-	gap: 6px;
-	border: 1px solid var(--c-border);
-	border-radius: 14px;
-	padding: 2px 4px 2px 10px;
-	font-size: 0.85rem;
-	max-width: 100%;
+	gap: 2px 10px;
+	min-height: 44px;
+	padding: 2px 0;
+	border-bottom: 1px solid var(--c-border-soft);
+}
+.acp-agents-list-who {
+	overflow-wrap: anywhere;
+	min-width: 0;
+}
+.acp-agents-list-item .acp-status {
+	font-size: 0.8rem;
+}
+.acp-agents-list-link {
+	margin-left: auto;
+	display: inline-flex;
+	align-items: center;
+	min-height: 44px;
+	color: var(--c-accent);
+	font-size: 0.8rem;
 }
 .acp-agent-name {
 	font-weight: 600;
@@ -262,7 +361,8 @@
 	opacity: 0.75;
 }
 /* "Administrar agentes" (from the ⋯ menu; open on a project with no agents). */
-.acp-agents-panel:not([hidden]) {
+.acp-agents-panel:not([hidden]),
+.acp-agents-list:not([hidden]) {
 	margin-top: 8px;
 	display: flex;
 	flex-direction: column;
@@ -339,16 +439,9 @@
 	.acp-project .pv-title {
 		font-size: 1rem;
 	}
-	.acp-agent-chip {
-		font-size: 0.78rem;
-	}
 	.acp-project-tools .files-btn,
 	.acp-add-select {
 		font-size: 0.78rem;
-		min-height: 44px;
-	}
-	/* 44-px touch targets: the agents' links and the panel's buttons. */
-	.acp-agent-chip {
 		min-height: 44px;
 	}
 	.acp-agent-remove {

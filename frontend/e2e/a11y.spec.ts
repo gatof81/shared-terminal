@@ -92,6 +92,15 @@ test.describe("accessibility — axe on the main views", () => {
 		await page.getByRole("menuitem", { name: "Administrar agentes" }).click();
 		await expect(page.locator("#project-view .acp-agents-panel")).toBeVisible();
 		await expectClean(page, "Project Chat, manage panel open");
+		// The recipients menu and the agents' list open.
+		await page.keyboard.press("Escape");
+		await page.getByRole("button", { name: "Elegir destinatarios" }).click();
+		await expect(page.getByRole("menu", { name: "Destinatarios" })).toBeVisible();
+		await expectClean(page, "Project Chat, recipients menu open");
+		await page.keyboard.press("Escape");
+		await page.locator("#project-view .acp-agents-group").click();
+		await expect(page.locator("#project-view .acp-agents-list")).toBeVisible();
+		await expectClean(page, "Project Chat, agents list open");
 	});
 
 	test("ACP threads, every kind of row, on the whole page (no exclusions)", async ({
