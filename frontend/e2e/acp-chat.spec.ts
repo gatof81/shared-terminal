@@ -413,7 +413,9 @@ test.describe("ACP chat headers", () => {
 		// The privacy first on a phone (a long name cuts the end off).
 		await expect(page.locator("#acp-chat .acp-chat-input")).toHaveAttribute(
 			"placeholder",
-			info.project.use.isMobile ? "Privado · a @solo" : /^Mensaje directo a @solo \(privado\)/,
+			info.project.use.isMobile
+				? "Privado · a @solo"
+				: "Mensaje privado a @solo · Ctrl+Enter envía",
 		);
 		// The failure is on the closed panel's button: visibly and by name.
 		await expect(settings).toHaveAccessibleName("Ajustes (el modelo no se aplicó)");
@@ -631,12 +633,22 @@ test.describe("ACP chat composer and scroll", () => {
 		const send = page.locator("#acp-chat .acp-chat-send");
 		const height = async (l: typeof input) => Math.round((await l.boundingBox())!.height);
 		await expect(input).toBeVisible();
-		// One row: the field and Enviar side by side, 44 px; no hint row at rest.
-		expect(await height(input)).toBeLessThanOrEqual(46);
-		expect(await height(send)).toBeGreaterThanOrEqual(44);
-		expect(Math.abs((await input.boundingBox())!.y - (await send.boundingBox())!.y)).toBeLessThan(
-			2,
+		// One surface of 44 px at rest: the field and Enviar side by side, the
+		// arrow's target the whole 44 px (its cell plus the 1-px border band); no
+		// line above it at rest.
+		const surface = page.locator("#acp-chat .acp-chat-field");
+		expect(await height(surface)).toBe(44);
+		expect(await height(input)).toBeLessThanOrEqual(44);
+		const s = (await surface.boundingBox())!;
+		const b = (await send.boundingBox())!;
+		const hits = await page.evaluate(
+			([x, top, bottom]) =>
+				[top, bottom].map(
+					(y) => document.elementFromPoint(x!, y!)?.closest(".acp-chat-send") !== null,
+				),
+			[b.x + b.width / 2, s.y + 0.5, s.y + s.height - 0.5],
 		);
+		expect(hits).toEqual([true, true]);
 		await expect(page.locator("#acp-chat .acp-chat-hint")).toBeHidden();
 		expect(await height(page.locator("#acp-chat .acp-chat-composer"))).toBeLessThanOrEqual(64);
 
@@ -645,8 +657,10 @@ test.describe("ACP chat composer and scroll", () => {
 		expect(three).toBeGreaterThan(70);
 		await input.fill(Array.from({ length: 20 }, (_, i) => `línea ${i}`).join("\n"));
 		const capped = await height(input);
-		// 6 lines of 16 px × 1.4 plus padding, well under 20 lines.
-		expect(capped).toBeLessThanOrEqual(160);
+		// A phone: up to 30 % of the visible height, and never past 8 lines of
+		// 22 px plus padding — well under 20 lines.
+		expect(capped).toBeLessThanOrEqual(Math.round(page.viewportSize()!.height * 0.3) + 1);
+		expect(capped).toBeLessThanOrEqual(8 * 22 + 20);
 		expect(await input.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
 
 		// A tap on Enviar keeps the focus in the field (no blur closing the keyboard).
