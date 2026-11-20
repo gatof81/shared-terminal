@@ -9,6 +9,8 @@ export interface AcpSessionEntry {
 }
 
 let bySession = new Map<string, AcpSessionEntry>();
+/** The list was read at least once (before that, "not an agent" is unknown). */
+let loaded = false;
 
 export function setAcpAgents(
 	list: ReadonlyArray<{ sessionId: string; name: string; projectId?: string | null }>,
@@ -22,8 +24,14 @@ export function setAcpAgents(
 			([k, v]) => bySession.get(k)?.projectId === v.projectId && bySession.get(k)?.name === v.name,
 		);
 	bySession = next;
+	loaded = true;
 	if (!same && typeof window !== "undefined")
 		window.dispatchEvent(new CustomEvent("st:acp-agents"));
+}
+
+/** Is the session an ACP agent's? null while the list has not been read yet. */
+export function isAcpAgentSession(sessionId: string): boolean | null {
+	return loaded ? bySession.has(sessionId) : null;
 }
 
 export function acpEntry(sessionId: string): AcpSessionEntry | null {
