@@ -293,6 +293,41 @@ test.describe("chat scroll: ACP chats", () => {
 	});
 });
 
+test.describe("chat scroll: a reader who scrolls at once", () => {
+	test("a scroll right after the chat opens is the reader's: it stays, and the button shows", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.enableAcp();
+		for (let i = 1; i <= 30; i++)
+			backend.addAcpMessage({
+				to_id: "solo",
+				body: `pregunta ${i}`,
+				state: "done",
+				result_text: `Respuesta ${i}.\n\nUna línea más.`,
+			});
+		// Scrolls to the top in the same task the rows land in — before the
+		// thread's ResizeObserver has had a frame to look at its box.
+		await page.addInitScript(() => {
+			new MutationObserver((_, obs) => {
+				const t = document.querySelector<HTMLElement>("#acp-chat .acp-chat-thread");
+				if (!t || !t.textContent?.includes("Respuesta 30.")) return;
+				obs.disconnect();
+				queueMicrotask(() => {
+					t.scrollTop = 0;
+				});
+			}).observe(document, { subtree: true, childList: true });
+		});
+		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
+		const t = page.locator(AGENT);
+		await expect(t).toContainText("Respuesta 30.");
+		await page.waitForTimeout(300);
+		expect(await t.evaluate((e) => e.scrollTop)).toBeLessThan(50);
+		await expect(page.locator("#acp-chat .chat-end")).toBeVisible();
+	});
+});
+
 test.describe("chat scroll: the end button and an open question", () => {
 	test("on a short phone screen with the field focused, news never puts the button over a question's options", async ({
 		app,

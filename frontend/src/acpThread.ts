@@ -829,8 +829,13 @@ export class AcpThread {
 	}
 
 	private scrollToEnd(): void {
+		const t = this.threadEl;
 		this.atBottom = true;
-		this.threadEl.scrollTop = this.threadEl.scrollHeight;
+		t.scrollTop = t.scrollHeight;
+		// The box it was placed in, now: the scroll handler takes a scroll in a
+		// box of another height for the layout's and pins the end. Left to the
+		// ResizeObserver's first frame, a reader scrolling at once was pulled back.
+		if (t.clientHeight > 0) this.box = t.clientHeight;
 		this.clearNew();
 	}
 
