@@ -238,6 +238,8 @@ let acpAgentError: HTMLElement | null = null;
 // templates) is the ordinary dialog, where the agent stays optional.
 let agentMode = false;
 let sessionNameFollows = false;
+/** Agent mode's opener ("+ Nueva sesión con agente"), for the focus on close. */
+let agentOpener: HTMLElement | null = null;
 /** Server-side rule for an agent's name (acp/agents.ts): the input's `pattern`, checked here. */
 const AGENT_NAME_RE = /^[a-z][a-z0-9-]{1,31}$/;
 
@@ -255,7 +257,8 @@ function applyAgentMode(on: boolean): void {
 	if (on) {
 		newSessionModalTitle.textContent = "Nuevo agente";
 		newSessionSubmitBtn.textContent = "Crear agente";
-	}
+		newSessionInputLabel.textContent = "Nombre de la sesión";
+	} else agentOpener = null;
 }
 
 /** "Nuevo agente en <proyecto>" once the preselected project's name is known. */
@@ -394,8 +397,12 @@ async function acpAgentForCreate(): Promise<
 
 /** Opens the new-session dialog for an ACP agent, optionally already in a project (from Project Chat). */
 window.addEventListener("st:new-acp-session", (e) => {
-	acpPreselectProject = (e as CustomEvent<{ projectId?: string }>).detail?.projectId ?? null;
-	openNewSessionModal(newSessionBtn, { agent: true });
+	const detail = (e as CustomEvent<{ projectId?: string; opener?: HTMLElement }>).detail;
+	acpPreselectProject = detail?.projectId ?? null;
+	// The focus goes back to the button that asked (not to the sidebar's
+	// "+ New session", inside a closed drawer on a phone).
+	agentOpener = detail?.opener ?? null;
+	openNewSessionModal(agentOpener ?? newSessionBtn, { agent: true });
 });
 
 function openNewSessionModal(opener: HTMLElement, opts: { agent?: boolean } = {}) {
@@ -647,7 +654,15 @@ async function openBootstrapLogModal(session: SessionInfo): Promise<void> {
 // the next open whichever way the modal was dismissed.
 const newSessionDialog = createDialog(newSessionModal, {
 	initialFocus: () => newSessionInput,
-	onClose: resetNewSessionModal,
+	onClose: () => {
+		resetNewSessionModal();
+		// Agent mode: the dialog returned the focus to its opener when it
+		// could; if that button is gone (its panel closed meanwhile), the
+		// project page's title takes it rather than nothing.
+		const o = agentOpener;
+		agentOpener = null;
+		if (o && !o.isConnected) document.getElementById("pv-title")?.focus();
+	},
 });
 
 function closeNewSessionModal() {
@@ -1378,7 +1393,7 @@ newSessionForm.addEventListener("submit", async (e) => {
 	}
 
 	try {
-		showToast("Creating session…");
+		showToast(agentMode ? "Creando agente…" : "Creating session…");
 		const config = buildSessionConfigPayload();
 		const acpAgent = await acpAgentForCreate();
 		const session = await createSession(name, undefined, config, acpAgent);
@@ -1398,8 +1413,20 @@ newSessionForm.addEventListener("submit", async (e) => {
 		void openSession(session.sessionId);
 		showToast(created);
 	} catch (err) {
-		showToast((err as Error).message, true);
 		newSessionSubmitBtn.disabled = false;
+		// The backend's 409: that name is taken. Said where the name is,
+		// like the checks above; what was written stays.
+		if ((err as Error).message === "agent-name-taken" && acpAgentInput && acpAgentError) {
+			setFieldError(
+				acpAgentInput,
+				acpAgentError,
+				`Ya hay un agente @${acpAgentInput.value.trim()}; elegí otro nombre.`,
+			);
+			setActiveSessionTab("basics");
+			acpAgentInput.focus();
+			return;
+		}
+		showToast((err as Error).message, true);
 	}
 });
 

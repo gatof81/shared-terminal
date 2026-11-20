@@ -18,6 +18,15 @@ test.describe("new agent form", () => {
 			if (method !== "POST" || path !== "/sessions") return false;
 			const body = JSON.parse(route.request().postData() ?? "{}") as Record<string, unknown>;
 			posts.push(body);
+			// The backend's answer for a name already taken (acp agents are unique per owner).
+			if ((body.acpAgent as { name?: string } | undefined)?.name === "arq") {
+				await route.fulfill({
+					status: 409,
+					contentType: "application/json",
+					body: '{"error":"agent-name-taken"}',
+				});
+				return true;
+			}
 			const sid = `7c1f2c3d-0000-4000-8000-${String(posts.length).padStart(12, "0")}`;
 			backend.sessions.push({
 				sessionId: sid,
@@ -150,5 +159,56 @@ test.describe("new agent form", () => {
 		await expect.poll(() => posts.length).toBe(1);
 		expect(posts[0]).toEqual({ name: "plain" });
 		await expect(app.toast('Session "plain" created')).toBeVisible();
+	});
+
+	test("a name already taken is said next to the field; what was written stays", async ({
+		app,
+		page,
+	}) => {
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		await openFromProjectChat(page);
+		// Agent mode in Spanish: the session's label and the progress toast.
+		await expect(page.locator("#new-session-input-label")).toHaveText("Nombre de la sesión");
+		const agent = page.locator("#new-session-acp-agent");
+		await agent.fill("arq");
+		await page.click("#new-session-submit");
+		await expect(app.toast("Creando agente…")).toBeVisible();
+		await expect(page.locator("#new-session-acp-agent-error")).toHaveText(
+			"Ya hay un agente @arq; elegí otro nombre.",
+		);
+		await expect(agent).toHaveAttribute("aria-invalid", "true");
+		await expect(agent).toBeFocused();
+		await expect(agent).toHaveValue("arq");
+		await expect(page.locator("#new-session-input")).toHaveValue("arq");
+		await expect(app.toast("agent-name-taken")).toHaveCount(0);
+		await expect(page.locator("#new-session-submit")).toBeEnabled();
+	});
+
+	test("closing gives the focus back to the button that opened it (or the project's title)", async ({
+		app,
+		page,
+	}) => {
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		const opener = page.getByRole("button", { name: "+ Nueva sesión con agente" });
+		for (const close of ["Escape", "cancel", "x"] as const) {
+			await openFromProjectChat(page);
+			if (close === "Escape") await page.keyboard.press("Escape");
+			else if (close === "cancel")
+				await page
+					.locator("#new-session-modal button[data-close-modal]", { hasText: "Cancel" })
+					.click();
+			else await page.locator("#new-session-modal .modal-close").click();
+			await expect(page.locator("#new-session-modal-title")).toBeHidden();
+			await expect(opener, `after ${close}`).toBeFocused();
+		}
+		// The opener left the page while the dialog was open: the project's title.
+		await openFromProjectChat(page);
+		await opener.evaluate((b) => b.remove());
+		await page.keyboard.press("Escape");
+		await expect(page.locator("#pv-title")).toBeFocused();
+		// The sidebar's dialog keeps its English label.
+		await app.openSidebar();
+		await page.click("#new-session-btn");
+		await expect(page.locator("#new-session-input-label")).toHaveText("Session name");
 	});
 });

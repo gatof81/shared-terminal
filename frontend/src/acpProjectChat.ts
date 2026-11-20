@@ -216,7 +216,10 @@ function buildTools(pid: string, candidates: AcpAgentInfo[]): HTMLElement {
 	const create = el("button", "files-btn", "+ Nueva sesión con agente");
 	create.type = "button";
 	create.addEventListener("click", () =>
-		window.dispatchEvent(new CustomEvent("st:new-acp-session", { detail: { projectId: pid } })),
+		// The button itself: the dialog gives the focus back to it on close.
+		window.dispatchEvent(
+			new CustomEvent("st:new-acp-session", { detail: { projectId: pid, opener: create } }),
+		),
 	);
 	tools.append(create);
 	return tools;
