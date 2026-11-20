@@ -159,6 +159,7 @@ export interface MockAcpAgent {
 	pending: number;
 	authRequired?: boolean;
 	loginMethods?: Array<{ id: string; name: string; description: string }>;
+	waitingInput?: boolean;
 	modelApplied?: { requested: string; current: string | null; error: string | null } | null;
 }
 
@@ -472,6 +473,8 @@ export class MockBackend {
 	/** ACP_AGENTS_ENABLED: `features.acpAgents` + the /acp routes and /ws/acp. */
 	acp = false;
 	acpAgents: MockAcpAgent[] = [];
+	/** GET /acp/agents: an optional delay before each answer. */
+	acpAgentsDelayMs = 0;
 	acpMessages: MockAcpMessage[] = [];
 	/** Open/answered questions the feeds return (AcpQuestion rows). */
 	acpQuestions: Array<Record<string, unknown>> = [];
@@ -691,6 +694,7 @@ export class MockBackend {
 	): Promise<boolean> {
 		const page = (msgs: MockAcpMessage[]) => msgs.slice(-100);
 		if (path === "/acp/agents" && method === "GET") {
+			if (this.acpAgentsDelayMs) await new Promise((r) => setTimeout(r, this.acpAgentsDelayMs));
 			await json(200, this.acpAgents);
 			return true;
 		}

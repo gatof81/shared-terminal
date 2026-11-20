@@ -28,6 +28,7 @@ import {
 	upsert,
 	who,
 } from "./acpModel.js";
+import { acpReadTicket, setAcpAgents } from "./acpRegistry.js";
 import {
 	type AcpActivity,
 	type AcpAgentInfo,
@@ -596,8 +597,11 @@ export class AcpThread {
 			this.agentsTimer = null;
 			const gen = this.gen;
 			const src = this.source;
+			const ticket = acpReadTicket();
 			void acpListAgents()
 				.then((all) => {
+					// Every read of the list keeps the one registry current (sidebar).
+					setAcpAgents(all, ticket);
 					if (gen !== this.gen || !src) return;
 					const mine =
 						src.kind === "agent"

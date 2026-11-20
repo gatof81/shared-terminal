@@ -8,7 +8,7 @@
 // Messages typed here are DIRECT: private to the person and this agent.
 
 import { ACP_MODELS, agentStatus, modelLabel, modelState } from "./acpModel.js";
-import { setAcpAgents } from "./acpRegistry.js";
+import { acpReadTicket, setAcpAgents } from "./acpRegistry.js";
 import { AcpThread, type ThreadState } from "./acpThread.js";
 import {
 	type AcpAgentInfo,
@@ -108,9 +108,10 @@ export function acpAgentOfSession(sessionId: string): AcpAgentInfo | null {
 async function loadAgents(): Promise<void> {
 	if (!acpAgentsEnabled()) return;
 	try {
+		const ticket = acpReadTicket();
 		const list = await acpListAgents();
 		agentsBySession = new Map(list.map((a) => [a.sessionId, a]));
-		setAcpAgents(list);
+		setAcpAgents(list, ticket);
 	} catch {
 		/* keep what we had */
 	}

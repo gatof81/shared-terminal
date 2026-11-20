@@ -9,9 +9,12 @@
  * used only inside functions, so the circular import is TDZ-safe.
  */
 
-import { acpEntry } from "./acpRegistry.js";
+import { sidebarAgentStatus } from "./acpModel.js";
+import { acpAgentsLoaded, acpAgentsReadAt, acpEntry, isAcpAgentSession } from "./acpRegistry.js";
+import { readAcpAgents, startAcpStatusFeed } from "./acpStatusFeed.js";
 import { openObserversModalFor } from "./admin.js";
 import {
+	acpAgentsEnabled,
 	createTab,
 	deleteSession,
 	deleteTab,
@@ -76,6 +79,7 @@ import { badgeFor, clearBadge, recordOutput } from "./tabActivity.js";
 import { openTerminalSession, type SessionStatus } from "./terminal.js";
 import { currentShell } from "./uiShell.js";
 import {
+	landsByPolicy,
 	readHistoryHint,
 	readLastConversation,
 	readLastConversationTitle,
@@ -367,6 +371,9 @@ export async function refreshSessions() {
 		if (gen !== listGen || !isLoggedIn()) return;
 		const firstLoad = !listLoaded;
 		listLoaded = true;
+		// Who is an agent decides where a selected session lands: read it now,
+		// so it is known before the first click (no wait in the normal case).
+		if (firstLoad && acpAgentsEnabled() && !acpAgentsLoaded()) void readAcpAgents();
 		setServerReachable(true);
 		setSessions(list);
 		console.debug(
@@ -427,8 +434,15 @@ if (typeof window !== "undefined")
 	window.addEventListener("st:acp-agents", () => {
 		if (sessionListLoaded()) renderSessionList();
 	});
+// Only an agent's state changed: its row and its group heading are
+// repainted in place — no rebuild, so focus, scroll, hover and the
+// groups' folding are untouched.
+window.addEventListener("st:acp-status", () => {
+	if (sessionListLoaded()) paintAgentStatus();
+});
 
 export function renderSessionList() {
+	noteStarts();
 	// Re-rendered on every 5 s poll: keep the keyboard user's place.
 	const active = document.activeElement;
 	const focusedId =
@@ -460,9 +474,117 @@ export function renderSessionList() {
 			)
 			?.focus();
 	}
+	paintAgentStatus();
+	// Agents' states keep current without any chat open (acpStatusFeed.ts).
+	if (acpAgentsEnabled()) startAcpStatusFeed();
 	// Sidebar observables (#394) dedupe against THIS list, so re-render
 	// them whenever it changes.
 	renderSidebarObservables();
+}
+
+/**
+ * Each agent row's state (mark + one word; the full label in its tooltip
+ * and accessible name) and, on each group heading, whether an agent of the
+ * group waits for the person — visible with the group folded. Run after
+ * every build and on `st:acp-status`; it only touches the agent parts.
+ */
+function paintAgentStatus(): void {
+	const now = acpAgentsReadAt();
+	const asking = new Map<string, string[]>();
+	for (const row of sessionList.querySelectorAll<HTMLElement>(".session-item[data-session-id]")) {
+		const sid = row.dataset.sessionId!;
+		const span = row.querySelector<HTMLElement>(".session-agent-status");
+		const a = acpEntry(sid);
+		const select = row.querySelector<HTMLElement>(".session-select");
+		if (!span || !a || !select) continue;
+		const st = sidebarAgentStatus(a, now, startedAt(sid));
+		span.className = `session-agent-status tone-${st.tone}${st.asks ? " asks" : ""}`;
+		span.lastChild!.textContent = st.word;
+		select.dataset.agentLabel = st.label;
+		labelSessionRow(select);
+		if (st.asks) {
+			const group = row.closest<HTMLElement>(".sgroup")?.dataset.group;
+			if (group) asking.set(group, [...(asking.get(group) ?? []), `@${a.name}: ${st.label}`]);
+		}
+	}
+	for (const head of sessionList.querySelectorAll<HTMLElement>(".sgroup-head")) {
+		const group = head.parentElement?.dataset.group ?? "";
+		const who = asking.get(group);
+		let flag = head.querySelector<HTMLElement>(".sgroup-asks");
+		// The heading's focusable controls (chevron, project link) describe the
+		// flag: with the group folded, Tab through the headings still says it.
+		const controls = head.querySelectorAll<HTMLElement>(".sgroup-toggle, a.sgroup-title");
+		if (!who) {
+			flag?.remove();
+			for (const c of controls) c.removeAttribute("aria-describedby");
+			continue;
+		}
+		if (!flag) {
+			flag = document.createElement("span");
+			flag.className = "sgroup-asks";
+			flag.id = `sgroup-asks-${group.replace(/[^a-zA-Z0-9-]/g, "_")}`;
+			head.querySelector(".sgroup-count")?.before(flag);
+		}
+		flag.textContent = "te espera";
+		const text = `${who.length === 1 ? "Un agente te espera" : `${who.length} agentes te esperan`}: ${who.join(", ")}`;
+		flag.title = text;
+		// Read through aria-describedby: its visible word plus who waits.
+		const detail =
+			flag.querySelector<HTMLElement>(".visually-hidden") ?? document.createElement("span");
+		detail.className = "visually-hidden";
+		detail.textContent = ` — ${text}`;
+		flag.append(detail);
+		for (const c of controls) c.setAttribute("aria-describedby", flag.id);
+	}
+}
+
+/**
+ * When each session was last seen (re)starting by this page: a session that
+ * turned running between two polls; else its creation time. "iniciando" is
+ * judged against it (acpModel.RUNNER_START_GRACE_MS).
+ */
+const startedSeenAt = new Map<string, number>();
+const lastStatus = new Map<string, string>();
+function noteStarts(): void {
+	for (const s of sessions) {
+		const prev = lastStatus.get(s.sessionId);
+		if (prev !== undefined && prev !== "running" && s.status === "running")
+			startedSeenAt.set(s.sessionId, Date.now());
+		lastStatus.set(s.sessionId, s.status);
+	}
+}
+/** The session's latest start this page knows of: its creation or a status turning `running`. */
+function startedAt(sessionId: string): number | undefined {
+	const s = sessions.find((x) => x.sessionId === sessionId);
+	const created = s ? Date.parse(s.createdAt) : Number.NaN;
+	const at = Math.max(startedSeenAt.get(sessionId) ?? 0, Number.isNaN(created) ? 0 : created);
+	return at > 0 ? at : undefined;
+}
+
+/**
+ * The row's accessible name STARTS with the words on the row, in their order
+ * (WCAG 2.5.3 — a voice user says what they see; axe
+ * `label-content-name-mismatch`), then says what the shapes and the tooltip
+ * say: the session's status, the agent's full state.
+ */
+function labelSessionRow(select: HTMLElement): void {
+	const words = [...select.querySelectorAll<HTMLElement>(".session-name, .session-meta > *")]
+		.map((c) => c.textContent ?? "")
+		.join(" ")
+		.replace(/\s+/g, " ")
+		.trim();
+	const status = select.dataset.status ?? "";
+	const agent = select.dataset.agentLabel ? `, agente: ${select.dataset.agentLabel}` : "";
+	select.setAttribute(
+		"aria-label",
+		`${words}, session ${status}${status === "failed" ? " — view the bootstrap log" : ""}${agent}`,
+	);
+	const base = select.dataset.baseTitle ?? "";
+	const tip = [base, select.dataset.agentLabel ? `Agente: ${select.dataset.agentLabel}` : ""]
+		.filter(Boolean)
+		.join("\n");
+	if (tip) select.title = tip;
+	else select.removeAttribute("title");
 }
 
 /**
@@ -753,29 +875,38 @@ function buildSessionItem(s: SessionInfo): HTMLElement {
 						: s.status;
 		meta.appendChild(state);
 	}
-	// An ACP agent's session: its name, as the agent is addressed.
+	// An ACP agent's session: its name, as the agent is addressed, and — while
+	// its container runs — the agent's state (paintAgentStatus fills it). A
+	// stopped one says "Stopped" above: "runner sin señal" would be noise.
 	const acp = acpEntry(s.sessionId);
 	if (acp) {
+		const line = document.createElement("span");
+		line.className = "session-agent-line";
 		const tag = document.createElement("span");
 		tag.className = "session-agent-tag";
 		tag.textContent = `@${acp.name}`;
-		meta.appendChild(tag);
+		line.appendChild(tag);
+		if (s.status === "running") {
+			const st = document.createElement("span");
+			st.className = "session-agent-status";
+			const mark = document.createElement("span");
+			mark.className = "session-agent-mark";
+			mark.setAttribute("aria-hidden", "true");
+			st.append(mark, document.createTextNode(""));
+			line.append(" ", st);
+		}
+		meta.appendChild(line);
 	}
 	// A space between the row's words: laid out by flex they need none, but
 	// the row's text is read as one string (accessible-name checks, copy).
 	for (const c of [...meta.children].slice(1)) c.before(" ");
 	if (meta.childElementCount > 0) nameCol.append(" ", meta);
 	select.appendChild(nameCol);
-	// The accessible name STARTS with the words on the row, in their order
-	// (WCAG 2.5.3 — a voice user says what they see; axe
-	// `label-content-name-mismatch`), then says what the shapes and the
-	// tooltip say: the session's status and Claude's full state. The agent
-	// is one of those words ("@handle", also where CSS hides it).
-	const shown = [s.name, ...[...meta.children].map((c) => c.textContent ?? "")].join(" ");
-	select.setAttribute(
-		"aria-label",
-		`${shown}, session ${s.status}${s.status === "failed" ? " — view the bootstrap log" : ""}`,
-	);
+	// The accessible name: labelSessionRow (also run when an agent's state
+	// changes). The agent is one of the row's words ("@handle" and its state).
+	select.dataset.status = s.status;
+	if (select.title) select.dataset.baseTitle = select.title;
+	labelSessionRow(select);
 	select.addEventListener("click", () => {
 		// A failed session has no workspace: the row opens its log.
 		void runSessionAction(s, s.status === "failed" ? "viewLog" : "open");
@@ -879,27 +1010,80 @@ let wantedTabId: string | null = null;
 // session lands as if it had none; the Chat list corrects the memory.
 const LANDING_HISTORY_WAIT_MS = 1500;
 
+/** Is the session an ACP agent's: false with the feature off, null until the list was read. */
+function agentKnown(sessionId: string): boolean | null {
+	return acpAgentsEnabled() ? isAcpAgentSession(sessionId) : false;
+}
+
+// How long a selection may wait for the agents list. It is read when the
+// session list first loads (refreshSessions), so normally it is in before
+// the first click and nothing waits; this only covers a click in the first
+// instants after load. A read is one request with three D1 queries in
+// parallel — about one D1 round trip — so 500 ms covers it with margin,
+// while a slow or failing list costs at most half a second, once.
+const LANDING_AGENTS_WAIT_MS = 500;
 /**
- * Resolve the landing view (UI unification §9, decision 1) for a session
- * being selected. Synchronous when the person's choice or the history
- * answer is already remembered; otherwise the one request that decides
- * Chat vs Terminal/Files runs now, in parallel with the tab listing.
+ * A selection already waited for the list in this page load and it was not
+ * there (late or failed): later selections never wait — they take "not an
+ * agent" at once while the read goes on (acpStatusFeed retries a failed
+ * one), and use it once it lands.
  */
-function decideLanding(sessionId: string, running: boolean): View | Promise<View> {
-	if (currentShell() !== "v2") return landingFor(sessionId, running);
-	if (readViewPref(sessionId) !== null || readHistoryHint(sessionId) !== null) {
-		return landingFor(sessionId, running);
-	}
-	const asked = fetchConversations(sessionId, { capture: false })
-		.then((d) => {
-			writeHistoryHint(sessionId, d.conversations.length > 0);
-			return d.conversations.length > 0;
-		})
-		.catch(() => null);
-	const wait = new Promise<null>((resolve) =>
-		setTimeout(() => resolve(null), LANDING_HISTORY_WAIT_MS),
-	);
-	return Promise.race([asked, wait]).then(() => landingFor(sessionId, running));
+let agentsWaitSpent = false;
+
+/** The landing from what is known now; null = shell v1's own flow (a traditional session). */
+function landingNow(sessionId: string, running: boolean): View | null {
+	const shell = currentShell() === "v2" ? "v2" : "v1";
+	// Past the wait, an agent list still unread counts as "not an agent".
+	if (!landsByPolicy(shell, agentKnown(sessionId) ?? false)) return null;
+	return landingFor(sessionId, running);
+}
+
+/**
+ * Resolve the landing view (UI unification §9, decision 1; viewPolicy.ts)
+ * for a session being selected. Synchronous when everything it depends on
+ * is known; otherwise the reads that decide it — is it an agent's session
+ * (both shells), has it captured history (v2) — run now, once each, in
+ * parallel with the tab listing, and the landing waits for them (bounded).
+ * null: shell v1's own flow (a traditional session, unchanged).
+ */
+function decideLanding(sessionId: string, running: boolean): View | null | Promise<View | null> {
+	const v2 = currentShell() === "v2";
+	let agent = agentKnown(sessionId);
+	// The one wait of this page load was spent: decided without the list.
+	if (agent === null && agentsWaitSpent) agent = false;
+	if (!landsByPolicy(v2 ? "v2" : "v1", agent)) return null;
+	const reads: Promise<unknown>[] = [];
+	// The one shared read of the agents list (acpStatusFeed.ts), bounded.
+	if (agent === null)
+		reads.push(
+			Promise.race([readAcpAgents(), sleep(LANDING_AGENTS_WAIT_MS)]).then(() => {
+				if (!acpAgentsLoaded()) agentsWaitSpent = true;
+			}),
+		);
+	// The history answer matters only for a v2 session that is not known to
+	// be an agent's and has nothing remembered.
+	if (
+		v2 &&
+		agent !== true &&
+		readViewPref(sessionId) === null &&
+		readHistoryHint(sessionId) === null
+	)
+		reads.push(
+			Promise.race([
+				fetchConversations(sessionId, { capture: false })
+					.then((d) => writeHistoryHint(sessionId, d.conversations.length > 0))
+					.catch(() => null),
+				sleep(LANDING_HISTORY_WAIT_MS),
+			]),
+		);
+	if (reads.length === 0) return landingNow(sessionId, running);
+	// Each read carries its own bound (the agents' above, the history's here);
+	// the landing is decided once both are in or timed out.
+	return Promise.all(reads).then(() => landingNow(sessionId, running));
+}
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export async function openSession(
@@ -917,12 +1101,13 @@ export async function openSession(
 	renderSessionList();
 	const meta = sessions.find((x) => x.sessionId === sessionId);
 	const running = meta?.status === "running";
-	// The landing view (viewPolicy.ts) — shell v2 only; v1 keeps its own
-	// flow below (the open view stays, a stopped session opens in Files) —
-	// unless the route names one (the router applies it right after).
-	// While it is being decided the view sync must not land a fallback of
-	// its own, and a view the person picks meanwhile wins over it.
-	const landing = opts.view || currentShell() !== "v2" ? null : decideLanding(sessionId, running);
+	// The landing view (viewPolicy.ts) — shell v2, and an agent's session
+	// in v1; a traditional v1 session keeps its own flow below (the open
+	// view stays, a stopped session opens in Files) — unless the route
+	// names one (the router applies it right after). While it is being
+	// decided the view sync must not land a fallback of its own, and a
+	// view the person picks meanwhile wins over it.
+	const landing = opts.view ? null : decideLanding(sessionId, running);
 	const choiceAt = choiceGeneration();
 	// The pending landing belongs to THIS session (viewSwitch keys it by
 	// id): an overlapping open of another session neither ends it early
@@ -939,7 +1124,7 @@ async function openSessionBody(
 	sessionId: string,
 	meta: SessionInfo | undefined,
 	running: boolean,
-	landing: View | Promise<View> | null,
+	landing: View | null | Promise<View | null> | null,
 	choiceAt: number,
 ): Promise<void> {
 	// updateToolbar → syncSessionViews re-keys every view to this session
@@ -956,6 +1141,11 @@ async function openSessionBody(
 		if (activeSessionId !== sessionId) return false;
 		// The person chose a view while this was deciding: theirs stands.
 		if (choiceGeneration() !== choiceAt) return true;
+		// Not an agent after all (v1): v1's own flow — a stopped session in Files.
+		if (v === null) {
+			if (!running) showFilesOnly();
+			return true;
+		}
 		landView(v, { forced: !running });
 		return true;
 	};
