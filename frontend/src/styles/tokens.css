@@ -77,6 +77,8 @@
   --s-4: 1rem;
   --s-5: 1.5rem;
   --s-6: 2rem;
+  /* The reading column of the ACP chats (individual + Project Chat). */
+  --chat-col: 56rem;
 
   /* Layers, lowest to highest. The overlays (Files / Git / Chat) sit
      above the terminal panes and the selection hint; the mobile view nav
