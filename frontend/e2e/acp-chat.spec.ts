@@ -284,6 +284,25 @@ test.describe("ACP chat headers", () => {
 		expect(await panel.evaluate((e) => getComputedStyle(e).overflowY)).toBe("auto");
 		const strip = (await page.locator("#project-view .acp-chat-thread").boundingBox())!.height;
 		expect(strip, "a readable strip of thread").toBeGreaterThanOrEqual(90);
+		// Scrolled to its end, the panel's heading and × stay in view and take the tap.
+		await panel.evaluate((e) => {
+			e.scrollTop = e.scrollHeight;
+		});
+		const close = panel.locator(".acp-agents-panel-close");
+		const pb = (await panel.boundingBox())!;
+		const cb = (await close.boundingBox())!;
+		expect(cb.y, "× inside the panel's visible box").toBeGreaterThanOrEqual(pb.y - 1);
+		expect(
+			await page.evaluate(
+				([x, y]) => document.elementFromPoint(x!, y!)?.closest(".acp-agents-panel-close") !== null,
+				[cb.x + cb.width / 2, cb.y + cb.height / 2],
+			),
+			"nothing covers the ×",
+		).toBe(true);
+		await close.click();
+		await expect(panel).toBeHidden();
+		await page.getByRole("button", { name: "Acciones del proyecto" }).click();
+		await page.getByRole("menuitem", { name: "Administrar agentes" }).click();
 		// Ajustes of an agent's chat, the same way.
 		const solo = backend.acpAgents.find((a) => a.name === "solo")!;
 		solo.projectId = PROJECT_IDS.hz;

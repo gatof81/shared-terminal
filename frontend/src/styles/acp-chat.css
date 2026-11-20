@@ -292,11 +292,20 @@
 	border-radius: 8px;
 	background: var(--c-surface);
 }
+/* Pinned while the squeezed panel scrolls inside: its × stays in view. It
+   reaches the panel's edges (negative margins over the padding) and has the
+   panel's background, so the scrolled content passes under it, unseen. */
 .acp-agents-panel-head {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
 	gap: 8px;
+	position: sticky;
+	top: -8px;
+	z-index: 1;
+	margin: -8px -10px 0;
+	padding: 8px 10px 4px;
+	background: var(--c-surface);
 }
 .acp-agents-panel-body {
 	display: flex;
