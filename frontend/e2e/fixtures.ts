@@ -90,8 +90,9 @@ export class App {
 	 * desktop, sidebar footer on mobile), the user menu's entry in v2.
 	 */
 	async appMenu(id: string): Promise<void> {
-		if (this.shell === "v2") {
-			// The user menu is in the header on both layouts in v2.
+		// Shell v2: the account menu is in the header — except under 400 px,
+		// where it moves to the drawer's footer (shell-v2.css), as in v1.
+		if (this.shell === "v2" && (await this.page.locator("#user-menu-btn").isVisible())) {
 			await this.page.click("#user-menu-btn");
 			await this.page.locator(`[role="menu"].action-menu [data-action="${id}"]`).click();
 			return;
