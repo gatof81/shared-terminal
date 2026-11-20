@@ -1,5 +1,5 @@
 /**
- * demoBackend.ts — DEMO ONLY (branch `preview/mobile-chat-demo`, never
+ * demoBackend.ts — DEMO ONLY (branch `preview/ux-iter3-demo`, never
  * merged): the app with no backend at all, to try the ACP chat on a real
  * phone from the branch's Cloudflare Pages preview.
  *
