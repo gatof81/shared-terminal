@@ -217,6 +217,7 @@ export function navigate(route: Route | null, opts: { replace?: boolean } = {}):
 	if (opts.replace) {
 		history.replaceState({ st: { n: depth() } }, "", url);
 	} else {
+		historyNav = false;
 		history.pushState({ st: { n: depth() + 1 } }, "", url);
 	}
 	for (const l of writeListeners) l();
@@ -253,7 +254,10 @@ export function navigateProject(route: ProjectRoute, opts: { replace?: boolean }
 	if (window.location.hash === hash) return;
 	const url = bare() + hash;
 	if (opts.replace) history.replaceState({ st: { n: depth() } }, "", url);
-	else history.pushState({ st: { n: depth() + 1 } }, "", url);
+	else {
+		historyNav = false;
+		history.pushState({ st: { n: depth() + 1 } }, "", url);
+	}
 	for (const l of writeListeners) l();
 }
 
@@ -263,6 +267,7 @@ export function navigateProject(route: ProjectRoute, opts: { replace?: boolean }
  * route — or none when no session is open — so Back returns to the page.
  */
 export function pushSessionAddress(): void {
+	historyNav = false;
 	const url = bare() + (current === null ? "" : routeHash(current));
 	history.pushState({ st: { n: depth() + 1 } }, "", url);
 	for (const l of writeListeners) l();
@@ -301,11 +306,44 @@ function emit(source: RouteSource): void {
 	for (const l of listeners) l(route, source);
 }
 
+/**
+ * Whether the page now shown was reached by Back / Forward, not opened: a
+ * chat put back there returns to where it was being read; any other opening
+ * shows its end. Dropped by the person's next input — a click, a tap or a
+ * key is a new choice — and by a push this module writes.
+ *
+ * `popstate` alone does not say it: browsers also fire it for a fragment
+ * navigation (a link to `#/…` followed, a URL pasted, `location.hash =`).
+ * Those create a NEW entry, whose state is null; a traversal lands on an
+ * entry that already has one — every entry gets one: ours (`navigate`), or
+ * SEEN, written on the first entry and on each entry a fragment navigation
+ * creates, as it is created.
+ */
+let historyNav = false;
+const SEEN = { stSeen: true };
+
+export function fromHistory(): boolean {
+	return historyNav;
+}
+
 let wired = false;
 /** Start listening to Back/Forward and address-bar edits (once). */
 export function start(): void {
 	if (wired) return;
 	wired = true;
+	if (history.state === null) history.replaceState(SEEN, "", window.location.href);
+	// Capture: at the target, capturing listeners run before the others
+	// (projectsView has its own), whoever registered first.
+	window.addEventListener(
+		"popstate",
+		(e) => {
+			historyNav = e.state !== null;
+			if (e.state === null) history.replaceState(SEEN, "", window.location.href);
+		},
+		{ capture: true },
+	);
+	for (const type of ["pointerdown", "keydown"] as const)
+		window.addEventListener(type, () => (historyNav = false), { capture: true, passive: true });
 	window.addEventListener("popstate", () => emit("popstate"));
 	window.addEventListener("hashchange", () => emit("hashchange"));
 }
@@ -313,6 +351,7 @@ export function start(): void {
 /** Test seam. */
 export function resetForTests(): void {
 	current = null;
+	historyNav = false;
 	listeners.length = 0;
 	writeListeners.length = 0;
 	disableProjectRoutes();

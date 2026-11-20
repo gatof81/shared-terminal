@@ -4,6 +4,7 @@ import {
 	currentRoute,
 	depth,
 	enableProjectRoutes,
+	fromHistory,
 	navigate,
 	navigateProject,
 	onAddressWrite,
@@ -132,6 +133,27 @@ describe("reads", () => {
 		history.replaceState(null, "", "/#session=zzz");
 		window.dispatchEvent(new HashChangeEvent("hashchange"));
 		expect(seen).toEqual([`popstate:#/sessions/${SID}/terminal`, "hashchange:null"]);
+	});
+
+	it("fromHistory: a traversal is Back / Forward; a fragment navigation, an input or a push is not", () => {
+		start();
+		// A traversal lands on an entry that has a state.
+		window.dispatchEvent(new PopStateEvent("popstate", { state: { st: { n: 1 } } }));
+		expect(fromHistory()).toBe(true);
+		// The person's next input is a new choice.
+		window.dispatchEvent(new Event("pointerdown"));
+		expect(fromHistory()).toBe(false);
+		window.dispatchEvent(new PopStateEvent("popstate", { state: { stSeen: true } }));
+		expect(fromHistory()).toBe(true);
+		navigate({ sessionId: SID, view: "git", detail: null });
+		expect(fromHistory()).toBe(false);
+		// A link followed / a URL pasted: the browser's popstate for a new
+		// entry (no state) — not Back; the entry is marked for a later Back to it.
+		history.replaceState(null, "", `/#/sessions/${SID}/files`);
+		window.dispatchEvent(new PopStateEvent("popstate", { state: null }));
+		expect(fromHistory()).toBe(false);
+		expect(history.state).toEqual({ stSeen: true });
+		expect(depth()).toBe(0);
 	});
 });
 

@@ -656,7 +656,7 @@ test.describe("ACP chat composer and scroll", () => {
 		await expect.poll(() => height(input)).toBeLessThanOrEqual(46);
 	});
 
-	test("a reader at the end stays there when the thread shrinks; one further up keeps their place and gets a pill", async ({
+	test("a reader at the end stays there when the thread shrinks; one further up keeps their place and gets the end button", async ({
 		page,
 		app,
 		backend,
@@ -682,8 +682,11 @@ test.describe("ACP chat composer and scroll", () => {
 			el.scrollTop = 40;
 			el.dispatchEvent(new Event("scroll"));
 		});
-		const pill = page.locator("#acp-chat .acp-new-pill");
-		await expect(pill).toBeHidden();
+		// Far from the end: the end button, the arrow alone (chat-scroll.spec.ts has its rules).
+		const pill = page.locator("#acp-chat .chat-end");
+		const count = pill.locator(".chat-end-count");
+		await expect(pill).toBeVisible();
+		await expect(count).toBeHidden();
 		const row = backend.addAcpMessage({
 			to_id: "solo",
 			from_id: "arq",
@@ -691,18 +694,18 @@ test.describe("ACP chat composer and scroll", () => {
 		});
 		backend.pushAcp({ type: "message", message: row });
 		await expect(thread).toContainText("Llegó mientras leías");
-		await expect(pill).toHaveText("↓ 1 novedad");
+		await expect(count).toHaveText("1");
 		expect(await thread.evaluate((el) => el.scrollTop)).toBe(40);
 		await pill.click();
 		await expect.poll(gap).toBeLessThan(4);
 		await expect(pill).toBeHidden();
 	});
 
-	test("an answer to a row already shown counts in the pill; tapping it goes to the end", async ({
+	test("an answer to a row already shown counts in the end button; tapping it goes to the end", async ({
 		page,
 		app,
 		backend,
-	}, info) => {
+	}) => {
 		const asked = backend.addAcpMessage({ to_id: "solo", body: "¿Cómo seguimos?" });
 		await app.login("alice", chatOf(PROJECT_SESSION_IDS.scratch));
 		const thread = page.locator("#acp-chat .acp-chat-thread");
@@ -714,31 +717,22 @@ test.describe("ACP chat composer and scroll", () => {
 			el.scrollTop = 40;
 			el.dispatchEvent(new Event("scroll"));
 		});
-		const pill = page.locator("#acp-chat .acp-new-pill");
+		const pill = page.locator("#acp-chat .chat-end");
+		const count = pill.locator(".chat-end-count");
 		// Live activity of the running message is not news.
 		backend.updateAcpMessage(asked.id, { state: "running" });
 		await page.waitForTimeout(300);
-		await expect(pill).toBeHidden();
+		await expect(count).toBeHidden();
 		backend.updateAcpMessage(asked.id, {
 			state: "done",
 			result_text: Array.from({ length: 30 }, (_, i) => `Paso ${i + 1}.`).join("\n\n"),
 		});
 		await expect(thread).toContainText("Paso 30.");
-		await expect(pill).toHaveText("↓ 1 novedad");
+		await expect(count).toHaveText("1");
 		await expect(page.locator("#acp-chat .acp-thread-wrap [role=status]")).toHaveText(
-			"1 novedad más abajo",
+			"1 mensaje nuevo más abajo",
 		);
 		expect(await thread.evaluate((el) => el.scrollTop)).toBe(40);
-		if (info.project.use.isMobile) {
-			// A 44-px touch target around the pill: 8 px above its edge is still the pill.
-			const box = (await pill.boundingBox())!;
-			expect(
-				await page.evaluate(
-					([x, y]) => document.elementFromPoint(x!, y!)?.classList.contains("acp-new-pill"),
-					[box.x + box.width / 2, box.y - 8],
-				),
-			).toBe(true);
-		}
 		await pill.click();
 		await expect.poll(gap).toBeLessThan(4);
 		await expect(pill).toBeHidden();

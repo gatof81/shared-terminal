@@ -652,7 +652,10 @@ function fakeLayout(row = 100, view = 500): () => void {
 		if (isScroller(this)) return rect(0, view);
 		const p = this.parentElement;
 		if (p && isScroller(p)) {
-			const i = [...p.children].indexOf(this);
+			// The index by sibling links: spreading jsdom's HTMLCollection per
+			// measurement made these tests quadratic in the thread's length.
+			let i = 0;
+			for (let s = this.previousElementSibling; s; s = s.previousElementSibling) i++;
 			return rect(i * row - p.scrollTop, row);
 		}
 		return rect(0, 0);
@@ -760,8 +763,9 @@ describe("Chat overlay — first-page error (C5) and reading position (C6)", () 
 		await flush();
 		expect(texts()).toHaveLength(400);
 		expect(firstVisible()).toEqual({ seq: 201, offset: -50 });
-		// Prepended history is not "new below the reader".
-		expect(pill().hidden).toBe(true);
+		// Prepended history is not "new below the reader": the end button
+		// (far from the end) has no count.
+		expect(pill().querySelector<HTMLElement>(".chat-end-count")?.hidden).toBe(true);
 	});
 
 	it("C6/2: crossing the 500-event window drops the newest end without moving the reader", async () => {
@@ -837,7 +841,9 @@ describe("Chat overlay — first-page error (C5) and reading position (C6)", () 
 		expect(pill().textContent).toBe("100 newer events · Jump to latest");
 	});
 
-	it("C6/5: A → B → A comes back to each conversation's own reading position", async () => {
+	it("C6/5: A → B → A from the list opens each at its end; Back / Forward comes back to its own reading position", async () => {
+		const router = await import("./router.js");
+		router.start();
 		await openChat();
 		await openThread(range(1, 100), false);
 		scrollTo(4200);
@@ -847,14 +853,23 @@ describe("Chat overlay — first-page error (C5) and reading position (C6)", () 
 		await flush();
 		expect(scroller().scrollTop).toBe(9500); // a new thread opens at its end
 		scrollTo(1300);
+		// Chosen again from the list (cached, no request): its end, not where it was left.
 		rows()[0]?.click();
 		await flush();
-		expect(scroller().scrollTop).toBe(4200);
-		expect(firstVisible()?.seq).toBe(43);
-		rows()[1]?.click();
+		expect(scroller().scrollTop).toBe(9500);
+		scrollTo(4200);
+		// Reached by Back / Forward (a traversal: an entry with a state): its place.
+		window.dispatchEvent(new PopStateEvent("popstate", { state: { st: { n: 1 } } }));
+		vs.applyRouteView("chat", "c2");
 		await flush();
 		expect(scroller().scrollTop).toBe(1300);
 		expect(firstVisible()?.seq).toBe(214);
+		vs.applyRouteView("chat", "c1");
+		await flush();
+		expect(scroller().scrollTop).toBe(4200);
+		expect(firstVisible()?.seq).toBe(43);
+		window.dispatchEvent(new Event("pointerdown"));
+		expect(router.fromHistory()).toBe(false);
 		expect(api.fetchConversationEvents).toHaveBeenCalledTimes(2);
 	});
 
@@ -871,13 +886,13 @@ describe("Chat overlay — first-page error (C5) and reading position (C6)", () 
 		await flush();
 		expect(texts()).toHaveLength(101);
 		expect(firstVisible()).toEqual({ seq: 101, offset: -50 });
-		expect(pill().textContent).toBe("↓ 1 new");
+		expect(pill().textContent).toBe("1");
 		resolve(page(range(1, 100), false));
 		await flush();
 		expect(texts()).toHaveLength(201);
 		expect(texts()[200]).toBe("live");
 		expect(firstVisible()).toEqual({ seq: 101, offset: -50 });
-		expect(pill().textContent).toBe("↓ 1 new");
+		expect(pill().textContent).toBe("1");
 		// Reaching the bottom clears it.
 		scrollTo(scroller().scrollHeight);
 		expect(pill().hidden).toBe(true);

@@ -610,6 +610,104 @@
 .chat-float[hidden] {
   display: none;
 }
+/* The capture Chat's scroller and its end button (anchored to its bottom edge). */
+.chat-scroll-wrap {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+/* "Ir al final" / "Jump to latest" (chatScroll.ts, the three chats; UX
+   iter3 §4): a 32-px pill on the surface, the arrow in accent, the count as
+   a small accent badge; the arrow alone is a 36-px circle. Centred on the
+   reading column, 12 px above what is under the thread (the message box,
+   the read-only note), so it rises with it and with the keyboard. */
+.chat-float.chat-end {
+  bottom: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px 0 10px;
+  background: var(--c-surface-2);
+  color: var(--c-text);
+  border: 1px solid var(--c-border);
+  font-size: 13px;
+  box-shadow: 0 6px 16px rgba(1, 4, 9, 0.55);
+  /* In 160 ms (fade + 8 px up); out in 120 ms, then display: none. */
+  transition:
+    opacity 160ms ease-out,
+    translate 160ms ease-out,
+    display 160ms allow-discrete;
+}
+.chat-end.solo {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+}
+/* A 44-px touch target around the visible pill. `inset` counts from the
+   padding box (inside the 1-px border): 30 + 2 × 7 and 34 + 2 × 5. */
+.chat-end::before {
+  content: "";
+  position: absolute;
+  inset: -7px;
+}
+.chat-end.solo::before {
+  inset: -5px;
+}
+.chat-float.chat-end[hidden] {
+  display: none;
+  opacity: 0;
+  translate: 0 8px;
+  pointer-events: none;
+  transition-duration: 120ms;
+}
+@starting-style {
+  .chat-float.chat-end:not([hidden]) {
+    opacity: 0;
+    translate: 0 8px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-float.chat-end,
+  .chat-float.chat-end[hidden] {
+    translate: none;
+    transition:
+      opacity 100ms linear,
+      display 100ms allow-discrete;
+  }
+  @starting-style {
+    .chat-float.chat-end:not([hidden]) {
+      translate: none;
+    }
+  }
+}
+.chat-end svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  fill: none;
+  stroke: var(--c-accent);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.chat-end-count {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--c-accent-strong);
+  color: var(--c-white);
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+}
+.chat-end-count[hidden] {
+  display: none;
+}
 
 /* Messages */
 .chat-msg {
@@ -1081,9 +1179,6 @@
   }
   .chat-tool > summary {
     min-height: 2.4rem;
-  }
-  .chat-float {
-    bottom: 4.4rem;
   }
   #chat-agents {
     position: absolute;

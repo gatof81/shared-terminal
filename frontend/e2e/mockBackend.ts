@@ -692,7 +692,10 @@ export class MockBackend {
 		req: ReturnType<Route["request"]>,
 		json: (status: number, body: unknown) => Promise<void>,
 	): Promise<boolean> {
-		const page = (msgs: MockAcpMessage[]) => msgs.slice(-100);
+		// The newest 100 (the real page), older than `?before=` when asked.
+		const before = Number(new URL(req.url()).searchParams.get("before") ?? 0);
+		const page = (msgs: MockAcpMessage[]) =>
+			(before > 0 ? msgs.filter((m) => m.id < before) : msgs).slice(-100);
 		if (path === "/acp/agents" && method === "GET") {
 			if (this.acpAgentsDelayMs) await new Promise((r) => setTimeout(r, this.acpAgentsDelayMs));
 			await json(200, this.acpAgents);

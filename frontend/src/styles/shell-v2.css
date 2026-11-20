@@ -138,9 +138,6 @@ html[data-shell="v2"] #terminal-area.view-nav-on #git-view,
 html[data-shell="v2"] #terminal-area.view-nav-on #chat-view {
   bottom: 0;
 }
-html[data-shell="v2"] .chat-float {
-  bottom: 4.4rem;
-}
 
 @media (max-width: 768px) {
   /* The bar and the tab strip are never hidden behind a drawer (mobile.css

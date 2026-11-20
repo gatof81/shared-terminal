@@ -58,6 +58,7 @@ import {
 	titleProblem,
 	writeFilter,
 } from "./chatMeta.js";
+import { ChatEndButton, END_SLACK, firstRowInView } from "./chatScroll.js";
 import { openActionMenu } from "./components/actionMenu.js";
 import { promptDialog } from "./components/dialog.js";
 import {
@@ -81,6 +82,7 @@ import {
 } from "./conversationModel.js";
 import { formatBytes, relativeDate } from "./format.js";
 import { activeSessionId, currentTabs, isMobile, sessions, showToast } from "./main.js";
+import { fromHistory } from "./router.js";
 import { renderSessionList, showTerminalTab, syncLastConversationCurrent } from "./sessionCore.js";
 import { sessionNoun, switcherWords } from "./switcherModel.js";
 import { button, el, stateBox } from "./ui.js";
@@ -135,6 +137,8 @@ interface ThreadCache {
 	nodes: Map<string, { sig: string; node: HTMLElement }>;
 	scrollTop: number;
 	atBottom: boolean;
+	/** The block being read (null at the end): what Back / Forward puts back. */
+	anchor: ReadAnchor | null;
 	liveStatus: LiveStatus | null;
 	loadedAt: number;
 	/** Live blocks that arrived below the reader's position (the "↓ N new" pill). */
@@ -227,7 +231,8 @@ onViewChange((next, prev) => {
 		if (stateSessionId !== null && list.status === "idle") void loadList();
 		if (selectedCid !== null) openSocket();
 		startListPoll();
-		renderAll();
+		// Shown again: its end, or (Back / Forward) where the reader left off.
+		renderAll(fromHistory() ? { restoreScroll: true } : { scrollToEnd: true });
 	} else if (prev === "chat") {
 		closeSocket();
 		stopListPoll();
@@ -412,6 +417,8 @@ async function openConversation(
 ): Promise<void> {
 	const sid = stateSessionId;
 	if (sid === null) return;
+	// Read before this opening writes the address (a push is a new choice).
+	const back = fromHistory();
 	const gen = ++threadGen;
 	const switching = selectedCid !== cid;
 	if (cur && switching) rememberScroll();
@@ -428,12 +435,13 @@ async function openConversation(
 	syncLastConversationCurrent();
 	const cached = threads.get(cid);
 	if (cached && !opts.fresh && Date.now() - cached.loadedAt < THREAD_CACHE_FRESH_MS) {
-		// Warm: show it now, re-follow from its seq (the server replays only
-		// what landed meanwhile), and land where the reader left off.
+		// Warm: show it now and re-follow from its seq (the server replays
+		// only what landed meanwhile). At its end — or, reached by Back /
+		// Forward, where the reader left off.
 		touchCache(cached);
 		cur = cached;
 		threadStatus = "loaded";
-		renderAll({ restoreScroll: true });
+		renderAll(back ? { restoreScroll: true } : { scrollToEnd: true });
 		openSocket();
 		return;
 	}
@@ -450,6 +458,7 @@ async function openConversation(
 			nodes: new Map(),
 			scrollTop: 0,
 			atBottom: true,
+			anchor: null,
 			liveStatus: null,
 			loadedAt: Date.now(),
 			pendingBelow: 0,
@@ -484,6 +493,7 @@ function rememberScroll(): void {
 	if (!cur || !sc) return;
 	cur.scrollTop = sc.scrollTop;
 	cur.atBottom = nearBottom(sc);
+	cur.anchor = cur.atBottom ? null : captureAnchor(sc);
 }
 
 async function loadOlder(): Promise<void> {
@@ -519,14 +529,14 @@ async function loadOlder(): Promise<void> {
 
 /** The first block at least partly in view, and where its top edge sits. */
 function captureAnchor(sc: HTMLElement): ReadAnchor | null {
-	const top = sc.getBoundingClientRect().top;
-	for (const child of sc.children) {
-		const seq = Number((child as HTMLElement).dataset.seq);
-		if (!Number.isFinite(seq) || seq <= 0) continue; // the Load-earlier button, markers
-		const r = child.getBoundingClientRect();
-		if (r.bottom > top) return { seq, offset: r.top - top };
-	}
-	return null;
+	const hit = firstRowInView(sc, isBlock);
+	return hit ? { seq: Number(hit.row.dataset.seq), offset: hit.offset } : null;
+}
+
+/** A thread block (not the Load-earlier button or a marker): it carries its seq. */
+function isBlock(el: HTMLElement): boolean {
+	const seq = Number(el.dataset.seq);
+	return Number.isFinite(seq) && seq > 0;
 }
 
 /**
@@ -535,14 +545,16 @@ function captureAnchor(sc: HTMLElement): ReadAnchor | null {
  * before it. When no block holds it — the window dropped its newest end past
  * the anchor (L8) — the closest surviving context is the end of the window,
  * so the reader lands there; the pill then says how many newer events exist.
+ * False when nothing was moved: no anchor, or one older than the window
+ * (a live render then keeps scrollTop; a Back restore shows the end).
  */
-function restoreAnchor(sc: HTMLElement, t: ThreadCache, anchor: ReadAnchor | null): void {
-	if (!anchor) return;
+function restoreAnchor(sc: HTMLElement, t: ThreadCache, anchor: ReadAnchor | null): boolean {
+	if (!anchor) return false;
 	const last = t.window.events[t.window.events.length - 1]?.seq ?? 0;
 	if (anchor.seq > last) {
 		setScrollNow(sc, sc.scrollHeight);
 		t.atBottom = nearBottom(sc);
-		return;
+		return true;
 	}
 	let node: HTMLElement | null = null;
 	for (const child of sc.children) {
@@ -551,11 +563,12 @@ function restoreAnchor(sc: HTMLElement, t: ThreadCache, anchor: ReadAnchor | nul
 		if (seq > anchor.seq) break;
 		node = child as HTMLElement;
 	}
-	if (!node) return;
+	if (!node) return false;
 	const now = node.getBoundingClientRect().top - sc.getBoundingClientRect().top;
 	setScrollNow(sc, sc.scrollTop + (now - anchor.offset));
 	t.scrollTop = sc.scrollTop;
 	t.atBottom = nearBottom(sc);
+	return true;
 }
 
 /** A position restore must land at once: `scroll-behavior: smooth` would animate it. */
@@ -728,7 +741,11 @@ function renderAll(opts: { scrollToEnd?: boolean; restoreScroll?: boolean } = {}
 	backBtn.hidden = !(isMobile() && inThread);
 	renderSummary();
 	renderList();
-	renderThread({ stick: opts.scrollToEnd === true, restore: opts.restoreScroll === true });
+	renderThread({
+		stick: opts.scrollToEnd === true,
+		toEnd: opts.scrollToEnd === true,
+		restore: opts.restoreScroll === true,
+	});
 	renderAgents();
 }
 
@@ -1341,7 +1358,7 @@ function threadScroller(): HTMLElement | null {
 	return threadEl.querySelector<HTMLElement>(".chat-scroll");
 }
 function nearBottom(sc: HTMLElement): boolean {
-	return sc.scrollHeight - sc.scrollTop - sc.clientHeight < 64;
+	return sc.scrollHeight - sc.scrollTop - sc.clientHeight < END_SLACK;
 }
 
 function renderThreadHead(): void {
@@ -1412,7 +1429,7 @@ function threadHeadChildren(c: ConversationSummary): HTMLElement[] {
 	return out;
 }
 
-function renderThread(opts: { stick: boolean; restore?: boolean }): void {
+function renderThread(opts: { stick: boolean; restore?: boolean; toEnd?: boolean }): void {
 	if (!isActive()) return;
 	const c = selected();
 	if (selectedCid === null) {
@@ -1444,7 +1461,13 @@ function renderThread(opts: { stick: boolean; restore?: boolean }): void {
 	// The scroller belongs to one conversation: a switch rebuilds the pane.
 	if (scroller && scroller.dataset.cid !== t.cid) scroller = null;
 	const wasEmpty = scroller === null || scroller.childElementCount === 0;
-	const atBottom = scroller !== null && nearBottom(scroller);
+	const atBottom = scroller !== null && (nearBottom(scroller) || endBtn.jumping);
+	// A reader further up keeps the block they are looking at in place,
+	// whatever a live update changes above or below it.
+	const keep =
+		scroller && !wasEmpty && !atBottom && !opts.stick && !opts.restore
+			? captureAnchor(scroller)
+			: null;
 	if (!scroller) {
 		threadEl.replaceChildren();
 		const head = el("div", "chat-thread-head");
@@ -1466,10 +1489,15 @@ function renderThread(opts: { stick: boolean; restore?: boolean }): void {
 			const sc = scroller;
 			new ResizeObserver(() => {
 				if (cur?.atBottom && sc.isConnected) setScrollNow(sc, sc.scrollHeight);
+				updateFloat();
 			}).observe(sc);
 		}
-		threadEl.appendChild(scroller);
-		threadEl.appendChild(floatPill());
+		// The end button sits over the scroller's bottom edge, so it rides on
+		// whatever is under the thread (the read-only note), at any height.
+		const wrap = el("div", "chat-scroll-wrap");
+		endBtn.reset();
+		wrap.append(scroller, endBtn.el);
+		threadEl.appendChild(wrap);
 		threadEl.appendChild(readOnlyNote());
 	}
 	syncOffline();
@@ -1528,13 +1556,26 @@ function renderThread(opts: { stick: boolean; restore?: boolean }): void {
 		if (!document.hidden) markSeen(t.cid, t.window.lastSeq);
 	}
 	if (opts.restore) {
+		// Back / Forward: the block being read, by its seq (a cached
+		// conversation keeps its DOM, so scrollTop is close and the anchor exact).
 		setScrollNow(scroller, t.atBottom ? scroller.scrollHeight : t.scrollTop);
+		// No longer in the window (L8 dropped it): the end.
+		if (!t.atBottom && t.anchor && !restoreAnchor(scroller, t, t.anchor)) {
+			setScrollNow(scroller, scroller.scrollHeight);
+			t.atBottom = true;
+		}
 		t.pendingBelow = 0;
-	} else if (opts.stick && (wasEmpty || atBottom)) {
-		scroller.scrollTop = scroller.scrollHeight;
+	} else if (opts.toEnd || (opts.stick && (wasEmpty || atBottom))) {
+		// At once (the scroller is `scroll-behavior: smooth`): an opening shows
+		// its end in the frame it is drawn, and a reader at the end must still
+		// be at the end when the next event lands (an animation's own scroll
+		// events would say otherwise).
+		setScrollNow(scroller, scroller.scrollHeight);
+		t.atBottom = true;
 		t.pendingBelow = 0;
-	} else if (fresh > 0 && !atBottom && !wasEmpty) {
-		t.pendingBelow += fresh;
+	} else {
+		if (keep) restoreAnchor(scroller, t, keep);
+		if (fresh > 0 && !atBottom && !wasEmpty) t.pendingBelow += fresh;
 	}
 	if (announce && announcer) {
 		announcer.textContent = "";
@@ -1544,55 +1585,64 @@ function renderThread(opts: { stick: boolean; restore?: boolean }): void {
 	renderThreadHead();
 }
 
+let anchorFrame = 0;
+
 function onScroll(): void {
 	const sc = threadScroller();
-	if (!sc || !cur) return;
+	// Hidden (another view): a box with no height says nothing about the reader.
+	if (!sc || !cur || sc.clientHeight === 0) return;
+	// "Jump to latest" scrolling smoothly: its own steps are not the reader moving up.
+	if (endBtn.jumping) {
+		cur.atBottom = true;
+		if (nearBottom(sc)) updateFloat();
+		return;
+	}
 	cur.scrollTop = sc.scrollTop;
 	cur.atBottom = nearBottom(sc);
-	if (cur.atBottom && cur.pendingBelow > 0) {
-		cur.pendingBelow = 0;
-		updateFloat();
-	}
+	if (cur.atBottom) cur.pendingBelow = 0;
+	updateFloat();
+	if (!anchorFrame)
+		anchorFrame = requestAnimationFrame(() => {
+			anchorFrame = 0;
+			const s = threadScroller();
+			if (cur && s && s.clientHeight > 0) cur.anchor = cur.atBottom ? null : captureAnchor(s);
+		});
 	// Reading upward into the past: fetch the next page before the reader hits the top.
 	if (sc.scrollTop < 120 && sc.scrollHeight > sc.clientHeight && cur.window.hasOlder) {
 		void loadOlder();
 	}
 }
 
-function floatPill(): HTMLElement {
-	const pill = button("", "chat-float", () => {
+/** "Jump to latest" (chatScroll.ts), one for whichever conversation is shown. */
+const endBtn = new ChatEndButton({
+	scroller: threadScroller,
+	name: (n) => (n === 0 ? "Jump to latest" : `Jump to latest, ${n} new`),
+	// Past the window's newest end (L8 dropped it): the newest page is read again.
+	onJump: () => {
+		if (!cur || cur.window.atLatest) return false;
+		jumpToLatest();
+		return true;
+	},
+	onJumped: () => {
 		if (!cur) return;
-		if (!cur.window.atLatest) {
-			jumpToLatest();
-			return;
-		}
-		const sc = threadScroller();
-		if (sc) sc.scrollTop = sc.scrollHeight;
+		cur.atBottom = true;
 		cur.pendingBelow = 0;
-		updateFloat();
-	});
-	pill.hidden = true;
-	return pill;
-}
+	},
+});
 
 function updateFloat(): void {
-	const pill = threadEl.querySelector<HTMLButtonElement>(".chat-float");
-	if (!pill || !cur) return;
+	if (!cur) return;
 	const t = cur;
 	if (!t.window.atLatest) {
-		pill.hidden = false;
-		pill.textContent =
+		endBtn.setText(
 			t.window.newerUnseen > 0
 				? `${t.window.newerUnseen} newer event${t.window.newerUnseen === 1 ? "" : "s"} · Jump to latest`
-				: "Jump to latest";
+				: "Jump to latest",
+		);
 		return;
 	}
-	if (t.pendingBelow > 0) {
-		pill.hidden = false;
-		pill.textContent = `↓ ${t.pendingBelow} new`;
-		return;
-	}
-	pill.hidden = true;
+	endBtn.setText(null);
+	endBtn.sync(t.pendingBelow, t.atBottom);
 }
 
 /** The seq a block starts at (its position in the thread). */
