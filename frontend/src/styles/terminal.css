@@ -56,8 +56,21 @@
   font-size: 12px;
   color: var(--c-muted);
 }
+#terminal-session-sub:not([hidden]) {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.3em;
+}
 #terminal-session-sub[hidden] {
   display: none;
+}
+.terminal-session-sub-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#terminal-session-sub a {
+  flex: none;
 }
 /* Underlined: inside a line of text a link is not told by colour alone. */
 #terminal-session-sub a {
