@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { classifyHref, renderInline, renderMarkdown, slugify } from "./markdown.js";
-import { appRouteHash } from "./router.js";
+import { appRouteHash, parseRoute, routeHash } from "./router.js";
 
 function render(src: string, opts = {}) {
 	const root = renderMarkdown(src, opts);
@@ -182,19 +182,28 @@ describe("links in an agent's answer (appRoute: router.appRouteHash)", () => {
 			href: "#/sessions/abc/files/src/a%20b.ts",
 		});
 		expect(kind("#/projects/p-1")).toEqual({ kind: "app", href: "#/projects/p-1" });
-		// Control characters are stripped first, as for every href.
-		expect(kind(" #/projects/p-1\t")).toEqual({ kind: "app", href: "#/projects/p-1" });
 		// Markup in an id cannot come back out: the href is re-encoded.
 		expect(kind('#/sessions/a"><img>')).toEqual({
 			kind: "app",
 			href: "#/sessions/a%22%3E%3Cimg%3E",
 		});
 	});
-	it("other fragments stay in-document anchors", () => {
+	it("a '#/' the router does not recognise, or not EXACTLY first, is no link", () => {
+		for (const h of [
+			"#/sessions/abc/nope", // not a view
+			"#/sessions/%zz", // malformed %
+			"#/sessions/abc/files/100%.md", // malformed % in the detail
+			"#/other/x",
+			" #/projects/p-1", // preceded by a space
+			"\t#/projects/p-1",
+			"#\t/projects/p-1", // a control char inside "#/"
+			"#\n/sessions/abc",
+		])
+			expect(kind(h), JSON.stringify(h)).toEqual({ kind: "blocked" });
+		// Encoded "#": a relative path (shown as text in a chat), never the app.
+		expect(kind("%23/projects/p-1").kind).toBe("relative");
+		// Other fragments stay in-document anchors.
 		expect(kind("#Intro").kind).toBe("anchor");
-		expect(kind("#/sessions/abc/nope").kind).toBe("anchor"); // not a view
-		expect(kind("#/sessions/%zz").kind).toBe("anchor"); // malformed
-		expect(kind("#/other/x").kind).toBe("anchor");
 	});
 	it("external http(s) as today; any other scheme blocked", () => {
 		expect(kind("https://example.com/x")).toEqual({
@@ -210,6 +219,98 @@ describe("links in an agent's answer (appRoute: router.appRouteHash)", () => {
 			"file:///etc/passwd",
 		])
 			expect(kind(bad)).toEqual({ kind: "blocked" });
+	});
+	it("the links' security table", () => {
+		// Never a link: script-ish schemes in any spelling the browser accepts.
+		for (const bad of [
+			"javascript:alert(1)",
+			"JavaScript:alert(1)",
+			"JAVASCRIPT:alert(1)",
+			" javascript:alert(1)",
+			"java\tscript:alert(1)",
+			"java\nscript:alert(1)",
+			"java\rscript:alert(1)",
+			"java\u0000script:alert(1)",
+			"\u0001javascript:alert(1)",
+			"data:text/html,<b>x</b>",
+			"DATA:text/html,x",
+			"vbscript:x",
+			"VBScript:x",
+			"file:///etc/passwd",
+			// Protocol-relative in backslash spellings (read as //host).
+			"/\\evil.example",
+			"\\\\evil.example",
+			"\\/evil.example",
+		])
+			expect(kind(bad), JSON.stringify(bad)).toEqual({ kind: "blocked" });
+		// External: the usual treatment (and "//host" made https).
+		expect(kind("HTTPS://example.com").kind).toBe("external");
+		expect(kind("//evil.example")).toEqual({ kind: "external", href: "https://evil.example" });
+		// An app link never leaves the origin: always a "#/" fragment.
+		for (const h of ["#/sessions/abc", "#/projects/p//evil.example", "#/sessions/abc/files//x"]) {
+			const k = kind(h);
+			if (k.kind === "app") expect(k.href.startsWith("#/")).toBe(true);
+		}
+	});
+	it("'..' and %2e%2e in a detail stay inside that session's view", () => {
+		for (const h of [
+			"#/sessions/abc/files/../../etc/passwd",
+			"#/sessions/abc/files/%2e%2e/%2e%2e/x",
+			"#/sessions/abc/files/..%2f..%2fx",
+		]) {
+			const k = kind(h);
+			expect(k.kind, h).toBe("app");
+			const r = parseRoute((k as { href: string }).href)!;
+			expect(r.sessionId).toBe("abc");
+			expect(r.view).toBe("files");
+			// Kept as the detail, decoded once (the server validates the path).
+			expect(r.detail).toBe(parseRoute(h)!.detail);
+		}
+		// ".." where the view goes: not a view, no link.
+		expect(kind("#/sessions/abc/../def/chat")).toEqual({ kind: "blocked" });
+		expect(kind("#/sessions/abc/%2e%2e/files")).toEqual({ kind: "blocked" });
+	});
+	it("an app link is written so the router reads back exactly what it names", () => {
+		const details = [
+			"src/my file.md", // spaces
+			"notes/a#b.md", // "#"
+			"q?x=1.md", // "?"
+			"100%.md", // "%"
+			"a&b.md", // "&"
+			"c++.md", // "+"
+			"staged:src/a b.ts", // git's "<area>:<path>"
+			"unstaged:dir/x:y.ts", // ":" inside the path too
+			"f(1).md", // parentheses
+			"año/ñandú.md", // non-ASCII
+			"🙂/emoji 🚀.md",
+			"%2F literal.md", // a "%2F" in the NAME
+		];
+		for (const detail of details) {
+			const view = detail.includes(":") && !detail.startsWith("%") ? "git" : "files";
+			const route = { sessionId: "abc", view, detail } as const;
+			const written = routeHash(route);
+			// The canonical form is a fixed point…
+			expect(kind(written), detail).toEqual({ kind: "app", href: written });
+			// …that the router parses back to the same route, through the URL parser too.
+			expect(parseRoute(written), detail).toEqual(route);
+			expect(new URL(written, "https://app.example/").hash, detail).toBe(written);
+			// In a Markdown answer (angle brackets allow the spaces): same href.
+			const [a] = renderInline(`[x](<${written}>)`, {
+				appRoute: appRouteHash,
+			}) as HTMLAnchorElement[];
+			expect(a!.getAttribute("href"), detail).toBe(written);
+		}
+		// Written as plain text by a model (unencoded): encoded, not trimmed.
+		const [a] = renderInline("[ver](<#/sessions/abc/files/mi archivo ñ (1).md>)", {
+			appRoute: appRouteHash,
+		}) as HTMLAnchorElement[];
+		expect(parseRoute(a!.getAttribute("href")!)!.detail).toBe("mi archivo ñ (1).md");
+		// Decoded once: "%2520" names "%20", not a space.
+		expect(
+			parseRoute((kind("#/sessions/abc/files/a%2520b") as { href: string }).href)!.detail,
+		).toBe("a%20b");
+		// A lone surrogate cannot be encoded: no link, no throw.
+		expect(kind("#/sessions/abc/files/\ud800x")).toEqual({ kind: "blocked" });
 	});
 	it("renders an app link as a same-tab link; without the option it is an anchor", () => {
 		const [a] = renderInline("[ver](#/sessions/abc/chat)", {

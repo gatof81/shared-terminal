@@ -143,10 +143,16 @@ export function sameProjectRoute(a: ProjectRoute | null, b: ProjectRoute | null)
  * re-written by these parsers, never the text as written.
  */
 export function appRouteHash(hash: string): string | null {
-	const r = parseRoute(hash);
-	if (r) return routeHash(r);
-	const p = parseProjectRoute(hash);
-	return p ? projectRouteHash(p) : null;
+	try {
+		const r = parseRoute(hash);
+		if (r) return routeHash(r);
+		const p = parseProjectRoute(hash);
+		return p ? projectRouteHash(p) : null;
+	} catch {
+		// encodeURIComponent throws on a lone surrogate (possible in text that
+		// was never UTF-8): such a destination is no address.
+		return null;
+	}
 }
 
 export function readProjectRoute(): ProjectRoute | null {
