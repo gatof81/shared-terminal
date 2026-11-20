@@ -24,6 +24,8 @@ import {
 	setProjectPageMode,
 	suspendAcpProject,
 } from "./acpProjectChat.js";
+import { resetAcpAgents } from "./acpRegistry.js";
+import { stopAcpStatusFeed } from "./acpStatusFeed.js";
 import type { FeedStatus } from "./acpThread.js";
 import {
 	archiveProject,
@@ -488,6 +490,8 @@ export function startProjects(): void {
 /** Logout / expiry: nothing of this account stays on screen or in memory. */
 export function resetProjects(): void {
 	gen++;
+	stopAcpStatusFeed();
+	resetAcpAgents();
 	active = false;
 	if (pollTimer) clearInterval(pollTimer);
 	pollTimer = null;

@@ -217,6 +217,17 @@ button.sgroup-title:focus-visible {
     padding-left: calc(8px + 0.5rem);
     line-height: 1.3;
   }
+  /* An agent's row: "@name ● state" on its own line under the name, never
+     cut to fit beside it (sidebar-sessions.css). */
+  .session-list-grouped .session-name-col:has(.session-agent-line) {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.1rem;
+  }
+  .session-list-grouped .session-meta:has(.session-agent-line) {
+    flex-direction: row;
+    gap: 0.4rem;
+  }
 }
 /* With the tree, "Projects [+]" titles the sidebar: the "Sessions" title
    under it would name the same list twice, so that bar keeps only its

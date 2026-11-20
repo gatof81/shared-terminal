@@ -285,7 +285,10 @@ export interface AgentStatus {
 /** A runner polls for work every ~2 s while idle and reports activity while busy. */
 export const RUNNER_FRESH_MS = 20_000;
 
-export function agentStatus(a: AcpAgentInfo, now: number, authRequired = false): AgentStatus {
+/** The fields agentStatus reads (a full /api/acp/agents row, or the registry's entry). */
+export type AgentStatusInput = Pick<AcpAgentInfo, "runnerSeenAt"> & Partial<AcpAgentInfo>;
+
+export function agentStatus(a: AgentStatusInput, now: number, authRequired = false): AgentStatus {
 	if (authRequired || a.authRequired) return { label: "esperando login", tone: "warn" };
 	if (a.waitingInput) return { label: "esperando tu respuesta", tone: "warn" };
 	const seen = a.runnerSeenAt ? now - Date.parse(a.runnerSeenAt) : Number.POSITIVE_INFINITY;
@@ -297,6 +300,67 @@ export function agentStatus(a: AcpAgentInfo, now: number, authRequired = false):
 			tone: "off",
 		};
 	return { label: a.pending ? `${a.pending} en espera` : "libre", tone: "ok" };
+}
+
+/**
+ * The sidebar's short form of agentStatus: one word next to a coloured mark,
+ * the full label for the tooltip and the accessible name, and whether it
+ * asks something of the person (a question, a login) — those two stand out,
+ * up to the project's heading.
+ */
+export interface SidebarAgentStatus extends AgentStatus {
+	word: string;
+	asks: boolean;
+}
+
+/**
+ * How long a started session's runner may take to show up before "iniciando"
+ * turns into "sin señal". The runner is launched only after the session's
+ * creation bootstrap (clone, dotfiles, postCreate: typically a minute or two)
+ * and then starts the adapter; three minutes covers that without hiding a
+ * runner that really failed to come up for long.
+ */
+export const RUNNER_START_GRACE_MS = 180_000;
+
+/**
+ * `startedAt`: when (client clock) the session was seen to (re)start, if this
+ * page saw it — its creation, or a status turning `running`. A runner that has
+ * not reported SINCE that start is starting, not lost, for the grace period:
+ * never reported (runnerSeenAt null), or last seen before the start — the
+ * backend keeps the previous run's `runnerSeenAt` across a restart. A restart
+ * this page did not see has no start, so it gets no grace ("sin señal" until
+ * the runner reports).
+ */
+export function sidebarAgentStatus(
+	a: AgentStatusInput,
+	now: number,
+	startedAt?: number,
+): SidebarAgentStatus {
+	const st = agentStatus(a, now);
+	const seen = a.runnerSeenAt ? Date.parse(a.runnerSeenAt) : Number.NaN;
+	if (
+		st.tone === "off" &&
+		startedAt !== undefined &&
+		now - startedAt < RUNNER_START_GRACE_MS &&
+		(Number.isNaN(seen) || seen < startedAt)
+	)
+		return {
+			label: "iniciando (el runner todavía no se conectó)",
+			tone: "off",
+			word: "iniciando",
+			asks: false,
+		};
+	const word =
+		st.label === "esperando login"
+			? "login"
+			: st.label === "esperando tu respuesta"
+				? "te espera"
+				: st.tone === "busy"
+					? "trabajando"
+					: st.tone === "off"
+						? "sin señal"
+						: "libre";
+	return { ...st, word, asks: st.tone === "warn" };
 }
 
 /** Login state of an agent from its activity: the last `auth` or answered turn wins. */

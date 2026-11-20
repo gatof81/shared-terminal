@@ -9,11 +9,12 @@
  * used only inside functions, so the circular import is TDZ-safe.
  */
 
-import { acpAgentsLoaded, acpEntry, isAcpAgentSession, setAcpAgents } from "./acpRegistry.js";
+import { sidebarAgentStatus } from "./acpModel.js";
+import { acpAgentsLoaded, acpAgentsReadAt, acpEntry, isAcpAgentSession } from "./acpRegistry.js";
+import { readAcpAgents, startAcpStatusFeed } from "./acpStatusFeed.js";
 import { openObserversModalFor } from "./admin.js";
 import {
 	acpAgentsEnabled,
-	acpListAgents,
 	createTab,
 	deleteSession,
 	deleteTab,
@@ -372,7 +373,7 @@ export async function refreshSessions() {
 		listLoaded = true;
 		// Who is an agent decides where a selected session lands: read it now,
 		// so it is known before the first click (no wait in the normal case).
-		if (firstLoad && acpAgentsEnabled() && !acpAgentsLoaded()) void readAgents();
+		if (firstLoad && acpAgentsEnabled() && !acpAgentsLoaded()) void readAcpAgents();
 		setServerReachable(true);
 		setSessions(list);
 		console.debug(
@@ -433,8 +434,15 @@ if (typeof window !== "undefined")
 	window.addEventListener("st:acp-agents", () => {
 		if (sessionListLoaded()) renderSessionList();
 	});
+// Only an agent's state changed: its row and its group heading are
+// repainted in place — no rebuild, so focus, scroll, hover and the
+// groups' folding are untouched.
+window.addEventListener("st:acp-status", () => {
+	if (sessionListLoaded()) paintAgentStatus();
+});
 
 export function renderSessionList() {
+	noteStarts();
 	// Re-rendered on every 5 s poll: keep the keyboard user's place.
 	const active = document.activeElement;
 	const focusedId =
@@ -466,9 +474,117 @@ export function renderSessionList() {
 			)
 			?.focus();
 	}
+	paintAgentStatus();
+	// Agents' states keep current without any chat open (acpStatusFeed.ts).
+	if (acpAgentsEnabled()) startAcpStatusFeed();
 	// Sidebar observables (#394) dedupe against THIS list, so re-render
 	// them whenever it changes.
 	renderSidebarObservables();
+}
+
+/**
+ * Each agent row's state (mark + one word; the full label in its tooltip
+ * and accessible name) and, on each group heading, whether an agent of the
+ * group waits for the person — visible with the group folded. Run after
+ * every build and on `st:acp-status`; it only touches the agent parts.
+ */
+function paintAgentStatus(): void {
+	const now = acpAgentsReadAt();
+	const asking = new Map<string, string[]>();
+	for (const row of sessionList.querySelectorAll<HTMLElement>(".session-item[data-session-id]")) {
+		const sid = row.dataset.sessionId!;
+		const span = row.querySelector<HTMLElement>(".session-agent-status");
+		const a = acpEntry(sid);
+		const select = row.querySelector<HTMLElement>(".session-select");
+		if (!span || !a || !select) continue;
+		const st = sidebarAgentStatus(a, now, startedAt(sid));
+		span.className = `session-agent-status tone-${st.tone}${st.asks ? " asks" : ""}`;
+		span.lastChild!.textContent = st.word;
+		select.dataset.agentLabel = st.label;
+		labelSessionRow(select);
+		if (st.asks) {
+			const group = row.closest<HTMLElement>(".sgroup")?.dataset.group;
+			if (group) asking.set(group, [...(asking.get(group) ?? []), `@${a.name}: ${st.label}`]);
+		}
+	}
+	for (const head of sessionList.querySelectorAll<HTMLElement>(".sgroup-head")) {
+		const group = head.parentElement?.dataset.group ?? "";
+		const who = asking.get(group);
+		let flag = head.querySelector<HTMLElement>(".sgroup-asks");
+		// The heading's focusable controls (chevron, project link) describe the
+		// flag: with the group folded, Tab through the headings still says it.
+		const controls = head.querySelectorAll<HTMLElement>(".sgroup-toggle, a.sgroup-title");
+		if (!who) {
+			flag?.remove();
+			for (const c of controls) c.removeAttribute("aria-describedby");
+			continue;
+		}
+		if (!flag) {
+			flag = document.createElement("span");
+			flag.className = "sgroup-asks";
+			flag.id = `sgroup-asks-${group.replace(/[^a-zA-Z0-9-]/g, "_")}`;
+			head.querySelector(".sgroup-count")?.before(flag);
+		}
+		flag.textContent = "te espera";
+		const text = `${who.length === 1 ? "Un agente te espera" : `${who.length} agentes te esperan`}: ${who.join(", ")}`;
+		flag.title = text;
+		// Read through aria-describedby: its visible word plus who waits.
+		const detail =
+			flag.querySelector<HTMLElement>(".visually-hidden") ?? document.createElement("span");
+		detail.className = "visually-hidden";
+		detail.textContent = ` — ${text}`;
+		flag.append(detail);
+		for (const c of controls) c.setAttribute("aria-describedby", flag.id);
+	}
+}
+
+/**
+ * When each session was last seen (re)starting by this page: a session that
+ * turned running between two polls; else its creation time. "iniciando" is
+ * judged against it (acpModel.RUNNER_START_GRACE_MS).
+ */
+const startedSeenAt = new Map<string, number>();
+const lastStatus = new Map<string, string>();
+function noteStarts(): void {
+	for (const s of sessions) {
+		const prev = lastStatus.get(s.sessionId);
+		if (prev !== undefined && prev !== "running" && s.status === "running")
+			startedSeenAt.set(s.sessionId, Date.now());
+		lastStatus.set(s.sessionId, s.status);
+	}
+}
+/** The session's latest start this page knows of: its creation or a status turning `running`. */
+function startedAt(sessionId: string): number | undefined {
+	const s = sessions.find((x) => x.sessionId === sessionId);
+	const created = s ? Date.parse(s.createdAt) : Number.NaN;
+	const at = Math.max(startedSeenAt.get(sessionId) ?? 0, Number.isNaN(created) ? 0 : created);
+	return at > 0 ? at : undefined;
+}
+
+/**
+ * The row's accessible name STARTS with the words on the row, in their order
+ * (WCAG 2.5.3 — a voice user says what they see; axe
+ * `label-content-name-mismatch`), then says what the shapes and the tooltip
+ * say: the session's status, the agent's full state.
+ */
+function labelSessionRow(select: HTMLElement): void {
+	const words = [...select.querySelectorAll<HTMLElement>(".session-name, .session-meta > *")]
+		.map((c) => c.textContent ?? "")
+		.join(" ")
+		.replace(/\s+/g, " ")
+		.trim();
+	const status = select.dataset.status ?? "";
+	const agent = select.dataset.agentLabel ? `, agente: ${select.dataset.agentLabel}` : "";
+	select.setAttribute(
+		"aria-label",
+		`${words}, session ${status}${status === "failed" ? " — view the bootstrap log" : ""}${agent}`,
+	);
+	const base = select.dataset.baseTitle ?? "";
+	const tip = [base, select.dataset.agentLabel ? `Agente: ${select.dataset.agentLabel}` : ""]
+		.filter(Boolean)
+		.join("\n");
+	if (tip) select.title = tip;
+	else select.removeAttribute("title");
 }
 
 /**
@@ -759,29 +875,38 @@ function buildSessionItem(s: SessionInfo): HTMLElement {
 						: s.status;
 		meta.appendChild(state);
 	}
-	// An ACP agent's session: its name, as the agent is addressed.
+	// An ACP agent's session: its name, as the agent is addressed, and — while
+	// its container runs — the agent's state (paintAgentStatus fills it). A
+	// stopped one says "Stopped" above: "runner sin señal" would be noise.
 	const acp = acpEntry(s.sessionId);
 	if (acp) {
+		const line = document.createElement("span");
+		line.className = "session-agent-line";
 		const tag = document.createElement("span");
 		tag.className = "session-agent-tag";
 		tag.textContent = `@${acp.name}`;
-		meta.appendChild(tag);
+		line.appendChild(tag);
+		if (s.status === "running") {
+			const st = document.createElement("span");
+			st.className = "session-agent-status";
+			const mark = document.createElement("span");
+			mark.className = "session-agent-mark";
+			mark.setAttribute("aria-hidden", "true");
+			st.append(mark, document.createTextNode(""));
+			line.append(" ", st);
+		}
+		meta.appendChild(line);
 	}
 	// A space between the row's words: laid out by flex they need none, but
 	// the row's text is read as one string (accessible-name checks, copy).
 	for (const c of [...meta.children].slice(1)) c.before(" ");
 	if (meta.childElementCount > 0) nameCol.append(" ", meta);
 	select.appendChild(nameCol);
-	// The accessible name STARTS with the words on the row, in their order
-	// (WCAG 2.5.3 — a voice user says what they see; axe
-	// `label-content-name-mismatch`), then says what the shapes and the
-	// tooltip say: the session's status and Claude's full state. The agent
-	// is one of those words ("@handle", also where CSS hides it).
-	const shown = [s.name, ...[...meta.children].map((c) => c.textContent ?? "")].join(" ");
-	select.setAttribute(
-		"aria-label",
-		`${shown}, session ${s.status}${s.status === "failed" ? " — view the bootstrap log" : ""}`,
-	);
+	// The accessible name: labelSessionRow (also run when an agent's state
+	// changes). The agent is one of the row's words ("@handle" and its state).
+	select.dataset.status = s.status;
+	if (select.title) select.dataset.baseTitle = select.title;
+	labelSessionRow(select);
 	select.addEventListener("click", () => {
 		// A failed session has no workspace: the row opens its log.
 		void runSessionAction(s, s.status === "failed" ? "viewLog" : "open");
@@ -897,41 +1022,11 @@ function agentKnown(sessionId: string): boolean | null {
 // parallel — about one D1 round trip — so 500 ms covers it with margin,
 // while a slow or failing list costs at most half a second, once.
 const LANDING_AGENTS_WAIT_MS = 500;
-// The one read of the agents list (acpRegistry is otherwise filled by the
-// ACP chats): shared by overlapping callers. A failure is retried in the
-// background (5 s, doubling, up to 60 s) until one answers.
-let agentsRead: Promise<void> | null = null;
-let agentsRetry: ReturnType<typeof setTimeout> | null = null;
-let agentsRetryMs = 5_000;
-function readAgents(): Promise<void> {
-	agentsRead ??= acpListAgents()
-		.then(setAcpAgents, () => retryAgentsLater())
-		.finally(() => {
-			agentsRead = null;
-		});
-	return agentsRead;
-}
-function retryAgentsLater(): void {
-	if (agentsRetry || agentsRetryOnShow) return;
-	agentsRetry = setTimeout(() => {
-		agentsRetry = null;
-		if (!isLoggedIn() || !acpAgentsEnabled() || acpAgentsLoaded()) return;
-		// A hidden tab reads nothing: one read when it shows again.
-		if (document.hidden) agentsRetryOnShow = true;
-		else void readAgents();
-	}, agentsRetryMs);
-	agentsRetryMs = Math.min(60_000, agentsRetryMs * 2);
-}
-let agentsRetryOnShow = false;
-document.addEventListener("visibilitychange", () => {
-	if (document.hidden || !agentsRetryOnShow) return;
-	agentsRetryOnShow = false;
-	if (isLoggedIn() && acpAgentsEnabled() && !acpAgentsLoaded()) void readAgents();
-});
 /**
  * A selection already waited for the list in this page load and it was not
  * there (late or failed): later selections never wait — they take "not an
- * agent" at once while the read goes on, and use it once it lands.
+ * agent" at once while the read goes on (acpStatusFeed retries a failed
+ * one), and use it once it lands.
  */
 let agentsWaitSpent = false;
 
@@ -958,9 +1053,10 @@ function decideLanding(sessionId: string, running: boolean): View | null | Promi
 	if (agent === null && agentsWaitSpent) agent = false;
 	if (!landsByPolicy(v2 ? "v2" : "v1", agent)) return null;
 	const reads: Promise<unknown>[] = [];
+	// The one shared read of the agents list (acpStatusFeed.ts), bounded.
 	if (agent === null)
 		reads.push(
-			Promise.race([readAgents(), sleep(LANDING_AGENTS_WAIT_MS)]).then(() => {
+			Promise.race([readAcpAgents(), sleep(LANDING_AGENTS_WAIT_MS)]).then(() => {
 				if (!acpAgentsLoaded()) agentsWaitSpent = true;
 			}),
 		);

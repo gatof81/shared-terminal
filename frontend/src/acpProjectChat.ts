@@ -8,7 +8,7 @@
 // individual chat — the thread component is shared (acpThread.ts).
 
 import { agentStatus } from "./acpModel.js";
-import { setAcpAgents } from "./acpRegistry.js";
+import { acpReadTicket, setAcpAgents } from "./acpRegistry.js";
 import {
 	AcpThread,
 	agentAvatar,
@@ -79,9 +79,10 @@ let allLoaded = false;
 
 export async function refreshAcpAgents(): Promise<AcpAgentInfo[]> {
 	try {
+		const ticket = acpReadTicket();
 		allAgents = await acpListAgents();
 		allLoaded = true;
-		setAcpAgents(allAgents);
+		setAcpAgents(allAgents, ticket);
 	} catch {
 		/* keep */
 	}
