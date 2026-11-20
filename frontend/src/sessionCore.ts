@@ -1638,7 +1638,11 @@ function paintBarIdentity(): void {
 	}
 	if (!terminalSessionSub) return;
 	const project = acp.projectId ? projects().find((p) => p.projectId === acp.projectId) : null;
-	const parts: Array<string | HTMLElement> = [`sesión ${s.name}`];
+	// The session's name gives way (ellipsis), never the project's link.
+	const session = document.createElement("span");
+	session.className = "terminal-session-sub-name";
+	session.textContent = `sesión ${s.name}`;
+	const parts: Array<string | HTMLElement> = [session];
 	if (project) {
 		const a = document.createElement("a");
 		a.href = projectRouteHash({ projectId: project.projectId });

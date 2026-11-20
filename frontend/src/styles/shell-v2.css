@@ -265,6 +265,11 @@ html[data-shell="v2"] #sidebar-footer {
   }
   html[data-shell="v2"] #sidebar-footer {
     display: flex !important;
+    flex-wrap: wrap;
+  }
+  /* The account's actions, now in the drawer: 44-px touch targets. */
+  html[data-shell="v2"] #sidebar-footer button {
+    min-height: 44px;
   }
 }
 @media (max-width: 360px) {

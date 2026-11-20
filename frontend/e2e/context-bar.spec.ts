@@ -49,6 +49,23 @@ test.describe("context bar", () => {
 		await expect(page).toHaveURL(new RegExp(`#/projects/${PROJECT_IDS.hz}`));
 	});
 
+	test("a long session name gives way in the subtitle; the project's link stays whole", async ({
+		app,
+		backend,
+		page,
+	}, info) => {
+		test.skip(info.project.use.isMobile === true, "wide screens (the subtitle is ≥ 1100 px)");
+		backend.sessions.find((s) => s.sessionId === PROJECT_SESSION_IDS.architect)!.name =
+			"hz-architect-with-a-session-name-far-too-long-for-the-bar";
+		await page.setViewportSize({ width: 1180, height: 800 });
+		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.architect}/chat`);
+		const sub = page.locator("#terminal-session-sub");
+		await expect(sub).toContainText("Educación HZ ↗");
+		const box = (await sub.boundingBox())!;
+		const link = (await sub.locator("a").boundingBox())!;
+		expect(link.x + link.width).toBeLessThanOrEqual(box.x + box.width + 0.5);
+	});
+
 	test("'Ajustes del agente' is the ⋯'s first entry; what the settings need is flagged on the ⋯", async ({
 		app,
 		backend,
