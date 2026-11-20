@@ -137,6 +137,13 @@ export class AcpThread {
 	private atBottom = true;
 	/** The thread's clientHeight when last seen by a scroll / resize observation. */
 	private box = 0;
+	/**
+	 * Where the thread was last pinned to its end. A render may run between
+	 * a scroll and its event (the event comes with the next frame): a thread
+	 * well above this, in a box of the same height, was scrolled up by the
+	 * reader, whatever `atBottom` still says.
+	 */
+	private pinnedTop = 0;
 
 	private source: ThreadSource | null = null;
 	/**
@@ -294,6 +301,7 @@ export class AcpThread {
 					this.box = t.clientHeight;
 					if (this.atBottom) {
 						t.scrollTop = t.scrollHeight;
+						this.pinnedTop = t.scrollTop;
 						return;
 					}
 				}
@@ -329,7 +337,10 @@ export class AcpThread {
 				if (wasHidden && !this.placePending) {
 					if (fromHistory()) this.restorePlace();
 					else this.scrollToEnd();
-				} else if (this.atBottom) t.scrollTop = t.scrollHeight;
+				} else if (this.atBottom) {
+					t.scrollTop = t.scrollHeight;
+					this.pinnedTop = t.scrollTop;
+				}
 				this.renderPill();
 			}).observe(this.threadEl);
 		// The field's cap depends on the visible height (keyboard, rotation).
@@ -704,6 +715,15 @@ export class AcpThread {
 		const focused = document.activeElement as HTMLElement | null;
 		const keepFocus =
 			focused && t.contains(focused) && focused.closest(".acp-question") ? focused : null;
+		if (
+			this.atBottom &&
+			// "Ir al final" scrolling smoothly is on its way down, not the reader up.
+			!this.endBtn.jumping &&
+			t.clientHeight > 0 &&
+			t.clientHeight === this.box &&
+			t.scrollTop < this.pinnedTop - END_SLACK
+		)
+			this.atBottom = false;
 		const atBottom = this.atBottom;
 		const prevTop = t.scrollTop;
 		// A reader further up keeps the row they are looking at where it is,
@@ -746,8 +766,10 @@ export class AcpThread {
 		syncChildren(t, nodes);
 		if (keepFocus?.isConnected) keepFocus.focus({ preventScroll: true });
 		const end = atBottom || this.toBottom;
-		if (end) t.scrollTop = t.scrollHeight;
-		else if (!keep || !this.putRow(keep)) t.scrollTop = prevTop;
+		if (end) {
+			t.scrollTop = t.scrollHeight;
+			this.pinnedTop = t.scrollTop;
+		} else if (!keep || !this.putRow(keep)) t.scrollTop = prevTop;
 		this.toBottom = false;
 		// News below a reader who is further up: a new row (an id above what
 		// was shown — an earlier page has lower ids), or a row already shown
@@ -838,6 +860,7 @@ export class AcpThread {
 		const t = this.threadEl;
 		this.atBottom = true;
 		t.scrollTop = t.scrollHeight;
+		this.pinnedTop = t.scrollTop;
 		// The box it was placed in, now: the scroll handler takes a scroll in a
 		// box of another height for the layout's and pins the end. Left to the
 		// ResizeObserver's first frame, a reader scrolling at once was pulled back.
