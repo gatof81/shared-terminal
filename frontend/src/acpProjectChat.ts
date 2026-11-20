@@ -9,13 +9,7 @@
 
 import { agentStatus } from "./acpModel.js";
 import { acpReadTicket, setAcpAgents } from "./acpRegistry.js";
-import {
-	AcpThread,
-	agentAvatar,
-	agentHue,
-	type FeedStatus,
-	type ThreadState,
-} from "./acpThread.js";
+import { AcpThread, agentHue, type FeedStatus, type ThreadState } from "./acpThread.js";
 import { type AcpAgentInfo, acpListAgents, acpSetProject } from "./api.js";
 import { confirmDialog } from "./components/dialog.js";
 import { showToast } from "./components/toast.js";
@@ -107,7 +101,7 @@ export function acpProjectPage(pid: string, header: HTMLElement): HTMLElement {
 		if (headerEl?.parentElement === root) headerEl.replaceWith(header);
 		// The panel is a sibling of the agents row: on a short screen it is
 		// the one part that gives way to the thread's minimum (acp-chat.css).
-		else root.replaceChildren(header, barEl, listEl, panelEl, thread.root);
+		else root.replaceChildren(header, barEl, listScrim, listEl, panelEl, thread.root);
 		headerEl = header;
 		// The agents' group sits in the header's row, before ⋯ and ×.
 		header.querySelector(".pv-tools")?.prepend(groupBtn);
@@ -195,6 +189,37 @@ listEl.addEventListener("keydown", (e) => {
 	e.stopPropagation();
 	closeList();
 });
+/**
+ * A phone (≤ 640 px): the list lies OVER the thread — opening or closing it
+ * moves nothing — from 4 px under the row that opens it, 8 px from the
+ * sides, never over the message box: at most min(60 % of the visible
+ * height, the room down to the box − 8 px). A transparent scrim under it
+ * takes a tap outside (it closes the list; the thread under it gets no
+ * tap). A wider screen keeps it in the flow (acp-chat.css).
+ */
+const listScrim = el("div", "acp-agents-list-scrim");
+listScrim.hidden = true;
+listScrim.addEventListener("click", () => closeList());
+
+function placeList(): void {
+	if (narrowMq?.matches !== true) {
+		listEl.style.removeProperty("top");
+		listEl.style.removeProperty("max-height");
+		return;
+	}
+	const page = root.getBoundingClientRect();
+	const opener = (groupBtn.closest(".pv-header") ?? groupBtn).getBoundingClientRect();
+	const top = opener.bottom + 4;
+	const box = thread.root.querySelector(".acp-chat-composer")?.getBoundingClientRect();
+	const visible = window.visualViewport?.height ?? window.innerHeight;
+	const room = (box && box.height > 0 ? box.top : visible) - 8 - top;
+	listEl.style.top = `${Math.round(top - page.top + root.scrollTop)}px`;
+	listEl.style.maxHeight = `${Math.max(88, Math.floor(Math.min(visible * 0.6, room)))}px`;
+}
+window.visualViewport?.addEventListener("resize", () => {
+	if (listOpen) placeList();
+});
+
 /** Agents whose running message was looked for and not found (the id), said in their row. */
 const notFound = new Map<string, number>();
 
@@ -203,19 +228,27 @@ const notFound = new Map<string, number>();
  * loads back up to 3 pages). A phone closes the list first — the thread is
  * under it; not found, the row says so (and a phone shows the list again).
  */
-async function goToRunning(name: string, id: number): Promise<void> {
-	const phone = narrowMq?.matches === true;
-	if (phone) {
+async function goToRunning(name: string, id: number, chip: HTMLElement): Promise<void> {
+	// Looking for it may load earlier pages: the chip says it is busy.
+	chip.setAttribute("aria-busy", "true");
+	const near = thread.placeOf(id) === "shown";
+	if (near) {
 		listOpen = false;
 		renderBar();
 	}
 	const found = await thread.revealMessage(id);
+	chip.removeAttribute("aria-busy");
 	if (found) {
 		notFound.delete(name);
+		if (listOpen) {
+			listOpen = false;
+			renderBar();
+		}
 		return;
 	}
+	// Never in silence: the list stays (or opens again) with the row saying so.
 	notFound.set(name, id);
-	if (phone) listOpen = true;
+	listOpen = true;
 	renderBar();
 }
 
@@ -309,26 +342,41 @@ function renderBar(): void {
 	if (groupBtn.hidden) listOpen = false;
 	if (ck !== listKey) {
 		listKey = ck;
+		// One row per agent, all the same height (acp-chat.css): its face, its
+		// name on one line, its state as a chip under it, "Abrir su chat" on
+		// the right. The state goes to the message the agent works on, when
+		// this chat has it (or may, on an earlier page): a chip with its fill
+		// and "›"; otherwise a bare chip, not focusable.
 		const items = ordered.map(({ a, st }) => {
 			const li = el("li", "acp-agents-list-item");
-			const who = agentAvatar(a.name);
-			who.classList.add("acp-agents-list-who");
-			const link = el("a", "acp-agents-list-link", "Abrir su chat");
+			li.style.setProperty("--acp-hue", String(agentHue(a.name)));
+			const face = el("span", "acp-avatar acp-agents-list-face", a.name.slice(0, 1).toUpperCase());
+			face.setAttribute("aria-hidden", "true");
+			const name = el("span", "acp-agents-list-name", `@${a.name}`);
+			name.title = `@${a.name}`;
+			const link = el("a", "btn sm acp-agents-list-link", "Abrir su chat");
 			link.href = routeHash({ sessionId: a.sessionId, view: "chat", detail: null });
 			link.title = "Abrir su sesión (Chat individual, Terminal, Files, Git)";
 			link.setAttribute("aria-label", `Abrir su chat (@${a.name})`);
-			// Working on a message of this Project Chat: the state goes to it.
+			// An action of the row closes the list (its destination takes over).
+			link.addEventListener("click", () => {
+				listOpen = false;
+				renderBar();
+			});
 			const id = target(a);
 			let state: HTMLElement;
 			if (id !== null) {
-				const go = el("button", `acp-status acp-status-${st.tone} acp-agents-list-goto`, st.label);
+				const go = el("button", `chip tone-${st.tone} acp-agents-list-goto`, st.label);
 				go.type = "button";
+				go.append(el("span", "acp-agents-list-goto-mark", "›"));
+				go.lastElementChild!.setAttribute("aria-hidden", "true");
 				// Starts with what it does; holds the words it shows (WCAG 2.5.3).
 				go.setAttribute("aria-label", `Ir al mensaje en curso de @${a.name} (${st.label})`);
-				go.addEventListener("click", () => void goToRunning(a.name, id));
+				go.addEventListener("click", () => void goToRunning(a.name, id, go));
 				state = go;
-			} else state = el("span", `acp-status acp-status-${st.tone}`, st.label);
-			li.append(who, state, link);
+			} else state = el("span", `chip bare tone-${st.tone}`, st.label);
+			state.classList.add("acp-agents-list-state");
+			li.append(face, name, state, link);
 			// Looked for and not found: said even now that it reads as not this
 			// chat's (all its pages loaded), and until the agent moves on.
 			if (typeof a.running === "number" && notFound.get(a.name) === a.running)
@@ -344,6 +392,8 @@ function renderBar(): void {
 		listBody.replaceChildren(...items);
 	}
 	listEl.hidden = !listOpen;
+	listScrim.hidden = !listOpen;
+	if (listOpen) placeList();
 	groupBtn.setAttribute("aria-expanded", String(listOpen));
 	const mk = JSON.stringify([pid, active, members.map((a) => a.name)]);
 	if (mk !== manageKey || !manageEl) {

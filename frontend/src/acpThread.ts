@@ -415,18 +415,28 @@ export class AcpThread {
 		const t = this.threadEl;
 		const anchor = row.dataset.anchor;
 		if (!anchor) return;
-		this.putRow({ anchor, offset: 12 });
+		// "esperando tu respuesta": the destination is the open question's card.
+		const card = row.querySelector<HTMLElement>(".acp-question-open");
+		const target = card ?? row;
+		// Its top at a quarter of the thread's height (context above it); the
+		// last rows stay where the end lets them.
+		const lead = target.getBoundingClientRect().top - row.getBoundingClientRect().top;
+		this.putRow({ anchor, offset: Math.round(t.clientHeight * 0.25) - lead });
 		this.box = t.clientHeight;
 		this.atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < END_SLACK;
 		this.noteAnchor();
 		this.renderPill();
-		row.tabIndex = -1;
-		row.focus({ preventScroll: true });
-		// A brief highlight (acp-chat.css: a fade, static with reduced motion).
-		row.classList.remove("acp-msg-flash");
-		void row.offsetWidth;
-		row.classList.add("acp-msg-flash");
-		setTimeout(() => row.classList.remove("acp-msg-flash"), 1600);
+		const ids = row.dataset.ids ?? "";
+		this.newAnnounce.textContent = card ? "Pregunta" : `Mensaje #${ids.split(" ")[0]}`;
+		if (card)
+			card
+				.querySelector<HTMLElement>("input, textarea, select, button")
+				?.focus({ preventScroll: true });
+		else {
+			row.tabIndex = -1;
+			row.focus({ preventScroll: true });
+		}
+		flash(target, card !== null);
 	}
 
 	/** Read the current chat again (a "Reintentar"). */
@@ -1684,6 +1694,28 @@ const SEND_REFUSED = new Map([
 	["unknown-recipient", "ese agente ya no existe"],
 	["project-not-found", "el proyecto ya no existe"],
 ]);
+
+/**
+ * A brief highlight on what was gone to: a 2-px ring and a tint, held
+ * 1200 ms then faded in 600 ms (acp-chat.css); with reduced motion, no
+ * transition: held 1500 ms and removed at once. Never moves the layout.
+ */
+function flash(target: HTMLElement, question: boolean): void {
+	const still = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
+	target.classList.remove("acp-msg-flash", "acp-msg-flash-out", "acp-msg-flash-warn");
+	target.classList.add("acp-msg-flash");
+	if (question) target.classList.add("acp-msg-flash-warn");
+	const clear = () =>
+		target.classList.remove("acp-msg-flash", "acp-msg-flash-out", "acp-msg-flash-warn");
+	if (still) {
+		setTimeout(clear, 1500);
+		return;
+	}
+	setTimeout(() => {
+		target.classList.add("acp-msg-flash-out");
+		setTimeout(clear, 600);
+	}, 1200);
+}
 
 /** States in which a message is over: reaching one is news for the pill. */
 const FINAL = new Set(["done", "failed", "uncertain"]);
