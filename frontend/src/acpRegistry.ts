@@ -29,6 +29,11 @@ export function setAcpAgents(
 		window.dispatchEvent(new CustomEvent("st:acp-agents"));
 }
 
+/** The list was read at least once (with this page). */
+export function acpAgentsLoaded(): boolean {
+	return loaded;
+}
+
 /** Is the session an ACP agent's? null while the list has not been read yet. */
 export function isAcpAgentSession(sessionId: string): boolean | null {
 	return loaded ? bySession.has(sessionId) : null;
