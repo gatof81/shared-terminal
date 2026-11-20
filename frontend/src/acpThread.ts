@@ -114,6 +114,8 @@ export class AcpThread {
 			this.atBottom = true;
 			this.newIds.clear();
 		},
+		// A question's options are the person's to tap: never under the button.
+		avoid: () => this.threadEl.querySelectorAll(".acp-question-open"),
 	});
 	/** Says it to a screen reader too (the button itself appears and goes). */
 	private readonly newAnnounce = el("div", "visually-hidden");
@@ -275,7 +277,6 @@ export class AcpThread {
 			// What is written by hand shows in the menu as it is typed.
 			if (this.pickOpen) this.renderPicker();
 		});
-		this.endBtn.el.classList.add("acp-new-pill");
 		this.newAnnounce.setAttribute("role", "status");
 		this.newAnnounce.setAttribute("aria-live", "polite");
 		const wrap = el("div", "acp-thread-wrap");

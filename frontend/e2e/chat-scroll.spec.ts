@@ -293,6 +293,81 @@ test.describe("chat scroll: ACP chats", () => {
 	});
 });
 
+test.describe("chat scroll: the end button and an open question", () => {
+	test("on a short phone screen with the field focused, news never puts the button over a question's options", async ({
+		app,
+		backend,
+		page,
+	}, info) => {
+		test.skip(!info.project.use.isMobile, "phone");
+		backend.enableAcp();
+		for (let i = 1; i <= 8; i++)
+			backend.addAcpMessage({
+				to_id: "solo",
+				body: `pregunta ${i}`,
+				state: "done",
+				result_text: `Respuesta ${i}.`,
+			});
+		const asking = backend.addAcpMessage({ to_id: "solo", body: "elegí", state: "running" });
+		backend.acpQuestions = [
+			{
+				id: 1,
+				agent: "solo",
+				message_id: asking.id,
+				request: JSON.stringify({
+					message: "¿Qué proveedor usamos?",
+					requestedSchema: {
+						type: "object",
+						properties: {
+							p: { type: "string", title: "Proveedor", enum: ["GitHub", "Google", "GitLab"] },
+						},
+						required: ["p"],
+					},
+				}),
+				state: "open",
+				answer: null,
+				created_at: "2026-10-31T10:29:30Z",
+				answered_at: null,
+				delivered_at: null,
+				note: null,
+			},
+		];
+		await page.setViewportSize({ width: 390, height: 450 });
+		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
+		const t = page.locator(AGENT);
+		const card = page.locator("#acp-chat .acp-question-open");
+		await expect(card).toBeVisible();
+		await page.locator("#acp-chat .acp-chat-input").focus();
+		await scrollBy(t, -90);
+		await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r(null))));
+		const row = backend.addAcpMessage({ to_id: "solo", from_id: "arq", body: "Llegó" });
+		backend.pushAcp({ type: "message", message: row });
+		const btn = page.locator("#acp-chat .chat-end");
+		await expect(t).toContainText("Llegó");
+		await page.waitForTimeout(300);
+		if (await btn.isVisible()) {
+			await btn.evaluate((e) => Promise.all(e.getAnimations().map((a) => a.finished)));
+			const b = (await btn.boundingBox())!;
+			// The button with its 44-px touch target (7 px past the pill).
+			const hit = {
+				top: b.y - 7,
+				bottom: b.y + b.height + 7,
+				left: b.x - 7,
+				right: b.x + b.width + 7,
+			};
+			for (const o of await card.locator(".acp-option").all()) {
+				const r = (await o.boundingBox())!;
+				const overlaps =
+					r.y < hit.bottom &&
+					r.y + r.height > hit.top &&
+					r.x < hit.right &&
+					r.x + r.width > hit.left;
+				expect(overlaps, `the button over "${await o.textContent()}"`).toBe(false);
+			}
+		}
+	});
+});
+
 test.describe("chat scroll: capture Chat", () => {
 	test.beforeEach(({ backend }) => {
 		// More than one page (200 events) in the first conversation.
