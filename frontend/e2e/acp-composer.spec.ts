@@ -99,6 +99,26 @@ test.describe("ACP composer: one surface", () => {
 		await expect(surface).toBeVisible();
 	});
 
+	test("the individual chat too: one ring on the surface, and the arrow's ring only on its circle", async ({
+		app,
+		page,
+	}) => {
+		// Inside #chat-view, whose own :focus-visible rule outweighs a class.
+		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
+		const input = page.locator("#acp-chat .acp-chat-input");
+		await input.fill("hola");
+		await input.focus();
+		expect(await input.evaluate((e) => getComputedStyle(e).outlineStyle)).toBe("none");
+		// The arrow from the keyboard: its cell draws nothing, its circle the ring.
+		await page.keyboard.press("Tab");
+		const send = page.locator("#acp-chat .acp-chat-send");
+		await expect(send).toBeFocused();
+		expect(await send.evaluate((e) => getComputedStyle(e).outlineStyle)).toBe("none");
+		expect(
+			await send.locator(".acp-cbtn-face").evaluate((e) => getComputedStyle(e).outlineStyle),
+		).toBe("solid");
+	});
+
 	test("'Para @a · @b' shows only while the text names its recipients (recipientsOf), in Project Chat only", async ({
 		app,
 		page,
