@@ -1,16 +1,30 @@
 // acpStatusFeed.ts — keeps the agents registry (acpRegistry.ts) current
-// without any chat open, for the sidebar. Budget (each read of
-// /api/acp/agents is three D1 queries): a re-read every 30 s while the tab is
-// visible; after a live event that changes an agent's state (a message, a
-// question, the agents list), one more read, debounced to ≥ 3 s; none while
-// the tab is hidden (a missed change is read when it shows again). Live
-// events also patch the registry at once, so a row moves without waiting
-// for the read that confirms it; activity batches (frequent while an agent
-// works) only patch — they never cause a read.
+// without any chat open, for the sidebar. Each read of /api/acp/agents is
+// three D1 queries, so the budget is:
+//
+// - The period: the registry is read when it is 30 s old — counting ANY read
+//   that refreshed it (an open chat's 15 s status poll included, so with a
+//   chat open this feed reads nothing) — and only while the tab is visible.
+// - Live events patch the registry at once and, when the patch leaves it
+//   right, cause no read: a message going `running` (the agent works on it)
+//   or final (it no longer does), a question opening (it waits for you),
+//   activity (runner liveness, login). The period confirms them.
+// - A read (debounced, ≥ 3 s, skipped if the registry is fresher than that)
+//   follows only what a patch cannot resolve: a question that is answered,
+//   withdrawn or orphaned (does the agent still wait? another question of
+//   it may be open), an `agents` frame (someone joined, left, changed model
+//   or login state), and a (re)connect of the socket (events were missed).
+// - Tab hidden: nothing; what was due is read when it shows again.
 
 import { subscribeAcp } from "./acpLive.js";
 import { authFromActivity } from "./acpModel.js";
-import { acpAgentsLoaded, acpEntryByName, patchAcpAgent, setAcpAgents } from "./acpRegistry.js";
+import {
+	acpAgentsLoaded,
+	acpAgentsReadAt,
+	acpEntryByName,
+	patchAcpAgent,
+	setAcpAgents,
+} from "./acpRegistry.js";
 import { acpAgentsEnabled, acpListAgents, isLoggedIn } from "./api.js";
 
 const PERIOD_MS = 30_000;
@@ -19,12 +33,13 @@ const FINAL = new Set(["done", "failed", "uncertain"]);
 
 let started = false;
 let unsubscribe: (() => void) | null = null;
-let periodTimer: ReturnType<typeof setInterval> | null = null;
+let periodTimer: ReturnType<typeof setTimeout> | null = null;
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 /** A read was due while the tab was hidden: done when it shows. */
 let dirty = false;
-let lastRead = 0;
 let inFlight: Promise<void> | null = null;
+/** When this module last asked (a failed read must not make the period retry at once). */
+let lastAttempt = 0;
 
 /**
  * The one read of the agents list (shared by overlapping callers: the
@@ -33,10 +48,10 @@ let inFlight: Promise<void> | null = null;
  * retried in the background (5 s, doubling, up to 60 s).
  */
 export function readAcpAgents(): Promise<void> {
+	if (!inFlight) lastAttempt = Date.now();
 	inFlight ??= acpListAgents()
 		.then(setAcpAgents, () => retryLater())
 		.finally(() => {
-			lastRead = Date.now();
 			inFlight = null;
 		});
 	return inFlight;
@@ -53,6 +68,11 @@ function retryLater(): void {
 	retryMs = Math.min(60_000, retryMs * 2);
 }
 
+/** How long ago the registry was last refreshed by any reader (or last asked for, here). */
+function age(): number {
+	return Date.now() - Math.max(acpAgentsReadAt(), lastAttempt);
+}
+
 function readIfVisible(): void {
 	if (!isLoggedIn() || !acpAgentsEnabled()) {
 		stopAcpStatusFeed();
@@ -66,10 +86,32 @@ function readIfVisible(): void {
 	void readAcpAgents();
 }
 
+/** Re-armed after every check: due when the registry turns 30 s old, whoever read it last. */
+function armPeriod(): void {
+	if (!started) return;
+	if (periodTimer) clearTimeout(periodTimer);
+	periodTimer = setTimeout(
+		() => {
+			periodTimer = null;
+			if (age() >= PERIOD_MS && !document.hidden) {
+				readIfVisible();
+				// Re-armed from the read's own time once it lands.
+				void (inFlight ?? Promise.resolve()).finally(armPeriod);
+				return;
+			}
+			if (document.hidden) dirty = true;
+			armPeriod();
+		},
+		Math.max(1_000, PERIOD_MS - age()),
+	);
+}
+
 function readSoon(): void {
 	if (debounceTimer) return;
 	debounceTimer = setTimeout(() => {
 		debounceTimer = null;
+		// Another reader just refreshed it: that read already says it.
+		if (age() < DEBOUNCE_MS) return;
 		readIfVisible();
 	}, DEBOUNCE_MS);
 }
@@ -78,9 +120,7 @@ function readSoon(): void {
 export function startAcpStatusFeed(): void {
 	if (started || !acpAgentsEnabled() || typeof document === "undefined") return;
 	started = true;
-	periodTimer = setInterval(() => {
-		if (!document.hidden) readIfVisible();
-	}, PERIOD_MS);
+	armPeriod();
 	unsubscribe = subscribeAcp((ev) => {
 		switch (ev.type) {
 			case "open":
@@ -88,17 +128,17 @@ export function startAcpStatusFeed(): void {
 				readSoon();
 				return;
 			case "message": {
+				// Patched only: the period confirms (and fills the queue count).
 				const m = ev.message;
 				if (m.state === "running") patchAcpAgent(m.to_id, { running: m.id });
-				// Finished: no longer working on it (the read tells what it took next).
 				else if (FINAL.has(m.state) && acpEntryByName(m.to_id)?.running === m.id)
 					patchAcpAgent(m.to_id, { running: null });
-				readSoon();
 				return;
 			}
 			case "question":
 				if (ev.question.state === "open") patchAcpAgent(ev.question.agent, { waitingInput: true });
-				readSoon();
+				// Closed: whether the agent still waits depends on its other questions.
+				else readSoon();
 				return;
 			case "agents":
 				readSoon();
@@ -123,7 +163,7 @@ export function stopAcpStatusFeed(): void {
 	started = false;
 	unsubscribe?.();
 	unsubscribe = null;
-	if (periodTimer) clearInterval(periodTimer);
+	if (periodTimer) clearTimeout(periodTimer);
 	periodTimer = null;
 	if (debounceTimer) clearTimeout(debounceTimer);
 	debounceTimer = null;
@@ -133,5 +173,6 @@ export function stopAcpStatusFeed(): void {
 if (typeof document !== "undefined")
 	document.addEventListener("visibilitychange", () => {
 		if (!started || document.hidden) return;
-		if (dirty || Date.now() - lastRead >= PERIOD_MS) readIfVisible();
+		if (dirty || age() >= PERIOD_MS) readIfVisible();
+		armPeriod();
 	});

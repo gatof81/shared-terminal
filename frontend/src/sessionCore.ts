@@ -442,6 +442,7 @@ window.addEventListener("st:acp-status", () => {
 });
 
 export function renderSessionList() {
+	noteStarts();
 	// Re-rendered on every 5 s poll: keep the keyboard user's place.
 	const active = document.activeElement;
 	const focusedId =
@@ -496,7 +497,7 @@ function paintAgentStatus(): void {
 		const a = acpEntry(sid);
 		const select = row.querySelector<HTMLElement>(".session-select");
 		if (!span || !a || !select) continue;
-		const st = sidebarAgentStatus(a, now);
+		const st = sidebarAgentStatus(a, now, startedAgo(sid));
 		span.className = `session-agent-status tone-${st.tone}${st.asks ? " asks" : ""}`;
 		span.lastChild!.textContent = st.word;
 		select.dataset.agentLabel = st.label;
@@ -510,21 +511,53 @@ function paintAgentStatus(): void {
 		const group = head.parentElement?.dataset.group ?? "";
 		const who = asking.get(group);
 		let flag = head.querySelector<HTMLElement>(".sgroup-asks");
+		// The heading's focusable controls (chevron, project link) describe the
+		// flag: with the group folded, Tab through the headings still says it.
+		const controls = head.querySelectorAll<HTMLElement>(".sgroup-toggle, a.sgroup-title");
 		if (!who) {
 			flag?.remove();
+			for (const c of controls) c.removeAttribute("aria-describedby");
 			continue;
 		}
 		if (!flag) {
 			flag = document.createElement("span");
 			flag.className = "sgroup-asks";
-			flag.setAttribute("role", "img");
+			flag.id = `sgroup-asks-${group.replace(/[^a-zA-Z0-9-]/g, "_")}`;
 			head.querySelector(".sgroup-count")?.before(flag);
 		}
 		flag.textContent = "te espera";
 		const text = `${who.length === 1 ? "Un agente te espera" : `${who.length} agentes te esperan`}: ${who.join(", ")}`;
 		flag.title = text;
-		flag.setAttribute("aria-label", text);
+		// Read through aria-describedby: its visible word plus who waits.
+		const detail =
+			flag.querySelector<HTMLElement>(".visually-hidden") ?? document.createElement("span");
+		detail.className = "visually-hidden";
+		detail.textContent = ` — ${text}`;
+		flag.append(detail);
+		for (const c of controls) c.setAttribute("aria-describedby", flag.id);
 	}
+}
+
+/**
+ * When each session was last seen (re)starting by this page: a session that
+ * turned running between two polls; else its creation time. "iniciando" is
+ * judged against it (acpModel.RUNNER_START_GRACE_MS).
+ */
+const startedSeenAt = new Map<string, number>();
+const lastStatus = new Map<string, string>();
+function noteStarts(): void {
+	for (const s of sessions) {
+		const prev = lastStatus.get(s.sessionId);
+		if (prev !== undefined && prev !== "running" && s.status === "running")
+			startedSeenAt.set(s.sessionId, Date.now());
+		lastStatus.set(s.sessionId, s.status);
+	}
+}
+function startedAgo(sessionId: string): number | undefined {
+	const s = sessions.find((x) => x.sessionId === sessionId);
+	const created = s ? Date.parse(s.createdAt) : Number.NaN;
+	const at = Math.max(startedSeenAt.get(sessionId) ?? 0, Number.isNaN(created) ? 0 : created);
+	return at > 0 ? Date.now() - at : undefined;
 }
 
 /**

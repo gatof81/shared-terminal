@@ -82,10 +82,41 @@ test.describe("sidebar: agents and their state", () => {
 		await head.locator(".sgroup-toggle").click();
 		await expect(app.sessionRow("hz-architect")).toBeHidden();
 		const flag = head.locator(".sgroup-asks");
-		await expect(flag).toHaveText("te espera");
-		await expect(flag).toHaveAttribute(
-			"aria-label",
-			/agentes te esperan: .*@arq: esperando tu respuesta/,
+		await expect(flag).toHaveText(/^te espera/);
+		// The folded heading's controls say it to a screen reader (Tab through headings).
+		for (const control of [head.locator(".sgroup-toggle"), head.locator("a.sgroup-title")])
+			await expect(control).toHaveAccessibleDescription(
+				/agentes te esperan: .*@arq: esperando tu respuesta/,
+			);
+	});
+
+	test("a just-started session whose runner has not connected says 'iniciando', not 'sin señal'", async ({
+		app,
+		backend,
+	}) => {
+		// Created 30 s before the page's clock (FIXED_NOW 10:30:00); its runner never reported.
+		const sid = "7c1f2c3d-0000-4000-8000-0000000000cc";
+		backend.sessions.push({
+			sessionId: sid,
+			ownerUserId: "u-alice",
+			name: "recien",
+			status: "running",
+			tabs: [],
+			createdAt: "2026-10-31T10:29:30Z",
+		});
+		backend.acpAgents.push({
+			...backend.acpAgents[0]!,
+			name: "recien",
+			sessionId: sid,
+			runnerSeenAt: null,
+		});
+		// An older session whose runner never reported: past the grace, "sin señal".
+		Object.assign(backend.acpAgents.find((a) => a.name === "arq")!, { runnerSeenAt: null });
+		await app.login("alice");
+		await app.openSidebar();
+		await expect(app.sessionRow("recien").locator(".session-agent-status")).toHaveText("iniciando");
+		await expect(app.sessionRow("hz-architect").locator(".session-agent-status")).toHaveText(
+			"sin señal",
 		);
 	});
 

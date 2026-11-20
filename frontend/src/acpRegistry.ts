@@ -62,14 +62,13 @@ export function setAcpAgents(list: ReadonlyArray<AcpAgentRowLike>): void {
 		[...next].every(
 			([k, v]) => bySession.get(k)?.projectId === v.projectId && bySession.get(k)?.name === v.name,
 		);
-	const sameState =
-		sameMembers &&
-		[...next].every(([k, v]) => JSON.stringify(bySession.get(k)) === JSON.stringify(v));
 	bySession = next;
 	loaded = true;
 	readAt = Date.now();
+	// Every read is announced: a state judged against the clock ("iniciando"
+	// turning into "sin señal") is repainted even when no field changed.
 	if (!sameMembers) announce("st:acp-agents");
-	else if (!sameState) announce("st:acp-status");
+	else announce("st:acp-status");
 }
 
 /** A live event's effect on one agent (by name) before the next read confirms it. */

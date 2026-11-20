@@ -163,6 +163,15 @@ describe("activity", () => {
 			false,
 			"runner sin señal",
 		]);
+		// A runner not connected yet on a session that just started: starting,
+		// then — past the grace — "sin señal".
+		expect(sidebarAgentStatus({ runnerSeenAt: null }, now, 30_000).word).toBe("iniciando");
+		expect(sidebarAgentStatus({ runnerSeenAt: null }, now, 200_000).word).toBe("sin señal");
+		expect(sidebarAgentStatus({ runnerSeenAt: null }, now).word).toBe("sin señal");
+		// A runner that did report and then went quiet is not "starting".
+		expect(sidebarAgentStatus({ runnerSeenAt: "2026-11-18T09:58:00Z" }, now, 30_000).word).toBe(
+			"sin señal",
+		);
 		// Queued but idle: still the "libre" word, the queue in the full label.
 		expect(short({ runnerSeenAt: fresh, pending: 2 })).toEqual([
 			"libre",

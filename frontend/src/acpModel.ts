@@ -205,8 +205,38 @@ export interface SidebarAgentStatus extends AgentStatus {
 	asks: boolean;
 }
 
-export function sidebarAgentStatus(a: AgentStatusInput, now: number): SidebarAgentStatus {
+/**
+ * How long a started session's runner may take to show up before "iniciando"
+ * turns into "sin señal". The runner is launched only after the session's
+ * creation bootstrap (clone, dotfiles, postCreate: typically a minute or two)
+ * and then starts the adapter; three minutes covers that without hiding a
+ * runner that really failed to come up for long.
+ */
+export const RUNNER_START_GRACE_MS = 180_000;
+
+/**
+ * `startedAgoMs`: how long ago the session (re)started, when known. A runner
+ * that never reported (runnerSeenAt null) on a session that just started is
+ * starting, not lost.
+ */
+export function sidebarAgentStatus(
+	a: AgentStatusInput,
+	now: number,
+	startedAgoMs?: number,
+): SidebarAgentStatus {
 	const st = agentStatus(a, now);
+	if (
+		st.tone === "off" &&
+		!a.runnerSeenAt &&
+		startedAgoMs !== undefined &&
+		startedAgoMs < RUNNER_START_GRACE_MS
+	)
+		return {
+			label: "iniciando (el runner todavía no se conectó)",
+			tone: "off",
+			word: "iniciando",
+			asks: false,
+		};
 	const word =
 		st.label === "esperando login"
 			? "login"
