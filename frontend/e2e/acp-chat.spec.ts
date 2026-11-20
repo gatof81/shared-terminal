@@ -41,10 +41,10 @@ test.describe("ACP chat", () => {
 		page,
 		app,
 		backend,
-	}) => {
+		shell,
+	}, info) => {
 		await app.login("alice", chatOf(PROJECT_SESSION_IDS.scratch));
-		const settings = page.locator("#acp-chat .acp-settings-btn");
-		await settings.click();
+		const opener = await app.openAgentSettings();
 		const select = page.locator("#acp-chat .acp-project-select");
 		await select.selectOption({ label: "Educación HZ" });
 		await select.focus();
@@ -53,19 +53,25 @@ test.describe("ACP chat", () => {
 		await page.waitForTimeout(300);
 		await expect(select).toHaveValue(PROJECT_IDS.hz);
 		await expect(select).toBeFocused();
-		// Closed (Escape: the focus goes back to Ajustes) and reopened: the choice is still there.
+		// Closed (Escape: the focus goes back to what opened it) and reopened:
+		// the choice is still there.
 		await page.keyboard.press("Escape");
 		await expect(select).toBeHidden();
-		await expect(settings).toBeFocused();
-		await expect(settings).toHaveAttribute("aria-expanded", "false");
+		await expect(opener).toBeFocused();
 		backend.pushAcp(activity("solo", 3));
 		await page.waitForTimeout(300);
-		await settings.click();
+		await app.openAgentSettings();
 		await expect(select).toHaveValue(PROJECT_IDS.hz);
 		await page.locator("#acp-chat .acp-chat-project button", { hasText: "Guardar" }).click();
-		await expect(
-			page.locator("#acp-chat .acp-link", { hasText: "Abrir Project Chat" }),
-		).toBeVisible();
+		// The project now shows where the agent's identity is: its own row on a
+		// phone in shell v1, the bar's "proyecto ↗" on a wide screen (a v2
+		// phone's bar has no room for that subtitle).
+		if (!(info.project.use.isMobile && shell === "v2"))
+			await expect(
+				page
+					.locator("#acp-chat .acp-link:visible", { hasText: "Abrir Project Chat" })
+					.or(page.locator("#terminal-session-sub a:visible", { hasText: "Educación HZ ↗" })),
+			).toBeVisible();
 		expect(backend.acpAgents.find((a) => a.name === "solo")?.projectId).toBe(PROJECT_IDS.hz);
 	});
 
@@ -369,7 +375,7 @@ test.describe("ACP model", () => {
 		backend,
 	}) => {
 		await app.login("alice", chatOf(PROJECT_SESSION_IDS.scratch));
-		await page.locator("#acp-chat .acp-settings-btn").click();
+		await app.openAgentSettings();
 		const select = page.locator("#acp-chat .acp-model-select");
 		await expect(select).toHaveValue("");
 		await select.selectOption({ label: "Claude Opus 5.5" });
@@ -389,10 +395,11 @@ test.describe("ACP model", () => {
 test.describe("ACP chat headers", () => {
 	test.beforeEach(({ backend }) => backend.enableAcp());
 
-	test("the individual chat's header is one row; settings are closed, and a refused model shows on Ajustes", async ({
+	test("the agent's header: the session bar (its own row only on a v1 phone); settings closed; a refused model flagged where they open", async ({
 		page,
 		app,
 		backend,
+		shell,
 	}, info) => {
 		const solo = backend.acpAgents.find((a) => a.name === "solo")!;
 		solo.projectId = PROJECT_IDS.hz;
@@ -405,11 +412,23 @@ test.describe("ACP chat headers", () => {
 		await app.login("alice", chatOf(PROJECT_SESSION_IDS.scratch));
 		const header = page.locator("#acp-chat .acp-chat-header");
 		const settings = page.locator("#acp-chat .acp-settings-btn");
-		await expect(settings).toHaveAttribute("aria-expanded", "false");
+		const ownRow = info.project.use.isMobile && shell !== "v2";
 		await expect(page.locator("#acp-chat .acp-settings")).toBeHidden();
-		await expect(page.locator("#acp-chat .acp-chat-projlink")).toHaveText(
-			"Abrir Project Chat: Educación HZ",
-		);
+		// The bar names the agent (and its session) in either case.
+		await expect(page.locator("#terminal-session-name")).toHaveText("@solo");
+		await expect(page.locator("#terminal-toolbar")).toHaveAttribute("data-session-name", "scratch");
+		if (ownRow) {
+			await expect(settings).toHaveAttribute("aria-expanded", "false");
+			await expect(page.locator("#acp-chat .acp-chat-projlink")).toHaveText(
+				"Abrir Project Chat: Educación HZ",
+			);
+		} else {
+			await expect(header).toBeHidden();
+			if (!info.project.use.isMobile)
+				await expect(page.locator("#terminal-session-sub")).toHaveText(
+					"sesión scratch · Educación HZ ↗",
+				);
+		}
 		// The privacy first on a phone (a long name cuts the end off).
 		await expect(page.locator("#acp-chat .acp-chat-input")).toHaveAttribute(
 			"placeholder",
@@ -417,13 +436,18 @@ test.describe("ACP chat headers", () => {
 				? "Privado · a @solo"
 				: "Mensaje privado a @solo · Ctrl+Enter envía",
 		);
-		// The failure is on the closed panel's button: visibly and by name.
-		await expect(settings).toHaveAccessibleName("Ajustes (el modelo no se aplicó)");
-		await expect(settings.locator(".acp-settings-flag")).toBeVisible();
-		// One row: as tall as its tallest control (44 px on a phone) plus padding.
-		const h = (await header.boundingBox())!.height;
-		expect(h).toBeLessThanOrEqual(info.project.use.isMobile ? 60 : 56);
-		await settings.click();
+		// The failure is on what opens the closed panel: visibly and by name.
+		if (ownRow) {
+			await expect(settings).toHaveAccessibleName("Ajustes (el modelo no se aplicó)");
+			await expect(settings.locator(".acp-settings-flag")).toBeVisible();
+			// One row: as tall as its tallest control (44 px on a phone) plus padding.
+			expect((await header.boundingBox())!.height).toBeLessThanOrEqual(60);
+		} else {
+			const more = page.locator("#session-menu-btn");
+			await expect(more).toHaveAccessibleName("Session actions (el modelo no se aplicó)");
+			await expect(more.locator(".bar-menu-flag")).toBeVisible();
+		}
+		await app.openAgentSettings();
 		await expect(page.locator("#acp-chat .acp-model-state")).toContainText("modelo no disponible");
 	});
 
@@ -526,7 +550,7 @@ test.describe("ACP chat headers", () => {
 		await page.evaluate((h) => {
 			location.hash = h;
 		}, chatOf(PROJECT_SESSION_IDS.scratch));
-		await page.locator("#acp-chat .acp-settings-btn").click();
+		await app.openAgentSettings();
 		await expect(page.locator("#acp-chat .acp-settings")).toContainText(
 			"Mensajes directos: privados entre vos y @solo",
 		);

@@ -23,6 +23,7 @@ import {
 import { showToast } from "./components/toast.js";
 import { activeSessionId } from "./main.js";
 import { navigateProject } from "./router.js";
+import { setSessionMenuExtras } from "./sessionCore.js";
 import { el, syncChildren } from "./ui.js";
 import { getView, onSessionSync, onViewChange, setView } from "./viewSwitch.js";
 
@@ -74,7 +75,11 @@ settingsPanel.addEventListener("keydown", (e) => {
 	e.preventDefault();
 	e.stopPropagation();
 	setSettings(false);
-	settingsBtn.focus();
+	// Back to what opened it: its own button where the agent's row shows (a
+	// phone in shell v1), else the bar's ⋯ ("Ajustes del agente").
+	const back =
+		settingsBtn.offsetParent !== null ? settingsBtn : document.getElementById("session-menu-btn");
+	back?.focus();
 });
 
 function setSettings(open: boolean): void {
@@ -131,8 +136,10 @@ function sync(): void {
 function apply(): void {
 	const sid = activeSessionId;
 	const agent = sid ? (agentsBySession.get(sid) ?? null) : null;
+	if (agent) registerMenuExtras();
 	const active = getView() === "chat" && agent !== null;
 	owned = agent;
+	paintMenuFlag(agent, agent ? thread.state.auth.get(agent.name) === true : false);
 	if (agent) mount();
 	root.hidden = !active;
 	// The capture Chat's own children (header, list/thread body, announcer…) are
@@ -151,6 +158,68 @@ function apply(): void {
 onViewChange(() => apply());
 onSessionSync(() => sync());
 window.addEventListener("st:projects-changed", () => void loadProjectNames());
+
+// ── The bar is the agent's header (UX iter3 E) ──────────────────────────
+//
+// On an agent's session the session bar shows the agent (sessionCore
+// paintBarIdentity) and this chat's own header row goes (acp-chat.css; a
+// phone in shell v1 keeps it: its bar lives in a drawer). "Ajustes" is then
+// the bar's ⋯ first entry, and what the Ajustes button used to flag — a
+// model pending or refused, a login missing — is flagged on the ⋯ itself.
+
+let extrasRegistered = false;
+function registerMenuExtras(): void {
+	if (extrasRegistered) return;
+	extrasRegistered = true;
+	setSessionMenuExtras((s) => {
+		const a = agentsBySession.get(s.sessionId);
+		if (!a) return { items: [], onPick: () => false };
+		const why = flagWhy(a, thread.state.auth.get(a.name) === true);
+		return {
+			items: [{ id: "acp-settings", label: "Ajustes del agente", hint: why ?? undefined }],
+			onPick: (id) => {
+				if (id !== "acp-settings") return false;
+				openSettings();
+				return true;
+			},
+		};
+	});
+}
+
+/** "Ajustes del agente" from the ⋯: the agent's Chat with the panel open, the focus in it. */
+function openSettings(): void {
+	if (getView() !== "chat") setView("chat");
+	setSettings(true);
+	settingsPanel.querySelector<HTMLElement>("select, button, input")?.focus();
+}
+
+/** What the agent's settings need from the person, in words (null: nothing). */
+function flagWhy(a: AcpAgentInfo, auth: boolean): string | null {
+	const ms = modelState(a);
+	if (ms === "failed") return "el modelo no se aplicó";
+	if (auth || a.authRequired) return "falta conectar una cuenta";
+	if (ms === "pending") return "cambio de modelo pendiente";
+	return null;
+}
+
+function paintMenuFlag(a: AcpAgentInfo | null, auth: boolean): void {
+	const btn = document.getElementById("session-menu-btn");
+	if (!btn) return;
+	const why = a ? flagWhy(a, auth) : null;
+	let mark = btn.querySelector<HTMLElement>(".bar-menu-flag");
+	if (!why) {
+		mark?.remove();
+		btn.setAttribute("aria-label", "Session actions");
+		return;
+	}
+	if (!mark) {
+		mark = el("span", "bar-menu-flag");
+		mark.setAttribute("aria-hidden", "true");
+		btn.append(mark);
+	}
+	mark.textContent = why.startsWith("cambio") ? "…" : "!";
+	btn.setAttribute("aria-label", `Session actions (${why})`);
+}
 
 // ── Header ──────────────────────────────────────────────────────────────
 
@@ -202,6 +271,7 @@ function renderHeader(s: ThreadState): void {
 		shownModelKey = modelKey;
 		modelRowEl = modelRow(a);
 	}
+	paintMenuFlag(a, auth);
 	const flag = ms === "failed" ? "!" : ms === "pending" ? "…" : "";
 	settingsFlag.textContent = flag;
 	settingsFlag.hidden = flag === "";
@@ -351,6 +421,9 @@ function projectRow(a: AcpAgentInfo): HTMLElement {
 				agentsBySession.set(info.sessionId, { ...a, ...info });
 				// The thread's copy too: its next state must not bring the old project back.
 				thread.updateAgent(info);
+				// And the registry's (one read): the sidebar files the agent under its
+				// new project and the bar's "proyecto ↗" follows.
+				void loadAgents();
 			})
 			.catch((err: Error) => {
 				select.value = a.projectId ?? "";

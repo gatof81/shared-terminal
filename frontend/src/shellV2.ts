@@ -18,7 +18,6 @@
  */
 
 import { openActionMenu } from "./components/actionMenu.js";
-import { openActiveSessionMenu } from "./sessionCore.js";
 
 let inited = false;
 
@@ -67,12 +66,10 @@ export function initShellV2(): void {
 		if (el && tools) tools.appendChild(el);
 	}
 
-	// Session actions as one menu in the bar.
+	// Session actions as one menu in the bar, on every session (sessionCore
+	// opens it; in shell v1 it shows only on an agent's session).
 	const sessionMenuBtn = document.getElementById("session-menu-btn");
-	if (sessionMenuBtn) {
-		sessionMenuBtn.hidden = false;
-		sessionMenuBtn.addEventListener("click", () => openActiveSessionMenu(sessionMenuBtn));
-	}
+	if (sessionMenuBtn) sessionMenuBtn.hidden = false;
 
 	// The header cluster as one user menu. Items are the cluster's own
 	// buttons (their visibility and labels already follow role and push

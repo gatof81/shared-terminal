@@ -14,7 +14,7 @@ test.describe("base controls", () => {
 	}) => {
 		backend.enableAcp();
 		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
-		await page.locator("#acp-chat .acp-settings-btn").click();
+		await app.openAgentSettings();
 		const select = page.locator("#acp-chat .acp-model-select");
 		await expect(select).toBeVisible();
 		const save = page.locator("#acp-chat .btn", { hasText: "Cambiar modelo" });
@@ -53,8 +53,12 @@ test.describe("base controls", () => {
 		page,
 	}, info) => {
 		backend.enableAcp();
+		backend.acpAgents.find((a) => a.name === "solo")!.authRequired = true;
 		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
-		const settings = page.locator("#acp-chat .acp-settings-btn");
+		// "Abrir Terminal" of the login notice: a .btn.sm in every shell and width.
+		const settings = page.locator("#acp-chat .acp-login-actions .btn", {
+			hasText: "Abrir Terminal",
+		});
 		await expect(settings).toHaveClass(/\bbtn sm\b/);
 		const h = Math.round((await settings.boundingBox())!.height);
 		if (info.project.use.hasTouch) expect(h).toBeGreaterThanOrEqual(44);

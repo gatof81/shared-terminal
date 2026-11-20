@@ -32,7 +32,7 @@ import {
 	stopSession,
 	TabNotFoundError,
 } from "./api.js";
-import { openActionMenu } from "./components/actionMenu.js";
+import { type MenuItem, openActionMenu } from "./components/actionMenu.js";
 import { confirmDialog } from "./components/dialog.js";
 import { formatBytes, formatCpuCores, formatCpuPercent } from "./format.js";
 import { transformKeyInput } from "./keyBar.js";
@@ -113,6 +113,9 @@ const sidebarRefreshBtn = document.getElementById(
 const showTerminatedToggle = document.getElementById("show-terminated-toggle") as HTMLInputElement;
 const terminalToolbar = document.getElementById("terminal-toolbar")!;
 const terminalSessionName = document.getElementById("terminal-session-name")!;
+const terminalSessionSub = document.getElementById("terminal-session-sub");
+const sessionMenuBtn = document.getElementById("session-menu-btn") as HTMLButtonElement | null;
+sessionMenuBtn?.addEventListener("click", () => openActiveSessionMenu(sessionMenuBtn));
 const terminalStatusBadge = document.getElementById("terminal-status-badge")!;
 
 /**
@@ -275,9 +278,33 @@ export async function runSessionAction(s: SessionInfo, id: SessionActionId): Pro
 }
 
 /** The ⋯ menu of the ACTIVE session (shell v2's session bar). */
+/**
+ * What the bar's ⋯ shows first for the open session, before its actions —
+ * acpChat.ts: "Ajustes del agente" for an agent's session (UX iter3 E: its
+ * own header row goes; the bar is its header). `onPick` true = handled.
+ */
+type SessionMenuExtras = (s: SessionInfo) => { items: MenuItem[]; onPick: (id: string) => boolean };
+let sessionMenuExtras: SessionMenuExtras | null = null;
+export function setSessionMenuExtras(fn: SessionMenuExtras): void {
+	sessionMenuExtras = fn;
+}
+
 export function openActiveSessionMenu(opener: HTMLElement): void {
 	const s = sessions.find((x) => x.sessionId === activeSessionId);
-	if (s) openSessionMenu(s, opener);
+	if (!s) return;
+	const extra = sessionMenuExtras?.(s);
+	if (!extra || extra.items.length === 0) {
+		openSessionMenu(s, opener);
+		return;
+	}
+	openActionMenu({
+		title: s.name,
+		opener,
+		items: [...extra.items, ...sessionActions(actionContext(s))],
+		onPick: (id) => {
+			if (!extra.onPick(id)) void runSessionAction(s, id as SessionActionId);
+		},
+	});
 }
 
 function openSessionMenu(s: SessionInfo, opener: HTMLElement): void {
@@ -452,13 +479,17 @@ onViewChange(() => syncLastConversationCurrent());
 if (typeof window !== "undefined")
 	window.addEventListener("st:acp-agents", () => {
 		if (sessionListLoaded()) renderSessionList();
+		paintBarIdentity();
 	});
 // Only an agent's state changed: its row and its group heading are
 // repainted in place — no rebuild, so focus, scroll, hover and the
 // groups' folding are untouched.
 window.addEventListener("st:acp-status", () => {
 	if (sessionListLoaded()) paintAgentStatus();
+	paintBarIdentity();
 });
+// A project renamed: the bar's "proyecto ↗" link says the new name.
+window.addEventListener("st:projects-changed", () => paintBarIdentity());
 
 export function renderSessionList() {
 	noteStarts();
@@ -1549,9 +1580,31 @@ export function updateToolbar() {
 	// by renderTabBar/openTab — avoids an empty-bar flash before listTabs
 	// resolves.
 	emptyState.style.display = "none";
-	terminalSessionName.textContent = s.name;
-	// The bar shows a long name with an ellipsis (terminal.css): the full one on hover.
-	terminalSessionName.title = s.name;
+	paintBarIdentity();
+	// Refresh the mobile header context pill — its label tracks the
+	// active session/tab, and visibility flips on/off here.
+	updateChromeToggle();
+	syncSessionViews();
+	renderTerminalState();
+}
+
+/**
+ * The bar's identity zone (UX iter3 §2): the session's name and its state —
+ * or, for an ACP agent's session (E), "@agent" in its colour, the agent's
+ * state as the chip (the sidebar's words, #703) and "sesión X · proyecto ↗"
+ * (wide screens). What it holds depends on the KIND of session, never on
+ * the view, and it stays one line: the bar's height is part of the
+ * terminal's box (a different height would resize tmux on a view switch).
+ */
+function paintBarIdentity(): void {
+	const s = sessions.find((x) => x.sessionId === activeSessionId);
+	if (!s) return;
+	terminalToolbar.dataset.sessionName = s.name;
+	const acp = acpAgentsEnabled() ? acpEntry(s.sessionId) : null;
+	terminalToolbar.classList.toggle("bar-agent", acp !== null);
+	// Shell v1 shows the ⋯ only where it holds something its bar lacks: an
+	// agent's settings (v2 shows it on every session).
+	if (sessionMenuBtn && currentShell() !== "v2") sessionMenuBtn.hidden = acp === null;
 	// A running session whose terminal gave up reads "disconnected" until
 	// a pane is attached again (Reconnect) — the server-side status alone
 	// would say "running" over an empty area.
@@ -1559,12 +1612,60 @@ export function updateToolbar() {
 		s.status === "running" && disconnectedTabId !== null && currentActiveTabId === null
 			? "disconnected"
 			: s.status;
-	setStatusBadge(badge);
-	// Refresh the mobile header context pill — its label tracks the
-	// active session/tab, and visibility flips on/off here.
-	updateChromeToggle();
-	syncSessionViews();
-	renderTerminalState();
+	if (!acp) {
+		terminalSessionName.textContent = s.name;
+		nameFloor(terminalSessionName);
+		// A long name shows with an ellipsis (terminal.css): the full one on hover.
+		terminalSessionName.title = s.name;
+		terminalSessionName.style.removeProperty("--acp-hue");
+		if (terminalSessionSub) terminalSessionSub.hidden = true;
+		setStatusBadge(badge);
+		terminalStatusBadge.removeAttribute("title");
+		return;
+	}
+	terminalSessionName.textContent = `@${acp.name}`;
+	nameFloor(terminalSessionName);
+	terminalSessionName.title = `@${acp.name} — sesión ${s.name}`;
+	terminalSessionName.style.setProperty("--acp-hue", String(agentHue(acp.name)));
+	if (s.status === "running" && badge === "running") {
+		const st = sidebarAgentStatus(acp, acpAgentsReadAt(), startedAt(s.sessionId));
+		terminalStatusBadge.textContent = st.word;
+		terminalStatusBadge.className = `chip tone-${st.tone}${st.asks ? " asks" : ""}`;
+		terminalStatusBadge.title = `Agente: ${st.label}`;
+	} else {
+		setStatusBadge(badge);
+		terminalStatusBadge.removeAttribute("title");
+	}
+	if (!terminalSessionSub) return;
+	const project = acp.projectId ? projects().find((p) => p.projectId === acp.projectId) : null;
+	// The session's name gives way (ellipsis), never the project's link.
+	const session = document.createElement("span");
+	session.className = "terminal-session-sub-name";
+	session.textContent = `sesión ${s.name}`;
+	const parts: Array<string | HTMLElement> = [session];
+	if (project) {
+		const a = document.createElement("a");
+		a.href = projectRouteHash({ projectId: project.projectId });
+		a.textContent = `${project.name} ↗`;
+		a.title = `Abrir Project Chat: ${project.name}`;
+		a.addEventListener("click", (e) => {
+			if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+			e.preventDefault();
+			navigateProject({ projectId: project.projectId });
+		});
+		parts.push(" · ", a);
+	}
+	terminalSessionSub.replaceChildren(...parts);
+	terminalSessionSub.hidden = false;
+}
+
+/**
+ * The title keeps at least 8 characters before anything else gives way —
+ * but a floor must not WIDEN a shorter name ("docs" would push the rest
+ * right): min(8ch, its own length), terminal.css `--name-ch`.
+ */
+function nameFloor(name: HTMLElement): void {
+	name.style.setProperty("--name-ch", `${[...(name.textContent ?? "")].length}ch`);
 }
 
 // ── Tabs within the active session ──────────────────────────────────────────

@@ -205,7 +205,8 @@ html[data-shell="v2"] #sidebar-footer {
 @media (max-width: 768px) {
   html[data-shell="v2"][data-bar="merged"] header {
     gap: 0.3rem;
-    padding: 0.3rem 0.5rem;
+    /* The bar's controls are 44 px tall (UX iter3 §2): they make the row. */
+    padding: 0 0.5rem;
     min-height: 44px;
   }
   html[data-shell="v2"][data-bar="merged"] header #sidebar-toggle {
@@ -218,11 +219,13 @@ html[data-shell="v2"] #sidebar-footer {
     margin: 0;
     background: transparent;
     border: 0;
-    gap: 0.3rem;
+    gap: 2px;
   }
   html[data-shell="v2"][data-bar="merged"] header #terminal-session-name {
     flex: 1 1 auto;
-    min-width: 4.5rem;
+    /* 7 characters on a phone (8 on wider bars), never more than the name. */
+    min-width: min(7ch, var(--name-ch, 0ch));
+    margin-right: 4px;
     font-size: 0.85rem;
     font-weight: 600;
   }
@@ -231,22 +234,50 @@ html[data-shell="v2"] #sidebar-footer {
     flex-shrink: 0;
     gap: 0;
   }
+  /* Touch targets 44 px tall; the tabs and ⋯ 40 px wide (icons): with the
+     title's 7 characters, four tabs, ⋯ and the account that is what a
+     400-px bar holds. */
   html[data-shell="v2"][data-bar="merged"] header #view-switch button {
     padding: 0.3rem 0.35rem;
-    min-width: 34px;
-    min-height: 34px;
+    min-width: 40px;
+    min-height: 44px;
     justify-content: center;
   }
   html[data-shell="v2"][data-bar="merged"] header #session-menu-btn {
-    min-width: 34px;
-    min-height: 34px;
-    padding: 0.2rem 0.4rem;
+    min-width: 40px;
+    width: 40px;
+    min-height: 44px;
+    padding: 0;
     flex-shrink: 0;
   }
   html[data-shell="v2"][data-bar="merged"] #user-menu-btn {
-    width: 34px;
-    height: 34px;
+    width: 44px;
+    height: 44px;
     flex-shrink: 0;
+  }
+}
+/* Under 400 px the account goes to the drawer's footer (the title would
+   lose its 7 characters to it); 360 px and less, the bar takes the header's
+   whole width and the title keeps 6. The tabs never go under 40 px. */
+@media (max-width: 399px) {
+  html[data-shell="v2"][data-bar="merged"] #user-menu-btn {
+    display: none;
+  }
+  html[data-shell="v2"] #sidebar-footer {
+    display: flex !important;
+    flex-wrap: wrap;
+  }
+  /* The account's actions, now in the drawer: 44-px touch targets. */
+  html[data-shell="v2"] #sidebar-footer button {
+    min-height: 44px;
+  }
+}
+@media (max-width: 360px) {
+  html[data-shell="v2"][data-bar="merged"] header {
+    padding: 0 4px;
+  }
+  html[data-shell="v2"][data-bar="merged"] header #terminal-session-name {
+    min-width: min(6ch, var(--name-ch, 0ch));
   }
 }
 @media (max-width: 400px) {
