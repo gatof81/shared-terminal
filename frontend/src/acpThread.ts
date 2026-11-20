@@ -1584,8 +1584,9 @@ export class AcpThread {
 						this.noteLive({ row });
 						this.messages = upsert(this.messages, row);
 					}
-				} catch {
-					failed.push(`@${name}`);
+				} catch (err) {
+					const why = SEND_REFUSED.get((err as { code?: string }).code ?? "");
+					failed.push(why ? `@${name} (${why})` : `@${name}`);
 				}
 			}
 			// The person may have moved to another chat meanwhile: nothing of this
@@ -1611,6 +1612,17 @@ export class AcpThread {
 		}
 	}
 }
+
+/**
+ * The refusals a person can act on, in fixed words (never the server's own
+ * text): retrying the same send would fail the same way, so they say why.
+ * Any other failure is just "No se envió a @x." — a retry may well work.
+ */
+const SEND_REFUSED = new Map([
+	["not-in-project", "ya no está en este proyecto"],
+	["unknown-recipient", "ese agente ya no existe"],
+	["project-not-found", "el proyecto ya no existe"],
+]);
 
 /** States in which a message is over: reaching one is news for the pill. */
 const FINAL = new Set(["done", "failed", "uncertain"]);
