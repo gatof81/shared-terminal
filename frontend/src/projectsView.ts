@@ -15,6 +15,7 @@
 import {
 	acpProjectPage,
 	onProjectFeed,
+	openAgentsPanel,
 	type ProjectPageMode,
 	projectFeed,
 	refreshAcpAgents,
@@ -33,6 +34,7 @@ import {
 	projectChatEnabled,
 	renameProject,
 } from "./api.js";
+import { openActionMenu } from "./components/actionMenu.js";
 import { confirmDialog, promptDialog } from "./components/dialog.js";
 import { showToast } from "./components/toast.js";
 import {
@@ -273,16 +275,36 @@ function header(pid: string, name: string | null, st: PageState): HTMLElement {
 	title.tabIndex = -1;
 	const tools = el("div", "pv-tools");
 	// Writes only on a project confirmed live (fail-closed: see evaluate).
+	// One row: the title, a ⋯ menu (the app's action menu: Escape, focus
+	// back to the button, arrows between items) and ×.
 	if (st === "active") {
-		const rename = button("Renombrar", "pv-btn", () => void renameFlow(pid, name ?? ""));
-		const archive = button(
-			"Archivar",
-			"pv-btn",
-			() => void archiveFlow(pid, name ?? "este proyecto"),
+		const menu = button(
+			"⋯",
+			"pv-btn pv-menu-btn",
+			() =>
+				openActionMenu({
+					title: name ?? "Proyecto",
+					opener: menu,
+					items: [
+						{ id: "agents", label: "Administrar agentes" },
+						{ id: "rename", label: "Renombrar" },
+						{
+							id: "archive",
+							label: "Archivar",
+							kind: "danger",
+							hint: "No se puede deshacer desde la app; el historial sigue legible.",
+						},
+					],
+					onPick: (id) => {
+						if (id === "rename") void renameFlow(pid, name ?? "");
+						else if (id === "archive") void archiveFlow(pid, name ?? "este proyecto");
+						else openAgentsPanel(menu);
+					},
+				}),
+			"Acciones del proyecto",
 		);
-		archive.title =
-			"Deja de mostrarse y no se puede deshacer desde la app; sus agentes quedan sin proyecto. El historial sigue legible en el chat de cada agente y en la URL del proyecto.";
-		tools.append(rename, archive);
+		menu.setAttribute("aria-haspopup", "menu");
+		tools.append(menu);
 	}
 	const close = button("×", "pv-close", leavePage, "Cerrar el proyecto");
 	tools.append(close);

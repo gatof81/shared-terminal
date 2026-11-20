@@ -17,11 +17,57 @@
 	display: flex;
 	flex-direction: column;
 }
+/* The individual chat's header: one row — name, state, its project (a link,
+   truncated), Ajustes — and the settings panel under it, closed by default. */
 .acp-chat-title {
 	display: flex;
-	flex-wrap: wrap;
+	flex-wrap: nowrap;
 	align-items: center;
 	gap: 6px 10px;
+	min-width: 0;
+}
+.acp-chat-name,
+.acp-chat-projlink {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.acp-chat-name {
+	flex: 0 1 auto;
+}
+.acp-chat-title > .acp-status {
+	flex: none;
+}
+.acp-chat-projlink {
+	flex: 0 1 auto;
+}
+.acp-settings-btn {
+	flex: none;
+	margin-left: auto;
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+}
+/* A pending or refused model, seen with the panel closed. */
+.acp-settings-flag {
+	font-weight: 700;
+	color: var(--c-warn);
+}
+.acp-settings-flag[hidden] {
+	display: none;
+}
+.acp-settings-btn.acp-settings-failed {
+	border-color: var(--c-warn);
+	color: var(--c-warn);
+}
+.acp-settings:not([hidden]) {
+	display: flex;
+	flex-direction: column;
+	margin-top: 8px;
+}
+.acp-notice-short {
+	display: none;
 }
 .acp-chat-meta {
 	font-size: 0.78rem;
@@ -140,6 +186,19 @@
 .acp-project .pv-header {
 	flex: none;
 }
+/* Row 1: the title (one line, cut with an ellipsis), ⋯ and ×. A zero basis
+   keeps the tools on the title's line however long the name is. */
+.acp-project .pv-title {
+	flex: 1 1 0;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.pv-menu-btn {
+	min-width: 2.75rem;
+	justify-content: center;
+	font-size: 1rem;
+}
 .acp-project-agents {
 	flex: none;
 	display: flex;
@@ -148,15 +207,23 @@
 	padding: 8px 0;
 	border-bottom: 1px solid var(--c-border);
 }
+/* Row 2: the agents on one line (name + state); it scrolls sideways. */
 .acp-agent-chips {
 	display: flex;
-	flex-wrap: wrap;
+	flex-wrap: nowrap;
+	overflow-x: auto;
+	scrollbar-width: none;
 	gap: 6px;
 	list-style: none;
 	margin: 0;
 	padding: 0;
 }
+.acp-agent-chips::-webkit-scrollbar {
+	display: none;
+}
 .acp-agent-chip {
+	flex: none;
+	white-space: nowrap;
 	display: flex;
 	align-items: center;
 	gap: 6px;
@@ -170,19 +237,6 @@
 	font-weight: 600;
 	color: inherit;
 }
-.acp-chip-remove {
-	border: none;
-	background: transparent;
-	color: inherit;
-	opacity: 0.6;
-	cursor: pointer;
-	min-width: 1.8rem;
-	min-height: 1.8rem;
-	font-size: 1rem;
-}
-.acp-chip-remove:hover {
-	opacity: 1;
-}
 .acp-project-tools {
 	display: flex;
 	flex-wrap: wrap;
@@ -193,6 +247,43 @@
 	margin: 0;
 	font-size: 0.78rem;
 	opacity: 0.75;
+}
+/* "Administrar agentes" (from the ⋯ menu; open on a project with no agents). */
+.acp-agents-panel:not([hidden]) {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	padding: 8px 10px;
+	border: 1px solid var(--c-border);
+	border-radius: 8px;
+	background: var(--c-surface);
+}
+.acp-agents-panel-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+.acp-agents-panel-body {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+.acp-manage-list {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px 12px;
+	list-style: none;
+	margin: 0;
+	padding: 0;
+}
+.acp-manage-list:empty {
+	display: none;
+}
+.acp-manage-item {
+	display: flex;
+	align-items: center;
+	gap: 6px;
 }
 .acp-project .acp-thread {
 	border: 1px solid var(--c-border);
@@ -222,9 +313,6 @@
 		border-radius: 0;
 	}
 	/* The thread is what matters on a phone: the agents bar stays compact. */
-	.acp-project-help {
-		display: none;
-	}
 	.acp-project .pv-title {
 		font-size: 1rem;
 	}
@@ -234,7 +322,14 @@
 	.acp-project-tools .files-btn,
 	.acp-add-select {
 		font-size: 0.78rem;
-		min-height: 2.2rem;
+		min-height: 44px;
+	}
+	/* 44-px touch targets: the agents' links and the panel's buttons. */
+	.acp-agent-chip {
+		min-height: 44px;
+	}
+	.acp-agent-remove {
+		min-height: 44px;
 	}
 	.acp-project-agents {
 		gap: 4px;
@@ -527,9 +622,42 @@ pre.acp-msg-body {
 }
 /* After the rules above, which it overrides on a phone. */
 @media (max-width: 640px) {
+	/* Header controls: 44-px touch targets. */
+	.acp-settings-btn,
+	.acp-chat-projlink {
+		min-height: 44px;
+	}
+	/* Its own line box (a flex container would lose the ellipsis). */
+	.acp-chat-projlink {
+		line-height: 44px;
+	}
+	.acp-settings .acp-project-select,
+	.acp-settings .acp-model-select,
+	.acp-settings .files-btn {
+		min-height: 44px;
+	}
+	.acp-chat-header {
+		padding-top: 6px;
+		padding-bottom: 6px;
+	}
+	.acp-notice-long {
+		display: none;
+	}
+	.acp-notice-short {
+		display: inline;
+	}
+	.acp-login-actions .files-btn {
+		min-height: 44px;
+	}
 	.acp-chat-composer {
 		padding-top: 8px;
 		padding-bottom: 8px;
+	}
+	/* The field is one line: so is its placeholder (cut with an ellipsis). */
+	.acp-chat-input::placeholder {
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 	/* One line at rest: 44 px, a touch target as tall as Enviar. */
 	.acp-chat-input {
