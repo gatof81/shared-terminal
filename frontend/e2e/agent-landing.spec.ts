@@ -187,3 +187,40 @@ test.describe("the agents list never makes every selection wait", () => {
 		expect(await stoppedPanelSeen(page), "the second selection did not wait").toBe(false);
 	});
 });
+
+test.describe("the agents list's background retry", () => {
+	test("reads nothing while the tab is hidden; one read when it shows again", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.enableAcp();
+		let reads = 0;
+		backend.override = async (method, path, route) => {
+			if (method !== "GET" || path !== "/acp/agents") return false;
+			reads++;
+			await route.fulfill({
+				status: 503,
+				contentType: "application/json",
+				body: '{"error":"down"}',
+			});
+			return true;
+		};
+		await app.login("alice");
+		await expect.poll(() => reads).toBeGreaterThanOrEqual(1);
+		const hide = (hidden: boolean) =>
+			page.evaluate((h) => {
+				Object.defineProperty(document, "hidden", { configurable: true, get: () => h });
+				document.dispatchEvent(new Event("visibilitychange"));
+			}, hidden);
+		await hide(true);
+		const before = reads;
+		// The first retry is due 5 s after the failure: past it, still nothing.
+		await page.waitForTimeout(7_000);
+		expect(reads, "no read while hidden").toBe(before);
+		await hide(false);
+		await expect.poll(() => reads).toBe(before + 1);
+		await page.waitForTimeout(1_000);
+		expect(reads, "one read, not a burst").toBe(before + 1);
+	});
+});
