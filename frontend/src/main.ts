@@ -5,7 +5,7 @@
  * and terminal panel lifecycle.
  */
 
-// DEMO BRANCH ONLY (preview/mobile-chat-demo, never merged): an in-page
+// DEMO BRANCH ONLY (preview/ux-iter3-demo, never merged): an in-page
 // backend — fetch and WebSocket answered by the e2e mock, no network.
 import "./demo/demoBackend.js";
 
