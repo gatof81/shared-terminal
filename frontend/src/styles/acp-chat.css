@@ -760,7 +760,12 @@ pre.acp-msg-body {
 	font-size: 18px;
 	line-height: 1;
 }
-.acp-cbtn:focus-visible {
+.acp-cbtn:focus-visible,
+/* The individual chat lives in #chat-view, whose own `:focus-visible` ring
+   (chat.css) outweighs these classes: the surface (or the circle) is the
+   only ring, there too. */
+#chat-view .acp-chat-input:focus-visible,
+#chat-view .acp-cbtn:focus-visible {
 	outline: none;
 }
 .acp-cbtn:focus-visible .acp-cbtn-face {
