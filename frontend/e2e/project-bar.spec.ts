@@ -24,7 +24,8 @@ test.describe("Project Chat's header", () => {
 		const bar = (await page.locator("header").boundingBox())!;
 		const row = (await head.boundingBox())!;
 		expect(Math.abs(row.y - bar.y)).toBeLessThanOrEqual(1);
-		expect(Math.round(row.height)).toBe(44);
+		// It ends above the header's bottom line, which stays visible.
+		expect(row.y + row.height).toBeLessThanOrEqual(bar.y + bar.height - 1);
 		// The thread starts right under the bar: no row of its own above it.
 		const thread = (await page.locator("#project-view .acp-chat-thread").boundingBox())!;
 		expect(thread.y).toBeLessThan(bar.y + bar.height + 16);

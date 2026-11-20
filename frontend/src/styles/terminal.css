@@ -81,6 +81,11 @@
   font-weight: 700;
   color: var(--c-warn);
 }
+/* A flagged ⋯ grows to hold its mark (a fixed icon width drew it outside). */
+#session-menu-btn:has(.bar-menu-flag) {
+  width: auto;
+  padding: 0 6px;
+}
 /* Shell v1: the ⋯ (an agent's session only) is the bar's last control, and
    no taller than its tallest other one (the tabs, 22 px): the bar must be
    as tall for an agent's session as for any other (context-bar.spec). */

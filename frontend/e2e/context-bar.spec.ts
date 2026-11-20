@@ -66,6 +66,11 @@ test.describe("context bar", () => {
 		const more = page.locator("#session-menu-btn");
 		await expect(more).toHaveAccessibleName("Session actions (el modelo no se aplicó)");
 		await expect(more.locator(".bar-menu-flag")).toHaveText("!");
+		// The mark sits inside the button, clear of its edge (a fixed icon
+		// width left it touching the edge: it read as outside the button).
+		const btn = (await more.boundingBox())!;
+		const mark = (await more.locator(".bar-menu-flag").boundingBox())!;
+		expect(btn.x + btn.width - (mark.x + mark.width)).toBeGreaterThanOrEqual(4);
 		await more.click();
 		const first = page.getByRole("menuitem").first();
 		await expect(first).toContainText("Ajustes del agente");
