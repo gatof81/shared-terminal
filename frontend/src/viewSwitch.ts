@@ -24,6 +24,7 @@
  * here; this module imports neither, so it can't form a cycle with them.
  */
 
+import { isAcpAgentSession } from "./acpRegistry.js";
 import {
 	activeSessionId,
 	currentTerminals,
@@ -323,11 +324,12 @@ export function setView(next: View, opts: { forced?: boolean; landing?: boolean 
 
 /** The policy's landing for a session (viewPolicy.ts), from what is already known. */
 export function landingFor(sessionId: string, running: boolean): View {
-	if (currentShell() !== "v2") return running ? "terminal" : "files";
 	return chooseLanding({
 		pref: readViewPref(sessionId),
 		hasHistory: readHistoryHint(sessionId),
 		running,
+		isAgent: isAcpAgentSession(sessionId),
+		shell: currentShell() === "v2" ? "v2" : "v1",
 	});
 }
 

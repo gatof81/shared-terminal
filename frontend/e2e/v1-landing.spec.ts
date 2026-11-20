@@ -1,5 +1,5 @@
 import { expect, test } from "./fixtures.js";
-import { SESSION_IDS } from "./mockBackend.js";
+import { PROJECT_SESSION_IDS, SESSION_IDS } from "./mockBackend.js";
 
 const S = SESSION_IDS.running;
 
@@ -59,5 +59,29 @@ test.describe("shell v1 landing (unchanged)", () => {
 		await expect.poll(() => page.url()).toContain(`#/sessions/${S}/terminal/tab-1`);
 		// The navigation itself is the one entry.
 		expect(await page.evaluate(() => history.length)).toBe(base + 1);
+	});
+
+	test("with ACP agents on: an agent's session opens on its Chat, a traditional one exactly as before", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.enableAcp();
+		// A remembered Chat for the traditional session is still ignored by v1.
+		await page.addInitScript((k: string) => {
+			try {
+				localStorage.setItem(k, "chat");
+			} catch {
+				/* ignore */
+			}
+		}, `st.view.${S}`);
+		await app.login("alice");
+		await app.openSession("scratch");
+		await app.expectView("chat");
+		await expect.poll(() => page.url()).toContain(`#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
+		await app.openSession("my-project");
+		await app.expectTerminalReady();
+		await app.openSession("docs");
+		await app.expectView("files");
 	});
 });

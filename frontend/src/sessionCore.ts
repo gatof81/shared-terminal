@@ -9,9 +9,11 @@
  * used only inside functions, so the circular import is TDZ-safe.
  */
 
-import { acpEntry } from "./acpRegistry.js";
+import { acpEntry, isAcpAgentSession, setAcpAgents } from "./acpRegistry.js";
 import { openObserversModalFor } from "./admin.js";
 import {
+	acpAgentsEnabled,
+	acpListAgents,
 	createTab,
 	deleteSession,
 	deleteTab,
@@ -76,6 +78,7 @@ import { badgeFor, clearBadge, recordOutput } from "./tabActivity.js";
 import { openTerminalSession, type SessionStatus } from "./terminal.js";
 import { currentShell } from "./uiShell.js";
 import {
+	landsByPolicy,
 	readHistoryHint,
 	readLastConversation,
 	readLastConversationTitle,
@@ -879,27 +882,63 @@ let wantedTabId: string | null = null;
 // session lands as if it had none; the Chat list corrects the memory.
 const LANDING_HISTORY_WAIT_MS = 1500;
 
+/** Is the session an ACP agent's: false with the feature off, null until the list was read. */
+function agentKnown(sessionId: string): boolean | null {
+	return acpAgentsEnabled() ? isAcpAgentSession(sessionId) : false;
+}
+
+// The one read of the agents list a landing may wait on (acpRegistry is
+// otherwise filled by the ACP chats): shared by overlapping selections.
+let agentsRead: Promise<void> | null = null;
+function readAgents(): Promise<void> {
+	agentsRead ??= acpListAgents()
+		.then(setAcpAgents, () => {})
+		.finally(() => {
+			agentsRead = null;
+		});
+	return agentsRead;
+}
+
+/** The landing from what is known now; null = shell v1's own flow (a traditional session). */
+function landingNow(sessionId: string, running: boolean): View | null {
+	const shell = currentShell() === "v2" ? "v2" : "v1";
+	// Past the wait, an agent list still unread counts as "not an agent".
+	if (!landsByPolicy(shell, agentKnown(sessionId) ?? false)) return null;
+	return landingFor(sessionId, running);
+}
+
 /**
- * Resolve the landing view (UI unification §9, decision 1) for a session
- * being selected. Synchronous when the person's choice or the history
- * answer is already remembered; otherwise the one request that decides
- * Chat vs Terminal/Files runs now, in parallel with the tab listing.
+ * Resolve the landing view (UI unification §9, decision 1; viewPolicy.ts)
+ * for a session being selected. Synchronous when everything it depends on
+ * is known; otherwise the reads that decide it — is it an agent's session
+ * (both shells), has it captured history (v2) — run now, once each, in
+ * parallel with the tab listing, and the landing waits for them (bounded).
+ * null: shell v1's own flow (a traditional session, unchanged).
  */
-function decideLanding(sessionId: string, running: boolean): View | Promise<View> {
-	if (currentShell() !== "v2") return landingFor(sessionId, running);
-	if (readViewPref(sessionId) !== null || readHistoryHint(sessionId) !== null) {
-		return landingFor(sessionId, running);
-	}
-	const asked = fetchConversations(sessionId, { capture: false })
-		.then((d) => {
-			writeHistoryHint(sessionId, d.conversations.length > 0);
-			return d.conversations.length > 0;
-		})
-		.catch(() => null);
+function decideLanding(sessionId: string, running: boolean): View | null | Promise<View | null> {
+	const v2 = currentShell() === "v2";
+	const agent = agentKnown(sessionId);
+	if (!landsByPolicy(v2 ? "v2" : "v1", agent)) return null;
+	const reads: Promise<unknown>[] = [];
+	if (agent === null) reads.push(readAgents());
+	// The history answer matters only for a v2 session that is not known to
+	// be an agent's and has nothing remembered.
+	if (
+		v2 &&
+		agent !== true &&
+		readViewPref(sessionId) === null &&
+		readHistoryHint(sessionId) === null
+	)
+		reads.push(
+			fetchConversations(sessionId, { capture: false })
+				.then((d) => writeHistoryHint(sessionId, d.conversations.length > 0))
+				.catch(() => null),
+		);
+	if (reads.length === 0) return landingNow(sessionId, running);
 	const wait = new Promise<null>((resolve) =>
 		setTimeout(() => resolve(null), LANDING_HISTORY_WAIT_MS),
 	);
-	return Promise.race([asked, wait]).then(() => landingFor(sessionId, running));
+	return Promise.race([Promise.all(reads), wait]).then(() => landingNow(sessionId, running));
 }
 
 export async function openSession(
@@ -917,12 +956,13 @@ export async function openSession(
 	renderSessionList();
 	const meta = sessions.find((x) => x.sessionId === sessionId);
 	const running = meta?.status === "running";
-	// The landing view (viewPolicy.ts) — shell v2 only; v1 keeps its own
-	// flow below (the open view stays, a stopped session opens in Files) —
-	// unless the route names one (the router applies it right after).
-	// While it is being decided the view sync must not land a fallback of
-	// its own, and a view the person picks meanwhile wins over it.
-	const landing = opts.view || currentShell() !== "v2" ? null : decideLanding(sessionId, running);
+	// The landing view (viewPolicy.ts) — shell v2, and an agent's session
+	// in v1; a traditional v1 session keeps its own flow below (the open
+	// view stays, a stopped session opens in Files) — unless the route
+	// names one (the router applies it right after). While it is being
+	// decided the view sync must not land a fallback of its own, and a
+	// view the person picks meanwhile wins over it.
+	const landing = opts.view ? null : decideLanding(sessionId, running);
 	const choiceAt = choiceGeneration();
 	// The pending landing belongs to THIS session (viewSwitch keys it by
 	// id): an overlapping open of another session neither ends it early
@@ -939,7 +979,7 @@ async function openSessionBody(
 	sessionId: string,
 	meta: SessionInfo | undefined,
 	running: boolean,
-	landing: View | Promise<View> | null,
+	landing: View | null | Promise<View | null> | null,
 	choiceAt: number,
 ): Promise<void> {
 	// updateToolbar → syncSessionViews re-keys every view to this session
@@ -956,6 +996,11 @@ async function openSessionBody(
 		if (activeSessionId !== sessionId) return false;
 		// The person chose a view while this was deciding: theirs stands.
 		if (choiceGeneration() !== choiceAt) return true;
+		// Not an agent after all (v1): v1's own flow — a stopped session in Files.
+		if (v === null) {
+			if (!running) showFilesOnly();
+			return true;
+		}
 		landView(v, { forced: !running });
 		return true;
 	};
