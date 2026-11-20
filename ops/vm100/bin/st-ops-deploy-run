@@ -1,0 +1,15 @@
+#!/bin/bash
+# st-ops-deploy-run <id> — the deploy pipeline, launched by `st-ops deploy` under systemd-run so that a lost SSH
+# connection never interrupts it. Root only; not reachable through sudoers.
+set -euo pipefail
+umask 077
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export LC_ALL=C
+ST_OPS_ETC=/etc/st-ops
+ST_OPS_STATE=/var/lib/st-ops
+ST_OPS_LIB=/usr/local/lib/st-ops
+# shellcheck source=../lib/st-ops-lib.sh
+source "$ST_OPS_LIB/st-ops-lib.sh"
+# shellcheck source=../lib/st-ops-deploy.sh
+source "$ST_OPS_LIB/st-ops-deploy.sh"
+deploy_run "$@"

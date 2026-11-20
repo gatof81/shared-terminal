@@ -1,0 +1,13 @@
+#!/bin/bash
+# st-ops-root — root side of st-ops (ops/vm100/README.md). Every path is fixed here, never taken from the
+# environment (sudo env_reset already drops it) or from the caller.
+set -euo pipefail
+umask 077
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export LC_ALL=C
+ST_OPS_ETC=/etc/st-ops
+ST_OPS_STATE=/var/lib/st-ops
+ST_OPS_LIB=/usr/local/lib/st-ops
+# shellcheck source=../lib/st-ops-lib.sh
+source "$ST_OPS_LIB/st-ops-lib.sh"
+st_ops_main "$@"
