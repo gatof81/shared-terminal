@@ -81,9 +81,16 @@
   font-weight: 700;
   color: var(--c-warn);
 }
-/* Shell v1: the ⋯ (an agent's session only) is the bar's last control. */
+/* Shell v1: the ⋯ (an agent's session only) is the bar's last control, and
+   no taller than its tallest other one (the tabs, 22 px): the bar must be
+   as tall for an agent's session as for any other (context-bar.spec). */
 html:not([data-shell="v2"]) #session-menu-btn {
   order: 10;
+}
+@media (pointer: fine) {
+  html:not([data-shell="v2"]) #session-menu-btn {
+    height: 22px;
+  }
 }
 
 /* The overlays' own bars (Files, Git, the capture Chat): one look — 36 px,
