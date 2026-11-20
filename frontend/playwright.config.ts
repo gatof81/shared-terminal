@@ -22,9 +22,9 @@ const PORT = 5174;
 const PR_PROFILE = process.env.E2E_PROFILE === "pr";
 const V2_SPECIFIC =
 	/(shell-v2|chat-first|terminal-invariant|navigation|router|session-bar|keyboard|visual)\.spec\.ts/;
-const STACKED_BAR = PR_PROFILE
-	? /(shell-v2|terminal-invariant|navigation)\.spec\.ts/
-	: /(navigation|terminal-invariant|shell-v2|visual)\.spec\.ts/;
+// TEMPORARY (PR #714, reverted before review): the stacked bar's screenshots
+// on this PR, so its new baselines are the CI's own render.
+const STACKED_BAR = /(navigation|terminal-invariant|shell-v2|visual)\.spec\.ts/;
 const v2Match = PR_PROFILE ? { testMatch: V2_SPECIFIC } : {};
 
 export default defineConfig<ShellOptions>({
