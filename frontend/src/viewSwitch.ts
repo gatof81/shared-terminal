@@ -196,6 +196,55 @@ const terminalArea = document.getElementById("terminal-area");
 const viewNav = document.getElementById("view-nav");
 const navButtons = [...(viewNav?.querySelectorAll<HTMLButtonElement>("button[data-view]") ?? [])];
 
+// ── Typing in an overlay (the nav makes room for the soft keyboard) ─────────
+// While a text field of an overlay has the focus, #terminal-area carries
+// `kb-typing` and, on a touch screen, the nav takes no room (viewnav.css):
+// the soft keyboard covers that strip. The class must NOT follow `:focus`
+// live: a tap on any control of the overlay blurs the field on its
+// `mousedown`, and the nav coming back then would move the layout (55 px)
+// between that and the `click`, which would land elsewhere or nowhere. So a
+// blur only drops the class after the tap in progress has ended — after the
+// next `click` has been dispatched, or a short margin when no click follows
+// (Tab, the keyboard's own "done") — and focusing another text field
+// meanwhile keeps it.
+const TYPING_RELEASE_MS = 400;
+let typingRelease: (() => void) | null = null;
+
+function isOverlayTextField(t: EventTarget | null): boolean {
+	if (!(t instanceof HTMLElement) || !t.closest("#files-view, #git-view, #chat-view")) return false;
+	if (t instanceof HTMLTextAreaElement) return true;
+	return (
+		t instanceof HTMLInputElement && ["text", "search", ""].includes(t.getAttribute("type") ?? "")
+	);
+}
+
+function cancelTypingRelease(): void {
+	typingRelease?.();
+	typingRelease = null;
+}
+
+document.addEventListener("focusin", (e) => {
+	if (!isOverlayTextField(e.target)) return;
+	cancelTypingRelease();
+	terminalArea?.classList.add("kb-typing");
+});
+document.addEventListener("focusout", (e) => {
+	if (!isOverlayTextField(e.target)) return;
+	cancelTypingRelease();
+	const drop = () => {
+		cancelTypingRelease();
+		if (!isOverlayTextField(document.activeElement)) terminalArea?.classList.remove("kb-typing");
+	};
+	// After the click's own handlers ran (capture listener → next task).
+	const onClick = () => setTimeout(drop, 0);
+	const timer = setTimeout(drop, TYPING_RELEASE_MS);
+	document.addEventListener("click", onClick, { capture: true, once: true });
+	typingRelease = () => {
+		clearTimeout(timer);
+		document.removeEventListener("click", onClick, { capture: true });
+	};
+});
+
 // ── State ───────────────────────────────────────────────────────────────────
 
 let view: View = "terminal";

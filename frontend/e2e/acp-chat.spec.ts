@@ -243,10 +243,145 @@ test.describe("ACP chat composer and scroll", () => {
 		});
 		backend.pushAcp({ type: "message", message: row });
 		await expect(thread).toContainText("Llegó mientras leías");
-		await expect(pill).toHaveText("↓ 1 nuevo");
+		await expect(pill).toHaveText("↓ 1 novedad");
 		expect(await thread.evaluate((el) => el.scrollTop)).toBe(40);
 		await pill.click();
 		await expect.poll(gap).toBeLessThan(4);
 		await expect(pill).toBeHidden();
+	});
+
+	test("an answer to a row already shown counts in the pill; tapping it goes to the end", async ({
+		page,
+		app,
+		backend,
+	}, info) => {
+		const asked = backend.addAcpMessage({ to_id: "solo", body: "¿Cómo seguimos?" });
+		await app.login("alice", chatOf(PROJECT_SESSION_IDS.scratch));
+		const thread = page.locator("#acp-chat .acp-chat-thread");
+		await expect(thread).toContainText("¿Cómo seguimos?");
+		const gap = () =>
+			thread.evaluate((el) => Math.round(el.scrollHeight - el.clientHeight - el.scrollTop));
+		await expect.poll(gap).toBeLessThan(4);
+		await thread.evaluate((el) => {
+			el.scrollTop = 40;
+			el.dispatchEvent(new Event("scroll"));
+		});
+		const pill = page.locator("#acp-chat .acp-new-pill");
+		// Live activity of the running message is not news.
+		backend.updateAcpMessage(asked.id, { state: "running" });
+		await page.waitForTimeout(300);
+		await expect(pill).toBeHidden();
+		backend.updateAcpMessage(asked.id, {
+			state: "done",
+			result_text: Array.from({ length: 30 }, (_, i) => `Paso ${i + 1}.`).join("\n\n"),
+		});
+		await expect(thread).toContainText("Paso 30.");
+		await expect(pill).toHaveText("↓ 1 novedad");
+		await expect(page.locator("#acp-chat .acp-thread-wrap [role=status]")).toHaveText(
+			"1 novedad más abajo",
+		);
+		expect(await thread.evaluate((el) => el.scrollTop)).toBe(40);
+		if (info.project.use.isMobile) {
+			// A 44-px touch target around the pill: 8 px above its edge is still the pill.
+			const box = (await pill.boundingBox())!;
+			expect(
+				await page.evaluate(
+					([x, y]) => document.elementFromPoint(x!, y!)?.classList.contains("acp-new-pill"),
+					[box.x + box.width / 2, box.y - 8],
+				),
+			).toBe(true);
+		}
+		await pill.click();
+		await expect.poll(gap).toBeLessThan(4);
+		await expect(pill).toBeHidden();
+	});
+});
+
+// A phone (v1, bottom nav): with the field focused, one tap on any control of
+// the chat does what it says — the nav coming back must not move the layout
+// between the tap's mousedown and its click.
+test.describe("ACP chat: taps with the keyboard up", () => {
+	test.beforeEach(({ backend }) => {
+		backend.enableAcp();
+		for (let i = 0; i < 14; i++)
+			backend.addAcpMessage({
+				to_id: "solo",
+				body: `Relleno ${i}`,
+				state: "done",
+				result_text: `Hecho ${i}.\n\nUna segunda línea para que el hilo ocupe lugar.`,
+			});
+	});
+
+	test("Recuperar el texto no enviado works on the first tap", async ({
+		page,
+		app,
+		backend,
+	}, info) => {
+		test.skip(!info.project.use.isMobile, "phone");
+		let fail = true;
+		backend.override = async (method, path, route) => {
+			if (method !== "POST" || path !== "/acp/messages" || !fail) return false;
+			await new Promise((r) => setTimeout(r, 400));
+			await route.fulfill({
+				status: 500,
+				contentType: "application/json",
+				body: '{"error":"caído"}',
+			});
+			return true;
+		};
+		await app.login("alice", chatOf(PROJECT_SESSION_IDS.scratch));
+		const input = page.locator("#acp-chat .acp-chat-input");
+		await input.fill("el primero");
+		await page.locator("#acp-chat .acp-chat-send").tap();
+		// Typed while the send was out: the failed text is offered, not written over this.
+		await input.fill("otro borrador");
+		const recover = page.locator("#acp-chat .acp-recover");
+		await expect(recover).toBeVisible();
+		fail = false;
+		await input.focus();
+		await expect(page.locator("#view-nav")).toBeHidden();
+		await recover.tap();
+		await expect(input).toHaveValue("otro borrador\n\nel primero");
+	});
+
+	test("an option of a question at the end of a long thread is chosen on the first tap", async ({
+		page,
+		app,
+		backend,
+	}, info) => {
+		test.skip(!info.project.use.isMobile, "phone");
+		const asking = backend.addAcpMessage({
+			to_id: "solo",
+			body: "elegí el proveedor",
+			state: "running",
+		});
+		backend.acpQuestions = [
+			{
+				id: 1,
+				agent: "solo",
+				message_id: asking.id,
+				request: JSON.stringify({
+					message: "¿Qué proveedor usamos?",
+					requestedSchema: {
+						type: "object",
+						properties: { p: { type: "string", title: "Proveedor", enum: ["GitHub", "Google"] } },
+						required: ["p"],
+					},
+				}),
+				state: "open",
+				answer: null,
+				created_at: "2026-10-31T10:29:30Z",
+				answered_at: null,
+				delivered_at: null,
+				note: null,
+			},
+		];
+		await app.login("alice", chatOf(PROJECT_SESSION_IDS.scratch));
+		const option = page.locator("#acp-chat .acp-question-open .acp-option", { hasText: "Google" });
+		await expect(option).toBeVisible();
+		await page.locator("#acp-chat .acp-chat-input").focus();
+		await expect(page.locator("#view-nav")).toBeHidden();
+		await option.tap();
+		await expect(option.locator("input")).toBeChecked();
 	});
 });

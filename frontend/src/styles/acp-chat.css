@@ -516,6 +516,15 @@ pre.acp-msg-body {
 .acp-new-pill {
 	bottom: 0.75rem;
 }
+/* A 44-px touch target around the small pill: a transparent extension of
+   the button (a tap on it is a tap on the pill); what is seen stays the same. */
+@media (pointer: coarse) {
+	.acp-new-pill::before {
+		content: "";
+		position: absolute;
+		inset: -9px -6px;
+	}
+}
 /* After the rules above, which it overrides on a phone. */
 @media (max-width: 640px) {
 	.acp-chat-composer {

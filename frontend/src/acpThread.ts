@@ -72,11 +72,22 @@ export class AcpThread {
 	readonly input = el("textarea", "acp-chat-input");
 	private readonly sendBtn = el("button", "files-btn acp-chat-send", "Enviar");
 	private readonly hint = el("div", "acp-chat-hint");
-	/** "↓ N nuevos": messages that arrived below a reader who is further up. */
+	/**
+	 * "↓ N novedades": rows that arrived, or got their answer, below a reader
+	 * who is further up. Each row counts once (a Set of ids).
+	 */
 	private readonly newPill = el("button", "chat-float acp-new-pill");
+	/** Says it to a screen reader too (the pill itself appears and goes). */
+	private readonly newAnnounce = el("div", "visually-hidden");
 	private readonly newIds = new Set<number>();
 	/** Highest message id the last render showed (new ones are above it). */
 	private shownMax = 0;
+	/**
+	 * Per row shown, its outcome as last rendered: a final state and whether
+	 * it has an answer. A change there is news; live activity and the partial
+	 * text of a running message are not (they would make the pill blink).
+	 */
+	private readonly shownOutcome = new Map<number, string>();
 	/**
 	 * Whether the reader is at the end of the thread, kept by scroll events.
 	 * The thread's height also changes WITHOUT a scroll event (the keyboard,
@@ -207,8 +218,10 @@ export class AcpThread {
 		this.newPill.type = "button";
 		this.newPill.hidden = true;
 		this.newPill.addEventListener("click", () => this.scrollToEnd());
+		this.newAnnounce.setAttribute("role", "status");
+		this.newAnnounce.setAttribute("aria-live", "polite");
 		const wrap = el("div", "acp-thread-wrap");
-		wrap.append(this.threadEl, this.newPill);
+		wrap.append(this.threadEl, this.newPill, this.newAnnounce);
 		this.threadEl.addEventListener(
 			"scroll",
 			() => {
@@ -320,6 +333,7 @@ export class AcpThread {
 			this.readOnce = false;
 			this.atBottom = true;
 			this.shownMax = 0;
+			this.shownOutcome.clear();
 			this.clearNew();
 			this.offerUnsent();
 			this.threadEl.replaceChildren(el("div", "acp-chat-empty", "Cargando…"));
@@ -616,22 +630,37 @@ export class AcpThread {
 		else if (prevTop < 5 && t.scrollHeight > prevHeight) t.scrollTop = t.scrollHeight - prevHeight;
 		else t.scrollTop = prevTop;
 		this.toBottom = false;
-		// New messages (ids above what was shown; an earlier page has lower
-		// ids) that landed below a reader who is further up.
+		// News below a reader who is further up: a new row (an id above what
+		// was shown — an earlier page has lower ids), or a row already shown
+		// that got its answer or finished.
+		const before = this.newIds.size;
+		for (const m of this.messages) {
+			const outcome = `${FINAL.has(m.state) ? m.state : ""}|${m.result_text ? "r" : ""}`;
+			const prev = this.shownOutcome.get(m.id);
+			if (!end && this.shownMax > 0) {
+				if (prev === undefined ? m.id > this.shownMax : prev !== outcome && outcome !== "|")
+					this.newIds.add(m.id);
+			}
+			this.shownOutcome.set(m.id, outcome);
+		}
 		if (end) {
 			this.atBottom = true;
 			this.clearNew();
-		} else if (this.shownMax > 0)
-			for (const m of this.messages) if (m.id > this.shownMax) this.newIds.add(m.id);
+		}
 		this.shownMax = Math.max(this.shownMax, this.messages.at(-1)?.id ?? 0);
 		this.renderPill();
+		if (this.newIds.size > before) this.newAnnounce.textContent = `${this.pillText()} más abajo`;
 		this.renderComposer();
 	}
 
-	private renderPill(): void {
+	private pillText(): string {
 		const n = this.newIds.size;
-		this.newPill.hidden = n === 0;
-		this.newPill.textContent = `↓ ${n} ${n === 1 ? "nuevo" : "nuevos"}`;
+		return `${n} ${n === 1 ? "novedad" : "novedades"}`;
+	}
+
+	private renderPill(): void {
+		this.newPill.hidden = this.newIds.size === 0;
+		this.newPill.textContent = `↓ ${this.pillText()}`;
 	}
 
 	private clearNew(): void {
@@ -1219,6 +1248,9 @@ export class AcpThread {
 		}
 	}
 }
+
+/** States in which a message is over: reaching one is news for the pill. */
+const FINAL = new Set(["done", "failed", "uncertain"]);
 
 function insertMention(input: HTMLTextAreaElement, name: string): void {
 	const start = input.selectionStart ?? input.value.length;
