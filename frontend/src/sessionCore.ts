@@ -672,8 +672,8 @@ function labelSessionRow(select: HTMLElement): void {
  * With projects on, the rows are grouped by the project their ACP agent
  * takes part in (acpRegistry.ts), in the project list's order and including
  * the projects without a session yet — the tree is where projects are
- * listed; every other session is in "Sin proyecto". The rows themselves are
- * the same as without the feature.
+ * listed. Then two sections: the agents that take part in no project, and
+ * the sessions worked from their Terminal (buildSection).
  */
 function renderGroupedSessions(): void {
 	const byProject = new Map<string, SessionInfo[]>();
