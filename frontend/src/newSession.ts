@@ -181,6 +181,9 @@ function ensureAcpAgentField(): void {
 	acpAgentInput.autocomplete = "off";
 	acpAgentInput.title = "Minúsculas, números y guiones. Se lo nombra con @nombre.";
 	const agentLabel = acpField("Agente ACP (opcional)", acpAgentInput);
+	acpAgentLabel = agentLabel;
+	acpAgentError = fieldError("new-session-acp-agent-error");
+	agentLabel.append(acpAgentError);
 	acpProjectSelect = document.createElement("select");
 	acpProjectSelect.id = "new-session-acp-project";
 	acpNewProjectInput = document.createElement("input");
@@ -210,12 +213,132 @@ function ensureAcpAgentField(): void {
 		if (acpNewProjectInput)
 			acpNewProjectInput.hidden = !on || acpProjectSelect?.value !== NEW_PROJECT;
 	};
-	acpAgentInput.addEventListener("input", sync);
+	acpAgentInput.addEventListener("input", () => {
+		sync();
+		clearFieldError(acpAgentInput!, acpAgentError!);
+		// Agent mode: the session takes the agent's name until the person
+		// writes one of their own.
+		if (agentMode && sessionNameFollows) {
+			newSessionInput.value = acpAgentInput!.value.trim();
+			clearFieldError(newSessionInput, sessionNameError);
+		}
+	});
 	acpProjectSelect.addEventListener("change", sync);
 	acpSyncFields = sync;
 	newSessionInput.closest("label")?.after(agentLabel, projectLabel, acpModelLabel, acpRuntimeLabel);
 }
 let acpSyncFields: () => void = () => {};
+let acpAgentLabel: HTMLLabelElement | null = null;
+let acpAgentError: HTMLElement | null = null;
+
+// ── Agent mode ("+ Nueva sesión con agente", from Project Chat) ─────────────
+// The same dialog, about the agent: titled "Nuevo agente", the agent's name
+// first and required, the session named after the agent unless the person
+// writes another name. Every other open (the sidebar's "+ New session",
+// templates) is the ordinary dialog, where the agent stays optional.
+let agentMode = false;
+let sessionNameFollows = false;
+/** Agent mode's opener ("+ Nueva sesión con agente"), for the focus on close. */
+let agentOpener: HTMLElement | null = null;
+/** Server-side rule for an agent's name (acp/agents.ts): the input's `pattern`, checked here. */
+const AGENT_NAME_RE = /^[a-z][a-z0-9-]{1,31}$/;
+
+function applyAgentMode(on: boolean): void {
+	agentMode = on;
+	sessionNameFollows = on;
+	if (!acpAgentInput || !acpAgentLabel) return;
+	acpAgentInput.required = on;
+	const cap = acpAgentLabel.querySelector(".session-field-label");
+	if (cap) cap.textContent = on ? "Nombre del agente" : "Agente ACP (opcional)";
+	const sessionLabel = newSessionInput.closest("label");
+	// The agent's field comes first in agent mode, after the session name otherwise.
+	if (on) sessionLabel?.before(acpAgentLabel);
+	else sessionLabel?.after(acpAgentLabel);
+	if (on) {
+		newSessionModalTitle.textContent = "Nuevo agente";
+		newSessionSubmitBtn.textContent = "Crear agente";
+		newSessionInputLabel.textContent = "Nombre de la sesión";
+	} else agentOpener = null;
+}
+
+/** "Nuevo agente en <proyecto>" once the preselected project's name is known. */
+function titleAgentProject(): void {
+	if (!agentMode || !acpProjectSelect) return;
+	const opt = acpProjectSelect.selectedOptions[0];
+	newSessionModalTitle.textContent =
+		opt?.value && opt.value !== NEW_PROJECT ? `Nuevo agente en ${opt.text}` : "Nuevo agente";
+}
+
+// ── Field errors (the form's `.modal-field-error` pattern, see Advanced) ────
+function fieldError(id: string): HTMLElement {
+	const e = document.createElement("span");
+	e.className = "modal-field-error";
+	e.id = id;
+	e.setAttribute("aria-live", "polite");
+	return e;
+}
+
+function setFieldError(input: HTMLInputElement, error: HTMLElement, text: string): void {
+	error.textContent = text;
+	input.setAttribute("aria-invalid", "true");
+	input.setAttribute("aria-describedby", error.id);
+}
+
+function clearFieldError(input: HTMLInputElement, error: HTMLElement): void {
+	if (!input.hasAttribute("aria-invalid")) return;
+	error.textContent = "";
+	input.removeAttribute("aria-invalid");
+	input.removeAttribute("aria-describedby");
+}
+
+const sessionNameError = fieldError("new-session-input-error");
+newSessionInput.closest("label")?.append(sessionNameError);
+newSessionInput.addEventListener("input", () => {
+	// Written by the person: it no longer follows the agent's name.
+	sessionNameFollows = false;
+	clearFieldError(newSessionInput, sessionNameError);
+});
+
+/**
+ * The Basics fields that must be right before anything is sent: a session
+ * name, and an agent name the server will accept (required in agent mode).
+ * Each problem is said next to its field; the focus goes to the first one.
+ */
+function validateBasics(): boolean {
+	const bad: HTMLInputElement[] = [];
+	const agent = acpAgentInput && editingTemplateId === null ? acpAgentInput.value.trim() : "";
+	if (acpAgentInput && acpAgentError && editingTemplateId === null) {
+		if (agentMode && agent === "") {
+			setFieldError(acpAgentInput, acpAgentError, "Escribí el nombre del agente.");
+			bad.push(acpAgentInput);
+		} else if (agent !== "" && !AGENT_NAME_RE.test(agent)) {
+			setFieldError(
+				acpAgentInput,
+				acpAgentError,
+				"Minúsculas, números y guiones, empezando por una letra (2 a 32 caracteres).",
+			);
+			bad.push(acpAgentInput);
+		} else clearFieldError(acpAgentInput, acpAgentError);
+	}
+	if (newSessionInput.value.trim() === "") {
+		setFieldError(
+			newSessionInput,
+			sessionNameError,
+			agentMode
+				? "Escribí un nombre para la sesión."
+				: editingTemplateId !== null
+					? "Enter a template name."
+					: "Enter a session name.",
+		);
+		bad.push(newSessionInput);
+	} else clearFieldError(newSessionInput, sessionNameError);
+	if (bad.length === 0) return true;
+	setActiveSessionTab("basics");
+	// In the order the fields are on screen (the agent's first in agent mode).
+	bad.sort((a, b) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
+	bad[0]!.focus();
+	return false;
+}
 
 async function loadAcpChoices(): Promise<void> {
 	const select = acpProjectSelect;
@@ -274,18 +397,27 @@ async function acpAgentForCreate(): Promise<
 
 /** Opens the new-session dialog for an ACP agent, optionally already in a project (from Project Chat). */
 window.addEventListener("st:new-acp-session", (e) => {
-	acpPreselectProject = (e as CustomEvent<{ projectId?: string }>).detail?.projectId ?? null;
-	openNewSessionModal(newSessionBtn);
-	acpAgentInput?.focus();
+	const detail = (e as CustomEvent<{ projectId?: string; opener?: HTMLElement }>).detail;
+	acpPreselectProject = detail?.projectId ?? null;
+	// The focus goes back to the button that asked (not to the sidebar's
+	// "+ New session", inside a closed drawer on a phone).
+	agentOpener = detail?.opener ?? null;
+	openNewSessionModal(agentOpener ?? newSessionBtn, { agent: true });
 });
 
-function openNewSessionModal(opener: HTMLElement) {
+function openNewSessionModal(opener: HTMLElement, opts: { agent?: boolean } = {}) {
 	ensureAcpAgentField();
+	clearFieldError(newSessionInput, sessionNameError);
+	if (acpAgentInput && acpAgentError) clearFieldError(acpAgentInput, acpAgentError);
 	if (acpAgentInput) acpAgentInput.value = "";
 	if (acpNewProjectInput) acpNewProjectInput.value = "";
 	// Every new agent starts on the default (Sonnet) unless chosen otherwise.
 	if (acpModelSelect) acpModelSelect.value = ACP_MODELS[0]!.id;
-	if (acpAgentInput) void loadAcpChoices().finally(() => (acpPreselectProject = null));
+	if (acpAgentInput)
+		void loadAcpChoices().finally(() => {
+			acpPreselectProject = null;
+			titleAgentProject();
+		});
 	renderSessionTabPlaceholders();
 	setActiveSessionTab("basics");
 	newSessionInput.value = "";
@@ -295,6 +427,9 @@ function openNewSessionModal(opener: HTMLElement) {
 	// `editTemplate(id)` after the modal is open and the form has been
 	// populated via `applyTemplateToForm`.
 	setNewSessionModalMode(null);
+	// After the ordinary mode's texts: agent mode only for this open (a
+	// later open from the sidebar is the ordinary dialog again).
+	applyAgentMode(opts.agent === true && acpAgentInput !== null);
 	// `resetEnvTab` no longer fires here — `closeNewSessionModal`
 	// already wiped state on the previous close, and the initial
 	// declaration of `envRows = []` covers the very first open.
@@ -307,7 +442,8 @@ function openNewSessionModal(opener: HTMLElement) {
 	newSessionDialog.open(opener);
 	// Defer focus to the next paint too: some browsers ignore .focus() on
 	// an element that just transitioned from display:none in the same frame.
-	requestAnimationFrame(() => newSessionInput.focus());
+	const first = agentMode && acpAgentInput ? acpAgentInput : newSessionInput;
+	requestAnimationFrame(() => first.focus());
 }
 
 /**
@@ -322,7 +458,7 @@ function openNewSessionModal(opener: HTMLElement) {
  */
 let activeBootstrap: { close: () => void } | null = null;
 
-function startBootstrapLiveTail(session: SessionInfo, name: string) {
+function startBootstrapLiveTail(session: SessionInfo, createdToast: string) {
 	clearBootstrapError();
 	const panel = document.createElement("div");
 	panel.className = "bootstrap-tail";
@@ -359,7 +495,7 @@ function startBootstrapLiveTail(session: SessionInfo, name: string) {
 			if (success) {
 				closeNewSessionModal();
 				void openSession(session.sessionId);
-				showToast(`Session "${name}" created`);
+				showToast(createdToast);
 				return;
 			}
 			// Hard fail: server already flipped row to `failed` and
@@ -518,7 +654,15 @@ async function openBootstrapLogModal(session: SessionInfo): Promise<void> {
 // the next open whichever way the modal was dismissed.
 const newSessionDialog = createDialog(newSessionModal, {
 	initialFocus: () => newSessionInput,
-	onClose: resetNewSessionModal,
+	onClose: () => {
+		resetNewSessionModal();
+		// Agent mode: the dialog returned the focus to its opener when it
+		// could; if that button is gone (its panel closed meanwhile), the
+		// project page's title takes it rather than nothing.
+		const o = agentOpener;
+		agentOpener = null;
+		if (o && !o.isConnected) document.getElementById("pv-title")?.focus();
+	},
 });
 
 function closeNewSessionModal() {
@@ -1210,11 +1354,8 @@ function collectEnvVarsForSubmit(): EnvVarEntryInput[] | undefined {
 
 newSessionForm.addEventListener("submit", async (e) => {
 	e.preventDefault();
+	if (!validateBasics()) return;
 	const name = newSessionInput.value.trim();
-	if (!name) {
-		newSessionInput.focus();
-		return;
-	}
 	// Disable the submit button for the duration of the request so a
 	// double-click doesn't fire two POSTs (which would create two
 	// sessions and burn quota silently — or two PUTs in edit mode).
@@ -1252,27 +1393,40 @@ newSessionForm.addEventListener("submit", async (e) => {
 	}
 
 	try {
-		showToast("Creating session…");
+		showToast(agentMode ? "Creando agente…" : "Creating session…");
 		const config = buildSessionConfigPayload();
 		const acpAgent = await acpAgentForCreate();
 		const session = await createSession(name, undefined, config, acpAgent);
 		// The sidebar files an agent session under its project from this list.
 		if (acpAgent) await acpListAgents().then(setAcpAgents, () => {});
 		addCreatedSession(session);
+		const created = acpAgent ? `Agente @${acpAgent.name} creado` : `Session "${name}" created`;
 		if (session.bootstrapping) {
 			// PR 185b2b: postCreate is running asynchronously on the
 			// server. Switch the modal into live-tail mode and wait
 			// for the WS terminal message before either closing
 			// (success) or rendering an error panel (failure).
-			startBootstrapLiveTail(session, name);
+			startBootstrapLiveTail(session, created);
 			return;
 		}
 		closeNewSessionModal();
 		void openSession(session.sessionId);
-		showToast(`Session "${name}" created`);
+		showToast(created);
 	} catch (err) {
-		showToast((err as Error).message, true);
 		newSessionSubmitBtn.disabled = false;
+		// The backend's 409: that name is taken. Said where the name is,
+		// like the checks above; what was written stays.
+		if ((err as Error).message === "agent-name-taken" && acpAgentInput && acpAgentError) {
+			setFieldError(
+				acpAgentInput,
+				acpAgentError,
+				`Ya hay un agente @${acpAgentInput.value.trim()}; elegí otro nombre.`,
+			);
+			setActiveSessionTab("basics");
+			acpAgentInput.focus();
+			return;
+		}
+		showToast((err as Error).message, true);
 	}
 });
 

@@ -70,6 +70,21 @@ test.describe("accessibility — axe on the main views", () => {
 		await expectClean(page, "sidebar");
 	});
 
+	test("the new-agent dialog with its field errors", async ({ app, backend, page }) => {
+		backend.enableAcp();
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		// The button lives in "Administrar agentes", opened from the project's ⋯ menu.
+		await page.getByRole("button", { name: "Acciones del proyecto" }).click();
+		await page.getByRole("menuitem", { name: "Administrar agentes" }).click();
+		await page.getByRole("button", { name: "+ Nueva sesión con agente" }).click();
+		await page.fill("#new-session-acp-agent", "Dev_1");
+		await page.locator("#new-session-input").fill("");
+		await page.click("#new-session-submit");
+		await expect(page.locator("#new-session-acp-agent-error")).not.toHaveText("");
+		// The dialog only (the page behind has its own sweep).
+		await expectClean(page, "new agent dialog", ["#new-session-modal .modal-card"]);
+	});
+
 	test("sidebar with agents: free, working, waiting for you, login", async ({
 		app,
 		backend,
