@@ -13,12 +13,17 @@ import { acpLiveUp, subscribeAcp } from "./acpLive.js";
 import {
 	ACTIVITY_STATE,
 	activityRows,
+	agentStatus,
 	answerText,
+	applyEdits,
 	authFromActivity,
 	groupThread,
+	mapThroughEdits,
 	questionForm,
+	recipientRow,
 	recipientsOf,
 	STATE_LABEL,
+	setRecipient,
 	type ThreadItem,
 	upsert,
 	who,
@@ -68,9 +73,18 @@ export class AcpThread {
 	readonly root = el("div", "acp-thread");
 	private readonly threadEl = el("div", "acp-chat-thread");
 	private readonly composer = el("form", "acp-chat-composer");
-	private readonly mentionsEl = el("div", "acp-mentions");
 	readonly input = el("textarea", "acp-chat-input");
-	private readonly sendBtn = el("button", "files-btn acp-chat-send", "Enviar");
+	/** Inside the field's right edge (an arrow): see the constructor. */
+	private readonly sendBtn = el("button", "acp-chat-send");
+	/** Project Chat with more than one agent: "+" opens the recipients menu. */
+	private readonly pickBtn = el("button", "acp-pick-btn", "+");
+	/** The menu's box (positioned over the thread): a note, then the menu itself. */
+	private readonly pickMenu = el("div", "acp-pick-menu");
+	private readonly pickList = el("div", "acp-pick-list");
+	/** Why nobody is checked: an unknown leading mention (recipientsOf's error). */
+	private readonly pickNote = el("p", "acp-pick-note");
+	/** Read by a screen reader: "Enviando…", then "Enviado a @a, @b" (not the queue line). */
+	private readonly sendStatus = el("div", "visually-hidden");
 	private readonly hint = el("div", "acp-chat-hint");
 	/**
 	 * "↓ N novedades": rows that arrived, or got their answer, below a reader
@@ -185,6 +199,10 @@ export class AcpThread {
 		this.input.rows = 1;
 		this.input.setAttribute("aria-label", "Mensaje");
 		this.sendBtn.type = "submit";
+		this.sendBtn.setAttribute("aria-label", "Enviar");
+		this.sendBtn.title = "Enviar (Ctrl+Enter)";
+		this.sendBtn.append(sendIcon());
+		this.buildPicker();
 		const actions = el("div", "acp-chat-actions");
 		this.recoverBtn.type = "button";
 		this.recoverBtn.hidden = true;
@@ -199,17 +217,23 @@ export class AcpThread {
 		});
 		actions.append(this.hint, this.recoverBtn);
 		const row = el("div", "acp-chat-row");
-		row.append(this.input, this.sendBtn);
+		// The arrow sits inside the field's frame, bottom right (it stays there
+		// as the field grows); the field's padding keeps the text clear of it.
+		const field = el("div", "acp-chat-field");
+		field.append(this.input, this.sendBtn);
+		row.append(this.pickBtn, field, this.pickMenu);
 		// Errors sit by the field, not at the top of the thread: a refused send
 		// must be seen where the person is looking, however long the thread.
 		this.errorEl.setAttribute("role", "alert");
 		this.errorEl.hidden = true;
-		this.composer.append(this.errorEl, this.mentionsEl, actions, row);
+		this.sendStatus.setAttribute("role", "status");
+		this.sendStatus.setAttribute("aria-live", "polite");
+		this.composer.append(this.errorEl, actions, row, this.sendStatus);
 		// A tap on Enviar, a mention or "↓ N nuevos" must not take the focus from the field:
 		// on a phone that blur closes the keyboard, the layout grows back (the
 		// bottom bar returns) and the button moves away under the finger before
 		// the tap lands. Keyboard activation does not go through these events.
-		for (const b of [this.sendBtn, this.mentionsEl, this.newPill])
+		for (const b of [this.sendBtn, this.pickBtn, this.pickMenu, this.newPill])
 			for (const type of ["pointerdown", "mousedown"] as const)
 				b.addEventListener(type, (e) => {
 					if (document.activeElement === this.input) e.preventDefault();
@@ -217,6 +241,9 @@ export class AcpThread {
 		this.input.addEventListener("input", () => {
 			this.fitInput();
 			this.renderHint();
+			this.syncSendBtn();
+			// What is written by hand shows in the menu as it is typed.
+			if (this.pickOpen) this.renderPicker();
 		});
 		this.newPill.type = "button";
 		this.newPill.hidden = true;
@@ -328,6 +355,7 @@ export class AcpThread {
 				: source.projectId === (this.source as { projectId: string }).projectId);
 		if (!same) {
 			this.gen++;
+			this.closePicker(false);
 			if (this.source) this.saveDraft(this.source, this.input.value);
 			this.source = source;
 			this.input.value = this.drafts.get(sourceKey(source)) ?? "";
@@ -377,6 +405,7 @@ export class AcpThread {
 
 	/** Stops following (the DOM and state stay for a quick return). */
 	close(): void {
+		this.closePicker(false);
 		this.unsubscribe?.();
 		this.unsubscribe = null;
 		this.stopPoll();
@@ -1162,23 +1191,180 @@ export class AcpThread {
 		this.recoverBtn.hidden = !u || u.restored || this.composerMode !== "on";
 		const writable = this.composerMode === "on";
 		this.input.disabled = !writable;
-		this.sendBtn.disabled = !writable;
+		this.syncSendBtn();
 		this.composer.classList.toggle("acp-composer-off", this.composerMode === "off");
-		const src = this.source;
-		const names = [...this.agents.keys()];
-		this.mentionsEl.replaceChildren();
-		if (writable && src?.kind === "project" && names.length > 1) {
-			for (const n of names) {
-				const b = el("button", "acp-mention", `@${n}`);
-				b.type = "button";
-				b.title = `Mencionar a @${n}`;
-				b.addEventListener("click", () => insertMention(this.input, n));
-				this.mentionsEl.append(b);
-			}
-		}
-		this.mentionsEl.hidden = this.mentionsEl.childElementCount === 0;
+		const picks = writable && this.source?.kind === "project" && this.agents.size > 1;
+		this.pickBtn.hidden = !picks;
+		if (!picks) this.closePicker(false);
+		else if (this.pickOpen) this.renderPicker();
 		this.renderHint();
 		this.fitInput();
+	}
+
+	/** The arrow: off when nothing can be sent (still on while another send is out). */
+	private syncSendBtn(): void {
+		this.sendBtn.disabled = this.composerMode !== "on" || this.input.value.trim() === "";
+	}
+
+	// ── Recipients menu ("+") ───────────────────────────────────────────
+	//
+	// Edits ONLY the leading @mentions of the text (acpModel.setRecipient):
+	// what it shows checked is always recipientsOf(text).to. A small menu of
+	// its own, not openActionMenu (a modal that takes the focus): opened by a
+	// tap while typing, it must leave the focus — and a phone's keyboard —
+	// in the field.
+
+	private pickOpen = false;
+	/** "+" activated from the keyboard (Enter / Space on it): the focus goes into the menu. */
+	private pickByKey = false;
+
+	private buildPicker(): void {
+		const id = `acp-pick-${++pickerSeq}`;
+		this.pickList.id = id;
+		this.pickList.setAttribute("role", "menu");
+		this.pickList.setAttribute("aria-label", "Destinatarios");
+		this.pickNote.id = `${id}-note`;
+		this.pickNote.hidden = true;
+		this.pickMenu.append(this.pickNote, this.pickList);
+		this.pickMenu.hidden = true;
+		// Not from the click's `detail`: a real touch tap arrives with detail 0
+		// too, and moving the focus off the field closes a phone's keyboard.
+		this.pickBtn.addEventListener("keydown", (e) => {
+			if (e.key === "Enter" || e.key === " ") this.pickByKey = true;
+		});
+		this.pickBtn.addEventListener("pointerdown", () => {
+			this.pickByKey = false;
+		});
+		this.pickBtn.type = "button";
+		this.pickBtn.hidden = true;
+		this.pickBtn.setAttribute("aria-label", "Elegir destinatarios");
+		this.pickBtn.title = "Elegir destinatarios";
+		this.pickBtn.setAttribute("aria-haspopup", "menu");
+		this.pickBtn.setAttribute("aria-expanded", "false");
+		this.pickBtn.setAttribute("aria-controls", id);
+		this.pickBtn.addEventListener("click", () => {
+			const byKey = this.pickByKey;
+			this.pickByKey = false;
+			if (this.pickOpen) {
+				this.closePicker(false);
+				return;
+			}
+			this.pickOpen = true;
+			this.pickMenu.hidden = false;
+			this.pickBtn.setAttribute("aria-expanded", "true");
+			this.renderPicker();
+			// From the keyboard the focus goes into the menu; a tap or a click
+			// leaves it where it was (the field, with its keyboard).
+			if (byKey) this.pickRows()[0]?.focus();
+		});
+		this.pickMenu.addEventListener("keydown", (e) => {
+			const rows = this.pickRows();
+			const i = rows.indexOf(document.activeElement as HTMLElement);
+			let next = -1;
+			if (e.key === "ArrowDown") next = (i + 1) % rows.length;
+			else if (e.key === "ArrowUp") next = (i - 1 + rows.length) % rows.length;
+			else if (e.key === "Home") next = 0;
+			else if (e.key === "End") next = rows.length - 1;
+			else if (e.key === "Escape") {
+				e.preventDefault();
+				e.stopPropagation();
+				this.closePicker(true);
+				return;
+			} else if (e.key === "Tab") {
+				this.closePicker(false);
+				return;
+			}
+			if (next < 0 || rows.length === 0) return;
+			e.preventDefault();
+			rows[next]!.focus();
+		});
+		// Escape while typing with the menu open closes the menu (only).
+		this.input.addEventListener("keydown", (e) => {
+			if (e.key !== "Escape" || !this.pickOpen) return;
+			e.preventDefault();
+			e.stopPropagation();
+			this.closePicker(true);
+		});
+		// A tap or click anywhere else closes it.
+		document.addEventListener(
+			"pointerdown",
+			(e) => {
+				if (!this.pickOpen) return;
+				const t = e.target as Node;
+				if (this.pickMenu.contains(t) || this.pickBtn.contains(t)) return;
+				this.closePicker(false);
+			},
+			true,
+		);
+	}
+
+	private pickRows(): HTMLElement[] {
+		return [...this.pickList.querySelectorAll<HTMLElement>("[role=menuitemcheckbox]")];
+	}
+
+	private closePicker(focusField: boolean): void {
+		if (!this.pickOpen) return;
+		this.pickOpen = false;
+		this.pickMenu.hidden = true;
+		this.pickBtn.setAttribute("aria-expanded", "false");
+		if (focusField) this.input.focus();
+	}
+
+	private renderPicker(): void {
+		const names = [...this.agents.keys()];
+		const text = this.input.value;
+		const focused = (document.activeElement as HTMLElement | null)?.dataset?.agent;
+		const now = Date.now();
+		const rows = names.map((n) => {
+			const { checked, implicit } = recipientRow(text, names, n);
+			const a = this.agents.get(n)!;
+			const st = agentStatus(a, now, this.auth.get(n) === true);
+			const b = el("button", `acp-pick-row${checked ? " checked" : ""}`);
+			b.type = "button";
+			b.tabIndex = -1;
+			b.dataset.agent = n;
+			b.setAttribute("role", "menuitemcheckbox");
+			b.setAttribute("aria-checked", String(checked));
+			const mark = el("span", "acp-pick-mark", checked ? "✓" : "");
+			mark.setAttribute("aria-hidden", "true");
+			const info = el("span", "acp-pick-info");
+			info.append(agentAvatar(n), el("span", `acp-pick-state acp-status-${st.tone}`, st.label));
+			if (implicit) {
+				// Checked by a mention inside the message: only editing the text unchecks it.
+				info.append(el("span", "acp-pick-why", "mencionado en el mensaje"));
+				b.setAttribute("aria-disabled", "true");
+			}
+			b.append(mark, info);
+			b.addEventListener("click", () => this.toggleRecipient(n));
+			return b;
+		});
+		this.pickList.replaceChildren(...rows);
+		// A leading mention that is no agent: nobody is checked and nothing
+		// would be sent — said here, not only when sending.
+		const r = recipientsOf(text, names);
+		const unknownLead = r.error !== null && /^\s*@[A-Za-z0-9_-]/.test(text);
+		this.pickNote.hidden = !unknownLead;
+		this.pickNote.textContent = unknownLead ? (r.error ?? "") : "";
+		if (unknownLead) this.pickList.setAttribute("aria-describedby", this.pickNote.id);
+		else this.pickList.removeAttribute("aria-describedby");
+		if (focused) rows.find((r) => r.dataset.agent === focused)?.focus();
+	}
+
+	/** Checks / unchecks `name` by editing the leading mentions; the caret keeps its place. */
+	private toggleRecipient(name: string): void {
+		const names = [...this.agents.keys()];
+		const i = this.input;
+		const text = i.value;
+		const row = recipientRow(text, names, name);
+		const edits = setRecipient(text, names, name, !row.checked);
+		if (edits.length === 0) return;
+		const [a, b, dir] = [i.selectionStart, i.selectionEnd, i.selectionDirection];
+		i.value = applyEdits(text, edits);
+		i.setSelectionRange(mapThroughEdits(a, edits), mapThroughEdits(b, edits), dir ?? "none");
+		this.fitInput();
+		this.renderHint();
+		this.syncSendBtn();
+		this.renderPicker();
 	}
 
 	/**
@@ -1192,14 +1378,18 @@ export class AcpThread {
 		const src = this.source;
 		if (!src) return;
 		const narrow = window.matchMedia?.("(max-width: 640px)").matches === true;
+		// 320–360 px: "+" and the arrow leave the field ~180 px of text.
+		const tiny = window.matchMedia?.("(max-width: 360px)").matches === true;
 		const text =
 			src.kind === "agent"
 				? narrow
 					? `Privado · a @${src.name}`
 					: `Mensaje directo a @${src.name} (privado). Ctrl+Enter envía; podés seguir enviando mientras trabaja.`
-				: narrow
-					? "Empezá con @agente…"
-					: "Empezá con @agente (uno o varios): cada uno lo recibe en su cola y responde acá. Ctrl+Enter envía.";
+				: tiny
+					? "Con @agente…"
+					: narrow
+						? "Empezá con @agente…"
+						: "Empezá con @agente (uno o varios): cada uno lo recibe en su cola y responde acá. Ctrl+Enter envía.";
 		if (this.input.placeholder !== text) this.input.placeholder = text;
 	}
 
@@ -1211,6 +1401,7 @@ export class AcpThread {
 		const queued = this.messages.filter((m) => m.state === "pending").length;
 		const running = this.messages.filter((m) => m.state === "running").length;
 		const parts: string[] = [];
+		if (this.sending) parts.push(this.sending > 1 ? `Enviando (${this.sending})…` : "Enviando…");
 		if (running) parts.push(`${running} en curso`);
 		if (queued) parts.push(`${queued} en espera`);
 		// UTF-8 takes at most 3 bytes per UTF-16 unit: below that bound nothing
@@ -1245,6 +1436,8 @@ export class AcpThread {
 		const clientId = retry?.clientId ?? crypto.randomUUID();
 		const bodies = retry?.bodies ?? new Map<string, string>();
 		this.input.value = "";
+		this.syncSendBtn();
+		this.closePicker(false);
 		this.drafts.delete(sourceKey(src));
 		// A send that did not go out gives its text back to ITS chat: into the
 		// field if that chat is on screen and the field is empty; otherwise it
@@ -1275,7 +1468,8 @@ export class AcpThread {
 		}
 		this.toBottom = true;
 		this.sending++;
-		this.sendBtn.textContent = this.sending > 1 ? `Enviando (${this.sending})…` : "Enviando…";
+		this.renderHint();
+		this.sendStatus.textContent = this.sending > 1 ? `Enviando (${this.sending})…` : "Enviando…";
 		const failed: string[] = [];
 		try {
 			const tooBig = new TextEncoder().encode(text).length > this.maxBytes;
@@ -1304,19 +1498,22 @@ export class AcpThread {
 			}
 			// The person may have moved to another chat meanwhile: nothing of this
 			// send is shown there; it is kept for THIS chat (giveBack).
-			if (failed.length)
+			if (failed.length) {
+				// The error (role=alert, next to the field) says it.
+				this.sendStatus.textContent = "";
 				giveBack(
 					`No se envió a ${failed.join("; ")}. Enviar el mismo texto de nuevo no duplica a quienes ya lo recibieron.`,
 				);
-			else {
+			} else {
 				// Sent: its failure record (if this was its retry, or it was taken
 				// back into the field) is done; an unsent text not yet taken back stays offered.
 				const u = this.unsent.get(key);
 				if (u && (u.clientId === clientId || u.restored)) this.unsent.delete(key);
+				this.sendStatus.textContent = `Enviado a ${to.to.map((n) => `@${n}`).join(", ")}`;
 			}
 		} finally {
 			this.sending--;
-			this.sendBtn.textContent = this.sending > 0 ? `Enviando (${this.sending})…` : "Enviar";
+			this.renderHint();
 			this.refreshAgentsSoon(0);
 			this.changed();
 		}
@@ -1326,16 +1523,19 @@ export class AcpThread {
 /** States in which a message is over: reaching one is news for the pill. */
 const FINAL = new Set(["done", "failed", "uncertain"]);
 
-function insertMention(input: HTMLTextAreaElement, name: string): void {
-	const start = input.selectionStart ?? input.value.length;
-	const end = input.selectionEnd ?? start;
-	const before = input.value.slice(0, start);
-	const pad = before === "" || /\s$/.test(before) ? "" : " ";
-	const ins = `${pad}@${name} `;
-	input.value = before + ins + input.value.slice(end);
-	const at = start + ins.length;
-	input.setSelectionRange(at, at);
-	input.focus();
+let pickerSeq = 0;
+
+/** The send arrow (decorative: the button carries aria-label "Enviar"). */
+function sendIcon(): SVGElement {
+	const ns = "http://www.w3.org/2000/svg";
+	const svg = document.createElementNS(ns, "svg");
+	svg.setAttribute("viewBox", "0 0 24 24");
+	svg.setAttribute("aria-hidden", "true");
+	svg.setAttribute("focusable", "false");
+	const path = document.createElementNS(ns, "path");
+	path.setAttribute("d", "M5 12h12M12 6l6 6-6 6");
+	svg.append(path);
+	return svg;
 }
 
 function time(iso: string): string {
@@ -1353,6 +1553,16 @@ function hue(name: string): number {
 }
 
 /** An agent's name with its avatar, in its colour: the same face wherever it speaks. */
+/** An agent's avatar + @name, in its colour (also the Project Chat header's). */
+export function agentAvatar(name: string): HTMLElement {
+	return agentId(name);
+}
+
+/** The hue of an agent's colour (avatars elsewhere: the header's group). */
+export function agentHue(name: string): number {
+	return hue(name);
+}
+
 function agentId(name: string): HTMLElement {
 	const id = el("span", "acp-msg-who acp-agent-id");
 	id.append(el("span", "acp-avatar", name.slice(0, 1).toUpperCase()), `@${name}`);
