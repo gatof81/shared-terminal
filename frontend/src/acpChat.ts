@@ -62,10 +62,11 @@ settingsPanel.id = "acp-settings";
 settingsPanel.hidden = true;
 settingsPanel.setAttribute("role", "group");
 settingsPanel.setAttribute("aria-label", "Ajustes del agente");
+const privacyEl = el("div", "acp-chat-meta acp-chat-privacy");
 const runtimeEl = el("div", "acp-chat-meta");
 let projectLinkEl: HTMLElement | null = null;
 let shownLinkKey = "";
-headerEl.append(titleEl, settingsPanel);
+headerEl.append(titleEl);
 settingsBtn.addEventListener("click", () => setSettings(settingsPanel.hidden));
 // Escape closes the panel and gives the focus back to its button.
 settingsPanel.addEventListener("keydown", (e) => {
@@ -82,7 +83,10 @@ function setSettings(open: boolean): void {
 }
 const noticeEl = el("div", "acp-chat-notice");
 const thread = new AcpThread();
-root.append(headerEl, noticeEl, thread.root);
+// The panel is the header's sibling, not its child: on a short screen it is
+// the one part that gives way (shrinks, scrolls inside) to the thread's
+// minimum, while the title row never does (acp-chat.css).
+root.append(headerEl, settingsPanel, noticeEl, thread.root);
 thread.onState = (s) => renderHeader(s);
 
 // Mounted on first use (the module is imported by chatView.ts, also in tests
@@ -165,6 +169,8 @@ function renderHeader(s: ThreadState): void {
 	nameEl.textContent = `@${a.name}`;
 	statusEl.className = `acp-status acp-status-${st.tone}`;
 	statusEl.textContent = st.label;
+	// The placeholder says it too, but it goes away while typing: here it stays.
+	privacyEl.textContent = `Mensajes directos: privados entre vos y @${a.name}`;
 	runtimeEl.textContent = `Runtime: ${a.runtime}`;
 	const linkKey = projectChatEnabled()
 		? JSON.stringify([
@@ -211,7 +217,7 @@ function renderHeader(s: ThreadState): void {
 	if (projectLinkEl) title.push(projectLinkEl);
 	title.push(settingsBtn);
 	syncChildren(titleEl, title);
-	const parts: HTMLElement[] = [runtimeEl, modelRowEl];
+	const parts: HTMLElement[] = [privacyEl, runtimeEl, modelRowEl];
 	if (projectRowEl) parts.push(projectRowEl);
 	syncChildren(settingsPanel, parts);
 	const noticeKey = JSON.stringify([a.name, auth, a.loginMethods ?? []]);

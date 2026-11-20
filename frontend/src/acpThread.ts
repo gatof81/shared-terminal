@@ -1114,7 +1114,8 @@ export class AcpThread {
 	 * Who reads what is written here (a direct message is private; in a
 	 * project, start with the agent): the headers no longer say it. The full
 	 * text where the field rests on two wide lines; on a phone the field is
-	 * one line, so only what fits in it.
+	 * one line, so only what fits in it — the privacy first, since a long
+	 * name cuts the end off.
 	 */
 	private setPlaceholder(): void {
 		const src = this.source;
@@ -1123,7 +1124,7 @@ export class AcpThread {
 		const text =
 			src.kind === "agent"
 				? narrow
-					? `Mensaje directo a @${src.name} (privado)`
+					? `Privado · a @${src.name}`
 					: `Mensaje directo a @${src.name} (privado). Ctrl+Enter envía; podés seguir enviando mientras trabaja.`
 				: narrow
 					? "Empezá con @agente…"

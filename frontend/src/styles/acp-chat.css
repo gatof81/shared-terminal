@@ -10,16 +10,32 @@
 	height: 100%;
 	min-height: 0;
 }
-/* Thread + composer: the thread scrolls, the composer stays at the bottom. */
+/* Thread + composer: the thread scrolls, the composer stays at the bottom.
+   Its minimum is the composer plus a readable strip of thread (the wrap's
+   min-height, below): with a panel open on a short screen it is the panel
+   that gives way and scrolls inside, never the message box. */
 .acp-thread {
 	flex: 1;
-	min-height: 0;
+	min-height: auto;
 	display: flex;
 	flex-direction: column;
+}
+/* Ajustes / Administrar agentes: at most 40% of the visible height (--app-vh
+   follows the soft keyboard; dvh, then vh, where it is not set), and they
+   shrink further and scroll inside when the thread needs its minimum. */
+.acp-settings,
+.acp-agents-panel {
+	flex: 0 1 auto;
+	max-height: 40vh;
+	max-height: calc(var(--app-vh, 100dvh) * 0.4);
+	min-height: 0;
+	overflow-y: auto;
+	overscroll-behavior: contain;
 }
 /* The individual chat's header: one row — name, state, its project (a link,
    truncated), Ajustes — and the settings panel under it, closed by default. */
 .acp-chat-title {
+	flex: none;
 	display: flex;
 	flex-wrap: nowrap;
 	align-items: center;
@@ -64,7 +80,9 @@
 .acp-settings:not([hidden]) {
 	display: flex;
 	flex-direction: column;
-	margin-top: 8px;
+	padding: 8px 14px;
+	border-bottom: 1px solid var(--c-border);
+	font-size: 0.9rem;
 }
 .acp-notice-short {
 	display: none;
@@ -207,8 +225,23 @@
 	padding: 8px 0;
 	border-bottom: 1px solid var(--c-border);
 }
-/* Row 2: the agents on one line (name + state); it scrolls sideways. */
+/* Row 2: the agents on one line (name + state); it scrolls sideways. A
+   faded edge says there is more on that side (acpProjectChat.ts sets
+   more-left / more-right from the scroll position). */
+.acp-agent-chips.more-right {
+	-webkit-mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent);
+	mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent);
+}
+.acp-agent-chips.more-left {
+	-webkit-mask-image: linear-gradient(to right, transparent, #000 40px);
+	mask-image: linear-gradient(to right, transparent, #000 40px);
+}
+.acp-agent-chips.more-left.more-right {
+	-webkit-mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 40px), transparent);
+	mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 40px), transparent);
+}
 .acp-agent-chips {
+	flex: none;
 	display: flex;
 	flex-wrap: nowrap;
 	overflow-x: auto;
@@ -250,6 +283,7 @@
 }
 /* "Administrar agentes" (from the ⋯ menu; open on a project with no agents). */
 .acp-agents-panel:not([hidden]) {
+	margin-top: 8px;
 	display: flex;
 	flex-direction: column;
 	gap: 8px;
@@ -343,6 +377,7 @@
 	padding: 10px 14px;
 	border-bottom: 1px solid var(--c-border);
 	font-size: 0.9rem;
+	flex: none;
 }
 .acp-chat-meta,
 .acp-chat-runner {
@@ -603,7 +638,11 @@ pre.acp-msg-body {
 /* The thread and its "↓ N nuevos" pill (the capture Chat's .chat-float). */
 .acp-thread-wrap {
 	flex: 1;
-	min-height: 0;
+	/* A readable strip of thread, whatever is open above it. `contain: size`
+	   keeps the thread's content out of the minimum (the thread scrolls): the
+	   message box's column then asks for exactly this strip plus the box. */
+	min-height: 6rem;
+	contain: size;
 	position: relative;
 	display: flex;
 	flex-direction: column;

@@ -95,7 +95,9 @@ export function projectHasAcpAgents(pid: string): boolean | null {
 export function acpProjectPage(pid: string, header: HTMLElement): HTMLElement {
 	if (headerEl !== header) {
 		headerEl = header;
-		root.replaceChildren(header, barEl, thread.root);
+		// The panel is a sibling of the agents row: on a short screen it is
+		// the one part that gives way to the thread's minimum (acp-chat.css).
+		root.replaceChildren(header, barEl, panelEl, thread.root);
 	}
 	if (shownPid !== pid) {
 		shownPid = pid;
@@ -249,14 +251,28 @@ function renderBar(): void {
 	// The panel holds write tools: a live project only (fail-closed).
 	const open = active && (panelOpen ?? (state !== null && members.length === 0));
 	panelEl.hidden = !open;
-	const parts: HTMLElement[] = [chipsEl, panelEl];
+	const parts: HTMLElement[] = [chipsEl];
 	if (mode === "archived") {
 		archivedEl.textContent =
 			"Su historial se lee acá. Sus agentes siguen en sus sesiones y en su chat individual.";
 		parts.push(archivedEl);
 	}
 	syncChildren(barEl, parts);
+	markChipEdges();
 }
+
+/** A faded edge on the side of the agents row that has more off screen (acp-chat.css). */
+function markChipEdges(): void {
+	const c = chipsEl;
+	if (!c) return;
+	const max = c.scrollWidth - c.clientWidth;
+	c.classList.toggle("more-left", max > 1 && c.scrollLeft > 1);
+	c.classList.toggle("more-right", max > 1 && c.scrollLeft < max - 1);
+}
+// The row scrolls sideways (scroll does not bubble: captured here) and its
+// width changes with the screen.
+barEl.addEventListener("scroll", markChipEdges, { capture: true, passive: true });
+window.addEventListener("resize", markChipEdges);
 
 function buildTools(pid: string, candidates: AcpAgentInfo[]): HTMLElement {
 	const tools = el("div", "acp-project-tools");
