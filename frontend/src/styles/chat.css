@@ -610,6 +610,30 @@
 .chat-float[hidden] {
   display: none;
 }
+/* "Ir al final" / "Jump to latest" (chatScroll.ts, the three chats): an
+   arrow, with the count of what is new; a 44-px touch target. */
+.chat-end {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+  padding: 0 0.85rem;
+}
+.chat-end svg {
+  width: 1.1rem;
+  height: 1.1rem;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.chat-end-count[hidden] {
+  display: none;
+}
 
 /* Messages */
 .chat-msg {

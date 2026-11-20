@@ -44,6 +44,8 @@ import {
 	uploadSessionFiles,
 } from "./api.js";
 import { markdownBlock } from "./chatMarkdown.js";
+import { ChatEndButton, END_SLACK, firstRowInView } from "./chatScroll.js";
+import { fromHistory } from "./router.js";
 import { el, syncChildren } from "./ui.js";
 
 export type ThreadSource = { kind: "agent"; name: string } | { kind: "project"; projectId: string };
@@ -88,11 +90,19 @@ export class AcpThread {
 	private readonly sendStatus = el("div", "visually-hidden");
 	private readonly hint = el("div", "acp-chat-hint");
 	/**
-	 * "↓ N novedades": rows that arrived, or got their answer, below a reader
-	 * who is further up. Each row counts once (a Set of ids).
+	 * "Ir al final" (chatScroll.ts), with the count of `newIds`: rows that
+	 * arrived, or got their answer, below a reader who is further up. Each
+	 * row counts once (a Set of ids).
 	 */
-	private readonly newPill = el("button", "chat-float acp-new-pill");
-	/** Says it to a screen reader too (the pill itself appears and goes). */
+	private readonly endBtn = new ChatEndButton({
+		scroller: () => this.threadEl,
+		name: (n) => (n === 0 ? "Ir al final" : `Ir al final, ${newText(n)}`),
+		onJumped: () => {
+			this.atBottom = true;
+			this.newIds.clear();
+		},
+	});
+	/** Says it to a screen reader too (the button itself appears and goes). */
 	private readonly newAnnounce = el("div", "visually-hidden");
 	private readonly newIds = new Set<number>();
 	/** Highest message id the last render showed (new ones are above it). */
@@ -114,8 +124,12 @@ export class AcpThread {
 	private box = 0;
 
 	private source: ThreadSource | null = null;
-	/** A chat was (re)opened: its reading place is put back once its feed is read. */
+	/**
+	 * A chat was (re)opened: once its feed is read it shows its end, or — when
+	 * the opening was Back / Forward (`placeFromHistory`) — its reading place.
+	 */
 	private placePending = false;
+	private placeFromHistory = false;
 	private anchorFrame = 0;
 	private gen = 0;
 	private messages: AcpMessage[] = [];
@@ -240,7 +254,7 @@ export class AcpThread {
 		// on a phone that blur closes the keyboard, the layout grows back (the
 		// bottom bar returns) and the button moves away under the finger before
 		// the tap lands. Keyboard activation does not go through these events.
-		for (const b of [this.sendBtn, this.pickBtn, this.pickMenu, this.newPill])
+		for (const b of [this.sendBtn, this.pickBtn, this.pickMenu, this.endBtn.el])
 			for (const type of ["pointerdown", "mousedown"] as const)
 				b.addEventListener(type, (e) => {
 					if (document.activeElement === this.input) e.preventDefault();
@@ -252,13 +266,11 @@ export class AcpThread {
 			// What is written by hand shows in the menu as it is typed.
 			if (this.pickOpen) this.renderPicker();
 		});
-		this.newPill.type = "button";
-		this.newPill.hidden = true;
-		this.newPill.addEventListener("click", () => this.scrollToEnd());
+		this.endBtn.el.classList.add("acp-new-pill");
 		this.newAnnounce.setAttribute("role", "status");
 		this.newAnnounce.setAttribute("aria-live", "polite");
 		const wrap = el("div", "acp-thread-wrap");
-		wrap.append(this.threadEl, this.newPill, this.newAnnounce);
+		wrap.append(this.threadEl, this.endBtn.el, this.newAnnounce);
 		this.threadEl.addEventListener(
 			"scroll",
 			() => {
@@ -276,8 +288,16 @@ export class AcpThread {
 						return;
 					}
 				}
-				this.atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 60;
+				const away = t.scrollHeight - t.scrollTop - t.clientHeight;
+				// "Ir al final" scrolling smoothly: its own steps are not the reader moving up.
+				if (this.endBtn.jumping) {
+					this.atBottom = true;
+					if (away < END_SLACK) this.renderPill();
+					return;
+				}
+				this.atBottom = away < END_SLACK;
 				if (this.atBottom) this.clearNew();
+				else this.renderPill();
 				if (!this.anchorFrame)
 					this.anchorFrame = requestAnimationFrame(() => {
 						this.anchorFrame = 0;
@@ -295,10 +315,14 @@ export class AcpThread {
 				const wasHidden = this.box === 0;
 				this.box = t.clientHeight;
 				if (t.clientHeight === 0) return;
-				// Shown again (Back from a followed link to the same chat): the
-				// box was rebuilt, its scroll offset is not to be trusted.
-				if (wasHidden && !this.placePending) this.restorePlace();
-				else if (this.atBottom) t.scrollTop = t.scrollHeight;
+				// Shown again: the box was rebuilt, its scroll offset is not to be
+				// trusted. Back / Forward (from a followed link to the same chat)
+				// puts the reading place back; any other way in shows the end.
+				if (wasHidden && !this.placePending) {
+					if (fromHistory()) this.restorePlace();
+					else this.scrollToEnd();
+				} else if (this.atBottom) t.scrollTop = t.scrollHeight;
+				this.renderPill();
 			}).observe(this.threadEl);
 		// The field's cap depends on the visible height (keyboard, rotation).
 		window.visualViewport?.addEventListener("resize", () => this.fitInput());
@@ -384,11 +408,13 @@ export class AcpThread {
 			this.feed = "loading";
 			this.readOnce = false;
 			this.atBottom = true;
-			// Put back where this chat was being read, once its feed is in.
+			// Its end, or (Back / Forward) where it was being read, once its feed is in.
 			this.placePending = true;
+			this.placeFromHistory = fromHistory();
 			this.shownMax = 0;
 			this.shownOutcome.clear();
-			this.clearNew();
+			this.newIds.clear();
+			this.endBtn.reset();
 			this.offerUnsent();
 			this.threadEl.replaceChildren(el("div", "acp-chat-empty", "Cargando…"));
 			this.setPlaceholder();
@@ -448,8 +474,10 @@ export class AcpThread {
 				// The rows first: the render `applyFeed` asked for waits for the
 				// next frame, and the anchor's row must be on the page now (a
 				// return from ANOTHER chat left this one with only "Cargando…").
+				// Placed in that same task: no frame shows the thread elsewhere.
 				this.render();
-				this.restorePlace();
+				if (this.placeFromHistory) this.restorePlace();
+				else this.scrollToEnd();
 			}
 		} catch (err) {
 			if (gen !== this.gen) return;
@@ -661,8 +689,11 @@ export class AcpThread {
 		const keepFocus =
 			focused && t.contains(focused) && focused.closest(".acp-question") ? focused : null;
 		const atBottom = this.atBottom;
-		const prevHeight = t.scrollHeight;
 		const prevTop = t.scrollTop;
+		// A reader further up keeps the row they are looking at where it is,
+		// whatever changes above or below it (an earlier page, an answer, a
+		// question card): by that row, never by scrollTop or the distance to the end.
+		const keep = atBottom || this.toBottom ? null : this.rowInView();
 		const nodes: HTMLElement[] = [];
 		if (this.hasEarlier) {
 			this.moreBtn.disabled = false;
@@ -700,8 +731,7 @@ export class AcpThread {
 		if (keepFocus?.isConnected) keepFocus.focus({ preventScroll: true });
 		const end = atBottom || this.toBottom;
 		if (end) t.scrollTop = t.scrollHeight;
-		else if (prevTop < 5 && t.scrollHeight > prevHeight) t.scrollTop = t.scrollHeight - prevHeight;
-		else t.scrollTop = prevTop;
+		else if (!keep || !this.putRow(keep)) t.scrollTop = prevTop;
 		this.toBottom = false;
 		// News below a reader who is further up: a new row (an id above what
 		// was shown — an earlier page has lower ids), or a row already shown
@@ -727,17 +757,14 @@ export class AcpThread {
 	}
 
 	private pillText(): string {
-		const n = this.newIds.size;
-		return `${n} ${n === 1 ? "novedad" : "novedades"}`;
+		return newText(this.newIds.size);
 	}
 
 	private renderPill(): void {
-		this.newPill.hidden = this.newIds.size === 0;
-		this.newPill.textContent = `↓ ${this.pillText()}`;
+		this.endBtn.sync(this.newIds.size, this.atBottom);
 	}
 
 	private clearNew(): void {
-		if (this.newIds.size === 0 && this.newPill.hidden) return;
 		this.newIds.clear();
 		this.renderPill();
 	}
@@ -757,31 +784,38 @@ export class AcpThread {
 			readingPlaces.delete(key);
 			return;
 		}
-		const top = t.getBoundingClientRect().top;
-		for (const c of t.children) {
-			const anchor = (c as HTMLElement).dataset?.anchor;
-			if (!anchor) continue;
-			const r = c.getBoundingClientRect();
-			if (r.bottom <= top) continue;
-			readingPlaces.set(key, { anchor, offset: r.top - top });
-			return;
-		}
+		const place = this.rowInView();
+		if (place) readingPlaces.set(key, place);
+	}
+
+	/** The first row at least partly in view, and its top edge's offset from the thread's. */
+	private rowInView(): ReadingPlace | null {
+		const t = this.threadEl;
+		if (t.clientHeight === 0) return null;
+		const hit = firstRowInView(t, (c) => c.dataset.anchor !== undefined);
+		return hit ? { anchor: hit.row.dataset.anchor!, offset: hit.offset } : null;
+	}
+
+	/** Puts `place`'s row back at its offset; false when that row is not shown. */
+	private putRow(place: ReadingPlace): boolean {
+		const t = this.threadEl;
+		const row = [...t.children].find((c) => (c as HTMLElement).dataset?.anchor === place.anchor);
+		if (!row) return false;
+		t.scrollTop += row.getBoundingClientRect().top - t.getBoundingClientRect().top - place.offset;
+		return true;
 	}
 
 	/** Back to this chat's anchor; with none (or its row no longer shown), the end. */
 	private restorePlace(): void {
 		const t = this.threadEl;
 		const place = this.source ? readingPlaces.get(sourceKey(this.source)) : undefined;
-		const row = place
-			? [...t.children].find((c) => (c as HTMLElement).dataset?.anchor === place.anchor)
-			: undefined;
-		if (!place || !row) {
+		if (!place || !this.putRow(place)) {
 			this.scrollToEnd();
 			return;
 		}
 		this.box = t.clientHeight;
-		t.scrollTop += row.getBoundingClientRect().top - t.getBoundingClientRect().top - place.offset;
-		this.atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 60;
+		this.atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < END_SLACK;
+		this.renderPill();
 	}
 
 	private scrollToEnd(): void {
@@ -1597,7 +1631,17 @@ function agentVoice(bubble: HTMLElement, name: string): void {
  * Where each chat was being read (by sourceKey), kept while the page lives:
  * the first row in view and its offset from the thread's top.
  */
-const readingPlaces = new Map<string, { anchor: string; offset: number }>();
+const readingPlaces = new Map<string, ReadingPlace>();
+
+interface ReadingPlace {
+	anchor: string;
+	offset: number;
+}
+
+/** "3 mensajes nuevos": the count of the end button and its announcement. */
+function newText(n: number): string {
+	return `${n} ${n === 1 ? "mensaje nuevo" : "mensajes nuevos"}`;
+}
 
 function sourceKey(src: ThreadSource): string {
 	return src.kind === "agent" ? `a:${src.name}` : `p:${src.projectId}`;
