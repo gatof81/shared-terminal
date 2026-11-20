@@ -195,6 +195,30 @@ listEl.addEventListener("keydown", (e) => {
 	e.stopPropagation();
 	closeList();
 });
+/** Agents whose running message was looked for and not found (the id), said in their row. */
+const notFound = new Map<string, number>();
+
+/**
+ * The thread at the message an agent works on (AcpThread.revealMessage: it
+ * loads back up to 3 pages). A phone closes the list first — the thread is
+ * under it; not found, the row says so (and a phone shows the list again).
+ */
+async function goToRunning(name: string, id: number): Promise<void> {
+	const phone = narrowMq?.matches === true;
+	if (phone) {
+		listOpen = false;
+		renderBar();
+	}
+	const found = await thread.revealMessage(id);
+	if (found) {
+		notFound.delete(name);
+		return;
+	}
+	notFound.set(name, id);
+	if (phone) listOpen = true;
+	renderBar();
+}
+
 function closeList(): void {
 	listOpen = false;
 	renderBar();
@@ -261,10 +285,14 @@ function renderBar(): void {
 		st: agentStatus(a, now, state?.auth.get(a.name) === true),
 	}));
 	const active = mode === "active";
+	// The message an agent works on, if this chat has it (or an earlier page may).
+	const target = (a: AcpAgentInfo) =>
+		typeof a.running === "number" && thread.placeOf(a.running) !== "elsewhere" ? a.running : null;
 	const ck = JSON.stringify([
 		pid,
 		active,
-		statuses.map(({ a, st }) => [a.name, a.sessionId, st.label, st.tone]),
+		statuses.map(({ a, st }) => [a.name, a.sessionId, st.label, st.tone, target(a)]),
+		[...notFound],
 	]);
 	// Who needs the person first (a question, a login), then who works, then the rest.
 	const rank = (tone: string) => (tone === "warn" ? 0 : tone === "busy" ? 1 : 2);
@@ -289,7 +317,28 @@ function renderBar(): void {
 			link.href = routeHash({ sessionId: a.sessionId, view: "chat", detail: null });
 			link.title = "Abrir su sesión (Chat individual, Terminal, Files, Git)";
 			link.setAttribute("aria-label", `Abrir su chat (@${a.name})`);
-			li.append(who, el("span", `acp-status acp-status-${st.tone}`, st.label), link);
+			// Working on a message of this Project Chat: the state goes to it.
+			const id = target(a);
+			let state: HTMLElement;
+			if (id !== null) {
+				const go = el("button", `acp-status acp-status-${st.tone} acp-agents-list-goto`, st.label);
+				go.type = "button";
+				// Starts with what it does; holds the words it shows (WCAG 2.5.3).
+				go.setAttribute("aria-label", `Ir al mensaje en curso de @${a.name} (${st.label})`);
+				go.addEventListener("click", () => void goToRunning(a.name, id));
+				state = go;
+			} else state = el("span", `acp-status acp-status-${st.tone}`, st.label);
+			li.append(who, state, link);
+			// Looked for and not found: said even now that it reads as not this
+			// chat's (all its pages loaded), and until the agent moves on.
+			if (typeof a.running === "number" && notFound.get(a.name) === a.running)
+				li.append(
+					el(
+						"p",
+						"acp-agents-list-note",
+						`No se encontró el mensaje #${a.running} en este Project Chat.`,
+					),
+				);
 			return li;
 		});
 		listBody.replaceChildren(...items);

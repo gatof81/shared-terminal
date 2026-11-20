@@ -20,6 +20,7 @@ import {
 	authFromActivity,
 	groupThread,
 	mapThroughEdits,
+	messagePlace,
 	questionForm,
 	recipientRow,
 	recipientsOf,
@@ -379,6 +380,55 @@ export class AcpThread {
 		this.renderComposer();
 	}
 
+	/** Where message `id` stands in this chat: shown, on an earlier page, or not here. */
+	placeOf(id: number): "shown" | "earlier" | "elsewhere" {
+		return messagePlace(
+			id,
+			this.messages.map((m) => m.id),
+			this.hasEarlier,
+		);
+	}
+
+	/**
+	 * Puts message `id` in view near the thread's top, flashes its row and
+	 * gives it the focus. On an earlier page not loaded yet, loads back with
+	 * "Cargar anteriores" — at most 3 pages. False: not found (the caller
+	 * says so). The reader is then away from the end like any reader who
+	 * scrolled there: "Ir al final" shows, and news does not move them.
+	 */
+	async revealMessage(id: number): Promise<boolean> {
+		const gen = this.gen;
+		for (let pages = 0; ; pages++) {
+			if (gen !== this.gen) return false;
+			this.render();
+			const row = this.threadEl.querySelector<HTMLElement>(`[data-ids~="${id}"]`);
+			if (row) {
+				this.goToRow(row);
+				return true;
+			}
+			if (this.placeOf(id) !== "earlier" || pages >= 3) return false;
+			await this.loadEarlier();
+		}
+	}
+
+	private goToRow(row: HTMLElement): void {
+		const t = this.threadEl;
+		const anchor = row.dataset.anchor;
+		if (!anchor) return;
+		this.putRow({ anchor, offset: 12 });
+		this.box = t.clientHeight;
+		this.atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < END_SLACK;
+		this.noteAnchor();
+		this.renderPill();
+		row.tabIndex = -1;
+		row.focus({ preventScroll: true });
+		// A brief highlight (acp-chat.css: a fade, static with reduced motion).
+		row.classList.remove("acp-msg-flash");
+		void row.offsetWidth;
+		row.classList.add("acp-msg-flash");
+		setTimeout(() => row.classList.remove("acp-msg-flash"), 1600);
+	}
+
 	/** Read the current chat again (a "Reintentar"). */
 	retry(): void {
 		void this.reload();
@@ -733,8 +783,12 @@ export class AcpThread {
 				this.items.set(key, cached);
 			}
 			used.add(key);
-			// The reading anchor's handle (noteAnchor / restorePlace).
+			// The reading anchor's handle (noteAnchor / restorePlace), and the
+			// messages the row shows (revealMessage finds a message's row by them).
 			cached.el.dataset.anchor = key;
+			cached.el.dataset.ids = (item.kind === "post" ? item.messages : [item.message])
+				.map((m) => m.id)
+				.join(" ");
 			nodes.push(cached.el);
 		}
 		for (const key of [...this.items.keys()]) if (!used.has(key)) this.items.delete(key);
