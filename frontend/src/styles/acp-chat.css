@@ -202,8 +202,6 @@
 	text-overflow: ellipsis;
 }
 .pv-menu-btn {
-	min-width: 2.75rem;
-	justify-content: center;
 	font-size: 1rem;
 }
 .acp-project-agents[hidden] {

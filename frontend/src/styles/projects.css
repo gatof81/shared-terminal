@@ -824,3 +824,68 @@ body.project-page-on #actions-btn {
     font-size: 12px;
   }
 }
+
+/* ── Project Chat's header as the app's bar (UX iter3 D) ──────────
+   Shell v2 on a phone: the page's own header row (title, the agents'
+   group with ●N, ⋯) takes the merged bar's place — between ☰ and the
+   account — and the 51 px it used go to the thread. The session's bar
+   under it is hidden (visibility: the header's height is part of the
+   terminal's box), and × moves into the ⋯ ("Cerrar"). A header that says
+   something more (archived, not found, an error) stays in the page. The
+   body has a transform (base.css, --app-top), so `fixed` is relative to
+   it — exactly like the header it covers. */
+@media (max-width: 768px) {
+  html[data-shell="v2"][data-bar="merged"] body.project-page-on header #terminal-toolbar {
+    visibility: hidden;
+  }
+  html[data-shell="v2"][data-bar="merged"] body.project-page-on .acp-project .pv-header:not(:has(.pv-status)) {
+    position: fixed;
+    top: env(safe-area-inset-top, 0px);
+    left: calc(env(safe-area-inset-left, 0px) + 52px);
+    right: calc(env(safe-area-inset-right, 0px) + 57px);
+    height: 44px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: var(--c-surface);
+    flex-wrap: nowrap;
+    align-items: center;
+    z-index: 1;
+  }
+  html[data-shell="v2"][data-bar="merged"] body.project-page-on .acp-project .pv-header:not(:has(.pv-status)) .pv-close {
+    display: none;
+  }
+  html[data-shell="v2"][data-bar="merged"] body.project-page-on .pv-page.acp-project:has(.pv-header:not(:has(.pv-status))) {
+    padding-top: 0;
+  }
+  html[data-shell="v2"][data-bar="merged"] body.project-page-on .acp-project .pv-title {
+    font-size: 0.95rem;
+  }
+}
+@media (max-width: 399px) {
+  html[data-shell="v2"][data-bar="merged"] body.project-page-on .acp-project .pv-header:not(:has(.pv-status)) {
+    right: calc(env(safe-area-inset-right, 0px) + 8px);
+  }
+}
+@media (max-width: 360px) {
+  html[data-shell="v2"][data-bar="merged"] body.project-page-on .acp-project .pv-header:not(:has(.pv-status)) {
+    left: calc(env(safe-area-inset-left, 0px) + 48px);
+    right: calc(env(safe-area-inset-right, 0px) + 4px);
+  }
+}
+/* A v1 phone: the header names the project shown. */
+.header-project-title {
+  display: none;
+}
+@media (max-width: 768px) {
+  html:not([data-shell="v2"]) body.project-page-on .header-project-title:not([hidden]) {
+    display: block;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 600;
+    color: var(--c-text);
+  }
+}
