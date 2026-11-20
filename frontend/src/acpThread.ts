@@ -464,7 +464,8 @@ export class AcpThread {
 					? src.kind === "agent"
 						? "Este agente ya no existe."
 						: "Proyecto no encontrado."
-					: `No se pudo actualizar: ${e.message}`;
+					: // Fixed text: the server's message is a code ("internal"), not words for a person.
+						"No se pudo actualizar el chat.";
 		}
 		this.changed();
 	}

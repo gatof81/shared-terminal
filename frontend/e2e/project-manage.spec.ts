@@ -120,7 +120,9 @@ test.describe("project management", () => {
 		await expect(said).toBeVisible();
 		// The header says it, once: the message box does not repeat it (with the server's code).
 		await expect(page.locator(".acp-project .acp-chat-error")).toBeHidden();
-		await expect(page.locator(".acp-project").getByText(/No se pudo actualizar:/)).toBeHidden();
+		await expect(
+			page.locator(".acp-project").getByText(/No se pudo actualizar (el chat|:)/),
+		).toBeHidden();
 		await expect(page.locator(".acp-project .acp-chat-input")).toBeDisabled();
 		await expect(page.getByRole("button", { name: "Acciones del proyecto" })).toHaveCount(0);
 		backend.projectFeedFailure = 0;

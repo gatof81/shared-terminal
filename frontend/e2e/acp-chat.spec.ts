@@ -212,6 +212,30 @@ test.describe("ACP chat", () => {
 		).toBeLessThan(60);
 	});
 
+	test("a re-read that fails keeps the history and says so in words, not the server's code", async ({
+		page,
+		app,
+		backend,
+	}) => {
+		await app.login("alice", chatOf(PROJECT_SESSION_IDS.scratch));
+		const result = page.locator("#acp-chat .acp-msg-result");
+		await expect(result.locator("h2")).toHaveText("Resumen");
+		backend.override = async (method, path, route) => {
+			if (method !== "GET" || !path.startsWith("/acp/agents/solo/feed")) return false;
+			await route.fulfill({
+				status: 500,
+				contentType: "application/json",
+				body: '{"error":"internal"}',
+			});
+			return true;
+		};
+		// The live socket drops; its reconnect re-reads the feed, which now fails.
+		backend.dropAcpSockets();
+		const error = page.locator("#acp-chat .acp-chat-error");
+		await expect(error).toHaveText("No se pudo actualizar el chat.");
+		await expect(result.locator("h2")).toBeVisible();
+	});
+
 	test("a draft stays with its agent", async ({ page, app }) => {
 		await app.login("alice", chatOf(PROJECT_SESSION_IDS.scratch));
 		const input = page.locator("#acp-chat .acp-chat-input");
