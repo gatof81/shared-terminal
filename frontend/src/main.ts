@@ -900,7 +900,10 @@ function setSidebarOpen(open: boolean) {
 		);
 		firstFocusable?.focus();
 	} else if (!open && wasOpen) {
-		if (sidebarEl.contains(document.activeElement)) {
+		// A tap on the backdrop moved the focus to <body> before this ran
+		// (the backdrop takes none): that focus was lost from the drawer too.
+		const active = document.activeElement;
+		if (sidebarEl.contains(active) || active === null || active === document.body) {
 			sidebarToggleBtn.focus();
 		}
 	}

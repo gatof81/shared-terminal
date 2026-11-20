@@ -808,3 +808,19 @@ body.project-page-on #actions-btn {
   background: rgba(var(--c-warn-rgb), 0.16);
   font-size: 11px;
 }
+/* The phone's drawer (UX iter3 §1, mobile): one-line rows of 48 px — the
+   project headings too — so every row is a comfortable target and none
+   needs a second line. The drawer leaves 44 px of backdrop on the right
+   to close it (mobile.css); the list scrolls above the account footer. */
+@media (max-width: 768px) {
+  .sidebar-tree .session-list-grouped .session-item,
+  .sidebar-tree .session-list-grouped .session-select,
+  .sidebar-tree .sgroup-head {
+    min-height: 48px;
+  }
+  .sidebar-tree .session-avatar {
+    width: 24px;
+    height: 24px;
+    font-size: 12px;
+  }
+}

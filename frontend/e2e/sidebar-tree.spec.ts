@@ -83,6 +83,44 @@ test.describe("sidebar tree", () => {
 	});
 });
 
+test.describe("sidebar tree on a phone", () => {
+	test.beforeEach(({ backend }) => backend.enableAcp());
+
+	test("48-px rows; 44 px of backdrop to close it; the last row clear of the footer; focus in and back to ☰", async ({
+		app,
+		page,
+	}, info) => {
+		test.skip(!info.project.use.isMobile, "the phone's drawer");
+		await app.login("alice");
+		await app.openSidebar();
+		await expect(app.sessionRow("hz-design")).toBeVisible();
+		for (const name of ["hz-architect", "my-project"])
+			expect(Math.round((await app.sessionRow(name).boundingBox())!.height)).toBe(48);
+		const vw = page.viewportSize()!.width;
+		const drawer = (await page.locator("#sidebar").boundingBox())!;
+		expect(vw - (drawer.x + drawer.width)).toBeGreaterThanOrEqual(44);
+		// Scrolled to its end, the last row sits above the footer (when there is one).
+		const clear = await page.evaluate(() => {
+			const list = document.getElementById("session-list")!;
+			list.scrollTop = list.scrollHeight;
+			const last = [...list.querySelectorAll(".session-item")].at(-1)!.getBoundingClientRect();
+			const foot = document.getElementById("sidebar-footer")!.getBoundingClientRect();
+			return foot.height === 0 || last.bottom <= foot.top;
+		});
+		expect(clear).toBe(true);
+		// Focus: inside on open; the backdrop closes it and gives it back to ☰.
+		await expect(page.locator("#sidebar")).toContainText("New session");
+		expect(
+			await page.evaluate(() =>
+				document.getElementById("sidebar")!.contains(document.activeElement),
+			),
+		).toBe(true);
+		await page.mouse.click(vw - 20, Math.round(drawer.height / 2));
+		await expect(page.locator("main")).not.toHaveClass(/sidebar-open/);
+		await expect(page.locator("#sidebar-toggle")).toBeFocused();
+	});
+});
+
 test.describe("sidebar without projects", () => {
 	test("the flat list is as before: its bar with Show terminated and refresh, no sections", async ({
 		app,
