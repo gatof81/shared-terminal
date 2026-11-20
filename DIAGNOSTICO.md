@@ -103,6 +103,8 @@
 
 25. Un proyecto archivado sin mensajes dice «Sin mensajes… Mencioná a un agente para empezar», pero es de solo lectura y no se puede escribir. El estado vacío tendría que decir que el proyecto está archivado y no tiene historial. Lo encontré verificando el #708.
 
+26. Un error de envío todavía muestra el código del servidor: «No se envió a @arq: internal. …». Es heredado y lo marcó @qa en la revisión del #709. Pide el mismo arreglo que tuvo el feed: un texto fijo que conserve la segunda frase.
+
 ## Propuesta de las 5 mejoras (a acordar con @architect)
 
 | # | Mejora | Tamaño | Quién |
