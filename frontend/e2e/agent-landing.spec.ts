@@ -70,7 +70,18 @@ test.describe("an agent's session lands on its Chat", () => {
 		backend,
 		page,
 	}) => {
-		backend.acpAgentsDelayMs = 600;
+		// The agents list is held until the session has been clicked, then
+		// let go explicitly: the click always finds the read in flight, and
+		// the answer always lands inside the landing's wait. (A fixed delay
+		// raced the click: on a fast machine the click came early enough for
+		// the wait to run out first, and the landing decided without the list.)
+		const held: Array<() => void> = [];
+		let holding = true;
+		backend.override = async (method, path) => {
+			if (!holding || method !== "GET" || path !== "/acp/agents") return false;
+			await new Promise<void>((r) => held.push(r));
+			return false;
+		};
 		// Records whether a terminal pane was ever on screen uncovered (the
 		// Terminal view shown before the landing decided).
 		await page.addInitScript(() => {
@@ -83,7 +94,11 @@ test.describe("an agent's session lands on its Chat", () => {
 			}).observe(document, { subtree: true, childList: true, attributes: true });
 		});
 		await app.login("alice");
-		await app.openSession("scratch");
+		await expect.poll(() => held.length, "the agents read is in flight").toBeGreaterThan(0);
+		await app.openSidebar();
+		await app.sessionRow("scratch").click();
+		holding = false;
+		for (const release of held.splice(0)) release();
 		await app.expectView("chat");
 		await page.waitForTimeout(300);
 		expect(
