@@ -1,0 +1,2 @@
+320 sessionmenu   4953 pixels (ratio 0.03 of all image pixels) are different.   - 4953 pixels (ratio 0.03 of all image pixels) are different.   - 4953 pixels (ratio 0.03 of all image pixels) are different.
+390 sessionmenu   8118 pixels (ratio 0.03 of all image pixels) are different.   - 8118 pixels (ratio 0.03 of all image pixels) are different.   - 8118 pixels (ratio 0.03 of all image pixels) are different.
