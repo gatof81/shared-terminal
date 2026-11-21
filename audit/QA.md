@@ -113,11 +113,21 @@ Antes de empezar:
 - Las capturas numeradas.
 - En una frase, para cada caso: «qué subió» (todo, solo el hilo, el campo quedó arriba o abajo), «quedó así» o «volvió solo», y «primer foco» frente a «segundo foco».
 
-**Qué contesta cada dato (para @developer):**
-- `ih` contra `vv.h` con el teclado abierto: si `ih` también baja, `maxTop = 0` (`main.ts:188`) y `data-kb` nunca se activa (`main.ts:193`). En ese caso #506 y #659 no hacen nada en el dispositivo (hipótesis H3).
-- `sy`/`doc` > 0 en `focus+100…1000`, antes de que aparezca `kb: "open"`: iOS scrolleó la página antes de que body quedara fijo (H1).
-- `vv.top` > 0 con `appTop` distinto de `vv.top`: el espejo del pan llega tarde o recortado (H2).
-- `bodyBox` y `focusBox` en cada evento: dónde quedó dibujada la app y dónde quedó el campo respecto de `vv.h`.
+**Qué contesta cada dato.** Numeración de hipótesis de @developer, `audit/DEVELOPER.md` §D1.6 (rama `assets/audit-2026-11-developer` @ `666615f`); la uso en todo este archivo.
+- **H1** scroll de la página antes del fijo: `focusin` → `win-scroll` con `sy`/`doc` > 0 **antes** de la primera muestra con `kb: "open"`.
+- **H2** el clamp anula el pan: con foco, `kb: ""`, `ih ≈ vv.h` y `vv.top > 0`. Si `ih` baja con el teclado, `maxTop = 0` (`main.ts:188`) y `data-kb` nunca se activa (`main.ts:193`): #506 y #659 no actúan en el dispositivo. **Se ve con los campos actuales.**
+- **H3** un ancestro `overflow:hidden` desplazado: necesita el campo 2 de abajo.
+- **H4** pan y scroll a la vez: `vv.pageTop ≠ vv.top + sy`, o `bodyBox[0] ≠ vv.top`. Se ve con los campos actuales.
+
+**Campos que hay que agregar a `?vvdebug=1` antes de la medición completa.** Los define @developer (§D1.6) y los implementa @developer si @architect lo autoriza; QA los pide como condición del protocolo:
+1. `scrollTop` de `#project-view .acp-chat-thread` y `#acp-chat .acp-chat-thread`, en lugar de `.tw-timeline` y `.chat-scroll` (todas las muestras).
+2. `scrollTop` de `#app-view`, `main`, `#terminal-area`, `#project-view`, `#chat-view` y `.acp-chat` (todas las muestras; H3).
+3. `document.scrollingElement.scrollHeight` (`focusin` y cada `win-scroll`; H1).
+4. Caja `[top,bottom]` de `.acp-chat-composer` y de `#terminal-toolbar`/`header` (todas las muestras).
+5. Una muestra en `pointerdown`/`touchstart` sobre el campo, antes del `focusin`.
+6. `navigator.userAgent`, que ya está en la cabecera de «Copy log» (`vvDebug.ts:133`), y `data-shell` (QA).
+
+**Si la corrección no está autorizada todavía:** el protocolo mínimo de @developer (un registro por chat en Safari y en Chrome si se puede: abrir con `?vvdebug=1`, tocar el campo, esperar 2 s, escribir una línea, enviar, cerrar el teclado y copiar) ya decide **H2 y H4** con los campos actuales. Se corre primero, y las secciones A–F completas después de la corrección.
 
 ### Q1.3 Qué puede y qué no puede probar la automatización
 
@@ -383,7 +393,7 @@ El balance neto en la suite es negativo:
 
 ## Lo que no pude demostrar y qué evidencia falta
 
-- **La causa raíz del P0 no está demostrada.** Hay tres hipótesis (H1 scroll de la página antes de `data-kb`, H2 pan no reflejado, H3 `innerHeight` que baja y anula `maxTop`). Se deciden con un registro de `?vvdebug=1` del iPhone, mejor con los campos corregidos. No hay **ningún** registro del dispositivo en el repo ni en los issues.
+- **La causa raíz del P0 no está demostrada.** Hay cuatro hipótesis (H1–H4 de @developer, ver Q1.2 bis). H2 y H4 se deciden con el vvdebug actual; H1 y H3 necesitan los campos 1–5. Se deciden con un registro de `?vvdebug=1` del iPhone, mejor con los campos corregidos. No hay **ningún** registro del dispositivo en el repo ni en los issues.
 - El shell que usa el owner en cada dispositivo (producción dice v1; puede haber `?ui=v2` guardado).
 - Si el owner usa la PWA standalone: decide el riesgo de quitar la X.
 - WebKit/iPhone, lectores de pantalla reales y producción con login: no validados en ningún PR del stack.
