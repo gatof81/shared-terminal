@@ -7,7 +7,8 @@
  */
 
 import { createDialog } from "./components/dialog.js";
-import { getActiveTerminal, showToast } from "./main.js";
+import { showToast } from "./components/toast.js";
+import { getActiveTerminal } from "./main.js";
 
 // ── DOM (re-queried locally; see header) ─────────────────────────────────
 const pasteModal = document.getElementById("paste-modal")!;

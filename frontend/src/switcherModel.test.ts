@@ -10,10 +10,9 @@ import {
 	ProjectLoader,
 	parallelSummary,
 	parallelSummaryText,
+	SWITCHER_WORDS,
 	sectionize,
 	sessionLabel,
-	sessionNoun,
-	switcherWords,
 	toItem,
 	visibleInSwitcher,
 } from "./switcherModel.js";
@@ -39,7 +38,6 @@ function conv(over: Partial<ConversationSummary> = {}): ConversationSummary {
 		eventsCount: 10,
 		gapsCount: 0,
 		claudeVersion: "2.1.314",
-		canSendInput: true,
 		customTitle: null,
 		archivedAt: null,
 		...over,
@@ -59,7 +57,7 @@ describe("toItem — the epoch is no time", () => {
 	});
 });
 
-describe("bucketOf — states come from the presentation, never from age or canSendInput alone", () => {
+describe("bucketOf — states come from the presentation, never from age alone", () => {
 	it("only a fresh permission prompt needs the person; Claude fresh at its prompt is 'ready' (option A)", () => {
 		expect(bucketOf(conv({ status: "waiting_permission" }), NOW).bucket).toBe("attention");
 		expect(bucketOf(conv({ status: "waiting_input" }), NOW).bucket).toBe("ready");
@@ -106,12 +104,6 @@ describe("bucketOf — states come from the presentation, never from age or canS
 			status: { label: "State unknown" },
 		});
 		expect(bucketOf(conv({ status: "ended" }), NOW).bucket).toBe("recent");
-	});
-	it("canSendInput does not change the bucket", () => {
-		expect(bucketOf(conv({ status: "running", canSendInput: true }), NOW).bucket).toBe("working");
-		expect(bucketOf(conv({ status: "waiting_input", canSendInput: false }), NOW).bucket).toBe(
-			"ready",
-		);
 	});
 });
 
@@ -310,7 +302,7 @@ describe("parallel work at a glance", () => {
 			workingProjects: 2,
 			incomplete: 0,
 		});
-		expect(parallelSummaryText(s)).toBe("Now: 1 needs you (alpha) · 2 working in 2 projects.");
+		expect(parallelSummaryText(s)).toBe("Now: 1 needs you (alpha) · 2 working in 2 sessions.");
 	});
 	it("says the counts may be short while a project is loading or failed; nothing to say ⇒ null", () => {
 		const s = parallelSummary(
@@ -318,7 +310,7 @@ describe("parallel work at a glance", () => {
 			[ok(a), { ...b, state: { kind: "loading" } }],
 		);
 		expect(parallelSummaryText(s)).toBe(
-			"Now: 1 working in 1 project — 1 project not loaded, so this may be incomplete.",
+			"Now: 1 working in 1 session — 1 session not loaded, so this may be incomplete.",
 		);
 		expect(parallelSummaryText(parallelSummary([], [ok(a)]))).toBeNull();
 		// Ready is a count only, after the rest, never "needs you".
@@ -331,22 +323,9 @@ describe("parallel work at a glance", () => {
 	});
 });
 
-describe("words: with Projects on, the switcher says 'session' (a project is only a P3a Project)", () => {
-	it("Projects off: every string is the previous one, byte for byte", () => {
-		const w = switcherWords(sessionNoun(false));
-		expect(w.search).toBe("Search conversations or projects");
-		expect(w.noneRunning).toBe(
-			"No running projects. Conversations are listed for projects that are running.",
-		);
-		expect(w.noneLoaded).toBe("No project could be loaded.");
-		expect(w.noneInLoaded).toBe("No conversations in the projects that loaded.");
-		expect(w.noneYet).toBe("No conversations yet in your running projects.");
-		expect(w.loading(1, 1)).toBe("Loading 1 of 1 project…");
-		expect(w.loading(2, 3)).toBe("Loading 2 of 3 projects…");
-		expect(w.otherConversations).toBe("Other projects' conversations…");
-	});
-	it("Projects on: sessions", () => {
-		const w = switcherWords(sessionNoun(true));
+describe("words: the switcher says 'session' (a project is only a Project)", () => {
+	it("sessions", () => {
+		const w = SWITCHER_WORDS;
 		expect(w.search).toBe("Search conversations or sessions");
 		expect(w.noneRunning).toBe(
 			"No running sessions. Conversations are listed for sessions that are running.",
@@ -362,7 +341,7 @@ describe("words: with Projects on, the switcher says 'session' (a project is onl
 			.join(" ");
 		expect(text).not.toMatch(/project/i);
 	});
-	it("the summary line follows the noun; the default is the previous wording", () => {
+	it("the summary line says sessions", () => {
 		const s = {
 			attention: 0,
 			attentionProjects: [],
@@ -372,9 +351,6 @@ describe("words: with Projects on, the switcher says 'session' (a project is onl
 			incomplete: 2,
 		};
 		expect(parallelSummaryText(s)).toBe(
-			"Now: 2 working in 1 project — 2 projects not loaded, so this may be incomplete.",
-		);
-		expect(parallelSummaryText(s, "session")).toBe(
 			"Now: 2 working in 1 session — 2 sessions not loaded, so this may be incomplete.",
 		);
 	});

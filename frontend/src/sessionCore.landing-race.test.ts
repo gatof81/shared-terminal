@@ -33,6 +33,10 @@ const mainState = vi.hoisted(() => ({
 	closingTabs: new Set<string>(),
 	showToast: vi.fn(),
 }));
+vi.mock("./components/toast.js", () => ({
+	showToast: mainState.showToast,
+	showCopySuccessToast: vi.fn(),
+}));
 vi.mock("./main.js", () => ({
 	get sessions() {
 		return mainState.sessions;
@@ -73,8 +77,6 @@ vi.mock("./main.js", () => ({
 	getActiveTerminal: () => null,
 	isMobile: () => false,
 	maybeInjectSelectionHint: vi.fn(),
-	showCopySuccessToast: vi.fn(),
-	showToast: mainState.showToast,
 	updateTerminalControls: vi.fn(),
 }));
 
@@ -92,11 +94,21 @@ const api = vi.hoisted(() => ({
 	isAdmin: () => false,
 	isLead: () => false,
 	isLoggedIn: () => true,
-	// P3a project directory: absent, as on a backend without the feature.
-	projectChatEnabled: () => false,
 	TabNotFoundError: class extends Error {},
 }));
-vi.mock("./api.js", () => ({ acpAgentsEnabled: () => false, ...api }));
+vi.mock("./api.js", () => api);
+// No ACP agent among the sessions, and the list already read: the landing
+// decides without waiting for it.
+vi.mock("./acpRegistry.js", () => ({
+	acpAgentsLoaded: () => true,
+	acpAgentsReadAt: () => 0,
+	acpEntry: () => null,
+	isAcpAgentSession: () => false,
+}));
+vi.mock("./acpStatusFeed.js", () => ({
+	readAcpAgents: vi.fn(async () => {}),
+	startAcpStatusFeed: vi.fn(),
+}));
 vi.mock("./admin.js", () => ({ openObserversModalFor: vi.fn() }));
 vi.mock("./components/actionMenu.js", () => ({ openActionMenu: vi.fn() }));
 vi.mock("./components/dialog.js", () => ({ confirmDialog: vi.fn() }));

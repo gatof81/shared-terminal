@@ -128,9 +128,14 @@
       </header>
       <main>
         <div id="sidebar-backdrop" aria-hidden="true"></div>
-        <aside id="sidebar">
-          <!-- Projects & Agents (P3a, projectsView.ts): shown only when
-               /auth/status reports features.projectChat. -->
+        <aside id="sidebar" class="sidebar-tree">
+          <!-- A box only for the tree layout on phones (projects.css puts the
+               two on one row there); `display: contents` everywhere else. -->
+          <div id="sidebar-actions">
+            <button id="sidebar-switcher-btn" type="button">Go to a conversation…</button>
+            <button id="new-session-btn" class="btn primary sm" type="button">+ New session</button>
+          </div>
+          <!-- Projects & Agents (projectsView.ts). -->
           <section id="project-section" aria-labelledby="project-section-title" hidden>
             <div id="project-section-header">
               <h2 id="project-section-title">Projects</h2>
@@ -156,13 +161,7 @@
               Show terminated
             </label>
           </div>
-          <!-- A box only for the tree layout on phones (projects.css puts the
-               two on one row there); `display: contents` everywhere else. -->
-          <div id="sidebar-actions">
-            <button id="sidebar-switcher-btn" type="button">Go to a conversation…</button>
-            <button id="new-session-btn" type="button">+ New session</button>
-          </div>
-          <div id="session-list"></div>
+          <div id="session-list" class="session-list-grouped"></div>
           <div id="observable-section" class="hidden">
             <h3 id="observable-section-title">My groups</h3>
             <div id="observable-list"></div>

@@ -36,28 +36,6 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-describe("features.projectChat", () => {
-	it("absent `features` ⇒ off (the flag-off answer has exactly the old keys)", async () => {
-		const api = await loadApi();
-		fetchSpy.mockResolvedValueOnce(res(200, STATUS));
-		await api.checkAuthStatus();
-		expect(api.projectChatEnabled()).toBe(false);
-	});
-
-	it("only `projectChat: true` turns it on", async () => {
-		const api = await loadApi();
-		fetchSpy.mockResolvedValueOnce(res(200, { ...STATUS, features: { projectChat: true } }));
-		await api.checkAuthStatus();
-		expect(api.projectChatEnabled()).toBe(true);
-		fetchSpy.mockResolvedValueOnce(res(200, { ...STATUS, features: { projectChat: "yes" } }));
-		await api.checkAuthStatus();
-		expect(api.projectChatEnabled()).toBe(false);
-		fetchSpy.mockResolvedValueOnce(res(200, { ...STATUS, features: null }));
-		await api.checkAuthStatus();
-		expect(api.projectChatEnabled()).toBe(false);
-	});
-});
-
 describe("project requests", () => {
 	it("decide on `error`, never `message`", async () => {
 		const api = await loadApi();

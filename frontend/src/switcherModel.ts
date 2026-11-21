@@ -374,20 +374,10 @@ export function parallelSummary(
 
 // ── Words ────────────────────────────────────────────────────────────────
 
-/**
- * What a session is called in the switcher and the Chat list. With the
- * Projects feature on (features.projectChat), "project" means ONLY a P3a
- * Project, so these surfaces — which list sessions — say "session"; with it
- * off, every string stays exactly as it was (screenshot baselines).
- */
-export type SessionNoun = "project" | "session";
-
-export function sessionNoun(projectsOn: boolean): SessionNoun {
-	return projectsOn ? "session" : "project";
-}
-
-function plural(n: number, noun: SessionNoun): string {
-	return `${noun}${n === 1 ? "" : "s"}`;
+// The switcher and the Chat list list sessions: "project" means only a
+// Project (projectsView.ts), so they say "session".
+function plural(n: number): string {
+	return `session${n === 1 ? "" : "s"}`;
 }
 
 export interface SwitcherWords {
@@ -401,17 +391,15 @@ export interface SwitcherWords {
 	otherConversations: string;
 }
 
-export function switcherWords(noun: SessionNoun): SwitcherWords {
-	return {
-		search: `Search conversations or ${noun}s`,
-		noneRunning: `No running ${noun}s. Conversations are listed for ${noun}s that are running.`,
-		noneLoaded: `No ${noun} could be loaded.`,
-		noneInLoaded: `No conversations in the ${noun}s that loaded.`,
-		noneYet: `No conversations yet in your running ${noun}s.`,
-		loading: (loading, total) => `Loading ${loading} of ${total} ${plural(total, noun)}…`,
-		otherConversations: `Other ${noun === "project" ? "projects'" : "sessions'"} conversations…`,
-	};
-}
+export const SWITCHER_WORDS: SwitcherWords = {
+	search: "Search conversations or sessions",
+	noneRunning: "No running sessions. Conversations are listed for sessions that are running.",
+	noneLoaded: "No session could be loaded.",
+	noneInLoaded: "No conversations in the sessions that loaded.",
+	noneYet: "No conversations yet in your running sessions.",
+	loading: (loading, total) => `Loading ${loading} of ${total} ${plural(total)}…`,
+	otherConversations: "Other sessions' conversations…",
+};
 
 /** A row's session line: its name, then "· @handle" when bound. */
 export function sessionLabel(name: string, handle: string | null | undefined): string {
@@ -419,23 +407,20 @@ export function sessionLabel(name: string, handle: string | null | undefined): s
 }
 
 /** The summary line, or null when there is nothing worth saying. */
-export function parallelSummaryText(
-	s: ParallelSummary,
-	noun: SessionNoun = "project",
-): string | null {
+export function parallelSummaryText(s: ParallelSummary): string | null {
 	const parts: string[] = [];
 	if (s.attention > 0)
 		parts.push(
 			`${s.attention} need${s.attention === 1 ? "s" : ""} you (${s.attentionProjects.join(", ")})`,
 		);
 	if (s.working > 0)
-		parts.push(`${s.working} working in ${s.workingProjects} ${plural(s.workingProjects, noun)}`);
+		parts.push(`${s.working} working in ${s.workingProjects} ${plural(s.workingProjects)}`);
 	// Secondary and discreet: a count, no project names.
 	if (s.ready > 0) parts.push(`${s.ready} ready`);
 	if (parts.length === 0) return null;
 	const tail =
 		s.incomplete > 0
-			? ` — ${s.incomplete} ${plural(s.incomplete, noun)} not loaded, so this may be incomplete`
+			? ` — ${s.incomplete} ${plural(s.incomplete)} not loaded, so this may be incomplete`
 			: "";
 	return `Now: ${parts.join(" · ")}${tail}.`;
 }

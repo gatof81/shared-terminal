@@ -34,7 +34,7 @@ import "./filesView.js";
 import "./gitView.js";
 import { type MenuItem, openActionMenu } from "./components/actionMenu.js";
 import { escapeHandledByDialog } from "./components/dialog.js";
-import { showCopySuccessToast, showToast } from "./components/toast.js";
+import { showToast } from "./components/toast.js";
 import { openInvitesModal } from "./invites.js";
 import { initKeyBar, updateKeyBarVisibility } from "./keyBar.js";
 import {
@@ -728,11 +728,6 @@ window.addEventListener(SESSION_EXPIRED_EVENT, () => {
 	handleLogout("Your session has expired — please sign in again");
 });
 
-// ── Toast ───────────────────────────────────────────────────────────────────
-// Lives in components/toast.ts (live region, stacked items, dedupe); the
-// historical names stay exported from here for the modules that import them.
-export { showCopySuccessToast, showToast };
-
 // ── First-session selection hint ────────────────────────────────────────────
 // tmux mouse-on (session-image/tmux.conf:54) means a plain mouse drag in the
 // terminal is forwarded to tmux as SGR-1006 mouse-tracking, not interpreted
@@ -798,7 +793,6 @@ export function maybeInjectSelectionHint(pane: HTMLElement) {
 // ── Show terminated toggle ──────────────────────────────────────────────────
 
 showTerminatedToggle.addEventListener("change", () => {
-	console.debug(`[sessions] show-terminated toggled → ${showTerminatedToggle.checked}`);
 	refreshSessions();
 });
 

@@ -65,7 +65,6 @@ interface Conversation {
 	title: string;
 	kind: "interactive" | "headless";
 	status: string;
-	canSendInput: boolean;
 	events: ConversationEvent[];
 	startedAt: string;
 	/** When the status was last evidenced; default: a minute before the fixed test clock. */
@@ -73,14 +72,6 @@ interface Conversation {
 	statusEvidence?: string;
 	/** null = the conversation has no pane (binding lost). */
 	paneId?: string | null;
-	/**
-	 * v1.9 §8.1.12 (EXPERIMENTAL): a background session reachable through
-	 * the CLI daemon. A send answers 202 `accepted`; `bgOutcome` then plays
-	 * the send's own `composer_send` events (and the CLI's user_prompt for a
-	 * delivery) over the socket.
-	 */
-	transport?: "background";
-	bgOutcome?: "delivered" | "unconfirmed" | "duplicated" | "possible-duplicate";
 	/** The tmux tab the conversation's pane lives in (default "tab-1"). */
 	tabId?: string | null;
 	/** Lost-event gaps reported in the list (default 0). */
@@ -347,7 +338,6 @@ function seedConversations(): Conversation[] {
 			title: "Refactor auth flow",
 			kind: "interactive",
 			status: "waiting_input",
-			canSendInput: true,
 			events: c1,
 			startedAt: iso(-10),
 		},
@@ -356,7 +346,6 @@ function seedConversations(): Conversation[] {
 			title: "Fix tests",
 			kind: "interactive",
 			status: "ended",
-			canSendInput: false,
 			events: c2,
 			startedAt: iso(-3100),
 		},
@@ -1395,8 +1384,6 @@ export class MockBackend {
 			eventsCount: c.events.length,
 			gapsCount: c.gapsCount ?? 0,
 			claudeVersion: "2.1.314",
-			canSendInput: c.canSendInput,
-			...(c.transport ? { transport: c.transport } : {}),
 			customTitle: this.metaUnavailable ? null : (c.customTitle ?? null),
 			archivedAt: this.metaUnavailable ? null : (c.archivedAt ?? null),
 		};

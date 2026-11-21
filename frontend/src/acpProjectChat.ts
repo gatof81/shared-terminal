@@ -75,23 +75,16 @@ export function retryProjectFeed(): void {
 
 /** ACP agents of the owner, by project (refreshed by the page and by changes). */
 let allAgents: AcpAgentInfo[] = [];
-let allLoaded = false;
 
 export async function refreshAcpAgents(): Promise<AcpAgentInfo[]> {
 	try {
 		const ticket = acpReadTicket();
 		allAgents = await acpListAgents();
-		allLoaded = true;
 		setAcpAgents(allAgents, ticket);
 	} catch {
 		/* keep */
 	}
 	return allAgents;
-}
-
-/** Does the project have ACP agents (as last known)? Null while unknown. */
-export function projectHasAcpAgents(pid: string): boolean | null {
-	return allLoaded ? allAgents.some((a) => a.projectId === pid) : null;
 }
 
 /**
@@ -145,7 +138,6 @@ export function resetAcpProject(): void {
 	shownPid = null;
 	headerEl = null;
 	allAgents = [];
-	allLoaded = false;
 }
 
 // ── Agents bar ───────────────────────────────────────────────────────────

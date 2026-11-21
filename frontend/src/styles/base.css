@@ -135,11 +135,6 @@ html[data-kb="open"] body {
 .btn.danger:hover:not(:disabled) {
   border-color: var(--c-err);
 }
-.btn.danger.solid {
-  background: var(--c-err);
-  border-color: var(--c-err);
-  color: var(--c-white);
-}
 .btn.btn-icon {
   width: 32px;
   padding: 0;
