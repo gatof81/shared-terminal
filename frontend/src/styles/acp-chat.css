@@ -19,6 +19,8 @@
    attribute and show an empty thread under the error. */
 .acp-thread:not([hidden]) {
 	flex: 1;
+	/* Its minimum is the message box alone (the thread-wrap below contributes
+	   nothing): the thread gives way first, then what is above it. */
 	min-height: auto;
 	display: flex;
 	flex-direction: column;
@@ -138,10 +140,15 @@
 	display: flex;
 	flex-direction: column;
 	box-sizing: border-box;
-	padding-bottom: var(--s-3, 12px);
+	/* The message box sits as far from the bottom edge as in an agent's chat. */
+	padding-bottom: 0;
 }
 .acp-project .pv-header {
-	flex: none;
+	/* After the thread, the header gives way (a keyboard leaving ~150 px):
+	   the message box is the one part that stays whole. */
+	flex: 0 1 auto;
+	min-height: 0;
+	overflow: clip;
 	/* The line the chips row used to draw under the header. */
 	padding-bottom: 6px;
 	border-bottom: 1px solid var(--c-border);
@@ -599,6 +606,8 @@ pre.acp-msg-body {
 	color: var(--c-warn);
 }
 .acp-chat-composer {
+	/* Never shrinks: the thread above it gives way instead. */
+	flex: none;
 	border-top: 1px solid var(--c-border);
 	padding: 10px 14px;
 	display: flex;
@@ -663,7 +672,11 @@ pre.acp-msg-body {
 	color: var(--c-text);
 	font: 15px/22px var(--font-ui);
 	resize: none;
-	overflow-y: hidden;
+	/* Grows with its text (Safari 26.2+, Chrome 123+) up to 8 lines — 30 % of
+	   the visible height on a phone (below) — then scrolls inside. */
+	field-sizing: content;
+	max-height: calc(8 * 22px + 20px);
+	overflow-y: auto;
 }
 /* The UA's placeholder grey measured 3.75:1 on the field: the muted text
    colour. One line: what does not fit is cut. */
@@ -891,10 +904,10 @@ pre.acp-msg-body {
 /* The thread and its "Ir al final" button (chatScroll.ts, .chat-end). */
 .acp-thread-wrap {
 	flex: 1;
-	/* A readable strip of thread, whatever is open above it. `contain: size`
-	   keeps the thread's content out of the minimum (the thread scrolls): the
-	   message box's column then asks for exactly this strip plus the box. */
-	min-height: 6rem;
+	/* The first thing to give way when the box is short (a keyboard up, a
+	   panel open): it may shrink to nothing, the message box never. `contain:
+	   size` keeps the thread's content out of the column's minimum. */
+	min-height: 0;
 	contain: size;
 	position: relative;
 	display: flex;
@@ -915,6 +928,9 @@ pre.acp-msg-body {
 	.acp-chat-composer {
 		padding-top: 8px;
 		padding-bottom: 8px;
+	}
+	.acp-chat-input {
+		max-height: max(42px, min(calc(8 * 22px + 20px), calc(var(--app-vh, 100dvh) * 0.3)));
 	}
 }
 /* 16 px on a touch screen: iOS zooms into a smaller field on focus. */

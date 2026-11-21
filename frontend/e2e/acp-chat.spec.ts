@@ -501,7 +501,8 @@ test.describe("ACP chat headers", () => {
 		);
 		expect(await panel.evaluate((e) => getComputedStyle(e).overflowY)).toBe("auto");
 		const strip = (await page.locator("#project-view .acp-chat-thread").boundingBox())!.height;
-		expect(strip, "a readable strip of thread").toBeGreaterThanOrEqual(90);
+		// No fixed minimum any more: the thread gives way first, here it still shows.
+		expect(strip, "a strip of thread").toBeGreaterThan(0);
 		// Scrolled to its end, the panel's heading and × stay in view and take the tap.
 		await panel.evaluate((e) => {
 			e.scrollTop = e.scrollHeight;

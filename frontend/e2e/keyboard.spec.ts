@@ -1,4 +1,5 @@
 import { expect, test } from "./fixtures.js";
+import { PROJECT_IDS, PROJECT_SESSION_IDS } from "./mockBackend.js";
 
 /**
  * The mobile soft keyboard, as far as Chromium can reproduce it. Playwright
@@ -266,4 +267,51 @@ test.describe("soft keyboard (simulated visual viewport)", () => {
 		expect(resizes() - r0, "one sync, not a cascade").toBe(1);
 		expect(backend.terminalSockets, "no new socket").toHaveLength(1);
 	});
+
+	for (const chat of [
+		{
+			name: "the agent's chat",
+			hash: `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`,
+			root: "#acp-chat",
+		},
+		{ name: "Project Chat", hash: `#/projects/${PROJECT_IDS.hz}`, root: "#project-view" },
+	])
+		test(`${chat.name}: with 150 px visible the layout fits its box — the thread gives way, the message box is whole`, async ({
+			app,
+			page,
+		}) => {
+			await app.login("alice", chat.hash);
+			const input = page.locator(`${chat.root} .acp-chat-input`);
+			await expect(input).toBeVisible();
+			await input.focus();
+			await keyboard(page, 150, 0);
+			const vh = 150;
+			const composer = (await page.locator(`${chat.root} .acp-chat-composer`).boundingBox())!;
+			expect(composer.y, "the message box starts inside the band").toBeGreaterThanOrEqual(0);
+			expect(composer.y + composer.height, "and ends inside it").toBeLessThanOrEqual(vh + 1);
+			const box = (await input.boundingBox())!;
+			expect(box.height, "the field keeps its resting line").toBeGreaterThanOrEqual(42);
+			// Nothing in the chat is taller than its box: no scroll outside the thread.
+			const overflow = await page.evaluate((sel) => {
+				const out: string[] = [];
+				for (const el of [
+					document.documentElement,
+					document.body,
+					...document.querySelectorAll(`${sel}, ${sel} *`),
+				]) {
+					const cs = getComputedStyle(el);
+					if (el.classList.contains("acp-chat-thread") || el.classList.contains("acp-chat-input"))
+						continue;
+					if (
+						/(auto|scroll)/.test(cs.overflowY) &&
+						el.scrollHeight > el.clientHeight + 1 &&
+						el.scrollTop > 0
+					)
+						out.push(el.className || el.tagName);
+				}
+				return out;
+			}, chat.root);
+			expect(overflow, "nothing but the thread scrolled").toEqual([]);
+			await keyboard(page, page.viewportSize()!.height, 0);
+		});
 });
