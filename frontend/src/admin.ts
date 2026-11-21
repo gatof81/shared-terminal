@@ -36,8 +36,8 @@ import {
 	updateAdminGroup,
 } from "./api.js";
 import { confirmDialog, createDialog } from "./components/dialog.js";
+import { showToast } from "./components/toast.js";
 import { formatBytes, formatCpuCores, formatCpuPercent } from "./format.js";
-import { showToast } from "./main.js";
 import { openObserveModalFor } from "./observeModal.js";
 
 // ── DOM (re-queried locally; see header) ─────────────────────────────────

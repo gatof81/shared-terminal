@@ -154,8 +154,7 @@
 .session-item:hover .session-actions {
   opacity: 1;
 }
-.session-action-btn,
-.session-kill {
+.session-action-btn {
   background: transparent;
   border: none;
   font-size: 0.75rem;
@@ -169,14 +168,8 @@
 .session-action-btn.stop {
   color: var(--c-warn);
 }
-.session-kill {
-  color: var(--c-err);
-}
 .session-action-btn:hover {
   background: rgba(255, 255, 255, 0.1);
-}
-.session-kill:hover {
-  background: rgba(var(--c-err-rgb), 0.15);
 }
 
 /* ── Rows as controls (UI unification, PR 4) ───────────────────
@@ -270,23 +263,9 @@
   min-width: 0;
   white-space: nowrap;
 }
-.session-usage-compact {
-  display: none;
-}
 .session-meta > * {
   overflow: hidden;
   text-overflow: ellipsis;
-}
-/* An ACP agent's session: "@name" and the agent's state (sessionCore.ts
-   paintAgentStatus) on one line, at every size. The state is a coloured mark
-   AND a word — never the colour alone; the full label is in the tooltip and
-   the row's accessible name. The two states that ask something of the
-   person (a question, a login) stand out. */
-.session-agent-line {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  min-width: 0;
 }
 .session-agent-tag {
   font-size: 0.7rem;
@@ -304,30 +283,15 @@
   font-size: 0.7rem;
   color: var(--c-muted);
 }
-.session-agent-mark {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: currentColor;
-}
 .session-agent-status.tone-ok {
   color: var(--c-ok);
 }
 .session-agent-status.tone-busy {
   color: var(--c-accent);
 }
-.session-agent-status.tone-off .session-agent-mark {
-  background: transparent;
-  border: 1px solid currentColor;
-}
 .session-agent-status.asks {
   color: var(--c-warn);
   font-weight: 700;
-}
-.session-agent-status.asks .session-agent-mark {
-  width: 8px;
-  height: 8px;
-  border-radius: 2px;
 }
 /* On a group's heading: an agent of the group waits for the person (seen
    with the group folded too). */
@@ -354,17 +318,8 @@
     padding: 0 0.25rem 0 0.6rem;
     margin-bottom: 0;
   }
-  .session-list-grouped .session-item > .session-agent-link {
-    display: none;
-  }
   .session-list-grouped .session-meta {
     flex-direction: row;
     gap: 0.4rem;
-  }
-  .session-list-grouped .session-usage-wide {
-    display: none;
-  }
-  .session-list-grouped .session-usage-compact {
-    display: inline;
   }
 }

@@ -16,6 +16,10 @@ const mainState = vi.hoisted(() => ({
 	showToast: vi.fn(),
 	showCopySuccessToast: vi.fn(),
 }));
+vi.mock("./components/toast.js", () => ({
+	showToast: mainState.showToast,
+	showCopySuccessToast: mainState.showCopySuccessToast,
+}));
 vi.mock("./main.js", () => ({
 	get activeSessionId() {
 		return mainState.activeSessionId;
@@ -31,8 +35,6 @@ vi.mock("./main.js", () => ({
 	},
 	getActiveTerminal: () => ({ focus: vi.fn() }),
 	isMobile: () => mainState.mobile,
-	showToast: mainState.showToast,
-	showCopySuccessToast: mainState.showCopySuccessToast,
 	updateTerminalControls: vi.fn(),
 }));
 
@@ -45,7 +47,6 @@ const sock = vi.hoisted(() => ({
 const api = vi.hoisted(() => ({
 	fetchConversations: vi.fn(),
 	fetchConversationEvents: vi.fn(),
-	sendConversationMessage: vi.fn(),
 	openConversationSocket: vi.fn(
 		(_sid: string, onFrame: (f: unknown) => void, onState: (c: boolean) => void) => {
 			sock.onFrame = onFrame;
@@ -54,8 +55,7 @@ const api = vi.hoisted(() => ({
 		},
 	),
 	// P3a project directory: absent, as on a backend without the feature.
-	projectChatEnabled: vi.fn(() => false),
-	acpAgentsEnabled: vi.fn(() => false),
+	isLoggedIn: vi.fn(() => false),
 }));
 vi.mock("./api.js", () => api);
 const core = vi.hoisted(() => ({
@@ -110,7 +110,6 @@ const conv = (over: Record<string, unknown> = {}) => ({
 	eventsCount: 10,
 	gapsCount: 0,
 	claudeVersion: "2.1.308",
-	canSendInput: false,
 	...over,
 });
 const REPORT = "## Done\n\nAll **green**.\n\u0001 exact bytes  \n";
@@ -171,7 +170,6 @@ beforeEach(() => {
 		conversations: [conv()],
 	});
 	api.fetchConversationEvents.mockReset();
-	api.sendConversationMessage.mockReset();
 	api.openConversationSocket.mockClear();
 	sock.follow.mockClear();
 	sock.close.mockClear();
@@ -272,8 +270,8 @@ describe("Chat overlay", () => {
 		expect(sock.follow).toHaveBeenCalledWith("c1", 6);
 	});
 
-	it("with ACP agents on, a traditional session's Chat is read-only history: no composer input", async () => {
-		api.acpAgentsEnabled.mockReturnValue(true);
+	it("signed in (ACP agents read), a traditional session's Chat is read-only history: no composer input", async () => {
+		api.isLoggedIn.mockReturnValue(true);
 		try {
 			await openChat();
 			await openThread([ev("user_prompt", { prompt: "hola" })]);
@@ -282,7 +280,7 @@ describe("Chat overlay", () => {
 			expect(thread.querySelector("textarea")).toBeNull();
 			expect(thread.querySelector(".chat-readonly-note")?.textContent).toContain("Terminal");
 		} finally {
-			api.acpAgentsEnabled.mockReturnValue(false);
+			api.isLoggedIn.mockReturnValue(false);
 		}
 	});
 
@@ -420,22 +418,12 @@ describe("Chat overlay", () => {
 		expect($("chat-body").classList.contains("show-thread")).toBe(false);
 	});
 
-	it("mobile switcher entry: 'projects' with the Projects feature off, 'sessions' with it on", async () => {
+	it("mobile switcher entry: other sessions' conversations", async () => {
 		mainState.mobile = true;
 		await openChat();
 		expect(document.querySelector(".chat-switcher-entry")?.textContent).toBe(
-			"Other projects' conversations…",
+			"Other sessions' conversations…",
 		);
-		vs.setView("terminal");
-		api.projectChatEnabled.mockReturnValue(true);
-		try {
-			await openChat("s2");
-			expect(document.querySelector(".chat-switcher-entry")?.textContent).toBe(
-				"Other sessions' conversations…",
-			);
-		} finally {
-			api.projectChatEnabled.mockReturnValue(false);
-		}
 	});
 
 	it("leaving the Chat view closes the live socket", async () => {
@@ -546,7 +534,7 @@ describe("Chat overlay", () => {
 		expect(thread.textContent).toContain("Explore agent finished");
 		expect($("chat-agents").hidden).toBe(true);
 		const btn = [...thread.querySelectorAll("button")].find((b) =>
-			b.textContent?.startsWith("Agents 1"),
+			b.textContent?.startsWith("Subagents 1"),
 		);
 		btn?.click();
 		await flush();

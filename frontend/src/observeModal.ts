@@ -13,7 +13,8 @@
 
 import { listTabs, type Tab } from "./api.js";
 import { confirmDialog, createDialog } from "./components/dialog.js";
-import { currentFontSize, showToast } from "./main.js";
+import { showToast } from "./components/toast.js";
+import { currentFontSize } from "./main.js";
 import { nextObserveMode, type ObserveMode } from "./observeMode.js";
 import { openTerminalSession, type TerminalSession } from "./terminal.js";
 

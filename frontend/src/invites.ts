@@ -8,7 +8,7 @@
 
 import { createInvite, type Invite, listInvites, revokeInvite } from "./api.js";
 import { alertDialog, confirmDialog, createDialog } from "./components/dialog.js";
-import { showToast } from "./main.js";
+import { showToast } from "./components/toast.js";
 
 // ── DOM (re-queried locally; see header) ─────────────────────────────────
 const invitesModal = document.getElementById("invites-modal")!;

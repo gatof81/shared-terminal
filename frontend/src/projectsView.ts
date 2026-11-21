@@ -33,7 +33,6 @@ import {
 	fetchProjects,
 	isLoggedIn,
 	type ProjectSummary,
-	projectChatEnabled,
 	renameProject,
 } from "./api.js";
 import { openActionMenu } from "./components/actionMenu.js";
@@ -471,9 +470,8 @@ function wire(): void {
 	}
 }
 
-/** The app is shown for a signed-in account. With the feature absent this does nothing. */
+/** The app is shown for a signed-in account. */
 export function startProjects(): void {
-	if (!projectChatEnabled()) return;
 	wire();
 	active = true;
 	enableProjectRoutes(() => shown !== null && readProjectRoute() !== null);

@@ -14,7 +14,6 @@ import { acpAgentsLoaded, acpAgentsReadAt, acpEntry, isAcpAgentSession } from ".
 import { readAcpAgents, startAcpStatusFeed } from "./acpStatusFeed.js";
 import { openObserversModalFor } from "./admin.js";
 import {
-	acpAgentsEnabled,
 	createTab,
 	deleteSession,
 	deleteTab,
@@ -26,7 +25,6 @@ import {
 	isLoggedIn,
 	listSessions,
 	listTabs,
-	projectChatEnabled,
 	type SessionInfo,
 	startSession,
 	stopSession,
@@ -34,6 +32,7 @@ import {
 } from "./api.js";
 import { type MenuItem, openActionMenu } from "./components/actionMenu.js";
 import { confirmDialog } from "./components/dialog.js";
+import { showCopySuccessToast, showToast } from "./components/toast.js";
 import { formatBytes, formatCpuCores, formatCpuPercent } from "./format.js";
 import { transformKeyInput } from "./keyBar.js";
 import {
@@ -51,8 +50,6 @@ import {
 	setCurrentTabs,
 	setServerReachable,
 	setSessions,
-	showCopySuccessToast,
-	showToast,
 	updateTerminalControls,
 } from "./main.js";
 import { renderSidebarObservables } from "./myGroups.js";
@@ -104,7 +101,6 @@ import {
 
 // ── DOM (re-queried locally) ─────────────────────────────────────────────
 const sessionList = document.getElementById("session-list")!;
-const sidebarEl = document.getElementById("sidebar");
 const sidebarRefreshBtn = document.getElementById(
 	"sidebar-refresh-btn",
 ) as HTMLButtonElement | null;
@@ -445,13 +441,9 @@ export async function refreshSessions() {
 		listLoaded = true;
 		// Who is an agent decides where a selected session lands: read it now,
 		// so it is known before the first click (no wait in the normal case).
-		if (firstLoad && acpAgentsEnabled() && !acpAgentsLoaded()) void readAcpAgents();
+		if (firstLoad && !acpAgentsLoaded()) void readAcpAgents();
 		setServerReachable(true);
 		setSessions(list);
-		console.debug(
-			`[sessions] fetched ${sessions.length} session(s) (includeTerminated=${includeTerminated})`,
-			sessions.map((s) => ({ id: s.sessionId.slice(0, 8), name: s.name, status: s.status })),
-		);
 		renderSessionList();
 		reattachIfStarted();
 		// A deep link that could not be resolved while the list had never
@@ -536,13 +528,8 @@ export function renderSessionList() {
 		sessionList.contains(active) &&
 		active.matches(".ssection-menu");
 	sessionList.replaceChildren();
-	// The tree (UX iter3 §1: projects → agents without a project → sessions)
-	// belongs to the grouped list only: with the project feature off the
-	// sidebar is exactly as before.
-	sessionList.classList.toggle("session-list-grouped", projectChatEnabled());
-	placeSidebarActions(projectChatEnabled());
-	if (projectChatEnabled()) renderGroupedSessions();
-	else for (const s of sessions) sessionList.appendChild(buildSessionItem(s));
+	// The tree (UX iter3 §1: projects → agents without a project → sessions).
+	renderGroupedSessions();
 	if (focusedId !== undefined) {
 		sessionList
 			.querySelector<HTMLElement>(
@@ -560,30 +547,10 @@ export function renderSessionList() {
 	}
 	paintAgentStatus();
 	// Agents' states keep current without any chat open (acpStatusFeed.ts).
-	if (acpAgentsEnabled()) startAcpStatusFeed();
+	startAcpStatusFeed();
 	// Sidebar observables (#394) dedupe against THIS list, so re-render
 	// them whenever it changes.
 	renderSidebarObservables();
-}
-
-/**
- * The tree puts the one primary action ("+ New session") first, above
- * "Projects"; the flat list keeps it under its "Sessions" bar, as before.
- * The node moves (not CSS `order`), so the Tab order is the order on screen.
- */
-function placeSidebarActions(tree: boolean): void {
-	if (!sidebarEl) return;
-	sidebarEl.classList.toggle("sidebar-tree", tree);
-	const actions = document.getElementById("sidebar-actions");
-	const first = document.getElementById("project-section");
-	const header = document.getElementById("sidebar-header");
-	const newSession = document.getElementById("new-session-btn");
-	newSession?.classList.toggle("btn", tree);
-	newSession?.classList.toggle("primary", tree);
-	newSession?.classList.toggle("sm", tree);
-	if (!actions || !first || !header) return;
-	if (tree && actions.nextElementSibling !== first) first.before(actions);
-	else if (!tree && header.nextElementSibling !== actions) header.after(actions);
 }
 
 /**
@@ -1009,13 +976,12 @@ function buildSessionItem(s: SessionInfo): HTMLElement {
 	select.dataset.role = "select";
 	select.setAttribute("aria-current", String(s.sessionId === activeSessionId));
 
-	// The tree (project feature on) names an ACP agent's row by the agent:
+	// The tree names an ACP agent's row by the agent:
 	// its face and "@name" (the same identity as in its chats), ONE indicator
 	// — the agent's state — and the session's name in the tooltip and the
 	// accessible name. Any other row: the session's status dot and its name.
-	const tree = projectChatEnabled();
 	const acp = acpEntry(s.sessionId);
-	const agentRow = tree && acp !== null;
+	const agentRow = acp !== null;
 	if (agentRow) {
 		const face = document.createElement("span");
 		face.className = "acp-avatar session-avatar";
@@ -1048,7 +1014,7 @@ function buildSessionItem(s: SessionInfo): HTMLElement {
 	// tooltip, and on the row only when memory runs hot (UX audit N2: they
 	// took two of each row's three lines and pushed the agent out of the
 	// phone's row).
-	if (tree && s.status === "running" && s.usage) {
+	if (s.status === "running" && s.usage) {
 		const usage = `CPU ${formatCpuCores(s.usage.cpuPercent / 100)} cores (${formatCpuPercent(s.usage.cpuPercent)}) · Mem ${formatBytes(s.usage.memBytes)} (${s.usage.memPercent.toFixed(0)}%)`;
 		select.title = `${s.name}\n${usage}`;
 		if (s.usage.memPercent >= USAGE_HOT_PERCENT) {
@@ -1057,22 +1023,6 @@ function buildSessionItem(s: SessionInfo): HTMLElement {
 			hot.textContent = `Mem ${s.usage.memPercent.toFixed(0)}%`;
 			meta.appendChild(hot);
 		}
-	} else if (s.status === "running" && s.usage) {
-		const cpuCores = s.usage.cpuPercent / 100;
-		const cpuLine = document.createElement("span");
-		cpuLine.className = "session-usage session-usage-wide";
-		cpuLine.textContent = `CPU ${formatCpuCores(cpuCores)} cores (${formatCpuPercent(s.usage.cpuPercent)})`;
-		meta.appendChild(cpuLine);
-		const memLine = document.createElement("span");
-		memLine.className = "session-usage session-usage-wide";
-		memLine.textContent = `Mem ${formatBytes(s.usage.memBytes)} (${s.usage.memPercent.toFixed(0)}%)`;
-		meta.appendChild(memLine);
-		// Phones: the same on one line (owner review 2026-11-13: the sidebar
-		// wasted room); wide layouts keep the two lines above.
-		const compact = document.createElement("span");
-		compact.className = "session-usage session-usage-compact";
-		compact.textContent = `${formatCpuCores(cpuCores)} cores · ${formatBytes(s.usage.memBytes)} (${s.usage.memPercent.toFixed(0)}%)`;
-		meta.appendChild(compact);
 	} else if (s.status !== "running") {
 		// The dot's colour alone told stopped / terminated / failed apart.
 		// The row's aria-label already says it: this line is for the eye.
@@ -1099,26 +1049,6 @@ function buildSessionItem(s: SessionInfo): HTMLElement {
 		const st = document.createElement("span");
 		st.className = "session-agent-status chip bare";
 		meta.appendChild(st);
-	}
-	// The flat list (no project feature) with an ACP agent's session: its name,
-	// as the agent is addressed, and — while its container runs — its state.
-	if (acp && !agentRow) {
-		const line = document.createElement("span");
-		line.className = "session-agent-line";
-		const tag = document.createElement("span");
-		tag.className = "session-agent-tag";
-		tag.textContent = `@${acp.name}`;
-		line.appendChild(tag);
-		if (s.status === "running") {
-			const st = document.createElement("span");
-			st.className = "session-agent-status";
-			const mark = document.createElement("span");
-			mark.className = "session-agent-mark";
-			mark.setAttribute("aria-hidden", "true");
-			st.append(mark, document.createTextNode(""));
-			line.append(" ", st);
-		}
-		meta.appendChild(line);
 	}
 	// A space between the row's words: laid out by flex they need none, but
 	// the row's text is read as one string (accessible-name checks, copy).
@@ -1233,9 +1163,9 @@ let wantedTabId: string | null = null;
 // session lands as if it had none; the Chat list corrects the memory.
 const LANDING_HISTORY_WAIT_MS = 1500;
 
-/** Is the session an ACP agent's: false with the feature off, null until the list was read. */
+/** Is the session an ACP agent's: null until the list was read. */
 function agentKnown(sessionId: string): boolean | null {
-	return acpAgentsEnabled() ? isAcpAgentSession(sessionId) : false;
+	return isAcpAgentSession(sessionId);
 }
 
 // How long a selection may wait for the agents list. It is read when the
@@ -1591,7 +1521,7 @@ function paintBarIdentity(): void {
 	const s = sessions.find((x) => x.sessionId === activeSessionId);
 	if (!s) return;
 	terminalToolbar.dataset.sessionName = s.name;
-	const acp = acpAgentsEnabled() ? acpEntry(s.sessionId) : null;
+	const acp = acpEntry(s.sessionId);
 	terminalToolbar.classList.toggle("bar-agent", acp !== null);
 	// A running session whose terminal gave up reads "disconnected" until
 	// a pane is attached again (Reconnect) — the server-side status alone

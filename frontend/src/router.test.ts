@@ -159,24 +159,11 @@ describe("reads", () => {
 
 describe("project routes", () => {
 	const PID = "6b1f2c3d-0000-4000-8000-000000000001";
-	const AID = "a0000000-0000-4000-8000-0000000000a2";
 
 	it("parses the project page and round-trips it", () => {
 		expect(parseProjectRoute(`#/projects/${PID}`)).toEqual({ projectId: PID });
 		for (const r of [{ projectId: PID }, { projectId: "p 1" }])
 			expect(parseProjectRoute(projectRouteHash(r))).toEqual(r);
-	});
-
-	it("addresses of the retired project views land on the project page", () => {
-		for (const h of [
-			`#/projects/${PID}/chat`,
-			`#/projects/${PID}/team`,
-			`#/projects/${PID}/new`,
-			`#/projects/${PID}/agents`,
-			`#/projects/${PID}/agents/${AID}`,
-			`#/projects/${PID}/threads/m1`,
-		])
-			expect(parseProjectRoute(h), h).toEqual({ projectId: PID });
 	});
 
 	it("rejects other shapes", () => {
@@ -185,6 +172,8 @@ describe("project routes", () => {
 			"#/projects/",
 			"#/projects//agents/x",
 			"#/projects/%zz",
+			`#/projects/${PID}/chat`,
+			`#/projects/${PID}/team`,
 			`#/sessions/${SID}`,
 		])
 			expect(parseProjectRoute(h), h).toBeNull();
