@@ -232,7 +232,7 @@ export class AcpThread {
 	onState: (s: ThreadState) => void = () => {};
 
 	constructor() {
-		// One line at rest (CSS); fitInput() grows it with the text up to a cap.
+		// One line at rest; CSS (field-sizing) grows it with the text up to a cap.
 		this.input.rows = 1;
 		this.input.setAttribute("aria-label", "Mensaje");
 		this.sendBtn.type = "submit";
@@ -277,7 +277,6 @@ export class AcpThread {
 					if (document.activeElement === this.input) e.preventDefault();
 				});
 		this.input.addEventListener("input", () => {
-			this.fitInput();
 			this.renderHint();
 			this.syncSendBtn();
 			// What is written by hand shows in the menu as it is typed.
@@ -343,27 +342,23 @@ export class AcpThread {
 				}
 				this.renderPill();
 			}).observe(this.threadEl);
-		// The field's cap depends on the visible height (keyboard, rotation).
-		window.visualViewport?.addEventListener("resize", () => this.fitInput());
-		window.addEventListener("resize", () => this.fitInput());
+		// The placeholder is one line at rest: its text follows the width.
+		for (const q of ["(max-width: 640px)", "(max-width: 360px)"])
+			window.matchMedia?.(q).addEventListener("change", () => this.setPlaceholder());
 		this.moreBtn.type = "button";
 		this.moreBtn.addEventListener("click", () => {
 			this.moreBtn.disabled = true;
 			void this.loadEarlier();
 		});
 		this.root.append(wrap, this.composer);
-		// send() empties the field before its first await; the field goes back
-		// to its resting height now, not when the network answers.
 		this.composer.addEventListener("submit", (e) => {
 			e.preventDefault();
 			void this.send();
-			this.fitInput();
 		});
 		this.input.addEventListener("keydown", (e) => {
 			if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
 				e.preventDefault();
 				void this.send();
-				this.fitInput();
 			}
 		});
 	}
@@ -868,37 +863,6 @@ export class AcpThread {
 		this.clearNew();
 	}
 
-	/**
-	 * The field grows with its text — up to 8 lines on a desktop, up to 30 %
-	 * of the visible height on a phone (the keyboard shrinks it) — then
-	 * scrolls inside; emptied, it is back to its resting line. Only the field
-	 * grows: the buttons sit at the bottom of the surface's grid.
-	 */
-	private fitInput(): void {
-		const i = this.input;
-		if (!i.isConnected) return;
-		this.setPlaceholder();
-		// Empty: the resting height. Chromium counts a placeholder's wrapped
-		// lines in scrollHeight, so measuring would grow the field for it.
-		if (i.value === "") {
-			i.style.height = "";
-			i.style.overflowY = "";
-			return;
-		}
-		const cs = getComputedStyle(i);
-		const line = Number.parseFloat(cs.lineHeight) || 20;
-		const border = Number.parseFloat(cs.borderTopWidth) + Number.parseFloat(cs.borderBottomWidth);
-		const frame = Number.parseFloat(cs.paddingTop) + Number.parseFloat(cs.paddingBottom) + border;
-		const visible = window.visualViewport?.height ?? window.innerHeight;
-		const phone = window.matchMedia?.("(max-width: 640px)").matches === true;
-		const lines = 8 * line + frame;
-		const cap = Math.max(line + frame, phone ? Math.min(lines, visible * 0.3) : lines);
-		i.style.height = "auto";
-		const want = i.scrollHeight + border;
-		i.style.height = `${Math.min(want, cap)}px`;
-		i.style.overflowY = want > cap + 1 ? "auto" : "hidden";
-	}
-
 	/** Everything an item shows: equal ⇒ the element on screen is still right. */
 	private itemSig(item: ThreadItem): string {
 		const ms = item.kind === "post" ? item.messages : [item.message];
@@ -1169,7 +1133,6 @@ export class AcpThread {
 					const prefix = this.source?.kind === "project" ? `@${q.agent} ` : "";
 					this.input.value = `${prefix}Sobre tu pregunta «${form.message}»: ${said && !said.startsWith("(") ? said : ""}`;
 					this.input.focus();
-					this.fitInput();
 				});
 				card.append(again);
 			}
@@ -1299,7 +1262,7 @@ export class AcpThread {
 		if (!picks) this.closePicker(false);
 		else if (this.pickOpen) this.renderPicker();
 		this.renderHint();
-		this.fitInput();
+		this.setPlaceholder();
 	}
 
 	/** The arrow: off when nothing can be sent (still on while another send is out). */
@@ -1464,7 +1427,6 @@ export class AcpThread {
 		const [a, b, dir] = [i.selectionStart, i.selectionEnd, i.selectionDirection];
 		i.value = applyEdits(text, edits);
 		i.setSelectionRange(mapThroughEdits(a, edits), mapThroughEdits(b, edits), dir ?? "none");
-		this.fitInput();
 		this.renderHint();
 		this.syncSendBtn();
 		this.renderPicker();
