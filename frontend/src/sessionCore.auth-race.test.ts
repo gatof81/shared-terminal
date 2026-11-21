@@ -73,10 +73,9 @@ vi.mock("./main.js", () => ({
 	getActiveTerminal: () => null,
 	isMobile: () => false,
 	maybeInjectSelectionHint: vi.fn(),
-	setChromeOpen: vi.fn(),
 	showCopySuccessToast: vi.fn(),
 	showToast: mainState.showToast,
-	updateChromeToggle: vi.fn(),
+	updateTerminalControls: vi.fn(),
 }));
 
 const api = vi.hoisted(() => ({
@@ -151,7 +150,6 @@ beforeAll(async () => {
 			<div id="terminal-container"></div>
 			<div id="key-bar"></div>
 			<div id="files-view" hidden></div><div id="git-view" hidden></div><div id="chat-view" hidden></div>
-			<nav id="view-nav" hidden></nav>
 		</section>`;
 	vi.stubGlobal(
 		"ResizeObserver",
@@ -169,7 +167,6 @@ beforeEach(() => {
 	localStorage.clear();
 	history.replaceState(null, "", "/");
 	router.resetForTests();
-	document.documentElement.dataset.shell = "v1";
 	mainState.sessions = [];
 	mainState.activeSessionId = null;
 	mainState.currentTabs = [];

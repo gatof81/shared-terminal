@@ -4,7 +4,6 @@ import {
 	forgetAllLastConversationTitles,
 	forgetSession,
 	type LandingInput,
-	landsByPolicy,
 	readHistoryHint,
 	readLastConversation,
 	readLastConversationTitle,
@@ -15,8 +14,8 @@ import {
 	writeViewPref,
 } from "./viewPolicy.js";
 
-/** A traditional session under shell v2: the original rules. */
-const V2 = { isAgent: false, shell: "v2" } as const;
+/** A traditional session. */
+const V2 = { isAgent: false } as const;
 
 describe("chooseLanding", () => {
 	it("the person's last choice wins on a running session", () => {
@@ -54,45 +53,21 @@ describe("chooseLanding — an ACP agent's session", () => {
 		hasHistory: null,
 		running: true,
 		isAgent: true,
-		shell: "v2",
 		...o,
 	});
 
-	it("lands on Chat in both shells, running or stopped, whatever the capture history says", () => {
-		for (const shell of ["v1", "v2"] as const)
-			for (const running of [true, false])
-				for (const hasHistory of [true, false, null])
-					expect(chooseLanding(agent({ shell, running, hasHistory }))).toBe("chat");
+	it("lands on Chat, running or stopped, whatever the capture history says", () => {
+		for (const running of [true, false])
+			for (const hasHistory of [true, false, null])
+				expect(chooseLanding(agent({ running, hasHistory }))).toBe("chat");
 	});
 
-	it("the view the person chose for it wins (in v1 too); a stopped one keeps only Files or Chat", () => {
-		for (const shell of ["v1", "v2"] as const) {
-			for (const pref of ["terminal", "files", "git", "chat"] as const)
-				expect(chooseLanding(agent({ shell, pref }))).toBe(pref);
-			expect(chooseLanding(agent({ shell, pref: "terminal", running: false }))).toBe("chat");
-			expect(chooseLanding(agent({ shell, pref: "git", running: false }))).toBe("chat");
-			expect(chooseLanding(agent({ shell, pref: "files", running: false }))).toBe("files");
-		}
-	});
-
-	it("a traditional session in v1 keeps v1's landing: nothing remembered is read", () => {
-		const v1 = { isAgent: false, shell: "v1" } as const;
-		expect(chooseLanding({ ...v1, pref: "chat", hasHistory: true, running: true })).toBe(
-			"terminal",
-		);
-		expect(chooseLanding({ ...v1, pref: "chat", hasHistory: true, running: false })).toBe("files");
-		// Not known to be an agent's: the same.
-		expect(
-			chooseLanding({ pref: "chat", hasHistory: true, running: true, isAgent: null, shell: "v1" }),
-		).toBe("terminal");
-	});
-
-	it("only v2, or a v1 session that is (or may be) an agent's, lands by the policy", () => {
-		expect(landsByPolicy("v2", false)).toBe(true);
-		expect(landsByPolicy("v2", null)).toBe(true);
-		expect(landsByPolicy("v1", true)).toBe(true);
-		expect(landsByPolicy("v1", null)).toBe(true);
-		expect(landsByPolicy("v1", false)).toBe(false);
+	it("the view the person chose for it wins; a stopped one keeps only Files or Chat", () => {
+		for (const pref of ["terminal", "files", "git", "chat"] as const)
+			expect(chooseLanding(agent({ pref }))).toBe(pref);
+		expect(chooseLanding(agent({ pref: "terminal", running: false }))).toBe("chat");
+		expect(chooseLanding(agent({ pref: "git", running: false }))).toBe("chat");
+		expect(chooseLanding(agent({ pref: "files", running: false }))).toBe("files");
 	});
 });
 

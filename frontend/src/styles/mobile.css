@@ -113,6 +113,11 @@
   html:not([data-shell="v2"]) main:not(.chrome-open) #terminal-tabs {
     display: none !important;
   }
+  /* The person hid the tab row (the bar's ⋯, sessionCore.ts): the terminal
+     takes its height — one deliberate resize, never on a view switch. */
+  #terminal-area.tabs-collapsed #terminal-tabs {
+    display: none !important;
+  }
 
   /* Compact toolbar+tabs when they DO show — saves another ~30 % of
      vertical space on a 430-pt-wide screen. */

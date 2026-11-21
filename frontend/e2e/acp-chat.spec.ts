@@ -290,12 +290,12 @@ test.describe("ACP chat", () => {
 		await page.evaluate((h) => {
 			location.hash = h;
 		}, chatOf(PROJECT_SESSION_IDS.architect));
-		await expect(page.locator("#acp-chat .acp-chat-title")).toContainText("@arq");
+		await expect(page.locator("#terminal-session-name")).toHaveText("@arq");
 		await expect(input).toHaveValue("");
 		await page.evaluate((h) => {
 			location.hash = h;
 		}, chatOf(PROJECT_SESSION_IDS.scratch));
-		await expect(page.locator("#acp-chat .acp-chat-title")).toContainText("@solo");
+		await expect(page.locator("#terminal-session-name")).toHaveText("@solo");
 		await expect(input).toHaveValue("solo para @solo");
 	});
 
@@ -405,12 +405,10 @@ test.describe("ACP chat headers", () => {
 			error: "modelo no disponible",
 		};
 		await app.login("alice", chatOf(PROJECT_SESSION_IDS.scratch));
-		const header = page.locator("#acp-chat .acp-chat-header");
 		await expect(page.locator("#acp-chat .acp-settings")).toBeHidden();
 		// The bar names the agent (and its session) in either case.
 		await expect(page.locator("#terminal-session-name")).toHaveText("@solo");
 		await expect(page.locator("#terminal-toolbar")).toHaveAttribute("data-session-name", "scratch");
-		await expect(header).toBeHidden();
 		if (!info.project.use.isMobile)
 			await expect(page.locator("#terminal-session-sub")).toHaveText(
 				"sesión scratch · Educación HZ ↗",
@@ -608,7 +606,7 @@ test.describe("ACP chat headers", () => {
 		await expect(group).toBeFocused();
 		await group.click();
 		await page.getByRole("link", { name: "Abrir su chat (@dev)" }).click();
-		await expect(page.locator("#acp-chat .acp-chat-title")).toContainText("@dev");
+		await expect(page.locator("#terminal-session-name")).toHaveText("@dev");
 	});
 });
 
@@ -798,7 +796,6 @@ test.describe("ACP chat: taps with the keyboard up", () => {
 		await expect(recover).toBeVisible();
 		fail = false;
 		await input.focus();
-		await expect(page.locator("#view-nav")).toBeHidden();
 		await recover.tap();
 		await expect(input).toHaveValue("otro borrador\n\nel primero");
 	});
@@ -839,7 +836,6 @@ test.describe("ACP chat: taps with the keyboard up", () => {
 		const option = page.locator("#acp-chat .acp-question-open .acp-option", { hasText: "Google" });
 		await expect(option).toBeVisible();
 		await page.locator("#acp-chat .acp-chat-input").focus();
-		await expect(page.locator("#view-nav")).toBeHidden();
 		await option.tap();
 		await expect(option.locator("input")).toBeChecked();
 	});

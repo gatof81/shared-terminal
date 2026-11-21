@@ -7,7 +7,7 @@
 //
 // Messages typed here are DIRECT: private to the person and this agent.
 
-import { ACP_MODELS, agentStatus, modelLabel, modelState } from "./acpModel.js";
+import { ACP_MODELS, modelLabel, modelState } from "./acpModel.js";
 import { acpReadTicket, setAcpAgents } from "./acpRegistry.js";
 import { AcpThread, type ThreadState } from "./acpThread.js";
 import {
@@ -22,7 +22,6 @@ import {
 } from "./api.js";
 import { showToast } from "./components/toast.js";
 import { activeSessionId } from "./main.js";
-import { navigateProject } from "./router.js";
 import { setSessionMenuExtras } from "./sessionCore.js";
 import { el, syncChildren } from "./ui.js";
 import { getView, onSessionSync, onViewChange, setView } from "./viewSwitch.js";
@@ -39,25 +38,11 @@ let shownNoticeKey = "";
 const root = el("div", "acp-chat");
 root.id = "acp-chat";
 root.hidden = true;
-const headerEl = el("div", "acp-chat-header");
-// One row of essentials (name, state, its project, Ajustes); the rest —
-// runtime, model, project choice — in a panel that is closed by default.
+// The agent's settings — runtime, model, project choice — in a panel that
+// is closed by default and opened from the bar's ⋯ ("Ajustes del agente").
 // Every element here is kept across renders (only `hidden` and texts
 // change): an unsaved choice and the focus survive live updates, and a
 // closed-then-reopened panel shows them again.
-const titleEl = el("div", "acp-chat-title");
-const nameEl = el("strong", "acp-chat-name");
-const statusEl = el("span", "acp-status");
-const settingsBtn = el("button", "btn sm acp-settings-btn");
-settingsBtn.type = "button";
-settingsBtn.setAttribute("aria-expanded", "false");
-settingsBtn.setAttribute("aria-controls", "acp-settings");
-const settingsLabel = el("span", undefined, "Ajustes");
-// A model that is pending or was refused shows on the button: a failure
-// must not hide in a closed panel.
-const settingsFlag = el("span", "acp-settings-flag");
-settingsFlag.setAttribute("aria-hidden", "true");
-settingsBtn.append(settingsLabel, settingsFlag);
 const settingsPanel = el("div", "acp-settings");
 settingsPanel.id = "acp-settings";
 settingsPanel.hidden = true;
@@ -65,33 +50,25 @@ settingsPanel.setAttribute("role", "group");
 settingsPanel.setAttribute("aria-label", "Ajustes del agente");
 const privacyEl = el("div", "acp-chat-meta acp-chat-privacy");
 const runtimeEl = el("div", "acp-chat-meta");
-let projectLinkEl: HTMLElement | null = null;
-let shownLinkKey = "";
-headerEl.append(titleEl);
-settingsBtn.addEventListener("click", () => setSettings(settingsPanel.hidden));
-// Escape closes the panel and gives the focus back to its button.
+// The agent whose panel is shown: another agent's chat starts with it closed.
+let shownAgentName: string | null = null;
+// Escape closes the panel and gives the focus back to the bar's ⋯.
 settingsPanel.addEventListener("keydown", (e) => {
 	if (e.key !== "Escape" || settingsPanel.hidden) return;
 	e.preventDefault();
 	e.stopPropagation();
 	setSettings(false);
-	// Back to what opened it: its own button where the agent's row shows (a
-	// phone in shell v1), else the bar's ⋯ ("Ajustes del agente").
-	const back =
-		settingsBtn.offsetParent !== null ? settingsBtn : document.getElementById("session-menu-btn");
-	back?.focus();
+	document.getElementById("session-menu-btn")?.focus();
 });
 
 function setSettings(open: boolean): void {
 	settingsPanel.hidden = !open;
-	settingsBtn.setAttribute("aria-expanded", String(open));
 }
 const noticeEl = el("div", "acp-chat-notice");
 const thread = new AcpThread();
-// The panel is the header's sibling, not its child: on a short screen it is
-// the one part that gives way (shrinks, scrolls inside) to the thread's
-// minimum, while the title row never does (acp-chat.css).
-root.append(headerEl, settingsPanel, noticeEl, thread.root);
+// On a short screen the panel is the part that gives way (shrinks, scrolls
+// inside) to the thread's minimum (acp-chat.css).
+root.append(settingsPanel, noticeEl, thread.root);
 thread.onState = (s) => renderHeader(s);
 
 // Mounted on first use (the module is imported by chatView.ts, also in tests
@@ -148,7 +125,8 @@ function apply(): void {
 	document.getElementById("chat-view")?.classList.toggle("acp-owned", agent !== null);
 	if (active && agent) {
 		// Another agent's chat starts with its panel closed.
-		if (nameEl.textContent !== `@${agent.name}`) setSettings(false);
+		if (shownAgentName !== agent.name) setSettings(false);
+		shownAgentName = agent.name;
 		thread.open({ kind: "agent", name: agent.name });
 		void loadProjectNames().then(() => renderHeader(thread.state));
 		renderHeader(thread.state);
@@ -162,10 +140,9 @@ window.addEventListener("st:projects-changed", () => void loadProjectNames());
 // ── The bar is the agent's header (UX iter3 E) ──────────────────────────
 //
 // On an agent's session the session bar shows the agent (sessionCore
-// paintBarIdentity) and this chat's own header row goes (acp-chat.css; a
-// phone in shell v1 keeps it: its bar lives in a drawer). "Ajustes" is then
-// the bar's ⋯ first entry, and what the Ajustes button used to flag — a
-// model pending or refused, a login missing — is flagged on the ⋯ itself.
+// paintBarIdentity). "Ajustes" is the bar's ⋯ first entry, and what needs
+// the person — a model pending or refused, a login missing — is flagged on
+// the ⋯ itself.
 
 let extrasRegistered = false;
 function registerMenuExtras(): void {
@@ -232,26 +209,12 @@ function renderHeader(s: ThreadState): void {
 	}
 	const a = owned;
 	const auth = s.auth.get(a.name) === true;
-	const st = agentStatus(a, Date.now(), auth);
 	// Called on every thread change (each activity batch, the 15 s status
 	// poll). Each part is rebuilt only when what it shows changed: a rebuilt
 	// project <select> lost the choice the person had not saved yet.
-	nameEl.textContent = `@${a.name}`;
-	statusEl.className = `acp-status acp-status-${st.tone}`;
-	statusEl.textContent = st.label;
 	// The placeholder says it too, but it goes away while typing: here it stays.
 	privacyEl.textContent = `Mensajes directos: privados entre vos y @${a.name}`;
 	runtimeEl.textContent = `Runtime: ${a.runtime}`;
-	const linkKey = projectChatEnabled()
-		? JSON.stringify([
-				a.projectId ?? null,
-				a.projectId ? (projectNames.get(a.projectId) ?? null) : null,
-			])
-		: "";
-	if (linkKey !== shownLinkKey) {
-		shownLinkKey = linkKey;
-		projectLinkEl = linkKey && a.projectId ? projectLink(a.projectId) : null;
-	}
 	const projectKey = projectChatEnabled()
 		? JSON.stringify([a.name, a.projectId ?? null, [...projectNames]])
 		: "";
@@ -272,22 +235,6 @@ function renderHeader(s: ThreadState): void {
 		modelRowEl = modelRow(a);
 	}
 	paintMenuFlag(a, auth);
-	const flag = ms === "failed" ? "!" : ms === "pending" ? "…" : "";
-	settingsFlag.textContent = flag;
-	settingsFlag.hidden = flag === "";
-	settingsBtn.classList.toggle("acp-settings-failed", ms === "failed");
-	settingsBtn.setAttribute(
-		"aria-label",
-		ms === "failed"
-			? "Ajustes (el modelo no se aplicó)"
-			: ms === "pending"
-				? "Ajustes (cambio de modelo pendiente)"
-				: "Ajustes",
-	);
-	const title: HTMLElement[] = [nameEl, statusEl];
-	if (projectLinkEl) title.push(projectLinkEl);
-	title.push(settingsBtn);
-	syncChildren(titleEl, title);
 	const parts: HTMLElement[] = [privacyEl, runtimeEl, modelRowEl];
 	if (projectRowEl) parts.push(projectRowEl);
 	syncChildren(settingsPanel, parts);
@@ -437,19 +384,4 @@ function projectRow(a: AcpAgentInfo): HTMLElement {
 	});
 	row.append(el("span", undefined, "Proyecto:"), select, save);
 	return row;
-}
-
-/** The agent's Project Chat, by the project's name (truncated by CSS). */
-function projectLink(pid: string): HTMLElement {
-	const name = projectNames.get(pid) ?? "Project Chat";
-	const link = el("a", "acp-link acp-chat-projlink");
-	link.append(el("span", "visually-hidden", "Abrir Project Chat: "), name);
-	link.title = `Abrir Project Chat · ${name}`;
-	link.href = `#/projects/${encodeURIComponent(pid)}`;
-	link.addEventListener("click", (e) => {
-		if (e.button !== 0 || e.metaKey || e.ctrlKey) return;
-		e.preventDefault();
-		navigateProject({ projectId: pid });
-	});
-	return link;
 }

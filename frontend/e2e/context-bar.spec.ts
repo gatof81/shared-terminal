@@ -43,7 +43,6 @@ test.describe("context bar", () => {
 		await expect(page.locator("#terminal-session-sub")).toHaveText(
 			"sesión hz-architect · Educación HZ ↗",
 		);
-		await expect(page.locator("#acp-chat .acp-chat-header")).toBeHidden();
 		// The subtitle's project opens Project Chat.
 		await page.locator("#terminal-session-sub a").click();
 		await expect(page).toHaveURL(new RegExp(`#/projects/${PROJECT_IDS.hz}`));

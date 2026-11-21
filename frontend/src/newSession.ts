@@ -54,7 +54,6 @@ const editTemplateDescriptionField = document.getElementById("edit-template-desc
 const editTemplateDescriptionInput = document.getElementById(
 	"edit-template-description-input",
 ) as HTMLInputElement;
-const templatesBtn = document.getElementById("templates-btn") as HTMLButtonElement;
 
 // ── New session ─────────────────────────────────────────────────────────────
 //
@@ -1577,11 +1576,10 @@ const templatesList = document.getElementById("templates-list") as HTMLDivElemen
 const templatesEmptyHint = document.getElementById("templates-empty-hint") as HTMLParagraphElement;
 
 /**
- * Pick the Templates button that's actually rendered for the current
- * viewport — `templatesBtn` on desktop, `sidebarTemplatesBtn` on mobile.
- * `offsetParent === null` is the standard "is this element rendered"
- * test (returns null for `display:none` ancestors), and the header /
- * sidebar split is exactly the case it was designed for.
+ * Pick the account control that's actually rendered for the current
+ * viewport — the user menu's button, or the drawer footer's Templates
+ * under 400 px (shell-v2.css). `offsetParent === null` is the standard
+ * "is this element rendered" test (null for `display:none` ancestors).
  *
  * Used by callers that open the templates modal from a third place
  * (e.g. the save-template flow re-opening templates after a save) —
@@ -1591,12 +1589,13 @@ const templatesEmptyHint = document.getElementById("templates-empty-hint") as HT
  * element and silently drop to `document.body`. See PR #257 review.
  */
 function resolveTemplatesOpener(): HTMLButtonElement {
-	return templatesBtn.offsetParent !== null ? templatesBtn : sidebarTemplatesBtn;
+	const menu = document.getElementById("user-menu-btn") as HTMLButtonElement | null;
+	return menu && menu.offsetParent !== null ? menu : sidebarTemplatesBtn;
 }
 
 const templatesDialog = createDialog(templatesModal);
 
-function openTemplatesModal(opener: HTMLElement) {
+export function openTemplatesModal(opener: HTMLElement) {
 	templatesDialog.open(opener);
 	void refreshTemplatesList();
 }
@@ -1698,7 +1697,6 @@ templatesModal.addEventListener("click", (e) => {
 	if (target.hasAttribute("data-close-modal")) closeTemplatesModal();
 });
 
-templatesBtn.addEventListener("click", () => openTemplatesModal(templatesBtn));
 sidebarTemplatesBtn.addEventListener("click", () => openTemplatesModal(sidebarTemplatesBtn));
 
 async function deleteTemplateConfirmed(id: string, card: HTMLDivElement) {

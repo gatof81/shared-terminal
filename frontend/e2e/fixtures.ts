@@ -173,16 +173,10 @@ export class App {
 	}
 
 	/**
-	 * An ACP agent's settings panel: from the bar's ⋯ ("Ajustes del agente",
-	 * UX iter3 E), or from the agent's own row where it shows (a phone in shell
-	 * v1). Returns the control that opened it (Escape gives the focus back to it).
+	 * An ACP agent's settings panel, from the bar's ⋯ ("Ajustes del agente",
+	 * UX iter3 E). Returns the ⋯ (Escape gives the focus back to it).
 	 */
 	async openAgentSettings(): Promise<Locator> {
-		const own = this.page.locator("#acp-chat .acp-settings-btn");
-		if (await own.isVisible()) {
-			await own.click();
-			return own;
-		}
 		const more = this.page.locator("#session-menu-btn");
 		await more.click();
 		await this.page.getByRole("menuitem", { name: /^Ajustes del agente/ }).click();

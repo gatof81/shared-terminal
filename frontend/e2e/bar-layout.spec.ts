@@ -17,8 +17,6 @@ test.describe("the bar layout", () => {
 		await app.expectTerminalReady();
 		const tabs = page.locator("#view-switch");
 		await expect(tabs).toBeVisible();
-		await expect(page.locator("#chrome-toggle")).toBeHidden();
-		await expect(page.locator("#view-nav")).toBeHidden();
 		// Terminal focused (on a phone this is when the soft keyboard is up).
 		await page.locator(".tab-pane.active .xterm-helper-textarea").focus();
 		await expect(tabs).toBeVisible();
@@ -84,8 +82,6 @@ test.describe("the bar layout", () => {
 		await app.expectTerminalReady();
 		await expect(page.locator("#tab-tools #font-size-btn")).toBeVisible();
 		await expect(page.locator("#tab-tools #terminal-search-btn")).toBeVisible();
-		await expect(page.locator("#terminal-toolbar #observers-btn")).toBeHidden();
-		await expect(page.locator("#terminal-toolbar #ports-btn")).toBeHidden();
 		await page.click("#session-menu-btn");
 		const menu = page.locator('[role="menu"].action-menu');
 		await expect(menu).toContainText("my-project");
@@ -131,13 +127,41 @@ test.describe("the bar layout", () => {
 		).toBeEnabled();
 	});
 
+	test("a phone hides the tab row from the ⋯ (remembered); one resize, then none on a view switch", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		test.skip(!app.mobile, "a phone");
+		await app.login("alice");
+		await app.openSession("my-project");
+		await app.expectTerminalReady();
+		await page.waitForTimeout(400);
+		const sock = backend.terminalSockets[0]!;
+		const resizes = () => sock.sent.filter((f) => f.type === "resize").length;
+		const r0 = resizes();
+		await page.click("#session-menu-btn");
+		await page.getByRole("menuitem", { name: /^Ocultar pestañas/ }).click();
+		await expect(page.locator("#terminal-tabs")).toBeHidden();
+		await expect.poll(resizes, "the terminal takes the row's height").toBe(r0 + 1);
+		await app.switchView("files");
+		await app.switchView("terminal");
+		await page.waitForTimeout(400);
+		expect(resizes(), "a view switch still resizes nothing").toBe(r0 + 1);
+		await page.reload();
+		await app.expectTerminalReady();
+		await expect(page.locator("#terminal-tabs")).toBeHidden();
+		await page.click("#session-menu-btn");
+		await page.getByRole("menuitem", { name: /^Mostrar pestañas/ }).click();
+		await expect(page.locator("#terminal-tabs")).toBeVisible();
+	});
+
 	test("desktop: the header cluster is one user menu with the role's entries", async ({
 		app,
 		page,
 	}) => {
 		test.skip(app.mobile, "the user menu replaces the desktop header cluster");
 		await app.login("admin");
-		await expect(page.locator("#admin-btn")).toBeHidden();
 		await page.click("#user-menu-btn");
 		const menu = page.locator('[role="menu"].action-menu');
 		await expect(menu.locator('[role="menuitem"]')).toHaveText([

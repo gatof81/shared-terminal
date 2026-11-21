@@ -8,10 +8,9 @@
 
 import { getSessionPorts, type PortSpec, updateSessionPorts } from "./api.js";
 import { createDialog } from "./components/dialog.js";
-import { activeSessionId, showToast } from "./main.js";
+import { showToast } from "./main.js";
 
 // ── DOM (re-queried locally; see header) ─────────────────────────────────
-const portsBtn = document.getElementById("ports-btn") as HTMLButtonElement;
 const portsModal = document.getElementById("ports-modal")!;
 const portsModalTableBody = document.getElementById(
 	"ports-modal-table-body",
@@ -170,12 +169,7 @@ function renderPortsModalRows(): void {
 	}
 }
 
-function openPortsModal(): void {
-	if (!activeSessionId) return;
-	openPortsModalFor(activeSessionId);
-}
-
-/** The editor for one session — from the toolbar (active session) or a sidebar row's menu. */
+/** The editor for one session — from the bar's ⋯ or a sidebar row's menu. */
 export function openPortsModalFor(sessionId: string): void {
 	portsModalSessionId = sessionId;
 	portsModalRows = [];
@@ -198,7 +192,7 @@ export function openPortsModalFor(sessionId: string): void {
 	loadingCell.textContent = "Loading…";
 	loading.appendChild(loadingCell);
 	portsModalTableBody.appendChild(loading);
-	portsDialog.open(portsBtn);
+	portsDialog.open(document.activeElement);
 	void (async () => {
 		try {
 			const data = await getSessionPorts(sessionId);
@@ -230,7 +224,7 @@ export function openPortsModalFor(sessionId: string): void {
 			// CRITICAL: disable Save + Add Row. The load failed, so
 			// `portsModalRows` is still []; a Save here would PATCH the whole
 			// set to [] and silently wipe every configured port. The buttons
-			// are re-enabled on the next openPortsModal().
+			// are re-enabled on the next openPortsModalFor().
 			portsModalTableBody.textContent = "";
 			setPortsModalError((err as Error).message);
 			portsModalSaveBtn.disabled = true;
@@ -352,7 +346,5 @@ portsModalTableBody.addEventListener("click", (e) => {
 });
 
 portsModalSaveBtn.addEventListener("click", () => void savePortsModal());
-
-portsBtn.addEventListener("click", () => openPortsModal());
 
 export { closePortsModal };

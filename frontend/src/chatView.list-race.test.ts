@@ -15,7 +15,6 @@ const mainState = vi.hoisted(() => ({
 	mobile: false,
 	showToast: vi.fn(),
 	showCopySuccessToast: vi.fn(),
-	setChromeOpen: vi.fn(),
 }));
 vi.mock("./main.js", () => ({
 	get activeSessionId() {
@@ -29,10 +28,9 @@ vi.mock("./main.js", () => ({
 	},
 	getActiveTerminal: () => ({ focus: vi.fn() }),
 	isMobile: () => mainState.mobile,
-	setChromeOpen: mainState.setChromeOpen,
 	showToast: mainState.showToast,
 	showCopySuccessToast: mainState.showCopySuccessToast,
-	updateChromeToggle: vi.fn(),
+	updateTerminalControls: vi.fn(),
 }));
 
 const api = vi.hoisted(() => ({
@@ -106,15 +104,13 @@ beforeAll(async () => {
 			<div id="terminal-tabs"></div>
 			<div id="terminal-container" style="display: block"><div class="tab-pane active"><textarea id="xterm-input"></textarea></div></div>
 			<div id="key-bar"></div>
-			<div id="files-view" hidden><button id="files-to-terminal-btn"></button></div>
+			<div id="files-view" hidden></div>
 			<div id="git-view" hidden>
-				<button id="git-to-terminal-btn"></button>
 				<div id="git-summary"></div>
 				<button id="git-refresh-btn"></button>
 				<div id="git-body"><div id="git-list"></div><div id="git-diff"></div></div>
 			</div>
 			<div id="chat-view" hidden>
-				<button id="chat-to-terminal-btn"></button>
 				<button id="chat-back-btn" hidden></button>
 				<div id="chat-summary"></div>
 				<button id="chat-refresh-btn"></button>
@@ -125,12 +121,6 @@ beforeAll(async () => {
 				</div>
 				<div id="chat-announcer"></div>
 			</div>
-			<nav id="view-nav" hidden>
-				<button data-view="chat"></button>
-				<button data-view="terminal"></button>
-				<button data-view="files"></button>
-				<button data-view="git"></button>
-			</nav>
 		</section>`;
 	vi.stubGlobal(
 		"ResizeObserver",

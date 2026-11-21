@@ -24,7 +24,7 @@ test.describe("an agent's session lands on its Chat", () => {
 		const length = await page.evaluate(() => history.length);
 		await app.openSession("scratch");
 		await app.expectView("chat");
-		await expect(page.locator("#acp-chat .acp-chat-title")).toContainText("@solo");
+		await expect(page.locator("#terminal-session-name")).toHaveText("@solo");
 		await expect.poll(() => page.url()).toContain(`#/sessions/${AGENT}/chat`);
 		expect(await page.evaluate(() => history.length), "a landing is not an entry").toBe(length);
 		// The attach behind the overlay sends nothing on its own.
@@ -145,7 +145,7 @@ test.describe("an agent's session lands on its Chat", () => {
 			"nuevo-agente",
 		);
 		await app.expectView("chat");
-		await expect(page.locator("#acp-chat .acp-chat-title")).toContainText("@nuevo");
+		await expect(page.locator("#terminal-session-name")).toHaveText("@nuevo");
 		expect(SESSION_IDS.running).not.toBe(sid);
 	});
 });
