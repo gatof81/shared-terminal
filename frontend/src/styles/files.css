@@ -9,13 +9,28 @@
   overflow: hidden;
   flex-shrink: 0;
 }
+/* Each view tab: icon + label; the icon alone on narrow screens, except
+   the active one, which keeps its label (mobile.css). */
 #view-switch button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
   background: transparent;
   border: 0;
   color: var(--c-muted);
   font-size: 0.75rem;
-  padding: 0.2rem 0.6rem;
+  padding: 0.25rem 0.6rem;
   cursor: pointer;
+}
+.view-icon {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  flex-shrink: 0;
 }
 #view-switch button + button {
   border-left: 1px solid var(--c-border);
@@ -534,7 +549,16 @@ span.files-crumb {
   .markdown .md-root {
     padding: 0.75rem 1rem 1.5rem;
   }
+  #view-switch {
+    margin-left: auto;
+  }
   #view-switch button {
-    padding: 0.3rem 0.7rem;
+    padding: 0.3rem 0.45rem;
+  }
+  #view-switch button[aria-pressed="false"] .view-label {
+    display: none;
+  }
+  #view-switch button[aria-pressed="true"] .view-label {
+    font-size: 0.72rem;
   }
 }

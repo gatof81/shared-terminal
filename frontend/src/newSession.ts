@@ -1578,7 +1578,7 @@ const templatesEmptyHint = document.getElementById("templates-empty-hint") as HT
 /**
  * Pick the account control that's actually rendered for the current
  * viewport — the user menu's button, or the drawer footer's Templates
- * under 400 px (shell-v2.css). `offsetParent === null` is the standard
+ * under 400 px (mobile.css). `offsetParent === null` is the standard
  * "is this element rendered" test (null for `display:none` ancestors).
  *
  * Used by callers that open the templates modal from a third place

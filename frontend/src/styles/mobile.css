@@ -59,13 +59,17 @@
     z-index: var(--z-drawer-backdrop);
   }
 
-  /* Slim header — every pixel here comes off the terminal viewport.
-     Drop the title text and the desktop user/invites/logout cluster;
-     the sidebar drawer's footer surfaces the same actions at the
-     ergonomic bottom of the screen instead. */
+  /* One line: ☰ · the session bar (name ●, view tabs, ⋯) · user — every
+     pixel here comes off the terminal viewport. The session bar is moved
+     into the header on narrow screens (main.ts); its controls are 44 px
+     tall (UX iter3 §2), they make the row. Budget at 390 px: the four view
+     tabs and the two menus are fixed (≥ 34-px targets), the name takes the
+     rest and never drops under 4.5 rem; the active tab's label is the
+     first thing to go when there is no room (below 400 px). */
   header {
-    padding: 0.45rem 0.6rem;
-    gap: 0.5rem;
+    padding: 0 0.5rem;
+    gap: 0.3rem;
+    min-height: 44px;
   }
   header h1 {
     /* Hide rather than remove from layout — keeps the document
@@ -87,49 +91,33 @@
   .header-right {
     display: none;
   }
-  /* The chrome-toggle replaces the title as the centre-of-screen widget
-     while a session is active — its label shows "session › tab" so the
-     user always knows their context without expanding anything. */
-  #chrome-toggle:not([hidden]) {
-    display: inline-flex;
-    flex: 1;
-  }
-
-  /* Surface the mobile menu inside the sidebar drawer. */
-  #sidebar-footer {
-    display: flex;
-  }
-
-  /* When the chrome drawer is closed (default on mobile), force the
-     toolbar + tabs out of the layout entirely so the terminal owns
-     the full viewport. The desktop inline `display: flex/none` set
-     by main.ts toolbar/tabs visibility logic is preserved when the
-     drawer is open — we just gate it behind .chrome-open. */
-  /* Shell v1 only: v2 has no chrome drawer, so its bar and tab strip
-     follow the same inline visibility as desktop (updateToolbar /
-     renderTabBar) — forcing them visible there showed the terminal's
-     tools with no session open. */
-  html:not([data-shell="v2"]) main:not(.chrome-open) #terminal-toolbar,
-  html:not([data-shell="v2"]) main:not(.chrome-open) #terminal-tabs {
-    display: none !important;
-  }
   /* The person hid the tab row (the bar's ⋯, sessionCore.ts): the terminal
      takes its height — one deliberate resize, never on a view switch. */
   #terminal-area.tabs-collapsed #terminal-tabs {
     display: none !important;
   }
 
-  /* Compact toolbar+tabs when they DO show — saves another ~30 % of
-     vertical space on a 430-pt-wide screen. */
+  /* Compact bar and tabs — saves another ~30 % of vertical space on a
+     430-pt-wide screen. Never hidden behind a drawer: a view switch changes
+     nothing in the terminal's box (zero resize). */
   #terminal-toolbar {
-    padding: 0.4rem 0.6rem;
-    gap: 0.5rem;
+    padding: 0.35rem 0.5rem;
+    gap: 0.4rem;
     font-size: 0.72rem;
-    /* The Terminal/Files switch made the row wider than a ~400px phone;
-       scroll sideways rather than wrap, so opening the chrome drawer
-       doesn't steal an extra row from the terminal. */
-    overflow-x: auto;
-    scrollbar-width: none;
+  }
+  #terminal-status-badge {
+    /* The chip's dot says it; the word is in the ⋯ menu's state line. */
+    font-size: 0;
+    gap: 0;
+    padding: 0;
+    height: auto;
+    background: none;
+  }
+  #session-menu-btn {
+    margin-left: 0;
+  }
+  #tab-tools #terminal-search-input {
+    width: 7rem;
   }
   #terminal-tabs {
     padding: 4px 6px 0 6px;
@@ -165,16 +153,91 @@
   .session-action-btn.stop {
     display: none;
   }
+}
 
-  /* Actions (+) button lives at the right edge of the mobile header.
-     chrome-toggle has `flex: 1` when active, but it can be hidden (no
-     session selected) — `margin-left: auto` pins actions-btn to the
-     right edge in both cases. Desktop doesn't need the auto-margin
-     because .header-right (which sits earlier in the DOM and carries
-     `margin-left: auto` itself) already pushes itself + actions-btn
-     to the right; on mobile .header-right is `display: none` and
-     would-be auto-pusher disappears, so we need our own. */
-  #actions-btn:not([hidden]) {
+/* ── The session bar in the header (phones) ──
+   ☰ · name ● · view tabs · ⋯ · user; the Insert (+) lives in the tab strip. */
+@media (max-width: 768px) {
+  header #sidebar-toggle {
+    flex-shrink: 0;
+  }
+  header #terminal-toolbar {
+    flex: 1;
+    min-width: 0;
+    padding: 0;
+    margin: 0;
+    background: transparent;
+    border: 0;
+    gap: 2px;
+  }
+  header #terminal-session-name {
+    flex: 1 1 auto;
+    /* 7 characters on a phone (8 on wider bars), never more than the name:
+       a plain floor in ch also WIDENS a shorter name. --name-ch is the
+       name's length (sessionCore.nameFloor). */
+    min-width: min(7ch, var(--name-ch, 0ch));
+    margin-right: 4px;
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+  header #view-switch {
     margin-left: auto;
+    flex-shrink: 0;
+    gap: 0;
+  }
+  /* Touch targets 44 px tall; the tabs and ⋯ 40 px wide (icons): with the
+     title's 7 characters, four tabs, ⋯ and the account that is what a
+     400-px bar holds. */
+  header #view-switch button {
+    padding: 0.3rem 0.35rem;
+    min-width: 40px;
+    min-height: 44px;
+    justify-content: center;
+  }
+  header #session-menu-btn,
+  header #session-menu-btn:has(.bar-menu-flag) {
+    min-width: 40px;
+    width: 40px;
+    min-height: 44px;
+    padding: 0;
+    flex-shrink: 0;
+  }
+  #user-menu-btn {
+    width: 44px;
+    height: 44px;
+    flex-shrink: 0;
+  }
+}
+/* Under 400 px the account goes to the drawer's footer (the title would
+   lose its 7 characters to it); 360 px and less, the bar takes the header's
+   whole width and the title keeps 6. The tabs never go under 40 px. */
+@media (max-width: 399px) {
+  #user-menu-btn {
+    display: none;
+  }
+  #sidebar-footer {
+    display: flex;
+    flex-wrap: wrap;
+  }
+  /* The account's actions, now in the drawer: 44-px touch targets. */
+  #sidebar-footer button {
+    min-height: 44px;
+  }
+}
+@media (max-width: 360px) {
+  header {
+    padding: 0 4px;
+  }
+  header #terminal-session-name {
+    min-width: min(6ch, var(--name-ch, 0ch));
+  }
+}
+@media (max-width: 400px) {
+  header #view-switch button .view-label {
+    display: none;
+  }
+  /* Without a label the active tab is told by colour alone: underline it too. */
+  header #view-switch button[aria-pressed="true"] {
+    box-shadow: inset 0 -2px 0 var(--c-accent);
   }
 }
