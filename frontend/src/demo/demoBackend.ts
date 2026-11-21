@@ -384,37 +384,10 @@ SEVEN.forEach((name, i) => {
 Object.assign(backend.acpAgents.find((a) => a.name === "infra")!, { waitingInput: true });
 // Needs a login.
 Object.assign(backend.acpAgents.find((a) => a.name === "datos")!, { authRequired: true });
-for (let i = 0; i < 12; i++)
-	add(
-		SEVEN[i % SEVEN.length]!,
-		`@${SEVEN[i % SEVEN.length]} ${ASKS[i % ASKS.length]!.replace(/^@\w+ /, "")}`,
-		ANSWERS[i % ANSWERS.length]!,
-		proj2,
-	);
-const infraAsk = add("infra", "@infra ¿subimos la réplica hoy?", null, proj2);
-infraAsk.state = "running";
-backend.acpAgents.find((a) => a.name === "infra")!.running = infraAsk.id;
-backend.acpQuestions.push({
-	id: 2,
-	agent: "infra",
-	message_id: infraAsk.id,
-	request: JSON.stringify({
-		message: "¿Cuándo subimos la réplica de lectura?",
-		requestedSchema: {
-			type: "object",
-			properties: {
-				cuando: { type: "string", title: "Cuándo", enum: ["Hoy", "Mañana", "La semana que viene"] },
-			},
-			required: ["cuando"],
-		},
-	}),
-	state: "open",
-	answer: null,
-	created_at: nowIso(),
-	answered_at: null,
-	delivered_at: null,
-	note: null,
-});
+// EMPTY on purpose (kbd diagnostic): no messages and no question card, so
+// the thread has nothing to scroll on a phone even with the keyboard up —
+// the case that isolates the page/ancestor scroll from the thread's own.
+Object.assign(backend.acpAgents.find((a) => a.name === "infra")!, { waitingInput: false });
 
 // Recent timestamps, oldest first, a couple of minutes apart.
 const n = backend.acpMessages.length;

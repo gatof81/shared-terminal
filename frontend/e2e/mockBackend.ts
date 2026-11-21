@@ -739,7 +739,11 @@ export class MockBackend {
 				agents: this.acpAgents.filter((a) => a.projectId === pid),
 				maxMessageBytes: 262144,
 				messages: page(this.acpMessages.filter((m) => m.project_id === pid)),
-				questions: this.acpQuestions,
+				// As the backend (routes/acp.ts:314): only questions asked while
+				// working on a message of this project.
+				questions: this.acpQuestions.filter((q) =>
+					this.acpMessages.some((m) => m.id === q.message_id && m.project_id === pid),
+				),
 				activity: this.acpActivity,
 				activitySeq: 0,
 			});
