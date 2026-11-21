@@ -58,8 +58,9 @@ describe("sample", () => {
 		expect(s.focus).toBe("textarea.tw-text");
 		expect(Array.isArray(s.focusBox)).toBe(true);
 		expect(s).toHaveProperty("sy");
-		expect(s).toHaveProperty("project");
-		expect(s).toHaveProperty("chat");
+		// The ACP threads, the capture Chat and the overflow:hidden boxes (D1.6).
+		for (const k of ["pThread", "aThread", "chat", "hid", "docSH", "composerBox", "barBox"])
+			expect(s).toHaveProperty(k);
 		expect(document.documentElement.getAttribute("style")).toBe(before);
 	});
 });
