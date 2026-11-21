@@ -129,6 +129,25 @@ Antes de empezar:
 
 **Si la corrección no está autorizada todavía:** el protocolo mínimo de @developer (un registro por chat en Safari y en Chrome si se puede: abrir con `?vvdebug=1`, tocar el campo, esperar 2 s, escribir una línea, enviar, cerrar el teclado y copiar) ya decide **H2 y H4** con los campos actuales. Se corre primero, y las secciones A–F completas después de la corrección.
 
+
+### Q1.2 ter Preview de diagnóstico (`preview/kbd-diagnostic` @ `532f72b`), verificada por QA
+
+- **Dónde está:** URL `https://preview-kbd-diagnostic.shared-terminal.pages.dev`. Tiene un backend falso dentro de la página y el medidor siempre encendido. La armó @developer (#637) a pedido de @architect (#633/#636). No se mergea.
+- **Cómo la verifiqué (2026-11-21):** Chromium a 390×844 con touch, contra el sitio publicado. Las pasadas fueron Project Chat largo y corto, el chat de @solo y Project Chat con `?ui=v2`. En cada una: Clear → tap en el campo → 2,3 s → escribir y Enter → blur → Copy log → leer el portapapeles. [V]
+- **Resultados:**
+  - **0 pedidos a `/api` y `/ws`** en las cuatro pasadas.
+  - **Cabecera:** UA, `dpr`, `screen`, `shell=v1|v2` y `url`.
+  - **Eventos:** `pointerdown`, `touchstart`, `focusin`, `focus+50…2000`, `p-thread-scroll` o `a-thread-scroll`, `focusout`, `blur+100…1000`.
+  - **Campos por muestra:** `n,t,ev,vv{h,w,top,pageTop,s},ih,sy,doc,docSH,body,appVh,appTop,kb,bodyBox,focus,focusBox,hid{app,main,area,pv,cv,acp},pThread,aThread,chat,composerBox,barBox,headerBox`.
+  - **Qué hilo se mide en cada chat:** `pThread` en Project Chat y `aThread` en el chat individual; el que no corresponde queda en `null`, como se espera.
+  - El botón «Show log» existe.
+- **Observaciones:**
+  - `barBox` es `null` en la página de proyecto en v1 y en v2, porque la barra de sesión está oculta allí (`projects.css:261-263`). En Project Chat la referencia arriba es `headerBox`.
+  - El proyecto «corto» no es corto (`pThread` scrollHeight 3113 contra clientHeight 641), así que no aísla el caso «sin scroll del hilo». Lo dejé fuera de los pasos del owner; si se quiere ese caso, hace falta un proyecto de 1–3 mensajes.
+  - En Chromium no hay teclado: `kb` queda en `""` y `vv` no cambia. Lo que importa medir sale del iPhone.
+
+**Pasos publicados para @owner (Project Chat, un solo mensaje):** preguntas previas (shell y app instalada en cada dispositivo) → Safari: Project Chat y chat de @solo (Clear, tocar el campo, esperar 2 s, escribir y enviar, cerrar el teclado, tocar el campo otra vez, esperar 2 s, cerrar, Copy log) → lo mismo en Chrome iOS → lo mismo con `?ui=v2` si usa v2 → si usa la app instalada, nota de que la preview no se instala y que se informe la diferencia.
+
 ### Q1.3 Qué puede y qué no puede probar la automatización
 
 Experimento aislado: no se tocó la configuración del repo.
