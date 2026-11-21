@@ -155,9 +155,8 @@ cd frontend && npm install && npm run dev     # http://localhost:5173
 docker compose up -d --build
 ```
 
-**Agents and Project Chat** are off in a fresh install. Set `ACP_AGENTS_ENABLED=true` and
-`PROJECT_CHAT_ENABLED=true`, install an adapter into the runtime directory, and restart the backend
-— see [docs/ACP_AGENTS.md → Setup](./docs/ACP_AGENTS.md#8-setup).
+**Agents and Project Chat** are always on; an agent needs an adapter installed into the runtime
+directory — see [docs/ACP_AGENTS.md → Setup](./docs/ACP_AGENTS.md#8-setup).
 
 Read [docs/SECURITY.md](./docs/SECURITY.md) before exposing the backend to the internet.
 

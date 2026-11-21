@@ -827,10 +827,8 @@ export const MIGRATIONS: readonly Migration[] = [
 	},
 	{
 		// P3a — project & agent directory (docs/PROJECTS.md). Additive: four
-		// new tables, two triggers, no existing column touched. Applied at
-		// boot whatever PROJECT_CHAT_ENABLED says (the flag only mounts the
-		// routes), so an older backend that later boots on this schema just
-		// ignores it.
+		// new tables, two triggers, no existing column touched, so an older
+		// backend that later boots on this schema just ignores it.
 		version: 19,
 		description: "projects, project_agents, agent_bindings (P3a directory)",
 		apply: async () => {
@@ -853,8 +851,7 @@ export const MIGRATIONS: readonly Migration[] = [
 		apply: () => addColumnIfMissing("sessions", "recreate_fence INTEGER NOT NULL DEFAULT 0"),
 	},
 	{
-		// Additive and inert with ACP_AGENTS_ENABLED off: nothing reads or
-		// writes these tables then.
+		// Additive: two new tables, no existing column touched.
 		version: 21,
 		description: "acp_agents + agent_messages — ACP agents and their durable inbox (experimental)",
 		apply: () => d1Batch([...ACP_AGENTS_DDL]),

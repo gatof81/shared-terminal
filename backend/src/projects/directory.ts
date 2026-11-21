@@ -10,8 +10,6 @@
  * prove the outcome is resolved by reading the record back — found ⇒ the
  * creation happened; not found ⇒ 503 `outcome-unknown` (a late write can
  * still land; the client retries with the same id). Nothing is retried here.
- *
- * Constructed only when PROJECT_CHAT_ENABLED is on (index.ts).
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -25,11 +23,6 @@ const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9
 // C0/C1 controls and the bidi overrides: a name is shown verbatim.
 // biome-ignore lint/suspicious/noControlCharactersInRegex: matching controls is the point
 const UNSAFE_TEXT_RE = /[\u0000-\u001f\u007f-\u009f‪-‮⁦-⁩]/;
-
-/** `PROJECT_CHAT_ENABLED`: only `true` / `1` turn it on; unset or empty (compose's `:-`) keeps it off. */
-export function projectChatFlagEnabled(raw: string | undefined): boolean {
-	return raw === "true" || raw === "1";
-}
 
 /** Every refusal: an HTTP status and a stable code. */
 export class ProjectError extends Error {

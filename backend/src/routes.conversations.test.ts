@@ -1,7 +1,7 @@
 /**
  * routes.conversations.test.ts — `GET /api/sessions/:id/conversations`
  * (docs/CONVERSATION.md §6): owner-only with the foreign→404 collapse,
- * the response shape, `canSendInput: false`, and the honest empty shape
+ * the response shape, and the honest empty shape
  * when the subsystem is not wired.
  */
 
@@ -104,9 +104,7 @@ describe("GET /api/sessions/:id/conversations", () => {
 	it("returns the service's list for the owner, with no-store caching", async () => {
 		const list = vi.fn(async () => ({
 			capture: { requested: true, effective: true, effectiveAfterRestart: false },
-			conversations: [
-				{ sessionId: "c1", kind: "interactive", status: "waiting_input", canSendInput: false },
-			],
+			conversations: [{ sessionId: "c1", kind: "interactive", status: "waiting_input" }],
 		}));
 		await start({ list } as unknown as ConversationService);
 		const res = await fetch(`${base}/api/sessions/s1/conversations`);
@@ -114,15 +112,13 @@ describe("GET /api/sessions/:id/conversations", () => {
 		expect(res.headers.get("cache-control")).toBe("no-store");
 		const body = await res.json();
 		expect(body.capture.effective).toBe(true);
-		expect(body.conversations[0]).toMatchObject({ sessionId: "c1", canSendInput: false });
+		expect(body.conversations[0]).toMatchObject({ sessionId: "c1" });
 		expect(list).toHaveBeenCalledWith("s1");
 	});
 	it("?capture=0 answers the summaries alone, without the capture check (no relay probe)", async () => {
 		const list = vi.fn();
 		const summariesWithMeta = vi.fn(async () => ({
-			conversations: [
-				{ sessionId: "c1", kind: "interactive", status: "running", canSendInput: false },
-			],
+			conversations: [{ sessionId: "c1", kind: "interactive", status: "running" }],
 			meta: "unavailable",
 		}));
 		await start({ list, summariesWithMeta } as unknown as ConversationService);
@@ -177,7 +173,6 @@ describe("PATCH /api/sessions/:id/conversations/:cid", () => {
 		customTitle: null,
 		archivedAt: null,
 		status: "ended",
-		canSendInput: false,
 		...patch,
 	});
 	const patchReq = (

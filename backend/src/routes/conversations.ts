@@ -7,7 +7,7 @@
  * Owner-only via `assertOwnedByOr404` (design §3.4, decision 6: titles
  * and derived metadata are conversation content, so a foreign session
  * answers like a missing one). An unknown conversation id answers the
- * same 404 as a foreign one. Read-only: the capture's history (`canSendInput` is always false).
+ * same 404 as a foreign one. Read-only: the capture's history.
  *
  * Reads stream the events file (it can be 64 MiB before rotating), so
  * they hold an `InFlightLimiter` slot — 4 per user, 16 process-wide — until

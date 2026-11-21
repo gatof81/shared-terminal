@@ -1039,62 +1039,29 @@ describe("#546 — a G4 eviction whose snapshot write fails keeps the entry (bou
 	});
 });
 
-describe("#546 — composer idempotency window after a restart with a stale snapshot", () => {
-	it("a `released` line the snapshot missed (its write failed) is found by rebuilding from the file", async () => {
-		const f = snapshotFailingFs("EDQUOT");
-		const store = new ConversationStore({ workspaceRoot: root, fs: f.fs });
-		await store.open("s1", "c0");
-		store.enqueue("s1", "c0", ev(0));
-		await store.flush("s1", "c0"); // snapshot without composerSends
-		f.state.failing = true;
-		store.enqueue("s1", "c0", releasedEv(MSG_ID, 202, { result: "delivered" }));
-		expect(await store.flush("s1", "c0")).toBe(false); // the line is on disk, the snapshot is not
-		// Restart: a new process over the same files.
-		const after = new ConversationStore({ workspaceRoot: root });
-		expect((await after.peekIndex("s1", "c0"))?.composerSends?.[MSG_ID]).toBeUndefined();
-		expect(await after.releasedComposerSend("s1", "c0", MSG_ID)).toMatchObject({
-			status: 202,
-			body: { result: "delivered" },
-		});
-		expect(after.residentCount()).toBe(0); // a read, nothing made resident
-		expect(await after.releasedComposerSend("s1", "c0", "other-id")).toBeNull();
-	});
-
-	it("no snapshot at all (every write failed): the file alone answers", async () => {
-		const f = snapshotFailingFs("ENOSPC");
-		f.state.failing = true;
-		const store = new ConversationStore({ workspaceRoot: root, fs: f.fs });
-		await store.open("s1", "c0");
-		store.enqueue("s1", "c0", releasedEv(MSG_ID, 502, { error: "delivery-failed" }));
-		await store.flush("s1", "c0");
-		await expect(fs.stat(store.indexPath("s1", "c0"))).rejects.toThrow();
-		const after = new ConversationStore({ workspaceRoot: root });
-		expect(await after.releasedComposerSend("s1", "c0", MSG_ID)).toMatchObject({ status: 502 });
-	});
-
-	it("an unreadable events file is not an empty window: the lookup throws (the composer fails closed)", async () => {
-		const f = snapshotFailingFs("EIO");
-		const store = new ConversationStore({ workspaceRoot: root, fs: f.fs });
-		await store.open("s1", "c0");
-		store.enqueue("s1", "c0", ev(0));
-		await store.flush("s1", "c0");
-		await store.close("s1", "c0");
-		f.state.failEventsRead = true;
-		await expect(store.releasedComposerSend("s1", "c0", MSG_ID)).rejects.toThrow(/EIO/);
-	});
-
-	it("a torn last line is not repaired by the read-only rebuild", async () => {
+describe("retired composer — an old snapshot's `composerSends` is tolerated", () => {
+	it("opens, ignores the field and never writes it back", async () => {
 		const store = new ConversationStore({ workspaceRoot: root });
 		await store.open("s1", "c0");
-		store.enqueue("s1", "c0", releasedEv(MSG_ID, 202, { ok: true }));
+		store.enqueue("s1", "c0", ev(0));
 		await store.flush("s1", "c0");
 		await store.close("s1", "c0");
-		await fs.rm(store.indexPath("s1", "c0"));
-		await fs.appendFile(store.eventsPath("s1", "c0"), '{"seq":2,"torn');
-		const before = await fs.readFile(store.eventsPath("s1", "c0"), "utf8");
+		const snap = JSON.parse(await fs.readFile(store.indexPath("s1", "c0"), "utf8"));
+		snap.composerSends = { [MSG_ID]: { status: 202, body: { result: "delivered" }, at: "x" } };
+		await fs.writeFile(store.indexPath("s1", "c0"), JSON.stringify(snap));
+		// A `composer_send` line from those days is still on disk, too.
+		await fs.appendFile(
+			store.eventsPath("s1", "c0"),
+			`${JSON.stringify({ seq: 2, ts: new Date().toISOString(), ...releasedEv(MSG_ID, 202, {}) })}\n`,
+		);
 		const after = new ConversationStore({ workspaceRoot: root });
-		expect(await after.releasedComposerSend("s1", "c0", MSG_ID)).toMatchObject({ status: 202 });
-		expect(await fs.readFile(store.eventsPath("s1", "c0"), "utf8")).toBe(before);
+		const idx = await after.open("s1", "c0");
+		expect(idx.lastSeq).toBe(2);
+		expect(idx).not.toHaveProperty("composerSends");
+		after.enqueue("s1", "c0", ev(3));
+		expect(await after.flush("s1", "c0")).toBe(true);
+		const written = JSON.parse(await fs.readFile(after.indexPath("s1", "c0"), "utf8"));
+		expect(written).not.toHaveProperty("composerSends");
 	});
 });
 
@@ -1196,9 +1163,6 @@ describe("#546 — recovery from the file rebuilds agents and session-start meta
 });
 
 describe("#546 review — a snapshot from an older L7 generation is never trusted for its offset", () => {
-	const ID_A = "aaaaaaaa-1111-4111-8111-111111111111";
-	const ID_B = "bbbbbbbb-2222-4222-8222-222222222222";
-	const ID_NEW = "cccccccc-3333-4333-8333-333333333333";
 	const pad = (i: number) => ev(i, { data: { prompt: `line ${i} ${"x".repeat(120)}` } });
 	const sizeOf = async (store: ConversationStore) =>
 		(await fs.stat(store.eventsPath("s1", "c0"))).size;
@@ -1223,15 +1187,13 @@ describe("#546 review — a snapshot from an older L7 generation is never truste
 		return { store, f, next: () => pad(i++) };
 	}
 
-	it("`released` early in the NEW file, which grows past the stale offset: the replay finds it (and open() too)", async () => {
+	it("the NEW file grows past the stale offset: open() still counts every line", async () => {
 		const { store, next } = await staleAfterHealthy(4000);
 		const stale = await snapshotOf(store);
 		while (store.stats.rotations === 0) {
 			store.enqueue("s1", "c0", next());
 			await store.flush("s1", "c0");
 		}
-		store.enqueue("s1", "c0", releasedEv(ID_B, 202, { result: "delivered" }));
-		await store.flush("s1", "c0");
 		while ((await sizeOf(store)) <= stale.offset + 50) {
 			store.enqueue("s1", "c0", next());
 			await store.flush("s1", "c0");
@@ -1239,91 +1201,30 @@ describe("#546 review — a snapshot from an older L7 generation is never truste
 		expect(store.stats.rotations).toBe(1);
 		expect((await snapshotOf(store)).offset).toBe(stale.offset); // still the old generation's
 		const after = new ConversationStore({ workspaceRoot: root });
-		expect(await after.releasedComposerSend("s1", "c0", ID_B)).toMatchObject({ status: 202 });
-		expect(await after.releasedComposerSend("s1", "c0", ID_NEW)).toBeNull();
 		const opened = await after.open("s1", "c0");
-		expect(opened.composerSends?.[ID_B]?.status).toBe(202);
 		expect(opened.lastSeq).toBe(store.getResidentIndex("s1", "c0")?.lastSeq);
 		expect(opened.eventsCount).toBe(store.getResidentIndex("s1", "c0")?.eventsCount);
 	});
 
-	it("`released` in `.1` past the stale offset, new file still small: the archive is read", async () => {
+	it("lines in `.1` past the stale offset, new file still small: the archive is read", async () => {
 		const { store, next } = await staleAfterHealthy(4000);
-		store.enqueue("s1", "c0", releasedEv(ID_A, 502, { error: "delivery-failed" }));
-		await store.flush("s1", "c0");
 		while (store.stats.rotations === 0) {
 			store.enqueue("s1", "c0", next());
 			await store.flush("s1", "c0");
 		}
 		const after = new ConversationStore({ workspaceRoot: root });
-		expect(await after.releasedComposerSend("s1", "c0", ID_A)).toMatchObject({ status: 502 });
-		expect(await after.releasedComposerSend("s1", "c0", ID_NEW)).toBeNull();
 		const opened = await after.open("s1", "c0");
-		expect(opened.composerSends?.[ID_A]?.status).toBe(502);
 		expect(opened.lastSeq).toBe(store.getResidentIndex("s1", "c0")?.lastSeq);
 	});
 
-	it("two rotations since the snapshot (a hole older than `.1`): the lost id is out of the window — null, a new attempt (§8.1.4 rule 10), read-only and resident; a fresh id is never refused", async () => {
+	it("two rotations since the snapshot (a hole older than `.1`): seq still never goes backwards", async () => {
 		const { store, next } = await staleAfterHealthy(4000);
-		store.enqueue("s1", "c0", releasedEv(ID_A, 202, { result: "delivered" }));
-		await store.flush("s1", "c0");
 		while (store.stats.rotations < 2) {
 			store.enqueue("s1", "c0", next());
 			await store.flush("s1", "c0");
 		}
 		const after = new ConversationStore({ workspaceRoot: root });
-		// Read-only rebuild: resolves (never rejects) to "not in the window".
-		expect(await after.releasedComposerSend("s1", "c0", ID_A)).toBeNull();
-		expect(await after.releasedComposerSend("s1", "c0", ID_NEW)).toBeNull();
-		// Resident: the same answers, and seq still never goes backwards.
 		const opened = await after.open("s1", "c0");
 		expect(opened.lastSeq).toBe(store.getResidentIndex("s1", "c0")?.lastSeq);
-		expect(await after.releasedComposerSend("s1", "c0", ID_A)).toBeNull();
-		for (const id of [ID_NEW, "dddddddd-4444-4444-8444-444444444444"]) {
-			expect(await after.releasedComposerSend("s1", "c0", id)).toBeNull();
-		}
-	});
-
-	it("a valid snapshot: the lookup reads only the tail past its offset (plus the first-line probe), never the whole file", async () => {
-		const f = snapshotFailingFs("EDQUOT");
-		const reads = { whole: 0, rangeBytes: 0 };
-		const counting: StoreFs = {
-			...f.fs,
-			readFile: async (p, e) => {
-				if (String(p).endsWith(".events.jsonl")) reads.whole++;
-				return f.fs.readFile(p, e);
-			},
-			readRange: async (p, start, length) => {
-				reads.rangeBytes += length;
-				const fh = await fs.open(p, "r");
-				try {
-					const buf = Buffer.alloc(length);
-					const { bytesRead } = await fh.read(buf, 0, length, start);
-					return buf.subarray(0, bytesRead);
-				} finally {
-					await fh.close();
-				}
-			},
-		};
-		const store = new ConversationStore({ workspaceRoot: root, fs: counting });
-		await store.open("s1", "c0");
-		for (let i = 0; i < 400; i++) {
-			store.enqueue("s1", "c0", pad(i));
-			if (i % 100 === 99) expect(await store.flush("s1", "c0")).toBe(true);
-		}
-		// The snapshot is valid here, ~70 KiB into the file.
-		f.state.failing = true;
-		store.enqueue("s1", "c0", releasedEv(ID_B, 202, { ok: true }));
-		await store.flush("s1", "c0");
-		const size = await sizeOf(store);
-		const offset = (await snapshotOf(store)).offset;
-		expect(size).toBeGreaterThan(64 * 1024);
-
-		const after = new ConversationStore({ workspaceRoot: root, fs: counting });
-		reads.whole = 0;
-		reads.rangeBytes = 0;
-		expect(await after.releasedComposerSend("s1", "c0", ID_B)).toMatchObject({ status: 202 });
-		expect(reads.whole).toBe(0);
-		expect(reads.rangeBytes).toBeLessThanOrEqual(4096 + (size - offset));
 	});
 });

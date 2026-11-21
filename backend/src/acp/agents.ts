@@ -1,5 +1,5 @@
 /**
- * acp/agents.ts — ACP agents (experimental, ACP_AGENTS_ENABLED).
+ * acp/agents.ts — ACP agents.
  *
  * An agent is a session whose container runs the ST runner
  * (acp-runtime/runner.mjs): a direct ACP client driving a provider adapter
@@ -28,10 +28,6 @@ import { logger } from "../logger.js";
 import { deriveSubkey } from "../secrets.js";
 
 // ── Configuration ─────────────────────────────────────────────────────────
-
-export function acpAgentsEnabled(raw: string | undefined): boolean {
-	return raw === "1" || raw === "true";
-}
 
 export interface AcpConfig {
 	/** Host path (== backend path, like WORKSPACE_ROOT) of the runtime dir. */

@@ -1,6 +1,6 @@
 /**
- * acp/ws.ts — `/ws/acp`, the live channel of the ACP chats (experimental,
- * ACP_AGENTS_ENABLED). One socket per browser tab, per owner: every message
+ * acp/ws.ts — `/ws/acp`, the live channel of the ACP chats. One socket per
+ * browser tab, per owner: every message
  * row written (INSERT or state change, the trigger's replies included) and
  * every activity batch of the owner's agents is pushed as it happens. The
  * client loads a page over REST, then applies these rows by id; after a

@@ -1,6 +1,6 @@
 # Projects
 
-Status: behind `PROJECT_CHAT_ENABLED` (off by default). Code: `backend/src/projects/directory.ts`,
+Status: always on. Code: `backend/src/projects/directory.ts`,
 `backend/src/routes/projects.ts`. Project Chat itself is part of the ACP message API —
 [ACP_AGENTS.md §4](./ACP_AGENTS.md#4-individual-chat-and-project-chat).
 
@@ -16,8 +16,7 @@ its own session, workspace, context and history, and takes part in at most one p
 | GET | `/api/projects` | The owner's live projects with `agentCount`. |
 | DELETE | `/api/projects/:pid` | Archive: the project's agents leave it, the row stays (`archived_at`). |
 
-A foreign or missing project is the same 404. With the flag off the routes are not mounted (404, not
-401) and `GET /api/auth/status` carries no `features.projectChat`.
+A foreign or missing project is the same 404.
 
 Agents join or leave a project with `PATCH /api/acp/agents/:name {projectId | null}`, or at creation
 with `acpAgent.projectId` on `POST /api/sessions`.
