@@ -26,7 +26,6 @@ import {
 	register,
 	SESSION_EXPIRED_EVENT,
 	type SessionInfo,
-	serverUiShell,
 	type Tab,
 } from "./api.js";
 // Overlay views register themselves with viewSwitch on load; nothing
@@ -71,15 +70,6 @@ import { closeSwitcher, initSwitcher, openSwitcher } from "./switcher.js";
 import { clearAllBadges } from "./tabActivity.js";
 import { resetTabTitle, setTitleParts } from "./tabTitle.js";
 import type { TerminalSession } from "./terminal.js";
-import {
-	applyBar,
-	applyShell,
-	consumeShellQuery,
-	currentShell,
-	DEFAULT_BAR,
-	readStoredBar,
-	resolveShell,
-} from "./uiShell.js";
 import { forgetAllLastConversationTitles } from "./viewPolicy.js";
 import { getView, isOverlayActive, onViewChange, overlayLabel } from "./viewSwitch.js";
 import { initVvDebug } from "./vvDebug.js";
@@ -136,20 +126,11 @@ const fontSizeBtn = document.getElementById("font-size-btn") as HTMLButtonElemen
 // actions.ts owns the (+) menu; main.ts only toggles the button's visibility.
 const actionsBtn = document.getElementById("actions-btn") as HTMLButtonElement;
 
-// ── Shell (v1 / v2) ─────────────────────────────────────────────────────────
-// Which shell to mount: a `?ui=` override for this browser, else the
-// operator's choice from /auth/status (uiShell.ts). Applied before the
-// first paint from the override alone, then again once the server has
-// answered — shellV2.ts moves a few controls, which is safe at any time.
-const shellOverride = consumeShellQuery();
-function applyResolvedShell(): void {
-	const shell = resolveShell({ stored: shellOverride, server: serverUiShell() });
-	if (shell === currentShell() && document.documentElement.dataset.shell) return;
-	applyShell(shell);
-	applyBar(shell === "v2" ? (readStoredBar() ?? DEFAULT_BAR) : null);
-	if (shell === "v2") initShellV2();
-}
-applyResolvedShell();
+// ── Interface ───────────────────────────────────────────────────────────────
+// One interface (`data-shell="v2" data-bar="merged"` are static in index.html
+// until their CSS is folded into the owning sheets); shellV2.ts does the
+// few DOM moves the stylesheet can't.
+initShellV2();
 
 // ── Viewport height ─────────────────────────────────────────────────────────
 // iOS Safari's soft keyboard overlays the layout viewport without resizing
@@ -310,8 +291,6 @@ async function initAuth() {
 	// for "show app vs. login" and `needsSetup` for "show invite field".
 	try {
 		const { needsSetup, authenticated } = await checkAuthStatus();
-		// The operator's shell (UI_SHELL) is known now; an override wins.
-		applyResolvedShell();
 		// #200: caps now mirrored in the api module — apply to the form
 		// once on init so the very first modal open shows operator-
 		// lowered bounds. Re-applied on every modal open below to catch

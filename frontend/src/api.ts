@@ -48,8 +48,6 @@ function setAuthMirror(loggedIn: boolean, admin: boolean, lead: boolean): void {
  *  see authLock.ts. Generous: the only thing it waits for is the previous
  *  request's answer. */
 export const AUTH_WAIT_MS = 10_000;
-// The shell the operator switched on (UI_SHELL) — `uiShell` on /auth/status.
-let _uiShell: "v1" | "v2" = "v1";
 // #200 — effective per-session resource caps mirrored from /auth/status
 // so the create-session form's CPU input `max` and the bounds hint can
 // reflect operator-lowered caps. Defaults match the v1 ceilings so a
@@ -99,11 +97,6 @@ export function isLead(): boolean {
 	return _isLead;
 }
 
-/** The server's `uiShell` from the last /auth/status (v1 until then). */
-export function serverUiShell(): "v1" | "v2" {
-	return _uiShell;
-}
-
 /** Effective per-session caps from the backend (#200). Mirrored on
  *  every /auth/status call so an operator change picks up on the next
  *  page reload. The create-session form reads these to set the CPU
@@ -135,8 +128,6 @@ export interface AuthStatus {
 	 *  client falls back to the hardcoded v1 ceilings. Units mirror
 	 *  the form: cores (decimal) and MiB (integer). */
 	resourceCaps?: { cpuMaxCores: number; memMaxMiB: number };
-	/** Which frontend shell to mount (UI unification §8.4); older backends omit it. */
-	uiShell?: "v1" | "v2";
 	/** P3a: present only with PROJECT_CHAT_ENABLED on. Absent ⇒ no project surface. */
 	features?: {
 		projectChat?: boolean;
@@ -167,7 +158,6 @@ async function fetchAuthStatus(): Promise<AuthStatus> {
 	// + lead status. Mirror all three so isLoggedIn() / isAdmin() /
 	// isLead() can answer instantly thereafter.
 	setAuthMirror(data.authenticated, data.isAdmin, data.isLead === true);
-	if (data.uiShell === "v1" || data.uiShell === "v2") _uiShell = data.uiShell;
 	_acpAgents =
 		typeof data.features === "object" && data.features !== null && data.features.acpAgents === true;
 	_projectChat =

@@ -128,10 +128,9 @@ export const SESSION_IDS = {
 };
 
 // ── Projects ──────────────────────────────
-// Off by default: with `projectChat` false the mock answers exactly as before
-// (no `features`, the project routes 404) — the visual baselines and every
-// other spec run against that. `enableProjects()` seeds one project and a few
-// more sessions of alice's.
+// On by default, as in production (the constructor calls `enableAcp()`): one
+// project and a few more sessions of alice's, @arq and @dev in it, @solo
+// without one.
 
 export const PROJECT_IDS = { hz: "6b1f2c3d-0000-4000-8000-000000000001" };
 
@@ -435,8 +434,6 @@ export class MockBackend {
 	capture = { requested: true, effective: true, effectiveAfterRestart: true };
 	/** Which push/notification shape the server reports. */
 	pushEnabled = false;
-	/** The operator's shell (UI_SHELL) as /auth/status reports it. */
-	uiShell: "v1" | "v2" = "v1";
 	requests: Array<{ method: string; path: string }> = [];
 	terminalSockets: TerminalSocket[] = [];
 	conversationSockets: ConversationSocket[] = [];
@@ -483,6 +480,10 @@ export class MockBackend {
 	acpSockets: WebSocketRoute[] = [];
 	private acpSeq = 0;
 
+	constructor() {
+		this.enableAcp();
+	}
+
 	/** Start every test logged in as `username` (skips the login form). */
 	loginAs(username: keyof typeof USERS): void {
 		this.current = USERS[username]!;
@@ -513,6 +514,7 @@ export class MockBackend {
 			agent("solo", PROJECT_SESSION_IDS.scratch, null),
 		];
 		this.acpMessages = [];
+		this.acpSeq = 0;
 		this.addAcpMessage({
 			to_id: "solo",
 			body: "Resumí el README",
@@ -573,6 +575,7 @@ export class MockBackend {
 
 	/** Turn projects on: one project and a few more sessions of alice's. */
 	enableProjects(): void {
+		if (this.projectChat) return;
 		this.projectChat = true;
 		const extra = (sessionId: string, name: string, status: MockSession["status"]) =>
 			this.sessions.push({
@@ -962,7 +965,6 @@ export class MockBackend {
 				isAdmin: this.current?.isAdmin ?? false,
 				isLead: this.current?.isLead ?? false,
 				resourceCaps: { cpuMaxCores: 8, memMaxMiB: 16384 },
-				uiShell: this.uiShell,
 				// P3a: present only with the flag on (byte-identical answer otherwise).
 				...(this.projectChat
 					? {

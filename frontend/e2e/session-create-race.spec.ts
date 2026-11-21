@@ -60,7 +60,7 @@ test("a stale list answer does not hide a session created meanwhile", async ({
 	await app.openSidebar();
 	// A list refresh leaves (the 15 s poll, a click) and is still on its way…
 	hold = true;
-	await page.click("#sidebar-refresh-btn");
+	await app.refreshSessions();
 	// …while the person creates a session.
 	await page.click("#new-session-btn");
 	await page.fill("#new-session-input", "nueva");

@@ -32,7 +32,7 @@ test.describe("auth and load races", () => {
 			}
 			return false;
 		};
-		await page.click("#sidebar-refresh-btn");
+		await app.refreshSessions();
 		await expect.poll(() => held !== null).toBe(true);
 		backend.override = null;
 

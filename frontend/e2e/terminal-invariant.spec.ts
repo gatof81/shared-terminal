@@ -22,58 +22,27 @@ test.describe("terminal invariant", () => {
 		const resizes = () => sock.sent.filter((f) => f.type === "resize").length;
 		const inputs = () => sock.sent.filter((f) => f.type === "input").length;
 
-		if (app.mobile && app.shell === "v1") {
-			// v1 mobile: the ONLY way from the Terminal into an overlay is the
-			// chrome drawer (header pill → toolbar + tabs), and showing/hiding
-			// that drawer changes the terminal's box — so this first hop does
-			// resize. It is the layout cost the shell v2 (roadmap PR 6: view
-			// tabs in a one-line session bar, no drawer) removes; the number
-			// below is the target it must bring to zero.
-			await app.switchView("files");
-			await page.waitForTimeout(400);
-			test.info().annotations.push({
-				type: "v1-mobile-drawer-resizes",
-				description: `${resizes()} resize frame(s) during Terminal → Files via the chrome drawer`,
-			});
-			expect(resizes(), "the drawer hop resizes in v1 mobile").toBeGreaterThan(0);
-		}
-
 		// From here on: pure view switches. Nothing may reach the terminal.
 		const framesBefore = sock.sent.length;
 		const rowsBefore = await page.locator(".tab-pane.active .xterm-rows > div").count();
 		const r0 = resizes();
 		const i0 = inputs();
-		// Overlay ⇄ overlay and overlay → Terminal are pure on both layouts;
-		// Terminal → overlay is pure on desktop and on shell v2 (the view tabs
-		// are always on screen) — on v1 mobile it is the drawer hop above.
-		const pureEntry = !app.mobile || app.shell === "v2";
-		if (pureEntry) await app.switchView("files");
+		// Every switch is pure on both layouts: the view tabs are always on screen.
+		await app.switchView("files");
 		await app.switchView("git");
 		await app.switchView("chat");
 		await app.switchView("terminal");
-		if (pureEntry) {
-			await app.switchView("chat");
-			await app.switchView("terminal");
-		}
+		await app.switchView("chat");
+		await app.switchView("terminal");
 		await page.waitForTimeout(400);
 
 		expect(backend.terminalSockets.length, "no new terminal socket").toBe(sockets);
 		expect(sock.closed, "the attach stayed open").toBe(false);
-		// v1 mobile: entering an overlay closes the chrome drawer, which changes
-		// the terminal's box while it is covered. The covered terminal keeps its
-		// geometry (terminalGeometry.ts) and syncs it ONCE when it is shown
-		// again; everywhere else a view switch sends nothing.
-		const deferredSync = app.mobile && app.shell === "v1" ? 1 : 0;
-		expect(resizes() - r0, "no resize sent by a view switch").toBe(deferredSync);
+		expect(resizes() - r0, "no resize sent by a view switch").toBe(0);
 		expect(inputs() - i0, "no input sent by a view switch").toBe(0);
-		expect(sock.sent.length - framesBefore, "no frame of any kind").toBe(deferredSync);
+		expect(sock.sent.length - framesBefore, "no frame of any kind").toBe(0);
 		const rowsAfter = await page.locator(".tab-pane.active .xterm-rows > div").count();
-		if (deferredSync === 0) expect(rowsAfter).toBe(rowsBefore);
-		else {
-			// The one deferred sync carries exactly the size the terminal shows.
-			const last = sock.sent.filter((f) => f.type === "resize").at(-1) as { rows: number };
-			expect(rowsAfter).toBe(last.rows);
-		}
+		expect(rowsAfter).toBe(rowsBefore);
 		// Output that arrives while an overlay is up still lands in the terminal.
 		await app.switchView("chat");
 		backend.pushTerminalOutput(sock.sessionId, "\r\nstill here\r\n");
@@ -103,7 +72,6 @@ test.describe("terminal invariant", () => {
 		await app.login("alice");
 		await app.openSession("my-project");
 		await app.expectTerminalReady();
-		await app.openChrome();
 		await page.locator("#terminal-tabs .tab-chip", { hasText: "Tab 2" }).click();
 		await expect
 			.poll(() => backend.terminalSockets.map((s) => `${s.tabId}:${s.closed}`))
