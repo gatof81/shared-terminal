@@ -12,7 +12,6 @@
 import { ACP_MODELS } from "./acpModel.js";
 import { setAcpAgents } from "./acpRegistry.js";
 import {
-	acpAgentsEnabled,
 	acpListAgents,
 	acpRuntimes,
 	createProject,
@@ -29,7 +28,6 @@ import {
 	listTemplates,
 	memBytesToFormUnit,
 	openBootstrapWs,
-	projectChatEnabled,
 	type SessionConfigPayload,
 	type SessionInfo,
 	stripConfigForTemplate,
@@ -38,8 +36,8 @@ import {
 	updateTemplate,
 } from "./api.js";
 import { confirmDialog, createDialog } from "./components/dialog.js";
+import { showToast } from "./components/toast.js";
 import { parseDotEnv } from "./envParser.js";
-import { showToast } from "./main.js";
 import { addCreatedSession, openSession, refreshSessions } from "./sessionCore.js";
 
 // ── DOM (re-queried locally) — added below after tsc enumerates them ──────
@@ -171,7 +169,7 @@ function acpField(caption: string, control: HTMLElement): HTMLLabelElement {
 }
 
 function ensureAcpAgentField(): void {
-	if (!acpAgentsEnabled() || acpAgentInput) return;
+	if (acpAgentInput) return;
 	acpAgentInput = document.createElement("input");
 	acpAgentInput.id = "new-session-acp-agent";
 	acpAgentInput.type = "text";
@@ -344,11 +342,9 @@ async function loadAcpChoices(): Promise<void> {
 	if (!select) return;
 	const keep = acpPreselectProject ?? select.value;
 	select.replaceChildren(new Option("Sin proyecto", ""));
-	if (projectChatEnabled()) {
-		const r = await fetchProjects().catch(() => null);
-		if (r?.ok) for (const p of r.body.projects) select.append(new Option(p.name, p.projectId));
-		select.append(new Option("+ Proyecto nuevo…", NEW_PROJECT));
-	}
+	const r = await fetchProjects().catch(() => null);
+	if (r?.ok) for (const p of r.body.projects) select.append(new Option(p.name, p.projectId));
+	select.append(new Option("+ Proyecto nuevo…", NEW_PROJECT));
 	select.value = [...select.options].some((o) => o.value === keep) ? keep : "";
 	const rt = acpRuntimeSelect;
 	if (rt && rt.options.length === 0) {

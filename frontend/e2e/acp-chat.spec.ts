@@ -244,7 +244,7 @@ test.describe("ACP chat", () => {
 		};
 		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
 		const solo = await column("#acp-chat");
-		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/chat`);
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
 		const project = await column(".acp-project");
 		const colPx = 56 * 16;
 		for (const c of [solo, project]) {

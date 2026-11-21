@@ -16,6 +16,10 @@ const mainState = vi.hoisted(() => ({
 	showToast: vi.fn(),
 }));
 
+vi.mock("./components/toast.js", () => ({
+	showToast: mainState.showToast,
+	showCopySuccessToast: vi.fn(),
+}));
 vi.mock("./main.js", () => ({
 	get activeSessionId() {
 		return mainState.activeSessionId;
@@ -28,8 +32,6 @@ vi.mock("./main.js", () => ({
 	},
 	getActiveTerminal: () => ({ focus: mainState.focus }),
 	isMobile: () => mainState.mobile,
-	showCopySuccessToast: vi.fn(),
-	showToast: mainState.showToast,
 	updateTerminalControls: vi.fn(),
 }));
 
@@ -50,7 +52,7 @@ const api = vi.hoisted(() => {
 		downloadSessionFile: vi.fn(),
 	};
 });
-vi.mock("./api.js", () => ({ acpAgentsEnabled: () => false, ...api }));
+vi.mock("./api.js", () => ({ isLoggedIn: () => false, ...api }));
 
 const saveBlob = vi.hoisted(() => vi.fn());
 vi.mock("./saveBlob.js", () => ({ saveBlob }));

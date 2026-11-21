@@ -15,7 +15,8 @@
  */
 
 import { searchTabHistory } from "./api.js";
-import { activeSessionId, currentActiveTabId, getActiveTerminal, showToast } from "./main.js";
+import { showToast } from "./components/toast.js";
+import { activeSessionId, currentActiveTabId, getActiveTerminal } from "./main.js";
 import { decideSearchAction, type SubmittedSearch } from "./search.js";
 import { isOverlayActive } from "./viewSwitch.js";
 

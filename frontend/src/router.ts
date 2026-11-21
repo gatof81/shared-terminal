@@ -26,14 +26,9 @@
  * `#session=<id>` (the service worker's one-shot notification jump) is a
  * different shape and is not this module's: it parses to null here.
  *
- * Project pages (P3a, docs/PROJECTS.md; D-UX2) are a SECOND route shape,
- * parsed apart so the session route above keeps its exact meaning:
- *
- *   #/projects/<pid>                      the project's agent directory
- *   #/projects/<pid>/agents/<aid>         an agent's page
- *
- * (`…/agents/<aid>/chat[/<chatId>]` is D-UX2's future conversation route;
- * it is not P3a's and parses to null.) A project page is shown OVER the
+ * The project page (`#/projects/<pid>`, its Project Chat) is a SECOND
+ * route shape, parsed apart so the session route above keeps its exact
+ * meaning. A project page is shown OVER the
  * session underneath, which stays open, attached and un-resized — so while
  * one is in the address, `current` keeps naming that session and the
  * session listeners are not told anything (projectsView.ts owns the page).
@@ -114,13 +109,9 @@ export interface ProjectRoute {
 	projectId: string;
 }
 
-/**
- * `#/projects/<pid>`: the project page (ACP Project Chat). Addresses of the
- * retired project views (`/chat`, `/team`, `/new`, `/agents[/<aid>]`,
- * `/threads/<id>`) still land on it, so an old link or bookmark is not a dead end.
- */
+/** `#/projects/<pid>`: the project page (ACP Project Chat). */
 export function parseProjectRoute(hash: string): ProjectRoute | null {
-	const m = /^#\/projects\/([^/?#]+)(?:\/[^?#]*)?$/.exec(hash);
+	const m = /^#\/projects\/([^/?#]+)$/.exec(hash);
 	if (!m) return null;
 	const projectId = decode(m[1]!);
 	if (projectId === null || projectId === "") return null;

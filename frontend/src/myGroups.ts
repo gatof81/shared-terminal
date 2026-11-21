@@ -16,7 +16,8 @@ import {
 	type ObservableSession,
 } from "./api.js";
 import { createDialog } from "./components/dialog.js";
-import { sessions, sessionsLoadedOnce, showToast } from "./main.js";
+import { showToast } from "./components/toast.js";
+import { sessions, sessionsLoadedOnce } from "./main.js";
 import { closeObserveModal, openObserveModalFor } from "./observeModal.js";
 
 // ── DOM (re-queried locally; see header) ─────────────────────────────────

@@ -8,7 +8,7 @@
 
 import { getSessionPorts, type PortSpec, updateSessionPorts } from "./api.js";
 import { createDialog } from "./components/dialog.js";
-import { showToast } from "./main.js";
+import { showToast } from "./components/toast.js";
 
 // ── DOM (re-queried locally; see header) ─────────────────────────────────
 const portsModal = document.getElementById("ports-modal")!;

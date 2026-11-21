@@ -17,7 +17,6 @@ test.describe("chat: active vs earlier", () => {
 		const [c1, c2] = backend.conversations;
 		// conv-1: claims "waiting_input" but the last evidence is 20 min old.
 		c1!.statusAt = "2026-10-31T10:10:00Z";
-		c1!.canSendInput = true;
 		// A third conversation: resumed, no report yet.
 		backend.conversations.push({
 			...c2!,
@@ -25,7 +24,6 @@ test.describe("chat: active vs earlier", () => {
 			title: "Resumed session",
 			status: "unknown",
 			statusEvidence: "created",
-			canSendInput: true,
 			events: c2!.events.map((e) => ({ ...e })),
 		});
 		// A fourth: lost its pane to another conversation.
@@ -36,7 +34,6 @@ test.describe("chat: active vs earlier", () => {
 			status: "unknown",
 			statusEvidence: "binding_lost",
 			paneId: null,
-			canSendInput: false,
 			events: c2!.events.map((e) => ({ ...e })),
 		});
 		await app.login("alice");

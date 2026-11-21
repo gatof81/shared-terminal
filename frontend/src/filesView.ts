@@ -26,9 +26,10 @@ import {
 	type WorkspacePreview,
 } from "./api.js";
 import { copyText } from "./clipboard.js";
+import { showCopySuccessToast, showToast } from "./components/toast.js";
 import { formatBytes } from "./format.js";
 import { highlightCode, languageForFile } from "./highlight.js";
-import { activeSessionId, isMobile, sessions, showCopySuccessToast, showToast } from "./main.js";
+import { activeSessionId, isMobile, sessions } from "./main.js";
 import { renderMarkdown } from "./markdown.js";
 import { saveBlob } from "./saveBlob.js";
 import { button, el, stateBox } from "./ui.js";

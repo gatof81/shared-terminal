@@ -64,10 +64,6 @@ export function registerRouteDetail(view: View, handler: RouteDetailHandler): vo
 // route again (the address already says it).
 let applying = false;
 
-export function isApplyingRoute(): boolean {
-	return applying;
-}
-
 /**
  * A detail a route named that its view could not show synchronously (a
  * listing or the git status is still loading). The address already says

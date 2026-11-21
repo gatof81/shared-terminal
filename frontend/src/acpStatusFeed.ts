@@ -32,7 +32,7 @@ import {
 	patchAcpAgent,
 	setAcpAgents,
 } from "./acpRegistry.js";
-import { acpAgentsEnabled, acpListAgents, isLoggedIn } from "./api.js";
+import { acpListAgents, isLoggedIn } from "./api.js";
 
 const PERIOD_MS = 30_000;
 const DEBOUNCE_MS = 3_000;
@@ -78,7 +78,7 @@ function retryLater(): void {
 	if (retryTimer || retryOnShow || acpAgentsLoaded()) return;
 	retryTimer = setTimeout(() => {
 		retryTimer = null;
-		if (!isLoggedIn() || !acpAgentsEnabled() || acpAgentsLoaded()) return;
+		if (!isLoggedIn() || acpAgentsLoaded()) return;
 		// A hidden tab reads nothing: one read when it shows again.
 		if (document.hidden) retryOnShow = true;
 		else void readAcpAgents();
@@ -94,7 +94,7 @@ function age(): number {
 }
 
 function readIfVisible(): void {
-	if (!isLoggedIn() || !acpAgentsEnabled()) {
+	if (!isLoggedIn()) {
 		stopAcpStatusFeed();
 		return;
 	}
@@ -159,7 +159,7 @@ function readStale(): void {
 		void inFlight.finally(covers ? afterStaleRead : readStale);
 		return;
 	}
-	if (!isLoggedIn() || !acpAgentsEnabled()) {
+	if (!isLoggedIn()) {
 		stopAcpStatusFeed();
 		return;
 	}
@@ -183,9 +183,9 @@ function afterStaleRead(): void {
 	armStale(staleRetryMs);
 }
 
-/** Started by the sidebar once it lists sessions with the ACP feature on; idempotent. */
+/** Started by the sidebar once it lists sessions; idempotent. */
 export function startAcpStatusFeed(): void {
-	if (started || !acpAgentsEnabled() || typeof document === "undefined") return;
+	if (started || typeof document === "undefined") return;
 	started = true;
 	armPeriod();
 	unsubscribe = subscribeAcp((ev) => {
@@ -244,7 +244,7 @@ if (typeof document !== "undefined")
 		if (document.hidden) return;
 		if (retryOnShow) {
 			retryOnShow = false;
-			if (isLoggedIn() && acpAgentsEnabled() && !acpAgentsLoaded()) void readAcpAgents();
+			if (isLoggedIn() && !acpAgentsLoaded()) void readAcpAgents();
 		}
 		if (!started) return;
 		// A pending re-read (awaited or retried until met) covers a due period too.

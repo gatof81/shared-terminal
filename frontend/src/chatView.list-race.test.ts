@@ -16,6 +16,10 @@ const mainState = vi.hoisted(() => ({
 	showToast: vi.fn(),
 	showCopySuccessToast: vi.fn(),
 }));
+vi.mock("./components/toast.js", () => ({
+	showToast: mainState.showToast,
+	showCopySuccessToast: mainState.showCopySuccessToast,
+}));
 vi.mock("./main.js", () => ({
 	get activeSessionId() {
 		return mainState.activeSessionId;
@@ -28,19 +32,15 @@ vi.mock("./main.js", () => ({
 	},
 	getActiveTerminal: () => ({ focus: vi.fn() }),
 	isMobile: () => mainState.mobile,
-	showToast: mainState.showToast,
-	showCopySuccessToast: mainState.showCopySuccessToast,
 	updateTerminalControls: vi.fn(),
 }));
 
 const api = vi.hoisted(() => ({
 	fetchConversations: vi.fn(),
 	fetchConversationEvents: vi.fn(),
-	sendConversationMessage: vi.fn(),
 	openConversationSocket: vi.fn(() => ({ follow: vi.fn(), close: vi.fn() })),
 	// P3a project directory: absent, as on a backend without the feature.
-	projectChatEnabled: () => false,
-	acpAgentsEnabled: () => false,
+	isLoggedIn: () => false,
 }));
 vi.mock("./api.js", () => api);
 vi.mock("./sessionCore.js", () => ({
@@ -83,7 +83,6 @@ const conv = (over: Record<string, unknown> = {}) => ({
 	eventsCount: 10,
 	gapsCount: 0,
 	claudeVersion: "2.1.308",
-	canSendInput: false,
 	...over,
 });
 

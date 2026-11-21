@@ -12,13 +12,12 @@ import { acpReadTicket, setAcpAgents } from "./acpRegistry.js";
 import { AcpThread, type ThreadState } from "./acpThread.js";
 import {
 	type AcpAgentInfo,
-	acpAgentsEnabled,
 	acpListAgents,
 	acpLogin,
 	acpSetModel,
 	acpSetProject,
 	fetchProjects,
-	projectChatEnabled,
+	isLoggedIn,
 } from "./api.js";
 import { showToast } from "./components/toast.js";
 import { activeSessionId } from "./main.js";
@@ -82,13 +81,8 @@ export function acpOwns(sessionId: string | null): boolean {
 	return sessionId !== null && agentsBySession.has(sessionId);
 }
 
-/** The agent of a session, when it is one (sidebar, project page). */
-export function acpAgentOfSession(sessionId: string): AcpAgentInfo | null {
-	return agentsBySession.get(sessionId) ?? null;
-}
-
 async function loadAgents(): Promise<void> {
-	if (!acpAgentsEnabled()) return;
+	if (!isLoggedIn()) return;
 	try {
 		const ticket = acpReadTicket();
 		const list = await acpListAgents();
@@ -100,13 +94,13 @@ async function loadAgents(): Promise<void> {
 }
 
 async function loadProjectNames(): Promise<void> {
-	if (!projectChatEnabled()) return;
+	if (!isLoggedIn()) return;
 	const r = await fetchProjects().catch(() => null);
 	if (r?.ok) projectNames = new Map(r.body.projects.map((p) => [p.projectId, p.name]));
 }
 
 function sync(): void {
-	if (!acpAgentsEnabled()) return;
+	if (!isLoggedIn()) return;
 	void loadAgents().then(apply);
 }
 
@@ -215,9 +209,7 @@ function renderHeader(s: ThreadState): void {
 	// The placeholder says it too, but it goes away while typing: here it stays.
 	privacyEl.textContent = `Mensajes directos: privados entre vos y @${a.name}`;
 	runtimeEl.textContent = `Runtime: ${a.runtime}`;
-	const projectKey = projectChatEnabled()
-		? JSON.stringify([a.name, a.projectId ?? null, [...projectNames]])
-		: "";
+	const projectKey = JSON.stringify([a.name, a.projectId ?? null, [...projectNames]]);
 	if (projectKey !== shownProjectKey || !projectRowEl) {
 		shownProjectKey = projectKey;
 		projectRowEl = projectKey ? projectRow(a) : null;
