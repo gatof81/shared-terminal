@@ -198,7 +198,7 @@ test.describe("auth transitions on the real cookie jar", () => {
 		expect(await tokenOf(context), "a stale logout deleted the new login's cookie").toBe("bob");
 		const before = server.received("GET /sessions");
 		await app.openSidebar();
-		await page.click("#sidebar-refresh-btn");
+		await app.refreshSessions();
 		await expect.poll(() => server.received("GET /sessions")).toBeGreaterThan(before);
 		expect(server.lastCookie("GET /sessions"), "the next request is Bob's").toBe("bob");
 		// The order the server saw: Alice's logout before Bob's login.
@@ -261,7 +261,7 @@ test.describe("auth transitions on the real cookie jar", () => {
 		// A list request sent with Alice's cookie is held; it will answer 401.
 		server.hold("sessions");
 		await app.openSidebar();
-		await page.click("#sidebar-refresh-btn");
+		await app.refreshSessions();
 		await expect.poll(() => server.isHeld("sessions")).toBe(true);
 
 		await app.appMenu("logout-btn");
@@ -288,7 +288,7 @@ test.describe("auth transitions on the real cookie jar", () => {
 		const logoutsBefore = server.received("POST /auth/logout");
 		server.hold("sessions");
 		await app.openSidebar();
-		await page.click("#sidebar-refresh-btn");
+		await app.refreshSessions();
 		await expect.poll(() => server.isHeld("sessions")).toBe(true);
 		server.release("sessions", 401);
 		await expect(page.locator("#auth-view")).toBeVisible();
@@ -335,7 +335,7 @@ test.describe("auth transitions on the real cookie jar", () => {
 			},
 		]);
 		await app.openSidebar();
-		await page.click("#sidebar-refresh-btn");
+		await app.refreshSessions();
 		await expect(
 			app.sessionRow("bob-new"),
 			"a stale status answer signed the mirror out",
