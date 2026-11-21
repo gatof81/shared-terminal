@@ -47,14 +47,13 @@ import {
 	maybeInjectSelectionHint,
 	sessions,
 	setActiveSessionId,
-	setChromeOpen,
 	setCurrentActiveTabId,
 	setCurrentTabs,
 	setServerReachable,
 	setSessions,
 	showCopySuccessToast,
 	showToast,
-	updateChromeToggle,
+	updateTerminalControls,
 } from "./main.js";
 import { renderSidebarObservables } from "./myGroups.js";
 import { openBootstrapLogModal } from "./newSession.js";
@@ -77,9 +76,7 @@ import {
 } from "./sessionActions.js";
 import { badgeFor, clearBadge, recordOutput } from "./tabActivity.js";
 import { openTerminalSession, type SessionStatus } from "./terminal.js";
-import { currentShell } from "./uiShell.js";
 import {
-	landsByPolicy,
 	readHistoryHint,
 	readLastConversation,
 	readLastConversationTitle,
@@ -93,6 +90,7 @@ import {
 	choiceGeneration,
 	endLanding,
 	endRouteApply,
+	getView,
 	landingFor,
 	landView,
 	onViewChange,
@@ -277,7 +275,38 @@ export async function runSessionAction(s: SessionInfo, id: SessionActionId): Pro
 	}
 }
 
-/** The ⋯ menu of the ACTIVE session (shell v2's session bar). */
+// ── The terminal's tab row on a phone ───────────────────────────────────────
+// The person may hide it from the bar's ⋯ to give the terminal its height
+// (remembered per browser). Only on the Terminal view: hiding it resizes the
+// terminal once, which is the point; a view switch still resizes nothing.
+const TABS_HIDDEN_KEY = "st.terminalTabsHidden";
+const terminalAreaEl = document.getElementById("terminal-area");
+function readTabsHidden(): boolean {
+	try {
+		return localStorage.getItem(TABS_HIDDEN_KEY) === "1";
+	} catch {
+		return false;
+	}
+}
+function setTabsHidden(hidden: boolean): void {
+	terminalAreaEl?.classList.toggle("tabs-collapsed", hidden);
+	try {
+		if (hidden) localStorage.setItem(TABS_HIDDEN_KEY, "1");
+		else localStorage.removeItem(TABS_HIDDEN_KEY);
+	} catch {
+		/* storage unavailable: just not remembered */
+	}
+}
+terminalAreaEl?.classList.toggle("tabs-collapsed", readTabsHidden());
+
+function tabRowItem(): MenuItem[] {
+	if (!isMobile() || getView() !== "terminal" || currentTabs.length === 0) return [];
+	return readTabsHidden()
+		? [{ id: "tabs-show", label: "Mostrar pestañas" }]
+		: [{ id: "tabs-hide", label: "Ocultar pestañas", hint: "Más alto para el terminal" }];
+}
+
+/** The ⋯ menu of the ACTIVE session (the session bar). */
 /**
  * What the bar's ⋯ shows first for the open session, before its actions —
  * acpChat.ts: "Ajustes del agente" for an agent's session (UX iter3 E: its
@@ -293,16 +322,13 @@ export function openActiveSessionMenu(opener: HTMLElement): void {
 	const s = sessions.find((x) => x.sessionId === activeSessionId);
 	if (!s) return;
 	const extra = sessionMenuExtras?.(s);
-	if (!extra || extra.items.length === 0) {
-		openSessionMenu(s, opener);
-		return;
-	}
 	openActionMenu({
 		title: s.name,
 		opener,
-		items: [...extra.items, ...sessionActions(actionContext(s))],
+		items: [...(extra?.items ?? []), ...tabRowItem(), ...sessionActions(actionContext(s))],
 		onPick: (id) => {
-			if (!extra.onPick(id)) void runSessionAction(s, id as SessionActionId);
+			if (id === "tabs-hide" || id === "tabs-show") setTabsHidden(id === "tabs-hide");
+			else if (!extra?.onPick(id)) void runSessionAction(s, id as SessionActionId);
 		},
 	});
 }
@@ -1227,28 +1253,17 @@ const LANDING_AGENTS_WAIT_MS = 500;
  */
 let agentsWaitSpent = false;
 
-/** The landing from what is known now; null = shell v1's own flow (a traditional session). */
-function landingNow(sessionId: string, running: boolean): View | null {
-	const shell = currentShell() === "v2" ? "v2" : "v1";
-	// Past the wait, an agent list still unread counts as "not an agent".
-	if (!landsByPolicy(shell, agentKnown(sessionId) ?? false)) return null;
-	return landingFor(sessionId, running);
-}
-
 /**
  * Resolve the landing view (UI unification §9, decision 1; viewPolicy.ts)
  * for a session being selected. Synchronous when everything it depends on
- * is known; otherwise the reads that decide it — is it an agent's session
- * (both shells), has it captured history (v2) — run now, once each, in
- * parallel with the tab listing, and the landing waits for them (bounded).
- * null: shell v1's own flow (a traditional session, unchanged).
+ * is known; otherwise the reads that decide it — is it an agent's session,
+ * has it captured history — run now, once each, in parallel with the tab
+ * listing, and the landing waits for them (bounded).
  */
-function decideLanding(sessionId: string, running: boolean): View | null | Promise<View | null> {
-	const v2 = currentShell() === "v2";
+function decideLanding(sessionId: string, running: boolean): View | Promise<View> {
 	let agent = agentKnown(sessionId);
 	// The one wait of this page load was spent: decided without the list.
 	if (agent === null && agentsWaitSpent) agent = false;
-	if (!landsByPolicy(v2 ? "v2" : "v1", agent)) return null;
 	const reads: Promise<unknown>[] = [];
 	// The one shared read of the agents list (acpStatusFeed.ts), bounded.
 	if (agent === null)
@@ -1257,14 +1272,9 @@ function decideLanding(sessionId: string, running: boolean): View | null | Promi
 				if (!acpAgentsLoaded()) agentsWaitSpent = true;
 			}),
 		);
-	// The history answer matters only for a v2 session that is not known to
-	// be an agent's and has nothing remembered.
-	if (
-		v2 &&
-		agent !== true &&
-		readViewPref(sessionId) === null &&
-		readHistoryHint(sessionId) === null
-	)
+	// The history answer matters only for a session that is not known to be
+	// an agent's and has nothing remembered.
+	if (agent !== true && readViewPref(sessionId) === null && readHistoryHint(sessionId) === null)
 		reads.push(
 			Promise.race([
 				fetchConversations(sessionId, { capture: false })
@@ -1273,10 +1283,10 @@ function decideLanding(sessionId: string, running: boolean): View | null | Promi
 				sleep(LANDING_HISTORY_WAIT_MS),
 			]),
 		);
-	if (reads.length === 0) return landingNow(sessionId, running);
+	if (reads.length === 0) return landingFor(sessionId, running);
 	// Each read carries its own bound (the agents' above, the history's here);
 	// the landing is decided once both are in or timed out.
-	return Promise.all(reads).then(() => landingNow(sessionId, running));
+	return Promise.all(reads).then(() => landingFor(sessionId, running));
 }
 
 function sleep(ms: number): Promise<void> {
@@ -1298,10 +1308,8 @@ export async function openSession(
 	renderSessionList();
 	const meta = sessions.find((x) => x.sessionId === sessionId);
 	const running = meta?.status === "running";
-	// The landing view (viewPolicy.ts) — shell v2, and an agent's session
-	// in v1; a traditional v1 session keeps its own flow below (the open
-	// view stays, a stopped session opens in Files) — unless the route
-	// names one (the router applies it right after). While it is being
+	// The landing view (viewPolicy.ts) — unless the route names one (the
+	// router applies it right after). While it is being
 	// decided the view sync must not land a fallback of its own, and a
 	// view the person picks meanwhile wins over it.
 	const landing = opts.view ? null : decideLanding(sessionId, running);
@@ -1321,7 +1329,7 @@ async function openSessionBody(
 	sessionId: string,
 	meta: SessionInfo | undefined,
 	running: boolean,
-	landing: View | null | Promise<View | null> | null,
+	landing: View | Promise<View> | null,
 	choiceAt: number,
 ): Promise<void> {
 	// updateToolbar → syncSessionViews re-keys every view to this session
@@ -1338,18 +1346,13 @@ async function openSessionBody(
 		if (activeSessionId !== sessionId) return false;
 		// The person chose a view while this was deciding: theirs stands.
 		if (choiceGeneration() !== choiceAt) return true;
-		// Not an agent after all (v1): v1's own flow — a stopped session in Files.
-		if (v === null) {
-			if (!running) showFilesOnly();
-			return true;
-		}
 		landView(v, { forced: !running });
 		return true;
 	};
 
 	// Not running → no tmux to list tabs from or attach to, but the
 	// workspace is on the host: open straight into the Files view (or
-	// Chat, with history, under shell v2). refreshSessions re-opens it
+	// Chat, with history). refreshSessions re-opens it
 	// properly once the session is started.
 	if (meta && !running) {
 		filesOnlySessionId = sessionId;
@@ -1389,20 +1392,8 @@ async function openSessionBody(
 	// their first tab, and keep the terminal pane hidden.
 	if (currentTabs.length === 0) {
 		renderTabBar();
-		// On mobile the chrome drawer (where the + button lives) is
-		// collapsed by default — auto-expand it for the empty session
-		// so the user can actually find the + without hunting for it.
-		if (isMobile()) setChromeOpen(true);
 		return;
 	}
-
-	// Tapping a session in the sidebar drawer is the user's "go to that
-	// tmux" gesture; collapse the chrome drawer too so the freshly-attached
-	// terminal gets the full viewport. Mirrors the chip-click and addTab
-	// success paths — without this, switching session-to-session on mobile
-	// leaves whichever drawer state was last set by the previous session
-	// covering the top of the viewport.
-	if (isMobile()) setChromeOpen(false);
 
 	// Render the tab bar BEFORE calling openTab — disposeAllCurrentTerminals()
 	// at the top of openSession set #terminal-tabs to display:none, and
@@ -1571,7 +1562,7 @@ export function updateToolbar() {
 		emptyState.style.display = "flex";
 		terminalStateEl.hidden = true;
 		terminalStateEl.replaceChildren();
-		updateChromeToggle();
+		updateTerminalControls();
 		syncSessionViews();
 		return;
 	}
@@ -1583,7 +1574,7 @@ export function updateToolbar() {
 	paintBarIdentity();
 	// Refresh the mobile header context pill — its label tracks the
 	// active session/tab, and visibility flips on/off here.
-	updateChromeToggle();
+	updateTerminalControls();
 	syncSessionViews();
 	renderTerminalState();
 }
@@ -1602,9 +1593,6 @@ function paintBarIdentity(): void {
 	terminalToolbar.dataset.sessionName = s.name;
 	const acp = acpAgentsEnabled() ? acpEntry(s.sessionId) : null;
 	terminalToolbar.classList.toggle("bar-agent", acp !== null);
-	// Shell v1 shows the ⋯ only where it holds something its bar lacks: an
-	// agent's settings (v2 shows it on every session).
-	if (sessionMenuBtn && currentShell() !== "v2") sessionMenuBtn.hidden = acp === null;
 	// A running session whose terminal gave up reads "disconnected" until
 	// a pane is attached again (Reconnect) — the server-side status alone
 	// would say "running" over an empty area.
@@ -1754,11 +1742,10 @@ export function renderTabBar() {
 			)
 			?.focus();
 	}
-	// The chrome-toggle label tracks whichever tab is active — refresh
-	// every time the bar is rebuilt so renames/closes/switches stay in
-	// sync without having to thread updateChromeToggle() through every
-	// caller of openTab/addTab/closeTab.
-	updateChromeToggle();
+	// Insert (+) and the key bar follow whether a terminal is active —
+	// refresh every time the bar is rebuilt rather than in every caller of
+	// openTab/addTab/closeTab.
+	updateTerminalControls();
 	renderTerminalState();
 }
 
@@ -2135,13 +2122,6 @@ async function addTab(triggeredBy?: HTMLButtonElement) {
 		currentTabs.push(tab);
 		try {
 			openTab(tab.tabId);
-			// The tab-bar click listener auto-closes the chrome drawer
-			// on chip clicks, but the + button is filtered out of that
-			// path (it's not a chip yet at click time). Mirror the
-			// behaviour here so adding a tab on mobile drops the user
-			// straight into the new tmux pane instead of leaving the
-			// drawer covering the top of the viewport.
-			if (isMobile()) setChromeOpen(false);
 		} catch (err) {
 			// Roll back the push so the chip doesn't linger pointing at a
 			// tab with no currentTerminals entry, and clean up the backend
@@ -2219,14 +2199,6 @@ async function closeTab(tabId: string, triggeredBy?: HTMLButtonElement) {
 	}
 	setCurrentTabs(currentTabs.filter((t) => t.tabId !== tabId));
 	clearBadge(tabId);
-
-	// Closing the last tab on mobile leaves the chrome drawer collapsed
-	// (default state), and the CSS hides #terminal-tabs entirely while
-	// collapsed — so the + button rebuilt by renderTabBar() below isn't
-	// reachable until the user discovers the header pill. Mirror the
-	// openSession empty-tabs branch and auto-expand here too, so the
-	// first new tab is always one tap away.
-	if (isMobile() && currentTabs.length === 0) setChromeOpen(true);
 
 	if (currentActiveTabId === tabId) {
 		setCurrentActiveTabId(null);

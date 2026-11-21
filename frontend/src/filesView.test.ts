@@ -14,7 +14,6 @@ const mainState = vi.hoisted(() => ({
 	mobile: false,
 	focus: vi.fn(),
 	showToast: vi.fn(),
-	setChromeOpen: vi.fn(),
 }));
 
 vi.mock("./main.js", () => ({
@@ -29,10 +28,9 @@ vi.mock("./main.js", () => ({
 	},
 	getActiveTerminal: () => ({ focus: mainState.focus }),
 	isMobile: () => mainState.mobile,
-	setChromeOpen: mainState.setChromeOpen,
 	showCopySuccessToast: vi.fn(),
 	showToast: mainState.showToast,
-	updateChromeToggle: vi.fn(),
+	updateTerminalControls: vi.fn(),
 }));
 
 const api = vi.hoisted(() => {
@@ -106,18 +104,16 @@ beforeAll(async () => {
 			<div id="terminal-container" style="display: block"><div class="tab-pane active" id="pane"><textarea id="xterm-input"></textarea></div></div>
 			<div id="key-bar"></div>
 			<div id="files-view" hidden>
-				<button id="files-to-terminal-btn"></button>
 				<nav id="files-breadcrumbs"></nav>
 				<button id="files-refresh-btn"></button>
 				<div id="files-body"><div id="files-tree"></div><div id="files-preview"></div></div>
 			</div>
 			<div id="git-view" hidden>
-				<button id="git-to-terminal-btn"></button>
 				<div id="git-summary"></div>
 				<button id="git-refresh-btn"></button>
 				<div id="git-body"><div id="git-list"></div><div id="git-diff"></div></div>
 			</div>
-			<div id="chat-view" hidden><button id="chat-to-terminal-btn"></button></div>
+			<div id="chat-view" hidden></div>
 		</section>`;
 	// jsdom has no ResizeObserver; the module installs one at load.
 	vi.stubGlobal(
@@ -199,7 +195,6 @@ describe("view switching", () => {
 			mainState.focus.mockClear();
 			$("view-terminal-btn").click();
 			expect(mainState.focus).not.toHaveBeenCalled();
-			expect(mainState.setChromeOpen).toHaveBeenCalledWith(false);
 		} finally {
 			mainState.mobile = false;
 		}

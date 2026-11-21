@@ -11,7 +11,6 @@ import { alertDialog, confirmDialog, createDialog } from "./components/dialog.js
 import { showToast } from "./main.js";
 
 // ── DOM (re-queried locally; see header) ─────────────────────────────────
-const invitesBtn = document.getElementById("invites-btn") as HTMLButtonElement;
 const invitesModal = document.getElementById("invites-modal")!;
 const inviteCreateBtn = document.getElementById("invite-create-btn") as HTMLButtonElement;
 const inviteList = document.getElementById("invite-list")!;
@@ -19,11 +18,11 @@ const sidebarInvitesBtn = document.getElementById("sidebar-invites-btn") as HTML
 
 // ── Invites modal ───────────────────────────────────────────────────────────
 
-// The dialog returns focus to whichever button opened it (header on
-// desktop, sidebar footer on mobile — the other one is display:none).
+// The dialog returns focus to whichever control opened it (the user menu's
+// button, or the drawer's footer under 400 px).
 const invitesDialog = createDialog(invitesModal, { initialFocus: () => inviteCreateBtn });
 
-function openInvitesModal(opener: HTMLButtonElement) {
+export function openInvitesModal(opener: HTMLElement) {
 	invitesDialog.open(opener);
 	void renderInvites();
 }
@@ -136,7 +135,6 @@ async function renderInvites() {
 	}
 }
 
-invitesBtn.addEventListener("click", () => openInvitesModal(invitesBtn));
 sidebarInvitesBtn.addEventListener("click", () => openInvitesModal(sidebarInvitesBtn));
 
 // Mint flow: the server returns plaintext exactly once. We copy it to the

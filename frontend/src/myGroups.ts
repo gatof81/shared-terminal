@@ -20,7 +20,6 @@ import { sessions, sessionsLoadedOnce, showToast } from "./main.js";
 import { closeObserveModal, openObserveModalFor } from "./observeModal.js";
 
 // ── DOM (re-queried locally; see header) ─────────────────────────────────
-const myGroupsBtn = document.getElementById("my-groups-btn") as HTMLButtonElement;
 const sidebarMyGroupsBtn = document.getElementById("sidebar-my-groups-btn") as HTMLButtonElement;
 const myGroupsModal = document.getElementById("my-groups-modal")!;
 const myGroupsListEl = document.getElementById("my-groups-list")!;
@@ -63,7 +62,7 @@ function openObserveForLead(s: ObservableSession): void {
 	});
 }
 
-function openMyGroupsModal(opener: HTMLButtonElement) {
+export function openMyGroupsModal(opener: HTMLElement) {
 	myGroupsDialog.open(opener);
 	void refreshMyGroups();
 }
@@ -72,7 +71,6 @@ function closeMyGroupsModal() {
 	myGroupsDialog.close();
 }
 
-myGroupsBtn.addEventListener("click", () => openMyGroupsModal(myGroupsBtn));
 sidebarMyGroupsBtn.addEventListener("click", () => openMyGroupsModal(sidebarMyGroupsBtn));
 
 myGroupsRefreshBtn.addEventListener("click", () => {
