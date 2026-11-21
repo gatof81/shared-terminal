@@ -1,0 +1,11 @@
+  1) [wk-mobile] › e2e/keyboard.spec.ts:242:2 › soft keyboard (simulated visual viewport) › the covered terminal sends no resize while the keyboard opens and closes in Chat; one controlled sync on return 
+    Error: Timed out 7000ms waiting for expect(locator).toContainText(expected)
+  2) [wk-mobile-v2] › e2e/chat-scroll.spec.ts:303:2 › chat scroll: a link followed in the same instant as a scroll › Back still puts Project Chat at the row being read 
+    Error: Back after a link followed at once
+  3) [wk-mobile-v2] › e2e/keyboard.spec.ts:170:2 › soft keyboard (simulated visual viewport) › a reader at the bottom stays at the bottom when the keyboard shrinks the thread; one reading earlier keeps their place 
+    Error: the last message stayed in view
+  4) [wk-mobile-v2] › e2e/keyboard.spec.ts:242:2 › soft keyboard (simulated visual viewport) › the covered terminal sends no resize while the keyboard opens and closes in Chat; one controlled sync on return 
+    Error: Timed out 7000ms waiting for expect(locator).toContainText(expected)
+  4 failed
+  1 skipped
+  41 passed (1.4m)

@@ -1,0 +1,6 @@
+# --repeat-each=3, keyboard.spec.ts:170, chat-scroll.spec.ts:303, keyboard.spec.ts:242 (wk-mobile, wk-mobile-v2)
+keyboard.spec.ts:170  6/6 passed
+chat-scroll.spec.ts:303  6/6 passed
+keyboard.spec.ts:242  0/6: expect(#terminal-container .tab-pane.active).toContainText("Welcome") -> received "Hold Shift + drag to select text×"
+  (xterm does not render its rows as DOM text under this WebKit: environment, not the app)
+6 failed, 12 passed (43.5s)
