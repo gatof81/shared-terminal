@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-shell="v2" data-bar="merged">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <!-- viewport-fit=cover lets the app paint edge-to-edge on notched
@@ -180,7 +180,6 @@
         <section id="terminal-area">
           <div id="empty-state">Select or create a session →</div>
           <div id="terminal-toolbar">
-            <span>Session:</span>
             <span id="terminal-session-name"></span>
             <span id="terminal-status-badge"></span>
             <!-- An agent's session (UX iter3 E): "sesión X · proyecto ↗", wide screens only. -->
@@ -188,8 +187,8 @@
             <!-- Workspace Explorer: Terminal ⇄ Files. Files is an overlay
                  above the terminal panes (filesView.ts) so switching never
                  resizes, detaches or disposes the terminal. -->
-            <!-- Each view button carries an icon (shell v2 shows it alone on
-                 narrow screens, the label on the active one) and a label. -->
+            <!-- Each view button carries an icon (alone on narrow screens,
+                 the label on the active one) and a label. -->
             <div id="view-switch" role="group" aria-label="Session view" hidden>
               <button id="view-terminal-btn" type="button" aria-pressed="true" title="Terminal">
                 <svg class="view-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6l6 6-6 6M12 18h8" /></svg>

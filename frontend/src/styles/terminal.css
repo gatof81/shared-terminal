@@ -6,14 +6,14 @@
   position: relative;
 }
 #terminal-toolbar {
-  padding: 0.5rem 1rem;
+  padding: 0.4rem 0.75rem;
   background: var(--c-surface);
   border-bottom: 1px solid var(--c-border);
   font-size: 0.78rem;
   color: var(--c-muted);
   display: none;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.6rem;
   flex-shrink: 0;
 }
 /* The bar is ONE line, whatever it holds: its height is part of the
@@ -29,21 +29,15 @@
   color: var(--c-text);
   font-weight: 500;
   flex: 0 1 auto;
-  /* At least 8 characters show before anything else gives way, but never
-     more than the name has: a plain floor in ch also WIDENS a shorter name
-     ("docs" moved everything after it). --name-ch is the name's length
-     (sessionCore.nameFloor). The subtitle gives way first (1000 : 1). */
-  min-width: min(8ch, var(--name-ch, 0ch));
+  /* The subtitle gives way first (1000 : 1). On a phone the name keeps a
+     floor of 7 characters (mobile.css). */
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 /* An agent's session (UX iter3 E): "@agent" in its colour, its state as
    the chip, then "sesión X · proyecto ↗" — on wide screens only, and the
    first text to give way. One line, the same height as any session's bar. */
-/* "Session:" names a session; an agent's bar names the agent. */
-#terminal-toolbar.bar-agent > span:first-child {
-  display: none;
-}
 #terminal-toolbar.bar-agent #terminal-session-name {
   color: hsl(var(--acp-hue, 210) 55% 62%);
   font-weight: 600;
@@ -94,24 +88,33 @@
   font-weight: 700;
   color: var(--c-warn);
 }
+/* The session's actions (start / stop / ports / observers / terminate /
+   delete) as one menu, the bar's last control. */
+#session-menu-btn {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  color: var(--c-muted);
+  font-size: 0.9rem;
+  line-height: 1;
+  padding: 0.2rem 0.5rem;
+  cursor: pointer;
+}
+#session-menu-btn:hover {
+  color: var(--c-text);
+}
+#session-menu-btn:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
 /* A flagged ⋯ grows to hold its mark (a fixed icon width drew it outside). */
 #session-menu-btn:has(.bar-menu-flag) {
   width: auto;
-  padding: 0 6px;
 }
-/* Shell v1: the ⋯ (an agent's session only) is the bar's last control, and
-   no taller than its tallest other one (the tabs, 22 px): the bar must be
-   as tall for an agent's session as for any other (context-bar.spec). */
-html:not([data-shell="v2"]) #session-menu-btn {
-  order: 10;
-}
+/* As tall as its tabs, so the bar keeps its 40 px. */
 @media (pointer: fine) {
-  html:not([data-shell="v2"]) #session-menu-btn {
-    height: 22px;
-  }
-  /* Shell v2 (the ⋯ on every session): as tall as its tabs, so the bar
-     keeps its 40 px. */
-  html[data-shell="v2"] #session-menu-btn {
+  #session-menu-btn {
     height: 26px;
   }
 }
@@ -131,17 +134,8 @@ html:not([data-shell="v2"]) #session-menu-btn {
 #chat-refresh-btn {
   margin-left: auto;
 }
-@media (max-width: 768px) {
-  /* The v1 phone bar scrolls sideways (mobile.css): squeezing the name
-     there buys nothing and left "my-p…" for a ten-letter name. */
-  html:not([data-shell="v2"]) #terminal-session-name {
-    flex-shrink: 0;
-    max-width: 60vw;
-  }
-}
 /* The session's state: a .chip (base.css; sessionCore.setStatusBadge picks the tone). */
 #font-size-btn {
-  margin-left: auto;
   background: transparent;
   border: 1px solid var(--c-border);
   border-radius: 6px;
@@ -154,30 +148,6 @@ html:not([data-shell="v2"]) #session-menu-btn {
 #font-size-btn:hover {
   border-color: var(--c-accent);
   color: var(--c-accent);
-}
-/* Observers / Ports had no rule at all and rendered as white native
-   buttons in the v1 toolbar; same quiet style as the Aa button. (v2
-   moves both into the session menu, shell-v2.css.) */
-#observers-btn,
-#ports-btn {
-  background: transparent;
-  border: 1px solid var(--c-border);
-  border-radius: 6px;
-  color: var(--c-muted);
-  font-size: 0.75rem;
-  padding: 0.2rem 0.55rem;
-  cursor: pointer;
-  line-height: 1;
-}
-#observers-btn:hover,
-#ports-btn:hover {
-  border-color: var(--c-accent);
-  color: var(--c-accent);
-}
-#observers-btn:focus-visible,
-#ports-btn:focus-visible {
-  outline: 2px solid var(--c-accent);
-  outline-offset: 2px;
 }
 /* #357 — toolbar history-search widget. The magnifier button borrows the
    Aa button's quiet style; the input only occupies toolbar space while
@@ -209,14 +179,17 @@ html:not([data-shell="v2"]) #session-menu-btn {
   border-color: var(--c-accent);
   outline: none;
 }
-/* Actions button (+ menu) lives in the header on every viewport. The
-   menu hosts both the paste flow (mobile-essential, desktop-handy as a
-   text-paste fallback) and the file-attach flow (useful everywhere).
+/* Actions button (+ menu), in the tab strip's tools. The menu hosts both
+   the paste flow (mobile-essential, desktop-handy as a text-paste
+   fallback) and the file-attach flow (useful everywhere).
    `display: inline-flex` is the visible default; the [hidden] attribute
-   from main.ts gates it on whether there's an active session, in
-   lockstep with the chrome-toggle pill. */
+   from main.ts (updateTerminalControls) gates it on whether there's a
+   terminal to write into. */
 #actions-btn {
   display: inline-flex;
+  min-width: 34px;
+  min-height: 28px;
+  justify-content: center;
   background: transparent;
   border: 1px solid var(--c-border);
   border-radius: 6px;
@@ -228,7 +201,7 @@ html:not([data-shell="v2"]) #session-menu-btn {
   font-weight: 600;
   /* The "+" glyph is heavier than the prior "Paste" label and tends
      to ride high inside a tightly-padded button; nudge baseline down
-     a hair so it sits centred next to the chrome-toggle pill. */
+     a hair so it sits centred. */
   padding-bottom: 0.24rem;
 }
 #actions-btn[hidden] {

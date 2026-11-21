@@ -259,9 +259,19 @@ button.sgroup-title:focus-visible {
    nothing hidden can take focus. Same for the header controls that act
    on the terminal. */
 body.project-page-on #terminal-area > :not(#project-view),
-body.project-page-on #chrome-toggle,
 body.project-page-on #actions-btn {
   visibility: hidden;
+}
+/* On a phone the bar's view tabs and ⋯ sit in the header, where the rule
+   above does not reach, and they would act on that unrelated session.
+   visibility, NEVER display:none: the header's height is part of the
+   terminal's box, and a height change refits xterm and resizes tmux for
+   every viewer. A hidden element takes neither clicks nor focus;
+   pointer-events is the belt for any descendant. */
+body.project-page-on #view-switch,
+body.project-page-on #session-menu-btn {
+  visibility: hidden;
+  pointer-events: none;
 }
 #project-view {
   position: absolute;

@@ -122,8 +122,8 @@ const actionsBtn = document.getElementById("actions-btn") as HTMLButtonElement;
 // · ⋯ · user); on a wide screen it sits on top of #terminal-area. The
 // element is MOVED, not cloned, so every module keeps its references, and
 // only when the breakpoint is crossed. viewSwitch.positionOverlays knows the
-// overlays then start at the top of #terminal-area. (A layout that needs no
-// move is the CSS consolidation's to find; the header rules key on it.)
+// overlays then start at the top of #terminal-area; mobile.css styles it
+// there as `header #terminal-toolbar`.
 {
 	const toolbar = document.getElementById("terminal-toolbar")!;
 	const header = document.querySelector("header")!;
@@ -676,7 +676,7 @@ sidebarLogoutBtn.addEventListener("click", () => handleLogout());
 // The account's actions, declared here and acted on directly. What a role
 // may not use is left out (a UX hint only: every gated endpoint is
 // server-side requireAdmin / lead-checked). Under 400 px the button is
-// hidden and the drawer's footer holds the same actions (shell-v2.css).
+// hidden and the drawer's footer holds the same actions (mobile.css).
 const userMenuBtn = document.getElementById("user-menu-btn") as HTMLButtonElement;
 userMenuBtn.addEventListener("click", () => {
 	const items: MenuItem[] = [
