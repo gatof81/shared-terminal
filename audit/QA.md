@@ -143,7 +143,7 @@ Antes de empezar:
   - El botón «Show log» existe.
 - **Observaciones:**
   - `barBox` es `null` en la página de proyecto en v1 y en v2, porque la barra de sesión está oculta allí (`projects.css:261-263`). En Project Chat la referencia arriba es `headerBox`.
-  - El proyecto «corto» no es corto (`pThread` scrollHeight 3113 contra clientHeight 641), así que no aísla el caso «sin scroll del hilo». Lo dejé fuera de los pasos del owner; si se quiere ese caso, hace falta un proyecto de 1–3 mensajes.
+  - El proyecto «corto» no es corto (`pThread` scrollHeight 3113 contra clientHeight 641), así que no aísla el caso «sin scroll del hilo». Corregido por @developer en `9c52959` (#644): el proyecto ya no tiene mensajes y no muestra preguntas de otro proyecto. Lo verifiqué: `pThread` [0,663,663], 0 pedidos a `/api` y `/ws`, 0 preguntas. Se agregó a los pasos del owner como **Safari-vacío**.
   - En Chromium no hay teclado: `kb` queda en `""` y `vv` no cambia. Lo que importa medir sale del iPhone.
 
 **Pasos publicados para @owner (Project Chat, un solo mensaje):** preguntas previas (shell y app instalada en cada dispositivo) → Safari: Project Chat y chat de @solo (Clear, tocar el campo, esperar 2 s, escribir y enviar, cerrar el teclado, tocar el campo otra vez, esperar 2 s, cerrar, Copy log) → lo mismo en Chrome iOS → lo mismo con `?ui=v2` si usa v2 → si usa la app instalada, nota de que la preview no se instala y que se informe la diferencia.
