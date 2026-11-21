@@ -20,7 +20,7 @@ test.describe("auth", () => {
 		await expect(app.sessionRow("my-project")).toBeVisible();
 		await expect(app.sessionRow("docs")).toBeVisible();
 		await expect(app.sessionRow("old-poc")).toHaveCount(0);
-		await page.check("#show-terminated-toggle");
+		await app.showTerminated();
 		await expect(app.sessionRow("old-poc")).toBeVisible();
 	});
 

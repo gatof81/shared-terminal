@@ -18,17 +18,13 @@ export const FIXED_NOW = "2026-10-31T10:30:00Z";
 
 export type View = "terminal" | "files" | "git" | "chat";
 
-/** Project option: which shell the app mounts (uiShell.ts override). */
-export interface ShellOptions {
-	shell: "v1" | "v2";
-	/** Shell v2's mobile bar (uiShell.ts): null = the default (merged), "stacked" = the alternative. */
-	bar: "stacked" | null;
+/** Test options. */
+export interface AppOptions {
 	/**
 	 * What the browser remembers about the seeded sessions' views
-	 * (viewPolicy.ts). "legacy" (default) seeds the pre-policy landings —
-	 * Terminal for the running session, Files for the others — so the
-	 * suite's expectations hold under both shells; "none" starts clean, for
-	 * the landing policy's own spec.
+	 * (viewPolicy.ts). "legacy" (default) seeds Terminal for the running
+	 * session and Files for the others, which is what most specs start
+	 * from; "none" starts clean, for the landing policy's own spec.
 	 */
 	landing: "legacy" | "none";
 }
@@ -70,29 +66,19 @@ export class App {
 		readonly page: Page,
 		readonly backend: MockBackend,
 		readonly mobile: boolean,
-		readonly shell: "v1" | "v2",
 	) {
 		page.on("pageerror", (err) => this.errors.push(String(err)));
-	}
-
-	/** v1 mobile only: the chrome drawer (toolbar + tabs) must be open to reach them. */
-	async openChrome(): Promise<void> {
-		if (!this.mobile || this.shell === "v2") return;
-		const main = this.page.locator("main");
-		if (!(await main.evaluate((el) => el.classList.contains("chrome-open")))) {
-			await this.page.click("#chrome-toggle");
-		}
 	}
 
 	/**
 	 * Activate one of the header cluster's buttons by id (templates-btn,
 	 * admin-btn, logout-btn, …): the button itself in v1 (header on
-	 * desktop, sidebar footer on mobile), the user menu's entry in v2.
+	 * desktop, sidebar footer on mobile) or the user menu's entry.
 	 */
 	async appMenu(id: string): Promise<void> {
-		// Shell v2: the account menu is in the header — except under 400 px,
-		// where it moves to the drawer's footer (shell-v2.css), as in v1.
-		if (this.shell === "v2" && (await this.page.locator("#user-menu-btn").isVisible())) {
+		// The account menu is in the header — except under 400 px, where it
+		// moves to the drawer's footer (shell-v2.css).
+		if (await this.page.locator("#user-menu-btn").isVisible()) {
 			await this.page.click("#user-menu-btn");
 			await this.page.locator(`[role="menu"].action-menu [data-action="${id}"]`).click();
 			return;
@@ -156,6 +142,21 @@ export class App {
 		await expect(this.page.locator("#sidebar")).toHaveCSS("transform", "matrix(1, 0, 0, 1, 0, 0)");
 	}
 
+	/** The Sessions section's ⋯ (the sidebar tree): Show/Hide terminated. */
+	async showTerminated(): Promise<void> {
+		await this.openSidebar();
+		await this.page.locator(".ssection-sessions .ssection-menu").click();
+		await this.page.getByRole("menuitem", { name: /^Show terminated/ }).click();
+		await expect(this.page.locator("#show-terminated-toggle")).toBeChecked();
+	}
+
+	/** The Sessions section's ⋯ → Refresh: re-reads the session list. */
+	async refreshSessions(): Promise<void> {
+		await this.openSidebar();
+		await this.page.locator(".ssection-sessions .ssection-menu").click();
+		await this.page.getByRole("menuitem", { name: /^Refresh/ }).click();
+	}
+
 	async sidebarOpen(): Promise<boolean> {
 		return this.page.locator("main").evaluate((el) => el.classList.contains("sidebar-open"));
 	}
@@ -207,27 +208,11 @@ export class App {
 		return "terminal";
 	}
 
-	/**
-	 * Switch views the way the current layout offers it: the toolbar
-	 * segmented control on desktop; on mobile the toolbar lives in the
-	 * chrome drawer (opened from the header pill) while the terminal is
-	 * shown, and the bottom nav takes over once an overlay is up.
-	 */
+	/** Switch views with the session bar's view tabs (on screen on every view). */
 	async switchView(view: View): Promise<void> {
 		const current = await this.currentView();
 		if (current === view) return;
-		if (!this.mobile || this.shell === "v2") {
-			// v2: the view tabs are in the session bar on every view.
-			await this.page.click(`#view-${view}-btn`);
-		} else if (current === "terminal") {
-			const main = this.page.locator("main");
-			if (!(await main.evaluate((el) => el.classList.contains("chrome-open")))) {
-				await this.page.click("#chrome-toggle");
-			}
-			await this.page.click(`#view-${view}-btn`);
-		} else {
-			await this.page.click(`#view-nav button[data-view="${view}"]`);
-		}
+		await this.page.click(`#view-${view}-btn`);
 		await this.expectView(view);
 	}
 
@@ -255,26 +240,13 @@ export class App {
 	}
 }
 
-export const test = base.extend<ShellOptions & { backend: MockBackend; app: App }>({
-	shell: ["v1", { option: true }],
-	bar: [null, { option: true }],
+export const test = base.extend<AppOptions & { backend: MockBackend; app: App }>({
 	landing: ["legacy", { option: true }],
-	backend: async ({ page, shell, bar, landing }, use) => {
+	backend: async ({ page, landing }, use) => {
 		const backend = new MockBackend();
 		await backend.install(page);
 		await installFonts(page);
 		await page.clock.setFixedTime(FIXED_NOW);
-		if (shell === "v2") {
-			// The per-browser override, as `?ui=v2` (and `?bar=stacked`) would have stored it.
-			await page.addInitScript((stacked: boolean) => {
-				try {
-					localStorage.setItem("st.uiShell", "v2");
-					if (stacked) localStorage.setItem("st.uiShellBar", "stacked");
-				} catch {
-					/* ignore */
-				}
-			}, bar === "stacked");
-		}
 		if (landing === "legacy") {
 			await page.addInitScript(
 				(prefs: Record<string, string>) => {
@@ -293,8 +265,8 @@ export const test = base.extend<ShellOptions & { backend: MockBackend; app: App 
 		}
 		await use(backend);
 	},
-	app: async ({ page, backend, isMobile, shell }, use) => {
-		const app = new App(page, backend, isMobile === true, shell);
+	app: async ({ page, backend, isMobile }, use) => {
+		const app = new App(page, backend, isMobile === true);
 		await use(app);
 		expect(app.errors, "uncaught errors in the page").toEqual([]);
 	},

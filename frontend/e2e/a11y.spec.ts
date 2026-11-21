@@ -49,8 +49,6 @@ test.describe("accessibility — axe on the main views", () => {
 		await app.login("alice");
 		await app.openSession("my-project");
 		await app.expectTerminalReady();
-		// Phones (v1): the tabs live in the chrome drawer.
-		await app.openChrome();
 		await expect(page.locator("#terminal-tabs .tab-chip-btn")).toHaveCount(2);
 		await expectClean(page, "terminal");
 		for (const view of ["files", "git", "chat"]) {

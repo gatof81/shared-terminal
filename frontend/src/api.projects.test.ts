@@ -23,7 +23,6 @@ const STATUS = {
 	authenticated: true,
 	isAdmin: false,
 	isLead: false,
-	uiShell: "v1",
 };
 
 let fetchSpy: ReturnType<typeof vi.fn>;

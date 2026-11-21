@@ -70,12 +70,7 @@ test.describe("context bar", () => {
 		app,
 		backend,
 		page,
-		shell,
-	}, info) => {
-		test.skip(
-			info.project.use.isMobile === true && shell !== "v2",
-			"a v1 phone keeps the agent's own row and its Ajustes button",
-		);
+	}) => {
 		const solo = backend.acpAgents.find((a) => a.name === "solo")!;
 		solo.model = "claude-opus-5-5";
 		solo.modelApplied = { requested: "claude-opus-5-5", current: null, error: "no disponible" };
@@ -125,15 +120,14 @@ test.describe("context bar", () => {
 	});
 });
 
-test.describe("context bar on a v2 phone", () => {
+test.describe("context bar on a phone", () => {
 	for (const width of [320, 390]) {
 		test(`${width} px: 44-px tall targets, tabs at least 40 wide, nothing covered, the title keeps its letters`, async ({
 			app,
 			backend,
 			page,
-			shell,
 		}, info) => {
-			test.skip(!(info.project.use.isMobile && shell === "v2"), "shell v2 on a phone");
+			test.skip(!info.project.use.isMobile, "a phone");
 			backend.enableAcp();
 			await page.setViewportSize({ width, height: 700 });
 			await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);

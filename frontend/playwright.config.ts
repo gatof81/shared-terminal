@@ -1,5 +1,5 @@
 import { defineConfig, devices } from "@playwright/test";
-import type { ShellOptions } from "./e2e/fixtures.js";
+import type { AppOptions } from "./e2e/fixtures.js";
 
 // End-to-end harness (docs/design/ui-unificada.md §8.2, PR 3). The app runs
 // on the Vite dev server with VITE_API_URL pointing at ITSELF, so every
@@ -9,25 +9,7 @@ import type { ShellOptions } from "./e2e/fixtures.js";
 // stay in the Session Image workflow's smokes.
 const PORT = 5174;
 
-// CI profile. Pull requests run `E2E_PROFILE=pr`; pushes to main and local
-// runs keep the whole matrix (the default). The primary shell is v1: VM100
-// runs with UI_SHELL unset, so /api/auth/status answers `uiShell: "v1"`
-// (checked 2026-11-18) and that is what every browser without a `?ui=`
-// override mounts — so `desktop` and `mobile` (v1) run the whole suite on
-// every PR. The v2 projects keep, on a PR, the specs whose behaviour depends
-// on the shell or the bar (view tabs, Chat-first landing, the terminal
-// invariant, history/back, the session bar, the phone keyboard and their
-// screenshots); every other spec drives the same views through the same
-// mock and runs under v2 on main. If the primary shell changes, swap these.
-const PR_PROFILE = process.env.E2E_PROFILE === "pr";
-const V2_SPECIFIC =
-	/(shell-v2|chat-first|terminal-invariant|navigation|router|session-bar|keyboard|visual)\.spec\.ts/;
-const STACKED_BAR = PR_PROFILE
-	? /(shell-v2|terminal-invariant|navigation)\.spec\.ts/
-	: /(navigation|terminal-invariant|shell-v2|visual)\.spec\.ts/;
-const v2Match = PR_PROFILE ? { testMatch: V2_SPECIFIC } : {};
-
-export default defineConfig<ShellOptions>({
+export default defineConfig<AppOptions>({
 	testDir: "./e2e",
 	testMatch: /.*\.spec\.ts/,
 	fullyParallel: true,
@@ -94,42 +76,6 @@ export default defineConfig<ShellOptions>({
 				deviceScaleFactor: 1,
 				isMobile: true,
 				hasTouch: true,
-			},
-		},
-		// The same suite under shell v2 (uiShell.ts): the per-browser
-		// override is set before the app loads (e2e/fixtures.ts).
-		{
-			name: "desktop-v2",
-			...v2Match,
-			use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 800 }, shell: "v2" },
-		},
-		{
-			name: "mobile-v2",
-			...v2Match,
-			use: {
-				...devices["Desktop Chrome"],
-				viewport: { width: 390, height: 844 },
-				deviceScaleFactor: 1,
-				isMobile: true,
-				hasTouch: true,
-				shell: "v2",
-			},
-		},
-		// The stacked-bar alternative of v2 on a phone (uiShell.ts
-		// `?bar=stacked`; the merged bar is the default that `mobile-v2`
-		// runs): the navigation, the invariant, the shell spec and the
-		// screenshots (on a PR, the bar's own specs without the screenshots).
-		{
-			name: "mobile-v2-stacked",
-			testMatch: STACKED_BAR,
-			use: {
-				...devices["Desktop Chrome"],
-				viewport: { width: 390, height: 844 },
-				deviceScaleFactor: 1,
-				isMobile: true,
-				hasTouch: true,
-				shell: "v2",
-				bar: "stacked",
 			},
 		},
 	],

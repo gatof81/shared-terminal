@@ -1,19 +1,16 @@
 import { expect, test } from "./fixtures.js";
 
 /**
- * Shell v2 (docs/design/ui-unificada.md §5.2 / §5.3), behind the runtime
- * flag: the session bar carries the view tabs on every view, the ⋯ menu
+ * The interface (docs/design/ui-unificada.md §5.2 / §5.3):
+ * the session bar carries the view tabs on every view, the ⋯ menu
  * and — on mobile — stays on screen with the terminal focused; the
  * terminal-only controls live in the tab strip; the header cluster is one
- * user menu. Runs only on the v2 projects.
+ * user menu.
  */
-test.describe("shell v2", () => {
-	test.skip(({ shell }) => shell !== "v2", "v2 only");
-
+test.describe("the bar layout", () => {
 	test("the view tabs are in the session bar on every view, and stay with the terminal focused", async ({
 		app,
 		page,
-		bar,
 	}) => {
 		await app.login("alice");
 		await app.openSession("my-project");
@@ -31,11 +28,7 @@ test.describe("shell v2", () => {
 			await expect(tabs).toBeVisible();
 			await expect(page.locator("#terminal-toolbar")).toBeVisible();
 		}
-		if (app.mobile && bar === "stacked") {
-			// Icons only, the active one labelled.
-			await expect(page.locator("#view-terminal-btn .view-label")).toBeVisible();
-			await expect(page.locator("#view-files-btn .view-label")).toBeHidden();
-		} else if (app.mobile) {
+		if (app.mobile) {
 			// Merged bar at 390 px: icons only; the active one is told by aria-pressed and its underline.
 			await expect(page.locator("#view-switch .view-label:visible")).toHaveCount(0);
 			await expect(page.locator("#view-terminal-btn")).toHaveAttribute("aria-pressed", "true");
@@ -45,9 +38,8 @@ test.describe("shell v2", () => {
 	test("merged bar on a 390-px phone: one line, a legible name, four tabs, Insert in the tab strip; with the keyboard's height too", async ({
 		app,
 		page,
-		bar,
 	}) => {
-		test.skip(!app.mobile || bar === "stacked", "the merged bar is the mobile default");
+		test.skip(!app.mobile, "a phone");
 		await app.login("alice");
 		await app.openSession("my-project");
 		await app.expectTerminalReady();
