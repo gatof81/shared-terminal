@@ -1,7 +1,5 @@
 #!/usr/bin/env node
 // Real-Docker release check for #679, on DISPOSABLE sessions of a LAB backend:
-//   A. recreating an ACP agent's container keeps the runtime mount, the runner
-//      comes back in the new container and the agent keeps its ACP session;
 //   B. hard-deleting an ACTIVE agent session closes its queue, tells an agent
 //      that asked it something (once), and its token stops working;
 //   C. an interrupted agent → agent request is reported to the requester once
@@ -9,23 +7,21 @@
 // Agents use the deterministic test adapter (ACP_TEST_RUNTIME=1): no model, no
 // credentials. Run it ON the Docker host of the lab (it uses the `docker` CLI).
 //
-// Lab backend needs: ACP_TEST_RUNTIME=1,
-// CONVERSATION_ENABLED=true (recreation is the capture's engine),
-// RECREATE_DOCKER_FS_PATH set, and an admin login.
-//   LAB=1 ST=http://127.0.0.1:3101 LAB_LOGIN=1 BACKUP_CMD='docker compose exec -T app npm run backup' \
-//     node acp-r8-docker-check.mjs
-// It creates, recreates and hard-deletes its own sessions only (names `<PREFIX>-…`),
+// (Part A, the admin container recreation, was removed with that feature.)
+//
+// Lab backend needs: ACP_TEST_RUNTIME=1 and a login.
+//   LAB=1 ST=http://127.0.0.1:3101 LAB_LOGIN=1 node acp-r8-docker-check.mjs
+// It creates and hard-deletes its own sessions only (names `<PREFIX>-…`),
 // and refuses to run without LAB=1. KEEP=1 keeps them. Exit 1 on any FAIL.
 import { execFileSync, execSync } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 
 if (process.env.LAB !== "1") {
-	console.error("refusing: set LAB=1 — this script recreates and hard-deletes sessions (its own, but only on a lab)");
+	console.error("refusing: set LAB=1 — this script hard-deletes sessions (its own, but only on a lab)");
 	process.exit(2);
 }
 const ST = process.env.ST ?? "http://127.0.0.1:3101";
 const PREFIX = process.env.PREFIX ?? `r${randomBytes(2).toString("hex")}`;
-const REC = `${PREFIX}-rec`;
 const ASK = `${PREFIX}-ask`;
 const DEL = `${PREFIX}-del`;
 const SLOW = `${PREFIX}-slow`;
@@ -96,8 +92,6 @@ const runnerOnline = async (name) =>
 		(a) => a.name === name && a.runnerSeenAt && Date.now() - Date.parse(a.runnerSeenAt) < 15_000,
 	);
 const container = (sid) => `st-${sid.slice(0, 12)}`;
-const dockerJson = (...args) => JSON.parse(execFileSync("docker", args, { encoding: "utf8" }));
-const promptCount = (text) => Number(/sesión ACP: (\d+)/.exec(text ?? "")?.[1] ?? Number.NaN);
 const all = async () => (await api("GET", "/api/acp/messages")).body;
 
 async function agentSession(name) {
@@ -106,44 +100,6 @@ async function agentSession(name) {
 	created.push(r.body.sessionId);
 	check(`runner of @${name} online`, !!(await waitFor(() => runnerOnline(name), 90_000)));
 	return r.body.sessionId;
-}
-
-async function partA() {
-	console.log("— A. recreate an ACP agent's container");
-	const sid = await agentSession(REC);
-	const m0 = await waitMsg((await send(REC, "antes de recrear")).id);
-	check("@rec answers before the recreation", m0?.state === "done", m0?.result_text);
-	const before = promptCount(m0?.result_text);
-	const oldId = dockerJson("inspect", container(sid))[0].Id;
-	const cap = await api("PATCH", `/api/admin/sessions/${sid}/conversation`, { enabled: true });
-	check("capture requested (recreation precondition)", cap.status < 300, `${cap.status} ${JSON.stringify(cap.body)}`);
-	check("session stopped", (await api("POST", `/api/sessions/${sid}/stop`)).status < 300);
-	let pf = await api("GET", `/api/admin/sessions/${sid}/recreate?preserveLayer=1`);
-	if (pf.body?.blockers?.some((b) => b.code === "backup-stale") && process.env.BACKUP_CMD) {
-		execSync(process.env.BACKUP_CMD, { stdio: "inherit" });
-		pf = await api("GET", `/api/admin/sessions/${sid}/recreate?preserveLayer=1`);
-	}
-	if (!check("recreation preflight passes", pf.body?.recreatable === true, JSON.stringify(pf.body?.blockers)))
-		return;
-	const r = await api("POST", `/api/admin/sessions/${sid}/recreate`, {
-		expectImageId: pf.body.currentImageId ?? pf.body.imageId,
-		preserveLayer: true,
-	});
-	check("recreation committed", r.status === 200 && r.body?.outcome === "committed", `${r.status} ${JSON.stringify(r.body)}`);
-	const n = dockerJson("inspect", container(sid))[0];
-	check("the session's container is the new one", n.Id !== oldId && n.Id === r.body?.nContainerId, n.Id.slice(0, 12));
-	const mount = n.Mounts.find((m) => m.Destination === "/opt/st-acp");
-	check("N has the ACP runtime mounted read-only", !!mount && mount.RW === false, JSON.stringify(mount ?? null));
-	check("runner online again in N", !!(await waitFor(() => runnerOnline(REC), 90_000)));
-	const procs = execFileSync("docker", ["exec", container(sid), "pgrep", "-fc", "^node --no-warnings /opt/st-acp/st/runner.mjs"], {
-		encoding: "utf8",
-	}).trim();
-	check("exactly one runner process in N", procs === "1", `count=${procs}`);
-	const m1 = await waitMsg((await send(REC, "después de recrear")).id);
-	check("@rec answers after the recreation", m1?.state === "done", m1?.result_text);
-	check("same ACP session (context kept)", promptCount(m1?.result_text) > before, `${before} → ${promptCount(m1?.result_text)}`);
-	const ap = await api("POST", `/api/admin/sessions/${sid}/recreate/approve`);
-	check("retained old container approved (removed)", ap.status < 300, String(ap.status));
 }
 
 async function partB() {
@@ -205,7 +161,7 @@ async function main() {
 	console.log(`R8 Docker check against ${ST} — prefix ${PREFIX}`);
 	const rt = await api("GET", "/api/acp/runtimes");
 	if (!check("runtime st-test-agent installed", rt.body?.available?.includes("st-test-agent"), JSON.stringify(rt.body))) return;
-	for (const part of [partA, partB, partC]) {
+	for (const part of [partB, partC]) {
 		try {
 			await part();
 		} catch (err) {
