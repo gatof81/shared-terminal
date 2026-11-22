@@ -34,7 +34,7 @@ Donde difieran, vale este. #715 (`feat/project-chat-bar` @ `70e7b3a`) y #718 (`f
 
 | Criterio | Valor medible |
 |---|---|
-| Filas encima del hilo | **Una**, la del header: 44 px (≤ 46). Hoy son 107 (44 + 63). |
+| Filas encima del hilo | **Una**, la del header, del mismo alto que fuera del proyecto (≤ 48; hoy 47 por el marco de las pestañas). Hoy son 107 (44 + 63). |
 | Contenido, en orden | ☰ · título del proyecto · grupo de avatares · ⋯ del proyecto · cuenta (solo con ≥ 400 px, según U-1 A.3) |
 | ☰ | 44×44. Hoy mide 38×30 (auditoría U4-7). |
 | Título | 15 px, peso 600, una línea con elipsis, ocupa todo el ancho libre. Sigue siendo `h2#pv-title` con `tabindex=-1`, que recibe el foco al entrar. A 320 caben al menos 8 caracteres. |
@@ -158,7 +158,7 @@ Es igual que AGENTES-LISTA §2.4, sin cambios.
 
 Medidas a 320×568, 390×844, 390×450 (teclado simulado) y 1280×800.
 
-1. **Teléfono:** hay una fila arriba del hilo, de alto ≤ 46 px, con ☰, título, grupo y ⋯. El header mide lo mismo dentro y fuera del proyecto.
+1. **Teléfono:** hay una fila arriba del hilo, de alto ≤ 48 px e igual al del header fuera del proyecto, con ☰, título, grupo y ⋯. El header mide lo mismo dentro y fuera del proyecto.
 2. **Desktop:** la cabecera del proyecto es de una fila de ≤ 48 px y no tiene ×.
 3. **El ⋯ del proyecto** tiene exactamente Renombrar y Archivar.
 4. **Hay un solo panel de agentes en el DOM** (`#acp-agents-panel` ya no existe). Al abrirlo y cerrarlo, el `top`, el alto y el `scrollTop` del hilo cambian 0 px.
