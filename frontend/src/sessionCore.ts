@@ -273,10 +273,11 @@ export async function runSessionAction(s: SessionInfo, id: SessionActionId): Pro
 
 // ── The terminal's tab row on a phone ───────────────────────────────────────
 // The person may hide it from the bar's ⋯ to give the terminal its height
-// (remembered per browser). Only on the Terminal view: hiding it resizes the
-// terminal once, which is the point; a view switch still resizes nothing.
+// (one state per device, <html data-tabs="hidden">, applied by mobile.css on
+// a phone only). Offered on the Terminal view; the state does not depend on
+// the view, so a view switch still resizes nothing and the ⋯ item resizes
+// once, which is the point. Nothing hides or shows it on its own.
 const TABS_HIDDEN_KEY = "st.terminalTabsHidden";
-const terminalAreaEl = document.getElementById("terminal-area");
 function readTabsHidden(): boolean {
 	try {
 		return localStorage.getItem(TABS_HIDDEN_KEY) === "1";
@@ -284,8 +285,12 @@ function readTabsHidden(): boolean {
 		return false;
 	}
 }
+function applyTabsHidden(hidden: boolean): void {
+	if (hidden) document.documentElement.dataset.tabs = "hidden";
+	else delete document.documentElement.dataset.tabs;
+}
 function setTabsHidden(hidden: boolean): void {
-	terminalAreaEl?.classList.toggle("tabs-collapsed", hidden);
+	applyTabsHidden(hidden);
 	try {
 		if (hidden) localStorage.setItem(TABS_HIDDEN_KEY, "1");
 		else localStorage.removeItem(TABS_HIDDEN_KEY);
@@ -293,13 +298,14 @@ function setTabsHidden(hidden: boolean): void {
 		/* storage unavailable: just not remembered */
 	}
 }
-terminalAreaEl?.classList.toggle("tabs-collapsed", readTabsHidden());
+applyTabsHidden(readTabsHidden());
 
 function tabRowItem(): MenuItem[] {
 	if (!isMobile() || getView() !== "terminal" || currentTabs.length === 0) return [];
+	const hint = "Tabs, search and text size row";
 	return readTabsHidden()
-		? [{ id: "tabs-show", label: "Mostrar pestañas" }]
-		: [{ id: "tabs-hide", label: "Ocultar pestañas", hint: "Más alto para el terminal" }];
+		? [{ id: "tabs-show", label: "Show tabs", hint }]
+		: [{ id: "tabs-hide", label: "Hide tabs", hint }];
 }
 
 /** The ⋯ menu of the ACTIVE session (the session bar). */
@@ -321,7 +327,7 @@ export function openActiveSessionMenu(opener: HTMLElement): void {
 	openActionMenu({
 		title: s.name,
 		opener,
-		items: [...(extra?.items ?? []), ...tabRowItem(), ...sessionActions(actionContext(s))],
+		items: [...tabRowItem(), ...(extra?.items ?? []), ...sessionActions(actionContext(s))],
 		onPick: (id) => {
 			if (id === "tabs-hide" || id === "tabs-show") setTabsHidden(id === "tabs-hide");
 			else if (!extra?.onPick(id)) void runSessionAction(s, id as SessionActionId);

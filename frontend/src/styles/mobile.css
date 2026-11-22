@@ -92,8 +92,9 @@
     display: none;
   }
   /* The person hid the tab row (the bar's ⋯, sessionCore.ts): the terminal
-     takes its height — one deliberate resize, never on a view switch. */
-  #terminal-area.tabs-collapsed #terminal-tabs {
+     takes its height — one deliberate resize, never on a view switch.
+     !important: sessionCore sets the row's display inline. */
+  html[data-tabs="hidden"] #terminal-tabs {
     display: none !important;
   }
 
@@ -216,12 +217,7 @@
     display: none;
   }
   #sidebar-footer {
-    display: flex;
-    flex-wrap: wrap;
-  }
-  /* The account's actions, now in the drawer: 44-px touch targets. */
-  #sidebar-footer button {
-    min-height: 44px;
+    display: block;
   }
 }
 @media (max-width: 360px) {

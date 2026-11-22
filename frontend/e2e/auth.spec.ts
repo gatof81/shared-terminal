@@ -30,7 +30,7 @@ test.describe("auth", () => {
 		page,
 	}) => {
 		await app.login("alice");
-		await app.appMenu("logout-btn");
+		await app.appMenu("logout");
 		await expect(page.locator("#auth-view")).toBeVisible();
 		await expect(page.locator("#app-view")).toBeHidden();
 		expect(backend.current, "the server saw the logout").toBeNull();

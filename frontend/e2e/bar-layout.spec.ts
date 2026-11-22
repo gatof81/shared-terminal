@@ -127,7 +127,7 @@ test.describe("the bar layout", () => {
 		).toBeEnabled();
 	});
 
-	test("a phone hides the tab row from the ⋯ (remembered); one resize, then none on a view switch", async ({
+	test("a phone hides the tab row from the ⋯ (U-1 B): first item, one resize each way, none on a view switch, remembered", async ({
 		app,
 		backend,
 		page,
@@ -139,30 +139,58 @@ test.describe("the bar layout", () => {
 		await page.waitForTimeout(400);
 		const sock = backend.terminalSockets[0]!;
 		const resizes = () => sock.sent.filter((f) => f.type === "resize").length;
+		const termH = async () => (await page.locator("#terminal-container").boundingBox())!.height;
+		const firstItem = page.locator('[role="menu"].action-menu [role="menuitem"]').first();
 		const r0 = resizes();
+		const h0 = await termH();
 		await page.click("#session-menu-btn");
-		await page.getByRole("menuitem", { name: /^Ocultar pestañas/ }).click();
+		await expect(firstItem).toHaveText(/^Hide tabs/);
+		await firstItem.click();
 		await expect(page.locator("#terminal-tabs")).toBeHidden();
-		await expect.poll(resizes, "the terminal takes the row's height").toBe(r0 + 1);
-		await app.switchView("files");
-		await app.switchView("terminal");
+		await expect.poll(resizes, "one resize").toBe(r0 + 1);
+		const h1 = await termH();
+		expect(Math.abs(h1 - h0 - 40), "the terminal gains the row's height").toBeLessThanOrEqual(4);
+		for (const v of ["files", "git", "chat", "terminal"] as const) {
+			await app.switchView(v);
+			if (v !== "terminal") {
+				// Off the Terminal view the item is not offered.
+				await page.click("#session-menu-btn");
+				await expect(page.getByRole("menuitem", { name: /^(Hide|Show) tabs/ })).toHaveCount(0);
+				await app.escape();
+			}
+		}
 		await page.waitForTimeout(400);
-		expect(resizes(), "a view switch still resizes nothing").toBe(r0 + 1);
+		expect(resizes(), "a view switch resizes nothing").toBe(r0 + 1);
+		expect(await termH()).toBe(h1);
 		await page.reload();
 		await app.expectTerminalReady();
 		await expect(page.locator("#terminal-tabs")).toBeHidden();
+		await page.waitForTimeout(400);
+		const sock2 = backend.terminalSockets.at(-1)!;
+		const resizes2 = () => sock2.sent.filter((f) => f.type === "resize").length;
+		const r1 = resizes2();
 		await page.click("#session-menu-btn");
-		await page.getByRole("menuitem", { name: /^Mostrar pestañas/ }).click();
+		await expect(firstItem).toHaveText(/^Show tabs/);
+		await firstItem.click();
 		await expect(page.locator("#terminal-tabs")).toBeVisible();
+		await expect.poll(resizes2, "one resize back").toBe(r1 + 1);
+		await page.waitForTimeout(400);
+		expect(resizes2()).toBe(r1 + 1);
+		// On a wide screen the row shows and the item is not offered, whatever is stored.
+		await page.click("#session-menu-btn");
+		await page.getByRole("menuitem", { name: /^Hide tabs/ }).click();
+		await page.setViewportSize({ width: 1280, height: 800 });
+		await expect(page.locator("#terminal-tabs")).toBeVisible();
+		await page.click("#session-menu-btn");
+		await expect(page.getByRole("menuitem", { name: /^(Hide|Show) tabs/ })).toHaveCount(0);
 	});
 
-	test("desktop: the header cluster is one user menu with the role's entries", async ({
+	test("the user menu (U-1 A): the role's entries in order, a line before Logout; each acts; the focus goes back", async ({
 		app,
 		page,
 	}) => {
-		test.skip(app.mobile, "the user menu replaces the desktop header cluster");
 		await app.login("admin");
-		await page.click("#user-menu-btn");
+		await app.openUserMenu();
 		const menu = page.locator('[role="menu"].action-menu');
 		await expect(menu.locator('[role="menuitem"]')).toHaveText([
 			/Templates/,
@@ -170,11 +198,36 @@ test.describe("the bar layout", () => {
 			/Admin/,
 			/Logout/,
 		]);
-		await menu.locator('[data-action="admin-btn"]').click();
+		await expect(menu.locator('[data-action="logout"]')).toHaveCSS("border-top-style", "solid");
+		await menu.locator('[data-action="admin"]').click();
 		await expect(page.locator("#admin-modal")).toHaveClass(/open/);
 		await app.escape();
-		await expect(page.locator("#user-menu-btn")).toBeFocused();
+		// Back to the opener: the avatar, or under 400 px the ☰ (the drawer row's drawer is closed).
+		const avatar = page.locator("#user-menu-btn");
+		await expect(
+			(await avatar.isVisible()) ? avatar : page.locator("#sidebar-toggle"),
+		).toBeFocused();
+		// No copy of the old buttons left.
+		await expect(
+			page.locator(
+				"#templates-btn, #invites-btn, #my-groups-btn, #admin-btn, #notifications-btn, #logout-btn, [id^='sidebar-'][id$='-btn']:not(#sidebar-toggle):not(#sidebar-refresh-btn):not(#sidebar-switcher-btn):not(#sidebar-account-btn)",
+			),
+		).toHaveCount(0);
 	});
+
+	for (const width of [1280, 768, 400, 399, 360, 320])
+		test(`the user menu's one opener at ${width} px`, async ({ app, page }) => {
+			await page.setViewportSize({ width, height: 800 });
+			await app.login("alice");
+			const avatar = page.locator("#user-menu-btn");
+			if (width >= 400) {
+				await expect(avatar).toBeVisible();
+			} else {
+				await expect(avatar).toBeHidden();
+				await app.openSidebar();
+				await expect(page.locator("#sidebar-account-btn")).toBeVisible();
+			}
+		});
 
 	test("a stopped session: the bar's tabs reach Terminal (state panel), Files, Git and Chat", async ({
 		app,

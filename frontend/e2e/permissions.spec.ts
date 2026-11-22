@@ -9,16 +9,12 @@ import { SESSION_IDS } from "./mockBackend.js";
 test.describe("permissions", () => {
 	test("a plain user sees no admin, invites or groups controls", async ({ app, page }) => {
 		await app.login("alice");
-		for (const id of ["admin-btn", "invites-btn", "my-groups-btn"])
-			await expect(page.locator(`#sidebar-${id}`)).toHaveClass(/hidden/);
-		if (await page.locator("#user-menu-btn").isVisible()) {
-			await page.click("#user-menu-btn");
-			await expect(page.locator('[role="menu"].action-menu [role="menuitem"]')).toHaveText([
-				/Templates/,
-				/Logout/,
-			]);
-			await app.escape();
-		}
+		await app.openUserMenu();
+		await expect(page.locator('[role="menu"].action-menu [role="menuitem"]')).toHaveText([
+			/Templates/,
+			/Logout/,
+		]);
+		await app.escape();
 		await expect(page.locator("#observable-section")).toHaveClass(/hidden/);
 	});
 
@@ -33,7 +29,7 @@ test.describe("permissions", () => {
 
 	test("an admin sees the dashboard with every user's session", async ({ app, page }) => {
 		await app.login("admin");
-		await app.appMenu("admin-btn");
+		await app.appMenu("admin");
 		const modal = page.locator("#admin-modal");
 		await expect(modal).toHaveClass(/open/);
 		const list = modal.locator("#admin-sessions-list");
@@ -49,8 +45,10 @@ test.describe("permissions", () => {
 		page,
 	}) => {
 		await app.login("lead");
+		await app.openUserMenu();
+		await expect(page.locator('[role="menu"].action-menu [data-action="my-groups"]')).toBeVisible();
+		await app.escape();
 		await app.openSidebar();
-		await expect(page.locator("#sidebar-my-groups-btn")).not.toHaveClass(/hidden/);
 		const observable = page.locator("#observable-section");
 		await expect(observable).not.toHaveClass(/hidden/);
 		await expect(observable).toContainText("bob-api");

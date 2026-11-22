@@ -41,7 +41,6 @@ import { formatBytes, formatCpuCores, formatCpuPercent } from "./format.js";
 import { openObserveModalFor } from "./observeModal.js";
 
 // ── DOM (re-queried locally; see header) ─────────────────────────────────
-const sidebarAdminBtn = document.getElementById("sidebar-admin-btn") as HTMLButtonElement;
 const adminModal = document.getElementById("admin-modal")!;
 const adminStatsEl = document.getElementById("admin-stats")!;
 const adminSessionsListEl = document.getElementById("admin-sessions-list")!;
@@ -98,8 +97,6 @@ export function openAdminModal(opener: HTMLElement) {
 function closeAdminModal() {
 	adminDialog.close();
 }
-
-sidebarAdminBtn.addEventListener("click", () => openAdminModal(sidebarAdminBtn));
 
 adminRefreshBtn.addEventListener("click", () => {
 	void refreshAdmin();

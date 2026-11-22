@@ -65,11 +65,11 @@ test.describe("context bar", () => {
 		expect(link.x + link.width).toBeLessThanOrEqual(box.x + box.width + 0.5);
 	});
 
-	test("'Ajustes del agente' is the ⋯'s first entry; what the settings need is flagged on the ⋯", async ({
+	test("'Ajustes del agente' is the ⋯'s first entry (after Hide tabs on a phone's Terminal); what the settings need is flagged on the ⋯", async ({
 		app,
 		backend,
 		page,
-	}) => {
+	}, info) => {
 		const solo = backend.acpAgents.find((a) => a.name === "solo")!;
 		solo.model = "claude-opus-5-5";
 		solo.modelApplied = { requested: "claude-opus-5-5", current: null, error: "no disponible" };
@@ -83,7 +83,8 @@ test.describe("context bar", () => {
 		const mark = (await more.locator(".bar-menu-flag").boundingBox())!;
 		expect(btn.x + btn.width - (mark.x + mark.width)).toBeGreaterThanOrEqual(4);
 		await more.click();
-		const first = page.getByRole("menuitem").first();
+		// On a phone's Terminal view "Hide tabs" comes first (U-1 B), then the agent's entry.
+		const first = page.getByRole("menuitem").nth(info.project.use.isMobile ? 1 : 0);
 		await expect(first).toContainText("Ajustes del agente");
 		await first.click();
 		// From another view too: the agent's Chat, with the panel open and the focus in it.

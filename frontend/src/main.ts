@@ -98,18 +98,6 @@ const mainEl = document.querySelector("main")!;
 const sidebarEl = document.getElementById("sidebar")!;
 const sidebarToggleBtn = document.getElementById("sidebar-toggle") as HTMLButtonElement;
 const sidebarBackdrop = document.getElementById("sidebar-backdrop")!;
-const sidebarInvitesBtn = document.getElementById("sidebar-invites-btn") as HTMLButtonElement;
-const sidebarAdminBtn = document.getElementById("sidebar-admin-btn") as HTMLButtonElement;
-// #201e — lead-side "My groups" surface. Visibility flips on isLead()
-// from the api-layer mirror (same shape as Admin above).
-const sidebarMyGroupsBtn = document.getElementById("sidebar-my-groups-btn") as HTMLButtonElement;
-const sidebarLogoutBtn = document.getElementById("sidebar-logout-btn") as HTMLButtonElement;
-// #355 — Web Push toggle: the user menu's entry and the drawer footer's
-// button. State is read from the browser subscription + server status via
-// getPushToggleState(); nothing is persisted locally.
-const sidebarNotificationsBtn = document.getElementById(
-	"sidebar-notifications-btn",
-) as HTMLButtonElement;
 
 const terminalTabs = document.getElementById("terminal-tabs")!;
 const terminalContainer = document.getElementById("terminal-container")!;
@@ -347,9 +335,6 @@ function showApp() {
 	authView.style.display = "none";
 	appView.style.display = "flex";
 	userDisplay.textContent = "●";
-	// Keep the sidebar-footer marker in lockstep with the header one so
-	// a future swap of "●" for the actual username only needs editing
-	// a single line.
 	sidebarUserDisplay.textContent = userDisplay.textContent;
 	setServerReachable(true);
 	applyAdminVisibility();
@@ -374,18 +359,9 @@ function showApp() {
 	});
 }
 
-// #50 / #201e: gate role-conditional UI on the api-layer mirror.
-// Each button pair (header + sidebar) flips together. Hydrated from
-// /auth/status + login/register so this just reflects the current
-// authoritative answer without its own round-trip. Visibility is a
-// UX hint only — every gated endpoint is server-side requireAdmin /
-// requireAuth-gated, so a leaked button reveal is harmless.
+// #50 / #201e: role-conditional UI follows the api-layer mirror (the user
+// menu reads it when it opens).
 export function applyAdminVisibility() {
-	const admin = isAdmin();
-	sidebarInvitesBtn.classList.toggle("hidden", !admin);
-	sidebarAdminBtn.classList.toggle("hidden", !admin);
-	const lead = isLead();
-	sidebarMyGroupsBtn.classList.toggle("hidden", !lead);
 	// Sidebar observables section (#394): hydrate whenever lead status
 	// (re)resolves. The function self-hides the section for non-leads,
 	// so calling unconditionally keeps login/logout symmetric.
@@ -396,36 +372,35 @@ export function applyAdminVisibility() {
 //
 // Web Push opt-in. The source of truth is the browser subscription + server
 // status, never localStorage; the button re-reads that state via
-// getPushToggleState() on every app-show and after each click. The drawer
-// footer's button and the user menu's entry render the same state.
+// getPushToggleState() on every app-show and after each click; the user
+// menu shows the state's entry when it opens.
 
 let pushToggleBusy = false;
 let pushToggleState: PushToggleState = "unsupported";
 
 function renderNotificationsToggle(state: PushToggleState) {
 	pushToggleState = state;
-	const btns = [sidebarNotificationsBtn];
+}
+
+/** The user menu's notifications entry; null where there is nothing to offer. */
+function notificationsItem(): MenuItem | null {
+	const s = pushToggleState;
 	// "unsupported" folds together "browser can't push" and "server push not
-	// configured" — in both cases there is nothing to offer, so hide entirely.
-	const hidden = state === "unsupported";
-	for (const btn of btns) {
-		btn.hidden = hidden;
-		btn.classList.toggle("enabled", state === "on");
-		btn.disabled = state === "blocked" || pushToggleBusy;
-		if (state === "on") {
-			btn.textContent = "Notifications on";
-			btn.title = "Disable browser notifications for this device";
-		} else if (state === "off") {
-			btn.textContent = "Enable notifications";
-			btn.title = "Get notified when a session needs attention";
-		} else if (state === "blocked") {
-			btn.textContent = "Notifications blocked";
-			btn.title = "Notifications are blocked in your browser settings";
-		} else if (state === "ios-needs-install") {
-			btn.textContent = "Install to enable notifications";
-			btn.title = "Add this app to your home screen to enable notifications";
-		}
-	}
+	// configured" — in both cases there is nothing to offer.
+	if (s === "unsupported") return null;
+	const [label, hint] =
+		s === "on"
+			? ["Disable notifications", "Disable browser notifications for this device"]
+			: s === "off"
+				? ["Enable notifications", "Get notified when a session needs attention"]
+				: s === "blocked"
+					? ["Notifications blocked", "Notifications are blocked in your browser settings"]
+					: [
+							"Install to enable notifications",
+							"Add this app to your home screen to enable notifications",
+						];
+	const enabled = s !== "blocked" && !pushToggleBusy;
+	return { id: "notifications", label, hint, enabled, reason: enabled ? undefined : hint };
 }
 
 async function refreshNotificationsToggle() {
@@ -466,8 +441,6 @@ async function onNotificationsClick() {
 		await refreshNotificationsToggle();
 	}
 }
-
-sidebarNotificationsBtn.addEventListener("click", () => void onNotificationsClick());
 
 // Register the service worker as early as possible so a later enable-push
 // click finds an active registration. Idempotent + no-op where unsupported.
@@ -670,48 +643,41 @@ function handleLogout(toastMessage?: string): void {
 	if (toastMessage) showToast(toastMessage, true);
 }
 
-sidebarLogoutBtn.addEventListener("click", () => handleLogout());
-
 // ── User menu ───────────────────────────────────────────────────────────────
 // The account's actions, declared here and acted on directly. What a role
-// may not use is left out (a UX hint only: every gated endpoint is
-// server-side requireAdmin / lead-checked). Under 400 px the button is
-// hidden and the drawer's footer holds the same actions (mobile.css).
-const userMenuBtn = document.getElementById("user-menu-btn") as HTMLButtonElement;
-userMenuBtn.addEventListener("click", () => {
+// may not use is left out, never shown disabled (a UX hint only: every gated
+// endpoint is server-side requireAdmin / lead-checked). Opened from the
+// avatar, or under 400 px — where the bar has no room for it — from the
+// drawer's "Account" row; the focus then goes back to the ☰.
+function openUserMenu(opener: HTMLElement): void {
+	const notifications = notificationsItem();
 	const items: MenuItem[] = [
-		{ id: "templates-btn", label: "Templates", hint: "Session templates" },
-		...(isAdmin() ? [{ id: "invites-btn", label: "Invites", hint: "Manage invite codes" }] : []),
-		...(isLead() ? [{ id: "my-groups-btn", label: "My groups", hint: "Groups you lead" }] : []),
-		...(isAdmin() ? [{ id: "admin-btn", label: "Admin", hint: "Admin dashboard" }] : []),
-		...(pushToggleState === "unsupported"
-			? []
-			: [
-					{
-						id: "notifications-btn",
-						label: sidebarNotificationsBtn.textContent?.trim() ?? "Notifications",
-						hint: sidebarNotificationsBtn.title || undefined,
-						enabled: !sidebarNotificationsBtn.disabled,
-						reason: sidebarNotificationsBtn.disabled
-							? sidebarNotificationsBtn.title || undefined
-							: undefined,
-					},
-				]),
-		{ id: "logout-btn", label: "Logout", kind: "danger" },
+		{ id: "templates", label: "Templates", hint: "Session templates" },
+		...(isAdmin() ? [{ id: "invites", label: "Invites", hint: "Manage invite codes" }] : []),
+		...(isLead() ? [{ id: "my-groups", label: "My groups", hint: "Groups you lead" }] : []),
+		...(isAdmin() ? [{ id: "admin", label: "Admin", hint: "Admin dashboard" }] : []),
+		...(notifications ? [notifications] : []),
+		{ id: "logout", label: "Logout", kind: "danger" },
 	];
 	openActionMenu({
 		title: "Account",
-		opener: userMenuBtn,
+		opener,
 		items,
 		onPick: (id) => {
-			if (id === "templates-btn") openTemplatesModal(userMenuBtn);
-			else if (id === "invites-btn") openInvitesModal(userMenuBtn);
-			else if (id === "my-groups-btn") openMyGroupsModal(userMenuBtn);
-			else if (id === "admin-btn") openAdminModal(userMenuBtn);
-			else if (id === "notifications-btn") void onNotificationsClick();
-			else if (id === "logout-btn") handleLogout();
+			if (id === "templates") openTemplatesModal(opener);
+			else if (id === "invites") openInvitesModal(opener);
+			else if (id === "my-groups") openMyGroupsModal(opener);
+			else if (id === "admin") openAdminModal(opener);
+			else if (id === "notifications") void onNotificationsClick();
+			else if (id === "logout") handleLogout();
 		},
 	});
+}
+const userMenuBtn = document.getElementById("user-menu-btn") as HTMLButtonElement;
+userMenuBtn.addEventListener("click", () => openUserMenu(userMenuBtn));
+document.getElementById("sidebar-account-btn")?.addEventListener("click", () => {
+	setSidebarOpen(false);
+	openUserMenu(sidebarToggleBtn);
 });
 
 // Listen for the api-layer signal that our session cookie is no longer

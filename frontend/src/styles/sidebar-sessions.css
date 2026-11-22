@@ -23,47 +23,23 @@
   font-size: 0.68rem;
   color: var(--c-muted);
 }
-/* Mobile-only menu inside the sidebar drawer. On desktop the same
-   actions live in the header; on mobile we surface them here so the
-   header can stay slim. Hidden by default — the mobile media query
-   below flips this to flex. */
+/* The drawer's "Account" row: where the user menu opens under 400 px
+   (mobile.css shows it there). */
 #sidebar-footer {
   display: none;
-  align-items: center;
-  gap: 0.6rem;
   padding: 0.6rem 1rem;
   border-top: 1px solid var(--c-border);
   background: var(--c-bg);
   flex-shrink: 0;
 }
+#sidebar-account-btn {
+  width: 100%;
+  min-height: 44px;
+  justify-content: flex-start;
+}
 #sidebar-user-display {
   font-size: 0.7rem;
   color: var(--c-ok);
-  margin-right: auto;
-}
-#sidebar-templates-btn,
-#sidebar-invites-btn,
-#sidebar-admin-btn,
-#sidebar-notifications-btn,
-#sidebar-logout-btn {
-  background: transparent;
-  border: 1px solid var(--c-border);
-  border-radius: 6px;
-  color: var(--c-muted);
-  font-size: 0.78rem;
-  padding: 0.35rem 0.7rem;
-  cursor: pointer;
-}
-#sidebar-templates-btn:hover,
-#sidebar-invites-btn:hover,
-#sidebar-admin-btn:hover,
-#sidebar-notifications-btn:hover:not(:disabled) {
-  border-color: var(--c-accent);
-  color: var(--c-accent);
-}
-#sidebar-logout-btn:hover {
-  border-color: var(--c-err);
-  color: var(--c-err);
 }
 
 .session-item {

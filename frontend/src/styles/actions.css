@@ -220,6 +220,11 @@
 .action-menu .actions-menu-item.kind-danger .actions-menu-item-title {
   color: var(--c-err);
 }
+/* One line between the ordinary actions and the destructive ones. */
+.action-menu .actions-menu-item:not(.kind-danger) + .actions-menu-item.kind-danger {
+  border-top: 1px solid var(--c-border-soft);
+  margin-top: 4px;
+}
 .action-menu .actions-menu-item.kind-primary .actions-menu-item-title {
   color: var(--c-accent);
 }
