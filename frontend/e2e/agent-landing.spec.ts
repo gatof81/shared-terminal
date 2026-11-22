@@ -150,6 +150,70 @@ test.describe("an agent's session lands on its Chat", () => {
 	});
 });
 
+/**
+ * The agents list is read when the session list first loads, so a selection
+ * normally finds it there and waits for nothing; a list that never answers
+ * costs one bounded wait (LANDING_AGENTS_WAIT_MS, 500 ms) per page load,
+ * never one per selection. Measured in the page: from the click on a row to
+ * the first frame that shows the session's landing view (Chat: both
+ * sessions have captured history).
+ */
+test.describe("the agents list never makes every selection wait", () => {
+	test.use({ landing: "none" });
+
+	async function landingDelay(
+		app: import("./fixtures.js").App,
+		page: import("@playwright/test").Page,
+		name: string,
+	): Promise<number> {
+		await app.openSidebar();
+		const row = app.sessionRow(name).locator(".session-select");
+		await page.evaluate(() => {
+			const w = window as unknown as { __landed: number | null; __clicked: number | null };
+			w.__landed = null;
+			w.__clicked = null;
+			document.addEventListener(
+				"click",
+				() => {
+					w.__clicked = performance.now();
+					const tick = () => {
+						if (!document.getElementById("chat-view")!.hidden) w.__landed = performance.now();
+						else requestAnimationFrame(tick);
+					};
+					requestAnimationFrame(tick);
+				},
+				{ capture: true, once: true },
+			);
+		});
+		await row.click();
+		await app.expectView("chat");
+		return page.evaluate(() => {
+			const w = window as unknown as { __landed: number; __clicked: number };
+			return w.__landed - w.__clicked;
+		});
+	}
+
+	test("a list that never answers: the first selection waits once, the next one lands at once", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.acpAgentsDelayMs = 600_000;
+		await app.login("alice");
+		const first = await landingDelay(app, page, "my-project");
+		expect(first, "the first selection waits for the list (bounded)").toBeGreaterThanOrEqual(400);
+		const second = await landingDelay(app, page, "docs");
+		expect(second, "the second does not wait again").toBeLessThan(first - 200);
+	});
+
+	test("a list that answers: the first selection does not wait", async ({ app, backend, page }) => {
+		backend.acpAgentsDelayMs = 50;
+		await app.login("alice");
+		await page.waitForTimeout(300); // the read at load has answered
+		expect(await landingDelay(app, page, "docs")).toBeLessThan(400);
+	});
+});
+
 test.describe("the agents list's background retry", () => {
 	test("reads nothing while the tab is hidden; one read when it shows again", async ({
 		app,
