@@ -2,6 +2,16 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Personal application
+
+Shared Terminal is a personal application with exactly one user (the owner). That shapes every change:
+
+- No backward compatibility, no coexisting versions, no transition flags, no legacy routes, no grace periods.
+- No giant test matrices: one interface, tested on one desktop and one phone project.
+- KISS and YAGNI: delete before adding. A thing nobody uses is removed, not kept "just in case".
+- What IS preserved: data, sessions, repos, the configuration actually needed, backups, security and message integrity.
+- A change that would lose any of those needs the owner's explicit sign-off; a backend deploy always does.
+
 ## Commands
 
 All commands are run from within `backend/` or `frontend/`.
@@ -30,7 +40,7 @@ scripts/build-session-image.sh   # or: cd backend && npm run docker:build-sessio
 docker compose up -d --build
 ```
 
-Both workspaces have vitest suites and a Biome linter — `npm test` and `npm run lint` in each. CI (`.github/workflows/ci.yml`) runs Biome + `tsc` + vitest on every PR, in both workspaces, so a lint or test failure in either side blocks merge. Don't rely on `npm run build` alone — that's tsc, not Biome. The frontend also has a Playwright suite (`frontend/e2e/`, `npm run test:e2e`, desktop + mobile projects) that drives the real app on the Vite dev server (in CI: the production build via `vite preview`, inside the digest-pinned `mcr.microsoft.com/playwright` image) against the deterministic mock backend in `e2e/mockBackend.ts` — no backend, no Docker — and it is a required CI job too (a PR runs shell v1's whole suite on desktop + mobile and v2's shell-specific specs, `E2E_PROFILE=pr`; a push to main runs every project): navigation, dialogs, permissions, the terminal invariant (a view switch sends no resize and opens no socket) and screenshot baselines (`e2e/__screenshots__/`, regenerate with `npm run test:e2e:update` after an intended visual change — inside that same image, whose fonts draw the glyphs the vendored fonts lack). Anything that needs tmux or Docker stays in the Session Image workflow's smokes. Beyond that, verify by exercising the feature in a browser.
+Both workspaces have vitest suites and a Biome linter — `npm test` and `npm run lint` in each. CI (`.github/workflows/ci.yml`) runs Biome + `tsc` + vitest on every PR, in both workspaces, so a lint or test failure in either side blocks merge. Don't rely on `npm run build` alone — that's tsc, not Biome. The frontend also has a Playwright suite (`frontend/e2e/`, `npm run test:e2e`, desktop + mobile projects) that drives the real app on the Vite dev server (in CI: the production build via `vite preview`, inside the digest-pinned `mcr.microsoft.com/playwright` image) against the deterministic mock backend in `e2e/mockBackend.ts` — no backend, no Docker — and it is a required CI job too (the whole suite on the `desktop` and `mobile` projects): navigation, dialogs, permissions, the terminal invariant (a view switch sends no resize and opens no socket) and screenshot baselines (`e2e/__screenshots__/`, regenerate with `npm run test:e2e:update` after an intended visual change — inside that same image, whose fonts draw the glyphs the vendored fonts lack). Anything that needs tmux or Docker stays in the Session Image workflow's smokes. Beyond that, verify by exercising the feature in a browser.
 
 ## Required environment
 
@@ -42,7 +52,7 @@ Backend refuses to start without `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`
 
 `PORT_PROXY_BASE_DOMAIN` is the optional base for the per-session-port reverse proxy (#190). When set, hosts of the form `p<container>-<sessionId>.<base>` are diverted to the dispatcher; when unset, port exposure is silently disabled (so dev/local without a Tunnel keeps working). Pair with `COOKIE_DOMAIN` set to a parent shared by the API hostname and the dispatcher base, otherwise the JWT cookie is host-only and private-port auth structurally fails. Boot logs warn loudly when one is set without the other. `docker-compose.yml` forwards both with `:-}` defaults, so setting them in `.env` is sufficient — see [docs/DEPLOYMENT.md → With Cloudflare Tunnel](./docs/DEPLOYMENT.md#with-cloudflare-tunnel) for the end-to-end config-file + DNS + verify recipe.
 
-The frontend has two shells (`v1` default, `v2`; docs/design/ui-unificada.md §8.4); the backend no longer chooses one (`UI_SHELL` and the `uiShell` field of `GET /api/auth/status` are gone). A browser picks the other shell with `?ui=v2` / `?ui=v1` in the address (kept in that browser's localStorage, `?ui=` clears it; `frontend/src/uiShell.ts`). Shell v2 (`frontend/src/shellV2.ts` + `styles/shell-v2.css`, keyed on `html[data-shell="v2"]`) reuses the v1 markup: the session bar (`#terminal-toolbar`) stays visible on every view with the view tabs and a ⋯ session menu, the terminal-only controls move into the tab strip (`#tab-tools`), the header cluster becomes one user menu, and the mobile chrome drawer and bottom nav are not used — which is what makes a view switch send zero `resize` on mobile (the e2e invariant spec requires it on the `*-v2` projects and records v1's drawer cost on `mobile`).
+The frontend has one interface: the session bar (`#terminal-toolbar`) stays visible on every view with the view tabs and a ⋯ session menu (on a phone it shares the header's line), the terminal-only controls live in the tab strip (`#tab-tools`), the account's actions are one user menu — which is what makes a view switch send zero `resize` on mobile (the e2e invariant spec requires it).
 
 The frontend needs `VITE_API_URL` at build time (Cloudflare Pages env var) so `vite.config.ts` can rewrite the CSP meta tag to allow connections back to the backend.
 

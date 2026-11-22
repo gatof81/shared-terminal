@@ -65,7 +65,6 @@ interface Conversation {
 	title: string;
 	kind: "interactive" | "headless";
 	status: string;
-	canSendInput: boolean;
 	events: ConversationEvent[];
 	startedAt: string;
 	/** When the status was last evidenced; default: a minute before the fixed test clock. */
@@ -73,14 +72,6 @@ interface Conversation {
 	statusEvidence?: string;
 	/** null = the conversation has no pane (binding lost). */
 	paneId?: string | null;
-	/**
-	 * v1.9 §8.1.12 (EXPERIMENTAL): a background session reachable through
-	 * the CLI daemon. A send answers 202 `accepted`; `bgOutcome` then plays
-	 * the send's own `composer_send` events (and the CLI's user_prompt for a
-	 * delivery) over the socket.
-	 */
-	transport?: "background";
-	bgOutcome?: "delivered" | "unconfirmed" | "duplicated" | "possible-duplicate";
 	/** The tmux tab the conversation's pane lives in (default "tab-1"). */
 	tabId?: string | null;
 	/** Lost-event gaps reported in the list (default 0). */
@@ -128,10 +119,9 @@ export const SESSION_IDS = {
 };
 
 // ── Projects ──────────────────────────────
-// Off by default: with `projectChat` false the mock answers exactly as before
-// (no `features`, the project routes 404) — the visual baselines and every
-// other spec run against that. `enableProjects()` seeds one project and a few
-// more sessions of alice's.
+// On by default, as in production (the constructor calls `enableAcp()`): one
+// project and a few more sessions of alice's, @arq and @dev in it, @solo
+// without one.
 
 export const PROJECT_IDS = { hz: "6b1f2c3d-0000-4000-8000-000000000001" };
 
@@ -348,7 +338,6 @@ function seedConversations(): Conversation[] {
 			title: "Refactor auth flow",
 			kind: "interactive",
 			status: "waiting_input",
-			canSendInput: true,
 			events: c1,
 			startedAt: iso(-10),
 		},
@@ -357,7 +346,6 @@ function seedConversations(): Conversation[] {
 			title: "Fix tests",
 			kind: "interactive",
 			status: "ended",
-			canSendInput: false,
 			events: c2,
 			startedAt: iso(-3100),
 		},
@@ -435,8 +423,6 @@ export class MockBackend {
 	capture = { requested: true, effective: true, effectiveAfterRestart: true };
 	/** Which push/notification shape the server reports. */
 	pushEnabled = false;
-	/** The operator's shell (UI_SHELL) as /auth/status reports it. */
-	uiShell: "v1" | "v2" = "v1";
 	requests: Array<{ method: string; path: string }> = [];
 	terminalSockets: TerminalSocket[] = [];
 	conversationSockets: ConversationSocket[] = [];
@@ -483,6 +469,10 @@ export class MockBackend {
 	acpSockets: WebSocketRoute[] = [];
 	private acpSeq = 0;
 
+	constructor() {
+		this.enableAcp();
+	}
+
 	/** Start every test logged in as `username` (skips the login form). */
 	loginAs(username: keyof typeof USERS): void {
 		this.current = USERS[username]!;
@@ -513,6 +503,7 @@ export class MockBackend {
 			agent("solo", PROJECT_SESSION_IDS.scratch, null),
 		];
 		this.acpMessages = [];
+		this.acpSeq = 0;
 		this.addAcpMessage({
 			to_id: "solo",
 			body: "Resumí el README",
@@ -573,6 +564,7 @@ export class MockBackend {
 
 	/** Turn projects on: one project and a few more sessions of alice's. */
 	enableProjects(): void {
+		if (this.projectChat) return;
 		this.projectChat = true;
 		const extra = (sessionId: string, name: string, status: MockSession["status"]) =>
 			this.sessions.push({
@@ -962,7 +954,6 @@ export class MockBackend {
 				isAdmin: this.current?.isAdmin ?? false,
 				isLead: this.current?.isLead ?? false,
 				resourceCaps: { cpuMaxCores: 8, memMaxMiB: 16384 },
-				uiShell: this.uiShell,
 				// P3a: present only with the flag on (byte-identical answer otherwise).
 				...(this.projectChat
 					? {
@@ -1393,8 +1384,6 @@ export class MockBackend {
 			eventsCount: c.events.length,
 			gapsCount: c.gapsCount ?? 0,
 			claudeVersion: "2.1.314",
-			canSendInput: c.canSendInput,
-			...(c.transport ? { transport: c.transport } : {}),
 			customTitle: this.metaUnavailable ? null : (c.customTitle ?? null),
 			archivedAt: this.metaUnavailable ? null : (c.archivedAt ?? null),
 		};

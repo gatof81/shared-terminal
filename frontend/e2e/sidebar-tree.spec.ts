@@ -5,7 +5,7 @@ import { PROJECT_IDS, PROJECT_SESSION_IDS } from "./mockBackend.js";
  * The sidebar tree (UX iter3 §1, alternative A): "+ New session" first,
  * then Projects with their agents, then the agents without a project, then
  * the sessions worked from their Terminal — whose ⋯ holds "Show terminated"
- * and Refresh. The flat list (no project feature) is unchanged.
+ * and Refresh.
  */
 test.describe("sidebar tree", () => {
 	test.beforeEach(({ backend }) => backend.enableAcp());
@@ -126,19 +126,5 @@ test.describe("sidebar tree on a phone", () => {
 		await page.mouse.click(vw - 20, Math.round(drawer.height / 2));
 		await expect(page.locator("main")).not.toHaveClass(/sidebar-open/);
 		await expect(page.locator("#sidebar-toggle")).toBeFocused();
-	});
-});
-
-test.describe("sidebar without projects", () => {
-	test("the flat list is as before: its bar with Show terminated and refresh, no sections", async ({
-		app,
-		page,
-	}) => {
-		await app.login("alice");
-		await app.openSidebar();
-		await expect(app.sessionRow("my-project")).toBeVisible();
-		await expect(page.locator("#show-terminated-toggle")).toBeVisible();
-		await expect(page.locator(".ssection")).toHaveCount(0);
-		await expect(page.locator("#sidebar")).not.toHaveClass(/sidebar-tree/);
 	});
 });

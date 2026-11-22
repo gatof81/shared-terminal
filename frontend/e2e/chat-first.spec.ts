@@ -13,7 +13,6 @@ const STOPPED = SESSION_IDS.stopped;
  * attached exactly as before and never resized by any of it.
  */
 test.describe("chat-first landing", () => {
-	test.skip(({ shell }) => shell !== "v2", "v2 only");
 	test.use({ landing: "none" });
 
 	test("a running session with history lands on Chat; the terminal attaches underneath, untouched", async ({
@@ -56,7 +55,7 @@ test.describe("chat-first landing", () => {
 		expect(page.url()).toContain(`#/sessions/${STOPPED}/chat`);
 		backend.historySessions.delete(STOPPED);
 		await app.openSidebar();
-		await page.locator("#show-terminated-toggle").check();
+		await app.showTerminated();
 		await app.openSession("old-poc");
 		await app.expectView("files");
 		expect(page.url()).toContain(`#/sessions/${SESSION_IDS.terminated}/files`);

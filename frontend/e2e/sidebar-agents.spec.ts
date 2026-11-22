@@ -268,17 +268,3 @@ test.describe("sidebar: agent state re-reads (clock running)", () => {
 		expect(await minute(), "a chat open").toBeLessThanOrEqual(4);
 	});
 });
-
-test.describe("sidebar: ACP off", () => {
-	test("nothing new is read or shown", async ({ app, backend }) => {
-		backend.enableProjects();
-		await app.login("alice");
-		await app.openSidebar();
-		await expect(app.sessionRow("hz-architect")).toBeVisible();
-		await expect(app.page.locator(".session-agent-line, .sgroup-asks")).toHaveCount(0);
-		// The one read the projects page always made at start (main does the
-		// same); nothing of the sidebar's: no periodic or event-driven re-read.
-		await app.page.waitForTimeout(3500);
-		expect(backend.requests.filter((r) => r.path === "/acp/agents")).toHaveLength(1);
-	});
-});

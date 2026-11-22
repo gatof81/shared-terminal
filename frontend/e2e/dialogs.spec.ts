@@ -77,7 +77,7 @@ test.describe("dialogs", () => {
 	}) => {
 		await app.login("alice");
 		await app.openSidebar();
-		await page.check("#show-terminated-toggle");
+		await app.showTerminated();
 		await app.sessionRow("old-poc").locator(".session-menu-btn").click();
 		await page.locator('[role="menuitem"][data-action="delete"]').click();
 		const dialog = page.locator('[role="alertdialog"]');

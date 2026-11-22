@@ -152,10 +152,7 @@ test.describe("soft keyboard (simulated visual viewport)", () => {
 		expect(Math.round(body!.y), "body starts at the top of the visible band").toBe(300);
 		expect(Math.round(body!.height)).toBe(visible);
 		const taBox = await ta.boundingBox();
-		// v1 keeps its bottom view bar (#view-nav) above the keyboard: the
-		// thread ends at the bar, not at the keyboard (a known v1 cost).
-		const nav = page.locator("#view-nav");
-		const keyboardTop = (await nav.isVisible()) ? (await nav.boundingBox())!.y : 300 + visible;
+		const keyboardTop = 300 + visible;
 		expect(
 			taBox!.y + taBox!.height,
 			"the thread's end is inside the visible band",
@@ -271,43 +268,50 @@ test.describe("soft keyboard (simulated visual viewport)", () => {
 		expect(backend.terminalSockets, "no new socket").toHaveLength(1);
 	});
 
-	test("the bottom view nav takes no room while the keyboard is up, and comes back after", async ({
-		app,
-		backend,
-		page,
-	}) => {
-		test.skip(app.shell === "v2", "shell v2 has no bottom view nav");
-		backend.enableAcp();
-		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
-		const nav = page.locator("#view-nav");
-		const composer = page.locator("#acp-chat .acp-chat-composer");
-		await expect(nav).toBeVisible();
-		const viewport = page.viewportSize()!;
-		const navTop = (await nav.boundingBox())!.y;
-		expect(
-			(await composer.boundingBox())!.y + (await composer.boundingBox())!.height,
-		).toBeLessThanOrEqual(navTop + 1);
-		// Typing: the field holds the focus and the keyboard is up.
-		await page.locator("#acp-chat .acp-chat-input").focus();
-		await keyboard(page, viewport.height - 380, 0);
-		await expect(nav).toBeHidden();
-		// The chat reaches the bottom of the (shrunk) app: the field sits right above the keyboard.
-		const box = (await composer.boundingBox())!;
-		expect(Math.round(box.y + box.height)).toBeGreaterThanOrEqual(viewport.height - 380 - 2);
-		await page.locator("#acp-chat .acp-chat-input").blur();
-		await keyboard(page, viewport.height, 0);
-		await expect(nav).toBeVisible();
-
-		// The project page is not a session overlay: no nav there, keyboard or not.
-		await page.evaluate((h) => {
-			location.hash = h;
-		}, `#/projects/${PROJECT_IDS.hz}`);
-		const pcomp = page.locator("#project-view .acp-chat-composer");
-		await expect(pcomp).toBeVisible();
-		await expect(nav).toBeHidden();
-		await keyboard(page, viewport.height - 380, 0);
-		const pbox = (await pcomp.boundingBox())!;
-		expect(pbox.y + pbox.height).toBeLessThanOrEqual(viewport.height - 380 + 1);
-		await keyboard(page, viewport.height, 0);
-	});
+	for (const chat of [
+		{
+			name: "the agent's chat",
+			hash: `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`,
+			root: "#acp-chat",
+		},
+		{ name: "Project Chat", hash: `#/projects/${PROJECT_IDS.hz}`, root: "#project-view" },
+	])
+		test(`${chat.name}: with 150 px visible the layout fits its box — the thread gives way, the message box is whole`, async ({
+			app,
+			page,
+		}) => {
+			await app.login("alice", chat.hash);
+			const input = page.locator(`${chat.root} .acp-chat-input`);
+			await expect(input).toBeVisible();
+			await input.focus();
+			await keyboard(page, 150, 0);
+			const vh = 150;
+			const composer = (await page.locator(`${chat.root} .acp-chat-composer`).boundingBox())!;
+			expect(composer.y, "the message box starts inside the band").toBeGreaterThanOrEqual(0);
+			expect(composer.y + composer.height, "and ends inside it").toBeLessThanOrEqual(vh + 1);
+			const box = (await input.boundingBox())!;
+			expect(box.height, "the field keeps its resting line").toBeGreaterThanOrEqual(42);
+			// Nothing in the chat is taller than its box: no scroll outside the thread.
+			const overflow = await page.evaluate((sel) => {
+				const out: string[] = [];
+				for (const el of [
+					document.documentElement,
+					document.body,
+					...document.querySelectorAll(`${sel}, ${sel} *`),
+				]) {
+					const cs = getComputedStyle(el);
+					if (el.classList.contains("acp-chat-thread") || el.classList.contains("acp-chat-input"))
+						continue;
+					if (
+						/(auto|scroll)/.test(cs.overflowY) &&
+						el.scrollHeight > el.clientHeight + 1 &&
+						el.scrollTop > 0
+					)
+						out.push(el.className || el.tagName);
+				}
+				return out;
+			}, chat.root);
+			expect(overflow, "nothing but the thread scrolled").toEqual([]);
+			await keyboard(page, page.viewportSize()!.height, 0);
+		});
 });

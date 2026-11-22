@@ -22,7 +22,7 @@
  * the reader is at the bottom; otherwise a "↓ N new" pill appears.
  *
  * Everything is built with textContent / renderMarkdown — no innerHTML.
- * Sending messages is 3.2: the composer is shown disabled with the reason.
+ * Read-only: nothing is sent from here (agents are talked to over ACP).
  *
  * v1.8 §6.2: the owner renames/archives from a ⋯ menu per row and in the
  * thread header; the list filters Active / Archived / All (chatMeta.ts holds
@@ -40,7 +40,6 @@ import {
 	fetchConversations,
 	openConversationSocket,
 	patchConversationMeta,
-	projectChatEnabled,
 } from "./api.js";
 import { copyButton, markdownBlock } from "./chatMarkdown.js";
 import {
@@ -61,6 +60,7 @@ import {
 import { ChatEndButton, END_SLACK, firstRowInView } from "./chatScroll.js";
 import { openActionMenu } from "./components/actionMenu.js";
 import { promptDialog } from "./components/dialog.js";
+import { showToast } from "./components/toast.js";
 import {
 	type AgentView,
 	buildThread,
@@ -81,10 +81,10 @@ import {
 	toolsSummary,
 } from "./conversationModel.js";
 import { formatBytes, relativeDate } from "./format.js";
-import { activeSessionId, currentTabs, isMobile, sessions, showToast } from "./main.js";
+import { activeSessionId, currentTabs, isMobile, sessions } from "./main.js";
 import { fromHistory } from "./router.js";
 import { renderSessionList, showTerminalTab, syncLastConversationCurrent } from "./sessionCore.js";
-import { sessionNoun, switcherWords } from "./switcherModel.js";
+import { SWITCHER_WORDS } from "./switcherModel.js";
 import { button, el, stateBox } from "./ui.js";
 import {
 	clearLastConversationTitle,
@@ -996,15 +996,12 @@ function renderListInner(): void {
 	// taps away: from the list, one tap reaches every running project's
 	// conversations. (The event name mirrors switcher.ts OPEN_SWITCHER_EVENT.)
 	if (isMobile()) {
-		const go = button(
-			switcherWords(sessionNoun(projectChatEnabled())).otherConversations,
-			"chat-switcher-entry",
-			() =>
-				document.dispatchEvent(
-					new CustomEvent("st:open-switcher", {
-						detail: { opener: listEl.querySelector(".chat-switcher-entry") },
-					}),
-				),
+		const go = button(SWITCHER_WORDS.otherConversations, "chat-switcher-entry", () =>
+			document.dispatchEvent(
+				new CustomEvent("st:open-switcher", {
+					detail: { opener: listEl.querySelector(".chat-switcher-entry") },
+				}),
+			),
 		);
 		listEl.appendChild(go);
 	}
@@ -1381,8 +1378,7 @@ function renderThreadHead(): void {
 
 /**
  * The server's newest probe of the open conversation (in its window, and
- * about the current process) said `kind: background`. Wording only: Chat's
- * input stays decided by the server's canSendInput.
+ * about the current process) said `kind: background`. Wording only.
  */
 function runsInBackground(c: ConversationSummary): boolean {
 	if (!cur || cur.cid !== c.sessionId) return false;
@@ -1411,7 +1407,7 @@ function threadHeadChildren(c: ConversationSummary): HTMLElement[] {
 	if (agents.length > 0) {
 		const running = agents.filter((a) => a.status === "running").length;
 		const b = button(
-			`${subagentsWord()} ${agents.length}${running > 0 ? ` · ${running} running` : ""}`,
+			`${SUBAGENTS_WORD} ${agents.length}${running > 0 ? ` · ${running} running` : ""}`,
 			"files-btn chat-agents-btn",
 			() => {
 				agentsOpen = !agentsOpen;
@@ -1885,13 +1881,10 @@ function meta(who: string, ts: string): HTMLElement {
 // ── Agents panel ────────────────────────────────────────────────────────────
 
 /**
- * What the CLI's own helpers inside a conversation are called. With the
- * project directory on (P3a), "agents" are the project's team agents, so
- * these become "Subagents" (design 15, D-UX7); with it off, nothing changes.
+ * What the CLI's own helpers inside a conversation are called: "agents" are
+ * the ACP agents, so these are "Subagents" (design 15, D-UX7).
  */
-function subagentsWord(): string {
-	return projectChatEnabled() ? "Subagents" : "Agents";
-}
+const SUBAGENTS_WORD = "Subagents";
 
 function renderAgents(): void {
 	const open = agentsOpen && selectedCid !== null && cur !== null;
@@ -1900,8 +1893,8 @@ function renderAgents(): void {
 	const agents = buildThread(cur.window.events).agents;
 	agentsEl.replaceChildren();
 	const head = el("div", "chat-agents-head");
-	agentsEl.setAttribute("aria-label", subagentsWord());
-	head.appendChild(el("h3", undefined, `${subagentsWord()} · ${agents.length}`));
+	agentsEl.setAttribute("aria-label", SUBAGENTS_WORD);
+	head.appendChild(el("h3", undefined, `${SUBAGENTS_WORD} · ${agents.length}`));
 	head.appendChild(
 		button(
 			"×",

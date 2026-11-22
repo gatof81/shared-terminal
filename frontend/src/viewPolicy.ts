@@ -4,16 +4,12 @@
  *
  * Pure and storage-only: no DOM, no requests. The order is fixed:
  *
- *   0. an ACP agent's session (either shell): the view the person last
+ *   0. an ACP agent's session: the view the person last
  *      chose for it, else Chat — the agent is talked to there, and its
  *      chat (acpChat.ts) needs no container, so a stopped one too;
  *   1. the view the person last chose for THIS session (a tab click);
  *   2. Chat, when the session has captured history;
  *   3. Terminal for a running session, Files for a stopped one.
- *
- * Rules 1–2 are shell v2's. Shell v1 keeps its own flow for a traditional
- * session (`landsByPolicy`): Terminal when running, Files when stopped,
- * nothing remembered read.
  *
  * A route with an explicit view is applied by the router before any of
  * this runs, so it always wins. A saved view that cannot work without a
@@ -41,7 +37,6 @@ export interface LandingInput {
 	running: boolean;
 	/** Whether the session is an ACP agent's; null = not known (taken as no). */
 	isAgent: boolean | null;
-	shell: "v1" | "v2";
 }
 
 export function chooseLanding(i: LandingInput): PolicyView {
@@ -50,7 +45,6 @@ export function chooseLanding(i: LandingInput): PolicyView {
 		if (i.pref !== null && (i.running || i.pref === "files" || i.pref === "chat")) return i.pref;
 		return "chat";
 	}
-	if (i.shell === "v1") return i.running ? "terminal" : "files";
 	if (i.running) {
 		if (i.pref !== null) return i.pref;
 		return i.hasHistory === true ? "chat" : "terminal";
@@ -59,16 +53,6 @@ export function chooseLanding(i: LandingInput): PolicyView {
 	// others would open on their "session not running" state.
 	if (i.pref === "files" || i.pref === "chat") return i.pref;
 	return i.hasHistory === true ? "chat" : "files";
-}
-
-/**
- * Whether selecting a session lands where chooseLanding says. Shell v2:
- * always. Shell v1: only an agent's session — or one not known yet, to be
- * decided when the agents are — while a traditional session keeps v1's own
- * flow (the open view stays; a stopped one shows Files).
- */
-export function landsByPolicy(shell: "v1" | "v2", isAgent: boolean | null): boolean {
-	return shell === "v2" || isAgent !== false;
 }
 
 export function isPolicyView(v: unknown): v is PolicyView {

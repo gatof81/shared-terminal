@@ -109,71 +109,33 @@
           <span>Conversations</span>
           <kbd aria-hidden="true">Ctrl K</kbd>
         </button>
-        <button
-          id="chrome-toggle"
-          type="button"
-          aria-label="Session — toggle session controls"
-          aria-expanded="false"
-          aria-controls="terminal-toolbar terminal-tabs"
-          hidden
-        >
-          <span id="chrome-toggle-label">Session</span>
-          <svg
-            id="chrome-toggle-icon"
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2.4"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            aria-hidden="true"
-          >
-            <polyline points="6 9 12 15 18 9"></polyline>
-          </svg>
-        </button>
         <div class="header-right">
           <span id="user-display"></span>
-          <button id="templates-btn" type="button" title="Session templates">Templates</button>
-          <button id="invites-btn" type="button" title="Manage invite codes">Invites</button>
-          <button id="my-groups-btn" type="button" title="Groups you lead">My groups</button>
-          <button id="admin-btn" type="button" title="Admin dashboard">Admin</button>
-          <button id="notifications-btn" type="button" hidden>Enable notifications</button>
-          <button id="logout-btn" type="button">Logout</button>
         </div>
-        <!-- Shell v2: one user menu (templates, invites, groups, admin,
-             notifications, logout) instead of the button cluster above;
-             shown by shell-v2.css, wired in shellV2.ts. -->
+        <!-- The user menu (templates, invites, groups, admin, notifications,
+             logout; main.ts). Under 400 px the drawer's footer holds them. -->
         <button
           id="user-menu-btn"
           type="button"
           aria-label="Account and app menu"
           aria-haspopup="menu"
-          hidden
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
             <circle cx="12" cy="8" r="4"></circle>
             <path d="M4 21c0-4 4-6 8-6s8 2 8 6"></path>
           </svg>
         </button>
-        <button
-          id="actions-btn"
-          type="button"
-          title="Insert into terminal"
-          aria-label="Insert into terminal"
-          aria-haspopup="menu"
-          aria-expanded="false"
-          hidden
-        >
-          +
-        </button>
       </header>
       <main>
         <div id="sidebar-backdrop" aria-hidden="true"></div>
-        <aside id="sidebar">
-          <!-- Projects & Agents (P3a, projectsView.ts): shown only when
-               /auth/status reports features.projectChat. -->
+        <aside id="sidebar" class="sidebar-tree">
+          <!-- A box only for the tree layout on phones (projects.css puts the
+               two on one row there); `display: contents` everywhere else. -->
+          <div id="sidebar-actions">
+            <button id="sidebar-switcher-btn" type="button">Go to a conversation…</button>
+            <button id="new-session-btn" class="btn primary sm" type="button">+ New session</button>
+          </div>
+          <!-- Projects & Agents (projectsView.ts). -->
           <section id="project-section" aria-labelledby="project-section-title" hidden>
             <div id="project-section-header">
               <h2 id="project-section-title">Projects</h2>
@@ -199,31 +161,23 @@
               Show terminated
             </label>
           </div>
-          <!-- A box only for the tree layout on phones (projects.css puts the
-               two on one row there); `display: contents` everywhere else. -->
-          <div id="sidebar-actions">
-            <button id="sidebar-switcher-btn" type="button">Go to a conversation…</button>
-            <button id="new-session-btn" type="button">+ New session</button>
-          </div>
-          <div id="session-list"></div>
+          <div id="session-list" class="session-list-grouped"></div>
           <div id="observable-section" class="hidden">
             <h3 id="observable-section-title">My groups</h3>
             <div id="observable-list"></div>
           </div>
+          <!-- Under 400 px the user menu opens from here (the bar has no room
+               for its button); the same menu (main.ts). -->
           <div id="sidebar-footer">
-            <span id="sidebar-user-display" aria-hidden="true"></span>
-            <button id="sidebar-templates-btn" type="button">Templates</button>
-            <button id="sidebar-invites-btn" type="button">Invites</button>
-            <button id="sidebar-my-groups-btn" type="button">My groups</button>
-            <button id="sidebar-admin-btn" type="button">Admin</button>
-            <button id="sidebar-notifications-btn" type="button" hidden>Enable notifications</button>
-            <button id="sidebar-logout-btn" type="button">Logout</button>
+            <button id="sidebar-account-btn" class="btn" type="button" aria-label="Account and app menu">
+              <span id="sidebar-user-display" aria-hidden="true"></span>
+              <span>Account</span>
+            </button>
           </div>
         </aside>
         <section id="terminal-area">
           <div id="empty-state">Select or create a session →</div>
           <div id="terminal-toolbar">
-            <span>Session:</span>
             <span id="terminal-session-name"></span>
             <span id="terminal-status-badge"></span>
             <!-- An agent's session (UX iter3 E): "sesión X · proyecto ↗", wide screens only. -->
@@ -231,8 +185,8 @@
             <!-- Workspace Explorer: Terminal ⇄ Files. Files is an overlay
                  above the terminal panes (filesView.ts) so switching never
                  resizes, detaches or disposes the terminal. -->
-            <!-- Each view button carries an icon (shell v2 shows it alone on
-                 narrow screens, the label on the active one) and a label. -->
+            <!-- Each view button carries an icon (alone on narrow screens,
+                 the label on the active one) and a label. -->
             <div id="view-switch" role="group" aria-label="Session view" hidden>
               <button id="view-terminal-btn" type="button" aria-pressed="true" title="Terminal">
                 <svg class="view-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6l6 6-6 6M12 18h8" /></svg>
@@ -254,8 +208,8 @@
                 <span class="view-label">Chat</span>
               </button>
             </div>
-            <!-- Shell v2: the session's actions (start / stop / ports /
-                 observers / terminate / delete) as one menu in the bar. -->
+            <!-- The session's actions (start / stop / ports / observers /
+                 terminate / delete) as one menu in the bar. -->
             <button
               id="session-menu-btn"
               class="btn btn-icon sm"
@@ -263,75 +217,59 @@
               title="Session actions"
               aria-label="Session actions"
               aria-haspopup="menu"
-              hidden
             >
               ⋯
             </button>
-            <button
-              id="font-size-btn"
-              type="button"
-              title="Cycle terminal font size"
-              aria-label="Aa — terminal font size, press to change"
-            >
-              Aa
-            </button>
-            <!-- #201e-2: surfaces the per-session observe history.
-                 Owner / admin / lead-of-group-containing-owner can
-                 read; the backend `/api/sessions/:id/observe-log`
-                 enforces via assertCanObserve. The button is shown
-                 for every authenticated user on every session — the
-                 modal itself surfaces a 403 toast if the caller
-                 isn't authorised. -->
-            <button
-              id="observers-btn"
-              type="button"
-              title="Who has watched this session"
-              aria-label="Observers — who has watched this session"
-            >
-              Observers
-            </button>
-            <!-- #190 — live-edit the exposed-port set. Opens the ports
-                 modal; changes apply immediately (no session recycle)
-                 because the dispatcher proxies the container directly by
-                 name over the shared network. Owner-gated server-side. -->
-            <button
-              id="ports-btn"
-              type="button"
-              title="Edit exposed ports"
-              aria-label="Edit exposed ports"
-            >
-              Ports
-            </button>
-            <!-- #357 — search the tab's full tmux history. The input is
-                 toggled by the magnifier button (or Ctrl+Shift+F) and
-                 drives tmux copy-mode search server-side; the result UI
-                 is tmux's own, streamed through the terminal itself.
-                 Wiring + key handling in searchBar.ts. -->
-            <input
-              id="terminal-search-input"
-              type="text"
-              placeholder="Search history"
-              maxlength="256"
-              spellcheck="false"
-              autocomplete="off"
-              aria-label="Search terminal history"
-              hidden
-            />
-            <button
-              id="terminal-search-btn"
-              type="button"
-              title="Search terminal history (Ctrl+Shift+F)"
-              aria-label="Search terminal history"
-            >
-              ⌕
-            </button>
           </div>
           <!-- The tab strip is rendered by sessionCore.renderTabBar; #tab-tools
-               is empty in shell v1 and hosts the terminal-only controls (font
-               size, history search) in shell v2 (shellV2.ts). -->
+               holds the terminal-only controls (history search, font size,
+               Insert), so the bar holds only what belongs to the session. -->
           <div id="terminal-tabs">
             <div id="tab-strip"></div>
-            <div id="tab-tools"></div>
+            <div id="tab-tools">
+              <!-- #357 — search the tab's full tmux history. The input is
+                   toggled by the magnifier button (or Ctrl+Shift+F) and
+                   drives tmux copy-mode search server-side; the result UI
+                   is tmux's own, streamed through the terminal itself.
+                   Wiring + key handling in searchBar.ts. -->
+              <input
+                id="terminal-search-input"
+                type="text"
+                placeholder="Search history"
+                maxlength="256"
+                spellcheck="false"
+                autocomplete="off"
+                aria-label="Search terminal history"
+                hidden
+              />
+              <button
+                id="terminal-search-btn"
+                type="button"
+                title="Search terminal history (Ctrl+Shift+F)"
+                aria-label="Search terminal history"
+              >
+                ⌕
+              </button>
+              <button
+                id="font-size-btn"
+                type="button"
+                title="Cycle terminal font size"
+                aria-label="Aa — terminal font size, press to change"
+              >
+                Aa
+              </button>
+              <button
+                id="actions-btn"
+                type="button"
+                title="Insert into terminal"
+                aria-label="Insert into terminal"
+                aria-haspopup="menu"
+                aria-expanded="false"
+                hidden
+              >
+                +
+              </button>
+            </div>
           </div>
           <div id="terminal-container"></div>
           <!-- What the terminal area offers when it has no pane to show —
@@ -371,9 +309,6 @@
                bottom edge (see filesView.ts). Content is built in TS. -->
           <div id="files-view" hidden>
             <div id="files-header">
-              <button id="files-to-terminal-btn" class="files-btn files-mobile-only" type="button">
-                ‹ Terminal
-              </button>
               <nav id="files-breadcrumbs" aria-label="Current path"></nav>
               <button
                 id="files-refresh-btn"
@@ -396,9 +331,6 @@
                TS (gitView.ts). -->
           <div id="git-view" hidden>
             <div id="git-header">
-              <button id="git-to-terminal-btn" class="files-btn files-mobile-only" type="button">
-                ‹ Terminal
-              </button>
               <div id="git-summary" aria-live="polite"></div>
               <button
                 id="git-refresh-btn"
@@ -421,9 +353,6 @@
                (chatView.ts). -->
           <div id="chat-view" hidden>
             <div id="chat-header">
-              <button id="chat-to-terminal-btn" class="files-btn files-mobile-only" type="button">
-                ‹ Terminal
-              </button>
               <button
                 id="chat-back-btn"
                 class="files-btn chat-back"
@@ -456,31 +385,6 @@
                session — its siblings only turn visibility:hidden, so the
                terminal keeps its box and its socket. -->
           <div id="project-view" hidden></div>
-          <!-- Mobile bottom navigation between the session views. Shown only
-               on narrow screens and only while an overlay covers the
-               terminal (viewSwitch.ts): the terminal keeps its own key bar
-               and layout box, which must not change on a view switch. -->
-          <nav id="view-nav" aria-label="Session view" hidden>
-            <button type="button" data-view="chat" aria-pressed="false">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H8l-4 4z" /></svg>
-              <span>Chat</span>
-            </button>
-            <button type="button" data-view="terminal" aria-pressed="false">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6l6 6-6 6M12 18h8" /></svg>
-              <span>Terminal</span>
-            </button>
-            <button type="button" data-view="files" aria-pressed="false">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h6l2 2h10v11H3z" /></svg>
-              <span>Files</span>
-            </button>
-            <button type="button" data-view="git" aria-pressed="false">
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <circle cx="6" cy="5" r="2.5" /><circle cx="6" cy="19" r="2.5" /><circle cx="18" cy="9" r="2.5" />
-                <path d="M6 7.5v9M18 11.5c0 3-3 4-6 4H9" />
-              </svg>
-              <span>Git</span>
-            </button>
-          </nav>
         </section>
       </main>
     </div>

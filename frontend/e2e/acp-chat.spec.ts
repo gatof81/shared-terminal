@@ -41,7 +41,6 @@ test.describe("ACP chat", () => {
 		page,
 		app,
 		backend,
-		shell,
 	}, info) => {
 		await app.login("alice", chatOf(PROJECT_SESSION_IDS.scratch));
 		const opener = await app.openAgentSettings();
@@ -63,14 +62,11 @@ test.describe("ACP chat", () => {
 		await app.openAgentSettings();
 		await expect(select).toHaveValue(PROJECT_IDS.hz);
 		await page.locator("#acp-chat .acp-chat-project button", { hasText: "Guardar" }).click();
-		// The project now shows where the agent's identity is: its own row on a
-		// phone in shell v1, the bar's "proyecto ↗" on a wide screen (a v2
+		// The project now shows in the bar's "proyecto ↗" on a wide screen (a
 		// phone's bar has no room for that subtitle).
-		if (!(info.project.use.isMobile && shell === "v2"))
+		if (!info.project.use.isMobile)
 			await expect(
-				page
-					.locator("#acp-chat .acp-link:visible", { hasText: "Abrir Project Chat" })
-					.or(page.locator("#terminal-session-sub a:visible", { hasText: "Educación HZ ↗" })),
+				page.locator("#terminal-session-sub a:visible", { hasText: "Educación HZ ↗" }),
 			).toBeVisible();
 		expect(backend.acpAgents.find((a) => a.name === "solo")?.projectId).toBe(PROJECT_IDS.hz);
 	});
@@ -248,7 +244,7 @@ test.describe("ACP chat", () => {
 		};
 		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
 		const solo = await column("#acp-chat");
-		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/chat`);
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
 		const project = await column(".acp-project");
 		const colPx = 56 * 16;
 		for (const c of [solo, project]) {
@@ -294,12 +290,12 @@ test.describe("ACP chat", () => {
 		await page.evaluate((h) => {
 			location.hash = h;
 		}, chatOf(PROJECT_SESSION_IDS.architect));
-		await expect(page.locator("#acp-chat .acp-chat-title")).toContainText("@arq");
+		await expect(page.locator("#terminal-session-name")).toHaveText("@arq");
 		await expect(input).toHaveValue("");
 		await page.evaluate((h) => {
 			location.hash = h;
 		}, chatOf(PROJECT_SESSION_IDS.scratch));
-		await expect(page.locator("#acp-chat .acp-chat-title")).toContainText("@solo");
+		await expect(page.locator("#terminal-session-name")).toHaveText("@solo");
 		await expect(input).toHaveValue("solo para @solo");
 	});
 
@@ -395,11 +391,10 @@ test.describe("ACP model", () => {
 test.describe("ACP chat headers", () => {
 	test.beforeEach(({ backend }) => backend.enableAcp());
 
-	test("the agent's header: the session bar (its own row only on a v1 phone); settings closed; a refused model flagged where they open", async ({
+	test("the agent's header: the session bar; settings closed; a refused model flagged where they open", async ({
 		page,
 		app,
 		backend,
-		shell,
 	}, info) => {
 		const solo = backend.acpAgents.find((a) => a.name === "solo")!;
 		solo.projectId = PROJECT_IDS.hz;
@@ -410,25 +405,14 @@ test.describe("ACP chat headers", () => {
 			error: "modelo no disponible",
 		};
 		await app.login("alice", chatOf(PROJECT_SESSION_IDS.scratch));
-		const header = page.locator("#acp-chat .acp-chat-header");
-		const settings = page.locator("#acp-chat .acp-settings-btn");
-		const ownRow = info.project.use.isMobile && shell !== "v2";
 		await expect(page.locator("#acp-chat .acp-settings")).toBeHidden();
 		// The bar names the agent (and its session) in either case.
 		await expect(page.locator("#terminal-session-name")).toHaveText("@solo");
 		await expect(page.locator("#terminal-toolbar")).toHaveAttribute("data-session-name", "scratch");
-		if (ownRow) {
-			await expect(settings).toHaveAttribute("aria-expanded", "false");
-			await expect(page.locator("#acp-chat .acp-chat-projlink")).toHaveText(
-				"Abrir Project Chat: Educación HZ",
+		if (!info.project.use.isMobile)
+			await expect(page.locator("#terminal-session-sub")).toHaveText(
+				"sesión scratch · Educación HZ ↗",
 			);
-		} else {
-			await expect(header).toBeHidden();
-			if (!info.project.use.isMobile)
-				await expect(page.locator("#terminal-session-sub")).toHaveText(
-					"sesión scratch · Educación HZ ↗",
-				);
-		}
 		// The privacy first on a phone (a long name cuts the end off).
 		await expect(page.locator("#acp-chat .acp-chat-input")).toHaveAttribute(
 			"placeholder",
@@ -437,16 +421,9 @@ test.describe("ACP chat headers", () => {
 				: "Mensaje privado a @solo · Ctrl+Enter envía",
 		);
 		// The failure is on what opens the closed panel: visibly and by name.
-		if (ownRow) {
-			await expect(settings).toHaveAccessibleName("Ajustes (el modelo no se aplicó)");
-			await expect(settings.locator(".acp-settings-flag")).toBeVisible();
-			// One row: as tall as its tallest control (44 px on a phone) plus padding.
-			expect((await header.boundingBox())!.height).toBeLessThanOrEqual(60);
-		} else {
-			const more = page.locator("#session-menu-btn");
-			await expect(more).toHaveAccessibleName("Session actions (el modelo no se aplicó)");
-			await expect(more.locator(".bar-menu-flag")).toBeVisible();
-		}
+		const more = page.locator("#session-menu-btn");
+		await expect(more).toHaveAccessibleName("Session actions (el modelo no se aplicó)");
+		await expect(more.locator(".bar-menu-flag")).toBeVisible();
 		await app.openAgentSettings();
 		await expect(page.locator("#acp-chat .acp-model-state")).toContainText("modelo no disponible");
 	});
@@ -524,7 +501,8 @@ test.describe("ACP chat headers", () => {
 		);
 		expect(await panel.evaluate((e) => getComputedStyle(e).overflowY)).toBe("auto");
 		const strip = (await page.locator("#project-view .acp-chat-thread").boundingBox())!.height;
-		expect(strip, "a readable strip of thread").toBeGreaterThanOrEqual(90);
+		// No fixed minimum any more: the thread gives way first, here it still shows.
+		expect(strip, "a strip of thread").toBeGreaterThan(0);
 		// Scrolled to its end, the panel's heading and × stay in view and take the tap.
 		await panel.evaluate((e) => {
 			e.scrollTop = e.scrollHeight;
@@ -629,7 +607,7 @@ test.describe("ACP chat headers", () => {
 		await expect(group).toBeFocused();
 		await group.click();
 		await page.getByRole("link", { name: "Abrir su chat (@dev)" }).click();
-		await expect(page.locator("#acp-chat .acp-chat-title")).toContainText("@dev");
+		await expect(page.locator("#terminal-session-name")).toHaveText("@dev");
 	});
 });
 
@@ -777,7 +755,7 @@ test.describe("ACP chat composer and scroll", () => {
 	});
 });
 
-// A phone (v1, bottom nav): with the field focused, one tap on any control of
+// A phone: with the field focused, one tap on any control of
 // the chat does what it says — the nav coming back must not move the layout
 // between the tap's mousedown and its click.
 test.describe("ACP chat: taps with the keyboard up", () => {
@@ -819,7 +797,6 @@ test.describe("ACP chat: taps with the keyboard up", () => {
 		await expect(recover).toBeVisible();
 		fail = false;
 		await input.focus();
-		await expect(page.locator("#view-nav")).toBeHidden();
 		await recover.tap();
 		await expect(input).toHaveValue("otro borrador\n\nel primero");
 	});
@@ -860,7 +837,6 @@ test.describe("ACP chat: taps with the keyboard up", () => {
 		const option = page.locator("#acp-chat .acp-question-open .acp-option", { hasText: "Google" });
 		await expect(option).toBeVisible();
 		await page.locator("#acp-chat .acp-chat-input").focus();
-		await expect(page.locator("#view-nav")).toBeHidden();
 		await option.tap();
 		await expect(option.locator("input")).toBeChecked();
 	});

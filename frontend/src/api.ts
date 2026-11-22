@@ -48,8 +48,6 @@ function setAuthMirror(loggedIn: boolean, admin: boolean, lead: boolean): void {
  *  see authLock.ts. Generous: the only thing it waits for is the previous
  *  request's answer. */
 export const AUTH_WAIT_MS = 10_000;
-// The shell the operator switched on (UI_SHELL) — `uiShell` on /auth/status.
-let _uiShell: "v1" | "v2" = "v1";
 // #200 — effective per-session resource caps mirrored from /auth/status
 // so the create-session form's CPU input `max` and the bounds hint can
 // reflect operator-lowered caps. Defaults match the v1 ceilings so a
@@ -62,25 +60,6 @@ let _resourceCaps: { cpuMaxCores: number; memMaxMiB: number } = {
 
 export function isLoggedIn(): boolean {
 	return _loggedIn;
-}
-
-// P3a (docs/PROJECTS.md §1): `features.projectChat` on /auth/status. The
-// key is ABSENT with the flag off, and then the project surface does not
-// exist — no section, no route, no request. A deployment property, not an
-// account's: a logout keeps it (the login screen's own status answered it).
-let _projectChat = false;
-
-// Experimental ACP agents: `features.acpAgents`, present only with
-// ACP_AGENTS_ENABLED. Absent ⇒ no agent field, no /acp request.
-let _acpAgents = false;
-
-export function acpAgentsEnabled(): boolean {
-	return _acpAgents;
-}
-
-/** True only when the last /auth/status said `features.projectChat === true`. */
-export function projectChatEnabled(): boolean {
-	return _projectChat;
 }
 
 /** True iff `users.is_admin = 1` for the current session (#50). Gates
@@ -97,11 +76,6 @@ export function isAdmin(): boolean {
  *  buttons. */
 export function isLead(): boolean {
 	return _isLead;
-}
-
-/** The server's `uiShell` from the last /auth/status (v1 until then). */
-export function serverUiShell(): "v1" | "v2" {
-	return _uiShell;
 }
 
 /** Effective per-session caps from the backend (#200). Mirrored on
@@ -135,14 +109,6 @@ export interface AuthStatus {
 	 *  client falls back to the hardcoded v1 ceilings. Units mirror
 	 *  the form: cores (decimal) and MiB (integer). */
 	resourceCaps?: { cpuMaxCores: number; memMaxMiB: number };
-	/** Which frontend shell to mount (UI unification §8.4); older backends omit it. */
-	uiShell?: "v1" | "v2";
-	/** P3a: present only with PROJECT_CHAT_ENABLED on. Absent ⇒ no project surface. */
-	features?: {
-		projectChat?: boolean;
-		/** Experimental ACP agents: present only with ACP_AGENTS_ENABLED. */
-		acpAgents?: boolean;
-	};
 }
 
 export async function checkAuthStatus(): Promise<AuthStatus> {
@@ -167,13 +133,6 @@ async function fetchAuthStatus(): Promise<AuthStatus> {
 	// + lead status. Mirror all three so isLoggedIn() / isAdmin() /
 	// isLead() can answer instantly thereafter.
 	setAuthMirror(data.authenticated, data.isAdmin, data.isLead === true);
-	if (data.uiShell === "v1" || data.uiShell === "v2") _uiShell = data.uiShell;
-	_acpAgents =
-		typeof data.features === "object" && data.features !== null && data.features.acpAgents === true;
-	_projectChat =
-		typeof data.features === "object" &&
-		data.features !== null &&
-		data.features.projectChat === true;
 	// #200: mirror caps if present. A pre-#200 backend omits the field
 	// and leaves the v1 defaults in place — same hardcoded ceilings the
 	// form would have used before this PR.
@@ -880,18 +839,6 @@ export async function stopSession(id: string): Promise<SessionInfo> {
 export async function startSession(id: string): Promise<SessionInfo> {
 	const res = await apiFetch(`/sessions/${id}/start`, { method: "POST" });
 	if (!res.ok) throw new Error("Failed to start session");
-	return res.json();
-}
-
-export async function updateEnvVars(
-	id: string,
-	envVars: Record<string, string>,
-): Promise<SessionInfo> {
-	const res = await apiFetch(`/sessions/${id}/env`, {
-		method: "PATCH",
-		body: JSON.stringify({ envVars }),
-	});
-	if (!res.ok) throw new Error("Failed to update env vars");
 	return res.json();
 }
 
@@ -1848,8 +1795,6 @@ export interface ConversationSummary {
 	eventsCount: number;
 	gapsCount: number;
 	claudeVersion: string | null;
-	/** 3.2 (§8.1.1): orientative — the POST decides; false while the composer flag is off. */
-	canSendInput: boolean;
 	/**
 	 * v1.8 §6.2: the owner's name for it — prevails over `title`, which stays
 	 * the automatic one — and when it was archived. Absent from an older
@@ -1857,76 +1802,6 @@ export interface ConversationSummary {
 	 */
 	customTitle?: string | null;
 	archivedAt?: string | null;
-	/** 3.2 (§8.1.8): why the pane cannot take a send right now, when it cannot. */
-	composer?: {
-		blocked: boolean;
-		reason?: "in-progress" | "effects-pending" | "unverifiable";
-		clientMessageId?: string;
-		result?: string;
-		since?: string;
-	};
-	/**
-	 * v1.9 §8.1.12 (EXPERIMENTAL): "background" when a send here would go
-	 * through the CLI daemon (a pane-less conversation, background transport
-	 * on). Orientative like canSendInput; absent otherwise.
-	 */
-	transport?: "background";
-}
-
-/** `POST …/messages` (CONVERSATION.md §8.1): the answer, 2xx or not, with its status. */
-export interface ComposerSendResult {
-	status: number;
-	body: {
-		/**
-		 * `accepted` (v1.9 §8.1.12, background sessions only): Claude Code's
-		 * daemon handed the text to the session — NOT delivered to Claude yet.
-		 */
-		result?: "delivered" | "unconfirmed" | "misdelivered" | "uncertain" | "accepted";
-		error?: string;
-		detail?: string;
-		clientMessageId?: string;
-		promptId?: string;
-		seq?: number;
-		conversation?: string;
-		stage?: string;
-		segmentsSent?: number;
-		segments?: number;
-		effects?: string;
-	};
-}
-
-/**
- * Send a message to a conversation's CLI (3.2). Never retried by the
- * client: a repeat is a NEW clientMessageId chosen by the person. Returns
- * the status and body for every outcome so the view can explain 400/409/502
- * exactly as the server said them.
- */
-export async function sendConversationMessage(
-	sessionId: string,
-	cid: string,
-	text: string,
-	clientMessageId: string,
-	/**
-	 * v1.9 §8.1.12 (D1): the earlier `unconfirmed` background send of the
-	 * same text the person confirmed they checked in the Terminal.
-	 */
-	opts: { acknowledgeUnconfirmed?: string } = {},
-): Promise<ComposerSendResult> {
-	const res = await apiFetch(
-		`/sessions/${encodeURIComponent(sessionId)}/conversations/${encodeURIComponent(cid)}/messages`,
-		{
-			method: "POST",
-			body: JSON.stringify({
-				text,
-				clientMessageId,
-				...(opts.acknowledgeUnconfirmed
-					? { acknowledgeUnconfirmed: opts.acknowledgeUnconfirmed }
-					: {}),
-			}),
-		},
-	);
-	const body = (await res.json().catch(() => ({}))) as ComposerSendResult["body"];
-	return { status: res.status, body };
 }
 
 export interface ConversationEventsPage {
@@ -2071,31 +1946,6 @@ export async function fetchConversationEvent(
 	);
 	if (!res.ok) throw new Error(await errorMessage(res));
 	return res.json();
-}
-
-/**
- * The same read as fetchConversationEvent, answering the status instead of
- * throwing: the v3 workspace tells "the capture no longer holds it" (404)
- * apart from a failure it can retry.
- */
-export async function readConversationEvent(
-	sessionId: string,
-	cid: string,
-	seq: number,
-): Promise<{ ok: true; event: ConversationEvent } | { ok: false; status: number }> {
-	let res: Response;
-	try {
-		res = await apiFetch(
-			`/sessions/${encodeURIComponent(sessionId)}/conversations/${encodeURIComponent(cid)}/events/${seq}`,
-		);
-	} catch {
-		return { ok: false, status: 0 };
-	}
-	if (!res.ok) return { ok: false, status: res.status };
-	const event = (await res.json().catch(() => null)) as ConversationEvent | null;
-	return event && typeof event === "object"
-		? { ok: true, event }
-		: { ok: false, status: res.status };
 }
 
 async function errorMessage(res: Response): Promise<string> {

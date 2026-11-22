@@ -209,9 +209,7 @@ test.describe("router with delayed answers", () => {
 		await app.openSession("my-project");
 		await app.expectTerminalReady();
 		await app.switchView("files");
-		// Measured from here: entering Files on v1 mobile goes through the
-		// chrome drawer (its known resize cost, terminal-invariant.spec.ts);
-		// everything that follows must send nothing.
+		// Measured from here: everything that follows must send nothing.
 		await page.waitForTimeout(300);
 		const sock = backend.terminalSockets[0]!;
 		const frames = sock.sent.length;

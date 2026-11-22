@@ -176,7 +176,7 @@ test.describe("conversation switcher", () => {
 		for (const s of backend.sessions) if (s.status === "running") s.status = "stopped";
 		await app.login("alice");
 		await openSwitcher(app, page);
-		await expect(page.locator(".switcher-empty")).toContainText("No running projects");
+		await expect(page.locator(".switcher-empty")).toContainText("No running sessions");
 	});
 
 	test("Ctrl+K opens it from the page", async ({ app, page }) => {
@@ -224,7 +224,7 @@ test.describe("conversation switcher", () => {
 		backend.metaUnavailable = true;
 		await app.login("alice");
 		await openSwitcher(app, page);
-		await expect(page.locator(".switcher-note")).toContainText(
+		await expect(page.locator(".switcher-note").first()).toContainText(
 			"names and archive state unavailable",
 		);
 		await expect(page.locator(".switcher-option").first()).toBeVisible();
