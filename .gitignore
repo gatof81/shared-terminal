@@ -46,7 +46,7 @@ REVIEW.md
 .config/
 .npm-global/
 
-# Python bytecode (session-image/hooks/relay.py)
+# Python bytecode
 __pycache__/
 *.pyc
 
