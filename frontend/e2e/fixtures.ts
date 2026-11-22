@@ -70,25 +70,25 @@ export class App {
 		page.on("pageerror", (err) => this.errors.push(String(err)));
 	}
 
-	/**
-	 * Activate one of the header cluster's buttons by id (templates-btn,
-	 * admin-btn, logout-btn, …): the button itself in v1 (header on
-	 * desktop, sidebar footer on mobile) or the user menu's entry.
-	 */
-	async appMenu(id: string): Promise<void> {
-		// The account menu is in the header — except under 400 px, where it
-		// moves to the drawer's footer (shell-v2.css).
+	/** Open the user menu: the avatar, or under 400 px the drawer's "Account" row. */
+	async openUserMenu(): Promise<void> {
 		if (await this.page.locator("#user-menu-btn").isVisible()) {
 			await this.page.click("#user-menu-btn");
-			await this.page.locator(`[role="menu"].action-menu [data-action="${id}"]`).click();
-			return;
-		}
-		if (this.mobile) {
+		} else {
 			await this.openSidebar();
-			await this.page.click(`#sidebar-${id}`);
-			return;
+			await this.page.click("#sidebar-account-btn");
 		}
-		await this.page.click(`#${id}`);
+		await expect(this.page.locator('[role="menu"].action-menu')).toBeVisible();
+	}
+
+	/**
+	 * Pick an entry of the user menu by its id (templates, invites,
+	 * my-groups, admin, notifications, logout): from the avatar, or under
+	 * 400 px from the drawer's "Account" row.
+	 */
+	async appMenu(id: string): Promise<void> {
+		await this.openUserMenu();
+		await this.page.locator(`[role="menu"].action-menu [data-action="${id}"]`).click();
 	}
 
 	/** Load the app at `/` (optionally with a hash) already authenticated as `user`. */

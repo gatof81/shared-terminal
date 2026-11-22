@@ -166,14 +166,13 @@
             <h3 id="observable-section-title">My groups</h3>
             <div id="observable-list"></div>
           </div>
+          <!-- Under 400 px the user menu opens from here (the bar has no room
+               for its button); the same menu (main.ts). -->
           <div id="sidebar-footer">
-            <span id="sidebar-user-display" aria-hidden="true"></span>
-            <button id="sidebar-templates-btn" type="button">Templates</button>
-            <button id="sidebar-invites-btn" type="button">Invites</button>
-            <button id="sidebar-my-groups-btn" type="button">My groups</button>
-            <button id="sidebar-admin-btn" type="button">Admin</button>
-            <button id="sidebar-notifications-btn" type="button" hidden>Enable notifications</button>
-            <button id="sidebar-logout-btn" type="button">Logout</button>
+            <button id="sidebar-account-btn" class="btn" type="button" aria-label="Account and app menu">
+              <span id="sidebar-user-display" aria-hidden="true"></span>
+              <span>Account</span>
+            </button>
           </div>
         </aside>
         <section id="terminal-area">

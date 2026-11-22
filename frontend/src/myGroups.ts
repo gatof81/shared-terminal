@@ -21,7 +21,6 @@ import { sessions, sessionsLoadedOnce } from "./main.js";
 import { closeObserveModal, openObserveModalFor } from "./observeModal.js";
 
 // ── DOM (re-queried locally; see header) ─────────────────────────────────
-const sidebarMyGroupsBtn = document.getElementById("sidebar-my-groups-btn") as HTMLButtonElement;
 const myGroupsModal = document.getElementById("my-groups-modal")!;
 const myGroupsListEl = document.getElementById("my-groups-list")!;
 const myGroupsRefreshBtn = document.getElementById("my-groups-refresh-btn") as HTMLButtonElement;
@@ -71,8 +70,6 @@ export function openMyGroupsModal(opener: HTMLElement) {
 function closeMyGroupsModal() {
 	myGroupsDialog.close();
 }
-
-sidebarMyGroupsBtn.addEventListener("click", () => openMyGroupsModal(sidebarMyGroupsBtn));
 
 myGroupsRefreshBtn.addEventListener("click", () => {
 	void refreshMyGroups();

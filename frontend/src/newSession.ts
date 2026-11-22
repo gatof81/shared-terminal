@@ -1566,27 +1566,20 @@ saveTemplateForm.addEventListener("submit", async (e) => {
 // type:"secret" with empty values so the user has to fill them in
 // before submit. Edit is deferred to a follow-up.
 
-const sidebarTemplatesBtn = document.getElementById("sidebar-templates-btn") as HTMLButtonElement;
 const templatesModal = document.getElementById("templates-modal")!;
 const templatesList = document.getElementById("templates-list") as HTMLDivElement;
 const templatesEmptyHint = document.getElementById("templates-empty-hint") as HTMLParagraphElement;
 
 /**
- * Pick the account control that's actually rendered for the current
- * viewport — the user menu's button, or the drawer footer's Templates
- * under 400 px (mobile.css). `offsetParent === null` is the standard
- * "is this element rendered" test (null for `display:none` ancestors).
- *
- * Used by callers that open the templates modal from a third place
- * (e.g. the save-template flow re-opening templates after a save) —
- * those callers don't know which button the user clicked first, so
- * they must resolve the contextually-correct opener themselves.
- * Without this, focus restoration on close would land on a hidden
- * element and silently drop to `document.body`. See PR #257 review.
+ * Where the focus goes back when the templates modal is reopened from a
+ * third place (the save-template flow): the user menu's button, or — under
+ * 400 px, where it is hidden and the menu opens from the drawer — the ☰.
  */
 function resolveTemplatesOpener(): HTMLButtonElement {
-	const menu = document.getElementById("user-menu-btn") as HTMLButtonElement | null;
-	return menu && menu.offsetParent !== null ? menu : sidebarTemplatesBtn;
+	const menu = document.getElementById("user-menu-btn") as HTMLButtonElement;
+	return menu.offsetParent !== null
+		? menu
+		: (document.getElementById("sidebar-toggle") as HTMLButtonElement);
 }
 
 const templatesDialog = createDialog(templatesModal);
@@ -1692,8 +1685,6 @@ templatesModal.addEventListener("click", (e) => {
 	const target = e.target as HTMLElement;
 	if (target.hasAttribute("data-close-modal")) closeTemplatesModal();
 });
-
-sidebarTemplatesBtn.addEventListener("click", () => openTemplatesModal(sidebarTemplatesBtn));
 
 async function deleteTemplateConfirmed(id: string, card: HTMLDivElement) {
 	const name = card.querySelector("strong")?.textContent ?? "this template";

@@ -180,7 +180,7 @@ test.describe("auth transitions on the real cookie jar", () => {
 
 		// Alice's logout reaches the server, whose answer (the cookie delete) is held.
 		server.hold("logout");
-		await app.appMenu("logout-btn");
+		await app.appMenu("logout");
 		await expect(page.locator("#auth-view")).toBeVisible();
 		await expect.poll(() => server.isHeld("logout")).toBe(true);
 
@@ -217,7 +217,7 @@ test.describe("auth transitions on the real cookie jar", () => {
 		await expect.poll(() => tokenOf(context)).toBe("alice");
 
 		server.hold("logout");
-		await app.appMenu("logout-btn");
+		await app.appMenu("logout");
 		await expect.poll(() => server.isHeld("logout")).toBe(true);
 
 		// The cross-tab ordering is the browser's Web Locks, not the in-page fallback.
@@ -264,7 +264,7 @@ test.describe("auth transitions on the real cookie jar", () => {
 		await app.refreshSessions();
 		await expect.poll(() => server.isHeld("sessions")).toBe(true);
 
-		await app.appMenu("logout-btn");
+		await app.appMenu("logout");
 		await expect(page.locator("#auth-view")).toBeVisible();
 		backend.loginAs("bob");
 		await signIn(page, "bob");
@@ -303,7 +303,7 @@ test.describe("auth transitions on the real cookie jar", () => {
 	}) => {
 		await signIn(page, "alice");
 		await expect(page.locator("#app-view")).toBeVisible();
-		await app.appMenu("logout-btn");
+		await app.appMenu("logout");
 		await expect(page.locator("#auth-view")).toBeVisible();
 
 		// On the login screen a status probe goes out (entering register mode

@@ -38,7 +38,7 @@ test.describe("auth and load races", () => {
 
 		// Alice logs out; Bob signs in on the same tab (no reload — the held
 		// request is still alive).
-		await app.appMenu("logout-btn");
+		await app.appMenu("logout");
 		await expect(page.locator("#auth-view")).toBeVisible();
 		await page.fill("#auth-username", "bob");
 		await page.fill("#auth-password", "pw");

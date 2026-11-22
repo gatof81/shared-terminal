@@ -20,7 +20,7 @@ test.describe("tab title", () => {
 		expect(await page.title()).not.toContain("Refactor");
 		await app.switchView("files");
 		await expect(page).toHaveTitle("my-project · Files — Shared Terminal");
-		await app.appMenu("logout-btn");
+		await app.appMenu("logout");
 		await expect(page.locator("#auth-view")).toBeVisible();
 		await expect(page).toHaveTitle("Shared Terminal");
 	});

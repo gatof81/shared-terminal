@@ -14,7 +14,6 @@ import { showToast } from "./components/toast.js";
 const invitesModal = document.getElementById("invites-modal")!;
 const inviteCreateBtn = document.getElementById("invite-create-btn") as HTMLButtonElement;
 const inviteList = document.getElementById("invite-list")!;
-const sidebarInvitesBtn = document.getElementById("sidebar-invites-btn") as HTMLButtonElement;
 
 // ── Invites modal ───────────────────────────────────────────────────────────
 
@@ -134,8 +133,6 @@ async function renderInvites() {
 		inviteList.appendChild(footer);
 	}
 }
-
-sidebarInvitesBtn.addEventListener("click", () => openInvitesModal(sidebarInvitesBtn));
 
 // Mint flow: the server returns plaintext exactly once. We copy it to the
 // clipboard and, when that fails, show it in a dialog the person must
