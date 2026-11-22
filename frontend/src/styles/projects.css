@@ -378,14 +378,6 @@ body.project-page-on #actions-btn {
     gap: 0.5rem;
     padding: 0.5rem 0.75rem 0.25rem;
   }
-  #sidebar.sidebar-tree #sidebar-actions #sidebar-switcher-btn {
-    flex: 1;
-    min-width: 0;
-    margin: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
   #sidebar.sidebar-tree #sidebar-actions #new-session-btn {
     flex-shrink: 0;
     width: auto;
@@ -470,9 +462,6 @@ body.project-page-on #actions-btn {
   gap: 8px;
   border-radius: var(--radius-s);
   color: var(--c-text-2);
-}
-.sidebar-tree .session-list-grouped .session-item:has(.session-last-conv) {
-  flex-wrap: wrap;
 }
 .sidebar-tree .session-list-grouped .session-item:hover {
   background: var(--c-surface-2);

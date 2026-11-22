@@ -77,9 +77,8 @@ test.describe("soft keyboard (simulated visual viewport)", () => {
 	test.skip(({ isMobile }) => !isMobile, "mobile layouts");
 
 	test("a pan alone (only `scroll`, same height) moves the app with it", async ({ app, page }) => {
-		await app.login("alice");
-		await app.openSession("my-project");
-		await app.switchView("chat");
+		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
+		await app.expectView("chat");
 		const viewport = page.viewportSize()!;
 		await keyboard(page, viewport.height - 380, 0);
 		const top = () => page.locator("body").evaluate((b) => Math.round(b.getBoundingClientRect().y));
@@ -95,9 +94,8 @@ test.describe("soft keyboard (simulated visual viewport)", () => {
 		app,
 		page,
 	}) => {
-		await app.login("alice");
-		await app.openSession("my-project");
-		await app.switchView("chat");
+		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
+		await app.expectView("chat");
 		const viewport = page.viewportSize()!;
 		const top = () => page.locator("body").evaluate((b) => Math.round(b.getBoundingClientRect().y));
 		await keyboard(page, viewport.height - 380, 300);
@@ -112,9 +110,8 @@ test.describe("soft keyboard (simulated visual viewport)", () => {
 		app,
 		page,
 	}) => {
-		await app.login("alice");
-		await app.openSession("my-project");
-		await app.switchView("chat");
+		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
+		await app.expectView("chat");
 		const top = () => page.locator("body").evaluate((b) => Math.round(b.getBoundingClientRect().y));
 		await pan(page, 250, 2);
 		await page.waitForTimeout(200);
@@ -135,12 +132,9 @@ test.describe("soft keyboard (simulated visual viewport)", () => {
 		app,
 		page,
 	}) => {
-		await app.login("alice");
-		await app.openSession("my-project");
-		await app.switchView("chat");
-		await page.locator("#chat-list .chat-conv-row", { hasText: "Refactor auth flow" }).click();
-		// The thread's last element (the read-only note) is what must stay above the keyboard.
-		const ta = page.locator("#chat-thread .chat-readonly-note");
+		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
+		// The chat's last element (the message box) is what must stay above the keyboard.
+		const ta = page.locator("#acp-chat .acp-chat-composer");
 		await expect(ta).toBeVisible();
 
 		// Keyboard up, Safari panned the view 300 px down to reveal the field.
@@ -164,79 +158,7 @@ test.describe("soft keyboard (simulated visual viewport)", () => {
 		expect(Math.round((await page.locator("body").boundingBox())!.y)).toBe(0);
 	});
 
-	test("a reader at the bottom stays at the bottom when the keyboard shrinks the thread; one reading earlier keeps their place", async ({
-		app,
-		backend,
-		page,
-	}) => {
-		// Enough messages for the thread to scroll.
-		const conv = backend.conversations[0]!;
-		for (let i = 0; i < 40; i++) {
-			conv.events.push({
-				seq: (conv.events.at(-1)?.seq ?? 0) + 1,
-				ts: conv.events.at(-1)!.ts,
-				ev: "assistant_delta",
-				prompt_id: `p-k${i}`,
-				turn_id: `t-k${i}`,
-				agent_id: null,
-				pane: "%1",
-				data: { message_id: `mk${i}`, index: 0, delta: `Filler message ${i}`, final: true },
-			});
-		}
-		await app.login("alice");
-		await app.openSession("my-project");
-		await app.switchView("chat");
-		await page.locator("#chat-list .chat-conv-row", { hasText: "Refactor auth flow" }).click();
-		const sc = page.locator("#chat-thread .chat-scroll");
-		await expect(sc).toContainText("Filler message 39");
-		const gap = () =>
-			sc.evaluate((el) => Math.round(el.scrollHeight - el.clientHeight - el.scrollTop));
-		await expect.poll(gap).toBeLessThan(4);
-
-		const viewport = page.viewportSize()!;
-		await keyboard(page, viewport.height - 380, 0);
-		await expect.poll(gap, "the last message stayed in view").toBeLessThan(4);
-		// With the keyboard up, a new message still sticks to the bottom.
-		backend.pushConversationEvent(conv.cid, {
-			ts: conv.events.at(-1)!.ts,
-			ev: "assistant_delta",
-			prompt_id: "p-live",
-			turn_id: "t-live",
-			agent_id: null,
-			pane: "%1",
-			data: { message_id: "m-live", index: 0, delta: "Arrived with the keyboard up", final: true },
-		});
-		await expect(sc).toContainText("Arrived with the keyboard up");
-		await expect.poll(gap, "a live message sticks while the keyboard is up").toBeLessThan(4);
-		await expect(page.locator("#chat-thread .chat-float")).toBeHidden();
-		await keyboard(page, viewport.height, 0);
-		await expect.poll(gap).toBeLessThan(4);
-
-		// Reading earlier messages: the keyboard does not yank the reader down.
-		await sc.evaluate((el) => {
-			el.style.scrollBehavior = "auto";
-			el.scrollTop = 200;
-			el.dispatchEvent(new Event("scroll"));
-		});
-		const before = await sc.evaluate((el) => el.scrollTop);
-		const firstVisible = () =>
-			sc.evaluate((el) => {
-				const top = el.getBoundingClientRect().top;
-				const items = [...el.querySelectorAll<HTMLElement>(".chat-assistant, .chat-user")];
-				return items.find((i) => i.getBoundingClientRect().bottom > top + 1)?.textContent ?? "";
-			});
-		const readingAt = await firstVisible();
-		await keyboard(page, viewport.height - 380, 0);
-		await page.waitForTimeout(300);
-		expect(await sc.evaluate((el) => el.scrollTop), "keyboard up: not yanked down").toBe(before);
-		expect(await firstVisible(), "the same message is still at the top").toBe(readingAt);
-		await keyboard(page, viewport.height, 0);
-		await page.waitForTimeout(300);
-		expect(await sc.evaluate((el) => el.scrollTop), "keyboard down: still in place").toBe(before);
-		expect(await firstVisible()).toBe(readingAt);
-	});
-
-	test("the covered terminal sends no resize while the keyboard opens and closes in Chat; one controlled sync on return", async ({
+	test("the covered terminal sends no resize while the keyboard opens and closes over an overlay; one controlled sync on return", async ({
 		app,
 		backend,
 		page,
@@ -244,7 +166,7 @@ test.describe("soft keyboard (simulated visual viewport)", () => {
 		await app.login("alice");
 		await app.openSession("my-project");
 		await app.expectTerminalReady();
-		await app.switchView("chat");
+		await app.switchView("files");
 		await page.waitForTimeout(300);
 		const sock = backend.terminalSockets[0]!;
 		const resizes = () => sock.sent.filter((f) => f.type === "resize").length;
@@ -256,7 +178,7 @@ test.describe("soft keyboard (simulated visual viewport)", () => {
 			await keyboard(page, viewport.height, 0);
 			await page.waitForTimeout(250);
 		}
-		expect(resizes() - r0, "keyboard churn in Chat reached tmux").toBe(0);
+		expect(resizes() - r0, "keyboard churn over Files reached tmux").toBe(0);
 		// Keyboard left up when going back: the terminal fits once to the new size.
 		await keyboard(page, viewport.height - 380, 0);
 		await page.waitForTimeout(250);

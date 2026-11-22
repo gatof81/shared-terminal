@@ -18,7 +18,14 @@ test.describe("context bar", () => {
 		const heights: number[] = [];
 		for (const name of ["my-project", "hz-architect"]) {
 			await app.openSession(name);
-			for (const view of ["terminal", "files", "git", "chat"] as const) {
+			// Only an agent's session has a Chat.
+			const views = [
+				"terminal",
+				"files",
+				"git",
+				...(name === "my-project" ? [] : ["chat"]),
+			] as const;
+			for (const view of views as ReadonlyArray<"terminal" | "files" | "git" | "chat">) {
 				await app.switchView(view);
 				await app.expectView(view);
 				heights.push(
@@ -111,7 +118,7 @@ test.describe("context bar", () => {
 		test.skip(info.project.use.isMobile === true, "desktop measures");
 		await app.login("alice");
 		await app.openSession("my-project");
-		for (const view of ["files", "git", "chat"] as const) {
+		for (const view of ["files", "git"] as const) {
 			await app.switchView(view);
 			const bar = app.page.locator(`#${view}-header`);
 			expect(Math.round((await bar.boundingBox())!.height)).toBe(36);

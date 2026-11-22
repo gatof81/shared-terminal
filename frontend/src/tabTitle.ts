@@ -2,9 +2,9 @@
  * tabTitle.ts — the browser tab says which project (and which view) it shows,
  * so several tabs supervising several projects can be told apart.
  *
- * Project name and view only. A conversation title is content: browsers keep
- * page titles in their history, which outlives a logout on a shared machine,
- * so it never goes into the tab title.
+ * Project name and view only. Content (a message, a file's text) stays out:
+ * browsers keep page titles in their history, which outlives a logout on a
+ * shared machine.
  */
 
 export const APP_TITLE = "Shared Terminal";

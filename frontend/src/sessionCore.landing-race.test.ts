@@ -1,7 +1,8 @@
 /**
  * sessionCore.landing-race.test.ts — hypotheses C and E (shell v2 landing
  * policy), sessionCore + viewSwitch under jsdom with main.ts / api.ts
- * mocked. Controlled promises only.
+ * mocked. Controlled promises only: the landing waits on the agents list
+ * (an agent's session lands on Chat), whose reads the tests hold.
  *
  *   C. a click on the already-active Terminal tab while `decideLanding`
  *      is pending must count as the person's choice;
@@ -83,7 +84,6 @@ vi.mock("./main.js", () => ({
 const api = vi.hoisted(() => ({
 	listSessions: vi.fn(),
 	listTabs: vi.fn(),
-	fetchConversations: vi.fn(),
 	getSession: vi.fn(),
 	fetchAdminSessions: vi.fn(),
 	createTab: vi.fn(),
@@ -97,18 +97,17 @@ const api = vi.hoisted(() => ({
 	TabNotFoundError: class extends Error {},
 }));
 vi.mock("./api.js", () => api);
-// No ACP agent among the sessions, and the list already read: the landing
-// decides without waiting for it.
+// The agents list: unknown (null) until a test's read lands it; `agents`
+// are the sessions that turn out to be an agent's.
+const registry = vi.hoisted(() => ({ loaded: false, agents: new Set<string>() }));
 vi.mock("./acpRegistry.js", () => ({
-	acpAgentsLoaded: () => true,
+	acpAgentsLoaded: () => registry.loaded,
 	acpAgentsReadAt: () => 0,
 	acpEntry: () => null,
-	isAcpAgentSession: () => false,
+	isAcpAgentSession: (sid: string) => (registry.loaded ? registry.agents.has(sid) : null),
 }));
-vi.mock("./acpStatusFeed.js", () => ({
-	readAcpAgents: vi.fn(async () => {}),
-	startAcpStatusFeed: vi.fn(),
-}));
+const feed = vi.hoisted(() => ({ readAcpAgents: vi.fn(), startAcpStatusFeed: vi.fn() }));
+vi.mock("./acpStatusFeed.js", () => feed);
 vi.mock("./admin.js", () => ({ openObserversModalFor: vi.fn() }));
 vi.mock("./components/actionMenu.js", () => ({ openActionMenu: vi.fn() }));
 vi.mock("./components/dialog.js", () => ({ confirmDialog: vi.fn() }));
@@ -137,8 +136,18 @@ function deferred<T>() {
 	return { promise, resolve };
 }
 
-const withHistory = { capture: null, conversations: [{ sessionId: "c1" }] };
-const noHistory = { capture: null, conversations: [] };
+/** One read of the agents list, landed by the test: `agents` are agents' sessions. */
+function agentsRead() {
+	const d = deferred<void>();
+	return {
+		promise: d.promise,
+		land(...agents: string[]) {
+			for (const a of agents) registry.agents.add(a);
+			registry.loaded = true;
+			d.resolve();
+		},
+	};
+}
 
 beforeAll(async () => {
 	document.body.innerHTML = `
@@ -185,7 +194,9 @@ beforeEach(() => {
 	mainState.currentTerminals.clear();
 	mainState.showToast.mockClear();
 	api.listTabs.mockReset();
-	api.fetchConversations.mockReset();
+	registry.loaded = false;
+	registry.agents.clear();
+	feed.readAcpAgents.mockReset();
 	core.renderSessionList();
 	core.updateToolbar();
 	vs.setView("terminal");
@@ -200,21 +211,22 @@ afterEach(() => {
 describe("C: the already-active Terminal tab clicked while the landing is deciding", () => {
 	it("counts as the person's choice: the landing must not move them to Chat afterwards", async () => {
 		mainState.sessions = [{ sessionId: "s1", name: "s1", status: "running" }];
-		const history = deferred<typeof withHistory>();
+		const read = agentsRead();
 		const tabs = deferred<Tab[]>();
-		api.fetchConversations.mockReturnValueOnce(history.promise);
+		feed.readAcpAgents.mockReturnValueOnce(read.promise);
 		api.listTabs.mockReturnValueOnce(tabs.promise);
 
 		const open = core.openSession("s1");
 		await flush();
 		expect(vs.getView()).toBe("terminal");
-		expect(api.fetchConversations).toHaveBeenCalledWith("s1", { capture: false });
+		expect(feed.readAcpAgents).toHaveBeenCalledTimes(1);
 
 		// The person confirms "Terminal" (the tab already pressed) while the
-		// "has history" answer is still on its way.
+		// agents list is still on its way.
 		$("view-terminal-btn").click();
 
-		history.resolve(withHistory);
+		// s1 turns out to be an agent's session: its landing would be Chat.
+		read.land("s1");
 		tabs.resolve([]);
 		await open;
 		await flush();
@@ -235,11 +247,9 @@ describe("E: overlapping openSession() calls share one landingPending flag", () 
 			{ sessionId: "s1", name: "s1", status: "stopped" },
 			{ sessionId: "s2", name: "s2", status: "stopped" },
 		];
-		const h1 = deferred<typeof noHistory>();
-		const h2 = deferred<typeof withHistory>();
-		api.fetchConversations.mockImplementation((sid: string) =>
-			sid === "s1" ? h1.promise : h2.promise,
-		);
+		const h1 = agentsRead();
+		const h2 = agentsRead();
+		feed.readAcpAgents.mockReturnValueOnce(h1.promise).mockReturnValueOnce(h2.promise);
 		const landed: string[] = [];
 		vs.onViewChange((next) => landed.push(next));
 
@@ -249,9 +259,9 @@ describe("E: overlapping openSession() calls share one landingPending flag", () 
 		await flush();
 		expect(vs.getView(), "both landings pending: nothing landed yet").toBe("terminal");
 
-		// s1's answer arrives after the switch: its continuation does nothing
-		// for the screen, but ends the (shared) landing.
-		h1.resolve(noHistory);
+		// s1's read lands after the switch (s2 not yet known as an agent's):
+		// its continuation does nothing for the screen, but ends s1's landing.
+		h1.land();
 		await open1;
 		await flush();
 
@@ -262,7 +272,7 @@ describe("E: overlapping openSession() calls share one landingPending flag", () 
 			"s2's landing is still pending, yet the sync landed its own fallback",
 		).toBe("terminal");
 
-		h2.resolve(withHistory);
+		h2.land("s2");
 		await open2;
 		await flush();
 		expect(vs.getView()).toBe("chat");
@@ -274,9 +284,9 @@ describe("E: overlapping openSession() calls share one landingPending flag", () 
 			{ sessionId: "s1", name: "s1", status: "running" },
 			{ sessionId: "s2", name: "s2", status: "stopped" },
 		];
-		const h1 = deferred<typeof noHistory>();
+		const h1 = agentsRead();
 		const t1 = deferred<Tab[]>();
-		api.fetchConversations.mockReturnValueOnce(h1.promise);
+		feed.readAcpAgents.mockReturnValueOnce(h1.promise);
 		api.listTabs.mockReturnValueOnce(t1.promise);
 
 		const open1 = core.openSession("s1");
@@ -288,10 +298,10 @@ describe("E: overlapping openSession() calls share one landingPending flag", () 
 		await flush();
 		expect(vs.getView()).toBe("terminal");
 
-		// s1's tabs and history land after the switch: openSession(s1)
+		// s1's tabs and the agents list land after the switch: openSession(s1)
 		// returns at `activeSessionId !== sessionId` without endLanding().
 		t1.resolve([]);
-		h1.resolve(noHistory);
+		h1.land();
 		await open1;
 		await flush();
 

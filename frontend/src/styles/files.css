@@ -32,6 +32,10 @@
   stroke-linejoin: round;
   flex-shrink: 0;
 }
+/* Chat exists only on an agent's session (viewSwitch.renderChatTab). */
+#view-switch button[hidden] {
+  display: none;
+}
 #view-switch button + button {
   border-left: 1px solid var(--c-border);
 }

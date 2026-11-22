@@ -3,10 +3,10 @@ import { expect, test } from "./fixtures.js";
 import { PROJECT_IDS, PROJECT_SESSION_IDS } from "./mockBackend.js";
 
 /**
- * Scroll and navigation inside the three chats (ACP agent chat, Project Chat,
- * capture Chat): an opening shows the end, Back / Forward puts the reading
- * row back, a reader further up is never moved, and one "go to the end"
- * button (chatScroll.ts) for all three. The Back cases after a followed
+ * Scroll and navigation inside the ACP chats (an agent's chat, Project Chat):
+ * an opening shows the end, Back / Forward puts the reading row back, a
+ * reader further up is never moved, and one "go to the end" button
+ * (chatScroll.ts) for both. The Back cases after a followed
  * link are in acp-chat.spec.ts; the keyboard cases in keyboard.spec.ts.
  */
 
@@ -439,118 +439,5 @@ test.describe("chat scroll: the end button and an open question", () => {
 				expect(overlaps, `the button over "${await o.textContent()}"`).toBe(false);
 			}
 		}
-	});
-});
-
-test.describe("chat scroll: capture Chat", () => {
-	test.beforeEach(({ backend }) => {
-		// More than one page (200 events) in the first conversation.
-		const conv = backend.conversations[0]!;
-		for (let i = 0; i < 260; i++)
-			conv.events.push({
-				seq: (conv.events.at(-1)?.seq ?? 0) + 1,
-				ts: conv.events.at(-1)!.ts,
-				ev: "assistant_delta",
-				prompt_id: `p-f${i}`,
-				turn_id: `t-f${i}`,
-				agent_id: null,
-				pane: "%1",
-				data: { message_id: `mf${i}`, index: 0, delta: `Filler message ${i}`, final: true },
-			});
-	});
-
-	const open = async (page: Page, title: string, mobile: boolean) => {
-		if (mobile && (await page.locator("#chat-back-btn").isVisible()))
-			await page.locator("#chat-back-btn").click();
-		await page.locator("#chat-list .chat-conv-row", { hasText: title }).click();
-	};
-
-	test("an opening shows the end; Back puts the row back; reopening from the list or the view tab shows the end", async ({
-		app,
-		page,
-		isMobile,
-	}) => {
-		await app.login("alice");
-		await app.openSession("my-project");
-		await app.switchView("chat");
-		await open(page, "Refactor auth flow", isMobile);
-		const sc = page.locator("#chat-thread .chat-scroll");
-		await expect(sc).toContainText("Filler message 259");
-		await expect.poll(() => gap(sc), "opened from the list").toBeLessThan(4);
-
-		// Another view, then Back: the conversation, where it was being read.
-		await readAt(page, sc, "Filler message 240");
-		const top = await rowTop(sc, "Filler message 240");
-		await app.switchView("terminal");
-		await page.goBack();
-		await app.expectView("chat");
-		await stays(sc, "Filler message 240", top, "Back");
-
-		// Another conversation and this one again, from the list: its end.
-		await open(page, "Fix tests", isMobile);
-		await expect(sc).toContainText("All green now.");
-		await open(page, "Refactor auth flow", isMobile);
-		await expect(sc).toContainText("Filler message 259");
-		await expect.poll(() => gap(sc), "reopened from the list").toBeLessThan(4);
-
-		// Another view and back by its tab: the end too.
-		await readAt(page, sc, "Filler message 240");
-		await app.switchView("terminal");
-		await app.switchView("chat");
-		await expect.poll(() => gap(sc), "the view shown again").toBeLessThan(4);
-	});
-
-	test("a reader further up is not moved by a new event or an earlier page; the end button counts and goes down", async ({
-		app,
-		backend,
-		page,
-		isMobile,
-	}) => {
-		await app.login("alice");
-		await app.openSession("my-project");
-		await app.switchView("chat");
-		await open(page, "Refactor auth flow", isMobile);
-		const sc = page.locator("#chat-thread .chat-scroll");
-		const btn = page.locator("#chat-thread .chat-end");
-		await expect(sc).toContainText("Filler message 259");
-		await expect.poll(() => gap(sc)).toBeLessThan(4);
-		await expect(btn).toBeHidden();
-
-		await readAt(page, sc, "Filler message 230");
-		const top = await rowTop(sc, "Filler message 230");
-		await expect(btn).toBeVisible();
-		await expect(btn).toHaveAccessibleName("Jump to latest");
-		backend.pushConversationEvent("conv-1", {
-			ts: new Date().toISOString(),
-			ev: "assistant_delta",
-			prompt_id: "p-new",
-			turn_id: "t-new",
-			agent_id: null,
-			pane: "%1",
-			data: { message_id: "m-new", index: 0, delta: "Arrived while reading", final: true },
-		});
-		await expect(sc).toContainText("Arrived while reading");
-		await stays(sc, "Filler message 230", top, "a new event below");
-		await expect(btn.locator(".chat-end-count")).toHaveText("1");
-		await expect(btn).toHaveAccessibleName("Jump to latest, 1 new");
-
-		await btn.click();
-		await expect(btn).toBeHidden();
-		await expect.poll(() => gap(sc)).toBeLessThan(4);
-
-		// Reading up to the top: the earlier page (held until the row is
-		// measured) lands without moving the row read.
-		let release: (() => void) | null = null;
-		backend.override = async (_method, path) => {
-			if (!/\/events\?.*before=/.test(path)) return false;
-			await new Promise<void>((r) => (release = r));
-			return false;
-		};
-		await scrollBy(sc, 40);
-		await expect.poll(() => release !== null, "the earlier page was asked for").toBe(true);
-		const firstAt = await rowTop(sc, "Filler message 62");
-		release!();
-		await expect(sc).toContainText("Refactor the auth flow");
-		await stays(sc, "Filler message 62", firstAt, "an earlier page");
 	});
 });

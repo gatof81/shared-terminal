@@ -30,6 +30,7 @@ import {
 } from "./api.js";
 // Overlay views register themselves with viewSwitch on load; nothing
 // else imports them by name, so the side-effect imports keep them in.
+import "./acpChat.js";
 import "./filesView.js";
 import "./gitView.js";
 import { type MenuItem, openActionMenu } from "./components/actionMenu.js";
@@ -67,11 +68,9 @@ import {
 	sessionListLoaded,
 	updateToolbar,
 } from "./sessionCore.js";
-import { closeSwitcher, initSwitcher, openSwitcher } from "./switcher.js";
 import { clearAllBadges } from "./tabActivity.js";
 import { resetTabTitle, setTitleParts } from "./tabTitle.js";
 import type { TerminalSession } from "./terminal.js";
-import { forgetAllLastConversationTitles } from "./viewPolicy.js";
 import { getView, isOverlayActive, onViewChange } from "./viewSwitch.js";
 import { initVvDebug } from "./vvDebug.js";
 
@@ -352,9 +351,8 @@ function showApp() {
 		// shareable, survives the login screen (the hash rides along
 		// untouched until here) and restores the view on reload.
 		void applyRoute(readRoute());
-		// Projects & Agents (P3a): a no-op unless /auth/status reported
-		// features.projectChat. After the list, so a #/projects/… deep
-		// link names the sessions it links to.
+		// Projects & Agents. After the list, so a #/projects/… deep link
+		// names the sessions it links to.
 		if (isLoggedIn()) startProjects();
 	});
 }
@@ -601,10 +599,6 @@ function handleLogout(toastMessage?: string): void {
 	// idempotent when no observe is active, so calling it
 	// unconditionally needs no guard.
 	closeObserveModal();
-	// The conversation switcher lists this account's titles and may still be
-	// loading them: close it before the login view shows.
-	closeSwitcher();
-	forgetAllLastConversationTitles();
 	forgetSidebarCollapsed();
 	// Unsent drafts are the person's words: none survives for the next account.
 	void logout();
@@ -903,16 +897,6 @@ document.addEventListener("keydown", (e) => {
 	if (escapeHandledByDialog(e)) return;
 	if (!mainEl.classList.contains("sidebar-open")) return;
 	setSidebarOpen(false);
-});
-
-// Conversation switcher: header button + Ctrl/⌘+K (switcher.ts); on a phone
-// the drawer's own entry, which closes the drawer first so the switcher is
-// not opened underneath it.
-initSwitcher(() => isLoggedIn());
-const sidebarSwitcherBtn = document.getElementById("sidebar-switcher-btn");
-sidebarSwitcherBtn?.addEventListener("click", () => {
-	if (isMobile()) setSidebarOpen(false);
-	openSwitcher(document.getElementById("sidebar-toggle"));
 });
 
 // On mobile, picking a session should dismiss the drawer so the user can

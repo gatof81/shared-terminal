@@ -1,7 +1,6 @@
 // chatMarkdown.ts — an agent's text as the chats show it: rendered Markdown
 // (markdown.ts, textContent-only) with a Copy button on every code block.
-// Shared by the capture Chat (chatView.ts) and the ACP chats (acpThread.ts),
-// so a report reads the same in both.
+// Used by the ACP chats (acpThread.ts), so a report reads the same in all of them.
 
 import { copyText } from "./clipboard.js";
 import { showCopySuccessToast, showToast } from "./components/toast.js";
