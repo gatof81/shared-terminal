@@ -20,7 +20,10 @@ test.describe("navigation", () => {
 		await app.expectTerminalReady();
 	});
 
-	test("Terminal ⇄ Files ⇄ Git ⇄ Chat keep the same session", async ({ app, page }) => {
+	test("Terminal ⇄ Files ⇄ Git keep the same session; a traditional session has no Chat", async ({
+		app,
+		page,
+	}) => {
 		await app.login("alice");
 		await app.openSession("my-project");
 		await app.expectTerminalReady();
@@ -33,8 +36,7 @@ test.describe("navigation", () => {
 		await expect(page.locator("#git-summary")).toContainText("main");
 		await expect(page.locator("#git-list .git-row")).toHaveCount(2);
 
-		await app.switchView("chat");
-		await expect(page.locator("#chat-list .chat-conv-row")).toHaveCount(2);
+		await expect(page.locator("#view-chat-btn")).toBeHidden();
 
 		await app.switchView("terminal");
 		await expect(page.locator("#terminal-session-name")).toHaveText("my-project");

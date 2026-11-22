@@ -21,7 +21,7 @@ test.describe("the bar layout", () => {
 		await page.locator(".tab-pane.active .xterm-helper-textarea").focus();
 		await expect(tabs).toBeVisible();
 		await expect(page.locator("#view-files-btn")).toBeVisible();
-		for (const v of ["files", "git", "chat", "terminal"] as const) {
+		for (const v of ["files", "git", "terminal"] as const) {
 			await app.switchView(v);
 			await expect(tabs).toBeVisible();
 			await expect(page.locator("#terminal-toolbar")).toBeVisible();
@@ -33,7 +33,7 @@ test.describe("the bar layout", () => {
 		}
 	});
 
-	test("merged bar on a 390-px phone: one line, a legible name, four tabs, Insert in the tab strip; with the keyboard's height too", async ({
+	test("merged bar on a 390-px phone: one line, a legible name, three tabs, Insert in the tab strip; with the keyboard's height too", async ({
 		app,
 		page,
 	}) => {
@@ -51,7 +51,8 @@ test.describe("the bar layout", () => {
 		const name = await box("#terminal-session-name");
 		expect(name.width, "the session name keeps room to read").toBeGreaterThanOrEqual(72);
 		await expect(page.locator("#terminal-session-name")).toHaveText("my-project");
-		for (const v of ["terminal", "files", "git", "chat"] as const) {
+		await expect(page.locator("#view-chat-btn"), "a traditional session has no Chat").toBeHidden();
+		for (const v of ["terminal", "files", "git"] as const) {
 			const b = await box(`#view-${v}-btn`);
 			expect(b.width, `${v} tab is a touch target`).toBeGreaterThanOrEqual(34);
 			expect(b.height, `${v} tab is a touch target`).toBeGreaterThanOrEqual(34);
@@ -62,12 +63,10 @@ test.describe("the bar layout", () => {
 		// Insert (+) is a terminal control: in the tab strip on the Terminal view, gone under an overlay.
 		await expect(page.locator("#tab-tools #actions-btn")).toBeVisible();
 		await expect(header.locator("#actions-btn")).toHaveCount(0);
-		await app.switchView("chat");
+		await app.switchView("files");
 		await expect(page.locator("#tab-tools #actions-btn")).toBeHidden();
-		// The soft keyboard takes about half the height: the bar stays one line and the thread's end is reachable.
-		await page.locator("#chat-list .chat-conv-row", { hasText: "Refactor auth flow" }).click();
+		// The soft keyboard takes about half the height: the bar stays one line.
 		await page.setViewportSize({ width: 390, height: 420 });
-		await expect(page.locator("#chat-thread .chat-readonly-note")).toBeInViewport();
 		expect((await box("header")).height).toBeLessThanOrEqual(48);
 		await expect(page.locator("#view-terminal-btn")).toBeInViewport();
 		await page.setViewportSize({ width: 390, height: 844 });
@@ -150,7 +149,7 @@ test.describe("the bar layout", () => {
 		await expect.poll(resizes, "one resize").toBe(r0 + 1);
 		const h1 = await termH();
 		expect(Math.abs(h1 - h0 - 40), "the terminal gains the row's height").toBeLessThanOrEqual(4);
-		for (const v of ["files", "git", "chat", "terminal"] as const) {
+		for (const v of ["files", "git", "terminal"] as const) {
 			await app.switchView(v);
 			if (v !== "terminal") {
 				// Off the Terminal view the item is not offered.
@@ -210,7 +209,7 @@ test.describe("the bar layout", () => {
 		// No copy of the old buttons left.
 		await expect(
 			page.locator(
-				"#templates-btn, #invites-btn, #my-groups-btn, #admin-btn, #notifications-btn, #logout-btn, [id^='sidebar-'][id$='-btn']:not(#sidebar-toggle):not(#sidebar-refresh-btn):not(#sidebar-switcher-btn):not(#sidebar-account-btn)",
+				"#templates-btn, #invites-btn, #my-groups-btn, #admin-btn, #notifications-btn, #logout-btn, [id^='sidebar-'][id$='-btn']:not(#sidebar-toggle):not(#sidebar-refresh-btn):not(#sidebar-account-btn)",
 			),
 		).toHaveCount(0);
 	});
@@ -229,7 +228,7 @@ test.describe("the bar layout", () => {
 			}
 		});
 
-	test("a stopped session: the bar's tabs reach Terminal (state panel), Files, Git and Chat", async ({
+	test("a stopped session: the bar's tabs reach Terminal (state panel), Files and Git", async ({
 		app,
 		page,
 	}) => {
@@ -238,7 +237,7 @@ test.describe("the bar layout", () => {
 		await app.expectView("files");
 		await app.switchView("terminal");
 		await expect(page.locator("#terminal-state")).toContainText("stopped");
-		await app.switchView("chat");
-		await expect(page.locator("#chat-list .chat-conv-row")).toHaveCount(2);
+		await app.switchView("git");
+		await expect(page.locator("#view-chat-btn")).toBeHidden();
 	});
 });

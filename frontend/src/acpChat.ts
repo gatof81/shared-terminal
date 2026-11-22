@@ -1,9 +1,9 @@
-// ACP agent chat (experimental, `features.acpAgents`): the individual chat.
-// When the open session is an ACP agent, this module owns #chat-view: the
-// agent's whole inbox (direct messages and what it got in Project Chat, each
-// tagged) through the shared thread component (acpThread.ts), plus a header
-// with its state, its project and the login notice. chatView.ts (the
-// capture-based Chat) stands down for such a session.
+// ACP agent chat: the individual chat. This module owns #chat-view, the Chat
+// view of an ACP agent's session (a traditional session has none,
+// viewSwitch.renderChatTab): the agent's whole inbox (direct messages and
+// what it got in Project Chat, each tagged) through the shared thread
+// component (acpThread.ts), plus a header with its state, its project and
+// the login notice.
 //
 // Messages typed here are DIRECT: private to the person and this agent.
 
@@ -70,15 +70,9 @@ const thread = new AcpThread();
 root.append(settingsPanel, noticeEl, thread.root);
 thread.onState = (s) => renderHeader(s);
 
-// Mounted on first use (the module is imported by chatView.ts, also in tests
-// whose DOM has no #chat-view).
+// Mounted on first use (tests import the module with a DOM that has no #chat-view).
 function mount(): void {
 	if (!root.isConnected) document.getElementById("chat-view")?.appendChild(root);
-}
-
-/** True when the session's Chat belongs to this module (chatView.ts checks it). */
-export function acpOwns(sessionId: string | null): boolean {
-	return sessionId !== null && agentsBySession.has(sessionId);
 }
 
 async function loadAgents(): Promise<void> {
@@ -113,10 +107,6 @@ function apply(): void {
 	paintMenuFlag(agent, agent ? thread.state.auth.get(agent.name) === true : false);
 	if (agent) mount();
 	root.hidden = !active;
-	// The capture Chat's own children (header, list/thread body, announcer…) are
-	// styled with `display: flex/grid`, which beats the `hidden` attribute: a class
-	// on #chat-view hides every child but this one (acp-chat.css).
-	document.getElementById("chat-view")?.classList.toggle("acp-owned", agent !== null);
 	if (active && agent) {
 		// Another agent's chat starts with its panel closed.
 		if (shownAgentName !== agent.name) setSettings(false);

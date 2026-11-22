@@ -883,8 +883,7 @@ export class AcpThread {
 	/**
 	 * Remembers where this chat is being read, by its first row in view and
 	 * that row's offset — never by distance to the end, which new rows below
-	 * change (the capture Chat's read anchor, chatView.ts). A reader at the
-	 * end has no anchor: they come back to the end.
+	 * change. A reader at the end has no anchor: they come back to the end.
 	 */
 	private noteAnchor(): void {
 		const t = this.threadEl;
@@ -1783,7 +1782,7 @@ function sourceKey(src: ThreadSource): string {
 	return src.kind === "agent" ? `a:${src.name}` : `p:${src.projectId}`;
 }
 
-/** An agent's text (its answer, a consult, a system note): Markdown, like the capture Chat. */
+/** An agent's text (its answer, a consult, a system note): Markdown. */
 function agentText(text: string): HTMLElement {
 	const box = el("div", "acp-msg-body acp-md");
 	box.append(markdownBlock(text));

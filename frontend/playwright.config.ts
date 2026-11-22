@@ -1,5 +1,4 @@
 import { defineConfig, devices } from "@playwright/test";
-import type { AppOptions } from "./e2e/fixtures.js";
 
 // End-to-end harness (docs/design/ui-unificada.md §8.2, PR 3). The app runs
 // on the Vite dev server with VITE_API_URL pointing at ITSELF, so every
@@ -9,7 +8,7 @@ import type { AppOptions } from "./e2e/fixtures.js";
 // stay in the Session Image workflow's smokes.
 const PORT = 5174;
 
-export default defineConfig<AppOptions>({
+export default defineConfig({
 	testDir: "./e2e",
 	testMatch: /.*\.spec\.ts/,
 	fullyParallel: true,

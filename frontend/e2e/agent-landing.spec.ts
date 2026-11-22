@@ -8,11 +8,9 @@ const AGENT = PROJECT_SESSION_IDS.scratch; // @solo's session ("scratch")
  * shells: running or stopped, unless the person chose another view for
  * that session; a route with a view still wins; a landing is never a
  * history entry and never flickers through Terminal while the agents list
- * is read. Traditional sessions keep each shell's landing (v1-landing,
- * chat-first).
+ * is read. A traditional session lands on Terminal (running) or Files.
  */
 test.describe("an agent's session lands on its Chat", () => {
-	test.use({ landing: "none" });
 	test.beforeEach(({ backend }) => backend.enableAcp());
 
 	test("selected from the sidebar: Chat, in place; the terminal attaches underneath untouched", async ({
@@ -31,9 +29,10 @@ test.describe("an agent's session lands on its Chat", () => {
 		await expect.poll(() => backend.terminalSockets.length).toBe(1);
 		await page.waitForTimeout(300);
 		expect(backend.terminalSockets[0]!.sent.filter((f) => f.type === "resize")).toEqual([]);
-		// A traditional session with captured history lands on Chat too.
+		// A traditional session has no Chat: it lands on its Terminal.
 		await app.openSession("my-project");
-		await app.expectView("chat");
+		await app.expectView("terminal");
+		await expect(page.locator("#view-chat-btn")).toBeHidden();
 	});
 
 	test("a stopped agent's session also lands on Chat, with its history", async ({
@@ -155,20 +154,26 @@ test.describe("an agent's session lands on its Chat", () => {
  * normally finds it there and waits for nothing; a list that never answers
  * costs one bounded wait (LANDING_AGENTS_WAIT_MS, 500 ms) per page load,
  * never one per selection. Measured in the page: from the click on a row to
- * the first frame that shows the session's landing view (Chat: both
- * sessions have captured history).
+ * the first frame that shows the session's landing view (`view`: Git for
+ * my-project, whose saved view it is; Files for the stopped docs).
  */
 test.describe("the agents list never makes every selection wait", () => {
-	test.use({ landing: "none" });
+	test.beforeEach(async ({ page }) => {
+		await page.addInitScript(
+			(sid) => localStorage.setItem(`st.view.${sid}`, "git"),
+			SESSION_IDS.running,
+		);
+	});
 
 	async function landingDelay(
 		app: import("./fixtures.js").App,
 		page: import("@playwright/test").Page,
 		name: string,
+		view: "files" | "git",
 	): Promise<number> {
 		await app.openSidebar();
 		const row = app.sessionRow(name).locator(".session-select");
-		await page.evaluate(() => {
+		await page.evaluate((view) => {
 			const w = window as unknown as { __landed: number | null; __clicked: number | null };
 			w.__landed = null;
 			w.__clicked = null;
@@ -177,16 +182,16 @@ test.describe("the agents list never makes every selection wait", () => {
 				() => {
 					w.__clicked = performance.now();
 					const tick = () => {
-						if (!document.getElementById("chat-view")!.hidden) w.__landed = performance.now();
+						if (!document.getElementById(`${view}-view`)!.hidden) w.__landed = performance.now();
 						else requestAnimationFrame(tick);
 					};
 					requestAnimationFrame(tick);
 				},
 				{ capture: true, once: true },
 			);
-		});
+		}, view);
 		await row.click();
-		await app.expectView("chat");
+		await app.expectView(view);
 		return page.evaluate(() => {
 			const w = window as unknown as { __landed: number; __clicked: number };
 			return w.__landed - w.__clicked;
@@ -200,9 +205,9 @@ test.describe("the agents list never makes every selection wait", () => {
 	}) => {
 		backend.acpAgentsDelayMs = 600_000;
 		await app.login("alice");
-		const first = await landingDelay(app, page, "my-project");
+		const first = await landingDelay(app, page, "my-project", "git");
 		expect(first, "the first selection waits for the list (bounded)").toBeGreaterThanOrEqual(400);
-		const second = await landingDelay(app, page, "docs");
+		const second = await landingDelay(app, page, "docs", "files");
 		expect(second, "the second does not wait again").toBeLessThan(first - 200);
 	});
 
@@ -210,7 +215,7 @@ test.describe("the agents list never makes every selection wait", () => {
 		backend.acpAgentsDelayMs = 50;
 		await app.login("alice");
 		await page.waitForTimeout(300); // the read at load has answered
-		expect(await landingDelay(app, page, "docs")).toBeLessThan(400);
+		expect(await landingDelay(app, page, "docs", "files")).toBeLessThan(400);
 	});
 });
 

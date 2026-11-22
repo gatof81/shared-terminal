@@ -30,10 +30,6 @@ test.describe("router", () => {
 		await page.locator("#git-list .git-row", { hasText: "auth.ts" }).click();
 		await expect.poll(() => page.url()).toContain(`#/sessions/${S}/git/unstaged:src/auth.ts`);
 
-		await app.switchView("chat");
-		await page.locator("#chat-list .chat-conv-row", { hasText: "Fix tests" }).click();
-		await expect.poll(() => page.url()).toContain(`#/sessions/${S}/chat/conv-2`);
-
 		await app.switchView("terminal");
 		const depthBefore = await page.evaluate(
 			() => (history.state as { st?: { n: number } })?.st?.n ?? 0,
@@ -65,10 +61,7 @@ test.describe("router", () => {
 
 		await app.switchView("files");
 		await app.switchView("git");
-		await app.switchView("chat");
 		const f0 = frames();
-		await page.goBack();
-		await app.expectView("git");
 		await page.goBack();
 		await app.expectView("files");
 		await page.goForward();
@@ -85,33 +78,15 @@ test.describe("router", () => {
 		await expect(page.locator(".tab-pane.active")).toContainText("Welcome");
 	});
 
-	test("Back undoes an opened file / diff / conversation; the chat history survives", async ({
-		app,
-		page,
-	}) => {
+	test("Back undoes an opened file or diff", async ({ app, page }) => {
 		await app.login("alice");
 		await app.openSession("my-project");
-		await app.switchView("chat");
-		const rows = page.locator("#chat-list .chat-conv-row");
-		await rows.filter({ hasText: "Refactor auth flow" }).click();
-		await expect(page.locator("#chat-thread .chat-assistant")).toContainText("cookie check");
-		// The second conversation by address (on mobile the list pane is
-		// hidden behind the thread); a hash assignment is a history entry.
-		await page.evaluate((h) => {
-			window.location.hash = h;
-		}, `#/sessions/${S}/chat/conv-2`);
-		await expect(page.locator("#chat-thread .chat-assistant")).toContainText("All green");
+		await app.switchView("git");
+		await page.locator("#git-list .git-row", { hasText: "auth.ts" }).click();
+		await expect(page.locator("#git-diff")).toContainText("cookie === null");
 		await page.goBack();
-		await expect.poll(() => page.url()).toContain("/chat/conv-1");
-		await expect(page.locator("#chat-thread .chat-assistant")).toContainText("cookie check");
-		await page.goBack();
-		await expect.poll(() => page.url()).toMatch(new RegExp(`#/sessions/${S}/chat$`));
-		await expect(page.locator("#chat-list")).toBeVisible();
-		if (app.mobile) await expect(page.locator("#chat-thread")).toBeHidden();
-		// Forward brings the thread back from the cache (no events request).
-		const events = page.locator("#chat-thread .chat-assistant");
-		await page.goForward();
-		await expect(events).toContainText("cookie check");
+		await expect.poll(() => page.url()).toMatch(new RegExp(`#/sessions/${S}/git$`));
+		if (app.mobile) await expect(page.locator("#git-list")).toBeVisible();
 
 		await app.switchView("files");
 		await page.locator("#files-tree .files-row", { hasText: "README.md" }).click();
@@ -158,17 +133,9 @@ test.describe("router", () => {
 		await expect(page.locator("#git-list .git-row.selected")).toContainText("auth.ts");
 	});
 
-	test("deep links open a conversation, a file and a tab directly", async ({
-		app,
-		backend,
-		page,
-	}) => {
-		await app.login("alice", `#/sessions/${S}/chat/conv-1`);
+	test("deep links open a file and a tab directly", async ({ app, backend, page }) => {
+		await app.login("alice", `#/sessions/${S}/files/src/auth.ts`);
 		await expect(page.locator("#terminal-session-name")).toHaveText("my-project");
-		await app.expectView("chat");
-		await expect(page.locator("#chat-thread .chat-assistant")).toContainText("cookie check");
-
-		await page.goto(`/#/sessions/${S}/files/src/auth.ts`);
 		await app.expectView("files");
 		await expect(page.locator("#files-preview")).toContainText("export function login");
 		await expect(page.locator("#files-breadcrumbs")).toContainText("auth.ts");
@@ -181,7 +148,7 @@ test.describe("router", () => {
 		expect(since[since.length - 1]).toBe("tab-2");
 	});
 
-	test("a stopped session's deep link to the terminal shows its state; to chat shows the history", async ({
+	test("a stopped session's deep link to the terminal shows its state; to chat lands on Files (no Chat)", async ({
 		app,
 		page,
 	}) => {
@@ -190,8 +157,8 @@ test.describe("router", () => {
 		await app.expectView("terminal");
 		await expect(page.locator("#terminal-state")).toContainText("stopped");
 		await page.goto(`/#/sessions/${SESSION_IDS.stopped}/chat`);
-		await app.expectView("chat");
-		await expect(page.locator("#chat-list .chat-conv-row")).toHaveCount(2);
+		await app.expectView("files");
+		await expect(page.locator("#view-chat-btn")).toBeHidden();
 	});
 
 	test("an unknown or foreign session: one toast, the address cleared, no request for it", async ({
@@ -199,7 +166,7 @@ test.describe("router", () => {
 		backend,
 		page,
 	}) => {
-		await app.login("alice", `#/sessions/${SESSION_IDS.bob}/chat/conv-1`);
+		await app.login("alice", `#/sessions/${SESSION_IDS.bob}/files/README.md`);
 		await expect(app.toast("Session not found")).toBeVisible();
 		await expect.poll(() => page.url()).not.toContain(SESSION_IDS.bob);
 		expect(backend.requests.filter((r) => r.path.includes(SESSION_IDS.bob))).toEqual([]);

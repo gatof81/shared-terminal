@@ -45,13 +45,13 @@ async function expectClean(page: Page, view: string, include?: string[]): Promis
 }
 
 test.describe("accessibility — axe on the main views", () => {
-	test("session views: Terminal, Files, Git, Chat", async ({ app, page }) => {
+	test("session views: Terminal, Files, Git", async ({ app, page }) => {
 		await app.login("alice");
 		await app.openSession("my-project");
 		await app.expectTerminalReady();
 		await expect(page.locator("#terminal-tabs .tab-chip-btn")).toHaveCount(2);
 		await expectClean(page, "terminal");
-		for (const view of ["files", "git", "chat"]) {
+		for (const view of ["files", "git"]) {
 			await page.goto(`/#/sessions/${SESSION_IDS.running}/${view}`);
 			await expect(page.locator(`#${view}-view`)).toBeVisible();
 			await expectClean(page, view);

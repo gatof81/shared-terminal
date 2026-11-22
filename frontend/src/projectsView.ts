@@ -4,8 +4,6 @@
  * the new-project dialog. A project only groups ACP agents and gives them a
  * shared conversation; each agent keeps its own session.
  *
- * Nothing here exists unless `/auth/status` reported `features.projectChat`.
- *
  * The page is shown OVER the session workbench, never instead of it: the
  * terminal area's other children only turn `visibility: hidden` (layout
  * kept), so the terminal is neither resized nor detached and its socket
