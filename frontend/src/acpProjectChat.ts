@@ -419,7 +419,13 @@ function agentRow(
 		chip = go;
 	} else chip = el("span", `chip bare tone-${st.tone}`, st.label);
 	chip.classList.add("acp-agents-state");
-	const open = el("a", "btn sm acp-agents-open", "Abrir su chat");
+	// "Chat" on the narrowest phones (acp-chat.css), where the long label
+	// would cover the state chip; the accessible name stays the long one.
+	const open = el("a", "btn sm acp-agents-open");
+	open.append(
+		el("span", "acp-agents-open-long", "Abrir su chat"),
+		el("span", "acp-agents-open-short", "Chat"),
+	);
 	open.href = routeHash({ sessionId: a.sessionId, view: "chat", detail: null });
 	open.title = "Abrir su sesión (Chat individual, Terminal, Files, Git)";
 	open.setAttribute("aria-label", `Abrir su chat (@${a.name})`);

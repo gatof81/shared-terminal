@@ -171,6 +171,65 @@ test.describe("Project Chat (U-2)", () => {
 		expect(composer.y - (p.y + p.height)).toBeGreaterThanOrEqual(8);
 	});
 
+	for (const width of [320, 360, 390])
+		test(`at ${width} px the longest state chip is whole, clear of "Abrir su chat"; a tappable chip takes 44 px`, async ({
+			app,
+			backend,
+			page,
+		}) => {
+			test.skip(!app.mobile, "a phone");
+			backend.acpAgents.find((a) => a.name === "dev")!.waitingInput = true;
+			const m = backend.addAcpMessage({
+				to_id: "arq",
+				body: "@arq algo",
+				state: "running",
+				project_id: PROJECT_IDS.hz,
+			});
+			backend.acpAgents.find((a) => a.name === "arq")!.running = m.id;
+			await page.setViewportSize({ width, height: 700 });
+			await app.login("alice", HZ);
+			const panel = await openPanel(page);
+			for (const name of ["dev", "arq"]) {
+				const row = panel.locator(".acp-agents-row", { hasText: `@${name}` });
+				const chip = row.locator(".acp-agents-state");
+				const geo = await chip.evaluate((c) => {
+					const open = c.parentElement!.querySelector(".acp-agents-open")!.getBoundingClientRect();
+					const b = c.getBoundingClientRect();
+					// The end of what it shows: the "›" of a tappable chip (its ::after,
+					// the larger touch area, counts in scrollWidth), else its text.
+					const r = document.createRange();
+					r.selectNodeContents(c);
+					const end =
+						c.querySelector(".acp-agents-goto-mark")?.getBoundingClientRect().right ??
+						r.getBoundingClientRect().right;
+					return { cut: end > b.right + 0.5, right: b.right, openLeft: open.left };
+				});
+				expect(geo.cut, `@${name}'s chip is not cut`).toBe(false);
+				expect(geo.right, `@${name}'s chip clear of the button`).toBeLessThanOrEqual(geo.openLeft);
+				expect(Math.abs((await row.boundingBox())!.height - 64)).toBeLessThanOrEqual(1);
+			}
+			await expect(panel.locator(".acp-agents-open").first()).toHaveAccessibleName(
+				/^Abrir su chat \(@/,
+			);
+			const first = panel.locator(".acp-agents-open").first();
+			await expect(
+				first.locator(width <= 360 ? ".acp-agents-open-short" : ".acp-agents-open-long"),
+			).toBeVisible();
+			await expect(
+				first.locator(width <= 360 ? ".acp-agents-open-long" : ".acp-agents-open-short"),
+			).toBeHidden();
+			// The tappable chip answers a tap 12 px above and below its box.
+			const go = panel.locator(".acp-agents-goto");
+			const b = (await go.boundingBox())!;
+			for (const y of [b.y - 11, b.y + b.height + 11]) {
+				const hit = await page.evaluate(
+					([x, y]) => document.elementFromPoint(x!, y!)?.closest(".acp-agents-goto") !== null,
+					[b.x + b.width / 2, y] as const,
+				);
+				expect(hit, `a tap at y=${Math.round(y)}`).toBe(true);
+			}
+		});
+
 	test("Quitar del proyecto: the row's ⋯ and a confirmation; the agent is then in 'Agregar agente existente…'; the panel stays open", async ({
 		app,
 		backend,
@@ -270,6 +329,11 @@ test.describe("Project Chat (U-2)", () => {
 			.locator(".modal-primary-action, .modal-danger-action", { hasText: "Archivar" })
 			.click();
 		await expect(page.locator("#project-view")).toContainText("Proyecto archivado · solo lectura");
+		// On a phone the note is one line (U-2 §2.4).
+		if (app.mobile) {
+			const notes = page.locator("#project-view .acp-project-agents");
+			expect((await notes.boundingBox())!.height).toBeLessThanOrEqual(32);
+		}
 		expect(new URL(page.url()).hash).toBe(hash);
 		await expect(page.locator("#project-view .acp-chat-input")).toBeHidden();
 		const ro = await openPanel(page);
