@@ -52,8 +52,8 @@ Auth is via the httpOnly cookie `st_token` set by `POST /api/auth/login` and `PO
 | Exposed ports | `PATCH /api/sessions/:id/ports` | At once on a running session (a new port `< 1024` needs `allowPrivilegedPorts` from create) |
 | CPU / memory caps | `PATCH /api/admin/sessions/:id/resources` (admin) | At once (`docker update`) |
 | ACP agent: project, model | `PATCH /api/acp/agents/:name` | At once; the model is switched by the runner while the agent is idle |
-| Environment variables | `PATCH /api/sessions/:id/env` | Stored at once; a container gets its environment when it is **created**, so a running or stopped container keeps the old one until it is recreated |
-| Image, repository, auth, hooks, dotfiles, agent seed, capture | — | Fixed at creation; changing them means recreating the container or a new session |
+| Environment variables | `PATCH /api/sessions/:id/env` | Stored at once; a container gets its environment when it is **created**, so a running or stopped container keeps the old one until it is re-created (soft delete + start) |
+| Image, repository, auth, hooks, dotfiles, agent seed | — | Fixed at creation; the image changes when the container is re-created (soft delete + start); the rest needs a new session |
 
 A `PATCH /api/sessions/:id` carrying both fields writes them in one statement; an invalid field fails the whole request with 400 and writes nothing, and an unknown key is a 400 too.
 
@@ -90,20 +90,6 @@ Cross-user observability + force-actions surfaced to the admin dashboard. All ro
 | DELETE | /api/admin/sessions/:id?hard=true | Force hard-delete (also purges workspace + drops the D1 row)                               |
 | GET    | /api/admin/users                | Users list with quota overrides, effective quotas, and current usage (#202)                  |
 | PATCH  | /api/admin/users/:id/quotas     | Set per-user quota overrides; `null` clears back to the deployment default (#202)            |
-
-## Conversation capture (`CONVERSATION_ENABLED`, traditional sessions, read-only)
-
-| Method | Path | Description |
-| ------ | ---- | ----------- |
-| GET    | /api/sessions/:id/conversations[?capture=0] | Captured Claude Code conversations of the session (`capture=0`: summaries only, no container probe — use it when polling) |
-| PATCH  | /api/sessions/:id/conversations/:cid | Owner metadata: rename / archive |
-| GET    | /api/sessions/:id/conversations/:cid/events[?before=] | Backward page of events |
-| GET    | /api/sessions/:id/conversations/:cid/events/:seq | One event |
-| GET    | /api/sessions/:id/conversations/:cid/agents | Subagents of the conversation |
-| PATCH  | /api/admin/sessions/:id/conversation | Admin: `{enabled}` — request or disable capture |
-| GET/POST | /api/admin/sessions/:id/recreate | Admin: preflight / recreate the session container (`…/recreate/{approve,rollback,recover}` for the carry-over and recovery verbs) |
-
-Contract: [CONVERSATION.md](./CONVERSATION.md) (§6). There is no write path into the CLI: the Composer was removed.
 
 ## Projects
 
@@ -142,7 +128,6 @@ All channels are cookie-authed (browser sends `st_token` automatically on the up
 ```
 wss://host/ws/sessions/<sessionId>?tab=<tabId>     # terminal attach
 wss://host/ws/bootstrap/<sessionId>                # bootstrap pipeline live-tail
-wss://host/ws/conversation/<sessionId>             # captured Claude Code conversation (CONVERSATION.md §6.1)
 wss://host/ws/acp                                  # ACP messages, questions and activity of the owner
 ```
 

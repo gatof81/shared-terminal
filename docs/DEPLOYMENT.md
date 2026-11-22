@@ -87,11 +87,9 @@ containers run on it**. Every image a session container uses therefore carries
   that id and the pin still names it — else the never-started container is
   removed. A pin that cannot be established (the image vanished between
   resolve and pin, a daemon error, a pin that does not land) fails the spawn:
-  **no container is created**. The recreation does the same as its own
-  `pin image` / `pin N` requests (CONVERSATION.md §2.7.2 step 1).
+  **no container is created**.
 - **Boot pass** (each backend start): pins the image of every session
-  container that still exists — running, stopped, retained `-old-`/`-new-` —
-  and logs the gate: each exception used, each unused exception, and every
+  container that still exists — running or stopped — and logs the gate: each exception used, each unused exception, and every
   NEW missing image as an error. Idempotent: the pin name is derived from the
   id.
 - **The gate** — `docker compose exec app npm run images:pins` — exits 0 (GO)
@@ -137,7 +135,7 @@ containers run on it**. Every image a session container uses therefore carries
   docker:build-session` (calls it), and `docker compose build session-image`
   (produces only `shared-terminal-session:candidate`, never used by the
   backend; build with the script instead).
-- **Docker API needs**: spawns and recreations now call the images API
+- **Docker API needs**: spawns call the images API
   (inspect + tag) before every create; with the docker-socket-proxy shape
   (SECURITY.md) the proxy must grant `IMAGES: 1`, or every create fails.
   The `images:pins` CLI honours `DOCKER_HOST` like the backend.
@@ -376,467 +374,63 @@ Each session runs in a Docker container based on `session-image/Dockerfile`:
 - **ACP agent sessions** (experimental): the same image; the agent runtime (runner + pinned adapter) is not in it but mounted read-only at `/opt/st-acp` from `<WORKSPACE_ROOT>/.acp-runtime` — see [ACP_AGENTS.md](./ACP_AGENTS.md#2-runtime-independent-of-the-image)
 - **Resources:** Per-session caps come from `session_configs` (`cpu_limit` 0.25–8 cores, `mem_limit` 256 MiB–16 GiB, `idle_ttl_seconds` 60s–24h). Sessions created without explicit caps fall back to the `DEFAULT_NANO_CPUS` (2 cores) / `DEFAULT_MEMORY_BYTES` (2 GiB) constants in `dockerManager.ts`. Idle auto-stop is opt-in (omit `idleTtlSeconds` to disable).
 
-## Conversation capture (Phase 3, `docs/CONVERSATION.md`)
+## Applying a new image to a session
 
-The backend can receive Claude Code hook events from session containers
-and persist them as a per-conversation event log on the host
-(`<WORKSPACE_ROOT>/.conversations/<sessionId>/<claudeSessionId>.events.jsonl`).
-3.0b ships the receiver, 3.0c the session-image side (an empty
-managed-settings directory, the SessionStart script, the loopback relay the
-hooks post to, the `st-backend` alias) and 3.0d the activation: the image's
-control directory and label, capture authorization, the recreation engine
-and the admin surface ([CONVERSATION.md §2.7 and §7](./CONVERSATION.md#27-recreación-administrativa-y-activación-30d);
-image side in [session-image/README.md](../session-image/README.md#conversation-hooks-managed-settings)).
-With `CONVERSATION_ENABLED` unset, nothing is mounted or injected and no
-session emits anything.
+A session container keeps the image it was created from: a plain stop + start
+reuses it. To put an existing session on a newly built image (after
+`scripts/build-session-image.sh`), re-create its container with a **soft
+delete** followed by a start:
 
-> **Operational restrictions in force (owner decisions).** Capture stays off
-> until a coordinated deploy is authorized. The first and only pilot is a
-> **new, disposable** session with no real data (D8). **No real working
-> session is recreated** until a manual administrative recovery procedure
-> exists and has been validated. A recreation has no rule on the workspace
-> CLI's version (the `RECREATE_CLI_*` rule was removed on 2026-11-18, #678).
+1. `DELETE /api/sessions/<sessionId>` (no `?hard=true`): the container is
+   killed and the row becomes `terminated`; the workspace, uploads and
+   `session_configs` are untouched.
+2. `POST /api/sessions/<sessionId>/start`: the backend spawns a new container
+   from the current image, with the session's stored config, env and ports.
+   `postStart` runs; `postCreate` and the rest of the bootstrap don't.
+3. **Verify:** `docker inspect st-… --format '{{.Image}}'` shows the new image
+   id.
 
-| Variable | Default | Effect |
-| --- | --- | --- |
-| `CONVERSATION_ENABLED` | unset (`false`) | Master switch. Off: `POST /ingest/claude/hook` answers 204 and discards (`ingest_rejected{disabled}`), no session gets a hooks file, an ingest token, `relay.enabled` or the extra read-only bind mounts, and boot `reconcile` deletes every stale `conversation.json` and `relay.enabled`. On: capture is still **per-session opt-in** (`sessions.conversation_requested`). |
-| `CONVERSATION_ALLOW_USERS` | unset | Comma-separated user ids whose **new** sessions are born with capture requested (`conversation_requested=1`); the owner decides, also for an admin create on behalf of someone. Existing sessions are never touched. Requested is not effective: the flag, no revocation and an image with the relay still apply. Entries that are not user ids are ignored with a warning. Keep it **empty until the pilot has passed** (stage 3 is a separate decision). |
-| `INGEST_REQUIRE_SESSION_ORIGIN` | unset (`false`) | CONVERSATION.md §3.1.1 (v1.8.6). `true`: a hook-ingest request is accepted only if its TCP peer (`req.socket.remoteAddress`, never a header) is an address of the session's **current** container on `SESSIONS_NETWORK`, inspected by id (≤ 500 ms); anything else is `ingest_rejected{wrong_origin}` (still 204). `observe`: the same check on every authenticated request, **never refusing**, counted in admin stats — the activation gate below. `false`/unset: identical to before, no Docker inspection; any other value is treated as off and logged. |
-| `PORT` | `3001` | Passed to capturing session containers as `ST_BACKEND_PORT`: the relay forwards to `http://st-backend:<PORT>/ingest/claude/hook`. The hooks file itself always targets the relay, `http://127.0.0.1:47613/ingest/claude/hook`. |
+**Kept:** everything under the workspace, including the HOME state symlinked
+into it (Claude CLI state, `~/.ssh`, `~/.npm-global`); the uploads; the D1 row
+and config.
 
-These variables are forwarded by `docker-compose.yml` with empty defaults
-(before 3.0d `CONVERSATION_ENABLED` was not, so setting it in `.env` did
-nothing under compose).
+**Lost — everything that lived only in the container layer:**
+- the **git identity** (`~/.gitconfig`). The bootstrap writes it only at
+  create, and a start doesn't re-run it;
+- whatever **dotfiles** installed outside the workspace. The dotfiles stage
+  also runs only at create;
+- packages installed with `apt` or anywhere else outside the workspace;
+- `~/.bash_history` and every other file in HOME that isn't symlinked into
+  the workspace;
+- `/tmp`, running processes and the tmux tabs.
 
-#### Ingest network origin — activation gate before `INGEST_REQUIRE_SESSION_ORIGIN=true`
+## Retired: conversation capture and container recreation
 
-The flag is only safe if each request that authenticates as session S reaches the backend from S's
-own container on `sessions-net`. A proxy, NAT, `network_mode: host` or a published port in between
-would make every peer look like a gateway, and `true` would then reject **all** capture. Sampling
-sockets cannot prove this: short-lived hook connections are easy to miss, and a socket does not say
-which session's token it carried. The gate therefore measures the real ingest requests, at the
-point where they are authenticated, with the `observe` mode, which **never refuses** anything:
+Conversation capture (Claude Code hook events relayed from session containers
+to the backend, the read-only capture Chat) and the administrative container
+recreation were removed, with their routes, CLIs (`conversation:*`,
+`recreate:*`) and variables (`CONVERSATION_*`, `INGEST_*`, `RECREATE_*`; remove
+them from `.env`). Nothing of their data is deleted: `<WORKSPACE_ROOT>/.conversations/`,
+`<WORKSPACE_ROOT>/.st-control/` and the D1 tables/columns (`claude_conversations`,
+`conversation_user_meta`, `sessions.ingest_token_hash*`, `conversation_requested`,
+`revocation_seq`, `recreate_fence`) stay as inert data that nothing reads.
+A hard delete removes the session's `.conversations/<sid>`, `.st-control/<sid>`
+and `.claude-managed/<sid>` along with its workspace. On boot the backend logs
+a read-only warning for any `.st-control/*/recreate-attempt.json` that is not
+resolved; it acts on none of them.
 
-1. Set `INGEST_REQUIRE_SESSION_ORIGIN=observe` and restart the backend. Capture keeps working
-   exactly as before; the only addition is one `docker inspect` per capturing container every 10 s.
-2. Let every capturing session produce hooks for a while (normal use, or one prompt in each).
-3. Read the counters (admin only; counts, never session ids, addresses or tokens):
+Containers created from an older image still run the in-container relay. It
+is harmless: it answers the CLI with 204 at once, its queue and logs are
+bounded, and what it forwards gets a 404 and is never retried. A container
+created from a rebuilt image has no relay.
 
-   ```bash
-   curl -s -b "st_token=<admin JWT>" https://<api-host>/api/admin/stats \
-     | jq '.conversation.originObservedSinceBoot'
-   ```
+## Release gate: a migration against the real data, on the host
 
-4. **PASS** only if `byCause` has `match` and nothing else, `sessionsNotMatched` is `0`, and
-   `sessionsMatched` equals the number of sessions that produced hooks during the window. Any other
-   cause (`mismatch` above all, or `inspect_timeout`, `inspect_pending` or `inspect_failed`) is a **FAIL**: stay on
-   `observe` or go back to `false`, and investigate before trying again.
-5. Only after a PASS: set `true`, restart, and confirm that
-   `.conversation.originRejectedSinceBoot` stays empty while capture keeps working. Any
-   `wrong_origin` on a legitimate session ⇒ go back to `observe` (or `false`) and restart.
-
-### Composer — removed
-
-The Composer (sending text into the Claude Code CLI from the Chat, CONVERSATION.md §8) was removed
-on 2026-11-18 (#678), with `CONVERSATION_COMPOSER_*`, its routes, the `composer:resolve` CLI and the
-composer smokes/canary. The capture Chat of a traditional session is read-only history. Messages
-to agents go through the ACP message API ([ACP_AGENTS.md](./ACP_AGENTS.md)).
-
-### Coordinated deploy (3.0d) — documented, not yet executed
-
-One deploy, when the owner authorizes it, with the VM untouched until then.
-Each stage can be stopped and rolled back, and moving to the next one needs
-explicit authorization. The detailed plan, with the pilot checklist, is in
-[design/phase3-3.0d-audit.md §6–§7](./design/phase3-3.0d-audit.md).
-
-**Preflight (no change to what is running: backend, image, sessions and `.env` stay as they are; step 2 only writes a backup directory on the host):**
-
-1. Record the SHA running today (`git rev-parse HEAD`) and the session
-   image id (`docker image inspect shared-terminal-session --format
-   '{{.Id}}'`). These are the rollback points.
-2. Run `docker compose exec app npm run backup`, and check that the directory
-   has a `manifest.json`.
-3. `docker network inspect sessions-net` succeeds, and there is disk space
-   for one more image and for `.conversations/`.
-4. `CONVERSATION_ENABLED` and `CONVERSATION_ALLOW_USERS` are **unset** in
-   `.env`.
-5. Note every session's status, `container_id` and image (`GET
-   /api/admin/sessions`) to compare against afterwards.
-
-**Stage 0 — backend 3.0d + image `="2"`, flag off.**
-
-1. Tag the current image for the rollback:
-   `docker tag shared-terminal-session shared-terminal-session:pre-3.0`.
-2. `git pull` to the approved SHA, then
-   `docker build -t shared-terminal-session ./session-image` (historical
-   record of the 3.0d rollout; today use `scripts/build-session-image.sh`,
-   see "Session image pins"). Check
-   `docker image inspect shared-terminal-session --format '{{index .Config.Labels "io.shared-terminal.conversation-relay"}}'`
-   prints `2`.
-3. `docker compose up -d --build`. Compose recreates only `app` (with the
-   `st-backend` alias); session containers are not touched. The pending
-   migrations, up to v17, are all additive.
-4. **Verify,** creating or recreating nothing:
-   - the boot log says `conversation capture disabled`, with no `reconcile`
-     or `recoverOnBoot` errors;
-   - existing sessions are unchanged (status, `container_id`, image);
-   - from a session container,
-     `curl -s -o /dev/null -w '%{http_code}\n' -X POST http://st-backend:3001/ingest/claude/hook`
-     prints `204` (`disabled`);
-   - `GET /api/admin/sessions/<sid>/recreate` lists `flag-off`, with no
-     effects;
-   - `GET /api/admin/stats` → `conversation.enabledSessions = 0`;
-   - there is no `conversation.json` and no `relay.enabled` anywhere.
-
-**Stage 1 — flag on, nobody requested.** Set `CONVERSATION_ENABLED=true` in
-`.env` and run `docker compose up -d`. Verify that `reconcile` corrects and
-orphans nothing, that `enabledSessions = 0`, and that no file is written.
-
-**Stage 2 — the pilot**, a new disposable session ([below](#recreating-a-session-container)).
-It may end up blocked in `recreate-unresolved` (see below).
-
-**Stage 3 — `CONVERSATION_ALLOW_USERS`:** a separate owner decision, after
-the pilot. The pending decisions #465–#467 are taken before it.
-
-The deploy does **not** recreate any existing container, enable capture on a
-real session, or use the emergency manual procedure.
-
-### Rollback (from 3.0d)
-
-Fastest first:
-
-- **Cut ingest now:**
-  `docker compose exec app npm run conversation:disable -- <sessionId>` (or
-  `--all`). The receiver refuses from the marker on and the files are
-  removed. A running CLI is only guaranteed to stop emitting when it
-  restarts (CLI 2.1.308 was measured to stop on its own settings reload, but
-  don't rely on it); the receiver's refusal is the cut. The relay of a
-  running container stays up, inert, until the container is recreated.
-- **Global off:** unset `CONVERSATION_ENABLED` and run `docker compose up -d`.
-  `reconcile` deletes every `conversation.json` and `relay.enabled`, and new
-  containers get no token, no mounts and no relay. Existing containers keep
-  an inert token (and relay) until they are recreated.
-- **Image:** disable capture first (either bullet above), **then**
-  `docker tag shared-terminal-session:pre-3.0 shared-terminal-session`. Only
-  **new** containers are affected; existing ones, also after a stop + start,
-  keep the image they were created from. Under the 3.0d backend a spawn from
-  the older, unlabelled image prepares no capture.
-- **Backend (to the SHA recorded in the preflight):**
-  1. Turn the flag off first (global off above) and wait for `reconcile` to
-     have removed the files.
-  2. Then `git checkout <SHA>` and `docker compose up -d --build`. The
-     additive schema doesn't bother an older backend.
-
-  **Never roll the backend back while a recreation is unresolved:** a
-  backend older than 3.0d knows neither the attempt record nor the
-  `recreate-unresolved` gate, so `start`, `stop` and a hard delete would act
-  on that session. Keep the 3.0d backend in place (next section).
-
-  **Rolling back past the commit fence (contract v1.9.4, #627) is a known
-  limitation, accepted by the owner.** From that version on, every attempt
-  record (`.st-control/<sid>/recreate-attempt.json`) carries `commitFence`,
-  resolved ones included. An older backend does not understand that key: its
-  strict parser reads the record as unreadable, and that session stays
-  `recreate-unresolved` (start, stop, recreate and hard delete refused) for
-  as long as the older backend runs.
-  - **Never delete, edit or convert those records** to get past this. The
-    record is the only durable evidence of the attempt (and of whether its
-    commit may have been sent); a record stripped of `commitFence` would
-    turn a fenced attempt into one the old backend thinks it understands.
-  - The only way to make those sessions usable again is to **reinstall a
-    backend version that reads them** (v1.9.4 or later).
-  - The `recreate_fence` column (migration v20) itself does not bother the
-    older backend: it never reads or writes it.
-- **Alias:** harmless to keep.
-
-Captured data stays under `.conversations/` until a hard delete (or manual
-removal); a rollback never deletes it.
-
-### Unresolved recreations (D8)
-
-A recreation that is interrupted (backend restart, Docker not answering, a
-commit whose outcome is unknown) leaves the session **`recreate-unresolved`**.
-**Nothing resolves it automatically after a backend restart:** that is owner
-decision D8, fail-closed.
-
-**What you see:**
-- `start`, `stop`, `delete` (soft and hard), `PATCH /ports` and
-  `PATCH …/conversation {"enabled": true}` answer 409 `recreate-unresolved`
-  and do nothing;
-- the preflight lists `recreate-unresolved`, and so do the session's
-  `capture.pendingReasons`;
-- the record is at `<WORKSPACE_ROOT>/.st-control/<sid>/recreate-attempt.json`,
-  with state `uncertain` (and `orphanedAt` after a restart).
-
-**What still works:** disabling capture (`PATCH {enabled:false}`) and the
-emergency command.
-
-**What to do:**
-1. Stop the procedure (the pilot).
-2. Keep the 3.0d backend deployed: it is what keeps the session gated, while
-   every other session goes on working.
-3. Collect the `[recreate]` log lines and the record for review.
-4. Run the operator recovery (§2.7.7): stop every container of the
-   session by hand if one runs (`docker stop`), then
-   `POST /api/admin/sessions/<sid>/recreate/recover` (or
-   `npm run recreate:admin -- <sid> recover --user <admin>`). It resolves
-   the attempt from the evidence D1 and Docker hold — `rolled-back` (start
-   the session) or `committed` (verify the new container) — and lifts the
-   gate. It refuses while a container runs or while a live backend still
-   owns the attempt.
-
-There is **no other way out**:
-- a hard delete is refused;
-- don't roll the backend back;
-- don't edit the record, D1 or the containers.
-
-### Recreating a session container
-
-Needed whenever a session must pick up something fixed at container
-creation: a new or rolled-back image, capture at the container level, a
-fresh ingest token. **Never use a hard delete:** it purges the workspace and
-the session row.
-
-**Restriction (owner decision D8):** the strict recreation below is used on
-the **disposable pilot session**; an existing working session is recreated
-only through the carry-over mode of the next section, one session at a time
-and each with the owner's explicit GO. No version of the workspace's Claude Code
-is required or refused (the `RECREATE_CLI_*` rule and `cliCompat.ts` were
-removed on 2026-11-18). For every session you recreate:
-- no pinning and no downgrade: a CLI that updated itself is fine;
-- check `claude --version` right before the `POST` and compare it with the
-  preflight (the version is read again under the lock), so the log records
-  which CLI N runs.
-
-**The endpoint (3.0d, [CONVERSATION.md §2.7](./CONVERSATION.md#27-recreación-administrativa-y-activación-30d))**, admin only:
-
-1. **Stop** the session (owner `POST /api/sessions/<sessionId>/stop`, or admin
-   `POST /api/admin/sessions/<sessionId>/stop`). A running session is never
-   recreated.
-2. **Preflight**, no effects: `GET /api/admin/sessions/<sessionId>/recreate`
-   → `{ recreatable, blockers[], imageId, currentImageId, captureAfter }`
-   (`?preserveLayer=1` adds the carry-over preview, next section; `retained`
-   appears whenever a retained container exists).
-   `blockers` are codes with counts, never paths:
-   - anything in the container layer that would be lost (`layer-*`, e.g.
-     `~/.bash_history`, packages installed with `apt`, configured dotfiles);
-   - a workspace that isn't ready (`workspace-*`);
-   - customized managed skills (`managed-skills-*`);
-   - capture not requested or not allowed;
-   - the image, or the CLI version;
-   - an unresolved earlier attempt.
-3. **Recreate:** `POST /api/admin/sessions/<sessionId>/recreate
-   {"expectImageId": "<currentImageId from the preflight>"}`.
-   - A moved image tag answers 409 `image-changed`; any other failing
-     precondition answers 409 with its code and does nothing.
-   - For a session owned by someone else, an `operate` row goes into the
-     observe log before anything is done; if it can't be written, nothing
-     is done.
-   - Don't edit the session's ports or resource limits while it runs (ports
-     wait for it; limits don't, audit A6).
-
-   Results:
-   - `200 { outcome: "committed", nContainerId, capture, cliVersion,
-     warnings, incomplete }`: the session runs on the new container. With
-     `unresolved: true` and `pending[]`, the convergence is still being
-     finished and the session stays gated until it is;
-   - `500 { error: "recreate-failed", step }`: rolled back, the previous
-     state intact;
-   - `500 { error: "recreate-failed", step, unresolved: true }`: it isn't
-     known how it ended, so the session stays `recreate-unresolved` (see
-     above);
-   - `409 busy` (another lifecycle operation in progress), or `503
-     docker-unavailable`.
-4. **Verify:** `GET /api/sessions/<sessionId>/conversations` reports
-   `capture.effective: true`.
-
-**What the endpoint preserves:**
-- the **workspace**, including the HOME state that lives there through its
-  symlinks: `~/.claude` and `~/.claude.json` (CLI state and transcripts, so
-  `claude --resume` keeps working), `~/.npm-global` (the CLI itself),
-  `~/.vscode-cli`, `~/.config/gh` and `~/.ssh`;
-- the uploads;
-- the D1 row and `session_configs` (secrets, ports, resource caps, hooks);
-- the conversation history;
-- the git identity, re-applied from `session_configs`.
-
-The preconditions refuse a container whose layer holds anything else, so
-nothing that lived only there is lost.
-
-### Activating an existing session (carry-over, §2.7.7)
-
-The three sessions created before 3.0d hold years of state in their
-container layer (`~/.npm`, `~/.local`, `~/.cache`, `~/.config`, hand-made
-HOME directories, edited `~/.bashrc`, build caches under `/tmp` — 4 to 12 GB
-each), so the strict recreation refuses them. The carry-over mode
-([CONVERSATION.md §2.7.7](./CONVERSATION.md#277-activación-de-sesiones-existentes-recreación-con-traslado-de-capa))
-creates the new container from the current image, as always, and streams
-every top-level HOME and `/tmp` entry of the old layer into it **before it
-first starts**; the old container is **kept, stopped**, under
-`st-<sid12>-old-<ts>` until you approve, so the way back is one call. A
-change outside HOME and `/tmp` (a package installed with `apt`) is not
-carried: the preflight blocks with `layer-system` and the session stays as
-it is.
-
-**One session at a time**, each with the owner's GO, in the agreed order
-(Educación HZ, then Shared Terminal, Home Automation last). Admin only. Run
-every verb on the host as
-`docker compose exec app npm run recreate:admin -- <sid> <verb> --user <admin>`
-(`preflight [--preserve]`, `recreate --image <sha> [--preserve]`, `approve`,
-`rollback`, `recover`): it calls the same endpoints on loopback. **Use the CLI,
-not `curl` against the public hostname, for the recreation itself:** a real
-layer takes minutes and Cloudflare cuts an origin response at 100 s (524),
-so a public `POST` would lose the answer every time while the backend
-continues. The CLI waits up to 65 min (T_rec's cap plus T_rb), never
-repeats a recreation on its own, and on a lost connection prints `UNCERTAIN`
-(exit 2) with the preflight of that moment — act on that evidence
-(`retained` ⇒ committed; `recreate-unresolved` ⇒ still finishing, or the
-backend died ⇒ `recover`), never by running it again.
-
-**One-time setup — where the copy is written.** The new container's layer
-is written on Docker's data-root filesystem, which the backend container
-cannot see, so it refuses every carry-over with `disk-space-unknown` until
-`RECREATE_DOCKER_FS_PATH` names a path inside the backend container on that
-same filesystem. On the host:
-
-```bash
-sudo docker info --format '{{.DockerRootDir}}'      # /var/lib/docker
-stat -c '%d %n' /var/lib/docker /var/shared-terminal/workspaces   # same device id ⇒ same filesystem
-df -P /var/lib/docker /var/shared-terminal/workspaces
-```
-
-VM100 (checked read-only 2026-10-31): both on `/dev/sda1` (device 2049) with
-`/` — so `RECREATE_DOCKER_FS_PATH=/var/shared-terminal/workspaces` in `.env`
-is correct there (the workspace bind IS that filesystem), 23.2 GiB free,
-containerd snapshotter (`overlayfs`), 18 GB of earlier backups also on it.
-On a host where the devices differ, create an empty probe directory beside
-the data root (`/var/lib/docker-fs-probe`), bind it read-only into `app`
-(`docker-compose.override.yml`: `- /var/lib/docker-fs-probe:/mnt/docker-fs:ro`)
-and set `RECREATE_DOCKER_FS_PATH=/mnt/docker-fs`. Never mount the data root
-itself. The preflight reports what it measured (`carry.diskMeasuredAt`,
-`diskFreeBytes`) against `diskRequiredBytes` = 1.2 × the layer + 1 GiB;
-`SizeRw` is an apparent size, the margin covers filesystem overhead, and
-until `approve` the old and the new layer both occupy the disk (Home
-Automation: 11.8 GB twice).
-
-1. **Agree a window with the owner.** Record `claude --version` in the
-   session (2.1.316 for the pre-3.0d sessions, 2.1.322 for session A; any newer stable release is fine) and the running Claude processes; the owner
-   finishes their work. The stop ends the tmux tabs and the Claude processes;
-   `claude --resume` continues the conversations afterwards (the CLI's state
-   lives in the workspace, which is untouched).
-2. *(Removed: the Composer version check — the Composer no longer exists.)*
-3. **Request capture** if not already requested:
-   `PATCH /api/admin/sessions/<sid>/conversation {"enabled": true}` answers
-   `requiresRecreate: true` on a pre-3.0d container (no control mount) and
-   writes nothing; it records the request (`conversation_requested=1`) the
-   recreation needs.
-4. **Stop** the session (owner or admin `POST …/stop`). From here on nothing
-   writes to the workspace or the layer.
-5. **Backup — after the stop, before anything else:**
-   `docker compose exec app npm run backup` (into
-   `<WORKSPACE_ROOT>/.backups/<timestamp>/`). The recreation refuses with
-   `backup-stale` unless a manifest there is younger than 24 h, **taken after
-   the container stopped** (`State.FinishedAt`) and without
-   `concurrentChanges` for the session — a consistent recovery point, not the
-   previous day's backup of a live session. The backup is of the workspace
-   (and uploads); the container layer itself is kept by retention, not by
-   the backup.
-6. **Preflight:** `recreate:admin -- <sid> preflight --user <admin>` (strict —
-   `layer-home`/`layer-tmp` are expected there) and `… preflight --preserve`
-   → `recreatable: true` with `carry: { entries, bytes, skipped, backupFresh:
-   true, diskFreeBytes, diskMeasuredAt, diskRequiredBytes }` and no
-   `blockers`. Any blocker — `layer-system` (a change outside HOME and
-   `/tmp`), `layer-entrypoint-unexpected` (a real `~/.ssh`, `~/.claude`,
-   `~/.claude.json`, `~/.vscode-cli`, `~/.npm-global` or `~/.config/gh` where
-   the entrypoint puts a symlink: credentials or state the new container's
-   entrypoint would replace), `disk-space`, `disk-space-unknown`,
-   `backup-stale`, `retained-pending` — stop and report; nothing has
-   happened. Do **not** prune images or the build cache to make room without
-   the owner's GO.
-7. **Recreate:** `recreate:admin -- <sid> recreate --image <currentImageId>
-   --preserve --user <admin>`. Expect `200 { outcome: "committed", carried: {
-   entries, bytes }, retained: { containerId, name, role: "O" }, capture, … }`
-   (exit 0). The copy runs at the daemon's pace (budget 20 MiB/s: a 12 GB
-   layer is about 10 minutes; T_rec is extended accordingly, up to 60 min);
-   other lifecycle calls answer `busy` meanwhile; a second `recreate` is
-   refused with `busy` too. Outcomes:
-   - `500 { error: "recreate-failed", step }` **without** `unresolved`:
-     rolled back, the old container is canonical again, nothing else changed;
-   - `500 { …, unresolved: true }` or `UNCERTAIN` (exit 2): a request to
-     Docker (a copy of a large entry, typically) is still out; the session is
-     `recreate-unresolved` until it answers and the engine resolves by that
-     evidence — the new container is not touched while it may still be
-     written. Watch `preflight` and the `[recreate]` log lines; **never run
-     `recreate` again**. If the backend died meanwhile: `recover` (below).
-8. **Verify** with the owner: `GET /api/sessions/<sid>` shows the session
-   running on the new container; in its terminal `ls ~/.npm ~/.local
-   ~/.config`, `tail ~/.bashrc`, `claude --version` (the workspace CLI,
-   2.1.316) and `claude --resume` (previous conversations listed) all look as
-   before; `GET /api/sessions/<sid>/conversations` reports
-   `capture.effective: true` once a `claude` is running; Chat shows the
-   events.
-9. **Observe** for the agreed period with the old container retained (it
-   costs its layer's disk, nothing else). While it is retained, a further
-   recreation answers 409 `retained-pending` and a hard delete 409
-   `retained-present`; `start`, `stop` and a soft delete work as always. Then
-   **approve:** `recreate:admin -- <sid> approve --user <admin>` removes it
-   (409 `retained-running` if someone started it by hand). Nothing removes
-   it automatically.
-
-**Going back.** At any point before approval:
-1. Stop the session (`POST …/stop`).
-2. `recreate:admin -- <sid> rollback --user <admin>` → 200 `{ outcome:
-   "rolled-back-to-retained", containerId, retained }`: D1 points at the old
-   container again, the names are swapped back, the port mappings cleared,
-   the ingest token hash cleared (so capture is off: `token-mismatch`,
-   nothing authorized, marker and hooks file withdrawn). 409 `running` while
-   the new container runs. A transient failure (a rename the daemon refused,
-   a D1 statement that did not apply) restores the names, leaves the old
-   container retained and answers 409 `rollback-not-applied` or 500
-   `recreate-failed { detail }` — read the record (`preflight` shows
-   `retained`) rather than the status code, then simply run `rollback` again.
-3. `POST /api/sessions/<sid>/start`: the old container boots exactly as it
-   was — its files, its CLI, its state in the workspace. Verify with the owner.
-4. The new container is now the retained one (`role: "N"`): `approve`
-   removes it, or recreate again later. The failure goes to the PR/issue
-   before any further attempt.
-
-**Interrupted (backend died mid-recreation or mid-rollback).** The session
-is `recreate-unresolved` (next section). With the backend up again:
-`docker ps` must show every container of the session stopped (the old one,
-the new one, the retained one); then `recreate:admin -- <sid> recover --user
-<admin>`. It resolves from the evidence (D1, the containers by their
-immutable ids, the record) and answers `{ outcome: { kind: "rolled-back" } }`
-(nothing moved: the current container is canonical — start the session; a
-retained one, if any, is still retained and `rollback` still available) or
-`{ outcome: { kind: "committed", nContainerId }, retained }` (the move had
-happened: that container is current — verify as in step 8). 409 `running`
-until everything is stopped; 409 `not-orphaned` means a live backend owns
-the attempt (wait for it); a second `recover` answers `already-resolved`.
-
-**The commit fence (contract v1.9.4, #627; migration v20).** When the record
-says the dead backend may have sent its commit statement (`commit` in the
-record), `recover` first invalidates that statement's generation in D1
-(`sessions.recreate_fence`) and decides only after a re-read proves it — so
-a statement still in flight can never land on a container the recovery just
-removed. If D1 can't prove it (timeout, error), `recover` answers 409
-`recover-retry` and removes nothing: run it again later. A record written by
-a backend **before** this version answers 409 `commit-unknown-legacy` unless
-D1 is already on the new container: that backend's statement carries no
-fence, so nothing proves it will not land. Before deploying this version,
-check that no `<WORKSPACE_ROOT>/.st-control/*/recreate-attempt.json` has a
-`state` other than `resolved`; if `recover` answers `commit-unknown-legacy`,
-leave the containers, the record and the row as they are and take it to the
-owner (CONVERSATION.md §2.7.7). Rolling the backend back past this version
-makes every record that carries `commitFence` unreadable to the old parser —
-those sessions stay `recreate-unresolved` until the new version is back.
-
-**Release gate: migration v20 against the real data, on the host.** Before
-deploying, prove v20 on a copy of production's rows without them leaving
-the host and without touching D1:
+Before deploying a release that adds a migration, prove it on a copy of
+production's rows without them leaving the host and without touching D1:
 
 1. `docker compose exec app npm run backup` (the running backend, still at
-   v19) — a directory `<WORKSPACE_ROOT>/.backups/<timestamp>/`.
+   the previous schema) — a directory `<WORKSPACE_ROOT>/.backups/<timestamp>/`.
 2. Build the release image under its own tag, from the release checkout, so
    the running `app` is not touched:
    `docker build -t st-backend:migrate-check .`
@@ -852,63 +446,17 @@ the host and without touching D1:
      st-backend:migrate-check npm run -s db:migrate-check -- /backup
    ```
 
-It builds an in-memory SQLite at the backup's schema (v19) through the real
+It builds an in-memory SQLite at the backup's schema through the real
 `migrateDb()` ledger path, loads every table as `restore` would, applies the
 pending migrations and prints, per table, the row count and a SHA-256 of the
-pre-existing columns before → after, then `sessions.recreate_fence` (present,
-0 on every row), the ledger (v20 recorded), `foreign_key_check` and
-`integrity_check`. The last line is `PASS` (exit 0) or `FAIL` (exit 1, with
-the reasons); a refusal (no manifest, a backup already at v20) exits 2. It
+pre-existing columns before → after, the ledger (every pending migration
+recorded), `foreign_key_check` and `integrity_check`. The last line is
+`PASS` (exit 0) or `FAIL` (exit 1, with the reasons); a refusal (no
+manifest, a backup already at the current schema) exits 2. It
 prints counts, hashes and verdicts only — never a row or a value — needs no
 credential (it drops the D1 variables before loading anything and never
 calls `validateD1Config`), and makes no network call. Delete the image
 afterwards if you like (`docker rmi st-backend:migrate-check`).
-
-### Emergency only — the manual procedure
-
-It bypasses every check of the endpoint: layer, skills, image, CLI version
-and capture authorization. Use it only when the endpoint can't be used **and
-the losses below are accepted**, never on a session with a recreation
-unresolved: its `stop` and `start` steps answer `recreate-unresolved` then,
-and that must not be worked around. It relies on existing behaviour:
-`POST /start` re-creates the container when the one on record no longer
-exists in Docker (the "stale container id" path of `startContainer`).
-
-1. **Stop** the session: `POST /api/sessions/<sessionId>/stop` (owner), or
-   `POST /api/admin/sessions/<sessionId>/stop` (admin). The container stays,
-   and the workspace, uploads and `session_configs` are untouched.
-2. **Remove only the container**, on the host:
-   `docker rm st-<first 12 chars of sessionId>` (the name is `containerName`
-   in `GET /api/sessions/<sessionId>`). No `-v` is needed: sessions have no
-   volumes, and the workspace is a host bind mount.
-3. **Start** it: `POST /api/sessions/<sessionId>/start` (owner or admin).
-   - The backend finds no container behind the stored id and spawns a new
-     one from the current image, with the session's stored config, env and
-     ports.
-   - If capture is requested and `CONVERSATION_ENABLED` is set, the new
-     container also gets a new token and the mounts.
-   - `postStart` runs; `postCreate` and the rest of the bootstrap don't.
-4. **Verify:** `docker inspect st-… --format '{{.Image}}'` shows the new
-   image id, and, with capture, `GET /api/sessions/<sessionId>/conversations`
-   reports `capture.effective: true`.
-
-**Kept:** everything under the workspace, including the HOME state symlinked
-into it (as listed above); the uploads; the D1 row and config; and the
-conversation history.
-
-**Lost — everything that lived only in the container layer:**
-- the **git identity** (`~/.gitconfig`). The bootstrap writes it only at
-  create, and a start doesn't re-run it;
-- whatever **dotfiles** installed outside the workspace. The dotfiles stage
-  also runs only at create;
-- packages installed with `apt` or anywhere else outside the workspace;
-- `~/.bash_history` and every other file in HOME that isn't symlinked into
-  the workspace;
-- `/tmp`, running processes and the tmux tabs.
-
-A soft delete (`DELETE /api/sessions/:id` without `?hard=true`) followed by
-`POST /start` also re-creates the container with the same losses, passing
-through `terminated`; prefer the steps above.
 
 ## Projects (`docs/PROJECTS.md`)
 
@@ -1129,33 +677,20 @@ Restore guards:
 - Workspace tarballs are entry-checked before extraction (paths must stay
   under `<sid>/`, `.uploads/<sid>/`, `.conversations/<sid>/` or
   `.st-control/<sid>/` — no traversal).
-- **Control evidence is never extracted live.** The tarball carries the
-  session's `.st-control/<sid>/` (capture attestations, recreation record,
-  `relay.enabled`, and in older backups the retired Composer's pane records). Restore extracts it, together
-  with `.conversations/<sid>/REVOKED` and `LIFTED`, into
+- **Control data is never extracted live.** The tarball may carry the
+  session's `.st-control/<sid>/` and `.conversations/<sid>/REVOKED` /
+  `LIFTED` — inert data of the retired conversation capture and recreation.
+  Restore keeps them out of the live extraction, stages them under
   `<WORKSPACE_ROOT>/.restore-evidence/<backup>-<random>/` (0700, never read
   by the backend; remove it by hand when no longer needed) and installs
-  from there only (a) capture attestations that verify with THIS
-  deployment's key, never replacing one already present, and (b) the
-  revocation that was **in effect** in the backup, only when the
-  destination has no `REVOKED` of its own — a destination marker is never
-  touched, a revocation lifted in the backup is not brought back, and one
-  in effect comes back in effect (lift it with the admin enable). The log
-  line `[restore] control <sid>: attestations installed=… kept=…
-  rejected=…; revocation …` reports each. `rejected > 0` means the
-  attestations do not verify with this key (wrong key or damaged backup).
-  See docs/CONVERSATION.md §2.7.5.1.
+  nothing of them. Old and new backups are both accepted.
 - **Tampered backups.** Every `workspaces/<name>.tar.gz` must be named
   after a session listed in that backup's manifest (refused before any
   write otherwise); a session's root dirs must be directories, and nothing
   under `.conversations/<sid>/` or `.st-control/<sid>/` may be a link.
-- **Global emergency cut.** `.conversations/REVOKED_ALL`, when present, is
-  copied to `<backup>/REVOKED_ALL` (`globalRevocation: true` in the
-  manifest) and restored in effect unless the destination has its own —
-  lift it with `npm run conversation:enable-all`. `enable-all` leaves no
-  trace of the lift, so a `--force` restore on the SAME host of a backup
-  taken during a global cut puts the cut back even if it was lifted since
-  (fail-closed, logged): run `enable-all` again if that cut is over.
+- **`REVOKED_ALL`.** `.conversations/REVOKED_ALL`, when present, is copied
+  to `<backup>/REVOKED_ALL` (`globalRevocation: true` in the manifest) as
+  inert data; restore leaves it in the backup dir.
 - Member names must be canonical (`<sid>//`, `<sid>/./`, `./<sid>` are
   refused): tar treats them as the same path, the type rules would not.
 

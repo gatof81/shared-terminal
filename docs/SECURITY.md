@@ -159,43 +159,17 @@ Unlike `writeEnvFile` this is not opt-in — persistence is the point of
 the feature, and the alternative (state evaporating on every recreate)
 was a standing bug, not a privacy control anyone relied on.
 
-## Conversation events at rest (Phase 3)
+## Retired conversation capture data at rest
 
-When conversation capture is on for a session (`CONVERSATION_ENABLED=true`
-and the session requested it), Claude Code hooks post events to
-`POST /ingest/claude/hook` and the backend appends them, in cleartext, to
-`<WORKSPACE_ROOT>/.conversations/<sessionId>/<claudeSessionId>.events.jsonl`
-on the host. The contract (`docs/CONVERSATION.md` §4.2–§4.3) decides what
-is in there:
-
-- **Persisted**: the user's prompts, the assistant's displayed text and its
-  final reports (`last_assistant_message`), tool names and durations, a
-  **structural summary** of each tool input (program names of a shell
-  pipeline, a file path, a URL host, byte counts, MCP key names), subagent
-  ids and results, notification types, task subjects.
-- **Never persisted**: tool responses, the text of a shell command or any
-  other free-form tool argument, `compact_summary`, task descriptions, the
-  full `claude` argv, or any field the contract does not list (unknown
-  fields are dropped and counted).
-
-What can still contain secrets, knowingly: the prompt and the assistant's
-text are the conversation itself, with the same sensitivity as the CLI's
-own transcript under `.st/claude-state`; a file path can be revealing; a
-subagent's short description is model-written. No "secret removal" is
-claimed for those. Mitigations are the same as for the CLI state:
-owner-only API access (`assertOwnedByOr404`, including titles and
-metadata), the directory sits outside every container mount, soft delete
-keeps it and only `?hard=true` purges it, and `npm run backup` includes
-it in the per-session tarball (treat backups accordingly).
-
-Authentication of the ingest path is a per-container token
-(`ST_INGEST_TOKEN`, SHA-256 hash in `sessions.ingest_token_hash`). It
-authorises exactly one thing — self-reporting events for that session —
-and is visible to every process inside that container (the session's own
-user). The endpoint never answers anything but 204 so a wrong token
-cannot be distinguished from a right one by the response; outcomes are
-counters only. Revocation is an on-disk marker checked on every event
-(CONVERSATION.md §2.5).
+Conversation capture was removed, but its data was not deleted:
+`<WORKSPACE_ROOT>/.conversations/<sessionId>/` still holds, in cleartext,
+the event logs captured while it ran (the user's prompts, the assistant's
+displayed text, tool names and structural summaries of tool inputs), with
+the same sensitivity as the CLI's own transcript under `.st/claude-state`.
+Nothing reads it any more and no API serves it. It sits outside every
+container mount, soft delete keeps it, `?hard=true` purges it with the
+session, and `npm run backup` still carries it in the per-session tarball
+(treat backups accordingly).
 
 ## Browsing workspace files from the browser
 
@@ -486,7 +460,7 @@ services:
       # exit code.
       POST: 1 # POST verbs (create/start/exec/resize/stop)
       IMAGES: 1 # /images/* — image inspect + tag. Since the session image
-      # pins (#521) EVERY spawn and recreation resolves its image to an id
+      # pins (#521) EVERY spawn resolves its image to an id
       # and pins it (POST /images/{id}/tag) before the create; without this
       # flag every POST /sessions and every respawn fails, even with
       # SESSION_IMAGE_PINS=off (the create still resolves the id).
