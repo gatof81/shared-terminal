@@ -161,6 +161,53 @@
 @media (max-width: 768px) {
   header #sidebar-toggle {
     flex-shrink: 0;
+    width: 44px;
+    height: 44px;
+  }
+  /* A project page: its header row takes the session bar's place in the
+     header (acpProjectChat.placeHeader) — ☰ · title · agents · ⋯ · account.
+     The bar goes (its tabs and ⋯ act on the session underneath); every
+     control is 44 px tall, so the header keeps its height: the terminal
+     under the page is not resized on entering or leaving it. */
+  body.project-page-on header #terminal-toolbar {
+    /* !important: sessionCore sets the bar's display inline. */
+    display: none !important;
+  }
+  #header-project:not([hidden]) {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    align-items: center;
+    /* As tall as the session bar it replaces (its view tabs: 44 px plus
+       their 1-px frame): the header's height must not change. */
+    min-height: 46px;
+  }
+  #header-project .pv-header {
+    flex: 1;
+    min-width: 0;
+    flex-wrap: nowrap;
+    gap: 4px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+  #header-project .pv-title {
+    flex: 1 1 0;
+    min-width: 8ch;
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #header-project .pv-menu-btn {
+    width: 40px;
+    min-width: 40px;
+    min-height: 44px;
+  }
+  .pv-page.acp-project {
+    padding-top: 0;
   }
   header #terminal-toolbar {
     flex: 1;

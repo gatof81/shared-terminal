@@ -181,7 +181,7 @@ describe("links in an agent's answer (appRoute: router.appRouteHash)", () => {
 			kind: "app",
 			href: "#/sessions/abc/files/src/a%20b.ts",
 		});
-		expect(kind("#/projects/p-1")).toEqual({ kind: "app", href: "#/projects/p-1" });
+		expect(kind("#/projects/p-1")).toEqual({ kind: "app", href: "#/projects/p-1/chat" });
 		// Markup in an id cannot come back out: the href is re-encoded.
 		expect(kind('#/sessions/a"><img>')).toEqual({
 			kind: "app",

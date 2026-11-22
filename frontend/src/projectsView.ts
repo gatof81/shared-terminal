@@ -15,7 +15,6 @@
 import {
 	acpProjectPage,
 	onProjectFeed,
-	openAgentsPanel,
 	type ProjectPageMode,
 	projectFeed,
 	refreshAcpAgents,
@@ -259,8 +258,12 @@ function hidePage(): void {
 	renderSection();
 }
 
-/** Leave the page for the session underneath (Back returns to the page). */
-function leavePage(): void {
+/**
+ * A session row picked while the page is up — the active session's too, which
+ * would not change the address on its own: the page gives way to it (Back
+ * returns to the page). The page itself has no control that does this.
+ */
+function leaveForSession(): void {
 	if (shown === null) return;
 	pushSessionAddress();
 	sync();
@@ -276,18 +279,18 @@ function header(pid: string, name: string | null, st: PageState): HTMLElement {
 	title.tabIndex = -1;
 	const tools = el("div", "pv-tools");
 	// Writes only on a project confirmed live (fail-closed: see evaluate).
-	// One row: the title, a ⋯ menu (the app's action menu: Escape, focus
-	// back to the button, arrows between items) and ×.
+	// One row: the title, the agents' group (acpProjectChat) and a ⋯ menu
+	// (the app's action menu: Escape, focus back to the button, arrows). No
+	// ×: the way out is the sidebar (☰ on a phone) or Back (U-2 N1/N2).
 	if (st === "active") {
 		const menu = button(
 			"⋯",
-			"pv-btn pv-menu-btn",
+			"btn btn-icon pv-menu-btn",
 			() =>
 				openActionMenu({
 					title: name ?? "Proyecto",
 					opener: menu,
 					items: [
-						{ id: "agents", label: "Administrar agentes" },
 						{ id: "rename", label: "Renombrar" },
 						{
 							id: "archive",
@@ -299,7 +302,6 @@ function header(pid: string, name: string | null, st: PageState): HTMLElement {
 					onPick: (id) => {
 						if (id === "rename") void renameFlow(pid, name ?? "");
 						else if (id === "archive") void archiveFlow(pid, name ?? "este proyecto");
-						else openAgentsPanel(menu);
 					},
 				}),
 			"Acciones del proyecto",
@@ -307,13 +309,17 @@ function header(pid: string, name: string | null, st: PageState): HTMLElement {
 		menu.setAttribute("aria-haspopup", "menu");
 		tools.append(menu);
 	}
-	const close = button("×", "pv-close", leavePage, "Cerrar el proyecto");
-	tools.append(close);
 	h.append(title, tools);
-	const note = statusNote(st);
-	if (note) h.append(note);
 	headerFor = { key, el: h };
 	return h;
+}
+
+let noteCache: { key: string; el: HTMLElement | null } | null = null;
+/** The state line, kept across re-renders while the state is the same. */
+function noteFor(st: PageState): HTMLElement | null {
+	const key = `${st}:${feedStatus}`;
+	if (noteCache?.key !== key) noteCache = { key, el: statusNote(st) };
+	return noteCache.el;
 }
 
 function statusNote(st: PageState): HTMLElement | null {
@@ -339,7 +345,7 @@ function renderPage(): void {
 	// The live list's name first (a rename lands there); the feed's for an archived one.
 	const name = projectName(shown) ?? (pageState === "missing" ? null : feedName);
 	setTitlePage(name ?? "Proyecto");
-	const page = acpProjectPage(shown, header(shown, name, pageState));
+	const page = acpProjectPage(shown, header(shown, name, pageState), noteFor(pageState));
 	if (pageEl.childNodes.length !== 1 || pageEl.firstChild !== page) pageEl.replaceChildren(page);
 }
 
@@ -357,8 +363,9 @@ async function archiveFlow(pid: string, name: string): Promise<void> {
 		return;
 	}
 	await refreshAcpAgents();
-	if (shown === pid) leavePage();
+	// The page stays, archived and read-only, at the same address (U-2 N4).
 	await loadProjects();
+	if (shown === pid) evaluate();
 }
 
 // ── Rename ──────────────────────────────────────────────────────────────────
@@ -463,7 +470,7 @@ function wire(): void {
 				if (shown === null) return;
 				const t = e.target;
 				if (t instanceof Element && t.closest(".session-actions")) return;
-				leavePage();
+				leaveForSession();
 			},
 			true,
 		);
