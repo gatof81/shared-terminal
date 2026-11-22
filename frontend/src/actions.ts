@@ -9,7 +9,8 @@
 
 import { downloadSessionFile, uploadSessionFiles } from "./api.js";
 import { createDialog, promptDialog } from "./components/dialog.js";
-import { activeSessionId, getActiveTerminal, showToast } from "./main.js";
+import { showToast } from "./components/toast.js";
+import { activeSessionId, getActiveTerminal } from "./main.js";
 import { runPasteFlow } from "./paste.js";
 import { saveBlob } from "./saveBlob.js";
 

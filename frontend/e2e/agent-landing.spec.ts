@@ -24,17 +24,16 @@ test.describe("an agent's session lands on its Chat", () => {
 		const length = await page.evaluate(() => history.length);
 		await app.openSession("scratch");
 		await app.expectView("chat");
-		await expect(page.locator("#acp-chat .acp-chat-title")).toContainText("@solo");
+		await expect(page.locator("#terminal-session-name")).toHaveText("@solo");
 		await expect.poll(() => page.url()).toContain(`#/sessions/${AGENT}/chat`);
 		expect(await page.evaluate(() => history.length), "a landing is not an entry").toBe(length);
 		// The attach behind the overlay sends nothing on its own.
 		await expect.poll(() => backend.terminalSockets.length).toBe(1);
 		await page.waitForTimeout(300);
 		expect(backend.terminalSockets[0]!.sent.filter((f) => f.type === "resize")).toEqual([]);
-		// A traditional session still lands as its shell says.
+		// A traditional session with captured history lands on Chat too.
 		await app.openSession("my-project");
-		if (app.shell === "v1") await app.expectTerminalReady();
-		else await app.expectView("chat"); // v2: it has captured history
+		await app.expectView("chat");
 	});
 
 	test("a stopped agent's session also lands on Chat, with its history", async ({
@@ -146,63 +145,72 @@ test.describe("an agent's session lands on its Chat", () => {
 			"nuevo-agente",
 		);
 		await app.expectView("chat");
-		await expect(page.locator("#acp-chat .acp-chat-title")).toContainText("@nuevo");
+		await expect(page.locator("#terminal-session-name")).toHaveText("@nuevo");
 		expect(SESSION_IDS.running).not.toBe(sid);
 	});
 });
 
 /**
  * The agents list is read when the session list first loads, so a selection
- * normally finds it there and waits for nothing; a list that is slow or never
- * answers costs one bounded wait per page load, never one per selection.
- * The witness (shell v1): while a landing waits, a stopped session shows the
- * Terminal view's "stopped" panel; without a wait it goes straight to Files.
+ * normally finds it there and waits for nothing; a list that never answers
+ * costs one bounded wait (LANDING_AGENTS_WAIT_MS, 500 ms) per page load,
+ * never one per selection. Measured in the page: from the click on a row to
+ * the first frame that shows the session's landing view (Chat: both
+ * sessions have captured history).
  */
 test.describe("the agents list never makes every selection wait", () => {
 	test.use({ landing: "none" });
-	test.skip(({ shell }) => shell !== "v1", "v1: a traditional session's own flow is the witness");
-	test.beforeEach(async ({ backend, page }) => {
-		backend.enableAcp();
-		await page.addInitScript(() => {
-			const w = window as unknown as { __stoppedPanel: boolean };
-			w.__stoppedPanel = false;
-			// Sampled per frame: only what was actually painted counts.
-			const tick = () => {
-				const p = document.getElementById("terminal-state");
-				const files = document.getElementById("files-view");
-				if (p && !p.hidden && files?.hidden && p.textContent?.includes("stopped"))
-					w.__stoppedPanel = true;
-				requestAnimationFrame(tick);
-			};
-			requestAnimationFrame(tick);
-		});
-	});
-	const stoppedPanelSeen = (page: import("@playwright/test").Page) =>
-		page.evaluate(() => (window as unknown as { __stoppedPanel: boolean }).__stoppedPanel);
 
-	test("a list that answers: the first selection does not wait", async ({ app, backend, page }) => {
-		backend.acpAgentsDelayMs = 50;
-		await app.login("alice");
+	async function landingDelay(
+		app: import("./fixtures.js").App,
+		page: import("@playwright/test").Page,
+		name: string,
+	): Promise<number> {
 		await app.openSidebar();
-		await expect(app.sessionRow("docs")).toBeVisible();
-		await page.waitForTimeout(300); // the read at load has answered
-		await app.openSession("docs");
-		await app.expectView("files");
-		expect(await stoppedPanelSeen(page), "straight to Files").toBe(false);
-	});
+		const row = app.sessionRow(name).locator(".session-select");
+		await page.evaluate(() => {
+			const w = window as unknown as { __landed: number | null; __clicked: number | null };
+			w.__landed = null;
+			w.__clicked = null;
+			document.addEventListener(
+				"click",
+				() => {
+					w.__clicked = performance.now();
+					const tick = () => {
+						if (!document.getElementById("chat-view")!.hidden) w.__landed = performance.now();
+						else requestAnimationFrame(tick);
+					};
+					requestAnimationFrame(tick);
+				},
+				{ capture: true, once: true },
+			);
+		});
+		await row.click();
+		await app.expectView("chat");
+		return page.evaluate(() => {
+			const w = window as unknown as { __landed: number; __clicked: number };
+			return w.__landed - w.__clicked;
+		});
+	}
 
-	test("a list that never answers: one wait, then the next selection lands at once", async ({
+	test("a list that never answers: the first selection waits once, the next one lands at once", async ({
 		app,
 		backend,
 		page,
 	}) => {
 		backend.acpAgentsDelayMs = 600_000;
 		await app.login("alice");
-		await app.openSession("my-project");
-		await app.expectTerminalReady();
-		await app.openSession("docs");
-		await app.expectView("files");
-		expect(await stoppedPanelSeen(page), "the second selection did not wait").toBe(false);
+		const first = await landingDelay(app, page, "my-project");
+		expect(first, "the first selection waits for the list (bounded)").toBeGreaterThanOrEqual(400);
+		const second = await landingDelay(app, page, "docs");
+		expect(second, "the second does not wait again").toBeLessThan(first - 200);
+	});
+
+	test("a list that answers: the first selection does not wait", async ({ app, backend, page }) => {
+		backend.acpAgentsDelayMs = 50;
+		await app.login("alice");
+		await page.waitForTimeout(300); // the read at load has answered
+		expect(await landingDelay(app, page, "docs")).toBeLessThan(400);
 	});
 });
 

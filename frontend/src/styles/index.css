@@ -21,13 +21,10 @@
 @import "./keybar.css";
 @import "./files.css";
 @import "./git.css";
-@import "./viewnav.css";
 @import "./chat.css";
 /* Shared components (components/*.ts): styled on top of everything above. */
 @import "./dialog.css";
 @import "./switcher.css";
 @import "./projects.css";
-/* Shell v2 overrides, keyed on html[data-shell="v2"] (uiShell.ts). Last on purpose. */
-@import "./shell-v2.css";
 /* Experimental ACP agent chat: classes used only by acpChat.ts. */
 @import "./acp-chat.css";

@@ -40,7 +40,8 @@
 #terminal-tabs {
   display: none;
   align-items: stretch;
-  gap: 4px;
+  justify-content: space-between;
+  gap: 0.5rem;
   padding: 4px 8px 0 8px;
   background: var(--c-bg);
   border-bottom: 1px solid var(--c-border);
@@ -169,16 +170,21 @@
   position: relative;
 }
 
-/* The chips' row. #terminal-tabs = #tab-strip + #tab-tools (shell v2 puts
-   the terminal-only controls in the latter; empty in v1): the strip
-   carries exactly the layout the chips had as direct children of
-   #terminal-tabs, so nothing moved. */
+/* The chips' row. #terminal-tabs = #tab-strip + #tab-tools (the
+   terminal-only controls: history search, font size, Insert). */
 #tab-strip {
   display: flex;
   align-items: stretch;
   gap: 4px;
   min-width: 0;
   overflow-x: clip;
+}
+#tab-tools {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding-bottom: 4px;
+  flex-shrink: 0;
 }
 
 /* ── Tabs as controls (UI unification, PR 4) ───────────────────
@@ -213,6 +219,11 @@
    card with a danger tone and a visible reason on disabled items. */
 .action-menu .actions-menu-item.kind-danger .actions-menu-item-title {
   color: var(--c-err);
+}
+/* One line between the ordinary actions and the destructive ones. */
+.action-menu .actions-menu-item:not(.kind-danger) + .actions-menu-item.kind-danger {
+  border-top: 1px solid var(--c-border-soft);
+  margin-top: 4px;
 }
 .action-menu .actions-menu-item.kind-primary .actions-menu-item-title {
   color: var(--c-accent);

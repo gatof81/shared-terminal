@@ -35,7 +35,6 @@ test.describe("router", () => {
 		await expect.poll(() => page.url()).toContain(`#/sessions/${S}/chat/conv-2`);
 
 		await app.switchView("terminal");
-		await app.openChrome();
 		const depthBefore = await page.evaluate(
 			() => (history.state as { st?: { n: number } })?.st?.n ?? 0,
 		);
@@ -78,19 +77,11 @@ test.describe("router", () => {
 		await page.goBack();
 		await app.expectView("terminal");
 		await page.waitForTimeout(300);
-		// Pure view history: no socket, no input, no resize — except on v1
-		// mobile, where entering the overlays closed the chrome drawer while
-		// the terminal was covered: the covered terminal kept its geometry
-		// and syncs it ONCE when Back returns to it (terminalGeometry.ts).
+		// Pure view history: no socket, no input, no resize.
 		expect(backend.terminalSockets.length).toBe(sockets);
 		expect(sock.closed).toBe(false);
-		const deferredSync = app.mobile && app.shell === "v1" ? 1 : 0;
 		const sent = sock.sent.slice(f0);
-		expect(sent.length, "frames sent during Back/Forward").toBe(deferredSync);
-		expect(
-			sent.every((f) => f.type === "resize"),
-			"only the deferred resize",
-		).toBe(true);
+		expect(sent.length, "frames sent during Back/Forward").toBe(0);
 		await expect(page.locator(".tab-pane.active")).toContainText("Welcome");
 	});
 

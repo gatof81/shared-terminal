@@ -14,7 +14,7 @@ import "./styles/index.css";
 // imports them by name (the dialog stack in components/dialog.ts owns
 // Escape, focus and backdrop clicks for all of them).
 import "./actions.js";
-import "./admin.js";
+import { openAdminModal } from "./admin.js";
 import {
 	checkAuthStatus,
 	InviteRequiredError,
@@ -26,24 +26,25 @@ import {
 	register,
 	SESSION_EXPIRED_EVENT,
 	type SessionInfo,
-	serverUiShell,
 	type Tab,
 } from "./api.js";
 // Overlay views register themselves with viewSwitch on load; nothing
 // else imports them by name, so the side-effect imports keep them in.
 import "./filesView.js";
 import "./gitView.js";
+import { type MenuItem, openActionMenu } from "./components/actionMenu.js";
 import { escapeHandledByDialog } from "./components/dialog.js";
-import { showCopySuccessToast, showToast } from "./components/toast.js";
-import "./invites.js";
+import { showToast } from "./components/toast.js";
+import { openInvitesModal } from "./invites.js";
 import { initKeyBar, updateKeyBarVisibility } from "./keyBar.js";
 import {
 	clearSidebarObservables,
 	closeObserveModal,
+	openMyGroupsModal,
 	refreshSidebarObservables,
 	renderSidebarObservables,
 } from "./myGroups.js";
-import { applyResourceCapsToForm } from "./newSession.js";
+import { applyResourceCapsToForm, openTemplatesModal } from "./newSession.js";
 import "./paste.js";
 import "./ports.js";
 import { resetProjects, startProjects } from "./projectsView.js";
@@ -66,22 +67,12 @@ import {
 	sessionListLoaded,
 	updateToolbar,
 } from "./sessionCore.js";
-import { initShellV2 } from "./shellV2.js";
 import { closeSwitcher, initSwitcher, openSwitcher } from "./switcher.js";
 import { clearAllBadges } from "./tabActivity.js";
 import { resetTabTitle, setTitleParts } from "./tabTitle.js";
 import type { TerminalSession } from "./terminal.js";
-import {
-	applyBar,
-	applyShell,
-	consumeShellQuery,
-	currentShell,
-	DEFAULT_BAR,
-	readStoredBar,
-	resolveShell,
-} from "./uiShell.js";
 import { forgetAllLastConversationTitles } from "./viewPolicy.js";
-import { getView, isOverlayActive, onViewChange, overlayLabel } from "./viewSwitch.js";
+import { getView, isOverlayActive, onViewChange } from "./viewSwitch.js";
 import { initVvDebug } from "./vvDebug.js";
 
 // ── DOM refs ────────────────────────────────────────────────────────────────
@@ -100,8 +91,6 @@ const authSubmitBtn = document.getElementById("auth-submit") as HTMLButtonElemen
 const userDisplay = document.getElementById("user-display")!;
 const sidebarUserDisplay = document.getElementById("sidebar-user-display")!;
 
-const logoutBtn = document.getElementById("logout-btn")!;
-const invitesBtn = document.getElementById("invites-btn") as HTMLButtonElement;
 const sessionList = document.getElementById("session-list")!;
 const showTerminatedToggle = document.getElementById("show-terminated-toggle") as HTMLInputElement;
 const sidebarRefreshBtn = document.getElementById("sidebar-refresh-btn") as HTMLButtonElement;
@@ -109,26 +98,6 @@ const mainEl = document.querySelector("main")!;
 const sidebarEl = document.getElementById("sidebar")!;
 const sidebarToggleBtn = document.getElementById("sidebar-toggle") as HTMLButtonElement;
 const sidebarBackdrop = document.getElementById("sidebar-backdrop")!;
-const sidebarInvitesBtn = document.getElementById("sidebar-invites-btn") as HTMLButtonElement;
-const sidebarAdminBtn = document.getElementById("sidebar-admin-btn") as HTMLButtonElement;
-const adminBtn = document.getElementById("admin-btn") as HTMLButtonElement;
-
-// #201e — lead-side "My groups" surface. Visibility flips on isLead()
-// from the api-layer mirror. Sidebar + header buttons are gated together
-// (same shape as the Admin pair above).
-const myGroupsBtn = document.getElementById("my-groups-btn") as HTMLButtonElement;
-const sidebarMyGroupsBtn = document.getElementById("sidebar-my-groups-btn") as HTMLButtonElement;
-const sidebarLogoutBtn = document.getElementById("sidebar-logout-btn") as HTMLButtonElement;
-// #355 — Web Push toggle. Header (desktop) + sidebar-footer (mobile drawer)
-// pair, mirroring the Admin/Invites button pairs. State is read from the
-// browser subscription + server status via getPushToggleState(); nothing is
-// persisted locally.
-const notificationsBtn = document.getElementById("notifications-btn") as HTMLButtonElement;
-const sidebarNotificationsBtn = document.getElementById(
-	"sidebar-notifications-btn",
-) as HTMLButtonElement;
-const chromeToggleBtn = document.getElementById("chrome-toggle") as HTMLButtonElement;
-const chromeToggleLabel = document.getElementById("chrome-toggle-label")!;
 
 const terminalTabs = document.getElementById("terminal-tabs")!;
 const terminalContainer = document.getElementById("terminal-container")!;
@@ -136,20 +105,30 @@ const fontSizeBtn = document.getElementById("font-size-btn") as HTMLButtonElemen
 // actions.ts owns the (+) menu; main.ts only toggles the button's visibility.
 const actionsBtn = document.getElementById("actions-btn") as HTMLButtonElement;
 
-// ── Shell (v1 / v2) ─────────────────────────────────────────────────────────
-// Which shell to mount: a `?ui=` override for this browser, else the
-// operator's choice from /auth/status (uiShell.ts). Applied before the
-// first paint from the override alone, then again once the server has
-// answered — shellV2.ts moves a few controls, which is safe at any time.
-const shellOverride = consumeShellQuery();
-function applyResolvedShell(): void {
-	const shell = resolveShell({ stored: shellOverride, server: serverUiShell() });
-	if (shell === currentShell() && document.documentElement.dataset.shell) return;
-	applyShell(shell);
-	applyBar(shell === "v2" ? (readStoredBar() ?? DEFAULT_BAR) : null);
-	if (shell === "v2") initShellV2();
+// ── Session bar placement ───────────────────────────────────────────────────
+// On a phone the session bar shares the header's line (☰ · name · view tabs
+// · ⋯ · user); on a wide screen it sits on top of #terminal-area. The
+// element is MOVED, not cloned, so every module keeps its references, and
+// only when the breakpoint is crossed. viewSwitch.positionOverlays knows the
+// overlays then start at the top of #terminal-area; mobile.css styles it
+// there as `header #terminal-toolbar`.
+{
+	const toolbar = document.getElementById("terminal-toolbar")!;
+	const header = document.querySelector("header")!;
+	const area = document.getElementById("terminal-area")!;
+	const tabs = document.getElementById("terminal-tabs")!;
+	const toggle = document.getElementById("sidebar-toggle")!;
+	const narrow = window.matchMedia("(max-width: 768px)");
+	const place = () => {
+		if (narrow.matches) {
+			if (toolbar.parentElement !== header) toggle.insertAdjacentElement("afterend", toolbar);
+		} else if (toolbar.parentElement !== area) {
+			area.insertBefore(toolbar, tabs);
+		}
+	};
+	place();
+	narrow.addEventListener("change", place);
 }
-applyResolvedShell();
 
 // ── Viewport height ─────────────────────────────────────────────────────────
 // iOS Safari's soft keyboard overlays the layout viewport without resizing
@@ -289,11 +268,7 @@ export function disposeAllCurrentTerminals() {
 	(document.getElementById("tab-strip") ?? terminalTabs).replaceChildren();
 	terminalTabs.style.display = "none";
 	terminalContainer.style.display = "none";
-	// Clearing the tabs invalidates the chrome-toggle label — refresh
-	// even though updateToolbar() (which would also do this) typically
-	// runs immediately after. The defensive call costs almost nothing
-	// and stops a stale "Tab N" lingering in the header on logout.
-	updateChromeToggle();
+	updateTerminalControls();
 }
 
 // ── Auth flow ───────────────────────────────────────────────────────────────
@@ -310,8 +285,6 @@ async function initAuth() {
 	// for "show app vs. login" and `needsSetup` for "show invite field".
 	try {
 		const { needsSetup, authenticated } = await checkAuthStatus();
-		// The operator's shell (UI_SHELL) is known now; an override wins.
-		applyResolvedShell();
 		// #200: caps now mirrored in the api module — apply to the form
 		// once on init so the very first modal open shows operator-
 		// lowered bounds. Re-applied on every modal open below to catch
@@ -362,9 +335,6 @@ function showApp() {
 	authView.style.display = "none";
 	appView.style.display = "flex";
 	userDisplay.textContent = "●";
-	// Keep the sidebar-footer marker in lockstep with the header one so
-	// a future swap of "●" for the actual username only needs editing
-	// a single line.
 	sidebarUserDisplay.textContent = userDisplay.textContent;
 	setServerReachable(true);
 	applyAdminVisibility();
@@ -389,21 +359,9 @@ function showApp() {
 	});
 }
 
-// #50 / #201e: gate role-conditional UI on the api-layer mirror.
-// Each button pair (header + sidebar) flips together. Hydrated from
-// /auth/status + login/register so this just reflects the current
-// authoritative answer without its own round-trip. Visibility is a
-// UX hint only — every gated endpoint is server-side requireAdmin /
-// requireAuth-gated, so a leaked button reveal is harmless.
+// #50 / #201e: role-conditional UI follows the api-layer mirror (the user
+// menu reads it when it opens).
 export function applyAdminVisibility() {
-	const admin = isAdmin();
-	invitesBtn.classList.toggle("hidden", !admin);
-	sidebarInvitesBtn.classList.toggle("hidden", !admin);
-	adminBtn.classList.toggle("hidden", !admin);
-	sidebarAdminBtn.classList.toggle("hidden", !admin);
-	const lead = isLead();
-	myGroupsBtn.classList.toggle("hidden", !lead);
-	sidebarMyGroupsBtn.classList.toggle("hidden", !lead);
 	// Sidebar observables section (#394): hydrate whenever lead status
 	// (re)resolves. The function self-hides the section for non-leads,
 	// so calling unconditionally keeps login/logout symmetric.
@@ -414,34 +372,35 @@ export function applyAdminVisibility() {
 //
 // Web Push opt-in. The source of truth is the browser subscription + server
 // status, never localStorage; the button re-reads that state via
-// getPushToggleState() on every app-show and after each click. Both the
-// header (desktop) and sidebar-footer (mobile) buttons render identically.
+// getPushToggleState() on every app-show and after each click; the user
+// menu shows the state's entry when it opens.
 
 let pushToggleBusy = false;
+let pushToggleState: PushToggleState = "unsupported";
 
 function renderNotificationsToggle(state: PushToggleState) {
-	const btns = [notificationsBtn, sidebarNotificationsBtn];
+	pushToggleState = state;
+}
+
+/** The user menu's notifications entry; null where there is nothing to offer. */
+function notificationsItem(): MenuItem | null {
+	const s = pushToggleState;
 	// "unsupported" folds together "browser can't push" and "server push not
-	// configured" — in both cases there is nothing to offer, so hide entirely.
-	const hidden = state === "unsupported";
-	for (const btn of btns) {
-		btn.hidden = hidden;
-		btn.classList.toggle("enabled", state === "on");
-		btn.disabled = state === "blocked" || pushToggleBusy;
-		if (state === "on") {
-			btn.textContent = "Notifications on";
-			btn.title = "Disable browser notifications for this device";
-		} else if (state === "off") {
-			btn.textContent = "Enable notifications";
-			btn.title = "Get notified when a session needs attention";
-		} else if (state === "blocked") {
-			btn.textContent = "Notifications blocked";
-			btn.title = "Notifications are blocked in your browser settings";
-		} else if (state === "ios-needs-install") {
-			btn.textContent = "Install to enable notifications";
-			btn.title = "Add this app to your home screen to enable notifications";
-		}
-	}
+	// configured" — in both cases there is nothing to offer.
+	if (s === "unsupported") return null;
+	const [label, hint] =
+		s === "on"
+			? ["Disable notifications", "Disable browser notifications for this device"]
+			: s === "off"
+				? ["Enable notifications", "Get notified when a session needs attention"]
+				: s === "blocked"
+					? ["Notifications blocked", "Notifications are blocked in your browser settings"]
+					: [
+							"Install to enable notifications",
+							"Add this app to your home screen to enable notifications",
+						];
+	const enabled = s !== "blocked" && !pushToggleBusy;
+	return { id: "notifications", label, hint, enabled, reason: enabled ? undefined : hint };
 }
 
 async function refreshNotificationsToggle() {
@@ -482,9 +441,6 @@ async function onNotificationsClick() {
 		await refreshNotificationsToggle();
 	}
 }
-
-notificationsBtn.addEventListener("click", () => void onNotificationsClick());
-sidebarNotificationsBtn.addEventListener("click", () => void onNotificationsClick());
 
 // Register the service worker as early as possible so a later enable-push
 // click finds an active registration. Idempotent + no-op where unsupported.
@@ -687,16 +643,42 @@ function handleLogout(toastMessage?: string): void {
 	if (toastMessage) showToast(toastMessage, true);
 }
 
-logoutBtn.addEventListener("click", () => {
-	handleLogout();
+// ── User menu ───────────────────────────────────────────────────────────────
+// The account's actions, declared here and acted on directly. What a role
+// may not use is left out, never shown disabled (a UX hint only: every gated
+// endpoint is server-side requireAdmin / lead-checked). Opened from the
+// avatar, or under 400 px — where the bar has no room for it — from the
+// drawer's "Account" row; the focus then goes back to the ☰.
+function openUserMenu(opener: HTMLElement): void {
+	const notifications = notificationsItem();
+	const items: MenuItem[] = [
+		{ id: "templates", label: "Templates", hint: "Session templates" },
+		...(isAdmin() ? [{ id: "invites", label: "Invites", hint: "Manage invite codes" }] : []),
+		...(isLead() ? [{ id: "my-groups", label: "My groups", hint: "Groups you lead" }] : []),
+		...(isAdmin() ? [{ id: "admin", label: "Admin", hint: "Admin dashboard" }] : []),
+		...(notifications ? [notifications] : []),
+		{ id: "logout", label: "Logout", kind: "danger" },
+	];
+	openActionMenu({
+		title: "Account",
+		opener,
+		items,
+		onPick: (id) => {
+			if (id === "templates") openTemplatesModal(opener);
+			else if (id === "invites") openInvitesModal(opener);
+			else if (id === "my-groups") openMyGroupsModal(opener);
+			else if (id === "admin") openAdminModal(opener);
+			else if (id === "notifications") void onNotificationsClick();
+			else if (id === "logout") handleLogout();
+		},
+	});
+}
+const userMenuBtn = document.getElementById("user-menu-btn") as HTMLButtonElement;
+userMenuBtn.addEventListener("click", () => openUserMenu(userMenuBtn));
+document.getElementById("sidebar-account-btn")?.addEventListener("click", () => {
+	setSidebarOpen(false);
+	openUserMenu(sidebarToggleBtn);
 });
-
-// Logout from the sidebar footer just delegates — handleLogout() tears
-// the whole UI down so focus return is moot. Invites is wired separately
-// further below: closeInvitesModal needs the actual opener button to
-// restore focus to (the desktop invitesBtn is `display:none` on mobile,
-// so a delegated `invitesBtn.click()` would silently lose focus on close).
-sidebarLogoutBtn.addEventListener("click", () => logoutBtn.click());
 
 // Listen for the api-layer signal that our session cookie is no longer
 // accepted (#95). Without this, a `refreshSessions()` tick 15 s after
@@ -711,11 +693,6 @@ sidebarLogoutBtn.addEventListener("click", () => logoutBtn.click());
 window.addEventListener(SESSION_EXPIRED_EVENT, () => {
 	handleLogout("Your session has expired — please sign in again");
 });
-
-// ── Toast ───────────────────────────────────────────────────────────────────
-// Lives in components/toast.ts (live region, stacked items, dedupe); the
-// historical names stay exported from here for the modules that import them.
-export { showCopySuccessToast, showToast };
 
 // ── First-session selection hint ────────────────────────────────────────────
 // tmux mouse-on (session-image/tmux.conf:54) means a plain mouse drag in the
@@ -782,7 +759,6 @@ export function maybeInjectSelectionHint(pane: HTMLElement) {
 // ── Show terminated toggle ──────────────────────────────────────────────────
 
 showTerminatedToggle.addEventListener("change", () => {
-	console.debug(`[sessions] show-terminated toggled → ${showTerminatedToggle.checked}`);
 	refreshSessions();
 });
 
@@ -966,10 +942,6 @@ document.getElementById("project-section")?.addEventListener("click", (e) => {
 // sidebar column pinned at 0 with no visible trigger to recover.
 mobileMql.addEventListener("change", () => {
 	setSidebarOpen(!isMobile());
-	// Re-derive the chrome drawer state too — desktop always wants it open
-	// (since the toolbar/tabs are part of the layout there), and mobile
-	// wants it closed unless the user is mid-onboarding (no tabs yet).
-	setChromeOpen(chromeDefaultOpen());
 });
 
 // Default state: open on desktop, closed on mobile. The HTML+CSS start
@@ -981,95 +953,18 @@ mobileMql.addEventListener("change", () => {
 setSidebarOpen(!isMobile());
 mainEl.setAttribute("data-sidebar-ready", "");
 
-// ── Chrome (toolbar + tabs) drawer toggle ───────────────────────────────────
-// Mobile only — desktop always shows the toolbar+tabs as part of the layout.
-// On mobile we hide them by default to give tmux the full viewport, and
-// surface a slim toggle in the header that mirrors the sessions-sidebar
-// pattern: tap to expand, tap a tab to collapse again.
-
-function chromeDefaultOpen(): boolean {
-	// Desktop: always open — the layout includes the toolbar/tabs row.
-	if (!isMobile()) return true;
-	// Mobile + active session with no tabs: expand so the user can see
-	// the "+" button and create their first tab. Without this they'd
-	// land on a blank screen with no obvious way forward.
-	if (activeSessionId !== null && currentTabs.length === 0) return true;
-	return false;
-}
-
-export function setChromeOpen(open: boolean) {
-	mainEl.classList.toggle("chrome-open", open);
-	chromeToggleBtn.setAttribute("aria-expanded", String(open));
-}
-
-// Keep the header chrome-toggle's label in sync with the active session
-// and tab. On mobile this IS the only on-screen indication of "where you
-// are" — sessions sidebar and tabs row are both hidden by default.
-// The mobile actions (+) button rides the same visibility lifecycle:
-// nothing to paste into or attach to when no session is active, so hide
-// both together.
-export function updateChromeToggle() {
+// ── Terminal-only controls ──────────────────────────────────────────────────
+// The Insert (+) menu (paste / attach / select) writes into the terminal:
+// hidden without a session, while an overlay covers the terminal (Files has
+// its own download button) and while there is no terminal to write into
+// (stopped session, no tab yet, lost socket — the state panel offers the
+// action that applies instead). The key bar follows the same lifecycle.
+export function updateTerminalControls() {
 	const s = sessions.find((x) => x.sessionId === activeSessionId);
-	// Hide the toggle entirely when there's no session — there's nothing
-	// for it to toggle, and the empty-state message in the terminal area
-	// already explains what to do next.
-	if (!s) {
-		chromeToggleBtn.hidden = true;
-		actionsBtn.hidden = true;
-		updateKeyBarVisibility();
-		return;
-	}
-	chromeToggleBtn.hidden = false;
-	// The actions menu (paste / attach / select) writes into the terminal:
-	// hidden while an overlay covers it (Files has its own download
-	// button) and while there is no terminal to write into (stopped
-	// session, no tab yet, lost socket — the state panel offers the action
-	// that applies instead).
-	actionsBtn.hidden = isOverlayActive() || getActiveTerminal() === null;
+	actionsBtn.hidden = !s || isOverlayActive() || getActiveTerminal() === null;
 	updateKeyBarVisibility();
-	const activeTab = currentTabs.find((t) => t.tabId === currentActiveTabId);
-	// Format: "session › tab". Falls back to just the session name when
-	// no tab is active yet (fresh session, between switches). Using a
-	// thin space + chevron keeps it scannable on a 430-pt-wide screen.
-	const overlay = overlayLabel();
-	chromeToggleLabel.textContent =
-		overlay !== null
-			? `${s.name} › ${overlay}`
-			: activeTab
-				? `${s.name} › ${activeTab.label}`
-				: s.name;
-	// The accessible name starts with what the button shows (WCAG 2.5.3).
-	chromeToggleBtn.setAttribute(
-		"aria-label",
-		`${chromeToggleLabel.textContent} — toggle session controls`,
-	);
 }
-
-chromeToggleBtn.addEventListener("click", () => {
-	setChromeOpen(!mainEl.classList.contains("chrome-open"));
-});
-
-// On mobile, picking a tab from the chrome drawer is the user's signal
-// that they're done with the controls and want to focus on tmux —
-// auto-collapse so the terminal regains the full viewport. Mirrors the
-// sessions-sidebar drawer behaviour. Closing/adding tabs and the font-size
-// button are NOT collapse triggers: those are tweaks the user often
-// repeats in succession, and forcing a re-expand each time is annoying.
-terminalTabs.addEventListener("click", (e) => {
-	if (!isMobile()) return;
-	const target = e.target as HTMLElement;
-	// Ignore the × close button and the + add button — they're explicit
-	// affordances inside the chrome drawer that the user expects to stay
-	// accessible. Only collapse on a chip click (tab switch).
-	if (target.closest(".tab-close")) return;
-	if (target.closest("#tab-add")) return;
-	if (target.closest(".tab-chip")) setChromeOpen(false);
-});
-
-// Default chrome state — apply once, then defer to the per-action
-// setChromeOpen calls scattered through openSession/openTab/etc.
-setChromeOpen(chromeDefaultOpen());
-updateChromeToggle();
+updateTerminalControls();
 
 // ── Font size cycle button ──────────────────────────────────────────────────
 

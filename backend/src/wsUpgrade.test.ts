@@ -16,7 +16,7 @@ import type { AddressInfo } from "node:net";
 import jwt from "jsonwebtoken";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocket, WebSocketServer } from "ws";
-import { ACP_WS_PREFIX, type AcpWsHub } from "./acp/ws.js";
+import type { AcpWsHub } from "./acp/ws.js";
 import { __resetJwtSecretForTests, validateJwtSecret } from "./auth.js";
 import { BootstrapBroadcaster } from "./bootstrap.js";
 import { ConversationWsHub } from "./conversation/ws.js";
@@ -179,11 +179,17 @@ afterEach(async () => {
 // ── Admission predicate ──────────────────────────────────────────────────────
 
 describe("isWsPath", () => {
-	it("admits exactly the three app prefixes", () => {
-		expect(WS_PATH_PREFIXES).toEqual(["/ws/sessions/", "/ws/bootstrap/", "/ws/conversation/"]);
+	it("admits exactly the four app prefixes", () => {
+		expect(WS_PATH_PREFIXES).toEqual([
+			"/ws/sessions/",
+			"/ws/bootstrap/",
+			"/ws/conversation/",
+			"/ws/acp",
+		]);
 		expect(isWsPath("/ws/sessions/abc?tab=t1")).toBe(true);
 		expect(isWsPath("/ws/bootstrap/abc")).toBe(true);
 		expect(isWsPath("/ws/conversation/abc")).toBe(true);
+		expect(isWsPath("/ws/acp")).toBe(true);
 	});
 	it("refuses near misses", () => {
 		for (const p of [
@@ -199,18 +205,13 @@ describe("isWsPath", () => {
 	});
 });
 
-// ── /ws/acp (experimental ACP agents) ─────────────────────────────────────────
+// ── /ws/acp (ACP agents) ─────────────────────────────────────────────────────
 
 describe("WS /ws/acp through server.on('upgrade')", () => {
-	it("flag off: not admitted (404)", async () => {
-		const c = await connect("/ws/acp", asOwner());
-		expect(c.status).toBe(404);
-	});
-
-	it("flag on: admitted, served for the cookie's user; no cookie is refused", async () => {
+	it("admitted, served for the cookie's user; no cookie is refused", async () => {
 		await new Promise<void>((r) => server.close(() => r()));
 		const owners: string[] = [];
-		await start({ extraPathPrefixes: [ACP_WS_PREFIX] }, {
+		await start({}, {
 			serve: (ws: WebSocket, owner: string) => {
 				owners.push(owner);
 				ws.send(JSON.stringify({ type: "hello" }));

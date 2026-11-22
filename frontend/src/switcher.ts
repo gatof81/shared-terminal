@@ -18,7 +18,6 @@ import {
 	type ConversationSummary,
 	fetchConversationAgents,
 	fetchConversationSummaries,
-	projectChatEnabled,
 } from "./api.js";
 import { focusAgentWhenOpen } from "./chatView.js";
 import { createDialog, isAnyDialogOpen } from "./components/dialog.js";
@@ -36,11 +35,10 @@ import {
 	Slots,
 	SWITCHER_CONCURRENCY,
 	SWITCHER_TIMEOUT_MS,
+	SWITCHER_WORDS,
 	type SwitcherItem,
 	sectionize,
 	sessionLabel,
-	sessionNoun,
-	switcherWords,
 	toItem,
 	visibleInSwitcher,
 } from "./switcherModel.js";
@@ -77,9 +75,7 @@ export function openSwitcher(opener?: Element | null): void {
 	openNow = true;
 	let closed = false;
 	const now = Date.now();
-	// Read once per open: the feature only changes on a fresh /auth/status.
-	const noun = sessionNoun(projectChatEnabled());
-	const words = switcherWords(noun);
+	const words = SWITCHER_WORDS;
 	// "@name" of the ACP agent a session runs (acpRegistry.ts); others show nothing.
 	const handles = new Map<string, string>();
 	for (const s of sessions) {
@@ -333,8 +329,7 @@ export function openSwitcher(opener?: Element | null): void {
 			statusEl.appendChild(el("p", "switcher-empty", msg));
 		}
 		// Parallel work at a glance (fresh evidence only; never the query's subset).
-		const summary =
-			all.length > 0 ? parallelSummaryText(parallelSummary(allItems(), all), noun) : null;
+		const summary = all.length > 0 ? parallelSummaryText(parallelSummary(allItems(), all)) : null;
 		summaryEl.textContent = summary ?? "";
 		summaryEl.hidden = summary === null;
 		if (loading > 0)

@@ -156,9 +156,9 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			});
 			return;
 		}
-		// Experimental ACP agent (acp/agents.ts): `acpAgent: { name, model? }`.
-		// Without the flag the field is refused, not ignored — a client must not
-		// believe it created an agent.
+		// ACP agent (acp/agents.ts): `acpAgent: { name, model? }`. A router built
+		// without ACP (route tests) refuses the field rather than ignoring it —
+		// a client must not believe it created an agent.
 		let acpAgentName: string | null = null;
 		let acpAgentModel: string | undefined;
 		let acpAgentRuntime: string | undefined;

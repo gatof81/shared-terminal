@@ -47,14 +47,14 @@ printf 'A=1\n' >"$T/env.min"; printf 'A=1\nexport NEWKEY=x\n  SPACED=1\nK2 = v\n
 expect_eq "export-prefixed, indented and spaced keys are seen" "$(env_key_delta "$T/env.min" "$T/env.compose" | tr '\n' ';')" "> K2;> NEWKEY;> SPACED;"
 
 # ── flag transition: absent vs forwarded-empty (since #591) ──
-printf 'NODE_ENV=production\nPROJECT_CHAT_ENABLED=true\nPROJECT_CONVERSATION_ENABLED=\n' >"$T/f.empty"
-printf 'NODE_ENV=production\nPROJECT_CHAT_ENABLED=true\n' >"$T/f.absent"
-printf 'NODE_ENV=production\nPROJECT_CHAT_ENABLED=true\nPROJECT_CONVERSATION_ENABLED=true\n' >"$T/f.on"
+printf 'NODE_ENV=production\nCONVERSATION_ENABLED=true\nPROJECT_CONVERSATION_ENABLED=\n' >"$T/f.empty"
+printf 'NODE_ENV=production\nCONVERSATION_ENABLED=true\n' >"$T/f.absent"
+printf 'NODE_ENV=production\nCONVERSATION_ENABLED=true\nPROJECT_CONVERSATION_ENABLED=true\n' >"$T/f.on"
 expect_true "empty → true is the one transition" 'flag_transition "$T/f.empty" "$T/f.on" PROJECT_CONVERSATION_ENABLED true'
 expect_true "absent → true is the one transition" 'flag_transition "$T/f.absent" "$T/f.on" PROJECT_CONVERSATION_ENABLED true'
-printf 'NODE_ENV=development\nPROJECT_CHAT_ENABLED=true\nPROJECT_CONVERSATION_ENABLED=true\n' >"$T/f.on.other"
+printf 'NODE_ENV=development\nCONVERSATION_ENABLED=true\nPROJECT_CONVERSATION_ENABLED=true\n' >"$T/f.on.other"
 expect_false "another flag changing too is refused" 'flag_transition "$T/f.empty" "$T/f.on.other" PROJECT_CONVERSATION_ENABLED true'
-printf 'NODE_ENV=production\nPROJECT_CHAT_ENABLED=true\nPROJECT_CONVERSATION_ENABLED=1\n' >"$T/f.on1"
+printf 'NODE_ENV=production\nCONVERSATION_ENABLED=true\nPROJECT_CONVERSATION_ENABLED=1\n' >"$T/f.on1"
 expect_false "a different value is refused" 'flag_transition "$T/f.empty" "$T/f.on1" PROJECT_CONVERSATION_ENABLED true'
 expect_false "no change at all is refused" 'flag_transition "$T/f.empty" "$T/f.empty" PROJECT_CONVERSATION_ENABLED true'
 

@@ -11,8 +11,8 @@ test.describe("session actions", () => {
 	test("session rows are buttons: arrow keys move, Enter opens", async ({ app, page }) => {
 		await app.login("alice");
 		await app.openSidebar();
-		const rows = page.locator("#session-list .session-select");
-		await expect(rows).toHaveCount(2);
+		const rows = page.locator("#session-list .ssection-sessions .session-select");
+		await expect(rows).toHaveCount(3);
 		await rows.first().focus();
 		await expect(rows.first()).toHaveAttribute("aria-label", /^my-project.*, session running/);
 		await page.keyboard.press("ArrowDown");
@@ -30,7 +30,6 @@ test.describe("session actions", () => {
 		await app.login("alice");
 		await app.openSession("my-project");
 		await app.expectTerminalReady();
-		await app.openChrome();
 		const tabs = page.locator("#terminal-tabs .tab-chip-btn");
 		await expect(tabs).toHaveCount(2);
 		await expect(tabs.first()).toHaveAttribute("aria-pressed", "true");
@@ -42,14 +41,11 @@ test.describe("session actions", () => {
 		await expect
 			.poll(() => backend.terminalSockets.map((s) => s.tabId))
 			.toEqual(["tab-1", "tab-2"]);
-		// Close the second tab from its own button (confirmed in a dialog). On
-		// mobile, picking a tab collapses the chrome drawer; reopen it first.
-		await app.openChrome();
+		// Close the second tab from its own button (confirmed in a dialog).
 		await page.locator('#terminal-tabs .tab-chip[data-tab-id="tab-2"] .tab-close').click();
 		await page.locator('[role="alertdialog"] .modal-danger-action').click();
 		await expect(tabs).toHaveCount(1);
 		// Delete on a tab is its ×: the same confirmation, nothing closed without it.
-		await app.openChrome();
 		await tabs.first().focus();
 		await page.keyboard.press("Delete");
 		await expect(page.locator('[role="alertdialog"]')).toBeVisible();
@@ -186,7 +182,7 @@ test.describe("session actions", () => {
 	}) => {
 		await app.login("alice");
 		await app.openSidebar();
-		await page.check("#show-terminated-toggle");
+		await app.showTerminated();
 		await app.openSession("old-poc");
 		await app.switchView("terminal");
 		const panel = page.locator("#terminal-state");
@@ -249,11 +245,11 @@ test.describe("server reachability", () => {
 			return false;
 		};
 		await app.openSidebar();
-		await page.click("#sidebar-refresh-btn");
+		await app.refreshSessions();
 		await expect(dot).toHaveClass(/unreachable/);
 		await expect(dot).toHaveAttribute("aria-label", /Can't refresh from the server/);
 		backend.override = null;
-		await page.click("#sidebar-refresh-btn");
+		await app.refreshSessions();
 		await expect(dot).not.toHaveClass(/unreachable/);
 	});
 });

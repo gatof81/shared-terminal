@@ -31,12 +31,10 @@ import {
 	getActiveTerminal,
 	isMobile,
 	sessions,
-	setChromeOpen,
-	updateChromeToggle,
+	updateTerminalControls,
 } from "./main.js";
 import { navigate } from "./router.js";
 import { setGeometryFrozen } from "./terminalGeometry.js";
-import { currentShell } from "./uiShell.js";
 import { chooseLanding, readHistoryHint, readViewPref, writeViewPref } from "./viewPolicy.js";
 
 export type View = "terminal" | "files" | "git" | "chat";
@@ -65,10 +63,6 @@ export function registerRouteDetail(view: View, handler: RouteDetailHandler): vo
 // is being applied: the resulting setView / selections must not write the
 // route again (the address already says it).
 let applying = false;
-
-export function isApplyingRoute(): boolean {
-	return applying;
-}
 
 /**
  * A detail a route named that its view could not show synchronously (a
@@ -183,76 +177,15 @@ const overlays: Record<Exclude<View, "terminal">, HTMLElement> = {
 	git: document.getElementById("git-view")!,
 	chat: document.getElementById("chat-view")!,
 };
-// Each overlay's own "‹ Terminal" button (mobile header).
-const toTerminalBtns = [
-	document.getElementById("files-to-terminal-btn"),
-	document.getElementById("git-to-terminal-btn"),
-	document.getElementById("chat-to-terminal-btn"),
-].filter((b): b is HTMLButtonElement => b instanceof HTMLButtonElement);
-// Mobile bottom navigation (index.html #view-nav). Shown only while an
-// overlay is up: on the Terminal view the key bar owns the bottom edge and
-// the terminal's layout box must not change on a view switch, so the nav
-// never overlaps it. CSS hides the nav entirely on wide screens.
 const terminalArea = document.getElementById("terminal-area");
-const viewNav = document.getElementById("view-nav");
-const navButtons = [...(viewNav?.querySelectorAll<HTMLButtonElement>("button[data-view]") ?? [])];
-
-// ── Typing in an overlay (the nav makes room for the soft keyboard) ─────────
-// While a text field of an overlay has the focus, #terminal-area carries
-// `kb-typing` and, on a touch screen, the nav takes no room (viewnav.css):
-// the soft keyboard covers that strip. The class must NOT follow `:focus`
-// live: a tap on any control of the overlay blurs the field on its
-// `mousedown`, and the nav coming back then would move the layout (55 px)
-// between that and the `click`, which would land elsewhere or nowhere. So a
-// blur only drops the class after the tap in progress has ended — after the
-// next `click` has been dispatched, or a short margin when no click follows
-// (Tab, the keyboard's own "done") — and focusing another text field
-// meanwhile keeps it.
-const TYPING_RELEASE_MS = 400;
-let typingRelease: (() => void) | null = null;
-
-function isOverlayTextField(t: EventTarget | null): boolean {
-	if (!(t instanceof HTMLElement) || !t.closest("#files-view, #git-view, #chat-view")) return false;
-	if (t instanceof HTMLTextAreaElement) return true;
-	return (
-		t instanceof HTMLInputElement && ["text", "search", ""].includes(t.getAttribute("type") ?? "")
-	);
-}
-
-function cancelTypingRelease(): void {
-	typingRelease?.();
-	typingRelease = null;
-}
-
-document.addEventListener("focusin", (e) => {
-	if (!isOverlayTextField(e.target)) return;
-	cancelTypingRelease();
-	terminalArea?.classList.add("kb-typing");
-});
-document.addEventListener("focusout", (e) => {
-	if (!isOverlayTextField(e.target)) return;
-	cancelTypingRelease();
-	const drop = () => {
-		cancelTypingRelease();
-		if (!isOverlayTextField(document.activeElement)) terminalArea?.classList.remove("kb-typing");
-	};
-	// After the click's own handlers ran (capture listener → next task).
-	const onClick = () => setTimeout(drop, 0);
-	const timer = setTimeout(drop, TYPING_RELEASE_MS);
-	document.addEventListener("click", onClick, { capture: true, once: true });
-	typingRelease = () => {
-		clearTimeout(timer);
-		document.removeEventListener("click", onClick, { capture: true });
-	};
-});
 
 // ── State ───────────────────────────────────────────────────────────────────
 
 let view: View = "terminal";
 // True when the current overlay was entered because the terminal was
 // unavailable (stopped session) rather than by the user — such a view
-// snaps back once the session is running again (to Terminal, or to what
-// the landing policy says under shell v2).
+// snaps back once the session is running again (to what the landing
+// policy says).
 let forced = false;
 // True while sessionCore is deciding a session's landing view (it may be
 // waiting on the "has history" answer): the sync below must not land a
@@ -278,11 +211,6 @@ export function isOverlayActive(): boolean {
 	return view !== "terminal";
 }
 
-/** Label for the mobile header pill: "Files" / "Git" / "Chat", or null for the terminal. */
-export function overlayLabel(): string | null {
-	return view === "files" ? "Files" : view === "git" ? "Git" : view === "chat" ? "Chat" : null;
-}
-
 /** Fires after the view changed (not on a same-view re-select). */
 export function onViewChange(listener: (next: View, prev: View) => void): void {
 	viewListeners.push(listener);
@@ -295,10 +223,9 @@ export function onSessionSync(listener: () => void): void {
 
 function positionOverlays(): void {
 	// offsetTop/offsetHeight are relative to #terminal-area (the toolbar's
-	// offsetParent — it's position:relative) and both read 0 while the
-	// toolbar is display:none (mobile, chrome drawer collapsed).
-	// Shell v2's merged mobile bar moves the toolbar into the header: it
-	// is then not inside #terminal-area at all and the overlays start at 0.
+	// offsetParent — it's position:relative). On a phone the toolbar is in
+	// the header (main.ts): not inside #terminal-area at all, so the
+	// overlays start at 0.
 	const inside = terminalArea?.contains(terminalToolbar) === true;
 	const bottom = inside ? terminalToolbar.offsetTop + terminalToolbar.offsetHeight : 0;
 	for (const el of Object.values(overlays)) el.style.top = `${bottom}px`;
@@ -364,7 +291,7 @@ export function setView(next: View, opts: { forced?: boolean; landing?: boolean 
 		getActiveTerminal()?.focus();
 	}
 	renderSwitch();
-	updateChromeToggle();
+	updateTerminalControls();
 	for (const l of viewListeners) l(next, prev);
 	// A view the person chose is a history entry; a landing (a stopped
 	// session opening in Files, Chat by policy) only updates the address in place.
@@ -378,7 +305,6 @@ export function landingFor(sessionId: string, running: boolean): View {
 		hasHistory: readHistoryHint(sessionId),
 		running,
 		isAgent: isAcpAgentSession(sessionId),
-		shell: currentShell() === "v2" ? "v2" : "v1",
 	});
 }
 
@@ -400,14 +326,6 @@ export function endLanding(sessionId: string): void {
 function renderSwitch(): void {
 	for (const [name, btn] of Object.entries(buttons)) {
 		btn.setAttribute("aria-pressed", String(view === name));
-	}
-	const navOn = view !== "terminal" && !viewSwitch.hidden;
-	if (viewNav) viewNav.hidden = !navOn;
-	terminalArea?.classList.toggle("view-nav-on", navOn);
-	for (const b of navButtons) {
-		const name = b.dataset.view as View;
-		b.setAttribute("aria-pressed", String(view === name));
-		if (name === "terminal") b.disabled = buttons.terminal.disabled;
 	}
 }
 
@@ -435,18 +353,16 @@ export function syncSessionViews(): void {
 	// Restore, Reconnect, Open a tab — sessionCore.renderTerminalState)
 	// rather than a disabled button whose only explanation is a tooltip.
 	buttons.terminal.disabled = false;
-	for (const b of toTerminalBtns) b.disabled = false;
 	renderSwitch();
 	buttons.terminal.title = canTerminal ? "Show terminal" : "Terminal (session not running)";
-	for (const b of toTerminalBtns) b.title = "Back to terminal";
 	// Listeners first: they re-key their state to the active session, so
 	// a forced switch below (which fires onViewChange → load) loads for
 	// the NEW session rather than racing a stale one.
 	for (const l of syncListeners) l();
 	if (landingOwner !== null && landingOwner === activeSessionId) return;
 	if (!canTerminal) {
-		// No terminal to show: land on Files (works for stopped sessions) —
-		// or on what the policy says under shell v2. A user already on
+		// No terminal to show: land on what the policy says (Files or
+		// Chat, both work for stopped sessions). A user already on
 		// Files, Git or Chat stays where they are.
 		if (view === "terminal") landView(landingFor(s.sessionId, false), { forced: true });
 	} else if (forced) {
@@ -459,26 +375,11 @@ export function syncSessionViews(): void {
 /** Open Files for a session that has no terminal (stopped/terminated). */
 export function showFilesOnly(): void {
 	setView("files", { forced: true });
-	if (isMobile()) setChromeOpen(false);
 }
 
 buttons.terminal.addEventListener("click", () => setView("terminal"));
-for (const b of toTerminalBtns) b.addEventListener("click", () => setView("terminal"));
-for (const b of navButtons) {
-	b.addEventListener("click", () => {
-		const name = b.dataset.view as View;
-		if (name === "terminal") setView("terminal");
-		else {
-			setView(name);
-			if (isMobile()) setChromeOpen(false);
-		}
-	});
-}
 for (const name of ["files", "git", "chat"] as const) {
 	buttons[name].addEventListener("click", () => {
 		setView(name);
-		// Mobile: the toolbar lives in the chrome drawer — collapse it so
-		// the overlay gets the full height (its header has a Terminal button).
-		if (isMobile()) setChromeOpen(false);
 	});
 }

@@ -59,11 +59,12 @@ export interface RouteContext {
 	recreation?: RecreationEngine;
 	// 3.0d — `CONVERSATION_ALLOW_USERS` (§7), lowercase user ids. Absent ⇒ empty.
 	conversationAllowUsers?: ReadonlySet<string>;
-	// Projects (ACP agents take part in one). Present only when
-	// PROJECT_CHAT_ENABLED is on; absent ⇒ its routes are not mounted.
+	// Projects (ACP agents take part in one). Always wired in production;
+	// optional so route tests can build a router without them (then the
+	// project routes are not mounted).
 	projects?: ProjectDirectory;
-	// Experimental ACP agents. Present only with ACP_AGENTS_ENABLED: the session
-	// create accepts `acpAgent`, `/auth/status` announces `features.acpAgents`.
+	// ACP agents. Always wired in production; optional for the same reason
+	// (then a session create carrying `acpAgent` is refused).
 	acp?: AcpAgents;
 }
 

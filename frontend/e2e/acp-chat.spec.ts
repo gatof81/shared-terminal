@@ -41,7 +41,6 @@ test.describe("ACP chat", () => {
 		page,
 		app,
 		backend,
-		shell,
 	}, info) => {
 		await app.login("alice", chatOf(PROJECT_SESSION_IDS.scratch));
 		const opener = await app.openAgentSettings();
@@ -63,14 +62,11 @@ test.describe("ACP chat", () => {
 		await app.openAgentSettings();
 		await expect(select).toHaveValue(PROJECT_IDS.hz);
 		await page.locator("#acp-chat .acp-chat-project button", { hasText: "Guardar" }).click();
-		// The project now shows where the agent's identity is: its own row on a
-		// phone in shell v1, the bar's "proyecto ↗" on a wide screen (a v2
+		// The project now shows in the bar's "proyecto ↗" on a wide screen (a
 		// phone's bar has no room for that subtitle).
-		if (!(info.project.use.isMobile && shell === "v2"))
+		if (!info.project.use.isMobile)
 			await expect(
-				page
-					.locator("#acp-chat .acp-link:visible", { hasText: "Abrir Project Chat" })
-					.or(page.locator("#terminal-session-sub a:visible", { hasText: "Educación HZ ↗" })),
+				page.locator("#terminal-session-sub a:visible", { hasText: "Educación HZ ↗" }),
 			).toBeVisible();
 		expect(backend.acpAgents.find((a) => a.name === "solo")?.projectId).toBe(PROJECT_IDS.hz);
 	});
@@ -89,7 +85,7 @@ test.describe("ACP chat", () => {
 		await app.login("alice", chatOf(PROJECT_SESSION_IDS.scratch));
 		const answer = page.locator("#acp-chat .acp-msg-result", { hasText: "Mirá" });
 		const internal = answer.getByRole("link", { name: "el proyecto" });
-		await expect(internal).toHaveAttribute("href", `#/projects/${PROJECT_IDS.hz}`);
+		await expect(internal).toHaveAttribute("href", `#/projects/${PROJECT_IDS.hz}/chat`);
 		await expect(internal).not.toHaveAttribute("target", /.+/);
 		const external = answer.getByRole("link", { name: "afuera" });
 		await expect(external).toHaveAttribute("target", "_blank");
@@ -248,7 +244,7 @@ test.describe("ACP chat", () => {
 		};
 		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
 		const solo = await column("#acp-chat");
-		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/chat`);
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
 		const project = await column(".acp-project");
 		const colPx = 56 * 16;
 		for (const c of [solo, project]) {
@@ -294,12 +290,12 @@ test.describe("ACP chat", () => {
 		await page.evaluate((h) => {
 			location.hash = h;
 		}, chatOf(PROJECT_SESSION_IDS.architect));
-		await expect(page.locator("#acp-chat .acp-chat-title")).toContainText("@arq");
+		await expect(page.locator("#terminal-session-name")).toHaveText("@arq");
 		await expect(input).toHaveValue("");
 		await page.evaluate((h) => {
 			location.hash = h;
 		}, chatOf(PROJECT_SESSION_IDS.scratch));
-		await expect(page.locator("#acp-chat .acp-chat-title")).toContainText("@solo");
+		await expect(page.locator("#terminal-session-name")).toHaveText("@solo");
 		await expect(input).toHaveValue("solo para @solo");
 	});
 
@@ -310,7 +306,7 @@ test.describe("ACP chat", () => {
 	}) => {
 		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
 		const input = page.locator("#project-view .acp-chat-input");
-		await expect(page.locator("#project-view .acp-agents-group")).toHaveAccessibleName(
+		await expect(page.locator(".acp-agents-group")).toHaveAccessibleName(
 			/^Agentes del proyecto: 2\./,
 		);
 		await input.fill("@devv revisá con @arq");
@@ -395,11 +391,10 @@ test.describe("ACP model", () => {
 test.describe("ACP chat headers", () => {
 	test.beforeEach(({ backend }) => backend.enableAcp());
 
-	test("the agent's header: the session bar (its own row only on a v1 phone); settings closed; a refused model flagged where they open", async ({
+	test("the agent's header: the session bar; settings closed; a refused model flagged where they open", async ({
 		page,
 		app,
 		backend,
-		shell,
 	}, info) => {
 		const solo = backend.acpAgents.find((a) => a.name === "solo")!;
 		solo.projectId = PROJECT_IDS.hz;
@@ -410,25 +405,14 @@ test.describe("ACP chat headers", () => {
 			error: "modelo no disponible",
 		};
 		await app.login("alice", chatOf(PROJECT_SESSION_IDS.scratch));
-		const header = page.locator("#acp-chat .acp-chat-header");
-		const settings = page.locator("#acp-chat .acp-settings-btn");
-		const ownRow = info.project.use.isMobile && shell !== "v2";
 		await expect(page.locator("#acp-chat .acp-settings")).toBeHidden();
 		// The bar names the agent (and its session) in either case.
 		await expect(page.locator("#terminal-session-name")).toHaveText("@solo");
 		await expect(page.locator("#terminal-toolbar")).toHaveAttribute("data-session-name", "scratch");
-		if (ownRow) {
-			await expect(settings).toHaveAttribute("aria-expanded", "false");
-			await expect(page.locator("#acp-chat .acp-chat-projlink")).toHaveText(
-				"Abrir Project Chat: Educación HZ",
+		if (!info.project.use.isMobile)
+			await expect(page.locator("#terminal-session-sub")).toHaveText(
+				"sesión scratch · Educación HZ ↗",
 			);
-		} else {
-			await expect(header).toBeHidden();
-			if (!info.project.use.isMobile)
-				await expect(page.locator("#terminal-session-sub")).toHaveText(
-					"sesión scratch · Educación HZ ↗",
-				);
-		}
 		// The privacy first on a phone (a long name cuts the end off).
 		await expect(page.locator("#acp-chat .acp-chat-input")).toHaveAttribute(
 			"placeholder",
@@ -437,127 +421,11 @@ test.describe("ACP chat headers", () => {
 				: "Mensaje privado a @solo · Ctrl+Enter envía",
 		);
 		// The failure is on what opens the closed panel: visibly and by name.
-		if (ownRow) {
-			await expect(settings).toHaveAccessibleName("Ajustes (el modelo no se aplicó)");
-			await expect(settings.locator(".acp-settings-flag")).toBeVisible();
-			// One row: as tall as its tallest control (44 px on a phone) plus padding.
-			expect((await header.boundingBox())!.height).toBeLessThanOrEqual(60);
-		} else {
-			const more = page.locator("#session-menu-btn");
-			await expect(more).toHaveAccessibleName("Session actions (el modelo no se aplicó)");
-			await expect(more.locator(".bar-menu-flag")).toBeVisible();
-		}
+		const more = page.locator("#session-menu-btn");
+		await expect(more).toHaveAccessibleName("Session actions (el modelo no se aplicó)");
+		await expect(more.locator(".bar-menu-flag")).toBeVisible();
 		await app.openAgentSettings();
 		await expect(page.locator("#acp-chat .acp-model-state")).toContainText("modelo no disponible");
-	});
-
-	test("Project Chat: title, the agents' group, ⋯ and × on ONE row; the manage panel is closed, open on an empty project", async ({
-		page,
-		app,
-		backend,
-	}, info) => {
-		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
-		const head = page.locator("#project-view .pv-header");
-		await expect(page.locator("#project-view .acp-agents-group")).toBeVisible();
-		// No second row of agents.
-		await expect(page.locator("#project-view .acp-project-agents")).toBeHidden();
-		const panel = page.locator("#project-view .acp-agents-panel");
-		await expect(panel).toBeHidden();
-		// One row (44-px controls, the padding and the line under it).
-		const row = info.project.use.isMobile ? 60 : 56;
-		expect((await head.boundingBox())!.height).toBeLessThanOrEqual(row);
-		// The manage panel, from the menu; an agent picked (not added) survives live
-		// updates and the panel closing and reopening.
-		const menu = page.getByRole("button", { name: "Acciones del proyecto" });
-		await menu.click();
-		await page.getByRole("menuitem", { name: "Administrar agentes" }).click();
-		await expect(panel).toBeVisible();
-		const add = panel.locator(".acp-add-select");
-		await add.selectOption("solo");
-		backend.pushAcp(activity("dev", 1));
-		await page.waitForTimeout(300);
-		await page.keyboard.press("Escape");
-		await expect(panel).toBeHidden();
-		await expect(menu).toBeFocused();
-		await menu.click();
-		await page.getByRole("menuitem", { name: "Administrar agentes" }).click();
-		await expect(add).toHaveValue("solo");
-		await panel.getByRole("button", { name: "Agregar", exact: true }).click();
-		await expect
-			.poll(() => backend.acpAgents.find((a) => a.name === "solo")?.projectId)
-			.toBe(PROJECT_IDS.hz);
-	});
-
-	test("a project without agents opens on the manage panel: it is all there is to do", async ({
-		page,
-		app,
-		backend,
-	}) => {
-		for (const a of backend.acpAgents) a.projectId = null;
-		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
-		const panel = page.locator("#project-view .acp-agents-panel");
-		await expect(panel).toBeVisible();
-		await expect(panel.getByRole("button", { name: "+ Nueva sesión con agente" })).toBeVisible();
-		await expect(panel).toContainText("todavía no tiene agentes");
-	});
-
-	test("on a short screen an open panel scrolls inside: the message box stays on screen, the thread keeps a strip", async ({
-		page,
-		app,
-		backend,
-	}) => {
-		const vp = page.viewportSize()!;
-		await page.setViewportSize({ width: Math.min(vp.width, 390), height: 450 });
-		const inView = async (sel: string) => {
-			const b = (await page.locator(sel).boundingBox())!;
-			return b.y >= 0 && b.y + b.height <= 451;
-		};
-		// Project Chat with "Administrar agentes" open.
-		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
-		await page.getByRole("button", { name: "Acciones del proyecto" }).click();
-		await page.getByRole("menuitem", { name: "Administrar agentes" }).click();
-		const panel = page.locator("#project-view .acp-agents-panel");
-		await expect(panel).toBeVisible();
-		expect(await inView("#project-view .acp-chat-composer"), "composer on screen").toBe(true);
-		expect(await panel.evaluate((e) => e.scrollHeight > e.clientHeight + 1), "panel scrolls").toBe(
-			true,
-		);
-		expect(await panel.evaluate((e) => getComputedStyle(e).overflowY)).toBe("auto");
-		const strip = (await page.locator("#project-view .acp-chat-thread").boundingBox())!.height;
-		expect(strip, "a readable strip of thread").toBeGreaterThanOrEqual(90);
-		// Scrolled to its end, the panel's heading and × stay in view and take the tap.
-		await panel.evaluate((e) => {
-			e.scrollTop = e.scrollHeight;
-		});
-		const close = panel.locator(".acp-agents-panel-close");
-		const pb = (await panel.boundingBox())!;
-		const cb = (await close.boundingBox())!;
-		expect(cb.y, "× inside the panel's visible box").toBeGreaterThanOrEqual(pb.y - 1);
-		expect(
-			await page.evaluate(
-				([x, y]) => document.elementFromPoint(x!, y!)?.closest(".acp-agents-panel-close") !== null,
-				[cb.x + cb.width / 2, cb.y + cb.height / 2],
-			),
-			"nothing covers the ×",
-		).toBe(true);
-		await close.click();
-		await expect(panel).toBeHidden();
-		await page.getByRole("button", { name: "Acciones del proyecto" }).click();
-		await page.getByRole("menuitem", { name: "Administrar agentes" }).click();
-		// Ajustes of an agent's chat, the same way.
-		const solo = backend.acpAgents.find((a) => a.name === "solo")!;
-		solo.projectId = PROJECT_IDS.hz;
-		await page.evaluate((h) => {
-			location.hash = h;
-		}, chatOf(PROJECT_SESSION_IDS.scratch));
-		await app.openAgentSettings();
-		await expect(page.locator("#acp-chat .acp-settings")).toContainText(
-			"Mensajes directos: privados entre vos y @solo",
-		);
-		expect(await inView("#acp-chat .acp-chat-composer"), "composer on screen").toBe(true);
-		expect(
-			(await page.locator("#acp-chat .acp-chat-thread").boundingBox())!.height,
-		).toBeGreaterThanOrEqual(90);
 	});
 
 	test("Project Chat with a long history opens at its end, entered directly and coming back", async ({
@@ -591,45 +459,6 @@ test.describe("ACP chat headers", () => {
 		await expect(thread).toBeVisible();
 		await page.waitForTimeout(500);
 		expect(await gap()).toBeLessThan(60);
-	});
-
-	test("the agents' group: 3 avatars on a phone, '+N'; an agent waiting in the '+N' is still marked and said; the list opens its chat", async ({
-		page,
-		app,
-		backend,
-	}) => {
-		const base = backend.acpAgents.find((a) => a.name === "dev")!;
-		for (let i = 0; i < 4; i++)
-			backend.acpAgents.push({ ...base, name: `agente-${i}`, sessionId: `${base.sessionId}-${i}` });
-		// Last in the list, and not busy: it would fall in the "+N" without its rank.
-		Object.assign(backend.acpAgents.find((a) => a.name === "agente-3")!, { waitingInput: true });
-		Object.assign(backend.acpAgents.find((a) => a.name === "agente-2")!, { authRequired: true });
-		await page.setViewportSize({ width: 320, height: 568 });
-		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
-		const group = page.locator("#project-view .acp-agents-group");
-		await expect(group.locator(".acp-group-avatar")).toHaveCount(3);
-		await expect(group.locator(".acp-group-more")).toHaveText("+3");
-		await expect(group.locator(".acp-group-alert")).toHaveText("2 !");
-		await expect(group).toHaveAccessibleName(
-			"Agentes del proyecto: 6. @agente-2 necesita login. @agente-3 espera tu respuesta.",
-		);
-		// Title, group, ⋯ and × fit one row at 320.
-		const head = page.locator("#project-view .pv-header");
-		expect((await head.boundingBox())!.height).toBeLessThanOrEqual(60);
-		// The full list: every agent, its long state, a link to its chat; Escape back to the button.
-		await group.click();
-		await expect(group).toHaveAttribute("aria-expanded", "true");
-		const list = page.locator("#project-view .acp-agents-list");
-		await expect(list.locator(".acp-agents-list-item")).toHaveCount(6);
-		await expect(list).toContainText("@agente-3esperando tu respuesta");
-		// The focus goes in, on the first agent's link (the one that needs you first).
-		await expect(page.getByRole("link", { name: "Abrir su chat (@agente-2)" })).toBeFocused();
-		await page.keyboard.press("Escape");
-		await expect(list).toBeHidden();
-		await expect(group).toBeFocused();
-		await group.click();
-		await page.getByRole("link", { name: "Abrir su chat (@dev)" }).click();
-		await expect(page.locator("#acp-chat .acp-chat-title")).toContainText("@dev");
 	});
 });
 
@@ -777,7 +606,7 @@ test.describe("ACP chat composer and scroll", () => {
 	});
 });
 
-// A phone (v1, bottom nav): with the field focused, one tap on any control of
+// A phone: with the field focused, one tap on any control of
 // the chat does what it says — the nav coming back must not move the layout
 // between the tap's mousedown and its click.
 test.describe("ACP chat: taps with the keyboard up", () => {
@@ -819,7 +648,6 @@ test.describe("ACP chat: taps with the keyboard up", () => {
 		await expect(recover).toBeVisible();
 		fail = false;
 		await input.focus();
-		await expect(page.locator("#view-nav")).toBeHidden();
 		await recover.tap();
 		await expect(input).toHaveValue("otro borrador\n\nel primero");
 	});
@@ -860,7 +688,6 @@ test.describe("ACP chat: taps with the keyboard up", () => {
 		const option = page.locator("#acp-chat .acp-question-open .acp-option", { hasText: "Google" });
 		await expect(option).toBeVisible();
 		await page.locator("#acp-chat .acp-chat-input").focus();
-		await expect(page.locator("#view-nav")).toBeHidden();
 		await option.tap();
 		await expect(option.locator("input")).toBeChecked();
 	});

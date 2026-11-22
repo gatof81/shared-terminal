@@ -43,7 +43,6 @@ test.describe("context bar", () => {
 		await expect(page.locator("#terminal-session-sub")).toHaveText(
 			"sesión hz-architect · Educación HZ ↗",
 		);
-		await expect(page.locator("#acp-chat .acp-chat-header")).toBeHidden();
 		// The subtitle's project opens Project Chat.
 		await page.locator("#terminal-session-sub a").click();
 		await expect(page).toHaveURL(new RegExp(`#/projects/${PROJECT_IDS.hz}`));
@@ -66,16 +65,11 @@ test.describe("context bar", () => {
 		expect(link.x + link.width).toBeLessThanOrEqual(box.x + box.width + 0.5);
 	});
 
-	test("'Ajustes del agente' is the ⋯'s first entry; what the settings need is flagged on the ⋯", async ({
+	test("'Ajustes del agente' is the ⋯'s first entry (after Hide tabs on a phone's Terminal); what the settings need is flagged on the ⋯", async ({
 		app,
 		backend,
 		page,
-		shell,
 	}, info) => {
-		test.skip(
-			info.project.use.isMobile === true && shell !== "v2",
-			"a v1 phone keeps the agent's own row and its Ajustes button",
-		);
 		const solo = backend.acpAgents.find((a) => a.name === "solo")!;
 		solo.model = "claude-opus-5-5";
 		solo.modelApplied = { requested: "claude-opus-5-5", current: null, error: "no disponible" };
@@ -89,7 +83,8 @@ test.describe("context bar", () => {
 		const mark = (await more.locator(".bar-menu-flag").boundingBox())!;
 		expect(btn.x + btn.width - (mark.x + mark.width)).toBeGreaterThanOrEqual(4);
 		await more.click();
-		const first = page.getByRole("menuitem").first();
+		// On a phone's Terminal view "Hide tabs" comes first (U-1 B), then the agent's entry.
+		const first = page.getByRole("menuitem").nth(info.project.use.isMobile ? 1 : 0);
 		await expect(first).toContainText("Ajustes del agente");
 		await first.click();
 		// From another view too: the agent's Chat, with the panel open and the focus in it.
@@ -125,15 +120,14 @@ test.describe("context bar", () => {
 	});
 });
 
-test.describe("context bar on a v2 phone", () => {
+test.describe("context bar on a phone", () => {
 	for (const width of [320, 390]) {
 		test(`${width} px: 44-px tall targets, tabs at least 40 wide, nothing covered, the title keeps its letters`, async ({
 			app,
 			backend,
 			page,
-			shell,
 		}, info) => {
-			test.skip(!(info.project.use.isMobile && shell === "v2"), "shell v2 on a phone");
+			test.skip(!info.project.use.isMobile, "a phone");
 			backend.enableAcp();
 			await page.setViewportSize({ width, height: 700 });
 			await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);

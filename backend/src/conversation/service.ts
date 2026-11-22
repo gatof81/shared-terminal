@@ -159,8 +159,6 @@ export interface ConversationSummary {
 	claudeVersion: string | null;
 	parentSessionId: string | null;
 	parentInferred: boolean;
-	/** 3.2 (§8.1.1): orientative; false until the composer route decorates it. */
-	canSendInput: boolean;
 	/**
 	 * v1.8 §6.2 — the owner's name for it (prevails over `title`, which stays
 	 * the automatic one) and when it was archived. Owner data, never derived
@@ -168,14 +166,6 @@ export interface ConversationSummary {
 	 */
 	customTitle: string | null;
 	archivedAt: string | null;
-	/** 3.2 (§8.1.8): the pane's blocking state, when the composer is wired. */
-	composer?: {
-		blocked: boolean;
-		reason?: "in-progress" | "effects-pending" | "unverifiable";
-		clientMessageId?: string;
-		result?: string;
-		since?: string;
-	};
 }
 
 /** `GET /api/admin/stats → conversation` (§7), minus the engine's `recreateOrphans`. */
@@ -2221,7 +2211,6 @@ function summarizeIndex(index: ConversationIndex): ConversationSummary {
 		claudeVersion: index.claudeVersion,
 		parentSessionId: index.parentSessionId,
 		parentInferred: index.parentInferred,
-		canSendInput: false,
 		customTitle: null,
 		archivedAt: null,
 	};
@@ -2247,7 +2236,6 @@ function summarizeRow(row: ConversationRow): ConversationSummary {
 		claudeVersion: row.claude_version,
 		parentSessionId: row.parent_session_id,
 		parentInferred: row.parent_inferred === 1,
-		canSendInput: false,
 		customTitle: null,
 		archivedAt: null,
 	};

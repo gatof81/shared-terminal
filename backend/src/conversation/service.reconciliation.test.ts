@@ -1148,7 +1148,6 @@ describe("v1.8.5 — who may hold a pane (§5.2): resume, takeover and the child
 		);
 		await store.flush("s1", "bg");
 		expect(await panes()).toMatchObject({ main: "%0", bg: null });
-		expect((await state("bg"))?.canSendInput).toBe(false);
 	});
 
 	it("G4: a teammate/unknown never ends up sharing a pane with an evicted live holder", async () => {

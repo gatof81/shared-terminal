@@ -49,8 +49,6 @@ test.describe("accessibility — axe on the main views", () => {
 		await app.login("alice");
 		await app.openSession("my-project");
 		await app.expectTerminalReady();
-		// Phones (v1): the tabs live in the chrome drawer.
-		await app.openChrome();
 		await expect(page.locator("#terminal-tabs .tab-chip-btn")).toHaveCount(2);
 		await expectClean(page, "terminal");
 		for (const view of ["files", "git", "chat"]) {
@@ -63,7 +61,7 @@ test.describe("accessibility — axe on the main views", () => {
 	test("sidebar tree and a project page", async ({ app, backend, page }) => {
 		backend.enableProjects();
 		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
-		await expect(page.locator("#project-view .pv-title")).toBeVisible();
+		await expect(page.locator("#pv-title")).toBeVisible();
 		await expectClean(page, "project page");
 		await app.openSidebar();
 		await expect(app.sessionRow("hz-architect")).toBeVisible();
@@ -73,9 +71,8 @@ test.describe("accessibility — axe on the main views", () => {
 	test("the new-agent dialog with its field errors", async ({ app, backend, page }) => {
 		backend.enableAcp();
 		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
-		// The button lives in "Administrar agentes", opened from the project's ⋯ menu.
-		await page.getByRole("button", { name: "Acciones del proyecto" }).click();
-		await page.getByRole("menuitem", { name: "Administrar agentes" }).click();
+		// The button is in the "Agentes" panel's foot, opened from the agents' group.
+		await page.locator(".acp-agents-group").click();
 		await page.getByRole("button", { name: "+ Nueva sesión con agente" }).click();
 		await page.fill("#new-session-acp-agent", "Dev_1");
 		await page.locator("#new-session-input").fill("");
@@ -127,19 +124,15 @@ test.describe("accessibility — axe on the main views", () => {
 		await expect(page.locator("#acp-chat .acp-model-select")).toBeVisible();
 		await expectClean(page, "ACP chat, settings open");
 		await page.goto(`/#/projects/${PROJECT_IDS.hz}`);
-		await page.getByRole("button", { name: "Acciones del proyecto" }).click();
-		await page.getByRole("menuitem", { name: "Administrar agentes" }).click();
-		await expect(page.locator("#project-view .acp-agents-panel")).toBeVisible();
-		await expectClean(page, "Project Chat, manage panel open");
+		await page.locator(".acp-agents-group").click();
+		await expect(page.locator("#acp-agents")).toBeVisible();
+		await expectClean(page, "Project Chat, agents panel open");
 		// The recipients menu and the agents' list open.
 		await page.keyboard.press("Escape");
 		await page.getByRole("button", { name: "Elegir destinatarios" }).click();
 		await expect(page.getByRole("menu", { name: "Destinatarios" })).toBeVisible();
 		await expectClean(page, "Project Chat, recipients menu open");
 		await page.keyboard.press("Escape");
-		await page.locator("#project-view .acp-agents-group").click();
-		await expect(page.locator("#project-view .acp-agents-list")).toBeVisible();
-		await expectClean(page, "Project Chat, agents list open");
 	});
 
 	test("ACP threads, every kind of row, on the whole page (no exclusions)", async ({

@@ -20,6 +20,7 @@ import {
 	authFromActivity,
 	groupThread,
 	mapThroughEdits,
+	messagePlace,
 	questionForm,
 	recipientRow,
 	recipientsOf,
@@ -163,6 +164,8 @@ export class AcpThread {
 	private readonly auth = new Map<string, boolean>();
 	private project: { id: string; name: string } | null = null;
 	private error = "";
+	/** A one-off notice in the composer's line (a message looked for and not found). */
+	private notice = "";
 	/**
 	 * `error` is the feed's own read failure (not an earlier page or a send).
 	 * Project Chat's page header already says it, with Reintentar
@@ -232,7 +235,7 @@ export class AcpThread {
 	onState: (s: ThreadState) => void = () => {};
 
 	constructor() {
-		// One line at rest (CSS); fitInput() grows it with the text up to a cap.
+		// One line at rest; CSS (field-sizing) grows it with the text up to a cap.
 		this.input.rows = 1;
 		this.input.setAttribute("aria-label", "Mensaje");
 		this.sendBtn.type = "submit";
@@ -277,7 +280,6 @@ export class AcpThread {
 					if (document.activeElement === this.input) e.preventDefault();
 				});
 		this.input.addEventListener("input", () => {
-			this.fitInput();
 			this.renderHint();
 			this.syncSendBtn();
 			// What is written by hand shows in the menu as it is typed.
@@ -343,27 +345,23 @@ export class AcpThread {
 				}
 				this.renderPill();
 			}).observe(this.threadEl);
-		// The field's cap depends on the visible height (keyboard, rotation).
-		window.visualViewport?.addEventListener("resize", () => this.fitInput());
-		window.addEventListener("resize", () => this.fitInput());
+		// The placeholder is one line at rest: its text follows the width.
+		for (const q of ["(max-width: 640px)", "(max-width: 360px)"])
+			window.matchMedia?.(q).addEventListener("change", () => this.setPlaceholder());
 		this.moreBtn.type = "button";
 		this.moreBtn.addEventListener("click", () => {
 			this.moreBtn.disabled = true;
 			void this.loadEarlier();
 		});
 		this.root.append(wrap, this.composer);
-		// send() empties the field before its first await; the field goes back
-		// to its resting height now, not when the network answers.
 		this.composer.addEventListener("submit", (e) => {
 			e.preventDefault();
 			void this.send();
-			this.fitInput();
 		});
 		this.input.addEventListener("keydown", (e) => {
 			if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
 				e.preventDefault();
 				void this.send();
-				this.fitInput();
 			}
 		});
 	}
@@ -391,6 +389,76 @@ export class AcpThread {
 	}
 
 	/** Read the current chat again (a "Reintentar"). */
+	/** Says `text` in the composer's notice line until the next send or chat. */
+	showNotice(text: string): void {
+		this.notice = text;
+		this.renderComposer();
+	}
+
+	/** Where message `id` stands in this chat: shown, on an earlier page, or not here. */
+	placeOf(id: number): "shown" | "earlier" | "elsewhere" {
+		return messagePlace(
+			id,
+			this.messages.map((m) => m.id),
+			this.hasEarlier,
+		);
+	}
+
+	/**
+	 * Puts message `id` with its top at a quarter of the thread's height,
+	 * flashes it and gives it the focus. On an earlier page not loaded yet,
+	 * loads back with "Cargar anteriores" (`aria-busy` on the thread
+	 * meanwhile) — at most 3 pages per call, so one tap never loads an
+	 * unbounded history. "shown": in view; "earlier": still further back
+	 * after those pages; "missing": not in this chat, or the load stopped.
+	 */
+	async revealMessage(id: number): Promise<"shown" | "earlier" | "missing"> {
+		const gen = this.gen;
+		try {
+			for (let pages = 0; ; pages++) {
+				if (gen !== this.gen) return "missing";
+				this.render();
+				const row = this.threadEl.querySelector<HTMLElement>(`[data-ids~="${id}"]`);
+				if (row) {
+					this.goToRow(row);
+					return "shown";
+				}
+				if (this.placeOf(id) !== "earlier") return "missing";
+				if (pages >= 3) return "earlier";
+				this.threadEl.setAttribute("aria-busy", "true");
+				await this.loadEarlier();
+			}
+		} finally {
+			this.threadEl.removeAttribute("aria-busy");
+		}
+	}
+
+	private goToRow(row: HTMLElement): void {
+		const t = this.threadEl;
+		const anchor = row.dataset.anchor;
+		if (!anchor) return;
+		// "esperando tu respuesta": the destination is the open question's card.
+		const card = row.querySelector<HTMLElement>(".acp-question-open");
+		const target = card ?? row;
+		const lead = target.getBoundingClientRect().top - row.getBoundingClientRect().top;
+		this.putRow({ anchor, offset: Math.round(t.clientHeight * 0.25) - lead });
+		this.box = t.clientHeight;
+		this.atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < END_SLACK;
+		this.noteAnchor();
+		this.renderPill();
+		const ids = row.dataset.ids ?? "";
+		this.newAnnounce.textContent = card ? "Pregunta" : `Mensaje #${ids.split(" ")[0]}`;
+		if (card)
+			card
+				.querySelector<HTMLElement>("input, textarea, select, button")
+				?.focus({ preventScroll: true });
+		else {
+			row.tabIndex = -1;
+			row.focus({ preventScroll: true });
+		}
+		flash(target, card !== null);
+	}
+
 	retry(): void {
 		void this.reload();
 	}
@@ -423,6 +491,7 @@ export class AcpThread {
 			this.auth.clear();
 			this.project = null;
 			this.error = "";
+			this.notice = "";
 			this.errorIsFeed = false;
 			this.feed = "loading";
 			this.readOnce = false;
@@ -753,8 +822,12 @@ export class AcpThread {
 				this.items.set(key, cached);
 			}
 			used.add(key);
-			// The reading anchor's handle (noteAnchor / restorePlace).
+			// The reading anchor's handle (noteAnchor / restorePlace), and the
+			// messages the row shows (revealMessage finds a message's row by them).
 			cached.el.dataset.anchor = key;
+			cached.el.dataset.ids = (item.kind === "post" ? item.messages : [item.message])
+				.map((m) => m.id)
+				.join(" ");
 			nodes.push(cached.el);
 		}
 		for (const key of [...this.items.keys()]) if (!used.has(key)) this.items.delete(key);
@@ -866,37 +939,6 @@ export class AcpThread {
 		// ResizeObserver's first frame, a reader scrolling at once was pulled back.
 		if (t.clientHeight > 0) this.box = t.clientHeight;
 		this.clearNew();
-	}
-
-	/**
-	 * The field grows with its text — up to 8 lines on a desktop, up to 30 %
-	 * of the visible height on a phone (the keyboard shrinks it) — then
-	 * scrolls inside; emptied, it is back to its resting line. Only the field
-	 * grows: the buttons sit at the bottom of the surface's grid.
-	 */
-	private fitInput(): void {
-		const i = this.input;
-		if (!i.isConnected) return;
-		this.setPlaceholder();
-		// Empty: the resting height. Chromium counts a placeholder's wrapped
-		// lines in scrollHeight, so measuring would grow the field for it.
-		if (i.value === "") {
-			i.style.height = "";
-			i.style.overflowY = "";
-			return;
-		}
-		const cs = getComputedStyle(i);
-		const line = Number.parseFloat(cs.lineHeight) || 20;
-		const border = Number.parseFloat(cs.borderTopWidth) + Number.parseFloat(cs.borderBottomWidth);
-		const frame = Number.parseFloat(cs.paddingTop) + Number.parseFloat(cs.paddingBottom) + border;
-		const visible = window.visualViewport?.height ?? window.innerHeight;
-		const phone = window.matchMedia?.("(max-width: 640px)").matches === true;
-		const lines = 8 * line + frame;
-		const cap = Math.max(line + frame, phone ? Math.min(lines, visible * 0.3) : lines);
-		i.style.height = "auto";
-		const want = i.scrollHeight + border;
-		i.style.height = `${Math.min(want, cap)}px`;
-		i.style.overflowY = want > cap + 1 ? "auto" : "hidden";
 	}
 
 	/** Everything an item shows: equal ⇒ the element on screen is still right. */
@@ -1169,7 +1211,6 @@ export class AcpThread {
 					const prefix = this.source?.kind === "project" ? `@${q.agent} ` : "";
 					this.input.value = `${prefix}Sobre tu pregunta «${form.message}»: ${said && !said.startsWith("(") ? said : ""}`;
 					this.input.focus();
-					this.fitInput();
 				});
 				card.append(again);
 			}
@@ -1282,7 +1323,7 @@ export class AcpThread {
 	private renderComposer(): void {
 		const u = this.source ? this.unsent.get(sourceKey(this.source)) : undefined;
 		const own = this.errorIsFeed && this.source?.kind === "project" ? "" : this.error;
-		const shown = [own, u?.error ?? ""].filter(Boolean).join(" ");
+		const shown = [own, u?.error ?? "", this.notice].filter(Boolean).join(" ");
 		this.errorEl.textContent = shown;
 		this.errorEl.hidden = shown === "";
 		this.recoverBtn.hidden = !u || u.restored || this.composerMode !== "on";
@@ -1299,7 +1340,7 @@ export class AcpThread {
 		if (!picks) this.closePicker(false);
 		else if (this.pickOpen) this.renderPicker();
 		this.renderHint();
-		this.fitInput();
+		this.setPlaceholder();
 	}
 
 	/** The arrow: off when nothing can be sent (still on while another send is out). */
@@ -1464,7 +1505,6 @@ export class AcpThread {
 		const [a, b, dir] = [i.selectionStart, i.selectionEnd, i.selectionDirection];
 		i.value = applyEdits(text, edits);
 		i.setSelectionRange(mapThroughEdits(a, edits), mapThroughEdits(b, edits), dir ?? "none");
-		this.fitInput();
 		this.renderHint();
 		this.syncSendBtn();
 		this.renderPicker();
@@ -1547,6 +1587,7 @@ export class AcpThread {
 		const text = this.input.value;
 		// Checked before the reservation below: a locked box keeps its draft.
 		if (this.composerMode !== "on" || !src || text.trim() === "") return;
+		this.notice = "";
 		// Reserve this send BEFORE any await: the text leaves the field and gets
 		// its client id now, so a second click (or Ctrl+Enter) on the same draft
 		// finds an empty field and sends nothing. A new message typed meanwhile is
@@ -1653,6 +1694,28 @@ const SEND_REFUSED = new Map([
 	["unknown-recipient", "ese agente ya no existe"],
 	["project-not-found", "el proyecto ya no existe"],
 ]);
+
+/**
+ * A brief highlight on what was gone to: a 2-px ring and a tint, held
+ * 1200 ms then faded in 600 ms (acp-chat.css); with reduced motion, no
+ * transition: held 1500 ms and removed at once. Never moves the layout.
+ */
+function flash(target: HTMLElement, question: boolean): void {
+	const still = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
+	target.classList.remove("acp-msg-flash", "acp-msg-flash-out", "acp-msg-flash-warn");
+	target.classList.add("acp-msg-flash");
+	if (question) target.classList.add("acp-msg-flash-warn");
+	const clear = () =>
+		target.classList.remove("acp-msg-flash", "acp-msg-flash-out", "acp-msg-flash-warn");
+	if (still) {
+		setTimeout(clear, 1500);
+		return;
+	}
+	setTimeout(() => {
+		target.classList.add("acp-msg-flash-out");
+		setTimeout(clear, 600);
+	}, 1200);
+}
 
 /** States in which a message is over: reaching one is news for the pill. */
 const FINAL = new Set(["done", "failed", "uncertain"]);

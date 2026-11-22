@@ -1,6 +1,6 @@
 # ACP agents and Project Chat
 
-> **Status:** implemented, behind `ACP_AGENTS_ENABLED` (off by default in a fresh install). Tested with
+> **Status:** implemented, always on. Tested with
 > Claude only (adapter `@agentclientprotocol/claude-agent-acp`). This page describes the code on `main`.
 > Developer-level detail: [CLAUDE.md → ACP agents](../CLAUDE.md) and the code (`backend/src/acp/`,
 > `backend/src/routes/acp.ts`, `acp-runtime/`). Anything marked *provisional* may change.
@@ -116,7 +116,7 @@ A message's `project_id` is its **scope**:
 - An agent **never chooses** scope: a request it sends takes the scope of the message it is working
   on when the recipient is in that project, and is direct otherwise. A consult started in Project
   Chat stays there; a private one stays private.
-- Projects themselves (`/api/projects`, behind `PROJECT_CHAT_ENABLED`) only group agents and give
+- Projects themselves (`/api/projects`) only group agents and give
   them Project Chat. Archiving a project makes its agents leave it.
 - **Live:** `/ws/acp` pushes every message row, question and activity batch to the owner's browsers.
   The client loads a page over REST (`…/feed?before=` for older pages), applies pushed rows by id,
@@ -172,8 +172,6 @@ session.
 
    | Variable | Default | |
    | --- | --- | --- |
-   | `ACP_AGENTS_ENABLED` | off | `true`/`1` mounts `/api/acp` and `/ws/acp` and supervises runners |
-   | `PROJECT_CHAT_ENABLED` | off | `/api/projects` and Project Chat |
    | `ACP_DEFAULT_RUNTIME` | `claude-acp-0.108.0` | adapter directory for new agents |
    | `ACP_DEFAULT_MODEL` | `claude-sonnet-5-5` | model when the create request names none |
    | `ACP_MESSAGE_MAX_BYTES` | `262144` | per-message cap |
@@ -190,10 +188,9 @@ session.
      --entrypoint bash shared-terminal-session /src/install.sh $WORKSPACE_ROOT/.acp-runtime 0.108.0
    ```
 
-3. **Restart the backend.** Migrations v21–v22 are additive and run at boot whatever the flags say.
+3. **Restart the backend.** Migrations v21–v22 are additive and run at boot.
 
-4. **Create an agent session:** the New session form's agent fields (name, project, runtime — shown
-   when `/api/auth/status` reports `features.acpAgents`), or `POST /api/sessions` with
+4. **Create an agent session:** the New session form's agent fields (name, project, runtime), or `POST /api/sessions` with
    `acpAgent: {name, model?, runtime?, projectId?}`. The name is `[a-z][a-z0-9-]{1,31}`, unique per
    owner; `owner`, `system` and `all` are reserved.
 
@@ -230,8 +227,7 @@ session.
   Docker). Their real-Docker check, `experiments/acp-agents/acp-r8-docker-check.mjs` (lab only,
   `LAB=1`, disposable sessions), has not been run yet: until its result is published, treat the
   container side (mount in the new container, one runner, resumed ACP session) as unverified.
-- **Rollback.** Unset `ACP_AGENTS_ENABLED` and restart: no routes, no runners. Tables stay; agent
-  sessions keep working as ordinary sessions.
+- **Stopping an agent.** Stop its session: no runner lives while the container is down.
 
 ## 10. Known limitations
 

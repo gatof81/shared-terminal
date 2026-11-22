@@ -14,6 +14,7 @@
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import type { WebSocketServer } from "ws";
+import { ACP_WS_PREFIX } from "./acp/ws.js";
 import { isAllowedWsOrigin } from "./auth.js";
 import { logger } from "./logger.js";
 import { newRequestId, runWithRequestId } from "./requestContext.js";
@@ -31,6 +32,7 @@ export const WS_PATH_PREFIXES: readonly string[] = [
 	"/ws/sessions/",
 	"/ws/bootstrap/",
 	"/ws/conversation/",
+	ACP_WS_PREFIX,
 ];
 
 /** Does `url` (the raw request-target of an upgrade) name an app WebSocket? */
@@ -49,8 +51,6 @@ export interface WsUpgradeDeps {
 	trustProxyValue: TrustProxyValue | undefined;
 	corsOrigins: readonly string[];
 	nodeEnv: string | undefined;
-	/** Paths admitted besides WS_PATH_PREFIXES — only those of features that are on. */
-	extraPathPrefixes?: readonly string[];
 }
 
 export type WsUpgradeHandler = (req: IncomingMessage, socket: Duplex, head: Buffer) => void;
@@ -119,7 +119,7 @@ export function createWsUpgradeHandler(deps: WsUpgradeDeps): WsUpgradeHandler {
 			// existing /ws/* path mustn't also run.
 			if (portDispatcher.handleUpgrade(req, socket, head)) return;
 			const url = req.url ?? "";
-			if (!isWsPath(url) && !(deps.extraPathPrefixes ?? []).some((p) => url.startsWith(p))) {
+			if (!isWsPath(url)) {
 				// socket.end() drains the write buffer before closing, so the
 				// 404 line actually reaches the client. socket.write() +
 				// socket.destroy() (the previous form) issues immediate

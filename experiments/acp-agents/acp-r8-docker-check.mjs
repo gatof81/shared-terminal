@@ -9,7 +9,7 @@
 // Agents use the deterministic test adapter (ACP_TEST_RUNTIME=1): no model, no
 // credentials. Run it ON the Docker host of the lab (it uses the `docker` CLI).
 //
-// Lab backend needs: ACP_AGENTS_ENABLED=1, ACP_TEST_RUNTIME=1,
+// Lab backend needs: ACP_TEST_RUNTIME=1,
 // CONVERSATION_ENABLED=true (recreation is the capture's engine),
 // RECREATE_DOCKER_FS_PATH set, and an admin login.
 //   LAB=1 ST=http://127.0.0.1:3101 LAB_LOGIN=1 BACKUP_CMD='docker compose exec -T app npm run backup' \

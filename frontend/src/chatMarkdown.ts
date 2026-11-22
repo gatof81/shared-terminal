@@ -4,7 +4,7 @@
 // so a report reads the same in both.
 
 import { copyText } from "./clipboard.js";
-import { showCopySuccessToast, showToast } from "./main.js";
+import { showCopySuccessToast, showToast } from "./components/toast.js";
 import { renderMarkdown } from "./markdown.js";
 import { appRouteHash } from "./router.js";
 import { button, el } from "./ui.js";

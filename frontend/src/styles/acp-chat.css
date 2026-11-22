@@ -19,67 +19,22 @@
    attribute and show an empty thread under the error. */
 .acp-thread:not([hidden]) {
 	flex: 1;
+	/* Its minimum is the message box alone (the thread-wrap below contributes
+	   nothing): the thread gives way first, then what is above it. */
 	min-height: auto;
 	display: flex;
 	flex-direction: column;
 }
-/* Ajustes / Administrar agentes: at most 40% of the visible height (--app-vh
-   follows the soft keyboard; dvh, then vh, where it is not set), and they
-   shrink further and scroll inside when the thread needs its minimum. */
-.acp-settings,
-.acp-agents-panel,
-.acp-agents-list {
+/* Ajustes: at most 40% of the visible height (--app-vh follows the soft
+   keyboard; dvh, then vh, where it is not set), and it shrinks further and
+   scrolls inside when the thread needs its minimum. */
+.acp-settings {
 	flex: 0 1 auto;
 	max-height: 40vh;
 	max-height: calc(var(--app-vh, 100dvh) * 0.4);
 	min-height: 0;
 	overflow-y: auto;
 	overscroll-behavior: contain;
-}
-/* The individual chat's header: one row — name, state, its project (a link,
-   truncated), Ajustes — and the settings panel under it, closed by default. */
-.acp-chat-title {
-	flex: none;
-	display: flex;
-	flex-wrap: nowrap;
-	align-items: center;
-	gap: 6px 10px;
-	min-width: 0;
-}
-.acp-chat-name,
-.acp-chat-projlink {
-	min-width: 0;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-}
-.acp-chat-name {
-	flex: 0 1 auto;
-}
-.acp-chat-title > .acp-status {
-	flex: none;
-}
-.acp-chat-projlink {
-	flex: 0 1 auto;
-}
-.acp-settings-btn {
-	flex: none;
-	margin-left: auto;
-	display: inline-flex;
-	align-items: center;
-	gap: 4px;
-}
-/* A pending or refused model, seen with the panel closed. */
-.acp-settings-flag {
-	font-weight: 700;
-	color: var(--c-warn);
-}
-.acp-settings-flag[hidden] {
-	display: none;
-}
-.acp-settings-btn.acp-settings-failed {
-	border-color: var(--c-warn);
-	color: var(--c-warn);
 }
 .acp-settings:not([hidden]) {
 	display: flex;
@@ -183,16 +138,24 @@
 	display: flex;
 	flex-direction: column;
 	box-sizing: border-box;
-	padding-bottom: var(--s-3, 12px);
+	/* The message box sits as far from the bottom edge as in an agent's chat. */
+	padding-bottom: 0;
 }
+/* The page's header: ONE row of at most 48 px — the title, the agents' group
+   and ⋯ (U-2 §2.2). After the thread it is what gives way (a keyboard
+   leaving ~150 px): the message box is the one part that stays whole. On a
+   phone the row lives in the app's header instead (below). */
 .acp-project .pv-header {
-	flex: none;
-	/* The line the chips row used to draw under the header. */
-	padding-bottom: 6px;
+	flex: 0 1 auto;
+	flex-wrap: nowrap;
+	min-height: 0;
+	max-height: 48px;
+	overflow: clip;
+	padding-bottom: 2px;
 	border-bottom: 1px solid var(--c-border);
 }
-/* Row 1: the title (one line, cut with an ellipsis), ⋯ and ×. A zero basis
-   keeps the tools on the title's line however long the name is. */
+/* The title (one line, cut with an ellipsis): a zero basis keeps the tools
+   on its line however long the name is. */
 .acp-project .pv-title {
 	flex: 1 1 0;
 	/* ~8 characters of the name stay, whatever the group beside it takes. */
@@ -201,9 +164,14 @@
 	overflow: hidden;
 	text-overflow: ellipsis;
 }
+.acp-project .pv-tools,
+#header-project .pv-tools {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex: none;
+}
 .pv-menu-btn {
-	min-width: 2.75rem;
-	justify-content: center;
 	font-size: 1rem;
 }
 .acp-project-agents[hidden] {
@@ -286,14 +254,15 @@
 	background: var(--c-warn);
 	color: var(--c-bg);
 }
-/* The full list (under the header, the "Administrar agentes" panel's mechanics). */
-/* A phone: title (≥ 8 characters), the group, ⋯ and × share 288 px at 320. */
+.acp-group-add {
+	background: transparent;
+	border: 1px dashed var(--c-border);
+	color: var(--c-text-2);
+}
+/* A phone: title (≥ 8 characters), the group and ⋯ share the header's row. */
 @media (max-width: 640px) {
-	.acp-project .pv-header {
-		column-gap: 6px;
-	}
-	.acp-project .pv-tools {
-		gap: 4px;
+	#header-project .pv-tools {
+		gap: 2px;
 	}
 	.acp-agents-group {
 		gap: 3px;
@@ -316,104 +285,13 @@
 		font-size: 0.7rem;
 	}
 }
-.acp-agents-list-body {
-	list-style: none;
-	margin: 0;
-	padding: 0;
-	display: flex;
-	flex-direction: column;
-	gap: 2px;
-}
-.acp-agents-list-item {
-	display: flex;
-	flex-wrap: wrap;
-	align-items: center;
-	gap: 2px 10px;
-	min-height: 44px;
-	padding: 2px 0;
-	border-bottom: 1px solid var(--c-border-soft);
-}
-.acp-agents-list-who {
-	overflow-wrap: anywhere;
-	min-width: 0;
-}
-.acp-agents-list-item .acp-status {
-	font-size: 0.8rem;
-}
-.acp-agents-list-link {
-	margin-left: auto;
-	display: inline-flex;
-	align-items: center;
-	min-height: 44px;
-	color: var(--c-accent);
-	font-size: 0.8rem;
-}
-.acp-agent-name {
-	font-weight: 600;
-	color: inherit;
-}
-.acp-project-tools {
-	display: flex;
-	flex-wrap: wrap;
-	gap: 6px 8px;
-	align-items: center;
-}
 .acp-project-help {
 	margin: 0;
 	font-size: 0.78rem;
 	opacity: 0.75;
 }
-/* "Administrar agentes" (from the ⋯ menu; open on a project with no agents). */
-.acp-agents-panel:not([hidden]),
-.acp-agents-list:not([hidden]) {
-	margin-top: 8px;
-	display: flex;
-	flex-direction: column;
-	gap: 8px;
-	padding: 8px 10px;
-	border: 1px solid var(--c-border);
-	border-radius: 8px;
-	background: var(--c-surface);
-}
-/* Pinned while the squeezed panel scrolls inside: its × stays in view. It
-   reaches the panel's edges (negative margins over the padding) and has the
-   panel's background, so the scrolled content passes under it, unseen. */
-.acp-agents-panel-head {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	gap: 8px;
-	position: sticky;
-	top: -8px;
-	z-index: 1;
-	margin: -8px -10px 0;
-	padding: 8px 10px 4px;
-	background: var(--c-surface);
-}
-.acp-agents-panel-body {
-	display: flex;
-	flex-direction: column;
-	gap: 8px;
-}
-.acp-manage-list {
-	display: flex;
-	flex-wrap: wrap;
-	gap: 6px 12px;
-	list-style: none;
-	margin: 0;
-	padding: 0;
-}
-.acp-manage-list:empty {
-	display: none;
-}
-.acp-manage-item {
-	display: flex;
-	align-items: center;
-	gap: 6px;
-}
 
 @media (max-width: 640px) {
-	.acp-chat-header,
 	.acp-chat-thread,
 	.acp-chat-composer {
 		padding-left: 10px;
@@ -436,19 +314,10 @@
 		font-size: 0.78rem;
 		min-height: 44px;
 	}
-	.acp-agent-remove {
-		min-height: 44px;
-	}
 	.acp-project-agents {
 		gap: 4px;
 		padding: 4px 0;
 	}
-}
-.acp-chat-header {
-	padding: 10px 14px;
-	border-bottom: 1px solid var(--c-border);
-	font-size: 0.9rem;
-	flex: none;
 }
 .acp-chat-meta,
 .acp-chat-runner {
@@ -651,6 +520,8 @@ pre.acp-msg-body {
 	color: var(--c-warn);
 }
 .acp-chat-composer {
+	/* Never shrinks: the thread above it gives way instead. */
+	flex: none;
 	border-top: 1px solid var(--c-border);
 	padding: 10px 14px;
 	display: flex;
@@ -715,7 +586,11 @@ pre.acp-msg-body {
 	color: var(--c-text);
 	font: 15px/22px var(--font-ui);
 	resize: none;
-	overflow-y: hidden;
+	/* Grows with its text (Safari 26.2+, Chrome 123+) up to 8 lines — 30 % of
+	   the visible height on a phone (below) — then scrolls inside. */
+	field-sizing: content;
+	max-height: calc(8 * 22px + 20px);
+	overflow-y: auto;
 }
 /* The UA's placeholder grey measured 3.75:1 on the field: the muted text
    colour. One line: what does not fit is cut. */
@@ -943,10 +818,10 @@ pre.acp-msg-body {
 /* The thread and its "Ir al final" button (chatScroll.ts, .chat-end). */
 .acp-thread-wrap {
 	flex: 1;
-	/* A readable strip of thread, whatever is open above it. `contain: size`
-	   keeps the thread's content out of the minimum (the thread scrolls): the
-	   message box's column then asks for exactly this strip plus the box. */
-	min-height: 6rem;
+	/* The first thing to give way when the box is short (a keyboard up, a
+	   panel open): it may shrink to nothing, the message box never. `contain:
+	   size` keeps the thread's content out of the column's minimum. */
+	min-height: 0;
 	contain: size;
 	position: relative;
 	display: flex;
@@ -954,22 +829,9 @@ pre.acp-msg-body {
 }
 /* After the rules above, which it overrides on a phone. */
 @media (max-width: 640px) {
-	/* Header controls: 44-px touch targets. */
-	.acp-settings-btn,
-	.acp-chat-projlink {
-		min-height: 44px;
-	}
-	/* Its own line box (a flex container would lose the ellipsis). */
-	.acp-chat-projlink {
-		line-height: 44px;
-	}
 	.acp-settings .acp-project-select,
 	.acp-settings .acp-model-select {
 		min-height: 44px;
-	}
-	.acp-chat-header {
-		padding-top: 6px;
-		padding-bottom: 6px;
 	}
 	.acp-notice-long {
 		display: none;
@@ -980,6 +842,9 @@ pre.acp-msg-body {
 	.acp-chat-composer {
 		padding-top: 8px;
 		padding-bottom: 8px;
+	}
+	.acp-chat-input {
+		max-height: max(42px, min(calc(8 * 22px + 20px), calc(var(--app-vh, 100dvh) * 0.3)));
 	}
 }
 /* 16 px on a touch screen: iOS zooms into a smaller field on focus. */
@@ -1077,7 +942,6 @@ pre.acp-msg-body {
 	.acp-project {
 		--chat-gutter: max(14px, calc((100% - var(--chat-col)) / 2));
 	}
-	.acp-chat-header,
 	.acp-settings:not([hidden]),
 	.acp-chat-notice:not([hidden]),
 	.acp-chat-thread,
@@ -1092,22 +956,207 @@ pre.acp-msg-body {
 		padding-left: 0;
 		padding-right: 0;
 	}
-	.acp-project .acp-agents-panel:not([hidden]),
-	.acp-project .acp-agents-list:not([hidden]) {
-		margin-left: var(--chat-gutter);
-		margin-right: var(--chat-gutter);
-	}
 }
 
-/* UX iter3 E: on an agent's session the session bar is the agent's header
-   (sessionCore paintBarIdentity; "Ajustes" in its ⋯), so this row goes.
-   A phone in shell v1 keeps it: its bar lives in the chrome drawer, and
-   without the row the agent's state would not show until it is opened. */
-html[data-shell="v2"] .acp-chat-header {
-  display: none;
+/* ── "Agentes": one panel over the thread (U-2 §3) ──────────────────────
+   Absolute at every width — opening it moves nothing in the thread —, its
+   top, left/width and max-height set by acpProjectChat.placePanel (4 px
+   under the header row, never over the message box, ≤ 60 % of the visible
+   height). A fixed head and foot; only the rows scroll. The scrim under it
+   takes a tap outside (it only closes the panel). */
+.pv-page.acp-project {
+	position: relative;
 }
-@media (min-width: 769px) {
-  .acp-chat-header {
-    display: none;
-  }
+.acp-agents:not([hidden]) {
+	position: absolute;
+	left: 8px;
+	right: 8px;
+	z-index: 20;
+	display: flex;
+	flex-direction: column;
+	box-sizing: border-box;
+	background: var(--c-surface);
+	border: 1px solid var(--c-border);
+	border-radius: var(--radius-m);
+	box-shadow: 0 6px 16px rgba(1, 4, 9, 0.55);
+}
+@media (min-width: 641px) {
+	.acp-agents:not([hidden]) {
+		right: auto;
+	}
+}
+.acp-agents-scrim:not([hidden]) {
+	position: absolute;
+	inset: 0;
+	z-index: 19;
+}
+.acp-agents-scrim[hidden] {
+	display: none;
+}
+.acp-agents-head {
+	flex: none;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	min-height: 44px;
+	padding: 0 4px 0 12px;
+	border-bottom: 1px solid var(--c-border-soft);
+}
+.acp-agents-close {
+	min-height: 44px;
+	min-width: 44px;
+}
+.acp-agents-rows {
+	flex: 0 1 auto;
+	min-height: 0;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	list-style: none;
+	margin: 0;
+	/* 4 px under the last row: with its own 8, the 12 px of a chip's larger
+	   touch area are not clipped by the scroll box. */
+	padding: 0 12px 4px;
+}
+.acp-agents-empty {
+	margin: 12px;
+	font-size: 0.85rem;
+	color: var(--c-text-2);
+}
+.acp-agents-empty[hidden],
+.acp-agents-foot[hidden] {
+	display: none;
+}
+.acp-agents-foot {
+	flex: none;
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	padding: 8px 12px;
+	border-top: 1px solid var(--c-border-soft);
+}
+.acp-agents-add {
+	display: flex;
+	gap: 8px;
+	flex: 1 1 100%;
+	min-width: 0;
+}
+.acp-agents-add .acp-add-select {
+	flex: 1;
+	min-width: 0;
+}
+/* One row per agent, every row 64 px (8 + the name's 20 + 4 + the chip's
+   24 + 8): the face, "Abrir su chat" and ⋯ across both lines, the name on one
+   line (an ellipsis, the whole one in its tooltip), the state under it. */
+.acp-agents-row {
+	display: grid;
+	grid-template-columns: 24px minmax(0, 1fr) auto auto;
+	grid-template-rows: 20px 24px;
+	column-gap: 8px;
+	row-gap: 4px;
+	align-items: center;
+	padding: 8px 0;
+	border-bottom: 1px solid var(--c-border-soft);
+}
+.acp-agents-row:last-child {
+	border-bottom: 0;
+}
+.acp-agents-face {
+	grid-column: 1;
+	grid-row: 1 / span 2;
+	width: 24px;
+	height: 24px;
+	font-size: 12px;
+	font-weight: 700;
+}
+.acp-agents-name {
+	grid-column: 2;
+	grid-row: 1;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 14px;
+	font-weight: 600;
+	line-height: 20px;
+	color: hsl(var(--acp-hue, 210) 55% 62%);
+}
+.acp-agents-state {
+	grid-column: 2;
+	grid-row: 2;
+	justify-self: start;
+	white-space: nowrap;
+}
+.acp-agents-open {
+	grid-column: 3;
+	grid-row: 1 / span 2;
+	text-decoration: none;
+}
+.acp-agents-more {
+	grid-column: 4;
+	grid-row: 1 / span 2;
+}
+/* A state that goes to the agent's message: a chip with its fill and "›"
+   (one that does not is .bare, not focusable); a 44-px target to the touch. */
+.acp-agents-goto {
+	position: relative;
+	border: 0;
+	font-family: inherit;
+	cursor: pointer;
+}
+.acp-agents-goto:focus-visible {
+	outline: 2px solid var(--c-accent);
+	outline-offset: 2px;
+}
+.acp-agents-goto-mark {
+	font-size: 12px;
+}
+/* ≥ 44 px tall and 8 px more on each side to the touch (U-2 §3.4). */
+.acp-agents-goto::after {
+	content: "";
+	position: absolute;
+	inset: -12px -8px;
+}
+.acp-agents-open-short {
+	display: none;
+}
+@media (max-width: 360px) {
+	.acp-agents-open-long {
+		display: none;
+	}
+	.acp-agents-open-short {
+		display: inline;
+	}
+}
+/* A phone: the archived note is one line (U-2 §2.4); its explanation is for
+   wider screens. */
+@media (max-width: 768px) {
+	.acp-project-archived {
+		display: none;
+	}
+}
+/* The message gone to: a 2-px ring and a tint, held 1200 ms then faded in
+   600 ms (acpThread.flash); with reduced motion, no transition at all.
+   Shadow and background only: nothing in the layout moves. */
+.acp-msg-flash {
+	border-radius: 10px;
+	background: var(--c-accent-bg);
+	box-shadow: 0 0 0 2px var(--c-accent);
+}
+.acp-msg-flash.acp-msg-flash-warn {
+	background: rgba(var(--c-warn-rgb), 0.12);
+	box-shadow: 0 0 0 2px var(--c-warn);
+}
+.acp-msg-flash.acp-msg-flash-out {
+	background: transparent;
+	box-shadow: 0 0 0 2px transparent;
+	transition:
+		background 600ms ease-out,
+		box-shadow 600ms ease-out;
+}
+.acp-msg-flash:focus {
+	outline: none;
+}
+@media (prefers-reduced-motion: reduce) {
+	.acp-msg-flash.acp-msg-flash-out {
+		transition: none;
+	}
 }

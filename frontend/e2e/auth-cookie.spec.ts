@@ -180,7 +180,7 @@ test.describe("auth transitions on the real cookie jar", () => {
 
 		// Alice's logout reaches the server, whose answer (the cookie delete) is held.
 		server.hold("logout");
-		await app.appMenu("logout-btn");
+		await app.appMenu("logout");
 		await expect(page.locator("#auth-view")).toBeVisible();
 		await expect.poll(() => server.isHeld("logout")).toBe(true);
 
@@ -198,7 +198,7 @@ test.describe("auth transitions on the real cookie jar", () => {
 		expect(await tokenOf(context), "a stale logout deleted the new login's cookie").toBe("bob");
 		const before = server.received("GET /sessions");
 		await app.openSidebar();
-		await page.click("#sidebar-refresh-btn");
+		await app.refreshSessions();
 		await expect.poll(() => server.received("GET /sessions")).toBeGreaterThan(before);
 		expect(server.lastCookie("GET /sessions"), "the next request is Bob's").toBe("bob");
 		// The order the server saw: Alice's logout before Bob's login.
@@ -217,7 +217,7 @@ test.describe("auth transitions on the real cookie jar", () => {
 		await expect.poll(() => tokenOf(context)).toBe("alice");
 
 		server.hold("logout");
-		await app.appMenu("logout-btn");
+		await app.appMenu("logout");
 		await expect.poll(() => server.isHeld("logout")).toBe(true);
 
 		// The cross-tab ordering is the browser's Web Locks, not the in-page fallback.
@@ -261,10 +261,10 @@ test.describe("auth transitions on the real cookie jar", () => {
 		// A list request sent with Alice's cookie is held; it will answer 401.
 		server.hold("sessions");
 		await app.openSidebar();
-		await page.click("#sidebar-refresh-btn");
+		await app.refreshSessions();
 		await expect.poll(() => server.isHeld("sessions")).toBe(true);
 
-		await app.appMenu("logout-btn");
+		await app.appMenu("logout");
 		await expect(page.locator("#auth-view")).toBeVisible();
 		backend.loginAs("bob");
 		await signIn(page, "bob");
@@ -288,7 +288,7 @@ test.describe("auth transitions on the real cookie jar", () => {
 		const logoutsBefore = server.received("POST /auth/logout");
 		server.hold("sessions");
 		await app.openSidebar();
-		await page.click("#sidebar-refresh-btn");
+		await app.refreshSessions();
 		await expect.poll(() => server.isHeld("sessions")).toBe(true);
 		server.release("sessions", 401);
 		await expect(page.locator("#auth-view")).toBeVisible();
@@ -303,7 +303,7 @@ test.describe("auth transitions on the real cookie jar", () => {
 	}) => {
 		await signIn(page, "alice");
 		await expect(page.locator("#app-view")).toBeVisible();
-		await app.appMenu("logout-btn");
+		await app.appMenu("logout");
 		await expect(page.locator("#auth-view")).toBeVisible();
 
 		// On the login screen a status probe goes out (entering register mode
@@ -335,7 +335,7 @@ test.describe("auth transitions on the real cookie jar", () => {
 			},
 		]);
 		await app.openSidebar();
-		await page.click("#sidebar-refresh-btn");
+		await app.refreshSessions();
 		await expect(
 			app.sessionRow("bob-new"),
 			"a stale status answer signed the mirror out",

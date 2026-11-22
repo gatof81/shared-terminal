@@ -6,10 +6,8 @@
  * DOM elements are re-queried locally via getElementById (elements are
  * singletons by id) so this module has NO module-top dependency on
  * main.ts — that avoids the circular-import TDZ trap. The only main.ts
- * imports (showToast, activeSessionId) are used inside functions, so they
- * resolve at call time after both modules have finished loading. (The
- * `activeSessionId` live binding is the one that would have TDZ exposure if
- * read at module top — it isn't.)
+ * import (showToast) is used inside functions, so it resolves at call time
+ * after both modules have finished loading.
  */
 
 import {
@@ -38,13 +36,11 @@ import {
 	updateAdminGroup,
 } from "./api.js";
 import { confirmDialog, createDialog } from "./components/dialog.js";
+import { showToast } from "./components/toast.js";
 import { formatBytes, formatCpuCores, formatCpuPercent } from "./format.js";
-import { activeSessionId, showToast } from "./main.js";
 import { openObserveModalFor } from "./observeModal.js";
 
 // ── DOM (re-queried locally; see header) ─────────────────────────────────
-const sidebarAdminBtn = document.getElementById("sidebar-admin-btn") as HTMLButtonElement;
-const adminBtn = document.getElementById("admin-btn") as HTMLButtonElement;
 const adminModal = document.getElementById("admin-modal")!;
 const adminStatsEl = document.getElementById("admin-stats")!;
 const adminSessionsListEl = document.getElementById("admin-sessions-list")!;
@@ -79,7 +75,6 @@ const adminGroupAddMemberInput = document.getElementById(
 	"admin-group-add-member-input",
 ) as HTMLInputElement;
 const adminGroupMembersListEl = document.getElementById("admin-group-members-list")!;
-const observersBtn = document.getElementById("observers-btn") as HTMLButtonElement;
 const observersModal = document.getElementById("observers-modal")!;
 const observersModalListEl = document.getElementById("observers-modal-list")!;
 
@@ -94,7 +89,7 @@ const observersModalListEl = document.getElementById("observers-modal-list")!;
 
 const adminDialog = createDialog(adminModal, { initialFocus: () => adminRefreshBtn });
 
-function openAdminModal(opener: HTMLButtonElement) {
+export function openAdminModal(opener: HTMLElement) {
 	adminDialog.open(opener);
 	void refreshAdmin();
 }
@@ -102,9 +97,6 @@ function openAdminModal(opener: HTMLButtonElement) {
 function closeAdminModal() {
 	adminDialog.close();
 }
-
-adminBtn.addEventListener("click", () => openAdminModal(adminBtn));
-sidebarAdminBtn.addEventListener("click", () => openAdminModal(sidebarAdminBtn));
 
 adminRefreshBtn.addEventListener("click", () => {
 	void refreshAdmin();
@@ -1105,19 +1097,14 @@ function renderAdminObserveLog(entries: AdminObserveLogEntry[]): void {
 
 const observersDialog = createDialog(observersModal);
 
-function openObserversModal(): void {
-	if (!activeSessionId) return;
-	openObserversModalFor(activeSessionId);
-}
-
-/** The per-session observe log — from the toolbar (active session) or a sidebar row's menu. */
+/** The per-session observe log — from the bar's ⋯ or a sidebar row's menu. */
 export function openObserversModalFor(sessionId: string): void {
 	observersModalListEl.textContent = "";
 	const loading = document.createElement("p");
 	loading.className = "modal-hint";
 	loading.textContent = "Loading…";
 	observersModalListEl.appendChild(loading);
-	observersDialog.open(document.activeElement ?? observersBtn);
+	observersDialog.open(document.activeElement);
 	void refreshObserversModal(sessionId);
 }
 
@@ -1164,7 +1151,5 @@ async function refreshObserversModal(sessionId: string): Promise<void> {
 		observersModalListEl.appendChild(row);
 	}
 }
-
-observersBtn.addEventListener("click", () => openObserversModal());
 
 export { closeAdminGroupMembersModal, closeAdminGroupModal, closeAdminModal, closeObserversModal };
