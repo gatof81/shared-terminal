@@ -47,30 +47,25 @@ import {
 	permsForBackup,
 	secure,
 } from "./backupPerms.js";
-import {
-	ATTESTATION_FILE_PREFIX,
-	ATTESTATION_KEY_INFO,
-	classifyAttestation,
-	readAttestation,
-	writeAttestation,
-} from "./conversation/captureAttestation.js";
-import {
-	LIFTED_FILE,
-	REVOKED_ALL_FILE,
-	REVOKED_FILE,
-	readSessionRevocation,
-	revokedAllPath,
-} from "./conversation/revocation.js";
 import { d1Query, migrateDb } from "./db.js";
 import { logger } from "./logger.js";
-import { CONTROL_DIR, fsyncDir } from "./recreateAttempt.js";
-import { decryptSecret, deriveSubkey, type EncryptedSecret } from "./secrets.js";
+import { decryptSecret, type EncryptedSecret } from "./secrets.js";
 
 const execFileP = promisify(execFile);
 
 const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT ?? "/var/shared-terminal/workspaces";
-// The shape of a session id as a path component (conversation/ids.ts).
+// The shape of a session id as a path component.
 const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+
+// What the removed conversation capture and container recreation left on
+// disk. Nothing reads it any more, but it is the owner's data: a backup still
+// carries it, and a restore keeps it out of the live tree (see restoreAll).
+// `.conversations/<sid>/REVOKED|LIFTED` were per-session revocation markers,
+// `.conversations/REVOKED_ALL` the global one.
+const CONTROL_DIR = ".st-control";
+const REVOKED_FILE = "REVOKED";
+const LIFTED_FILE = "LIFTED";
+const REVOKED_ALL_FILE = "REVOKED_ALL";
 
 // FK-dependency order — restore replays top to bottom. Each entry names
 // its deterministic ORDER BY so two backups of identical data are
@@ -103,11 +98,12 @@ export const TABLES: ReadonlyArray<{ name: string; orderBy: string; sinceSchema?
 	{ name: "user_group_members", orderBy: "group_id, user_id" },
 	{ name: "sessions", orderBy: "session_id" },
 	{ name: "session_configs", orderBy: "session_id" },
-	// Phase 3 — FK → sessions. The events files ride the per-session
-	// workspace tarball (`.conversations/<sid>` is added below);
-	// `.claude-managed/` is NOT backed up: reconcile regenerates it.
+	// FK → sessions. Data of the removed conversation capture, kept as is;
+	// the events files ride the per-session workspace tarball
+	// (`.conversations/<sid>` is added below). `.claude-managed/` (the
+	// generated hooks files) is not backed up.
 	{ name: "claude_conversations", orderBy: "session_id", sinceSchema: 16 },
-	// §6.2 — FK → sessions; owner data, not reconstructible from the events.
+	// FK → sessions; owner data (titles, archive flags) of the same capture.
 	{ name: "conversation_user_meta", orderBy: "st_session_id, cid", sinceSchema: 18 },
 	{ name: "sessions_port_mappings", orderBy: "session_id, container_port" },
 	{ name: "templates", orderBy: "id" },
@@ -134,7 +130,8 @@ export interface BackupManifest {
 	schemaVersion: number;
 	tables: Record<string, number>;
 	workspaces: Record<string, WorkspaceEntry>;
-	/** `.conversations/REVOKED_ALL` existed: copied to `<backup>/REVOKED_ALL`. */
+	/** `.conversations/REVOKED_ALL` existed: copied to `<backup>/REVOKED_ALL`
+	 *  (inert data; a restore leaves it there). */
 	globalRevocation?: true;
 	/**
 	 * Backups taken before the retired project conversation (D1–D3) carry
@@ -259,12 +256,11 @@ export async function runBackup(outDir: string): Promise<BackupManifest> {
 		for (const rel of [
 			session_id,
 			path.join(".uploads", session_id),
-			// Phase 3 — the conversation event log (docs/CONVERSATION.md §9).
+			// The removed capture's event log and the session's control dir
+			// (recreation records, relay markers …): inert data, carried so
+			// nothing of it is lost. Restore keeps the control dir and the
+			// revocation markers out of the live tree — see restoreAll.
 			path.join(".conversations", session_id),
-			// The session's control dir (capture attestations, recreation
-			// record, composer pane records, relay.enabled …). Carried as
-			// EVIDENCE: restore installs only the attestations from it, and
-			// only after verifying them — see installControlEvidence.
 			path.join(CONTROL_DIR, session_id),
 		]) {
 			try {
@@ -298,12 +294,15 @@ export async function runBackup(outDir: string): Promise<BackupManifest> {
 		logger.info(`[backup] workspace ${session_id}: ${fileCount} entries, ${tarBytes} bytes`);
 	}
 
-	// The global emergency cut is not inside any session's tarball.
+	// The old global revocation marker is not inside any session's tarball.
 	try {
-		await fs.copyFile(revokedAllPath(WORKSPACE_ROOT), path.join(outDir, REVOKED_ALL_FILE));
+		await fs.copyFile(
+			path.join(WORKSPACE_ROOT, ".conversations", REVOKED_ALL_FILE),
+			path.join(outDir, REVOKED_ALL_FILE),
+		);
 		await secure(path.join(outDir, REVOKED_ALL_FILE), "file", perms);
 		manifest.globalRevocation = true;
-		logger.warn("[backup] global conversation revocation (REVOKED_ALL) is in effect — carried");
+		logger.info("[backup] .conversations/REVOKED_ALL present — carried as data");
 	} catch (err) {
 		if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
 	}
@@ -473,7 +472,7 @@ async function preflightWorkspaces(
 	// The name becomes the allowlist prefix and the exclusion patterns of the
 	// extraction: a tarball named `.conversations.tar.gz` would otherwise turn
 	// `.conversations/<victim>/LIFTED` into an in-scope entry that no
-	// exclusion matches.
+	// exclusion matches, extracted over another session's file.
 	const wsDir = path.join(inDir, "workspaces");
 	const tarballs = await fs.readdir(wsDir).catch(() => [] as string[]);
 	const out: WorkspaceTarball[] = [];
@@ -520,11 +519,11 @@ async function preflightWorkspaces(
 			throw new Error(`workspace tarball ${file} contains out-of-scope paths — refusing`);
 		}
 		// Member TYPES, from the verbose listing (same order, one line per
-		// member). The session's root dirs must be directories and nothing
-		// under its conversations or control dir may be a link: tar never
-		// writes through a symlink it created itself, but the install step
-		// below does write under `.conversations/<sid>/` — a planted
-		// `.conversations/<sid> -> /elsewhere` would make it write there.
+		// member). The session's root dirs must be directories (a symlink
+		// `<sid>` would replace the live workspace root, which Docker then
+		// bind-mounts read-write) and nothing under its conversations or
+		// control dir may be a link: those dirs only ever held plain files
+		// written by the backend, so a link there is a tampered backup.
 		// Workspace content (`<sid>/…`, uploads) keeps its links.
 		// LC_ALL=C + numeric owners: the hard-link rule below reads tar's
 		// " link to " text, which is translated, after a name it must find.
@@ -569,8 +568,7 @@ async function preflightWorkspaces(
 		// is not "extracted earlier": the live pass below excludes the control
 		// dir and the revocation markers, so a link to one of THOSE members
 		// would resolve against the destination's live file (A's review of
-		// #670) — and nothing legitimate links into the capture's or the
-		// backend's own directories.
+		// #670) — and nothing legitimate links into those directories.
 		const linkable = new Set<string>();
 		entries.forEach((e, i) => {
 			if (types[i] === "h") {
@@ -608,13 +606,6 @@ async function preflightWorkspaces(
 		if (!out.some((w) => w.sid === sid)) {
 			throw new Error(`workspace tarball ${sid}.tar.gz is in the manifest but not in the backup`);
 		}
-	}
-	if (manifest.globalRevocation === true) {
-		await fs.access(path.join(inDir, REVOKED_ALL_FILE)).catch(() => {
-			throw new Error(
-				`the manifest carries a global revocation but ${REVOKED_ALL_FILE} is missing`,
-			);
-		});
 	}
 	return out;
 }
@@ -715,18 +706,6 @@ async function restoreAll(
 					"docs/SECRETS_ENCRYPTION_KEY.md. (Deliberately not overridable with --force.)",
 			);
 		}
-	}
-
-	// A global emergency cut (`conversation:disable -- --all`) in effect at
-	// the backup comes back in effect (fail-closed, like a per-session one:
-	// dropping it would end the cut without anyone running enable-all). Never
-	// replaces the destination's own marker. Installed before any D1 write.
-	if (manifest.globalRevocation === true) {
-		const bytes = await fs.readFile(path.join(inDir, REVOKED_ALL_FILE), "utf8");
-		const installed = await publishNoClobber(revokedAllPath(WORKSPACE_ROOT), bytes);
-		logger.warn(
-			`[restore] global conversation revocation (REVOKED_ALL) ${installed ? "installed" : "already present on the destination — kept"}; lift with conversation:enable-all`,
-		);
 	}
 
 	// Replay in FK order. INSERT OR REPLACE so a --force re-run over a
@@ -831,14 +810,13 @@ async function restoreAll(
 	let evidenceDir: string | undefined;
 	for (const { sid, tarPath, entries } of workspaces) {
 		// Everything EXCEPT the session's control dir and its revocation
-		// markers goes to its live place. Those must never be overwritten by
-		// an older copy: a backup's `.st-control` would bring back a recreation
-		// record, pane records or `relay.enabled` that no longer describe any
-		// container, and a backup's REVOKED/LIFTED pair would, over a newer
-		// destination state, either undo a revocation in effect (its LIFTED
-		// replaced) or put an already-lifted one back in effect (its LIFTED
-		// left in place, REVOKED replaced). `--anchored` keeps the patterns
-		// from matching the same names inside the workspace itself.
+		// markers goes to its live place. Nothing reads those any more, but
+		// they describe containers and operations of the SOURCE: in the live
+		// tree they would replace the destination's own copies (its data,
+		// and the newer state) and be acted on again by any older backend
+		// rolled back onto this host. So they are extracted, as data, to an
+		// evidence dir instead. `--anchored` keeps the patterns from matching
+		// the same names inside the workspace itself.
 		await execFileP("tar", [
 			"-xzf",
 			tarPath,
@@ -865,16 +843,17 @@ async function restoreAll(
 				"--",
 				...held.map((e) => e.replace(/\/$/, "")),
 			]);
-			const r = await installControlEvidence(evidenceDir, sid);
-			logger.info(
-				`[restore] control ${sid}: attestations installed=${r.installed} kept=${r.kept} rejected=${r.rejected}; revocation ${r.revocation}`,
-			);
 		}
 		logger.info(`[restore] workspace ${sid}: ${entries.length} entries`);
 	}
 	if (evidenceDir) {
 		logger.info(
 			`[restore] the backup's control dirs and revocation markers are kept as evidence in ${evidenceDir} (nothing there is live)`,
+		);
+	}
+	if (manifest.globalRevocation === true) {
+		logger.info(
+			`[restore] the backup's ${REVOKED_ALL_FILE} stays in ${inDir} (inert data, not installed)`,
 		);
 	}
 }
@@ -884,8 +863,7 @@ async function restoreAll(
 /**
  * `<WORKSPACE_ROOT>/.restore-evidence/<backup>-<random>/`: where a restore
  * extracts the backup's `.st-control/<sid>` and REVOKED/LIFTED. Never read by
- * the backend; kept for the operator (a recreation record or a pane record
- * is what an investigation after a disaster needs) until removed by hand.
+ * the backend; kept for the operator until removed by hand.
  */
 async function makeEvidenceDir(createdAt: string): Promise<string> {
 	const parent = path.join(WORKSPACE_ROOT, ".restore-evidence");
@@ -896,179 +874,6 @@ async function makeEvidenceDir(createdAt: string): Promise<string> {
 	);
 	await fs.mkdir(dir, { mode: 0o700 });
 	return dir;
-}
-
-/** `p` is a directory (not a link to one) whose real path is `expected`. */
-async function isRealDir(p: string, expected: string): Promise<boolean> {
-	try {
-		if (!(await fs.lstat(p)).isDirectory()) return false;
-		return (await fs.realpath(p)) === (await fs.realpath(expected).catch(() => expected));
-	} catch {
-		return false;
-	}
-}
-
-async function isRegularFile(p: string): Promise<boolean> {
-	try {
-		return (await fs.lstat(p)).isFile();
-	} catch {
-		return false;
-	}
-}
-
-export interface ControlInstall {
-	installed: number;
-	/** The destination already held an attestation of that container (never replaced). */
-	kept: number;
-	/** Did not verify with this deployment's key, malformed, or not a regular file. */
-	rejected: number;
-	revocation: "none" | "installed" | "destination-kept" | "lifted-in-backup";
-}
-
-/**
- * What a restore takes from the backup's control evidence, and nothing more:
- *
- * - **Capture attestations** (docs/CONVERSATION.md §2.7.5.1): each one that
- *   verifies with THIS deployment's key and names this session and the
- *   container its file name names is published at its live path, without
- *   replacing one already there. Installing one cannot grant anything by
- *   itself: it is a fact the backend signed about one container's creation
- *   (bound to its immutable id and image id), and capture still requires
- *   that container to be D1's, running, with both mounts, the token ↔ hash
- *   match, no revocation and a fresh relay probe. On a new host none of
- *   those containers exist and the files are inert; restored onto the same
- *   Docker host after losing WORKSPACE_ROOT, they are what keeps a session
- *   whose image was removed capable without a recreation — the recreation
- *   record that `conversation:attest` would need is not restored (below).
- * - **The per-session revocation**: the one IN EFFECT in the backup (REVOKED
- *   not named by LIFTED, the receiver's own rule) is installed only when the
- *   destination has no REVOKED of its own — a destination marker is always
- *   the newer state and is never touched. A revocation already lifted in the
- *   backup is not installed (nothing to bring back). One still in effect at
- *   the backup comes back in effect (fail-closed; the official enable lifts
- *   it like any other), because dropping it would silently undo an emergency
- *   disable.
- * - Everything else (`recreate-attempt.json`, composer pane records,
- *   `relay.enabled`, `defer-skill-seed`) stays in the evidence dir only: each
- *   describes containers or in-flight operations of the SOURCE, and the
- *   gates that read them (recreate-unresolved, retained-pending,
- *   send-in-progress) would act on that stale state. Restore lands every
- *   session stopped with no container (the same conclusion), and capture is
- *   re-established by the official procedure.
- */
-export async function installControlEvidence(
-	evidenceDir: string,
-	sessionId: string,
-	workspaceRoot: string = WORKSPACE_ROOT,
-): Promise<ControlInstall> {
-	const out: ControlInstall = { installed: 0, kept: 0, rejected: 0, revocation: "none" };
-	const stagedControl = path.join(evidenceDir, CONTROL_DIR, sessionId);
-	const names = (await isRealDir(stagedControl, path.join(evidenceDir, CONTROL_DIR, sessionId)))
-		? await fs.readdir(stagedControl).catch(() => [] as string[])
-		: [];
-	const attestationName = new RegExp(
-		`^${ATTESTATION_FILE_PREFIX.replace(/\./g, "\\.")}([0-9a-f]{64})\\.json$`,
-	);
-	let key: Buffer | null = null;
-	for (const name of names) {
-		const m = attestationName.exec(name);
-		if (!m) continue;
-		const containerId = m[1] as string;
-		if (!(await isRegularFile(path.join(stagedControl, name)))) {
-			out.rejected++;
-			continue;
-		}
-		const read = await readAttestation(evidenceDir, sessionId, containerId);
-		if (read.kind !== "present") {
-			out.rejected++;
-			continue;
-		}
-		try {
-			key ??= deriveSubkey(ATTESTATION_KEY_INFO);
-		} catch (err) {
-			logger.warn(
-				`[restore] control ${sessionId}: no attestation key (${(err as Error).message}) — attestations not installed`,
-			);
-			out.rejected++;
-			continue;
-		}
-		const verdict = classifyAttestation(
-			read,
-			{ sessionId, containerId, imageId: read.record.imageId },
-			key,
-		);
-		if (verdict !== "valid") {
-			out.rejected++;
-			continue;
-		}
-		if (await writeAttestation(workspaceRoot, read.record, () => true, { noClobber: true }))
-			out.installed++;
-		else out.kept++;
-	}
-	if (out.rejected > 0) {
-		logger.warn(
-			`[restore] control ${sessionId}: ${out.rejected} attestation(s) did not verify — not installed (a different SECRETS_ENCRYPTION_KEY, or a damaged/tampered backup)`,
-		);
-	}
-
-	const stagedConv = path.join(evidenceDir, ".conversations", sessionId);
-	const stagedRevoked = path.join(stagedConv, REVOKED_FILE);
-	const stagedLifted = path.join(stagedConv, LIFTED_FILE);
-	if (await isRegularFile(stagedRevoked)) {
-		const liveRevoked = path.join(workspaceRoot, ".conversations", sessionId, REVOKED_FILE);
-		const liftedOk =
-			!(await fs.lstat(stagedLifted).catch(() => null)) || (await isRegularFile(stagedLifted));
-		// A non-regular LIFTED lifts nothing: read the backup as "in effect".
-		const inEffect = liftedOk
-			? await readSessionRevocation(evidenceDir, sessionId)
-			: await fs.readFile(stagedRevoked, "utf8");
-		const liveDir = path.dirname(liveRevoked);
-		const expectedDir = path.join(await fs.realpath(workspaceRoot), ".conversations", sessionId);
-		if (inEffect === null) out.revocation = "lifted-in-backup";
-		else if (
-			(await fs.lstat(liveDir).catch(() => null)) !== null &&
-			!(await isRealDir(liveDir, expectedDir))
-		) {
-			// Not the real directory (a link): never write through it.
-			logger.warn(
-				`[restore] control ${sessionId}: ${liveDir} is not a plain directory — revocation not installed`,
-			);
-			out.revocation = "destination-kept";
-		} else {
-			// link(2) decides atomically: any destination REVOKED (the newer
-			// state, whatever its LIFTED says) is never replaced.
-			out.revocation = (await publishNoClobber(liveRevoked, inEffect))
-				? "installed"
-				: "destination-kept";
-		}
-	}
-	return out;
-}
-
-/** temp + fsync + link(2): creates `file` with exactly `bytes`, never replaces it. */
-async function publishNoClobber(file: string, bytes: string): Promise<boolean> {
-	const dir = path.dirname(file);
-	await fs.mkdir(dir, { recursive: true });
-	const tmp = `${file}.tmp.${process.pid}.${randomBytes(6).toString("hex")}`;
-	try {
-		const fh = await fs.open(tmp, "wx", 0o600);
-		try {
-			await fh.writeFile(bytes);
-			await fh.sync();
-		} finally {
-			await fh.close();
-		}
-		try {
-			await fs.link(tmp, file);
-		} catch (err) {
-			if ((err as NodeJS.ErrnoException).code === "EEXIST") return false;
-			throw err;
-		}
-	} finally {
-		await fs.rm(tmp, { force: true });
-	}
-	await fsyncDir(dir);
-	return true;
 }
 
 // ── CLI ─────────────────────────────────────────────────────────────────────

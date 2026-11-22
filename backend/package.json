@@ -18,10 +18,6 @@
     "db:migrate-check": "node --disable-warning=ExperimentalWarning dist/migrateCheck.js",
     "backup": "node dist/backup.js backup",
     "images:pins": "node dist/imagePinsCli.js",
-    "conversation:disable": "node dist/conversation/cli.js disable",
-    "conversation:enable-all": "node dist/conversation/cli.js enable-all",
-    "conversation:attest": "node dist/conversation/attestCli.js attest",
-    "recreate:admin": "node dist/recreate/adminCli.js",
     "restore": "node dist/backup.js restore",
     "backup:harden": "node dist/backup.js harden",
     "docker:build-session": "../scripts/build-session-image.sh"

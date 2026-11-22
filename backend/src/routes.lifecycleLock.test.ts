@@ -1,6 +1,6 @@
 /**
  * routes.lifecycleLock.test.ts — the per-session lifecycle lock on the
- * REST surface (CONVERSATION.md §2.7.2, precondition 1; 3.0d). Start,
+ * REST surface. Start,
  * stop, delete (soft/hard) and the admin force-stop/delete serialise on
  * one session, each re-reading the session under the lock and acting on
  * the state the previous holder left; nothing purges a workspace while a
@@ -12,7 +12,7 @@
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import express from "express";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const authStubs = vi.hoisted(() => ({
 	requireAuth: (req: { userId?: string }, _res: unknown, next: () => void) => {
@@ -50,12 +50,8 @@ const dbStubs = vi.hoisted(() => ({
 }));
 vi.mock("./db.js", () => dbStubs);
 
-import { promises as fs } from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import type { BootstrapBroadcaster } from "./bootstrap.js";
 import type { DockerManager } from "./dockerManager.js";
-import { RecreateAttemptStore } from "./recreateAttempt.js";
 import { buildRouter } from "./routes.js";
 import { SessionBusyError, sessionLifecycleLock } from "./sessionLifecycleLock.js";
 import type { SessionManager } from "./sessionManager.js";
@@ -414,7 +410,7 @@ describe("lifecycle lock on the REST routes", () => {
 		await spinUp(w.sessions, w.docker);
 		const spy = vi
 			.spyOn(sessionLifecycleLock, "run")
-			.mockRejectedValue(new SessionBusyError("sess-1", "delete", "recreate"));
+			.mockRejectedValue(new SessionBusyError("sess-1", "delete", "stop"));
 		try {
 			for (const [method, path] of [
 				["DELETE", "/api/sessions/sess-1?hard=true"],
@@ -430,136 +426,5 @@ describe("lifecycle lock on the REST routes", () => {
 			spy.mockRestore();
 		}
 		expect(w.events).toEqual([]);
-	});
-});
-
-describe("recreate-unresolved gate on the REST routes (§2.7.4, D8 fail-closed)", () => {
-	const SID = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
-	let root: string;
-	let store: RecreateAttemptStore;
-	const ident = {
-		attemptId: "att-1",
-		oContainerId: "cid-o",
-		oCanonicalName: "st-7c9e66797425",
-		oOldName: "st-7c9e66797425-old-1",
-		nTempName: "st-7c9e66797425-new-1",
-	};
-
-	beforeEach(async () => {
-		root = await fs.mkdtemp(path.join(os.tmpdir(), "st-gate-"));
-		store = new RecreateAttemptStore(root);
-		sessionLifecycleLock.setGuard((sid) => store.assertResolved(sid));
-	});
-	afterEach(async () => {
-		sessionLifecycleLock.setGuard(null);
-		await fs.rm(root, { recursive: true, force: true });
-	});
-
-	const ROUTES = [
-		["POST", `/api/sessions/${SID}/start`],
-		["POST", `/api/sessions/${SID}/stop`],
-		["DELETE", `/api/sessions/${SID}`],
-		["DELETE", `/api/sessions/${SID}?hard=true`],
-		["POST", `/api/admin/sessions/${SID}/stop`],
-		["DELETE", `/api/admin/sessions/${SID}?hard=true`],
-	] as const;
-
-	async function expectAllRefused(w: ReturnType<typeof makeWorld>) {
-		for (const [method, p] of ROUTES) {
-			const res = await fetch(`${baseUrl}${p}`, { method });
-			expect([p, res.status, await res.json()]).toEqual([p, 409, { error: "recreate-unresolved" }]);
-		}
-		// Nothing at all happened: no start/stop/kill, no purge, no row drop.
-		expect(w.events).toEqual([]);
-		expect(w.rowOf()).not.toBeNull();
-		expect(sessionLifecycleLock.heldBy(SID)).toBeNull();
-	}
-
-	function worldFor() {
-		const w = makeWorld("stopped");
-		(w.rowOf() as SessionMeta).sessionId = SID;
-		return w;
-	}
-
-	it("uncertain attempt ⇒ every lifecycle route answers 409 recreate-unresolved with no effect", async () => {
-		await store.begin(SID, ident);
-		await store.markUncertain(SID, "att-1", "docker request unanswered");
-		const w = worldFor();
-		await spinUp(w.sessions, w.docker);
-		await expectAllRefused(w);
-	});
-
-	it("retained container (§2.7.7): hard deletes answer 409 retained-present with no effect, soft stop/delete still work", async () => {
-		// The production guard shape (index.ts): the retained check only on the purge.
-		sessionLifecycleLock.setGuard((sid, op) =>
-			op === "delete-hard" ? store.assertResolvedAndNotRetained(sid) : store.assertResolved(sid),
-		);
-		await store.begin(SID, ident);
-		await store.resolve(
-			SID,
-			ident.attemptId,
-			{ kind: "committed", nContainerId: "cid-n" },
-			"carry-over",
-			{
-				retained: { containerId: "cid-o", name: `${ident.oOldName}`, role: "O", since: "t" },
-			},
-		);
-		const w = worldFor();
-		await spinUp(w.sessions, w.docker);
-		for (const p of [`/api/sessions/${SID}?hard=true`, `/api/admin/sessions/${SID}?hard=true`]) {
-			const res = await fetch(`${baseUrl}${p}`, { method: "DELETE" });
-			expect([p, res.status, await res.json()]).toEqual([p, 409, { error: "retained-present" }]);
-		}
-		expect(w.events).toEqual([]);
-		expect(w.rowOf()).not.toBeNull();
-		// Not a purge: the retained container is no obstacle.
-		expect(
-			(await fetch(`${baseUrl}/api/sessions/${SID}/stop`, { method: "POST" })).status,
-		).toBeLessThan(300);
-		expect(sessionLifecycleLock.heldBy(SID)).toBeNull();
-	});
-
-	it("an open record left by a dead process ⇒ refused before and after boot recovery", async () => {
-		await store.begin(SID, ident);
-		// Simulated restart: the new process's store does not own att-1.
-		store = new RecreateAttemptStore(root);
-		const w = worldFor();
-		await spinUp(w.sessions, w.docker);
-		await expectAllRefused(w);
-		await store.recoverOnBoot();
-		await expectAllRefused(w);
-	});
-
-	it("an unreadable record ⇒ refused", async () => {
-		await fs.mkdir(path.join(root, ".st-control", SID), { recursive: true });
-		await fs.writeFile(path.join(root, ".st-control", SID, "recreate-attempt.json"), "{torn");
-		const w = worldFor();
-		await spinUp(w.sessions, w.docker);
-		await expectAllRefused(w);
-	});
-
-	it("once resolved, the normal cycle works again (stop/start, then hard delete purges)", async () => {
-		await store.begin(SID, ident);
-		await store.resolve(SID, "att-1", { kind: "rolled-back" }, "all answered");
-		const w = worldFor();
-		await spinUp(w.sessions, w.docker);
-		expect((await fetch(`${baseUrl}/api/sessions/${SID}/start`, { method: "POST" })).status).toBe(
-			200,
-		);
-		expect((await fetch(`${baseUrl}/api/sessions/${SID}/stop`, { method: "POST" })).status).toBe(
-			200,
-		);
-		expect(
-			(await fetch(`${baseUrl}/api/sessions/${SID}?hard=true`, { method: "DELETE" })).status,
-		).toBe(204);
-		expect(w.events).toEqual([
-			"start:begin",
-			"start:end",
-			"stop",
-			"kill",
-			"terminate",
-			"purge",
-			"deleteRow",
-		]);
 	});
 });

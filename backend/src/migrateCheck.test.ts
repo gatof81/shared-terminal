@@ -8,7 +8,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { FENCE_MIGRATION, formatReport, RefusedError, runMigrateCheck } from "./migrateCheck.js";
+import { formatReport, RefusedError, runMigrateCheck } from "./migrateCheck.js";
 
 const SECRET = "SENTINEL-secret-value-0f9e8d7c";
 const U1 = "u-1";
@@ -105,15 +105,14 @@ afterEach(async () => {
 	await fs.rm(dir, { recursive: true, force: true });
 });
 
-describe("db:migrate-check (v20 release gate)", () => {
-	it("PASS on intact v19 data: counts and hashes unchanged, fence 0 everywhere, v20 recorded, FKs clean", async () => {
+describe("db:migrate-check (release gate)", () => {
+	it("PASS on intact v19 data: counts and hashes unchanged, every pending migration recorded, FKs clean", async () => {
 		await writeBackup(fixture());
 		const r = await runMigrateCheck(dir);
 		expect(r.failures).toEqual([]);
 		expect(r.ok).toBe(true);
 		expect(r.schemaFrom).toBe(19);
-		// The gate is v20's; later migrations apply after it.
-		expect(r.schemaTo).toBeGreaterThanOrEqual(FENCE_MIGRATION);
+		expect(r.schemaTo).toBe(22);
 		const by = Object.fromEntries(r.tables.map((t) => [t.name, t]));
 		expect(by.users).toMatchObject({
 			jsonlRows: 2,
@@ -127,8 +126,6 @@ describe("db:migrate-check (v20 release gate)", () => {
 		expect(by.sessions?.hashBefore).toMatch(/^[0-9a-f]{64}$/);
 		// Tables the backup has no file for load as 0 rows, like restore.
 		expect(by.templates).toMatchObject({ jsonlRows: null, rowsBefore: 0, ok: true });
-		expect(r.fence).toEqual({ column: true, rows: 2, nonZero: 0 });
-		expect(r.ledger.hasFence).toBe(true);
 		expect(r.foreignKeys).toEqual({ before: 0, after: 0 });
 		expect(r.integrity).toBe("ok");
 		// No network, no D1: the only fetch during the run was the local one,
@@ -159,14 +156,13 @@ describe("db:migrate-check (v20 release gate)", () => {
 		expect(formatReport(dir, r)).toMatch(/\nFAIL$/);
 	});
 
-	it("FAIL when a row disappears, and when the fence is not 0", async () => {
+	it("FAIL when a row disappears", async () => {
 		await writeBackup(fixture());
 		const { migrateDb, d1Query } = await import("./db.js");
 		const r = await runMigrateCheck(dir, {
 			migrate: async () => {
 				await migrateDb();
 				await d1Query("DELETE FROM sessions_port_mappings");
-				await d1Query("UPDATE sessions SET recreate_fence = 1 WHERE session_id = ?", [S2]);
 			},
 		});
 		expect(r.ok).toBe(false);
@@ -175,20 +171,16 @@ describe("db:migrate-check (v20 release gate)", () => {
 			rowsAfter: 0,
 			ok: false,
 		});
-		expect(r.fence).toEqual({ column: true, rows: 2, nonZero: 1 });
-		expect(r.failures).toContain("sessions.recreate_fence: 1 row(s) not 0");
 	});
 
-	it("FAIL when v20 is not applied (the migration under test skipped)", async () => {
+	it("FAIL when the pending migrations are not applied", async () => {
 		await writeBackup(fixture());
 		const r = await runMigrateCheck(dir, { migrate: async () => undefined });
 		expect(r.ok).toBe(false);
-		expect(r.fence.column).toBe(false);
-		expect(r.ledger.hasFence).toBe(false);
 		expect(r.failures).toEqual(
 			expect.arrayContaining([
-				"sessions.recreate_fence: column missing after the migration",
-				`schema_migrations: v${FENCE_MIGRATION} not recorded`,
+				"schema_migrations: v20 not recorded",
+				"schema_migrations: v22 not recorded",
 			]),
 		);
 	});
@@ -230,8 +222,8 @@ describe("db:migrate-check (v20 release gate)", () => {
 		expect(JSON.stringify(r)).not.toContain(SECRET);
 	});
 
-	it("PASS from a v20 backup to the latest (v22): data unchanged, the ACP tables new and empty, fence values kept", async () => {
-		await writeBackup(fixture(), { schemaVersion: FENCE_MIGRATION });
+	it("PASS from a v20 backup to the latest (v22): data unchanged, the ACP tables new and empty", async () => {
+		await writeBackup(fixture(), { schemaVersion: 20 });
 		const r = await runMigrateCheck(dir);
 		expect(r.failures).toEqual([]);
 		expect(r.ok).toBe(true);

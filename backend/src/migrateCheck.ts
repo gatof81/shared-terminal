@@ -1,7 +1,6 @@
 /**
- * migrateCheck.ts — release gate for a schema migration (first use: v20,
- * `sessions.recreate_fence`, contract v1.9.4, #627), run by the operator
- * against REAL data without that data leaving the host:
+ * migrateCheck.ts — release gate for a schema migration, run by the
+ * operator against REAL data without that data leaving the host:
  *
  *   npm run db:migrate-check -- <backupDir>
  *
@@ -16,9 +15,9 @@
  *   3. records, per table, the row count and a SHA-256 over every row's
  *      pre-existing columns in the table's backup ORDER BY;
  *   4. runs `migrateDb()` again, which applies the pending migrations;
- *   5. checks: counts and hashes unchanged, `sessions.recreate_fence`
- *      present and 0 on every row, v20 in `schema_migrations`, no foreign
- *      key violation, `integrity_check` ok.
+ *   5. checks: counts and hashes unchanged, every pending migration in
+ *      `schema_migrations`, new tables empty, no foreign key violation,
+ *      `integrity_check` ok.
  *
  * Output is counts, hashes and verdicts ONLY — never a row, a column value
  * or an SQLite error that could echo one (`env_vars`, secret blobs and
@@ -35,9 +34,6 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
-
-/** The migration this gate was written for; a backup at or past it has nothing to prove. */
-export const FENCE_MIGRATION = 20;
 
 // ── node:sqlite, typed narrowly (the repo's @types/node predates it) ────────
 
@@ -92,10 +88,9 @@ export interface CheckReport {
 	schemaFrom: number;
 	schemaTo: number;
 	tables: TableCheck[];
-	fence: { column: boolean; rows: number; nonZero: number };
 	/** Tables that did not exist at the backup's schema, with their row count after the migration (must be 0). */
 	newTables: Array<{ name: string; rows: number }>;
-	ledger: { versions: number; hasFence: boolean; max: number };
+	ledger: { versions: number; max: number };
 	foreignKeys: { before: number; after: number };
 	integrity: string;
 	failures: string[];
@@ -136,16 +131,12 @@ export async function runMigrateCheck(
 		const { MIGRATIONS, migrateDb } = await import("./db.js");
 		const { TABLES } = await import("./backup.js");
 		const latest = Math.max(...MIGRATIONS.map((m) => m.version));
-		// The gate is for whatever this build adds over the backup (v20 at first,
-		// v21 for the ACP tables): a backup already at the build's latest version
-		// has nothing to prove.
+		// The gate is for whatever this build adds over the backup: a backup
+		// already at the build's latest version has nothing to prove.
 		if (manifest.schemaVersion >= latest) {
 			throw new RefusedError(
 				`backup is already at schema v${manifest.schemaVersion} (≥ v${latest}, this build's latest): take the backup BEFORE deploying the migration`,
 			);
-		}
-		if (latest < FENCE_MIGRATION) {
-			throw new RefusedError(`this build has no migration v${FENCE_MIGRATION}`);
 		}
 
 		// 1. The backup's schema, through the real ledger path: the versions
@@ -247,18 +238,6 @@ export async function runMigrateCheck(
 			if (l.check.jsonlRows !== null && l.check.rowsBefore !== l.check.jsonlRows)
 				l.check.ok = false;
 		}
-		const sessionCols = columnsOf(db, "sessions");
-		const fence = { column: sessionCols.includes("recreate_fence"), rows: 0, nonZero: 0 };
-		fence.rows = count(db, "SELECT COUNT(*) AS n FROM sessions");
-		if (fence.column) {
-			fence.nonZero = count(db, "SELECT COUNT(*) AS n FROM sessions WHERE recreate_fence IS NOT 0");
-		} else {
-			failures.push("sessions.recreate_fence: column missing after the migration");
-		}
-		// Only a pre-v20 backup must come out all 0: past v20 the fence moves with
-		// every committed recreation, so real data carries non-zero values.
-		if (fence.nonZero > 0 && manifest.schemaVersion < FENCE_MIGRATION)
-			failures.push(`sessions.recreate_fence: ${fence.nonZero} row(s) not 0`);
 		const versions = (
 			db.prepare("SELECT version FROM schema_migrations ORDER BY version").all() as Array<{
 				version: number;
@@ -266,7 +245,6 @@ export async function runMigrateCheck(
 		).map((r) => r.version);
 		const ledger = {
 			versions: versions.length,
-			hasFence: versions.includes(FENCE_MIGRATION),
 			max: versions.length > 0 ? Math.max(...versions) : 0,
 		};
 		for (const m of MIGRATIONS)
@@ -287,7 +265,6 @@ export async function runMigrateCheck(
 			schemaFrom: manifest.schemaVersion,
 			schemaTo: ledger.max,
 			tables: loaded.map((l) => l.check),
-			fence,
 			newTables,
 			ledger,
 			foreignKeys: { before: fkBefore, after: fkAfter },
@@ -467,12 +444,7 @@ export function formatReport(dir: string, r: CheckReport): string {
 			`  ${t.name.padEnd(w)}  rows ${t.rowsBefore} → ${t.rowsAfter} (${src})  sha256 ${t.hashBefore} → ${t.hashAfter === t.hashBefore ? "same" : t.hashAfter}  ${t.ok ? "OK" : "FAIL"}`,
 		);
 	}
-	out.push(
-		`  sessions.recreate_fence: ${r.fence.column ? "present" : "MISSING"}, 0 on ${r.fence.rows - r.fence.nonZero}/${r.fence.rows} row(s)  ${r.fence.column && r.fence.nonZero === 0 ? "OK" : "FAIL"}`,
-	);
-	out.push(
-		`  schema_migrations: ${r.ledger.versions} version(s), max v${r.ledger.max}, v${FENCE_MIGRATION} ${r.ledger.hasFence ? "recorded  OK" : "MISSING  FAIL"}`,
-	);
+	out.push(`  schema_migrations: ${r.ledger.versions} version(s), max v${r.ledger.max}`);
 	for (const t of r.newTables)
 		out.push(`  new table ${t.name}: ${t.rows} row(s)  ${t.rows === 0 ? "OK" : "FAIL"}`);
 	out.push(
