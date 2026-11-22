@@ -76,14 +76,3 @@ header h1 {
   outline: 2px solid var(--c-accent);
   outline-offset: 2px;
 }
-/* "on" — subscribed on this device. */
-#sidebar-notifications-btn.enabled {
-  border-color: var(--c-ok);
-  color: var(--c-ok);
-}
-/* "blocked" — permission denied at the browser level; the click can't
-   recover it, so render it inert with an explanatory tooltip/label. */
-#sidebar-notifications-btn:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}

@@ -162,6 +162,8 @@ describe("project routes", () => {
 
 	it("parses the project page and round-trips it", () => {
 		expect(parseProjectRoute(`#/projects/${PID}`)).toEqual({ projectId: PID });
+		expect(parseProjectRoute(`#/projects/${PID}/chat`)).toEqual({ projectId: PID });
+		expect(projectRouteHash({ projectId: PID })).toBe(`#/projects/${PID}/chat`);
 		for (const r of [{ projectId: PID }, { projectId: "p 1" }])
 			expect(parseProjectRoute(projectRouteHash(r))).toEqual(r);
 	});
@@ -172,15 +174,15 @@ describe("project routes", () => {
 			"#/projects/",
 			"#/projects//agents/x",
 			"#/projects/%zz",
-			`#/projects/${PID}/chat`,
 			`#/projects/${PID}/team`,
+			`#/projects/${PID}/agents`,
 			`#/sessions/${SID}`,
 		])
 			expect(parseProjectRoute(h), h).toBeNull();
 	});
 
 	it("never changes how a session route parses, and a project hash is no session route", () => {
-		expect(parseRoute(`#/projects/${PID}`)).toBeNull();
+		expect(parseRoute(`#/projects/${PID}/chat`)).toBeNull();
 		expect(parseRoute(`#/sessions/${SID}/chat/c1`)).toEqual({
 			sessionId: SID,
 			view: "chat",
@@ -207,15 +209,15 @@ describe("project routes", () => {
 		onAddressWrite(() => writes.push(window.location.hash));
 		navigateProject({ projectId: PID });
 		shown = true;
-		expect(window.location.hash).toBe(`#/projects/${PID}`);
+		expect(window.location.hash).toBe(`#/projects/${PID}/chat`);
 		expect(depth()).toBe(1);
 		navigate({ sessionId: SID, view: "terminal", detail: "tab-2" }, { replace: true });
-		expect(window.location.hash).toBe(`#/projects/${PID}`);
+		expect(window.location.hash).toBe(`#/projects/${PID}/chat`);
 		expect(currentRoute()).toEqual({ sessionId: SID, view: "terminal", detail: "tab-2" });
 		// A view the person chose (push) leaves the page.
 		navigate({ sessionId: SID, view: "files", detail: null });
 		expect(window.location.hash).toBe(`#/sessions/${SID}/files`);
-		expect(writes).toEqual([`#/projects/${PID}`, `#/sessions/${SID}/files`]);
+		expect(writes).toEqual([`#/projects/${PID}/chat`, `#/sessions/${SID}/files`]);
 	});
 
 	it("leaving a page pushes the session underneath (Back returns to the page)", () => {

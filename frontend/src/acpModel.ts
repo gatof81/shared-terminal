@@ -485,3 +485,20 @@ export function agentHue(name: string): number {
 	for (const c of name) h = (h * 31 + c.charCodeAt(0)) % 360;
 	return h;
 }
+
+/**
+ * Where message `id` stands for a thread showing `shownIds` (its loaded
+ * page or pages): on screen; on an earlier page not loaded yet (older than
+ * the oldest shown, with earlier pages left — ids grow with time); or not
+ * in this chat at all (another scope, or gone).
+ */
+export function messagePlace(
+	id: number,
+	shownIds: readonly number[],
+	hasEarlier: boolean,
+): "shown" | "earlier" | "elsewhere" {
+	if (shownIds.includes(id)) return "shown";
+	const oldest = shownIds.length > 0 ? Math.min(...shownIds) : null;
+	if (hasEarlier && oldest !== null && id < oldest) return "earlier";
+	return "elsewhere";
+}

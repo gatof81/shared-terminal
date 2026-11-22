@@ -247,16 +247,8 @@ body.project-page-on #terminal-area > :not(#project-view),
 body.project-page-on #actions-btn {
   visibility: hidden;
 }
-/* On a phone the bar's view tabs and ⋯ sit in the header, where the rule
-   above does not reach, and they would act on that unrelated session.
-   visibility, NEVER display:none: the header's height is part of the
-   terminal's box, and a height change refits xterm and resizes tmux for
-   every viewer. A hidden element takes neither clicks nor focus;
-   pointer-events is the belt for any descendant. */
-body.project-page-on #view-switch,
-body.project-page-on #session-menu-btn {
-  visibility: hidden;
-  pointer-events: none;
+#header-project[hidden] {
+  display: none;
 }
 #project-view {
   position: absolute;
@@ -297,7 +289,6 @@ body.project-page-on #session-menu-btn {
   outline: none;
 }
 .pv-btn:focus-visible,
-.pv-close:focus-visible,
 #new-project-btn:focus-visible {
   outline: 2px solid var(--c-accent);
   outline-offset: 2px;
@@ -342,23 +333,6 @@ body.project-page-on #session-menu-btn {
 .pv-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
-}
-.pv-close {
-  min-width: 2rem;
-  justify-content: center;
-  padding: 0.3rem 0.5rem;
-}
-.pv-close {
-  background: transparent;
-  border: 1px solid transparent;
-  color: var(--c-muted);
-  font-size: 1.1rem;
-  border-radius: var(--radius-s);
-  cursor: pointer;
-}
-.pv-close:hover {
-  color: var(--c-text);
-  border-color: var(--c-border);
 }
 
 @media (max-width: 768px) {
@@ -423,10 +397,6 @@ body.project-page-on #session-menu-btn {
     font-size: 0.86rem;
   }
   .pv-btn {
-    min-height: 2.75rem;
-  }
-  .pv-close {
-    min-width: 2.75rem;
     min-height: 2.75rem;
   }
   .pv-page {

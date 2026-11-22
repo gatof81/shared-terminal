@@ -26,7 +26,7 @@
  * `#session=<id>` (the service worker's one-shot notification jump) is a
  * different shape and is not this module's: it parses to null here.
  *
- * The project page (`#/projects/<pid>`, its Project Chat) is a SECOND
+ * The project page (`#/projects/<pid>/chat`, its Project Chat) is a SECOND
  * route shape, parsed apart so the session route above keeps its exact
  * meaning. A project page is shown OVER the
  * session underneath, which stays open, attached and un-resized — so while
@@ -109,9 +109,12 @@ export interface ProjectRoute {
 	projectId: string;
 }
 
-/** `#/projects/<pid>`: the project page (ACP Project Chat). */
+/**
+ * `#/projects/<pid>/chat`: the project page (its Project Chat). The bare
+ * `#/projects/<pid>` is the same page.
+ */
 export function parseProjectRoute(hash: string): ProjectRoute | null {
-	const m = /^#\/projects\/([^/?#]+)$/.exec(hash);
+	const m = /^#\/projects\/([^/?#]+)(?:\/chat)?$/.exec(hash);
 	if (!m) return null;
 	const projectId = decode(m[1]!);
 	if (projectId === null || projectId === "") return null;
@@ -119,7 +122,7 @@ export function parseProjectRoute(hash: string): ProjectRoute | null {
 }
 
 export function projectRouteHash(route: ProjectRoute): string {
-	return `#/projects/${encodeURIComponent(route.projectId)}`;
+	return `#/projects/${encodeURIComponent(route.projectId)}/chat`;
 }
 
 export function sameProjectRoute(a: ProjectRoute | null, b: ProjectRoute | null): boolean {

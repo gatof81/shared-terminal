@@ -50,12 +50,9 @@ test.describe("new agent form", () => {
 
 	async function openFromProjectChat(page: import("@playwright/test").Page): Promise<void> {
 		const create = page.getByRole("button", { name: "+ Nueva sesión con agente" });
-		// The button lives in "Administrar agentes" (closed on a project with
-		// agents): opened from the project's ⋯ menu first, unless it already is.
-		if (!(await create.isVisible())) {
-			await page.getByRole("button", { name: "Acciones del proyecto" }).click();
-			await page.getByRole("menuitem", { name: "Administrar agentes" }).click();
-		}
+		// The button is in the "Agentes" panel's foot (closed on a project with
+		// agents): opened from the agents' group first, unless it already is.
+		if (!(await create.isVisible())) await page.locator(".acp-agents-group").click();
 		await create.click();
 		await expect(page.locator("#new-session-modal-title")).toBeVisible();
 	}
@@ -191,14 +188,15 @@ test.describe("new agent form", () => {
 		await expect(page.locator("#new-session-submit")).toBeEnabled();
 	});
 
-	test("closing gives the focus back to the button that opened it (or the project's title)", async ({
+	test("closing gives the focus back to the agents' group (the panel closed on the way in)", async ({
 		app,
 		page,
 	}) => {
 		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
-		const opener = page.getByRole("button", { name: "+ Nueva sesión con agente" });
+		const group = page.locator(".acp-agents-group");
 		for (const close of ["Escape", "cancel", "x"] as const) {
 			await openFromProjectChat(page);
+			await expect(page.locator("#acp-agents")).toBeHidden();
 			if (close === "Escape") await page.keyboard.press("Escape");
 			else if (close === "cancel")
 				await page
@@ -206,15 +204,8 @@ test.describe("new agent form", () => {
 					.click();
 			else await page.locator("#new-session-modal .modal-close").click();
 			await expect(page.locator("#new-session-modal-title")).toBeHidden();
-			// The opener lives in "Administrar agentes": still there, shown, and focused.
-			await expect(opener, `after ${close}`).toBeVisible();
-			await expect(opener, `after ${close}`).toBeFocused();
+			await expect(group, `after ${close}`).toBeFocused();
 		}
-		// The opener left the page while the dialog was open: the project's title.
-		await openFromProjectChat(page);
-		await opener.evaluate((b) => b.remove());
-		await page.keyboard.press("Escape");
-		await expect(page.locator("#pv-title")).toBeFocused();
 		// The sidebar's dialog keeps its English label.
 		await app.openSidebar();
 		await page.click("#new-session-btn");
