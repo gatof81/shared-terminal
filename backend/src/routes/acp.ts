@@ -1,5 +1,5 @@
 /**
- * routes/acp.ts — ACP agents API (experimental, ACP_AGENTS_ENABLED), mounted at
+ * routes/acp.ts — ACP agents API, mounted at
  * /api/acp. Two callers, one API:
  *
  * - the person (cookie, `requireAuth`): lists their agents, reads a feed,

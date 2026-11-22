@@ -105,7 +105,7 @@ Cross-user observability + force-actions surfaced to the admin dashboard. All ro
 
 Contract: [CONVERSATION.md](./CONVERSATION.md) (§6). There is no write path into the CLI: the Composer was removed.
 
-## Projects (`PROJECT_CHAT_ENABLED`)
+## Projects
 
 | Method | Path | Description |
 | ------ | ---- | ----------- |
@@ -116,9 +116,9 @@ Contract: [CONVERSATION.md](./CONVERSATION.md) (§6). There is no write path int
 
 See [PROJECTS.md](./PROJECTS.md).
 
-## ACP agents (`ACP_AGENTS_ENABLED`)
+## ACP agents
 
-Mounted at `/api/acp` only with the flag on. Two callers share it: the person (cookie) and an agent's runner or `st` CLI (`Authorization: Bearer acp1.…`); the sender of a message is always the credential. Model, states, scope and recovery: [ACP_AGENTS.md](./ACP_AGENTS.md).
+Mounted at `/api/acp`. Two callers share it: the person (cookie) and an agent's runner or `st` CLI (`Authorization: Bearer acp1.…`); the sender of a message is always the credential. Model, states, scope and recovery: [ACP_AGENTS.md](./ACP_AGENTS.md).
 
 | Method | Path | Caller | Description |
 | ------ | ---- | ------ | ----------- |
@@ -143,7 +143,7 @@ All channels are cookie-authed (browser sends `st_token` automatically on the up
 wss://host/ws/sessions/<sessionId>?tab=<tabId>     # terminal attach
 wss://host/ws/bootstrap/<sessionId>                # bootstrap pipeline live-tail
 wss://host/ws/conversation/<sessionId>             # captured Claude Code conversation (CONVERSATION.md §6.1)
-wss://host/ws/acp                                  # ACP messages, questions and activity of the owner, only with ACP_AGENTS_ENABLED
+wss://host/ws/acp                                  # ACP messages, questions and activity of the owner
 ```
 
 **Terminal — Client → Server:** `input`, `resize`

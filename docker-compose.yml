@@ -88,12 +88,9 @@ services:
       # CONVERSATION.md §3.1.1 — empty ⇒ off; `observe` = activation gate (never
       # refuses); `true` ONLY after that gate passes (DEPLOYMENT.md "Ingest network origin").
       - INGEST_REQUIRE_SESSION_ORIGIN=${INGEST_REQUIRE_SESSION_ORIGIN:-}
-      - UI_SHELL=${UI_SHELL:-}
-      - PROJECT_CHAT_ENABLED=${PROJECT_CHAT_ENABLED:-}
-      # Experimental ACP agents (backend/src/acp/agents.ts). Unset ⇒ off,
-      # byte-identical. The adapter bundle is installed apart from any image
-      # with acp-runtime/install.sh into <WORKSPACE_ROOT>/.acp-runtime.
-      - ACP_AGENTS_ENABLED=${ACP_AGENTS_ENABLED:-}
+      # ACP agents (backend/src/acp/agents.ts). The adapter bundle is installed
+      # apart from any image with acp-runtime/install.sh into
+      # <WORKSPACE_ROOT>/.acp-runtime.
       - ACP_DEFAULT_RUNTIME=${ACP_DEFAULT_RUNTIME:-claude-acp-0.108.0}
       - ACP_DEFAULT_MODEL=${ACP_DEFAULT_MODEL:-claude-sonnet-5-5}
       - ACP_MESSAGE_MAX_BYTES=${ACP_MESSAGE_MAX_BYTES:-262144}

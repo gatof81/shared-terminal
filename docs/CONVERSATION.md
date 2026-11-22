@@ -2093,7 +2093,7 @@ Todas owner-only (`assertOwnedByOr404`), rate limit `conversationIp` (300/min), 
 
 | Método | Ruta | Respuesta |
 | --- | --- | --- |
-| GET | `/api/sessions/:id/conversations` | `{ capture: { requested, effective, effectiveAfterRestart }, conversations: [{ sessionId, kind, title, status, statusEvidence, statusAt, tabId, paneId, startedAt, endedAt, lastEventAt, lastSeq, firstRetainedSeq, eventsCount, gapsCount, claudeVersion, parentSessionId, parentInferred, canSendInput, customTitle, archivedAt }], meta }` (`customTitle`, `archivedAt` y `meta` desde v1.8, §6.2). Con `?capture=0` responde `capture: null` y omite el probe del relay (D7): es la forma que un cliente *MUST* usar para sondear la lista periódicamente. |
+| GET | `/api/sessions/:id/conversations` | `{ capture: { requested, effective, effectiveAfterRestart }, conversations: [{ sessionId, kind, title, status, statusEvidence, statusAt, tabId, paneId, startedAt, endedAt, lastEventAt, lastSeq, firstRetainedSeq, eventsCount, gapsCount, claudeVersion, parentSessionId, parentInferred, customTitle, archivedAt }], meta }` (`customTitle`, `archivedAt` y `meta` desde v1.8, §6.2). Con `?capture=0` responde `capture: null` y omite el probe del relay (D7): es la forma que un cliente *MUST* usar para sondear la lista periódicamente. |
 | GET | `/api/sessions/:id/conversations/:cid/events?before=<seq>&limit=<n≤500>` | `{ events: [...], hasMore, firstRetainedSeq }` (orden ascendente por `seq`; `before` exclusivo; `before ≤ firstRetainedSeq` ⇒ `events: []`, `hasMore: false`) |
 | GET | `/api/sessions/:id/conversations/:cid/events/:seq` | un evento (para "Copiar informe" de eventos no montados) |
 | GET | `/api/sessions/:id/conversations/:cid/agents` | `{ agents: [{ agentId, agentType, status, startedSeq, endedSeq?, toolCount, hasResult }] }` |
@@ -2101,10 +2101,9 @@ Todas owner-only (`assertOwnedByOr404`), rate limit `conversationIp` (300/min), 
 | WS | `/ws/conversation/<id>` | ver §6.1 |
 | POST | `/api/sessions/:id/conversations/:cid/messages` | §8 (3.2). Cuerpo `{ text, clientMessageId }`; 202 `{ result: delivered\|unconfirmed\|misdelivered\|uncertain, … }`, 400/409 según §8.1.2–§8.1.3, 502 `delivery-failed` según §8.1.6, 503 `persist-failed` / `shutting-down` (apagado en curso, v1.7.1); 403 lead/observador; **ausente (404) con `CONVERSATION_COMPOSER_ENABLED` apagado** |
 
-`canSendInput` *MUST* ser `false` siempre mientras `CONVERSATION_COMPOSER_ENABLED` esté apagado; con
-la bandera encendida es **orientativo** según §8.1.1 (sin probe ni exec) y el `POST` decide por su
-cuenta. Con la bandera encendida el resumen añade `composer: { blocked, reason?, clientMessageId?, result?,
-since? }` (§8.1.8).
+Retirado con el Composer (§8, 2026-11-21): el resumen ya no lleva `canSendInput` ni el bloque
+`composer`; el `POST …/messages` de la tabla no existe (404). Las referencias a ambos en §8 son
+registro histórico.
 
 ### 6.1 Protocolo WS y contrapresión
 

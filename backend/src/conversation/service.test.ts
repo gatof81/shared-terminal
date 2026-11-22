@@ -632,9 +632,9 @@ describe("lifecycle, list, reconcile, probe", () => {
 		expect(listed.conversations[0]).toMatchObject({
 			sessionId: "c1",
 			status: "disconnected",
-			canSendInput: false,
 			title: "hello there",
 		});
+		expect(listed.conversations[0]).not.toHaveProperty("canSendInput");
 		// No Docker port wired in this harness: no container is ever seen
 		// and the current image is unknown, so nothing is promised (§2.7.6).
 		expect(listed.capture).toEqual({

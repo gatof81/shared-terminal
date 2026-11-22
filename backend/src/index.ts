@@ -10,8 +10,8 @@ import cookieParser from "cookie-parser";
 import express from "express";
 import rateLimit from "express-rate-limit";
 import { WebSocketServer } from "ws";
-import { AcpAgents, acpAgentsEnabled, acpConfigFromEnv } from "./acp/agents.js";
-import { ACP_WS_PREFIX, AcpWsHub } from "./acp/ws.js";
+import { AcpAgents, acpConfigFromEnv } from "./acp/agents.js";
+import { AcpWsHub } from "./acp/ws.js";
 import {
 	ensureAuthReady,
 	originMatches,
@@ -35,7 +35,7 @@ import { DockerManager } from "./dockerManager.js";
 import { IdleSweeper, listRunningSessionIds } from "./idleSweeper.js";
 import { logger } from "./logger.js";
 import { createPortDispatcher, validatePortProxyBaseDomain } from "./portDispatcher.js";
-import { ProjectDirectory, projectChatFlagEnabled } from "./projects/directory.js";
+import { ProjectDirectory } from "./projects/directory.js";
 import { conversationRecreatePort } from "./recreate/capturePort.js";
 import { d1RecreatePort } from "./recreate/d1.js";
 import { RecreationEngine } from "./recreate/engine.js";
@@ -138,25 +138,19 @@ const CONVERSATION_ALLOW_USERS = parseAllowUsers(process.env.CONVERSATION_ALLOW_
 const WORKSPACE_ROOT_FOR_CONVERSATION =
 	process.env.WORKSPACE_ROOT ?? "/var/shared-terminal/workspaces";
 const conversationStore = new ConversationStore({ workspaceRoot: WORKSPACE_ROOT_FOR_CONVERSATION });
-// Experimental ACP agents (acp/agents.ts). Off ⇒ nothing constructed, no route,
-// no hook: behaviour-neutral (migration v21 still runs, additive and unread).
-const acpAgents = acpAgentsEnabled(process.env.ACP_AGENTS_ENABLED)
-	? new AcpAgents(acpConfigFromEnv(WORKSPACE_ROOT_FOR_CONVERSATION, PORT), docker)
-	: undefined;
-if (acpAgents) {
-	docker.setAgentHooks(acpAgents.hooks());
-	// A runner held back during a creation bootstrap starts when it ends.
-	onBootstrapReleased((sessionId) => {
-		void acpAgents
-			.onBootstrapped(sessionId)
-			.catch((err) =>
-				logger.warn(
-					`[acp] runner launch after bootstrap of ${sessionId} failed: ${(err as Error).message}`,
-				),
-			);
-	});
-	logger.info("[server] ACP agents ENABLED (experimental)");
-}
+// ACP agents (acp/agents.ts).
+const acpAgents = new AcpAgents(acpConfigFromEnv(WORKSPACE_ROOT_FOR_CONVERSATION, PORT), docker);
+docker.setAgentHooks(acpAgents.hooks());
+// A runner held back during a creation bootstrap starts when it ends.
+onBootstrapReleased((sessionId) => {
+	void acpAgents
+		.onBootstrapped(sessionId)
+		.catch((err) =>
+			logger.warn(
+				`[acp] runner launch after bootstrap of ${sessionId} failed: ${(err as Error).message}`,
+			),
+		);
+});
 // 3.0d — durable recreation records and the fail-closed
 // `recreate-unresolved` gate (CONVERSATION.md §2.7.4). Installed on the
 // lifecycle lock before the server accepts requests, so every lifecycle
@@ -232,11 +226,8 @@ logger.info(
 // Composer (sending into a tmux pane) is retired: traditional sessions are
 // worked from their Terminal; agents talk through ACP (acp/agents.ts).
 logger.info("[server] composer disabled (retired)");
-// Projects (ACP agents take part in one). Off by default: with the flag off
-// nothing is constructed and its routes are not mounted.
-const PROJECT_CHAT_ENABLED = projectChatFlagEnabled(process.env.PROJECT_CHAT_ENABLED);
-const projectDirectory = PROJECT_CHAT_ENABLED ? new ProjectDirectory() : undefined;
-if (PROJECT_CHAT_ENABLED) logger.info("[server] projects ENABLED");
+// Projects (ACP agents take part in one).
+const projectDirectory = new ProjectDirectory();
 // Single shared bootstrap broadcaster (PR 185b2b). Owned at the server
 // scope so the route's runAsyncBootstrap and the WS handler's
 // /ws/bootstrap subscriber see the same per-session listener sets and
@@ -396,7 +387,7 @@ app.use(createIngestHandler({ service: conversation }));
 // 100 KB default); every other route keeps the global parser unchanged.
 const globalJson = express.json();
 app.use((req, res, next) =>
-	acpAgents && req.path.startsWith("/api/acp/") ? next() : globalJson(req, res, next),
+	req.path.startsWith("/api/acp/") ? next() : globalJson(req, res, next),
 );
 // Populates `req.cookies` from the Cookie header. requireAuth reads the
 // JWT from `req.cookies.st_token` (#18). No `secret` is passed because we
@@ -454,14 +445,14 @@ app.use((_req, res, next) => {
 // (not optional) on buildRouter so a future caller that omits it
 // surfaces as a TypeScript error rather than a silently-dropped
 // postCreate hook (PR #208 round 1 review).
-if (acpAgents) app.use("/api/acp", buildAcpRouter(acpAgents));
+app.use("/api/acp", buildAcpRouter(acpAgents));
 app.use(
 	"/api",
 	buildRouter(sessions, docker, bootstrapBroadcaster, undefined, idleSweeper, conversation, {
 		recreation,
 		conversationAllowUsers: CONVERSATION_ALLOW_USERS,
 		projects: projectDirectory,
-		...(acpAgents ? { acp: acpAgents } : {}),
+		acp: acpAgents,
 	}),
 );
 app.get("/health", (_req, res) => res.json({ ok: true }));
@@ -487,7 +478,6 @@ server.on(
 		trustProxyValue,
 		corsOrigins: CORS_ORIGINS,
 		nodeEnv: process.env.NODE_ENV,
-		extraPathPrefixes: [...(acpAgents ? [ACP_WS_PREFIX] : [])],
 	}),
 );
 
@@ -497,7 +487,7 @@ server.on(
 // racing teardown.
 const stopHeartbeat = startWsHeartbeat(wss, 30_000);
 
-const acpWs = acpAgents ? new AcpWsHub(acpAgents) : null;
+const acpWs = new AcpWsHub(acpAgents);
 
 // 3.1 — the Conversation WS (replay + live of persisted events, owner-only).
 const conversationWs = new ConversationWsHub(conversation);
@@ -511,7 +501,7 @@ wss.on("connection", (ws, req) => {
 		bootstrapBroadcaster,
 		idleSweeper,
 		conversationWs,
-		acpWs ?? undefined,
+		acpWs,
 	);
 });
 
@@ -539,14 +529,12 @@ async function start() {
 		logger.error(`[server] recreate attempt recovery failed: ${(err as Error).message}`);
 	}
 	await docker.reconcile();
-	if (acpAgents) {
-		try {
-			await acpAgents.installRunnerFiles();
-			await acpAgents.ensureAllRunning();
-			acpAgents.startWatchdog();
-		} catch (err) {
-			logger.warn(`[server] ACP agents boot failed: ${(err as Error).message}`);
-		}
+	try {
+		await acpAgents.installRunnerFiles();
+		await acpAgents.ensureAllRunning();
+		acpAgents.startWatchdog();
+	} catch (err) {
+		logger.warn(`[server] ACP agents boot failed: ${(err as Error).message}`);
 	}
 	try {
 		await recreation.bootPass();

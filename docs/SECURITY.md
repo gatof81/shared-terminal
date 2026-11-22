@@ -358,7 +358,8 @@ re-assignment rule is a separate decision (#566).
 
 ## ACP agents
 
-Off unless `ACP_AGENTS_ENABLED` is set ([ACP_AGENTS.md](./ACP_AGENTS.md)). What changes when it is on:
+Always available; a session is an agent only when created with `acpAgent`
+([ACP_AGENTS.md](./ACP_AGENTS.md)). What changes for such a session:
 
 - **The agent acts without asking.** The runner sets `bypassPermissions` on its ACP session. The
   container's hardening (unprivileged user, no capabilities, `no-new-privileges`) still bounds it,

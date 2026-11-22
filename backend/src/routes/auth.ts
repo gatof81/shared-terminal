@@ -23,7 +23,6 @@ import { d1Query } from "../db.js";
 import * as groups from "../groups.js";
 import { logger } from "../logger.js";
 import { EFFECTIVE_CPU_NANO_MAX, EFFECTIVE_MEM_BYTES_MAX } from "../sessionConfig.js";
-import { UI_SHELL } from "../uiShell.js";
 import type { RouteContext } from "./shared.js";
 
 export function registerAuthRoutes(router: Router, ctx: RouteContext): void {
@@ -97,27 +96,15 @@ export function registerAuthRoutes(router: Router, ctx: RouteContext): void {
 			cpuMaxCores: EFFECTIVE_CPU_NANO_MAX / 1_000_000_000,
 			memMaxMiB: EFFECTIVE_MEM_BYTES_MAX / (1024 * 1024),
 		};
-		// `uiShell` (UI unification §8.4): which frontend shell to mount —
-		// an operator switch with rollback by env var, no frontend redeploy.
 		res.json({
 			needsSetup: !anyUsers,
 			authenticated,
 			isAdmin,
 			isLead,
 			resourceCaps,
-			uiShell: UI_SHELL,
-			// P3a (E-6): present only with PROJECT_CHAT_ENABLED on, so with the
-			// flag off this answer stays byte-identical. Absent ⇒ false.
-			// Experimental ACP agents: the key exists only with ACP_AGENTS_ENABLED.
-			...(ctx.acp && !ctx.projects ? { features: { acpAgents: true } } : {}),
-			...(ctx.projects
-				? {
-						features: {
-							...(ctx.acp ? { acpAgents: true } : {}),
-							projectChat: true,
-						},
-					}
-				: {}),
+			// Both features are always on now; the field stays because the
+			// deployed frontend reads it (absent ⇒ it hides Projects and agents).
+			features: { projectChat: true, acpAgents: true },
 		});
 	});
 

@@ -53,7 +53,7 @@ export function buildRouter(
 	conversation?: ConversationService,
 	// 3.0d — the recreation engine and `CONVERSATION_ALLOW_USERS`; optional
 	// for the same reason.
-	// P3a — `projects` too (PROJECT_CHAT_ENABLED); optional for the same reason.
+	// Projects and ACP agents too; optional for the same reason.
 	conversationExtras: Pick<
 		RouteContext,
 		"recreation" | "conversationAllowUsers" | "projects" | "acp"

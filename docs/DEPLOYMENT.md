@@ -912,9 +912,7 @@ through `terminated`; prefer the steps above.
 
 ## Projects (`docs/PROJECTS.md`)
 
-Off by default (`PROJECT_CHAT_ENABLED` unset ⇒ `/api/projects` not mounted, `GET /api/auth/status`
-without `features.projectChat`). A project only groups ACP agents and gives them Project Chat, so it is
-useful with `ACP_AGENTS_ENABLED` on. The legacy tables of the retired P3a directory and D1–D3
+Always on. A project only groups ACP agents and gives them Project Chat. The legacy tables of the retired P3a directory and D1–D3
 conversation (`project_agents`, `agent_bindings`, `project_agent_creations`) and the
 `<WORKSPACE_ROOT>/.projects` directory are no longer read or written. Leave them in place: removing
 them is a separate, owner-approved data step (planned migration v23), after a fresh backup is on the
@@ -923,11 +921,10 @@ NAS. New backups do not carry `.projects`. Restoring an older backup prints wher
 
 ## ACP agents (`docs/ACP_AGENTS.md`)
 
-Off by default (`ACP_AGENTS_ENABLED` unset). `docker-compose.yml` forwards the `ACP_*` variables with
-their defaults. Migrations v21–v22 (`acp_agents`, `agent_messages`, `agent_questions`) are additive
-and applied at boot whatever the flag says.
+Always on. `docker-compose.yml` forwards the `ACP_*` variables with their defaults. Migrations
+v21–v22 (`acp_agents`, `agent_messages`, `agent_questions`) are additive.
 
-With the flag on, the backend:
+The backend:
 
 - mounts `/api/acp` and `/ws/acp`;
 - copies the runner files into `<WORKSPACE_ROOT>/.acp-runtime/st` at boot;
@@ -942,8 +939,7 @@ session-image rebuild. Runners reach the backend over `SESSIONS_NETWORK` at `ACP
 - **Recovery behaviour:** [→ Operation](./ACP_AGENTS.md#9-operation-and-recovery).
 - **Backups:** `npm run backup` includes the three tables, and the workspaces include each runner's
   state.
-- **Rollback:** unset the flag and restart. The tables stay, and agent sessions keep working as
-  ordinary sessions.
+- **Stopping an agent:** stop its session; nothing of it runs while the container is down.
 
 ## Backup & restore (#240)
 

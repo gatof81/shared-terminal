@@ -129,31 +129,6 @@ export interface ConversationIndex {
 	sealedMessages: string[];
 	/** Set once a `gap revoked` was written for this conversation (§2.5). */
 	revokedNoted?: boolean;
-	/**
-	 * 3.2 composer (§8.1.4 regla 10): the HTTP answer recorded for each
-	 * RELEASED `client_message_id`, newest last, at most IDEMPOTENCY_WINDOW
-	 * entries. Fed by `composer_send{state: released}` lines, so it is
-	 * rebuilt from the file like the rest; a pending operation lives in its
-	 * pane record (paneRecord.ts), never here.
-	 */
-	composerSends?: Record<string, { status: number; body: unknown; at: string }>;
-}
-
-/** §8.1.4 regla 10 — released ids kept per conversation. Mirrors composerText.IDEMPOTENCY_WINDOW. */
-export const COMPOSER_IDEMPOTENCY_WINDOW = 256;
-
-/** Record a released composer operation's answer in the index (bounded, oldest out). */
-export function trackComposerSend(index: ConversationIndex, event: PersistedEvent): void {
-	if (event.ev !== "composer_send" || event.data.state !== "released") return;
-	const id = event.data.client_message_id;
-	const http = event.data.http as { status?: unknown; body?: unknown } | null | undefined;
-	if (typeof id !== "string" || !http || typeof http.status !== "number") return;
-	if (!index.composerSends) index.composerSends = {};
-	const map = index.composerSends;
-	delete map[id];
-	map[id] = { status: http.status, body: http.body, at: event.ts };
-	const keys = Object.keys(map);
-	for (let i = 0; i < keys.length - COMPOSER_IDEMPOTENCY_WINDOW; i++) delete map[keys[i]!];
 }
 
 export interface StoreFs {
@@ -610,50 +585,6 @@ export class ConversationStore {
 		}
 	}
 
-	/**
-	 * §8.1.4 rules 9b/10 — the recorded answer of a RELEASED composer
-	 * operation, or null when `clientMessageId` is not in the window.
-	 *
-	 * In memory (resident or evicting) the index is complete: it was rebuilt
-	 * from the file when opened and every append since went through it. A
-	 * snapshot alone is only a cache that may be stale — its write can fail
-	 * (#546: EDQUOT, inode exhaustion) while the `released` lines still reach
-	 * the events file — so a miss there is settled by rebuilding the window
-	 * the way `open` would (snapshot + scan of the file past its offset),
-	 * without making the conversation resident and without writing anything.
-	 * A replay must never depend on a snapshot write having landed: an id
-	 * the file proves released and that is treated as new is a second
-	 * delivery. The rebuild reads the current file and, when the snapshot is
-	 * from an older L7 generation, the `.1` lines past it; an id whose file
-	 * L7 rotated away is out of the window and treated as new (§8.1.4 rule
-	 * 10). A read error other than "no file" throws: the composer answers
-	 * `send-in-progress{unverifiable}` rather than guess (fail closed).
-	 */
-	async releasedComposerSend(
-		stSessionId: string,
-		cid: string,
-		clientMessageId: string,
-	): Promise<{ status: number; body: unknown; at: string } | null> {
-		const key = `${stSessionId}/${cid}`;
-		const lookup = (index: ConversationIndex) => index.composerSends?.[clientMessageId] ?? null;
-		const inMemory = () => this.resident.get(key) ?? this.evicting.get(key);
-		let mem = inMemory();
-		if (!mem && this.opening.has(key)) {
-			await this.opening.get(key)?.catch(() => null);
-			mem = inMemory();
-		}
-		if (mem) return lookup(mem.index);
-		const { index, legacyPromptCorrelation, fromSnapshot } = await this.loadIndex(stSessionId, cid);
-		if (fromSnapshot) {
-			const hit = index.composerSends?.[clientMessageId];
-			if (hit) return hit;
-		}
-		await this.recoverFromFile(stSessionId, cid, index, legacyPromptCorrelation, fromSnapshot, {
-			readOnly: true,
-		});
-		return lookup(index);
-	}
-
 	getResidentIndex(stSessionId: string, cid: string): ConversationIndex | undefined {
 		return this.resident.get(`${stSessionId}/${cid}`)?.index;
 	}
@@ -708,7 +639,13 @@ export class ConversationStore {
 		};
 		try {
 			const raw = await this.fs.readFile(this.indexPath(stSessionId, cid), "utf8");
-			const parsed = JSON.parse(raw) as Partial<ConversationIndex>;
+			// A snapshot written while the (retired) composer existed may carry
+			// `composerSends`: dropped here so it is neither used nor written back.
+			const { composerSends: _retired, ...parsed } = JSON.parse(
+				raw,
+			) as Partial<ConversationIndex> & {
+				composerSends?: unknown;
+			};
 			if (parsed && parsed.v === 1 && parsed.cid === cid) {
 				return {
 					index: {
@@ -718,7 +655,6 @@ export class ConversationStore {
 						messageBytes: parsed.messageBytes ?? {},
 						messageIndex: parsed.messageIndex ?? {},
 						sealedMessages: parsed.sealedMessages ?? [],
-						composerSends: parsed.composerSends ?? {},
 					},
 					legacyPromptCorrelation: !("persistedPromptId" in parsed),
 					fromSnapshot: true,
@@ -1007,14 +943,13 @@ export class ConversationStore {
 
 	/**
 	 * #546 — what only the in-memory index held, rebuilt from a persisted
-	 * line where the file carries it: the composer window, the agents (lost
+	 * line where the file carries it: the agents (lost
 	 * on a crash too, before), the session-start metadata, the title and the
 	 * revocation note. Bindings (`paneId`/`tabId`) and `state` are not: they
 	 * converge through the stop/boot reconcile, the next event with a pane, a
 	 * hook or a probe (CONVERSATION.md v1.7.2).
 	 */
 	private recoverIndexState(index: ConversationIndex, ev: PersistedEvent): void {
-		trackComposerSend(index, ev);
 		if (ev.data && typeof ev.data === "object") {
 			this.trackMessageAndAgents(index, ev);
 			this.recoverMetadata(index, ev);
@@ -1165,7 +1100,6 @@ export class ConversationStore {
 		r.eventsSinceFlush++;
 		this.stats.persisted++;
 		this.trackMessageAndAgents(r.index, event);
-		trackComposerSend(r.index, event);
 		const meta = this.liveMeta.get(pending);
 		for (const l of this.listeners) {
 			try {

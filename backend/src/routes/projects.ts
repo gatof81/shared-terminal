@@ -1,8 +1,6 @@
 /**
  * routes/projects.ts — projects (projects/directory.ts): create, list,
- * rename, archive. Mounted only with PROJECT_CHAT_ENABLED on: off ⇒ the paths do not
- * exist (404, not 401 — `requireAuth` is per route). Owner-only; a foreign or
- * missing project is the same 404.
+ * rename, archive. Owner-only; a foreign or missing project is the same 404.
  */
 
 import type { Request, Response, Router } from "express";
