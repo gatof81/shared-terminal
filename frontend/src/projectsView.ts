@@ -51,6 +51,7 @@ import {
 	enableProjectRoutes,
 	navigateProject,
 	onAddressWrite,
+	projectRouteHash,
 	pushSessionAddress,
 	readProjectRoute,
 } from "./router.js";
@@ -210,6 +211,13 @@ function sync(): void {
 	const r = active ? readProjectRoute() : null;
 	if (r === null) {
 		hidePage();
+		return;
+	}
+	// The address is the page's canonical one (…/chat), also when it was
+	// entered by the bare form: written in place, not a history entry; the
+	// write comes back here (onAddressWrite).
+	if (window.location.hash !== projectRouteHash(r)) {
+		navigateProject(r, { replace: true });
 		return;
 	}
 	const changed = shown !== r.projectId;

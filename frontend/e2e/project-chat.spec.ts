@@ -250,14 +250,18 @@ test.describe("Project Chat (U-2)", () => {
 		app,
 		page,
 	}) => {
+		const length = await page.evaluate(() => history.length);
 		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
 		await expect(page.locator("#pv-title")).toBeVisible();
+		// Entered by the bare form: the address becomes the canonical …/chat, in place (N3).
+		await expect(page).toHaveURL(new RegExp(`#/projects/${PROJECT_IDS.hz}/chat$`));
+		expect(await page.evaluate(() => history.length)).toBeLessThanOrEqual(length + 1);
 		const panel = await openPanel(page);
 		await panel.getByRole("link", { name: "Abrir su chat (@dev)" }).click();
 		await expect(page).toHaveURL(new RegExp(`#/sessions/${PROJECT_SESSION_IDS.developer2}/chat$`));
 		await page.goBack();
 		await expect(page.locator("#pv-title")).toBeVisible();
-		expect(new URL(page.url()).hash).toMatch(new RegExp(`^#/projects/${PROJECT_IDS.hz}(/chat)?$`));
+		expect(new URL(page.url()).hash).toBe(`#/projects/${PROJECT_IDS.hz}/chat`);
 		// Archive: same address, archived · read-only, no composer, no ⋯ of row, no foot.
 		const hash = new URL(page.url()).hash;
 		await page.locator(".pv-menu-btn").click();
