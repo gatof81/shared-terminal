@@ -45,7 +45,7 @@ El menú es el mismo `openActionMenu` en todos los anchos, con su presentación 
 ### A.4 Qué verifica @qa
 
 1. Con un admin, el menú tiene exactamente: Templates, Invites, Admin, (notificaciones si aplica), separador y Logout, en ese orden. Sin admin: Templates, (My groups), (notificaciones) y Logout.
-2. A 1280, 768, 400 y 390 hay un solo abridor visible y es el avatar. A 399, 360 y 320 el abridor es la fila del cajón y no hay avatar en la barra.
+2. A 1280, 768 y 400 hay un solo abridor visible y es el avatar. A 399, 390, 360 y 320 el abridor es la fila del cajón y no hay avatar en la barra (A.3: por debajo de 400 px).
 3. Cada ítem hace lo mismo que su botón actual (abre el mismo modal; Logout cierra la sesión).
 4. No quedan en el DOM `#templates-btn`…`#logout-btn` ni `#sidebar-templates-btn`…`#sidebar-logout-btn`.
 5. El foco vuelve al abridor al cerrar; ↑ y ↓ recorren los ítems, como hoy.
