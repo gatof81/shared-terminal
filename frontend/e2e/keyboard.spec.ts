@@ -7,8 +7,9 @@ import { PROJECT_IDS, PROJECT_SESSION_IDS } from "./mockBackend.js";
  * the way iOS Safari does, so `window.visualViewport` is replaced before the
  * app loads by an EventTarget whose height/offsetTop the test sets — the
  * same two numbers Safari reports with the keyboard up and the view panned
- * to the focused field. What this proves: the app follows those numbers
- * (layout in the visible band, no safe-area strip), and the covered
+ * to the focused field. What this proves: the app follows the height
+ * (layout in the visible band, no safe-area strip), a scrolled document is
+ * put back at 0, and the covered
  * terminal sends nothing to tmux while Chat is shown. What only the device
  * proves: Safari's own pan and its timing — see docs/MOBILE_KEYBOARD.md.
  */
@@ -41,17 +42,6 @@ test.beforeEach(async ({ page }) => {
 			target.dispatchEvent(new Event("resize"));
 			target.dispatchEvent(new Event("scroll"));
 		};
-		// A pan alone: offsetTop (and the zoom scale) change, the height does
-		// not, and Safari fires only `scroll`.
-		(window as unknown as { __pan: (top: number, scale?: number) => void }).__pan = (
-			top,
-			scale = 1,
-		) => {
-			target.offsetTop = top;
-			target.pageTop = top;
-			target.scale = scale;
-			target.dispatchEvent(new Event("scroll"));
-		};
 	});
 });
 
@@ -64,98 +54,52 @@ async function keyboard(page: import("@playwright/test").Page, height: number, o
 	);
 }
 
-async function pan(page: import("@playwright/test").Page, offsetTop: number, scale = 1) {
-	await page.evaluate(
-		([t, s]) => {
-			(window as unknown as { __pan: (top: number, scale?: number) => void }).__pan(t, s);
-		},
-		[offsetTop, scale] as const,
-	);
-}
-
 test.describe("soft keyboard (simulated visual viewport)", () => {
 	test.skip(({ isMobile }) => !isMobile, "mobile layouts");
 
-	test("a pan alone (only `scroll`, same height) moves the app with it", async ({ app, page }) => {
-		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
-		await app.expectView("chat");
-		const viewport = page.viewportSize()!;
-		await keyboard(page, viewport.height - 380, 0);
-		const top = () => page.locator("body").evaluate((b) => Math.round(b.getBoundingClientRect().y));
-		expect(await top()).toBe(0);
-		// Focus moves to another field: Safari pans 120 px, no resize event.
-		await pan(page, 120);
-		await expect.poll(top).toBe(120);
-		await pan(page, 0);
-		await expect.poll(top).toBe(0);
-	});
-
-	test("a stale offset after the keyboard closes cannot push the app down", async ({
+	test("keyboard up: the app is as tall as the visible band, the message box stays inside it, no bottom safe-area strip", async ({
 		app,
 		page,
 	}) => {
 		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
-		await app.expectView("chat");
-		const viewport = page.viewportSize()!;
-		const top = () => page.locator("body").evaluate((b) => Math.round(b.getBoundingClientRect().y));
-		await keyboard(page, viewport.height - 380, 300);
-		await expect.poll(top).toBe(300);
-		// Keyboard closed, full height back, but the offset is still reported.
-		await keyboard(page, viewport.height, 300);
-		await expect.poll(top, "bounded by innerHeight - height = 0").toBe(0);
-		await expect(page.locator("html")).not.toHaveAttribute("data-kb", "open");
-	});
-
-	test("under a pinch zoom the offset is the reader panning: the app is not translated", async ({
-		app,
-		page,
-	}) => {
-		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
-		await app.expectView("chat");
-		const top = () => page.locator("body").evaluate((b) => Math.round(b.getBoundingClientRect().y));
-		await pan(page, 250, 2);
-		await page.waitForTimeout(200);
-		expect(await top(), "zoomed pan must not move the layout").toBe(0);
-		expect(
-			await page.evaluate(() =>
-				getComputedStyle(document.documentElement).getPropertyValue("--app-top").trim(),
-			),
-		).toBe("0px");
-		// Back to scale 1 with the keyboard up: the offset counts again.
-		await pan(page, 0, 1);
-		await keyboard(page, page.viewportSize()!.height - 380, 80);
-		await expect.poll(top).toBe(80);
-		await keyboard(page, page.viewportSize()!.height, 0);
-	});
-
-	test("the app lays out in the visible band: body follows the panned viewport, no bottom safe-area strip", async ({
-		app,
-		page,
-	}) => {
-		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
-		// The chat's last element (the message box) is what must stay above the keyboard.
 		const ta = page.locator("#acp-chat .acp-chat-composer");
 		await expect(ta).toBeVisible();
-
-		// Keyboard up, Safari panned the view 300 px down to reveal the field.
 		const viewport = page.viewportSize()!;
 		const visible = viewport.height - 380;
-		await keyboard(page, visible, 300);
+		await keyboard(page, visible, 0);
 		await expect(page.locator("html")).toHaveAttribute("data-kb", "open");
 		const body = await page.locator("body").boundingBox();
-		expect(Math.round(body!.y), "body starts at the top of the visible band").toBe(300);
+		expect(Math.round(body!.y)).toBe(0);
 		expect(Math.round(body!.height)).toBe(visible);
 		const taBox = await ta.boundingBox();
-		const keyboardTop = 300 + visible;
-		expect(
-			taBox!.y + taBox!.height,
-			"the thread's end is inside the visible band",
-		).toBeLessThanOrEqual(keyboardTop + 1);
+		expect(taBox!.y + taBox!.height, "the message box is above the keyboard").toBeLessThanOrEqual(
+			visible + 1,
+		);
 
-		// Keyboard down: back to the full height, no offset, flag cleared.
 		await keyboard(page, viewport.height, 0);
 		await expect(page.locator("html")).not.toHaveAttribute("data-kb", "open");
+		expect(Math.round((await page.locator("body").boundingBox())!.height)).toBe(viewport.height);
+	});
+
+	test("a scrolled document is put back at 0 (iOS Safari scrolls it by the keyboard's height to reveal the field)", async ({
+		app,
+		page,
+	}) => {
+		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
+		await app.expectView("chat");
+		await keyboard(page, page.viewportSize()!.height - 380, 0);
+		// Chromium has nothing to scroll: give the document the extent Safari's
+		// full-height layout viewport gives it, then scroll it like Safari does.
+		await page.evaluate(() => {
+			const pad = document.createElement("div");
+			pad.id = "kb-test-extent";
+			pad.style.cssText = "position:absolute;top:0;left:0;width:1px;height:3000px";
+			document.documentElement.append(pad);
+			window.scrollTo(0, 380);
+		});
+		await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
 		expect(Math.round((await page.locator("body").boundingBox())!.y)).toBe(0);
+		await page.evaluate(() => document.getElementById("kb-test-extent")?.remove());
 	});
 
 	test("the covered terminal sends no resize while the keyboard opens and closes over an overlay; one controlled sync on return", async ({
