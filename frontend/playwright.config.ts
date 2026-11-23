@@ -69,6 +69,11 @@ export default defineConfig({
 			name: "mobile",
 			// A 390-px phone with touch: the app's mobile breakpoint (≤ 768 px)
 			// and `pointer: coarse` (the key bar) both engage.
+			// `@any-viewport`: timing, network and cookie logic with nothing on
+			// screen that depends on the width (the read budget, the landing's
+			// waits, the auth transitions). One run on desktop proves it; the
+			// phone repeated it for ~45 s of worker time per CI run.
+			grepInvert: /@any-viewport/,
 			use: {
 				...devices["Desktop Chrome"],
 				viewport: { width: 390, height: 844 },

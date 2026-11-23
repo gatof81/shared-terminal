@@ -151,7 +151,7 @@ test.describe("sidebar: agents and their state", () => {
  * `Date.now()` (setFixedTime), which would freeze every age the feed judges
  * by — no period would ever be due and "read recently" would always be true.
  */
-test.describe("sidebar: agent state re-reads (clock running)", () => {
+test.describe("sidebar: agent state re-reads (clock running)", { tag: "@any-viewport" }, () => {
 	test.beforeEach(async ({ backend, page }) => {
 		backend.enableAcp();
 		for (const a of backend.acpAgents) a.runnerSeenAt = FRESH;

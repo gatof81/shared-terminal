@@ -264,7 +264,7 @@ export class MockBackend {
 	delays: Partial<Record<DelayKey, number>> = {};
 
 	// ── Projects ──
-	/** The /projects routes (off: the mock answers them 404). */
+	/** The project fixtures were seeded (`enableProjects`, idempotent). */
 	projectChat = false;
 	projects: MockProject[] = [];
 	/** A status (e.g. 500) the project feed answers instead of the feed (0: normal). */
@@ -274,7 +274,7 @@ export class MockBackend {
 	private seq = 100;
 
 	// ── ACP ──
-	/** The /acp routes and /ws/acp (off: the mock answers them 404). */
+	/** The ACP fixtures were seeded (`enableAcp`, called by the constructor). */
 	acp = false;
 	acpAgents: MockAcpAgent[] = [];
 	/** GET /acp/agents: an optional delay before each answer. */
@@ -426,11 +426,6 @@ export class MockBackend {
 		route: Route,
 	): Promise<boolean> {
 		if (!/^\/projects(\/|$)/.test(path)) return false;
-		// Off: the paths do not exist (the same 404 as any unknown route).
-		if (!this.projectChat) {
-			await json(404, { error: `No mock for ${method} ${path}` });
-			return true;
-		}
 		const mine = () => this.projects.filter((p) => p.ownerUserId === me.userId && !p.archivedAt);
 		if (path === "/projects" && method === "GET") {
 			await json(200, {
@@ -683,10 +678,6 @@ export class MockBackend {
 			return;
 		}
 		if (kind === "acp") {
-			if (!this.acp) {
-				ws.close({ code: 1008, reason: "Unknown route" });
-				return;
-			}
 			this.acpSockets.push(ws);
 			ws.onClose(() => {
 				this.acpSockets = this.acpSockets.filter((x) => x !== ws);
@@ -810,23 +801,7 @@ export class MockBackend {
 		// ── projects ──
 		if (await this.handleProjects(method, path, req, me, json, route)) return;
 		// ── ACP ──
-		if (this.acp && (await this.handleAcp(method, path, req, json))) return;
-		// Projects without ACP: what a project page reads (no agents).
-		if (this.projectChat && path === "/acp/agents" && method === "GET") return json(200, []);
-		const acpFeed = /^\/acp\/projects\/([^/]+)\/feed$/.exec(path);
-		if (this.projectChat && acpFeed && method === "GET") {
-			const p = this.projects.find((x) => x.projectId === decodeURIComponent(acpFeed[1]!));
-			if (!p) return json(404, { error: "project-not-found" });
-			return json(200, {
-				project: { id: p.projectId, name: p.name },
-				agents: [],
-				maxMessageBytes: 262144,
-				messages: [],
-				questions: [],
-				activity: {},
-				activitySeq: 0,
-			});
-		}
+		if (await this.handleAcp(method, path, req, json)) return;
 
 		// ── sessions ──
 		if (path === "/sessions" && method === "GET") {
