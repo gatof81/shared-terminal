@@ -11,8 +11,7 @@ REQUEST_TTL=86400
 # `approval-valid-for`). A request left halfway is closed with `cancel`, or stops blocking new ones when it lapses.
 APPROVAL_TTL=86400
 # Stage 1 = off: only the verbs that change nothing (help, status, propose, request-text, preflight, verify,
-# result, cancel). `approve` and `step` refuse until the owner sets `on` (stage 2). (Before the chat approval this
-# key was SIGNED_VERBS; that name is still read.)
+# result, cancel). `approve` and `step` refuse until the owner sets `on` (stage 2).
 WRITE_VERBS=off
 # Only for `status` (which image the backend's `app` service runs). Optional.
 COMPOSE_PROJECT=shared-terminal

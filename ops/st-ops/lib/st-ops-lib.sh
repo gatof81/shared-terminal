@@ -44,8 +44,7 @@ load_conf() {
 		REQUIRED_CHECKS) REQUIRED_CHECKS=$v ;;
 		REQUEST_TTL) [[ $v =~ ^[0-9]{2,6}$ ]] || die conf "REQUEST_TTL"; REQUEST_TTL=$v ;;
 		APPROVAL_TTL) [[ $v =~ ^[0-9]{2,6}$ ]] || die conf "APPROVAL_TTL"; APPROVAL_TTL=$v ;;
-		# SIGNED_VERBS: its name before the chat approval (2026-11-23); an installed st-ops.conf keeps working.
-		WRITE_VERBS | SIGNED_VERBS) [[ $v == on || $v == off ]] || die conf "$k"; [[ -z $WRITE_VERBS ]] || die conf "WRITE_VERBS twice"; WRITE_VERBS=$v ;;
+		WRITE_VERBS) [[ $v == on || $v == off ]] || die conf "WRITE_VERBS"; WRITE_VERBS=$v ;;
 		COMPOSE_PROJECT) [[ $v =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]] || die conf "COMPOSE_PROJECT"; COMPOSE_PROJECT=$v ;;
 		*) die conf "unknown key $k" ;;
 		esac

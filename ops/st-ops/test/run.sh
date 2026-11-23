@@ -528,12 +528,10 @@ expect_rc 2 "no step after cancel" st qa step "$idE" rollback-proof
 expect_rc 0 "propose after cancelling E" propose "$base" "$two"
 st qa cancel "$(new_id)" >/dev/null 2>&1
 
-# The key's old name still works.
+# The key's old name is refused (the install renames it).
 conf on SIGNED_VERBS
-expect_rc 0 "SIGNED_VERBS is read as WRITE_VERBS" st qa status
-expect_out "^write-verbs: on" "legacy key"
-printf 'WRITE_VERBS=on\n' >>"$ST_OPS_ETC/st-ops.conf"
-expect_rc 2 "both names at once" st qa status
+expect_rc 2 "SIGNED_VERBS is an unknown key" st qa status
+expect_out "ERROR conf: unknown key SIGNED_VERBS" "old key refused"
 conf on
 
 # ── install.sh grants nothing (static) ──

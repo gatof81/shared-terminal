@@ -45,6 +45,9 @@ fi
 systemctl reload ssh
 
 echo "installed. Keys granted: $(grep -cvE '^\s*(#|$)' /etc/st-ops/authorized_keys || true)"
-echo "write verbs: $(grep -E '^(WRITE|SIGNED)_VERBS=' /etc/st-ops/st-ops.conf || echo '?')"
+echo "write verbs: $(grep -E '^WRITE_VERBS=' /etc/st-ops/st-ops.conf || echo '?')"
 # The signature approval's file (before 2026-11-23) is no longer read; it is left for the owner to remove.
 [[ ! -e /etc/st-ops/allowed_signers ]] || echo "NOTE: /etc/st-ops/allowed_signers is no longer used (chat approval): remove it when convenient."
+if grep -qE '^SIGNED_VERBS=' /etc/st-ops/st-ops.conf; then
+	echo "NOTE: rename SIGNED_VERBS to WRITE_VERBS in /etc/st-ops/st-ops.conf: st-ops refuses the old key."
+fi

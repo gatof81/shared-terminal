@@ -19,7 +19,7 @@ operador ──ssh st-ops──▶ sshd (Match User st-ops: ForceCommand, sin TT
 | Cuenta `st-ops` | sistema, sin contraseña, sin home, **fuera de `docker`/`sudo`/`adm`** (install.sh se detiene si no) |
 | `/etc/st-ops/authorized_keys` | root 0644: la cuenta no puede añadir claves |
 | `/etc/st-ops/identities` | `<nombre> <SHA256:huella> [<agente ACP>]`: una clave no listada no ejecuta nada |
-| `/etc/st-ops/st-ops.conf` | repo, workflow y checks de CI requeridos, vencimiento, `WRITE_VERBS=off\|on` (antes `SIGNED_VERBS`, que se sigue leyendo) |
+| `/etc/st-ops/st-ops.conf` | repo, workflow y checks de CI requeridos, vencimiento, `WRITE_VERBS=off\|on` |
 | Programas | root 0755 en `/usr/local/lib/st-ops/`; `st-ops-root` fija todas las rutas (el kit incluido) y revalida cada palabra |
 | Estado | `/var/lib/st-ops/` root 0700: espejo git propio, pedidos (`requests/<id>/`) |
 | Auditoría | `journalctl -t st-ops`: identidad, verbo, argumentos, código de salida y de error, por cada verbo |
@@ -32,7 +32,7 @@ operador ──ssh st-ops──▶ sshd (Match User st-ops: ForceCommand, sin TT
 | `propose` (stdin: datos de la release, ≤ 16 KiB, sin bytes de control salvo `\n`) | UN pedido: guarda los datos en `requests/<id>/r<RELEASE>.conf` (archivo 0600, directorio 0700, de root; nunca en el kit), lee por regex y sin evaluar `RELEASE` (1-4 dígitos), `FROM`/`TARGET` (sha40) y `P_DIST_FILE` (solo `<LOG del kit>/new-image-dist-all.txt`), una línea cada una; TARGET en la cadena first-parent de `main` y descendiente de FROM, CI verde; imprime el pedido y su código de aprobación `r<RELEASE>-<sha7 del TARGET>` | no |
 | `request-text <id>` | los bytes exactos del pedido | no |
 | `preflight <id> [<mensaje>]` | `01 --release-file <ruta absoluta de esos datos>`, una vez; registra su `LOG` | no |
-| `approve <id> <mensaje>` | el mensaje de Chat del owner al agente operador que dice `OK <código>`, escrito después del `propose`, sin vencer, una sola vez | **es la aprobación** |
+| `approve <id> <mensaje>` | el mensaje de Chat del owner al agente operador que es exactamente `OK <código>`, escrito después del `propose`, sin vencer, una sola vez | **es la aprobación** |
 | `step <id> <paso> [<mensaje>]` | el siguiente paso, en orden y una vez: `backup` (02), `offhost` (02b `--detach`), `rollback-proof` (03), `deploy` (04 `--detach`), `acceptance` (06) | tras `approve` |
 | `verify <id>` | 05 (solo lectura), después de `deploy` OK; repetible (vale el último), obligatorio antes de `acceptance` | no |
 | `result <id> [<paso>]` | estado del pedido y de cada paso; el `.result` de un paso desacoplado | no |
@@ -66,8 +66,10 @@ VM100 y la app tienen un solo usuario: la aprobación es un mensaje de Chat del 
 <mensaje>` pide al kit `bin/owner-approval.sh <mensaje> <agente> <código>` (solo lectura, una SELECT; el texto se
 compara dentro de D1 y nunca se lee ni se imprime) y acepta solo rc 0, última línea `RESULT owner-approval OK rc=0` y
 exactamente una línea de cada una de: `MESSAGE_ID=<mensaje>`, `FROM=owner`, `TO=<agente de la identidad>`,
-`KIND=request`, `AGENT_EXISTS=yes`, `OWNER_IS_TOKEN_OWNER=yes`, `APPROVES_CODE=yes` (el texto contiene `ok <código>`,
-sin importar mayúsculas) y `CREATED_EPOCH` no anterior al `created-epoch` del pedido (con 120 s de margen entre el
+`KIND=request`, `AGENT_EXISTS=yes`, `OWNER_IS_TOKEN_OWNER=yes`, `APPROVES_CODE=yes` (el texto es **exactamente**
+`ok <código>` o `@<agente> ok <código>` —la mención inicial que agrega Project Chat—, sin importar mayúsculas ni
+espacios alrededor; nunca una subcadena: "todavía no le des OK r16-…" o una cita de la pregunta del agente no
+aprueban) y `CREATED_EPOCH` no anterior al `created-epoch` del pedido (con 120 s de margen entre el
 reloj de D1 y el del host). Además, un mensaje aprueba un solo pedido (`approved/message`).
 
 Por qué prueba que fue el owner: el backend escribe `from_id = owner` solo para un mensaje enviado con el login del
@@ -128,8 +130,8 @@ y el gate da BUSY.
    `preflight <id> <msg>`, y responde con un resumen corto — release, `compare`, commits, si trae migración, la
    última línea del preflight — y el código: "para aprobar, escribime `OK rNN-<sha7>`". Sin `approve` ni ningún
    `step`.
-2. **Aprobar** (el owner, en Chat, al operador): `OK rNN-<sha7>`. Ese mensaje ES la aprobación; el owner no
-   descarga ni firma nada. Plazo: `REQUEST_TTL` (24 h) desde el `propose`.
+2. **Aprobar** (el owner, en Chat, al operador): un mensaje que sea solo `OK rNN-<sha7>`. Ese mensaje ES la
+   aprobación; el owner no descarga ni firma nada; cualquier otro texto en el mismo mensaje lo invalida. Plazo: `REQUEST_TTL` (24 h) desde el `propose`.
 3. **Desplegar** (el operador, trabajando en ESE mensaje, `<msg>` = su id): `approve <id> <msg>`; `step <id>
    backup`; `step <id> offhost` y `result <id> offhost` hasta `RESULT=OK`; `step <id> rollback-proof`; y solo si
    los tres dieron OK, `step <id> deploy <msg>` — y termina el turno: el deploy reinicia el backend. Si la release
@@ -161,8 +163,8 @@ cierra con `cancel <id>`: no deshace nada y deja proponer el siguiente.
    instalado tiene que traer `bin/owner-approval.sh`.
 
 **Desde la firma (antes del 2026-11-23):** reinstalar con `install.sh` (no toca `st-ops.conf` ni las claves; avisa
-que `allowed_signers` ya no se usa, y se puede borrar). `SIGNED_VERBS=on` se lee como `WRITE_VERBS=on`; conviene
-subir `REQUEST_TTL` y `APPROVAL_TTL` a `86400`. Un pedido propuesto antes no tiene `created-epoch` ni código: se
+que `allowed_signers` ya no se usa, y se puede borrar). En `/etc/st-ops/st-ops.conf`: renombrar `SIGNED_VERBS` a
+`WRITE_VERBS` (st-ops rechaza la clave vieja) y subir `REQUEST_TTL` y `APPROVAL_TTL` a `86400`. Un pedido propuesto antes no tiene `created-epoch` ni código: se
 cierra con `cancel` y se propone de nuevo.
 
 **Revocación**: borrar la línea de `authorized_keys` (efecto en el siguiente login); `WRITE_VERBS=off` (corta
@@ -226,4 +228,4 @@ alterada, identidad sin agente o de otro agente, mensaje ya usado por otro pedid
 aprobación por chat), orden y un solo uso, datos y kit cambiados después de aprobar (copia propia y la congelada en
 el LOG), `--exclude-message` (ajeno, de otro agente, identidad sin agente, paso que no lo admite), 07 inalcanzable,
 código de salida del kit, cierre por fallo (también desacoplado y sin línea `RESULT`), `cancel` después de pasos
-que escriben y su rechazo con un paso `RUNNING`, el nombre viejo `SIGNED_VERBS`, e `install.sh` que no concede nada.
+que escriben y su rechazo con un paso `RUNNING`, la clave vieja `SIGNED_VERBS` rechazada, e `install.sh` que no concede nada.
