@@ -8,10 +8,11 @@ import { PROJECT_IDS, PROJECT_SESSION_IDS } from "./mockBackend.js";
  * app loads by an EventTarget whose height/offsetTop the test sets — the
  * same two numbers Safari reports with the keyboard up and the view panned
  * to the focused field. What this proves: the app follows the height
- * (layout in the visible band, no safe-area strip), a scrolled document is
- * put back at 0, and the covered
- * terminal sends nothing to tmux while Chat is shown. What only the device
- * proves: Safari's own pan and its timing — see docs/MOBILE_KEYBOARD.md.
+ * (layout in the visible band, no safe-area strip, the keyboard flag read
+ * against the layout viewport), a scrolled document is put back at 0, and
+ * the covered terminal sends nothing to tmux while Chat is shown. What only
+ * the device proves: Safari's own scroll and its timing (validated on an
+ * iPhone, Safari 27.2, #767).
  */
 
 test.beforeEach(async ({ page }) => {
@@ -66,6 +67,14 @@ test.describe("soft keyboard (simulated visual viewport)", () => {
 		await expect(ta).toBeVisible();
 		const viewport = page.viewportSize()!;
 		const visible = viewport.height - 380;
+		// As in the iPhone log: `innerHeight` shrinks with the visible area, so
+		// only the layout viewport (clientHeight) tells the keyboard is up.
+		await page.evaluate(() =>
+			Object.defineProperty(window, "innerHeight", {
+				configurable: true,
+				get: () => window.visualViewport!.height,
+			}),
+		);
 		await keyboard(page, visible, 0);
 		await expect(page.locator("html")).toHaveAttribute("data-kb", "open");
 		const body = await page.locator("body").boundingBox();

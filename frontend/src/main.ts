@@ -72,7 +72,6 @@ import { clearAllBadges } from "./tabActivity.js";
 import { resetTabTitle, setTitleParts } from "./tabTitle.js";
 import type { TerminalSession } from "./terminal.js";
 import { getView, isOverlayActive, onViewChange } from "./viewSwitch.js";
-import { initVvDebug } from "./vvDebug.js";
 
 // ── DOM refs ────────────────────────────────────────────────────────────────
 
@@ -181,10 +180,6 @@ window.visualViewport?.addEventListener("resize", syncViewportHeight);
 window.visualViewport?.addEventListener("scroll", syncViewportHeight);
 window.addEventListener("resize", syncViewportHeight);
 window.addEventListener("scroll", pinDocument, { passive: true });
-// `?vvdebug=1`: on-device measurements of the keyboard viewport (#616).
-// AFTER the viewport listeners: listeners run in registration order, so
-// each sample then shows what the app applied for that same event.
-initVvDebug();
 
 // ── Font size ───────────────────────────────────────────────────────────────
 // Persisted across reloads via localStorage. Mobile users want ~16 px on a
