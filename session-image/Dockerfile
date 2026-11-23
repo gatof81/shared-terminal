@@ -278,7 +278,7 @@ RUN mkdir -p /home/developer/.npm-global
 #   - The pin governs only what the image bakes into a FRESH workspace.
 #     `claude --update` self-updates persisted in an existing workspace's
 #     .npm-global keep floating by design (see the paragraph above).
-ARG CLAUDE_CODE_VERSION=2.1.308
+ARG CLAUDE_CODE_VERSION=2.1.314
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 
 # ── Default `claude` to --dangerously-skip-permissions in this image ────────
