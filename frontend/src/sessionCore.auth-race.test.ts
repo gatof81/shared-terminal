@@ -1,6 +1,6 @@
 /**
  * sessionCore.auth-race.test.ts — hypotheses A and D, sessionCore under
- * jsdom with main.ts / api.ts mocked (the chatView.test.ts style):
+ * jsdom with main.ts / api.ts mocked:
  *
  *   A. a `refreshSessions()` that answers after logout, or after another
  *      account's list already landed, must not render the old account's

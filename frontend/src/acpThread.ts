@@ -1742,7 +1742,7 @@ function time(iso: string): string {
 }
 
 /** An agent's avatar + @name, in its colour (also the Project Chat header's). */
-export function agentAvatar(name: string): HTMLElement {
+function agentAvatar(name: string): HTMLElement {
 	return agentId(name);
 }
 

@@ -102,9 +102,6 @@ export function registerAuthRoutes(router: Router, ctx: RouteContext): void {
 			isAdmin,
 			isLead,
 			resourceCaps,
-			// Both features are always on now; the field stays because the
-			// deployed frontend reads it (absent ⇒ it hides Projects and agents).
-			features: { projectChat: true, acpAgents: true },
 		});
 	});
 

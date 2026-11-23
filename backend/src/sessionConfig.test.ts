@@ -21,7 +21,6 @@ import {
 	isEmptyConfig,
 	PortsPatchSchema,
 	persistSessionConfig,
-	redactStoredAuth,
 	redactStoredEntries,
 	type SessionConfig,
 	SessionConfigSchema,
@@ -1754,9 +1753,9 @@ describe("encryptSecretEntries / decryptStoredEntries / redactStoredEntries", ()
 	});
 });
 
-// ── Auth-blob encrypt / decrypt / redact round-trip (#188 PR 188b) ───────
+// ── Auth-blob encrypt / decrypt round-trip (#188 PR 188b) ───────
 
-describe("encryptAuthCredentials / decryptStoredAuth / redactStoredAuth", () => {
+describe("encryptAuthCredentials / decryptStoredAuth", () => {
 	it("returns undefined for an empty / absent input (column collapses to NULL)", () => {
 		expect(encryptAuthCredentials(undefined)).toBeUndefined();
 		expect(encryptAuthCredentials({})).toBeUndefined();
@@ -1806,32 +1805,6 @@ describe("encryptAuthCredentials / decryptStoredAuth / redactStoredAuth", () => 
 			pat: { ...stored!.pat!, tag: tagBytes.toString("base64") },
 		};
 		expect(() => decryptStoredAuth(tampered)).toThrow();
-	});
-
-	it("redactStoredAuth collapses pat / ssh.privateKey to { isSet: true } and keeps knownHosts visible", () => {
-		const stored = encryptAuthCredentials({
-			pat: "ghp_token",
-			ssh: { privateKey: "secretkey", knownHosts: "default" },
-		});
-		const redacted = redactStoredAuth(stored);
-		expect(redacted).toEqual({
-			pat: { isSet: true },
-			ssh: { isSet: true, knownHosts: "default" },
-		});
-		// Defensive: no encrypted material survives the redact.
-		expect(JSON.stringify(redacted)).not.toMatch(/ciphertext|iv|tag|secretkey/);
-	});
-
-	it("redactStoredAuth returns undefined for undefined input", () => {
-		expect(redactStoredAuth(undefined)).toBeUndefined();
-	});
-
-	// PR #213 round 1 NIT: parity with `parseAuthColumn`. An `AuthStored`
-	// with neither `pat` nor `ssh` set must collapse to undefined so a
-	// future GET-config endpoint can use `auth !== undefined` as the
-	// "credentials configured?" predicate.
-	it("redactStoredAuth collapses an empty AuthStored to undefined", () => {
-		expect(redactStoredAuth({})).toBeUndefined();
 	});
 });
 

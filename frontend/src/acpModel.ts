@@ -283,7 +283,7 @@ export interface AgentStatus {
 }
 
 /** A runner polls for work every ~2 s while idle and reports activity while busy. */
-export const RUNNER_FRESH_MS = 20_000;
+const RUNNER_FRESH_MS = 20_000;
 
 /** The fields agentStatus reads (a full /api/acp/agents row, or the registry's entry). */
 export type AgentStatusInput = Pick<AcpAgentInfo, "runnerSeenAt"> & Partial<AcpAgentInfo>;

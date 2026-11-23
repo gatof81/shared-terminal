@@ -809,13 +809,6 @@ export type AuthStored = {
 		knownHosts: string;
 	};
 };
-/** Public/redacted `auth` for listing endpoints — collapses any
- *  encrypted credential to `{ isSet: true }`. `knownHosts` stays
- *  visible (it's public). */
-export type AuthPublic = {
-	pat?: { isSet: true };
-	ssh?: { isSet: true; knownHosts: string };
-};
 /** Sentinel known_hosts value resolved by 188d's runner to the
  *  bundled fingerprints. Exported so the runner and the frontend can
  *  agree without copying the literal string. */
@@ -1200,29 +1193,6 @@ export function decryptStoredAuth(stored: AuthStored): AuthInput {
 		};
 	}
 	return out;
-}
-
-/**
- * Redact stored auth credentials for listing endpoints. Encrypted
- * blobs collapse to `{ isSet: true }`; `knownHosts` (public) stays
- * visible so a client showing the Repo tab can still display "using
- * default known_hosts" vs "custom paste".
- */
-export function redactStoredAuth(stored: AuthStored | undefined): AuthPublic | undefined {
-	if (stored === undefined) return undefined;
-	const out: AuthPublic = {};
-	if (stored.pat !== undefined) out.pat = { isSet: true };
-	if (stored.ssh !== undefined) {
-		out.ssh = { isSet: true, knownHosts: stored.ssh.knownHosts };
-	}
-	// Mirror `parseAuthColumn`: an `AuthStored` with neither field set
-	// collapses to undefined so listing-endpoint callers can rely on
-	// `auth !== undefined` as the "are credentials configured?"
-	// predicate (PR #213 round 1 NIT). `parseAuthColumn` already drops
-	// rows that come back as `{}`, but a future code path that
-	// constructs an `AuthStored` directly (e.g. a partial-edit endpoint)
-	// would otherwise leak `{}` here.
-	return out.pat === undefined && out.ssh === undefined ? undefined : out;
 }
 
 /**

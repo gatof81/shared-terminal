@@ -23,7 +23,6 @@ import { z } from "zod";
 import type { AuthedRequest } from "../auth.js";
 import { ContainerNotFoundError } from "../dockerManager.js";
 import { EnvVarValidationError, validateEnvVars } from "../envVarValidation.js";
-import type { ExecRegistry } from "../execRegistry.js";
 import { logger } from "../logger.js";
 import { recordObserveEnd, recordObserveStart } from "../observeLog.js";
 import { getRequestId } from "../requestContext.js";

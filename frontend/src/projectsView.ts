@@ -66,7 +66,7 @@ const terminalArea = document.getElementById("terminal-area");
 const PROJECTS_REFRESH_MS = 60_000;
 const PROJECT_NAME_MAX = 80;
 
-let active = false; // feature on + signed in + app shown
+let active = false; // signed in + app shown
 let shown: string | null = null; // the project id on screen
 let gen = 0; // bumped by every reset (logout): a load started before applies nothing
 let loadError = false;
@@ -427,7 +427,7 @@ async function renameFlow(pid: string, current: string): Promise<void> {
 
 // ── New project ─────────────────────────────────────────────────────────────
 
-export async function openCreateProjectDialog(): Promise<void> {
+async function openCreateProjectDialog(): Promise<void> {
 	// One id per dialog: a retry after an unknown outcome is the same request.
 	const clientRequestId = crypto.randomUUID();
 	let created: string | null = null;
