@@ -90,7 +90,6 @@ async function waitFor(fn, ms = 90_000) {
 }
 const agents = async () => (await api("GET", "/api/acp/agents")).body;
 const agentFeed = async (n) => (await api("GET", `/api/acp/agents/${n}/feed`)).body;
-const runningOf = async (n) => (await agentFeed(n)).messages.filter((m) => m.to_id === n && m.state === "running");
 const short = (s, n = 110) => (s ?? "").replace(/\s+/g, " ").slice(0, n);
 const sessionCount = (text) => Number(/sesión ACP: (\d+) mensajes/.exec(text ?? "")?.[1] ?? Number.NaN);
 const cwdOf = (text) => /cwd (\S+)\)/.exec(text ?? "")?.[1] ?? null;
@@ -142,22 +141,37 @@ async function main() {
 	}
 	const badCtx = await api("POST", "/api/acp/messages", { to: A1, body: "hola", projectId: pid, context: "../x", clientId: randomUUID() });
 	check("P4 a context name outside [a-z0-9-] is refused", badCtx.status === 400, String(badCtx.status));
+	// P4b. A one-slot agent runs exactly one runner and one adapter (no extra slot's resources).
+	const procs = async (sid) => {
+		const out = await execOut(sid, ["sh", "-c", "pgrep -fc '^node --no-warnings /opt/st-acp/st/runner\\.mjs'; pgrep -fc 'test-agent\\.mjs'"]);
+		const [runners, adapters] = out.trim().split("\n").map(Number);
+		return { runners, adapters };
+	};
+	for (const name of [A1, A2]) {
+		const c = await procs(sids[name]);
+		check(`P4b @${name} with max_concurrency 1: one runner, one adapter`, c.runners === 1 && c.adapters === 1, JSON.stringify(c));
+	}
 	for (const name of [A1, A2]) {
 		const r = await api("PATCH", `/api/acp/agents/${name}`, { maxConcurrency: 2 });
 		check(`@${name} max_concurrency 2`, r.status === 200 && r.body?.maxConcurrency === 2, String(r.status));
 	}
+	const two = await waitFor(async () => {
+		const c = await procs(sids[A1]);
+		return c.runners === 2 && c.adapters === 2 ? c : null;
+	}, 60_000);
+	check("P4b @A1 with max_concurrency 2: two runners, two adapters", !!two, JSON.stringify(two ?? (await procs(sids[A1]))));
 	const before = { [A1]: await cgroup(sids[A1]), [A2]: await cgroup(sids[A2]) };
 
-	// P1. Global cap: 4 long runs that could all start (2 agents × 2 slots), at most MAX_RUNNING at once.
-	let peak = 0;
-	const watch = setInterval(async () => {
-		const n = (await runningOf(A1).catch(() => [])).length + (await runningOf(A2).catch(() => [])).length;
-		peak = Math.max(peak, n);
-	}, 400);
+	// P1. Global cap: 4 long runs that could all start (2 agents × 2 slots), at most MAX_RUNNING at once. The peak
+	// comes from the backend's own started_at/finished_at (two separate feed reads could add up a run that ended
+	// between them and the one that replaced it).
 	const four = [await send(A1, "esperá 12", pid), await send(A1, "esperá 12", pid, "a"), await send(A2, "esperá 12", pid), await send(A2, "esperá 12", pid, "a")];
 	const fourDone = await Promise.all(four.map((m) => waitMsg(m.id)));
-	clearInterval(watch);
 	check("P1 all four done", fourDone.every((m) => m.state === "done"), fourDone.map((m) => m.state).join(","));
+	const edges = fourDone.flatMap((m) => [[Date.parse(m.started_at), 1], [Date.parse(m.finished_at), -1]]).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+	let peak = 0;
+	let now = 0;
+	for (const [, d] of edges) peak = Math.max(peak, (now += d));
 	check(`P1 never more than MAX_RUNNING=${MAX_RUNNING} running at once, and the cap was reached`, peak <= MAX_RUNNING && peak === Math.min(4, MAX_RUNNING), `peak ${peak}`);
 	if (MAX_RUNNING < 4) {
 		const starts = fourDone.map((m) => Date.parse(m.started_at)).sort((a, b) => a - b);
@@ -198,6 +212,10 @@ async function main() {
 	check("P5 a context message is refused once the cap is 1", after.status === 400, String(after.status));
 	const dflt = await waitMsg((await send(A1, "hola", pid)).id);
 	check("P5 the default context keeps working in slot 1", dflt.state === "done" && dflt.slot === 1, `${dflt.state} slot ${dflt.slot}`);
+	// #744: lowering the cap leaves the extra slot idle (it claims nothing) until the container restarts — a known
+	// limit, reported here, not judged: the processes it keeps are printed.
+	const lowered = await procs(sids[A1]);
+	console.log(`INFO [${at()}] P5 after lowering to 1, @${A1} keeps ${lowered.runners} runner(s), ${lowered.adapters} adapter(s) until the next container start (#744: known limit)`);
 
 	// P6. Resources of the two session containers.
 	for (const name of [A1, A2]) {
