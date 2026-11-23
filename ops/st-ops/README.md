@@ -96,10 +96,48 @@ lee como en #517: solo la corrida `push` de `ci.yml` en `main` para ese SHA y lo
 nombre de un check-run no es identidad: cualquier workflow con `checks: write` puede publicar uno).
 
 ```
-operador: ssh st-ops propose < r13.conf ; ssh st-ops request-text <id> > request.txt ; ssh st-ops preflight <id>
-owner:    ssh-keygen -Y sign -f <clave personal> -n st-ops-deploy@shared-terminal request.txt
+operador: ssh st-ops propose < rNN.conf ; ssh st-ops preflight <id> <msg> ; ssh st-ops request-text <id> > request.txt
+owner:    st-sign request.txt <sha256 que reportó el operador>      # ops/st-ops/owner/st-sign
 operador: ssh st-ops approve <id> < request.txt.sig ; ssh st-ops step <id> backup ; … ; ssh st-ops result <id>
 ```
+
+## Un deploy, paso a paso
+
+Acordado por el owner y @architect tras R14 (2026-11-20, el primer deploy por st-ops). El operador es un agente
+ACP (hoy @qa); `<msg>` es siempre el id del mensaje en el que el operador está trabajando **en ese momento** — el
+de un mensaje anterior ya no está `running` y el despachador lo rechaza. Solo `preflight` y `deploy` aceptan
+`<msg>` (`STEP_EXCLUDABLE`: son los únicos pasos con gate de operaciones); con cualquier otro paso es `ERROR usage`
+sin consumir nada. Mientras el operador trabaja nadie le escribe: un mensaje nuevo para él es una operación
+abierta y el gate da BUSY.
+
+1. **Preparar** (mensaje al operador): `propose < rNN.conf`, `preflight <id> <msg>` y `request-text <id> >
+   request.txt` en su workspace. Devuelve el id, el sha256 de `request.txt`, la última línea del preflight y su
+   LOG. Sin `approve` ni ningún `step`.
+2. **Firma del owner**, en su máquina: baja `request.txt` desde la vista Files de la sesión del operador (nunca
+   copiado del chat: la firma es sobre los bytes exactos) y corre `st-sign request.txt <sha256>`. El script
+   compara el sha, muestra el pedido **completo** (commits, CI, compare, `kit-head`, datos de la release), pide
+   escribir `firmar`, firma con `~/.ssh/st-ops-sign` y verifica la firma como lo hará `approve`. Comprobar el sha
+   solo prueba que la bajada no alteró el texto que armó el operador; lo que el owner aprueba es el contenido.
+   Sube `request.txt.sig` a la sesión del operador (los uploads llevan un prefijo al azar en el nombre). Plazo:
+   `REQUEST_TTL` (2 h) desde el `propose`.
+3. **Aprobar y desplegar** (un mensaje): `approve <id> < …request.txt.sig`; `step <id> backup`; `step <id>
+   offhost` y `result <id> offhost` hasta `RESULT=OK`; `step <id> rollback-proof`; y solo si los tres dieron OK,
+   `step <id> deploy <msg>` — y el operador termina el turno enseguida: el deploy reinicia el backend. El OK de
+   `step deploy` solo dice que la unidad arrancó. Plazo: `APPROVAL_TTL` (6 h) desde el `approve`.
+4. **Verificar** (mensaje nuevo, unos minutos después): `result <id> deploy`, `verify <id>` y `step <id>
+   acceptance`.
+
+**BUSY** no cambió nada: se repite el mismo paso, con a lo sumo **3 intentos por paso** (contando todos los
+mensajes) y 5 minutos entre intentos; después el operador se detiene e informa (por ejemplo durante la ventana
+del backup nocturno, 08:00–09:00 UTC). El gate del deploy corre dentro de la unidad desacoplada, así que su BUSY
+aparece recién en `result` (paso 4): el operador relanza `step <id> deploy <msg del mensaje actual>`, termina el
+turno, y la verificación pasa a un mensaje más. **FAIL** cierra el camino: el operador no sigue e informa con la
+salida. **Si el operador se interrumpe** a mitad de un mensaje, no se reenvía ese mensaje: se le pide `result <id>`
+en uno nuevo y se sigue desde el paso que falte (el despachador no deja repetir uno ya corrido).
+
+**Excepción:** el primer deploy que traiga una migración de base de datos corta el paso 3 en dos (approve hasta
+rollback-proof; deploy en otro mensaje) para que se revise el backup antes del deploy: volver atrás ya no es solo
+cambiar de imagen. Después, flujo corto siempre.
 
 ## Instalación (owner, como root, en dos etapas)
 
@@ -111,7 +149,12 @@ operador: ssh st-ops approve <id> < request.txt.sig ; ssh st-ops step <id> backu
    - `/etc/st-ops/identities`: `qa SHA256:… qa`
 2. **Escritura**, tras probar la etapa 1: la clave personal del owner (que no esté en ninguna sesión) en
    `/etc/st-ops/allowed_signers` (`owner namespaces="st-ops-deploy@shared-terminal" ssh-ed25519 AAAA…`) y
-   `SIGNED_VERBS=on` en `/etc/st-ops/st-ops.conf`.
+   `SIGNED_VERBS=on` en `/etc/st-ops/st-ops.conf`. La clave se crea una vez en la máquina del owner
+   (`ssh-keygen -t ed25519 -f ~/.ssh/st-ops-sign`, con passphrase) y la línea se agrega con
+   `echo '…' | sudo tee -a /etc/st-ops/allowed_signers` (un `sudo echo … >>` redirige como el usuario, no como
+   root); se comprueba con `sudo cut -d' ' -f3,4 /etc/st-ops/allowed_signers | ssh-keygen -lf -` contra la huella
+   de la clave. `ops/st-ops/owner/st-sign` va en el `PATH` del owner (`~/bin`); lee la clave de `ST_SIGN_KEY` si
+   no es `~/.ssh/st-ops-sign`.
 
 **Revocación**: borrar la línea de `authorized_keys` (efecto en el siguiente login); `SIGNED_VERBS=off` (corta
 `approve`/`step` al instante); o `sudo bash ops/st-ops/uninstall.sh` (quita todo acceso, conserva `/var/lib/st-ops`).
@@ -170,3 +213,7 @@ control, tamaño), etapa 1, firmas (otra clave, otro namespace, otros bytes, bas
 reusada), orden y un solo uso, datos y kit cambiados después de firmar (copia propia y la congelada en el LOG),
 `--exclude-message` (ajeno, de otro agente, identidad sin agente, paso que no lo admite), 07 inalcanzable, código
 de salida del kit, cierre por fallo (también desacoplado y sin línea `RESULT`), y `install.sh` que no concede nada.
+
+`bash ops/st-ops/test/st-sign.test.sh` — el script del owner con una clave descartable y `ssh-keygen` real: sha
+distinto o mal formado, sin confirmación, pedido vencido, primera línea ajena, `.sig` ya existente (todos sin
+firmar), el pedido completo a la vista con los bytes de control visibles, y una firma que verifica como `approve`.
