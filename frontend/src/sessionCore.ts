@@ -310,7 +310,7 @@ export function setSessionMenuExtras(fn: SessionMenuExtras): void {
 	sessionMenuExtras = fn;
 }
 
-export function openActiveSessionMenu(opener: HTMLElement): void {
+function openActiveSessionMenu(opener: HTMLElement): void {
 	const s = sessions.find((x) => x.sessionId === activeSessionId);
 	if (!s) return;
 	const extra = sessionMenuExtras?.(s);
@@ -636,7 +636,7 @@ function labelSessionRow(select: HTMLElement): void {
 }
 
 /**
- * With projects on, the rows are grouped by the project their ACP agent
+ * The rows are grouped by the project their ACP agent
  * takes part in (acpRegistry.ts), in the project list's order and including
  * the projects without a session yet — the tree is where projects are
  * listed. Then two sections: the agents that take part in no project, and
@@ -1203,7 +1203,7 @@ async function openSessionBody(
 
 	// Not running → no tmux to list tabs from or attach to, but the
 	// workspace is on the host: open straight into the Files view (or
-	// Chat, with history). refreshSessions re-opens it
+	// an agent's Chat). refreshSessions re-opens it
 	// properly once the session is started.
 	if (meta && !running) {
 		filesOnlySessionId = sessionId;

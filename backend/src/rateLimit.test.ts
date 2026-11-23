@@ -810,8 +810,8 @@ describe("auth route rate limiting", () => {
 		const r4 = await fetch(`${baseUrl}/api/auth/status`);
 
 		expect(r1.status).toBe(200);
-		// Always announced (the deployed frontend reads it); no `uiShell`.
 		const body = await r1.json();
+		// Constant: the VM100 deploy kit checks it (see routes/auth.ts).
 		expect(body.features).toEqual({ projectChat: true, acpAgents: true });
 		expect(body).not.toHaveProperty("uiShell");
 		expect(r2.status).toBe(200);

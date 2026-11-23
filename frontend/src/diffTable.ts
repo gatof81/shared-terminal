@@ -1,6 +1,6 @@
 /**
- * diffTable.ts — the unified-diff rows as DOM (textContent only), shared by
- * the Git Changes view and the project conversation's attached diffs.
+ * diffTable.ts — the unified-diff rows as DOM (textContent only), for the Git
+ * Changes view.
  */
 
 import { type DiffRow, lineNumberDigits } from "./diff.js";

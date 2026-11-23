@@ -546,26 +546,6 @@ describe("runRestore", () => {
 		expect(restored).toBe("hola");
 	});
 
-	async function backupWithProject(): Promise<string> {
-		dbState.tables.set("users", [{ id: "u1", username: "diego" }]);
-		dbState.tables.set("sessions", [{ session_id: "s1", user_id: "u1", status: "stopped" }]);
-		await seedWorkspace("s1", { "s1/hello.txt": "hola" });
-		const pid = "6b1f0c4e-1d2a-4b3c-8d4e-5f6a7b8c9d0e";
-		const pdir = path.join(WORKSPACE_ROOT, ".projects", pid);
-		await fs.mkdir(pdir, { recursive: true });
-		await fs.writeFile(
-			path.join(pdir, "conversation.events.jsonl"),
-			`${JSON.stringify({ seq: 1, ev: "message", at: "t", w: "b", bn: 0, msg_id: "m1" })}\n`,
-		);
-		const manifest = await runBackup(outDir);
-		expect(Object.keys(manifest.projects ?? {})).toEqual([pid]);
-		await fs.rm(path.join(WORKSPACE_ROOT, "s1"), { recursive: true });
-		await fs.rm(path.join(WORKSPACE_ROOT, ".projects"), { recursive: true });
-		dbState.tables.clear();
-		dbState.inserts.length = 0;
-		return pdir;
-	}
-
 	it("--without-projects on a backup that has no projects is an ordinary complete restore", async () => {
 		await makeBackup();
 		const info = vi.spyOn(logger, "info");

@@ -74,7 +74,7 @@ export function decidePushToggleState(i: PushToggleInputs): PushToggleState {
 
 // ── Feature detection ───────────────────────────────────────────────────────
 
-export function isPushSupported(): boolean {
+function isPushSupported(): boolean {
 	return "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
 }
 

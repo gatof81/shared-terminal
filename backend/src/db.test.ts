@@ -270,9 +270,10 @@ describe("migrateDb ledger (#349)", () => {
 	});
 });
 
-// 3.0d: the recreation CAS must tell "D1 said the statement failed" (not
-// applied) from everything else (may have applied).
-describe("D1StatementError (#3.0d CAS)", () => {
+// A caller that must know whether a write applied (projects/directory.ts)
+// tells "D1 said the statement failed" (not applied) from everything else
+// (may have applied).
+describe("D1StatementError", () => {
 	it("an answer with success:false is a D1StatementError; a non-2xx or a timeout is not", async () => {
 		const { d1Query, D1StatementError } = await import("./db.js");
 		const realFetch = globalThis.fetch;

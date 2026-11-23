@@ -248,9 +248,7 @@
 /* ── Phones: one row per session (owner review 2026-11-13: the sidebar
    wasted space, projects / sessions / unassigned were hard to tell apart).
    The agent shows as a word on the row's second line instead of a 44-px
-   link row of its own (the group heading names the project); the "last
-   conversation" link keeps its own line. Only the grouped list (project
-   feature on): with the feature off the sidebar is unchanged. */
+   link row of its own (the group heading names the project). */
 @media (max-width: 768px) {
   .session-list-grouped .session-item {
     gap: 0.25rem;

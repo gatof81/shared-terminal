@@ -1,7 +1,4 @@
-/* ── Projects & Agents (P3a, projectsView.ts) ────────────────────
-   Nothing here applies unless the feature is on: the sidebar section
-   and the page are `hidden` in the markup, and the session-group rules
-   only match elements sessionCore.ts renders with the feature on. */
+/* ── Projects & Agents (projectsView.ts) ─────────────────────────── */
 
 /* ── Sidebar: Projects section (above the sessions) ── */
 #project-section {
@@ -61,7 +58,7 @@
   padding: 0.25rem 0.6rem;
 }
 
-/* ── Sidebar tree (feature on; sessionCore.ts renderGroupedSessions) ──
+/* ── Sidebar tree (sessionCore.ts renderGroupedSessions) ──
    Project → its sessions → each one's agent, plus "Unassigned". What tells
    a project from a session is not colour: the heading is sans, semibold,
    with a chevron and a count; a session is monospace, indented behind a

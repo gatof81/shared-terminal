@@ -1,5 +1,5 @@
 /**
- * sessionCore.landing-race.test.ts — hypotheses C and E (shell v2 landing
+ * sessionCore.landing-race.test.ts — hypotheses C and E (the landing
  * policy), sessionCore + viewSwitch under jsdom with main.ts / api.ts
  * mocked. Controlled promises only: the landing waits on the agents list
  * (an agent's session lands on Chat), whose reads the tests hold.
@@ -186,7 +186,6 @@ beforeAll(async () => {
 beforeEach(() => {
 	localStorage.clear();
 	history.replaceState(null, "", "/");
-	// Shell v2: the landing policy (viewPolicy.ts) is in force.
 	mainState.sessions = [];
 	mainState.activeSessionId = null;
 	mainState.currentTabs = [];

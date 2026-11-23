@@ -7,14 +7,13 @@
  *   #/sessions/<id>/<view>                view ∈ terminal | files | git | chat
  *   #/sessions/<id>/<view>/<detail>       what the view shows:
  *                                         files → a path, git → <area>:<path>,
- *                                         chat → a conversation id,
  *                                         terminal → a tab id
  *
  * Two kinds of writes, both through history and NEITHER fires
  * `hashchange` (so the app can't loop on its own writes):
  *   - replace: selecting a session, a forced landing, a tab switch — the
  *     address keeps up without turning Back into a carousel;
- *   - push: a view the person chose, a file / diff / conversation they
+ *   - push: a view the person chose, a file / diff they
  *     opened — Back and the mobile back gesture undo exactly that.
  *
  * Reads arrive from `popstate` (Back / Forward) and `hashchange` (a URL
@@ -35,7 +34,7 @@
  */
 
 export type RouteView = "terminal" | "files" | "git" | "chat";
-export const ROUTE_VIEWS: readonly RouteView[] = ["terminal", "files", "git", "chat"];
+const ROUTE_VIEWS: readonly RouteView[] = ["terminal", "files", "git", "chat"];
 
 export interface Route {
 	sessionId: string;
@@ -123,11 +122,6 @@ export function parseProjectRoute(hash: string): ProjectRoute | null {
 
 export function projectRouteHash(route: ProjectRoute): string {
 	return `#/projects/${encodeURIComponent(route.projectId)}/chat`;
-}
-
-export function sameProjectRoute(a: ProjectRoute | null, b: ProjectRoute | null): boolean {
-	if (a === null || b === null) return a === b;
-	return a.projectId === b.projectId;
 }
 
 /**
@@ -219,8 +213,8 @@ export function navigate(route: Route | null, opts: { replace?: boolean } = {}):
 
 // ── Project pages over the session ──────────────────────────────────────────
 
-// Set only while the project feature is on (projectsView.ts): with it off
-// nothing here changes how a session route is written or read.
+// Set only while signed in (projectsView.ts): signed out, nothing here
+// changes how a session route is written or read.
 let projectPageShown: () => boolean = () => false;
 let projectRoutesOn = false;
 const writeListeners: Array<() => void> = [];

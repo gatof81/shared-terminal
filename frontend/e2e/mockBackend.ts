@@ -715,8 +715,6 @@ export class MockBackend {
 				isAdmin: this.current?.isAdmin ?? false,
 				isLead: this.current?.isLead ?? false,
 				resourceCaps: { cpuMaxCores: 8, memMaxMiB: 16384 },
-				// Always announced by the backend (projects and ACP have no flag).
-				features: { projectChat: true, acpAgents: true },
 			});
 		}
 		if (path === "/auth/login" && method === "POST") {
