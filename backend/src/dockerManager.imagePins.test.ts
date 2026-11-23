@@ -36,9 +36,7 @@ import { DockerManager } from "./dockerManager.js";
 import { logger } from "./logger.js";
 import type { SessionManager } from "./sessionManager.js";
 
-function fakeSessions(
-	envVars: Record<string, string> = { ST_INGEST_TOKEN: "user-tries-to-shadow" },
-) {
+function fakeSessions(envVars: Record<string, string> = { FOO: "bar" }) {
 	const meta = {
 		sessionId: "sess-1",
 		userId: "u1",

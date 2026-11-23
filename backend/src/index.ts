@@ -5,7 +5,9 @@
  * Database is Cloudflare D1 (accessed via HTTP API).
  */
 
+import { promises as fs } from "node:fs";
 import http from "node:http";
+import path from "node:path";
 import cookieParser from "cookie-parser";
 import express from "express";
 import rateLimit from "express-rate-limit";
@@ -23,27 +25,16 @@ import {
 import { BellSweeper } from "./bellSweeper.js";
 import { BootstrapBroadcaster, drainInFlightBootstraps } from "./bootstrap.js";
 import { onBootstrapReleased } from "./bootstrapHold.js";
-import { parseAllowUsers } from "./conversation/allowUsers.js";
-import { ATTESTATION_KEY_INFO } from "./conversation/captureAttestation.js";
-import { IngestOriginVerifier } from "./conversation/ingestOrigin.js";
-import { createIngestHandler } from "./conversation/ingestRoute.js";
-import { ConversationService } from "./conversation/service.js";
-import { ConversationStore } from "./conversation/store.js";
-import { ConversationWsHub } from "./conversation/ws.js";
 import { migrateDb, validateD1Config } from "./db.js";
 import { DockerManager } from "./dockerManager.js";
 import { IdleSweeper, listRunningSessionIds } from "./idleSweeper.js";
 import { logger } from "./logger.js";
 import { createPortDispatcher, validatePortProxyBaseDomain } from "./portDispatcher.js";
 import { ProjectDirectory } from "./projects/directory.js";
-import { conversationRecreatePort } from "./recreate/capturePort.js";
-import { d1RecreatePort } from "./recreate/d1.js";
-import { RecreationEngine } from "./recreate/engine.js";
-import { RecreateAttemptStore } from "./recreateAttempt.js";
 import { requestIdMiddleware } from "./requestContext.js";
 import { buildAcpRouter } from "./routes/acp.js";
 import { buildRouter } from "./routes.js";
-import { deriveSubkey, validateSecretsKey } from "./secrets.js";
+import { validateSecretsKey } from "./secrets.js";
 import { sessionLifecycleLock } from "./sessionLifecycleLock.js";
 import { SessionManager } from "./sessionManager.js";
 import { parseTrustProxy, TrustProxyError, warnIfProductionMisconfigured } from "./trustProxy.js";
@@ -109,37 +100,9 @@ try {
 const sessions = new SessionManager();
 const docker = new DockerManager(sessions);
 
-// Phase 3 (docs/CONVERSATION.md) — conversation capture. Constructed
-// unconditionally so the ingest endpoint always exists and answers 204
-// (a hook pointed at a backend without the receiver would otherwise
-// see a 404 and retry noise); with CONVERSATION_ENABLED unset/false the
-// service rejects everything as `disabled`, writes no file, injects no
-// token and mounts no bind — behaviour-neutral by construction.
-const CONVERSATION_ENABLED = process.env.CONVERSATION_ENABLED === "true";
-// CONVERSATION.md §3.1.1 (v1.8.6) — bind hook ingest to the session container's
-// network origin. Off by default and kept off until the operator has verified,
-// read-only, that the backend sees the containers' sessions-net addresses:
-// on a deployment where it doesn't (a proxy/NAT in between), turning it on
-// would reject all capture.
-// Values: unset/`false` = off (no inspection at all); `observe` = run the check
-// on every authenticated request and only COUNT the outcome (the activation
-// gate, DEPLOYMENT.md); `true` = enforce. Anything else is treated as off and
-// logged, so a typo can never enforce by accident.
-const INGEST_ORIGIN_FLAG = process.env.INGEST_REQUIRE_SESSION_ORIGIN ?? "";
-const INGEST_ORIGIN_MODE: "enforce" | "observe" | null =
-	INGEST_ORIGIN_FLAG === "true" ? "enforce" : INGEST_ORIGIN_FLAG === "observe" ? "observe" : null;
-if (INGEST_ORIGIN_MODE === null && !["", "false"].includes(INGEST_ORIGIN_FLAG)) {
-	logger.warn(
-		`[conversation] INGEST_REQUIRE_SESSION_ORIGIN=${JSON.stringify(INGEST_ORIGIN_FLAG)} is not true|observe|false: origin check OFF`,
-	);
-}
-// 3.0d (§7): owners whose NEW sessions are born with capture requested.
-const CONVERSATION_ALLOW_USERS = parseAllowUsers(process.env.CONVERSATION_ALLOW_USERS);
-const WORKSPACE_ROOT_FOR_CONVERSATION =
-	process.env.WORKSPACE_ROOT ?? "/var/shared-terminal/workspaces";
-const conversationStore = new ConversationStore({ workspaceRoot: WORKSPACE_ROOT_FOR_CONVERSATION });
+const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT ?? "/var/shared-terminal/workspaces";
 // ACP agents (acp/agents.ts).
-const acpAgents = new AcpAgents(acpConfigFromEnv(WORKSPACE_ROOT_FOR_CONVERSATION, PORT), docker);
+const acpAgents = new AcpAgents(acpConfigFromEnv(WORKSPACE_ROOT, PORT), docker);
 docker.setAgentHooks(acpAgents.hooks());
 // A runner held back during a creation bootstrap starts when it ends.
 onBootstrapReleased((sessionId) => {
@@ -151,78 +114,6 @@ onBootstrapReleased((sessionId) => {
 			),
 		);
 });
-// 3.0d — durable recreation records and the fail-closed
-// `recreate-unresolved` gate (CONVERSATION.md §2.7.4). Installed on the
-// lifecycle lock before the server accepts requests, so every lifecycle
-// verb checks it under the lock; reconcile passes skip such sessions.
-const recreateAttempts = new RecreateAttemptStore(WORKSPACE_ROOT_FOR_CONVERSATION);
-const isRecreateUnresolved = (sid: string) =>
-	recreateAttempts.assertResolved(sid).then(
-		() => false,
-		() => true,
-	);
-sessionLifecycleLock.setGuard((sid, op) =>
-	op === "delete-hard"
-		? recreateAttempts.assertResolvedAndNotRetained(sid)
-		: recreateAttempts.assertResolved(sid),
-);
-docker.setRecreateUnresolvedCheck(isRecreateUnresolved);
-const conversation = new ConversationService({
-	workspaceRoot: WORKSPACE_ROOT_FOR_CONVERSATION,
-	enabled: CONVERSATION_ENABLED,
-	port: PORT,
-	store: conversationStore,
-	execCapture: (sid, cmd, opts) => docker.execCapture(sid, cmd, opts),
-	isRecreateUnresolved,
-	captureDocker: {
-		inspectCapture: (cid) => docker.inspectCapture(cid),
-		currentImage: () => docker.currentSessionImage(),
-		probeRelay: (sid, cid) => docker.probeRelay(sid, cid),
-	},
-	// §2.7.5.1 — capability attestations survive the loss of a container's image.
-	captureAttestationKey: () => deriveSubkey(ATTESTATION_KEY_INFO),
-	// §3.1.1 — absent unless the flag is on: off is the exact pre-v1.8.6 route.
-	ingestOrigin: INGEST_ORIGIN_MODE
-		? new IngestOriginVerifier({
-				inspectSessionNetwork: (cid) => docker.inspectSessionNetwork(cid),
-			})
-		: undefined,
-	ingestOriginMode: INGEST_ORIGIN_MODE ?? undefined,
-});
-docker.setConversationHooks({
-	prepareSpawn: async (sid) => {
-		const { prepareSpawnCapture } = await import("./conversation/activation.js");
-		// Fail-closed: an image that can't be inspected counts as one
-		// without the relay label ⇒ spawn without capture.
-		const image = await docker.currentSessionImage().catch(() => null);
-		const r = await prepareSpawnCapture(conversation.activationDeps, sid, image);
-		return { env: r.env, binds: r.binds, imageId: r.imageId };
-	},
-	onSessionDown: (sid) => conversation.onSessionDown(sid),
-	onSessionPurged: (sid) => conversation.onSessionPurged(sid),
-});
-// 3.0d — the recreation engine (CONVERSATION.md §2.7), driven by the admin
-// `GET`/`POST /api/admin/sessions/:id/recreate`. At boot it only runs its
-// pass over leftovers of RESOLVED attempts; unresolved attempts are never
-// resolved after a restart (D8).
-const recreation = new RecreationEngine({
-	workspaceRoot: WORKSPACE_ROOT_FOR_CONVERSATION,
-	docker: docker.recreatePort(),
-	d1: d1RecreatePort,
-	attempts: recreateAttempts,
-	lock: sessionLifecycleLock,
-	capture: conversationRecreatePort(conversation),
-	// §2.7.7: the filesystem a carry-over writes to is Docker's data root,
-	// which this container cannot see; the operator names a path on that
-	// same filesystem (DEPLOYMENT.md). Unset ⇒ carry-overs block
-	// (`disk-space-unknown`), nothing else changes.
-	dockerFsPath: process.env.RECREATE_DOCKER_FS_PATH || null,
-});
-logger.info(
-	CONVERSATION_ENABLED
-		? "[server] conversation capture ENABLED (per-session opt-in)"
-		: "[server] conversation capture disabled (CONVERSATION_ENABLED unset)",
-);
 // Composer (sending into a tmux pane) is retired: traditional sessions are
 // worked from their Terminal; agents talk through ACP (acp/agents.ts).
 logger.info("[server] composer disabled (retired)");
@@ -247,7 +138,7 @@ const bootstrapBroadcaster = new BootstrapBroadcaster();
 // activity signal when traffic lands on a different replica; that's
 // the same single-replica constraint the BootstrapBroadcaster has.
 const idleSweeper = new IdleSweeper({
-	// Lifecycle lock (CONVERSATION.md §2.7.2) without waiting: a session
+	// Lifecycle lock without waiting: a session
 	// someone else is starting, stopping or deleting is skipped and
 	// retried on the next sweep (its activity entry stays), instead of
 	// stalling the sweep for every other session behind it.
@@ -379,10 +270,6 @@ app.use(dispatcherLimiter);
 // `Cookie` header itself for auth gating on `public: false` ports —
 // see `extractAuthToken` in portDispatcher.ts.
 app.use((req, res, next) => portDispatcher.middleware(req, res, next));
-// Phase 3 — hook ingest BEFORE express.json/cookieParser/CORS: it has its
-// own L5-capped body reader, no cookies and no browser caller. It only
-// claims `POST /ingest/claude/hook`; everything else falls through.
-app.use(createIngestHandler({ service: conversation }));
 // /api/acp parses its own bodies (messages up to ACP_MESSAGE_MAX_BYTES, not the
 // 100 KB default); every other route keeps the global parser unchanged.
 const globalJson = express.json();
@@ -448,9 +335,7 @@ app.use((_req, res, next) => {
 app.use("/api/acp", buildAcpRouter(acpAgents));
 app.use(
 	"/api",
-	buildRouter(sessions, docker, bootstrapBroadcaster, undefined, idleSweeper, conversation, {
-		recreation,
-		conversationAllowUsers: CONVERSATION_ALLOW_USERS,
+	buildRouter(sessions, docker, bootstrapBroadcaster, undefined, idleSweeper, {
 		projects: projectDirectory,
 		acp: acpAgents,
 	}),
@@ -489,23 +374,43 @@ const stopHeartbeat = startWsHeartbeat(wss, 30_000);
 
 const acpWs = new AcpWsHub(acpAgents);
 
-// 3.1 — the Conversation WS (replay + live of persisted events, owner-only).
-const conversationWs = new ConversationWsHub(conversation);
-
 wss.on("connection", (ws, req) => {
-	handleWsConnection(
-		ws,
-		req,
-		sessions,
-		docker,
-		bootstrapBroadcaster,
-		idleSweeper,
-		conversationWs,
-		acpWs,
-	);
+	handleWsConnection(ws, req, sessions, docker, bootstrapBroadcaster, idleSweeper, acpWs);
 });
 
 // ── Startup ───────────────────────────────────────────────────────────────────
+
+/**
+ * The container recreation is gone, but a host may still hold the record of
+ * an attempt that never resolved (or that kept the old container under an
+ * `-old-` name). Nothing acts on it any more — the operator has to look at
+ * that session's containers by hand — so say so once at boot. Read-only.
+ */
+async function warnLeftoverRecreations(workspaceRoot: string): Promise<void> {
+	const controlRoot = path.join(workspaceRoot, ".st-control");
+	let sids: string[];
+	try {
+		sids = await fs.readdir(controlRoot);
+	} catch {
+		return;
+	}
+	for (const sid of sids) {
+		try {
+			const raw = await fs.readFile(path.join(controlRoot, sid, "recreate-attempt.json"), "utf8");
+			const r = JSON.parse(raw) as { state?: unknown; retained?: unknown };
+			if (r.state !== "resolved" || r.retained) {
+				logger.warn(
+					`[server] session ${sid} has a leftover container recreation (state=${String(r.state)}${r.retained ? ", a container retained" : ""}): check its containers by hand`,
+				);
+			}
+		} catch (err) {
+			const code = (err as NodeJS.ErrnoException).code;
+			if (code !== "ENOENT" && code !== "ENOTDIR") {
+				logger.warn(`[server] session ${sid}: unreadable recreation record`);
+			}
+		}
+	}
+}
 
 async function start() {
 	await migrateDb();
@@ -513,21 +418,7 @@ async function start() {
 	// AFTER migrateDb so the push_subscriptions table exists before any
 	// subscribe/send, and before the server accepts requests.
 	configureWebPush();
-	// Before any reconcile: an `open` record left by the previous process
-	// becomes `uncertain` (persisted). Never resolves anything (D8). The
-	// gate already refuses such sessions even before this runs (an `open`
-	// record this process did not begin counts as unresolved); this only
-	// makes the state explicit and logs it. Not fatal.
-	try {
-		const recovered = await recreateAttempts.recoverOnBoot();
-		if (recovered.uncertain.length || recovered.unreadable.length) {
-			logger.warn(
-				`[server] recreate-unresolved sessions: ${recovered.uncertain.length} uncertain, ${recovered.unreadable.length} unreadable`,
-			);
-		}
-	} catch (err) {
-		logger.error(`[server] recreate attempt recovery failed: ${(err as Error).message}`);
-	}
+	await warnLeftoverRecreations(WORKSPACE_ROOT);
 	await docker.reconcile();
 	try {
 		await acpAgents.installRunnerFiles();
@@ -536,23 +427,6 @@ async function start() {
 	} catch (err) {
 		logger.warn(`[server] ACP agents boot failed: ${(err as Error).message}`);
 	}
-	try {
-		await recreation.bootPass();
-	} catch (err) {
-		logger.warn(`[server] recreation boot pass failed: ${(err as Error).message}`);
-	}
-	// Phase 3 — after docker.reconcile so session statuses are settled:
-	// hooks files ⇔ requested ∧ token, revocation markers win over D1,
-	// `gap backend_restart` per live conversation, one probe per session.
-	// Flag off: only removes stale hooks files. Never fatal.
-	try {
-		await conversation.reconcile();
-	} catch (err) {
-		logger.warn(`[server] conversation reconcile failed: ${(err as Error).message}`);
-	}
-	// v1.7.2 §5.3: the silence decay and its re-confirming probe, after the
-	// boot reconcile (which already probed every running session once).
-	conversation.startSilenceSweep();
 	// Wait for the timing-parity dummy bcrypt hash to finish computing
 	// before accepting requests. Without this, the first unknown-user
 	// login would block on the ~2^BCRYPT_ROUNDS-ms hash computation,
@@ -625,7 +499,6 @@ function shutdown() {
 	// path is about to close. Idempotent — `stop()` is safe to call
 	// even if `start()` never ran.
 	idleSweeper.stop();
-	recreation.stop();
 	// #355 — same reason: stop the bell sweeper so a sweep can't fire a
 	// docker exec / D1 query / push mid-teardown. Null when push disabled
 	// (never started). PR #417 review SHOULD-FIX.
@@ -655,12 +528,6 @@ function shutdown() {
 	// below. (SIGKILL still strands — no drain can run; documented on
 	// drainInFlightBootstraps.)
 	const bootstrapsDrained = drainInFlightBootstraps();
-	// Phase 3 — flush queued conversation events and index snapshots so
-	// a deploy restart loses nothing that was already acknowledged with
-	// a 204. Bounded by the same watchdog below.
-	const conversationDrained = conversation.shutdown().catch((err) => {
-		logger.warn(`[server] conversation shutdown failed: ${(err as Error).message}`);
-	});
 	// Watchdog: if a client stalls its close handshake, the bootstrap
 	// drain wedges on Docker/D1, or some other handle keeps the event
 	// loop alive, exit anyway after a grace period instead of hanging
@@ -677,7 +544,7 @@ function shutdown() {
 		// under the drain's in-flight D1 writes. `finally` (not `then`):
 		// drainInFlightBootstraps never rejects today (Promise.allSettled
 		// inside), but the exit must not hinge on that staying true.
-		void Promise.allSettled([bootstrapsDrained, conversationDrained]).finally(() => {
+		void Promise.allSettled([bootstrapsDrained]).finally(() => {
 			clearTimeout(watchdog);
 			process.exit(0);
 		});

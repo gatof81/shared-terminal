@@ -11,8 +11,7 @@
 #   - a backup is PUBLISHED only by its `<name>.COMPLETE` marker, uploaded last, after the NAS's own
 #     checksums matched every local file. Anything without the marker is not a backup to this script:
 #     it is reported, never counted and never removed;
-#   - the host keeps the NEWEST backup (the recreation engine's `backup-stale` precondition needs a
-#     manifest younger than 24 h) and removes an older one only once it is published;
+#   - the host keeps the NEWEST backup and removes an older one only once it is published;
 #   - NAS retention removes backups BY NAME (retention.py), only in a run that just published one;
 #   - a failure never deletes anything, on either side, and ends non-zero with a status file.
 #

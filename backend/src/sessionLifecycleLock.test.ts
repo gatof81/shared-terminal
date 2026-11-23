@@ -72,7 +72,7 @@ describe("SessionLifecycleLock", () => {
 		const gate = deferred();
 		const holder = lock.run("s1", "delete", () => gate.promise);
 		const fn = vi.fn(async () => undefined);
-		const err = await lock.run("s1", "recreate", fn, { mode: "fail" }).catch((e) => e);
+		const err = await lock.run("s1", "stop", fn, { mode: "fail" }).catch((e) => e);
 		expect(err).toBeInstanceOf(SessionBusyError);
 		expect((err as SessionBusyError).heldBy).toBe("delete");
 		expect(fn).not.toHaveBeenCalled();
@@ -84,7 +84,7 @@ describe("SessionLifecycleLock", () => {
 		vi.useFakeTimers();
 		const lock = new SessionLifecycleLock();
 		const gate = deferred();
-		const holder = lock.run("s1", "recreate", () => gate.promise);
+		const holder = lock.run("s1", "stop", () => gate.promise);
 		const late = vi.fn(async () => undefined);
 		const waiting = lock.run("s1", "start", late).catch((e) => e);
 		await vi.advanceTimersByTimeAsync(LIFECYCLE_LOCK_MAX_WAIT_MS - 1);
@@ -116,51 +116,7 @@ describe("SessionLifecycleLock", () => {
 		await expect(next).resolves.toBeUndefined();
 	});
 
-	it("the guard runs under the lock before fn: a refusal never runs fn, releases the lock and the queue moves on", async () => {
-		const lock = new SessionLifecycleLock();
-		const refusal = new Error("recreate-unresolved");
-		const guard = vi.fn(async (_sid: string, op: string) => {
-			if (op === "start") throw refusal;
-		});
-		lock.setGuard(guard);
-		const gate = deferred();
-		const holder = lock.run("s1", "stop", () => gate.promise);
-		const refused = vi.fn(async () => undefined);
-		const startP = lock.run("s1", "start", refused).catch((e) => e);
-		const after = vi.fn(async () => "deleted");
-		const deleteP = lock.run("s1", "delete", after);
-		gate.resolve();
-		await holder;
-		expect(await startP).toBe(refusal);
-		expect(refused).not.toHaveBeenCalled();
-		await expect(deleteP).resolves.toBe("deleted");
-		expect(guard.mock.calls.map((c) => c[1])).toEqual(["stop", "start", "delete"]);
-		expect(lock.heldBy("s1")).toBeNull();
-	});
-
-	it("the guard is not consulted for create (a fresh id has no history)", async () => {
-		const lock = new SessionLifecycleLock();
-		const guard = vi.fn(async () => {
-			throw new Error("never");
-		});
-		lock.setGuard(guard);
-		await expect(lock.run("s-new", "create", async () => "ok")).resolves.toBe("ok");
-		expect(guard).not.toHaveBeenCalled();
-	});
-
-	it("fail mode (the idle sweeper) is refused by the guard too", async () => {
-		const lock = new SessionLifecycleLock();
-		lock.setGuard(async () => {
-			throw new Error("recreate-unresolved");
-		});
-		const stop = vi.fn(async () => undefined);
-		await expect(lock.run("s1", "stop", stop, { mode: "fail" })).rejects.toThrow(
-			"recreate-unresolved",
-		);
-		expect(stop).not.toHaveBeenCalled();
-	});
-
-	it("default cap is T_rec + T_rb (6 min)", () => {
+	it("default cap is 6 min", () => {
 		expect(LIFECYCLE_LOCK_MAX_WAIT_MS).toBe(6 * 60 * 1000);
 	});
 });

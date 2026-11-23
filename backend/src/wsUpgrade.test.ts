@@ -3,8 +3,8 @@
  *
  * Every earlier WS test called `handleWsConnection` directly, so the
  * `server.on("upgrade")` filter that stands before it was never exercised —
- * and 3.1 shipped with `/ws/conversation/` refused there (404 in production
- * with a valid cookie and an allowed Origin). This suite mounts the real
+ * and a route once shipped refused there (404 in production with a valid
+ * cookie and an allowed Origin). This suite mounts the real
  * `createWsUpgradeHandler` on a real `http.Server`, wires the real
  * `handleWsConnection` to its `connection` event, and drives both with a
  * real `ws` client, so a path the handler routes but the filter refuses
@@ -19,7 +19,6 @@ import { WebSocket, WebSocketServer } from "ws";
 import type { AcpWsHub } from "./acp/ws.js";
 import { __resetJwtSecretForTests, validateJwtSecret } from "./auth.js";
 import { BootstrapBroadcaster } from "./bootstrap.js";
-import { ConversationWsHub } from "./conversation/ws.js";
 import type { DockerManager } from "./dockerManager.js";
 import { createPortDispatcher } from "./portDispatcher.js";
 import { ForbiddenError, NotFoundError, type SessionManager } from "./sessionManager.js";
@@ -37,7 +36,6 @@ import { createWsUpgradeRateLimiter } from "./wsUpgradeRateLimit.js";
 const TEST_SECRET = "test-secret-do-not-use-in-prod";
 const ALLOWED_ORIGIN = "https://app.test";
 const OWNER = "user-owner";
-const OTHER = "user-other";
 const OWNED = "s-owned";
 const FOREIGN = "s-foreign";
 
@@ -77,22 +75,13 @@ let server: http.Server;
 let wss: WebSocketServer;
 let port: number;
 let broadcaster: BootstrapBroadcaster;
-let hub: ConversationWsHub;
-const summaries = vi.fn(async (_sid: string) => []);
 
 async function start(
 	overrides: Partial<WsUpgradeDeps> = {},
-	acpWs?: Parameters<typeof handleWsConnection>[7],
+	acpWs?: Parameters<typeof handleWsConnection>[6],
 ) {
 	wss = new WebSocketServer({ noServer: true });
 	broadcaster = new BootstrapBroadcaster();
-	hub = new ConversationWsHub({
-		summaries,
-		conversationFile: async () => null,
-		residentState: () => null,
-		onPersistedEvent: () => () => {},
-		noteWsResync: () => {},
-	});
 	server = http.createServer((_req, res) => {
 		res.statusCode = 404;
 		res.end();
@@ -116,7 +105,7 @@ async function start(
 		}),
 	);
 	wss.on("connection", (ws, req) => {
-		handleWsConnection(ws, req, sessions, docker, broadcaster, undefined, hub, acpWs);
+		handleWsConnection(ws, req, sessions, docker, broadcaster, undefined, acpWs);
 	});
 	await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
 	port = (server.address() as AddressInfo).port;
@@ -168,7 +157,6 @@ const asOwner = (extra: Record<string, string> = {}) => ({
 beforeEach(async () => {
 	sessions.assertOwnedBy.mockClear();
 	sessions.assertCanOperate.mockClear();
-	summaries.mockClear();
 	await start();
 });
 afterEach(async () => {
@@ -179,22 +167,16 @@ afterEach(async () => {
 // ── Admission predicate ──────────────────────────────────────────────────────
 
 describe("isWsPath", () => {
-	it("admits exactly the four app prefixes", () => {
-		expect(WS_PATH_PREFIXES).toEqual([
-			"/ws/sessions/",
-			"/ws/bootstrap/",
-			"/ws/conversation/",
-			"/ws/acp",
-		]);
+	it("admits exactly the three app prefixes", () => {
+		expect(WS_PATH_PREFIXES).toEqual(["/ws/sessions/", "/ws/bootstrap/", "/ws/acp"]);
 		expect(isWsPath("/ws/sessions/abc?tab=t1")).toBe(true);
 		expect(isWsPath("/ws/bootstrap/abc")).toBe(true);
-		expect(isWsPath("/ws/conversation/abc")).toBe(true);
 		expect(isWsPath("/ws/acp")).toBe(true);
 	});
-	it("refuses near misses", () => {
+	it("refuses near misses and the removed conversation channel", () => {
 		for (const p of [
+			"/ws/conversation/abc",
 			"/ws/conversation",
-			"/ws/conversations/abc",
 			"/ws/sessions",
 			"/ws/",
 			"/api/ws/sessions/x",
@@ -228,79 +210,6 @@ describe("WS /ws/acp through server.on('upgrade')", () => {
 	});
 });
 
-// ── /ws/conversation through the real upgrade path (3.1 hotfix) ─────────────
-
-describe("WS /ws/conversation/<sid> through server.on('upgrade')", () => {
-	it("a valid upgrade completes (101) and receives the hello frame", async () => {
-		const c = await connect(`/ws/conversation/${OWNED}`, asOwner());
-		expect(c.status).toBeNull();
-		expect(c.opened).toBe(true);
-		await waitFor(() => c.frames.some((f) => f.type === "hello"));
-		expect(c.frames[0]).toEqual({ type: "hello", conversations: [] });
-		expect(sessions.assertOwnedBy).toHaveBeenCalledWith(OWNED, OWNER);
-		expect(summaries).toHaveBeenCalledWith(OWNED);
-		expect(hub.openSockets(OWNER)).toBe(1);
-		c.ws.close();
-		await c.close;
-	});
-
-	it("works for a non-browser client (no Origin), like the REST surface", async () => {
-		const c = await connect(`/ws/conversation/${OWNED}`, { cookie: cookieFor(OWNER) });
-		expect(c.opened).toBe(true);
-		await waitFor(() => c.frames.some((f) => f.type === "hello"));
-		c.ws.close();
-		await c.close;
-	});
-
-	it("without a valid cookie the connection is refused before any authorization or hello", async () => {
-		for (const headers of [
-			{ origin: ALLOWED_ORIGIN },
-			{ origin: ALLOWED_ORIGIN, cookie: "st_token=not.a.jwt" },
-		]) {
-			const c = await connect(`/ws/conversation/${OWNED}`, headers);
-			const closed = await c.close;
-			expect(closed).toEqual({ code: 1008, reason: "Unauthorized" });
-			expect(c.frames).toEqual([{ type: "error", message: "Unauthorized" }]);
-		}
-		expect(sessions.assertOwnedBy).not.toHaveBeenCalled();
-		expect(summaries).not.toHaveBeenCalled();
-	});
-
-	it("a disallowed Origin is refused with 403 before the handshake — no socket, no auth", async () => {
-		const c = await connect(`/ws/conversation/${OWNED}`, asOwner({ origin: "https://evil.test" }));
-		expect(c.status).toBe(403);
-		expect(c.opened).toBe(false);
-		expect(wss.clients.size).toBe(0);
-		expect(sessions.assertOwnedBy).not.toHaveBeenCalled();
-		expect(hub.openSockets(OWNER)).toBe(0);
-	});
-
-	it("a foreign or missing session is refused identically, with no hello and no detail", async () => {
-		const foreign = await connect(`/ws/conversation/${FOREIGN}`, asOwner());
-		const missing = await connect("/ws/conversation/s-does-not-exist", asOwner());
-		const [fc, mc] = await Promise.all([foreign.close, missing.close]);
-		expect(fc).toEqual({ code: 1008, reason: "Not found" });
-		expect(mc).toEqual(fc);
-		expect(foreign.frames).toEqual([{ type: "error", message: "Session not found" }]);
-		expect(missing.frames).toEqual(foreign.frames);
-		expect(summaries).not.toHaveBeenCalled();
-		expect(hub.openSockets(OWNER)).toBe(0);
-		// The only owner check ran as the caller, never as the real owner.
-		expect(sessions.assertOwnedBy).toHaveBeenCalledWith(FOREIGN, OWNER);
-		expect(sessions.assertOwnedBy).toHaveBeenCalledWith("s-does-not-exist", OWNER);
-	});
-
-	it("another user's valid cookie cannot observe the owner's conversations", async () => {
-		const c = await connect(`/ws/conversation/${OWNED}`, {
-			cookie: cookieFor(OTHER),
-			origin: ALLOWED_ORIGIN,
-		});
-		expect(await c.close).toEqual({ code: 1008, reason: "Not found" });
-		expect(c.frames).toEqual([{ type: "error", message: "Session not found" }]);
-		expect(summaries).not.toHaveBeenCalled();
-	});
-});
-
 // ── The pre-existing routes and the refusals stay as they were ──────────────
 
 describe("existing WS routes through the same entry", () => {
@@ -327,6 +236,14 @@ describe("existing WS routes through the same entry", () => {
 		await c.close;
 	});
 
+	it("a disallowed Origin is refused with 403 before the handshake — no socket, no auth", async () => {
+		const c = await connect(`/ws/bootstrap/${OWNED}`, asOwner({ origin: "https://evil.test" }));
+		expect(c.status).toBe(403);
+		expect(c.opened).toBe(false);
+		expect(wss.clients.size).toBe(0);
+		expect(sessions.assertOwnedBy).not.toHaveBeenCalled();
+	});
+
 	it("unauthenticated callers on the existing routes still get Unauthorized", async () => {
 		for (const path of [`/ws/sessions/${OWNED}?tab=t1`, `/ws/bootstrap/${OWNED}`]) {
 			const c = await connect(path, { origin: ALLOWED_ORIGIN });
@@ -337,7 +254,7 @@ describe("existing WS routes through the same entry", () => {
 	it("an unknown WebSocket path is refused with 404 before the handshake", async () => {
 		for (const path of [
 			"/ws/other/x",
-			"/ws/conversations/s-owned",
+			`/ws/conversation/${OWNED}`,
 			"/ws/conversation",
 			"/api/sessions",
 			"/",

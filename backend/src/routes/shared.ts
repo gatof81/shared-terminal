@@ -9,7 +9,6 @@ import type { Response } from "express";
 import type { AcpAgents } from "../acp/agents.js";
 import type { BootstrapBroadcaster } from "../bootstrap.js";
 import type { StatsBySession } from "../containerStats.js";
-import type { ConversationService } from "../conversation/service.js";
 import type { DockerManager } from "../dockerManager.js";
 import { UploadQuotaExceededError } from "../dockerManager.js";
 import type { ExecRegistry } from "../execRegistry.js";
@@ -17,8 +16,6 @@ import type { IdleSweeperStats } from "../idleSweeper.js";
 import { logger } from "../logger.js";
 import type { ProjectDirectory } from "../projects/directory.js";
 import type { createAuthRateLimiters, RateLimitConfig, UsernameRateLimiter } from "../rateLimit.js";
-import type { RecreationEngine } from "../recreate/engine.js";
-import { RecreateRetainedError, RecreateUnresolvedError } from "../recreateAttempt.js";
 import { SessionBusyError } from "../sessionLifecycleLock.js";
 import type { SessionManager } from "../sessionManager.js";
 import { ForbiddenError, NotFoundError } from "../sessionManager.js";
@@ -50,15 +47,6 @@ export interface RouteContext {
 	// #381 — per-router so tests get isolation for free; production has
 	// exactly one router, so this is effectively the process singleton.
 	execRegistry: ExecRegistry;
-	// Phase 3 — absent when the subsystem isn't wired (older tests, a
-	// deployment that never constructs it); the list route then answers
-	// an honest "nothing captured" shape.
-	conversation?: ConversationService;
-	// 3.0d — the recreation engine behind `GET`/`POST /admin/sessions/:id/recreate`
-	// (CONVERSATION.md §2.7.2). Absent ⇒ those routes answer 503.
-	recreation?: RecreationEngine;
-	// 3.0d — `CONVERSATION_ALLOW_USERS` (§7), lowercase user ids. Absent ⇒ empty.
-	conversationAllowUsers?: ReadonlySet<string>;
 	// Projects (ACP agents take part in one). Always wired in production;
 	// optional so route tests can build a router without them (then the
 	// project routes are not mounted).
@@ -195,17 +183,9 @@ export function handleSessionError(err: unknown, res: Response): void {
 		res.status(404).json({ error: err.message });
 	} else if (err instanceof ForbiddenError) {
 		res.status(403).json({ error: err.message });
-	} else if (err instanceof RecreateUnresolvedError) {
-		// A recreation of this session is not resolved (CONVERSATION.md
-		// §2.7.4, D8 fail-closed). Nothing was done.
-		res.status(409).json({ error: "recreate-unresolved" });
-	} else if (err instanceof RecreateRetainedError) {
-		// A carry-over or rollback still retains a container (§2.7.7): a
-		// hard delete would orphan it. Nothing was done.
-		res.status(409).json({ error: "retained-present" });
 	} else if (err instanceof SessionBusyError) {
 		// Another lifecycle operation holds the session's lock and the wait
-		// cap ran out (or this verb never waits). Nothing was done.
+		// cap ran out. Nothing was done.
 		res.status(409).json({ error: "busy" });
 	} else if (err instanceof UploadQuotaExceededError) {
 		// 413 Payload Too Large is the HTTP-spec answer for "request

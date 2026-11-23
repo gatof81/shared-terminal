@@ -86,8 +86,7 @@ const D1_TIMEOUT_MS = 10_000;
  * D1 answered and said the statement failed: it was not applied. Every
  * other error from `d1Query` (timeout, network, a non-2xx without that
  * answer) leaves it unknown whether the statement ran — callers whose
- * correctness depends on that distinction (the recreation CAS,
- * CONVERSATION.md §2.7.2 step 4) must treat those as ambiguous.
+ * correctness depends on that distinction must treat those as ambiguous.
  */
 export class D1StatementError extends Error {
 	constructor(message: string) {

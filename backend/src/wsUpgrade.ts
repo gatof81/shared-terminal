@@ -3,10 +3,9 @@
  * every WebSocket in production (`server.on("upgrade", …)` in index.ts).
  *
  * Lives outside index.ts so a test can mount the SAME function on a real
- * `http.Server` and drive it with a real `ws` client. The 3.1 hotfix that
- * created this module fixed a filter that refused `/ws/conversation/` while
- * every test called `handleWsConnection` directly, behind the filter — the
- * admitted paths are now one list (`WS_PATH_PREFIXES`) that the handler
+ * `http.Server` and drive it with a real `ws` client. A filter once refused
+ * a route the handler knew while every test called `handleWsConnection`
+ * directly, behind the filter — the admitted paths are now one list (`WS_PATH_PREFIXES`) that the handler
  * routes and this filter admits, and `wsUpgrade.test.ts` goes through the
  * production entry.
  */
@@ -26,12 +25,11 @@ import { resolveClientIp, type WsUpgradeRateLimiter } from "./wsUpgradeRateLimit
  * The `/ws/*` paths `handleWsConnection` (wsHandler.ts) routes. The upgrade
  * filter admits exactly these; anything else is refused with 404 before a
  * WebSocket object exists. Keep the two in step: a path the handler routes
- * but this list lacks is unreachable in production (that was the 3.1 bug).
+ * but this list lacks is unreachable in production.
  */
 export const WS_PATH_PREFIXES: readonly string[] = [
 	"/ws/sessions/",
 	"/ws/bootstrap/",
-	"/ws/conversation/",
 	ACP_WS_PREFIX,
 ];
 

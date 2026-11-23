@@ -52,7 +52,6 @@ vi.mock("./db.js", () => dbStubs);
 
 import type { BootstrapBroadcaster } from "./bootstrap.js";
 import type { DockerManager } from "./dockerManager.js";
-import { RecreateUnresolvedError } from "./recreateAttempt.js";
 import { buildRouter } from "./routes.js";
 import { sessionLifecycleLock } from "./sessionLifecycleLock.js";
 import type { SessionManager } from "./sessionManager.js";
@@ -292,9 +291,9 @@ describe("PATCH /sessions/:id/ports", () => {
 // Reachability of the GET editor endpoint (#190d) — this was previously
 // untested (only PATCH was), which is why a route-registration regression
 // could ship silently.
-// 3.0d audit A2: a recreation writes the mappings from the config it read
-// under the session lifecycle lock; an edit must never land in between.
-describe("PATCH /sessions/:id/ports under the session lifecycle lock (3.0d audit A2)", () => {
+// A start/stop rewrites or clears the mappings under the session lifecycle
+// lock; an edit must never land in between.
+describe("PATCH /sessions/:id/ports under the session lifecycle lock", () => {
 	const writes = () =>
 		(dbStubs.d1Query.mock.calls as Array<[string, unknown[]]>).filter((c) =>
 			/^(UPDATE session_configs SET ports_json|DELETE FROM sessions_port_mappings|INSERT INTO sessions_port_mappings)/.test(
@@ -309,17 +308,13 @@ describe("PATCH /sessions/:id/ports under the session lifecycle lock (3.0d audit
 			meta: { changes: 0, duration: 0, last_row_id: 0 },
 		});
 	});
-	afterEach(() => {
-		sessionLifecycleLock.setGuard(null);
-	});
-
-	it("behind a recreation holding the lock: waits, writes nothing meanwhile, then applies", async () => {
+	it("behind a start holding the lock: waits, writes nothing meanwhile, then applies", async () => {
 		const { sessions } = makeFakeSessions();
 		await spinUp(sessions);
 		let release!: () => void;
 		const held = sessionLifecycleLock.run(
 			"sess-1",
-			"recreate",
+			"start",
 			() =>
 				new Promise<void>((r) => {
 					release = r;
@@ -333,17 +328,6 @@ describe("PATCH /sessions/:id/ports under the session lifecycle lock (3.0d audit
 		await held;
 		expect((await pending).status).toBe(200);
 		expect(writes().map((c) => c[0].split(" ")[0])).toEqual(["UPDATE", "DELETE", "INSERT"]);
-	});
-
-	it("with a recreation unresolved (the lock's guard) ⇒ 409 recreate-unresolved, nothing written", async () => {
-		const { sessions } = makeFakeSessions();
-		await spinUp(sessions);
-		sessionLifecycleLock.setGuard(async (sid) => {
-			throw new RecreateUnresolvedError(sid, "test");
-		});
-		const res = await patchPorts({ ports: [] });
-		expect([res.status, await res.json()]).toEqual([409, { error: "recreate-unresolved" }]);
-		expect(writes()).toEqual([]);
 	});
 
 	it("the session deleted while the edit waits ⇒ 404, nothing written", async () => {

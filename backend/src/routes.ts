@@ -12,7 +12,6 @@
 import { Router } from "express";
 import { requireAuth } from "./auth.js";
 import type { BootstrapBroadcaster } from "./bootstrap.js";
-import type { ConversationService } from "./conversation/service.js";
 import type { DockerManager } from "./dockerManager.js";
 import { ExecRegistry } from "./execRegistry.js";
 import type { RateLimitConfig } from "./rateLimit.js";
@@ -23,8 +22,6 @@ import {
 } from "./rateLimit.js";
 import { registerAdminRoutes } from "./routes/admin.js";
 import { registerAuthRoutes } from "./routes/auth.js";
-import { registerConversationAdminRoutes } from "./routes/conversationAdmin.js";
-import { registerConversationRoutes } from "./routes/conversations.js";
 import { registerExecRoutes } from "./routes/exec.js";
 import { registerFileRoutes } from "./routes/files.js";
 import { registerGitRoutes } from "./routes/git.js";
@@ -49,15 +46,8 @@ export function buildRouter(
 	// kill / hard-delete so the activity Map doesn't grow unboundedly
 	// across the backend's lifetime.
 	idleSweeper?: RouteIdleSweeper,
-	// Phase 3 — optional for the same reason as `idleSweeper`.
-	conversation?: ConversationService,
-	// 3.0d — the recreation engine and `CONVERSATION_ALLOW_USERS`; optional
-	// for the same reason.
-	// Projects and ACP agents too; optional for the same reason.
-	conversationExtras: Pick<
-		RouteContext,
-		"recreation" | "conversationAllowUsers" | "projects" | "acp"
-	> = {},
+	// Projects and ACP agents; optional for the same reason.
+	extras: Pick<RouteContext, "projects" | "acp"> = {},
 ): Router {
 	const router = Router();
 
@@ -76,8 +66,7 @@ export function buildRouter(
 		limiters,
 		usernameLimiter,
 		execRegistry: new ExecRegistry(),
-		conversation,
-		...conversationExtras,
+		...extras,
 	};
 
 	// ── Auth routes (public) ────────────────────────────────────────────────
@@ -141,8 +130,6 @@ export function buildRouter(
 	registerSessionRoutes(router, ctx);
 	registerFileRoutes(router, ctx);
 	registerGitRoutes(router, ctx);
-	registerConversationRoutes(router, ctx);
-	registerConversationAdminRoutes(router, ctx);
 	registerExecRoutes(router, ctx);
 	registerTemplateRoutes(router, ctx);
 	registerProjectRoutes(router, ctx);
