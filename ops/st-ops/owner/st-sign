@@ -59,10 +59,10 @@ echo
 read -r -p "Escribí 'firmar' para firmar: " ok
 [ "$ok" = firmar ] || die "no firmé nada"
 
-ssh-keygen -Y sign -q -f "$KEY" -n "$NS" "$REQ"
-
+# The temp file first: once the .sig exists, nothing may stop the script before it is verified or removed.
 AS=$(mktemp)
 trap 'rm -f "$AS"' EXIT
+ssh-keygen -Y sign -q -f "$KEY" -n "$NS" "$REQ"
 echo "owner namespaces=\"$NS\" $(cut -d' ' -f1,2 "$KEY.pub")" >"$AS"
 ssh-keygen -Y verify -f "$AS" -I owner -n "$NS" -s "$REQ.sig" <"$REQ" >/dev/null 2>&1 ||
 	{ rm -f "$REQ.sig"; die "la firma no verificó: la borré, no la subas"; }
