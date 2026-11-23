@@ -8,6 +8,10 @@
 //
 // What a message body asks (one directive per message):
 //   consultá a @x: <texto>   → runs `st send @x "<texto>"`, ends the turn
+//   rondas <N>: consultá a @x: <texto>
+//                            → the same consult, and N − 1 more: each reply of
+//                              @x sends it again while rounds are left (kept
+//                              with the session), then is only acknowledged
 //   esperá <N>               → a tool call that takes N seconds
 //   segundo plano <N>        → an async task that ends N seconds after the turn
 //   segundo plano <N>: consultá a @x: <texto>
@@ -93,6 +97,19 @@ const stSend = (sessionId, to, text) =>
 			resolve(err ? `error: ${stderr || err.message}` : stdout.trim()),
 		);
 	});
+/** `st send` as a tool call of the turn, like an agent's Bash. */
+async function consult(sessionId, to, text) {
+	const id = `t${++tool}`;
+	update(sessionId, { sessionUpdate: "tool_call", toolCallId: id, title: `st send @${to}`, kind: "execute", status: "pending" });
+	const result = await stSend(sessionId, to, text);
+	update(sessionId, {
+		sessionUpdate: "tool_call_update",
+		toolCallId: id,
+		status: result.startsWith("error") ? "failed" : "completed",
+		rawInput: { command: `st send @${to} …` },
+	});
+	return result;
+}
 const later = (sessionId, ms, fn) => {
 	const timers = loaded.get(sessionId)?.timers;
 	const t = setTimeout(() => {
@@ -142,7 +159,24 @@ async function prompt(sessionId, text) {
 	if (/^\[st-recovery\]/.test(header) || /^\[st-recovery\]/.test(body) || header.includes("de @system")) {
 		await say(`Reporte de @${ME}: no repetí nada; el mensaje interrumpido quedó sin rehacer. ${ctx}`);
 	} else if ((m = /^Respuesta de @([a-z][a-z0-9-]*) a tu mensaje #(\d+):\s*([\s\S]*)$/.exec(body))) {
-		await say(`Recibí la respuesta de @${m[1]} a #${m[2]}: «${m[3].trim().split("\n")[0].slice(0, 160)}» ${ctx}`);
+		const got = `Recibí la respuesta de @${m[1]} a #${m[2]}: «${m[3].trim().split("\n")[0].slice(0, 160)}»`;
+		const r = s.rounds;
+		if (r && r.to === m[1] && r.left > 0) {
+			r.left -= 1;
+			save();
+			const result = await consult(sessionId, r.to, r.text);
+			await say(`${got}. Otra ronda (quedan ${r.left}): ${result}. ${ctx}`);
+		} else {
+			if (r && r.to === m[1]) delete s.rounds;
+			save();
+			await say(`${got} ${ctx}`);
+		}
+	} else if ((m = /rondas (\d+):\s*consult[aá] a @([a-z][a-z0-9-]*):\s*([\s\S]+)$/i.exec(body))) {
+		const [, n, to, text] = m;
+		s.rounds = { to, text: text.trim(), left: Math.max(Number(n) - 1, 0) };
+		save();
+		const result = await consult(sessionId, to, s.rounds.text);
+		await say(`Ronda 1 de ${n} con @${to} (${result}). Sigo cuando responda. ${ctx}`);
 	} else if ((m = /(segundo plano|persistente) (\d+):\s*consult[aá] a @([a-z][a-z0-9-]*):\s*([\s\S]+)$/i.exec(body))) {
 		const [, how, secs, to, text] = m;
 		const taskId = `bg-${randomUUID().slice(0, 8)}`;
@@ -158,15 +192,7 @@ async function prompt(sessionId, text) {
 				: `En segundo plano (${taskId}) voy a consultar a @${to} en ${secs} s. ${ctx}`,
 		);
 	} else if ((m = /consult[aá] a @([a-z][a-z0-9-]*):\s*([\s\S]+)$/i.exec(body))) {
-		const id = `t${++tool}`;
-		update(sessionId, { sessionUpdate: "tool_call", toolCallId: id, title: `st send @${m[1]}`, kind: "execute", status: "pending" });
-		const result = await stSend(sessionId, m[1], m[2].trim());
-		update(sessionId, {
-			sessionUpdate: "tool_call_update",
-			toolCallId: id,
-			status: result.startsWith("error") ? "failed" : "completed",
-			rawInput: { command: `st send @${m[1]} …` },
-		});
+		const result = await consult(sessionId, m[1], m[2].trim());
 		await say(`Le consulté a @${m[1]} (${result}). Sigo cuando responda. ${ctx}`);
 	} else if ((m = /pregunt[aá]:\s*([^|\n]+)((?:\|[^|\n]+)+)/i.exec(body))) {
 		const question = m[1].trim();
