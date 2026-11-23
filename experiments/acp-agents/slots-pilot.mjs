@@ -213,9 +213,9 @@ async function main() {
 	const dflt = await waitMsg((await send(A1, "hola", pid)).id);
 	check("P5 the default context keeps working in slot 1", dflt.state === "done" && dflt.slot === 1, `${dflt.state} slot ${dflt.slot}`);
 	// #744: lowering the cap leaves the extra slot idle (it claims nothing) until the container restarts — a known
-	// limit, reported here, not judged: the processes it keeps are printed.
+	// limit: two processes are expected here, and the check says so.
 	const lowered = await procs(sids[A1]);
-	console.log(`INFO [${at()}] P5 after lowering to 1, @${A1} keeps ${lowered.runners} runner(s), ${lowered.adapters} adapter(s) until the next container start (#744: known limit)`);
+	check(`P5 after lowering to 1, @${A1} keeps the idle slot 2 until its container restarts (known limit, #744): two runners, two adapters`, lowered.runners === 2 && lowered.adapters === 2, JSON.stringify(lowered));
 
 	// P6. Resources of the two session containers.
 	for (const name of [A1, A2]) {
