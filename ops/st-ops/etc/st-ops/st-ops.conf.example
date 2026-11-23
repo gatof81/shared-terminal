@@ -6,12 +6,12 @@ REPO_URL=https://github.com/gatof81/shared-terminal.git
 REQUIRED_WORKFLOW=.github/workflows/ci.yml
 REQUIRED_CHECKS="Backend (tsc + vitest)|Backend image (clean dist, no host residue)|Frontend (tsc + vite build)|Frontend e2e (Playwright, desktop + mobile)|Ops checks (shellcheck + tests)"
 # A request must be approved this many seconds after it was proposed at the latest.
-REQUEST_TTL=7200
-# Once approved, the writing steps must run within this many seconds (signed into the request as
-# `approval-valid-for`). A request approved and left halfway stops blocking new ones when it lapses.
-APPROVAL_TTL=21600
-# Stage 1 = off: only the verbs that need no signature (help, status, propose, request-text, preflight, result,
-# cancel). `approve` and `step` refuse until the owner sets `on` (stage 2) AND adds their key to allowed_signers.
-SIGNED_VERBS=off
+REQUEST_TTL=86400
+# Once approved, the writing steps must run within this many seconds (written into the request as
+# `approval-valid-for`). A request left halfway is closed with `cancel`, or stops blocking new ones when it lapses.
+APPROVAL_TTL=86400
+# Stage 1 = off: only the verbs that change nothing (help, status, propose, request-text, preflight, verify,
+# result, cancel). `approve` and `step` refuse until the owner sets `on` (stage 2).
+WRITE_VERBS=off
 # Only for `status` (which image the backend's `app` service runs). Optional.
 COMPOSE_PROJECT=shared-terminal
