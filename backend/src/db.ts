@@ -890,6 +890,46 @@ export const MIGRATIONS: readonly Migration[] = [
 			await d1Batch([...ACP_SLOTS_DDL]);
 		},
 	},
+	{
+		// Additive: NULL root_id = the message is its own root (every row before
+		// it was a chain of its own for the new budget, which only counts rows
+		// that carry a root).
+		version: 25,
+		description:
+			"ACP chains — root message of an agent chain; a reply returns to the asker's depth",
+		apply: async () => {
+			await addColumnIfMissing("agent_messages", "root_id INTEGER");
+			await d1Batch([...ACP_CHAIN_DDL]);
+		},
+	},
+];
+
+/**
+ * v25. Depth measures NESTING only: a request an agent sends while working on
+ * a message of depth d has depth d + 1, and the reply brings the asker back to
+ * d (request.depth − 1) — so rounds of consult and answer between two agents
+ * never pile up depth, while a chain where each consult starts another still
+ * stops at ACP_MAX_DEPTH.
+ *
+ * `root_id` is the person's message a chain started from (copied to every
+ * request and reply of the chain; NULL on the root itself and on system
+ * messages). It bounds the ROUNDS: past ACP_MAX_CHAIN agent requests under one
+ * root, an agent's send is refused (acp/agents.ts). A new message from the
+ * person is a new root.
+ */
+export const ACP_CHAIN_DDL: readonly string[] = [
+	"CREATE INDEX IF NOT EXISTS idx_agent_messages_root ON agent_messages(owner_user_id, root_id)",
+	"DROP TRIGGER IF EXISTS trg_agent_message_reply",
+	`CREATE TRIGGER IF NOT EXISTS trg_agent_message_reply
+	AFTER UPDATE OF state ON agent_messages
+	WHEN OLD.state = 'running' AND NEW.state = 'done' AND NEW.kind = 'request'
+		AND EXISTS (SELECT 1 FROM acp_agents WHERE owner_user_id = NEW.owner_user_id AND name = NEW.from_id)
+	BEGIN
+		INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, reply_to, body, state, project_id, depth, context, root_id)
+		VALUES (NEW.owner_user_id, NEW.to_id, NEW.from_id, 'reply', NEW.id,
+			'Respuesta de @' || NEW.to_id || ' a tu mensaje #' || NEW.id || ':' || char(10) || char(10) || COALESCE(NEW.result_text, '(sin texto)'),
+			'pending', NEW.project_id, MAX(NEW.depth - 1, 0), NEW.from_context, NEW.root_id);
+	END`,
 ];
 
 /**

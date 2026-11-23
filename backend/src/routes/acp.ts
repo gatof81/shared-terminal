@@ -171,6 +171,7 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 			let scope: string | null = null;
 			let depth = 0;
 			let fromContext: string | null = null;
+			let rootId: number | null = null;
 			if (context !== undefined && context !== null) {
 				// Only the person places a message in a context; an agent's request
 				// always goes to the recipient's default one.
@@ -203,6 +204,14 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 					});
 				fromContext = c.context;
 				depth = cur.depth + 1;
+				// The chain's root: the person's message it started from (a root
+				// itself, or a system message, has none and is its own).
+				rootId = cur.root_id ?? cur.id;
+				if ((await acp.chainRequests(owner, rootId)) >= acp.config.maxChain)
+					return void res.status(409).json({
+						error: "chain-budget",
+						message: `ya hay ${acp.config.maxChain} pedidos entre agentes para un mismo mensaje de la persona: no se envió nada. Informá el estado y esperá a la persona.`,
+					});
 				if (depth > acp.config.maxDepth)
 					return void res.status(409).json({
 						error: "depth-limit",
@@ -222,6 +231,7 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 					clientId: typeof clientId === "string" ? clientId : null,
 					context: typeof context === "string" ? context : null,
 					fromContext,
+					rootId,
 				})
 				.catch((err: unknown) => {
 					if (err instanceof ClientIdConflictError) return err;

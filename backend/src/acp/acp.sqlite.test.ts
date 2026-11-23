@@ -1,7 +1,7 @@
 /**
  * acp/acp.sqlite.test.ts — the ACP message API against a REAL SQLite (D1 is
  * SQLite): `fetch` to the D1 endpoint is answered by an in-memory database,
- * so the real migrations (v1…v24), the v24 reply trigger and indexes and the
+ * so the real migrations (v1…v25), the v25 reply trigger and indexes and the
  * real router run. Docker is a stub; the caller is `x-test-user` (person) or
  * a real `acp1.` agent token.
  *
@@ -253,7 +253,7 @@ describe("ACP messages: scope, replies, loop guard (v22)", () => {
 			from_id: "developer",
 			to_id: "arquitecto",
 			project_id: "p-1",
-			depth: 1,
+			depth: 0, // v25: the reply returns the asker to its own depth (request − 1)
 			state: "pending",
 		});
 		expect(String(reply.body)).toContain("dos días");
@@ -606,7 +606,7 @@ describe("ACP messages: scope, replies, loop guard (v22)", () => {
 			to_id: "arquitecto",
 			state: "pending",
 			project_id: "p-1",
-			depth: 1,
+			depth: 0,
 		});
 		expect(String(fr[0]!.body)).toContain("falló");
 		expect(String(fr[0]!.body)).toContain("boom");
@@ -1112,5 +1112,83 @@ describe("ACP slots: contexts, caps and attribution (v24)", () => {
 		await settle(sys.body.id);
 		await settle(m1.id);
 		await call(owner, "POST", `/questions/${q1.body.id}/answer`, { action: "cancel" });
+	});
+});
+
+// v25: depth measures nesting only (a reply returns the asker to its depth);
+// rounds are bounded per person's message (root_id, ACP_MAX_CHAIN).
+describe("ACP chains: depth is nesting, rounds have a budget (v25)", () => {
+	// Two agents of their own: earlier suites leave messages queued for theirs.
+	beforeAll(async () => {
+		for (const [name, sid] of [
+			["ida", "aaaaaaaa-0000-4000-8000-00000000000a"],
+			["vuelta", "bbbbbbbb-0000-4000-8000-00000000000b"],
+		]) {
+			db.prepare(
+				"INSERT INTO sessions (session_id, user_id, name, container_name, status) VALUES (?, ?, ?, ?, 'running')",
+			).run(sid, OWNER, name, `st-${sid.slice(0, 12)}`);
+			tokens[name] = acp.tokenFor((await acp.create(sid, OWNER, name)).agent_id);
+		}
+	});
+	/** ida consults vuelta `rounds` times within one person's message. */
+	async function rounds(n: number) {
+		const root = (await call(owner, "POST", "/messages", { to: "ida", body: "coordiná" })).body;
+		let cur = (await call(as("ida"), "POST", "/runner/claim")).body;
+		expect(cur.id).toBe(root.id);
+		const sent: Array<{ status: number; body: Record<string, unknown> }> = [];
+		for (let i = 0; i < n; i++) {
+			const ask = await call(as("ida"), "POST", "/messages", {
+				to: "vuelta",
+				body: `ronda ${i}`,
+			});
+			sent.push(ask);
+			await call(as("ida"), "POST", `/runner/messages/${cur.id}/result`, {
+				state: "done",
+				text: ".",
+			});
+			if (ask.status !== 201) break;
+			const d = await call(as("vuelta"), "POST", "/runner/claim");
+			expect(d.body.id).toBe(ask.body.id);
+			await call(as("vuelta"), "POST", `/runner/messages/${d.body.id}/result`, {
+				state: "done",
+				text: "ok",
+			});
+			cur = (await call(as("ida"), "POST", "/runner/claim")).body; // the reply
+			expect(cur).toMatchObject({ kind: "reply", reply_to: ask.body.id, root_id: root.id });
+		}
+		if (sent.at(-1)?.status === 201)
+			await call(as("ida"), "POST", `/runner/messages/${cur.id}/result`, {
+				state: "done",
+				text: ".",
+			});
+		return { root, sent, last: cur };
+	}
+
+	it("v25 is recorded", () => {
+		expect(db.prepare("SELECT 1 FROM schema_migrations WHERE version = 25").get()).toBeTruthy();
+	});
+
+	it("a long run of consult/answer rounds keeps depth 1 and never meets the depth cap", async () => {
+		// maxDepth is 2 in this suite: 8 rounds would have reached 16 before.
+		const { root, sent, last } = await rounds(8);
+		expect(sent.map((s) => s.status)).toEqual(Array(8).fill(201));
+		expect(sent.map((s) => s.body.depth)).toEqual(Array(8).fill(1));
+		expect(sent.every((s) => s.body.root_id === root.id)).toBe(true);
+		expect(last.depth).toBe(0);
+	});
+
+	it("past ACP_MAX_CHAIN requests under one person's message, a send is refused; the person's next message is a new budget", async () => {
+		const prev = acp.config.maxChain;
+		acp.config.maxChain = 3;
+		try {
+			const { sent } = await rounds(4);
+			expect(sent.map((s) => s.status)).toEqual([201, 201, 201, 409]);
+			expect(sent[3].body.error).toBe("chain-budget");
+			expect(String(sent[3].body.message)).toMatch(/esperá a la persona/);
+			const again = await rounds(1);
+			expect(again.sent[0].status).toBe(201);
+		} finally {
+			acp.config.maxChain = prev;
+		}
 	});
 });
