@@ -34,6 +34,35 @@ export function modelState(a: {
 	return ap.error ? "failed" : "applied";
 }
 
+/**
+ * Where an agent's effort stands. `unknown`: nothing chosen and nothing
+ * reported (the report lives in the backend's memory, so a backend restart
+ * loses it while the runner, which already reported, says nothing more) —
+ * not flagged, like a model never chosen. A report made for another model
+ * than the stored one is stale: pending until the runner re-reports.
+ */
+export function effortState(a: {
+	model?: string | null;
+	effort?: string | null;
+	effortApplied?: { model?: string | null; requested: string; error: string | null } | null;
+}): "applied" | "pending" | "failed" | "unknown" {
+	const ap = a.effortApplied;
+	if (!ap) return a.effort ? "pending" : "unknown";
+	if (ap.requested !== (a.effort ?? "default")) return "pending";
+	if (a.model && ap.model !== a.model) return "pending";
+	return ap.error ? "failed" : "applied";
+}
+
+/** An effort level as people read it: `default` → "Default", `extra_high` → "Extra High". */
+export function effortLabel(level: string | null | undefined): string {
+	if (!level || level === "default") return "Default";
+	return level
+		.split(/[_-]+/)
+		.filter(Boolean)
+		.map((w) => w[0]!.toUpperCase() + w.slice(1))
+		.join(" ");
+}
+
 export const STATE_LABEL: Record<string, string> = {
 	pending: "pendiente",
 	running: "en curso",

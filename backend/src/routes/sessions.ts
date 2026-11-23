@@ -9,7 +9,7 @@ import { pipeline } from "node:stream/promises";
 import type { NextFunction, Request, Response, Router } from "express";
 import multer from "multer";
 import { v4 as uuidv4 } from "uuid";
-import { agentNameError } from "../acp/agents.js";
+import { agentNameError, effortOf } from "../acp/agents.js";
 import type { AuthedRequest } from "../auth.js";
 import { isUserAdmin, requireAuth } from "../auth.js";
 import { runAsyncBootstrap } from "../bootstrap.js";
@@ -156,11 +156,12 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			});
 			return;
 		}
-		// ACP agent (acp/agents.ts): `acpAgent: { name, model? }`. A router built
+		// ACP agent (acp/agents.ts): `acpAgent: { name, model?, effort? }`. A router built
 		// without ACP (route tests) refuses the field rather than ignoring it —
 		// a client must not believe it created an agent.
 		let acpAgentName: string | null = null;
 		let acpAgentModel: string | undefined;
+		let acpAgentEffort: string | null = null;
 		let acpAgentRuntime: string | undefined;
 		let acpAgentProject: string | null = null;
 		if (acpAgent !== undefined && acpAgent !== null) {
@@ -171,6 +172,7 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			const a = acpAgent as {
 				name?: unknown;
 				model?: unknown;
+				effort?: unknown;
 				runtime?: unknown;
 				projectId?: unknown;
 			};
@@ -185,6 +187,14 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			) {
 				res.status(400).json({ error: "acpAgent.model must be a model id" });
 				return;
+			}
+			if (a.effort !== undefined) {
+				const effort = effortOf(a.effort);
+				if (effort === undefined) {
+					res.status(400).json({ error: "acpAgent.effort must be an effort level" });
+					return;
+				}
+				acpAgentEffort = effort;
 			}
 			// A runtime is a directory installed under ACP_RUNTIME_DIR (one per
 			// pinned adapter version or provider); only an installed one is taken.
@@ -421,6 +431,7 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 				if (ctx.acp && acpAgentName !== null) {
 					await ctx.acp.create(meta.sessionId, targetOwnerId, acpAgentName, {
 						...(acpAgentModel ? { model: acpAgentModel } : {}),
+						effort: acpAgentEffort,
 						...(acpAgentRuntime ? { runtime: acpAgentRuntime } : {}),
 						projectId: acpAgentProject,
 					});

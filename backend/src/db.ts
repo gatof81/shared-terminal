@@ -868,6 +868,13 @@ export const MIGRATIONS: readonly Migration[] = [
 			await d1Batch([...ACP_PROJECTS_DDL]);
 		},
 	},
+	{
+		// Additive: NULL on existing rows = "default" (the CLI decides), which
+		// is what every agent ran before the column existed.
+		version: 23,
+		description: "acp_agents.effort — per-agent reasoning effort (applied by the runner)",
+		apply: () => addColumnIfMissing("acp_agents", "effort TEXT"),
+	},
 ];
 
 /**

@@ -289,9 +289,33 @@ async function main() {
 	const sw = await api("PATCH", `/api/acp/agents/${DEV}`, { model: "claude-opus-5-5" });
 	check("model change accepted and stored", sw.status === 200 && sw.body?.model === "claude-opus-5-5", JSON.stringify(sw.body?.model));
 	const onOpus = await waitMsg((await send(DEV, "¿qué modelo usás?", pid)).id);
-	check("the next message runs on the new model", onOpus.state === "done" && /modelo claude-opus-5-5\)/.test(onOpus.result_text ?? ""), short(onOpus.result_text));
+	check("the next message runs on the new model", onOpus.state === "done" && /modelo claude-opus-5-5 ·/.test(onOpus.result_text ?? ""), short(onOpus.result_text));
 	const applied = (await agents()).find((a) => a.name === DEV)?.modelApplied;
 	check("the runner reports the switch as applied, no error", applied?.requested === "claude-opus-5-5" && !applied?.error, JSON.stringify(applied));
+
+	// 6d. Effort: same path as the model. The levels are the adapter's for the current model (the test
+	// agent offers five on opus, three on sonnet); a model switch re-applies the effort and a level the
+	// new model lacks is reported as an error, never replaced by another one.
+	const ef = await api("PATCH", `/api/acp/agents/${DEV}`, { effort: "xhigh" });
+	check("effort change accepted and stored", ef.status === 200 && ef.body?.effort === "xhigh", JSON.stringify(ef.body?.effort));
+	const onXhigh = await waitMsg((await send(DEV, "¿qué effort usás?", pid)).id);
+	check("the next message runs on the new effort", onXhigh.state === "done" && /effort xhigh\)/.test(onXhigh.result_text ?? ""), short(onXhigh.result_text));
+	const efApplied = (await agents()).find((a) => a.name === DEV)?.effortApplied;
+	check(
+		"the runner reports the effort as applied with the adapter's levels",
+		efApplied?.requested === "xhigh" && efApplied?.current === "xhigh" && !efApplied?.error && efApplied?.levels?.includes("max"),
+		JSON.stringify(efApplied),
+	);
+	await api("PATCH", `/api/acp/agents/${DEV}`, { model: "claude-sonnet-5-5" });
+	const onSonnet = await waitMsg((await send(DEV, "¿y ahora?", pid)).id);
+	check("a model without that level drops it (effort default)", /effort default\)/.test(onSonnet.result_text ?? ""), short(onSonnet.result_text));
+	const efFailed = (await agents()).find((a) => a.name === DEV)?.effortApplied;
+	check(
+		"the runner reports the missing level as an error, with the new model's levels",
+		efFailed?.requested === "xhigh" && efFailed?.current === "default" && !!efFailed?.error && !efFailed?.levels?.includes("xhigh"),
+		JSON.stringify(efFailed),
+	);
+	await api("PATCH", `/api/acp/agents/${DEV}`, { effort: null });
 
 	// 7. Terminal, Files and Git of the same agent session still answer.
 	const sid = sids[DEV];

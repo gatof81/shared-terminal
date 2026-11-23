@@ -98,6 +98,14 @@ export interface MockAcpAgent {
 	loginMethods?: Array<{ id: string; name: string; description: string }>;
 	waitingInput?: boolean;
 	modelApplied?: { requested: string; current: string | null; error: string | null } | null;
+	effort?: string | null;
+	effortApplied?: {
+		model: string | null;
+		requested: string;
+		current: string | null;
+		levels: string[];
+		error: string | null;
+	} | null;
 }
 
 export interface MockAcpMessage {
@@ -314,6 +322,15 @@ export class MockBackend {
 			runnerSeenAt: iso(1790),
 			running: null,
 			pending: 0,
+			// As its runner reports after the first claim: the CLI's default effort.
+			effort: null,
+			effortApplied: {
+				model: null,
+				requested: "default",
+				current: "default",
+				levels: ["default", "low", "medium", "high"],
+				error: null,
+			},
 		});
 		this.acpAgents = [
 			agent("arq", PROJECT_SESSION_IDS.architect, PROJECT_IDS.hz),
@@ -578,9 +595,14 @@ export class MockBackend {
 				await json(404, { error: "agent-not-found" });
 				return true;
 			}
-			const b = JSON.parse(req.postData() ?? "{}") as { projectId?: string | null; model?: string };
+			const b = JSON.parse(req.postData() ?? "{}") as {
+				projectId?: string | null;
+				model?: string;
+				effort?: string | null;
+			};
 			if ("projectId" in b) a.projectId = b.projectId ?? null;
 			if (typeof b.model === "string") a.model = b.model;
+			if ("effort" in b) a.effort = b.effort === "default" ? null : (b.effort ?? null);
 			await json(200, a);
 			return true;
 		}

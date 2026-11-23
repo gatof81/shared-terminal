@@ -387,6 +387,116 @@ test.describe("ACP model", () => {
 	});
 });
 
+// Effort: its levels come only from what the agent's adapter reported.
+test.describe("ACP effort", () => {
+	test.beforeEach(({ backend }) => backend.enableAcp());
+
+	test("the settings offer exactly the reported levels; a change reads pending until applied", async ({
+		page,
+		app,
+		backend,
+	}) => {
+		const solo = backend.acpAgents.find((a) => a.name === "solo")!;
+		solo.effortApplied = {
+			model: null,
+			requested: "default",
+			current: "default",
+			levels: ["default", "low", "extra_high"],
+			error: null,
+		};
+		await app.login("alice", chatOf(PROJECT_SESSION_IDS.scratch));
+		await app.openAgentSettings();
+		const select = page.locator("#acp-chat .acp-effort-select");
+		const state = page.locator("#acp-chat .acp-effort-state");
+		expect(await select.locator("option").allTextContents()).toEqual([
+			"Default",
+			"Low",
+			"Extra High",
+		]);
+		await expect(select).toHaveValue("default");
+		await expect(state).toHaveText("Aplicado.");
+		await select.selectOption("extra_high");
+		await page.locator("#acp-chat .acp-chat-effort button", { hasText: "Cambiar effort" }).click();
+		await expect(state).toContainText("Se aplica cuando @solo esté libre");
+		expect(backend.acpAgents.find((a) => a.name === "solo")?.effort).toBe("extra_high");
+	});
+
+	test("a level the adapter refused stays shown, with its error, and flags the ⋯", async ({
+		page,
+		app,
+		backend,
+	}) => {
+		const solo = backend.acpAgents.find((a) => a.name === "solo")!;
+		solo.effort = "max";
+		solo.effortApplied = {
+			model: null,
+			requested: "max",
+			current: "high",
+			levels: ["default", "low", "high"],
+			error: "el adaptador no ofrece el nivel max para este modelo",
+		};
+		await app.login("alice", chatOf(PROJECT_SESSION_IDS.scratch));
+		await expect(page.locator("#session-menu-btn")).toHaveAccessibleName(
+			"Session actions (el effort no se aplicó)",
+		);
+		await app.openAgentSettings();
+		const select = page.locator("#acp-chat .acp-effort-select");
+		expect(await select.locator("option").allTextContents()).toEqual([
+			"Default",
+			"Low",
+			"High",
+			"Max",
+		]);
+		await expect(select).toHaveValue("max");
+		await expect(page.locator("#acp-chat .acp-effort-state")).toHaveText(
+			"El adaptador rechazó Max: el adaptador no ofrece el nivel max para este modelo",
+		);
+	});
+
+	test("a new agent's levels are the ones reported for the chosen model; Default is not sent", async ({
+		page,
+		app,
+		backend,
+	}) => {
+		backend.acpAgents.find((a) => a.name === "arq")!.effortApplied = {
+			model: "claude-opus-5-5",
+			requested: "default",
+			current: "default",
+			levels: ["default", "low", "max"],
+			error: null,
+		};
+		const created: Array<Record<string, unknown>> = [];
+		backend.override = async (method, path, route) => {
+			if (method !== "POST" || path !== "/sessions") return false;
+			created.push(JSON.parse(route.request().postData() ?? "{}"));
+			await route.fulfill({
+				status: 400,
+				contentType: "application/json",
+				body: '{"error":"stop here"}',
+			});
+			return true;
+		};
+		await app.login("alice");
+		await app.openSidebar();
+		await page.click("#new-session-btn");
+		await page.fill("#new-session-input", "arquitectura");
+		await page.fill("#new-session-acp-agent", "architect");
+		const effort = page.locator("#new-session-acp-effort");
+		await expect(effort).toBeVisible();
+		// Sonnet: no agent reported levels for it.
+		await expect.poll(() => effort.locator("option").allTextContents()).toEqual(["Default"]);
+		await page.locator("#new-session-acp-model").selectOption("claude-opus-5-5");
+		expect(await effort.locator("option").allTextContents()).toEqual(["Default", "Low", "Max"]);
+		await page.click("#new-session-submit");
+		await expect.poll(() => created.length).toBe(1);
+		expect(created[0]?.acpAgent).not.toHaveProperty("effort");
+		await effort.selectOption("max");
+		await page.click("#new-session-submit");
+		await expect.poll(() => created.length).toBe(2);
+		expect(created[1]?.acpAgent).toMatchObject({ model: "claude-opus-5-5", effort: "max" });
+	});
+});
+
 // The headers: the essentials on one row, the rest in a panel closed by default.
 test.describe("ACP chat headers", () => {
 	test.beforeEach(({ backend }) => backend.enableAcp());

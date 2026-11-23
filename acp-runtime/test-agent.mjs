@@ -16,8 +16,10 @@
 //   anything else            → an echo of the first line
 // A reply from another agent ("Respuesta de @x a tu mensaje #n: …") is
 // acknowledged. Every answer carries how many prompts this ACP session has
-// seen and the session's model — the session (count and model) survives runner
-// and container restarts, which is what the tests check continuity with.
+// seen and the session's model and effort — the session (count, model, effort)
+// survives runner and container restarts, which is what the tests check
+// continuity with. Effort levels per model are test-only (opus: five, sonnet or
+// no model: three, haiku: none — the option is absent, like the real adapter).
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -58,6 +60,29 @@ const ask = (method, params) =>
 		out({ id, method, params });
 	});
 
+const modelOf = (s) => s.model ?? process.env.ANTHROPIC_MODEL ?? null;
+function levelsOf(model) {
+	const m = (model ?? "").toLowerCase();
+	if (m.includes("haiku")) return [];
+	if (m.includes("opus")) return ["low", "medium", "high", "xhigh", "max"];
+	return ["low", "medium", "high"];
+}
+/** The session's configOptions, shaped like claude-agent-acp's. */
+function configOptions(s) {
+	const model = modelOf(s);
+	const opts = [{ id: "model", category: "model", type: "select", currentValue: model ?? "default", options: [] }];
+	const levels = levelsOf(model);
+	if (levels.length)
+		opts.push({
+			id: "effort",
+			category: "thought_level",
+			type: "select",
+			currentValue: s.effort ?? "default",
+			options: [{ value: "default", name: "Default" }, ...levels.map((l) => ({ value: l, name: l[0].toUpperCase() + l.slice(1) }))],
+		});
+	return opts;
+}
+
 async function prompt(sessionId, text) {
 	const s = sessions[sessionId];
 	s.prompts += 1;
@@ -70,7 +95,7 @@ async function prompt(sessionId, text) {
 		await sleep(150);
 		update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: t.slice(half) } });
 	};
-	const ctx = `(sesión ACP: ${s.prompts} mensajes · modelo ${s.model ?? process.env.ANTHROPIC_MODEL ?? "default"})`;
+	const ctx = `(sesión ACP: ${s.prompts} mensajes · modelo ${modelOf(s) ?? "default"} · effort ${s.effort ?? "default"})`;
 	let m;
 	if (/^\[st-recovery\]/.test(header) || /^\[st-recovery\]/.test(body) || header.includes("de @system")) {
 		await say(`Reporte de @${ME}: no repetí nada; el mensaje interrumpido quedó sin rehacer. ${ctx}`);
@@ -163,18 +188,31 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
 			const sessionId = randomUUID();
 			sessions[sessionId] = { prompts: 0 };
 			save();
-			result = { sessionId };
+			result = { sessionId, configOptions: configOptions(sessions[sessionId]) };
 		} else if (method === "session/resume") {
 			if (!sessions[params.sessionId]) throw Object.assign(new Error("unknown session"), { code: -32002 });
-			result = {};
+			result = { configOptions: configOptions(sessions[params.sessionId]) };
 		} else if (method === "session/set_mode") result = {};
 		else if (method === "session/set_config_option" && params.configId === "model") {
 			// Like claude-agent-acp: the session's model, kept with the session
 			// (it survives a resume), reported back as the option's current value.
-			if (!sessions[params.sessionId]) throw Object.assign(new Error("unknown session"), { code: -32002 });
-			sessions[params.sessionId].model = String(params.value);
+			// The effort pin survives only if the new model offers that level.
+			const s = sessions[params.sessionId];
+			if (!s) throw Object.assign(new Error("unknown session"), { code: -32002 });
+			s.model = String(params.value);
+			if (s.effort && !levelsOf(s.model).includes(s.effort)) delete s.effort;
 			save();
-			result = { configOptions: [{ id: "model", type: "select", currentValue: String(params.value), options: [] }] };
+			result = { configOptions: configOptions(s) };
+		} else if (method === "session/set_config_option" && params.configId === "effort") {
+			const s = sessions[params.sessionId];
+			if (!s) throw Object.assign(new Error("unknown session"), { code: -32002 });
+			const value = String(params.value);
+			if (value !== "default" && !levelsOf(modelOf(s)).includes(value))
+				throw Object.assign(new Error(`Invalid value for config option effort: ${value}`), { code: -32602 });
+			if (value === "default") delete s.effort;
+			else s.effort = value;
+			save();
+			result = { configOptions: configOptions(s) };
 		}
 		else if (method === "session/prompt" && existsSync(`${DIR}/require-auth`) && !existsSync(CREDS))
 			throw Object.assign(new Error("Authentication required"), { code: -32000 });
