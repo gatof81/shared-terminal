@@ -99,7 +99,12 @@ async function api(method, path, body) {
 				signal: AbortSignal.timeout(API_TIMEOUT_MS),
 			});
 			const text = await res.text();
-			return { status: res.status, body: text ? JSON.parse(text) : null, model: res.headers.get("x-st-model") };
+			return {
+				status: res.status,
+				body: text ? JSON.parse(text) : null,
+				model: res.headers.get("x-st-model"),
+				effort: res.headers.get("x-st-effort"),
+			};
 		} catch (err) {
 			log(`backend unreachable (${err.cause?.code ?? err.message}); retrying`);
 			await new Promise((ok) => setTimeout(ok, 2_000));
@@ -138,6 +143,7 @@ function onUpdate(u) {
 	record({ update: u });
 	lastActivity = Date.now();
 	const kind = u.sessionUpdate;
+	if (kind === "config_option_update") keepConfigOptions(u);
 	if (kind === "async_task_spawned") {
 		live.set(u.asyncTaskId, { taskType: u.taskType, name: u.name });
 		emit({ kind: "task", taskId: u.asyncTaskId, taskType: u.taskType, name: u.name, state: "running" });
@@ -321,10 +327,12 @@ async function openSession() {
 	let sessionId;
 	if (existsSync(SESSION_FILE)) {
 		sessionId = JSON.parse(readFileSync(SESSION_FILE, "utf8")).sessionId;
-		await request("session/resume", { sessionId, cwd: CWD, mcpServers: [], systemPrompt });
+		keepConfigOptions(await request("session/resume", { sessionId, cwd: CWD, mcpServers: [], systemPrompt }));
 		log(`resumed session ${sessionId}`);
 	} else {
-		sessionId = (await request("session/new", { cwd: CWD, mcpServers: [], systemPrompt })).sessionId;
+		const created = await request("session/new", { cwd: CWD, mcpServers: [], systemPrompt });
+		keepConfigOptions(created);
+		sessionId = created.sessionId;
 		writeFileSync(`${SESSION_FILE}.tmp`, JSON.stringify({ sessionId, cwd: CWD }));
 		renameSync(`${SESSION_FILE}.tmp`, SESSION_FILE);
 		log(`new session ${sessionId}`);
@@ -345,6 +353,10 @@ async function openSession() {
 // session (context, history) is kept. A refused switch is reported and not
 // retried until a different model is requested.
 let modelTried = null;
+// The requested model the adapter confirmed (null: refused, or it chose another
+// row). The effort report names it, so its levels are never attributed to a
+// model the adapter is not running (the new-session form offers them by model).
+let modelInEffect = null;
 // "claude-fable-5-2" vs a row "fable Fable 5.2 · …": same family and version.
 function sameModel(requested, row) {
 	const m = /^(?:claude-)?([a-z]+)-(\d+)-(\d+)/.exec(requested);
@@ -355,8 +367,10 @@ function sameModel(requested, row) {
 async function applyModel(sessionId, model) {
 	if (!model || model === modelTried) return;
 	modelTried = model;
+	modelInEffect = null;
 	try {
 		const r = await request("session/set_config_option", { sessionId, configId: "model", value: model });
+		keepConfigOptions(r);
 		const opt = (r?.configOptions ?? []).find((o) => o.id === "model");
 		const value = typeof opt?.currentValue === "string" ? opt.currentValue : null;
 		const chosen = (opt?.options ?? []).find((o) => o.value === value);
@@ -366,6 +380,7 @@ async function applyModel(sessionId, model) {
 		// Accept only a row that names the same family and version.
 		const mismatch = chosen && !sameModel(model, `${chosen.value} ${chosen.name ?? ""} ${chosen.description ?? ""}`);
 		log(`model → ${model} (adapter reports ${current ?? "nothing"}${mismatch ? ", NOT the requested one" : ""})`);
+		if (!mismatch) modelInEffect = model;
 		await api("POST", "/runner/model", {
 			requested: model,
 			current,
@@ -374,6 +389,62 @@ async function applyModel(sessionId, model) {
 	} catch (err) {
 		log(`model ${model} refused by the adapter: ${err.message}`);
 		await api("POST", "/runner/model", { requested: model, current: null, error: String(err.message).slice(0, 300) });
+	} finally {
+		// A switch was sent: the adapter keeps the effort pin only if the new model
+		// supports it, and the levels are the new model's. Apply and report again.
+		effortTried = null;
+	}
+}
+
+// ── Effort ────────────────────────────────────────────────────────────────
+// Same path as the model: chosen in Shared Terminal, sent with every claim
+// (X-ST-Effort, "default" = the CLI decides), applied with
+// `session/set_config_option` (configId "effort") only here, while idle — a
+// message in progress finishes on the effort it started with. The levels are
+// the adapter's, per model (the option is absent when the model has none), so
+// the runner reports them with every outcome and the product hardcodes none.
+// The adapter keeps the pin in memory only: effortTried starts null in every
+// process, so the first claim after a (re)start always applies and reports,
+// even when nothing was requested. A level the adapter does not offer is
+// reported as an error and never replaced by another one.
+let effortTried = null;
+// The adapter's latest configOptions (session/new|resume answers, every
+// set_config_option answer, config_option_update notifications).
+let lastConfigOptions = [];
+function keepConfigOptions(r) {
+	if (Array.isArray(r?.configOptions)) lastConfigOptions = r.configOptions;
+}
+const effortOption = () => lastConfigOptions.find((o) => o?.id === "effort");
+const effortLevels = (opt) => (Array.isArray(opt?.options) ? opt.options.map((o) => o?.value).filter((v) => typeof v === "string") : []);
+const currentOf = (opt) => (typeof opt?.currentValue === "string" ? opt.currentValue : null);
+
+async function applyEffort(sessionId, requested) {
+	if (requested === effortTried) return;
+	effortTried = requested;
+	const report = (current, levels, error) => {
+		log(`effort ${requested}: adapter reports ${current ?? "nothing"}${error ? ` (${error})` : ""}`);
+		return api("POST", "/runner/effort", {
+			model: modelInEffect,
+			requested,
+			current,
+			levels,
+			...(error ? { error: String(error).slice(0, 300) } : {}),
+		});
+	};
+	const opt = effortOption();
+	const levels = effortLevels(opt);
+	if (!opt) return report(null, [], requested === "default" ? undefined : "el modelo actual no admite effort");
+	if (!levels.includes(requested)) return report(currentOf(opt), levels, `el adaptador no ofrece el nivel ${requested} para este modelo`);
+	if (currentOf(opt) === requested) return report(requested, levels);
+	try {
+		const r = await request("session/set_config_option", { sessionId, configId: "effort", value: requested });
+		keepConfigOptions(r);
+		const after = (r?.configOptions ?? []).find((o) => o?.id === "effort");
+		const current = currentOf(after);
+		const now = after ? effortLevels(after) : levels;
+		await report(current, now, current === requested ? undefined : `el adaptador dejó ${current ?? "nada"} en lugar de ${requested}`);
+	} catch (err) {
+		await report(currentOf(opt), levels, err.message);
 	}
 }
 
@@ -581,6 +652,7 @@ async function main() {
 		const r = await api("POST", "/runner/claim");
 		// Idle here, by construction: switch before the claimed message starts.
 		await applyModel(sessionId, r.model);
+		await applyEffort(sessionId, r.effort ?? "default");
 		if (r.status === 200) await run(sessionId, r.body);
 		else if (r.status === 409) {
 			// Something of ours is `running` while we run nothing: our claim

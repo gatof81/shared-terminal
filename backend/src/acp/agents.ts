@@ -109,6 +109,8 @@ export interface AgentRow {
 	created_at: string;
 	/** The project this agent takes part in (v22); NULL = none. */
 	project_id: string | null;
+	/** Reasoning effort the runner asks its adapter for (v23); NULL = "default" (the CLI decides). */
+	effort: string | null;
 }
 
 export type MessageState = "pending" | "running" | "done" | "failed" | "uncertain";
@@ -192,6 +194,34 @@ export interface ModelApplied {
 	/** Why the switch failed, if it did (the agent keeps its previous model). */
 	error: string | null;
 	at: string;
+}
+
+/**
+ * What a runner reported after applying the effort to its adapter. The levels
+ * are the adapter's own for `model` (the product hardcodes none); empty when
+ * that model offers no effort.
+ */
+export interface EffortApplied {
+	/** The model the runner had applied when it reported (its requested id). */
+	model: string | null;
+	/** The level the runner asked for ("default" = none pinned). */
+	requested: string;
+	/** The adapter's current level after the request, null if it offers none. */
+	current: string | null;
+	levels: string[];
+	/** Why the level was not applied, if it was not (the agent keeps its previous one). */
+	error: string | null;
+	at: string;
+}
+
+/**
+ * Validates a requested effort: a level-shaped string or null. Only the shape:
+ * which levels exist is the adapter's answer for the agent's model. "default"
+ * is stored as NULL (no level pinned). Returns undefined for a bad value.
+ */
+export function effortOf(v: unknown): string | null | undefined {
+	if (v === null || v === "default") return null;
+	return typeof v === "string" && /^[a-z][a-z0-9_-]{0,31}$/.test(v) ? v : undefined;
 }
 
 /** A `clientId` already used for a different message to the same recipient. */
@@ -282,7 +312,12 @@ export class AcpAgents {
 		sessionId: string,
 		ownerUserId: string,
 		name: string,
-		opts: { model?: string; runtime?: string; projectId?: string | null } = {},
+		opts: {
+			model?: string;
+			effort?: string | null;
+			runtime?: string;
+			projectId?: string | null;
+		} = {},
 	): Promise<AgentRow> {
 		// Messages are addressed by name and outlive a hard-deleted agent: what
 		// that agent left unfinished must not be picked up by a new agent that
@@ -292,7 +327,7 @@ export class AcpAgents {
 		await this.failInbox(ownerUserId, name, { onlyIfUnheld: true });
 		const row = (
 			await d1Query<AgentRow>(
-				"INSERT INTO acp_agents (agent_id, session_id, owner_user_id, name, runtime, model, project_id) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *",
+				"INSERT INTO acp_agents (agent_id, session_id, owner_user_id, name, runtime, model, project_id, effort) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *",
 				[
 					randomUUID(),
 					sessionId,
@@ -301,6 +336,7 @@ export class AcpAgents {
 					opts.runtime ?? this.config.defaultRuntime,
 					opts.model ?? this.config.defaultModel,
 					opts.projectId ?? null,
+					opts.effort ?? null,
 				],
 			)
 		).results[0];
@@ -369,6 +405,32 @@ export class AcpAgents {
 		return row;
 	}
 
+	/**
+	 * Changes the reasoning effort, the same way as `setModel`: the runner
+	 * applies it while idle and re-applies it after every adapter (re)start and
+	 * model switch. NULL = "default". Whether the level exists for the agent's
+	 * model is the adapter's answer, reported through `setEffortApplied`.
+	 */
+	async setEffort(
+		ownerUserId: string,
+		name: string,
+		effort: string | null,
+	): Promise<AgentRow | null> {
+		const r = await d1Query<AgentRow>(
+			"UPDATE acp_agents SET effort = ? WHERE owner_user_id = ? AND name = ? RETURNING *",
+			[effort, ownerUserId, name],
+		);
+		const row = r.results[0] ?? null;
+		if (row) {
+			this.byId.set(row.agent_id, row);
+			this.publish(ownerUserId, { type: "agents" });
+			logger.info(
+				`[acp] @${name} effort → ${effort ?? "default"} (applied by its runner when idle)`,
+			);
+		}
+		return row;
+	}
+
 	/** The model the runner's adapter reports after its last switch (memory only, like activity). */
 	private readonly modelApplied = new Map<string, ModelApplied>();
 
@@ -388,6 +450,41 @@ export class AcpAgents {
 
 	modelAppliedOf(agentId: string): ModelApplied | null {
 		return this.modelApplied.get(agentId) ?? null;
+	}
+
+	/** The effort the runner's adapter reports after its last request (memory only). */
+	private readonly effortApplied = new Map<string, EffortApplied>();
+
+	setEffortApplied(agent: AgentRow, body: unknown): void {
+		const b = (body ?? {}) as {
+			model?: unknown;
+			requested?: unknown;
+			current?: unknown;
+			levels?: unknown;
+			error?: unknown;
+		};
+		const str = (v: unknown, max: number) => (typeof v === "string" && v.length <= max ? v : null);
+		const requested = str(b.requested, 32);
+		if (requested === null) return;
+		const levels =
+			Array.isArray(b.levels) &&
+			b.levels.length <= 16 &&
+			b.levels.every((l) => typeof l === "string" && l.length <= 32)
+				? (b.levels as string[])
+				: [];
+		this.effortApplied.set(agent.agent_id, {
+			model: str(b.model, 80),
+			requested,
+			current: str(b.current, 32),
+			levels,
+			error: str(b.error, 300),
+			at: new Date().toISOString(),
+		});
+		this.publish(agent.owner_user_id, { type: "agents" });
+	}
+
+	effortAppliedOf(agentId: string): EffortApplied | null {
+		return this.effortApplied.get(agentId) ?? null;
 	}
 
 	/** Running message and queue length per agent name (one query). */
@@ -726,6 +823,7 @@ export class AcpAgents {
 		this.activity.delete(agent.agent_id);
 		this.loginMethods.delete(agent.agent_id);
 		this.modelApplied.delete(agent.agent_id);
+		this.effortApplied.delete(agent.agent_id);
 		this.publish(agent.owner_user_id, { type: "agents" });
 	}
 

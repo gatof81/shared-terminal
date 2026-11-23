@@ -9,9 +9,10 @@
  * close functions are exported for main.ts's Escape handler.
  */
 
-import { ACP_MODELS } from "./acpModel.js";
-import { setAcpAgents } from "./acpRegistry.js";
+import { ACP_MODELS, effortLabel } from "./acpModel.js";
+import { acpReadTicket, setAcpAgents } from "./acpRegistry.js";
 import {
+	type AcpAgentInfo,
 	acpListAgents,
 	acpRuntimes,
 	createProject,
@@ -154,6 +155,10 @@ let acpRuntimeSelect: HTMLSelectElement | null = null;
 let acpRuntimeLabel: HTMLLabelElement | null = null;
 let acpModelSelect: HTMLSelectElement | null = null;
 let acpModelLabel: HTMLLabelElement | null = null;
+let acpEffortSelect: HTMLSelectElement | null = null;
+let acpEffortLabel: HTMLLabelElement | null = null;
+/** The agents last read (for the effort levels their adapters reported). */
+let acpKnownAgents: AcpAgentInfo[] = [];
 let acpPreselectProject: string | null = null;
 const NEW_PROJECT = "__new__";
 
@@ -200,10 +205,17 @@ function ensureAcpAgentField(): void {
 	acpModelSelect.value = ACP_MODELS[0]!.id;
 	acpModelLabel = acpField("Modelo", acpModelSelect);
 	acpModelLabel.hidden = true;
+	acpEffortSelect = document.createElement("select");
+	acpEffortSelect.id = "new-session-acp-effort";
+	acpEffortLabel = acpField("Effort", acpEffortSelect);
+	acpEffortLabel.hidden = true;
+	fillAcpEffort();
+	acpModelSelect.addEventListener("change", fillAcpEffort);
 	const sync = () => {
 		const on = acpAgentInput?.value.trim() !== "";
 		projectLabel.hidden = !on;
 		if (acpModelLabel) acpModelLabel.hidden = !on;
+		if (acpEffortLabel) acpEffortLabel.hidden = !on;
 		if (acpRuntimeLabel)
 			acpRuntimeLabel.hidden = !on || (acpRuntimeSelect?.options.length ?? 0) < 2;
 		if (acpNewProjectInput)
@@ -221,7 +233,29 @@ function ensureAcpAgentField(): void {
 	});
 	acpProjectSelect.addEventListener("change", sync);
 	acpSyncFields = sync;
-	newSessionInput.closest("label")?.after(agentLabel, projectLabel, acpModelLabel, acpRuntimeLabel);
+	newSessionInput
+		.closest("label")
+		?.after(agentLabel, projectLabel, acpModelLabel, acpEffortLabel, acpRuntimeLabel);
+}
+
+/**
+ * The effort choices for the selected model: Default plus the levels an
+ * existing agent's adapter reported for that same model. The product knows
+ * no levels of its own, and nothing is started to ask: with no such agent
+ * only Default is offered (the level can be changed later from the agent's
+ * settings, once its adapter reported them).
+ */
+function fillAcpEffort(): void {
+	const select = acpEffortSelect;
+	if (!select) return;
+	const keep = select.value;
+	const model = acpModelSelect?.value ?? "";
+	const levels =
+		acpKnownAgents.find((a) => a.effortApplied && a.effortApplied.model === model)?.effortApplied
+			?.levels ?? [];
+	select.replaceChildren(new Option("Default", "default"));
+	for (const v of levels) if (v !== "default") select.append(new Option(effortLabel(v), v));
+	select.value = [...select.options].some((o) => o.value === keep) ? keep : "default";
 }
 let acpSyncFields: () => void = () => {};
 let acpAgentLabel: HTMLLabelElement | null = null;
@@ -345,6 +379,15 @@ async function loadAcpChoices(): Promise<void> {
 	if (r?.ok) for (const p of r.body.projects) select.append(new Option(p.name, p.projectId));
 	select.append(new Option("+ Proyecto nuevo…", NEW_PROJECT));
 	select.value = [...select.options].some((o) => o.value === keep) ? keep : "";
+	const ticket = acpReadTicket();
+	acpKnownAgents = await acpListAgents().then(
+		(list) => {
+			setAcpAgents(list, ticket);
+			return list;
+		},
+		() => acpKnownAgents,
+	);
+	fillAcpEffort();
 	const rt = acpRuntimeSelect;
 	if (rt && rt.options.length === 0) {
 		const r = await acpRuntimes().catch(() => null);
@@ -366,7 +409,8 @@ async function loadAcpChoices(): Promise<void> {
 
 /** The ACP part of the create request; creates the new project first when asked. */
 async function acpAgentForCreate(): Promise<
-	{ name: string; projectId?: string; runtime?: string; model?: string } | undefined
+	| { name: string; projectId?: string; runtime?: string; model?: string; effort?: string }
+	| undefined
 > {
 	const name = acpAgentInput?.value.trim() ?? "";
 	if (!name) return undefined;
@@ -381,11 +425,13 @@ async function acpAgentForCreate(): Promise<
 	}
 	const runtime = acpRuntimeSelect && !acpRuntimeLabel?.hidden ? acpRuntimeSelect.value : undefined;
 	const model = acpModelSelect?.value || undefined;
+	const effort = acpEffortSelect?.value;
 	return {
 		name,
 		...(projectId ? { projectId } : {}),
 		...(runtime ? { runtime } : {}),
 		...(model ? { model } : {}),
+		...(effort && effort !== "default" ? { effort } : {}),
 	};
 }
 
@@ -407,6 +453,8 @@ function openNewSessionModal(opener: HTMLElement, opts: { agent?: boolean } = {}
 	if (acpNewProjectInput) acpNewProjectInput.value = "";
 	// Every new agent starts on the default (Sonnet) unless chosen otherwise.
 	if (acpModelSelect) acpModelSelect.value = ACP_MODELS[0]!.id;
+	if (acpEffortSelect) acpEffortSelect.value = "default";
+	fillAcpEffort();
 	if (acpAgentInput)
 		void loadAcpChoices().finally(() => {
 			acpPreselectProject = null;

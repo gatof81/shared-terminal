@@ -5,6 +5,8 @@ import {
 	answerText,
 	applyEdits,
 	authFromActivity,
+	effortLabel,
+	effortState,
 	groupThread,
 	mapThroughEdits,
 	modelLabel,
@@ -284,6 +286,47 @@ describe("model", () => {
 			modelState({ model: opus, modelApplied: { requested: opus, current: null, error: "no" } }),
 		).toBe("failed");
 		expect(modelState({ model: null, modelApplied: null })).toBe("unknown");
+	});
+});
+
+describe("effort", () => {
+	const ap = (requested: string, error: string | null = null) => ({
+		model: "claude-opus-5-5",
+		requested,
+		current: error ? null : requested,
+		levels: ["low", "high"],
+		error,
+	});
+	it("labels levels: default and words split on _ or -", () => {
+		expect(effortLabel(null)).toBe("Default");
+		expect(effortLabel("default")).toBe("Default");
+		expect(effortLabel("high")).toBe("High");
+		expect(effortLabel("extra_high")).toBe("Extra High");
+		expect(effortLabel("x-max")).toBe("X Max");
+	});
+	it("is pending until the runner reports that same level (null = default), then applied or failed", () => {
+		expect(effortState({ effort: "high", effortApplied: null })).toBe("pending");
+		// Nothing chosen, nothing reported (a backend restart): not flagged.
+		expect(effortState({ effort: null })).toBe("unknown");
+		expect(effortState({ effort: "high", effortApplied: ap("low") })).toBe("pending");
+		expect(effortState({ effort: "high", effortApplied: ap("high") })).toBe("applied");
+		expect(effortState({ effort: null, effortApplied: ap("default") })).toBe("applied");
+		expect(effortState({ effort: "high", effortApplied: ap("high", "no") })).toBe("failed");
+		// A report made for another model is stale until the runner re-reports.
+		expect(
+			effortState({
+				model: "claude-sonnet-5-5",
+				effort: "high",
+				effortApplied: { ...ap("high"), model: "claude-opus-5-5" },
+			}),
+		).toBe("pending");
+		expect(
+			effortState({
+				model: "claude-opus-5-5",
+				effort: "high",
+				effortApplied: { ...ap("high"), model: "claude-opus-5-5" },
+			}),
+		).toBe("applied");
 	});
 });
 

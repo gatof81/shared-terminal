@@ -7,13 +7,14 @@
 //
 // Messages typed here are DIRECT: private to the person and this agent.
 
-import { ACP_MODELS, modelLabel, modelState } from "./acpModel.js";
+import { ACP_MODELS, effortLabel, effortState, modelLabel, modelState } from "./acpModel.js";
 import { acpReadTicket, setAcpAgents } from "./acpRegistry.js";
 import { AcpThread, type ThreadState } from "./acpThread.js";
 import {
 	type AcpAgentInfo,
 	acpListAgents,
 	acpLogin,
+	acpSetEffort,
 	acpSetModel,
 	acpSetProject,
 	fetchProjects,
@@ -32,6 +33,8 @@ let projectRowEl: HTMLElement | null = null;
 let shownProjectKey = "";
 let modelRowEl: HTMLElement | null = null;
 let shownModelKey = "";
+let effortRowEl: HTMLElement | null = null;
+let shownEffortKey = "";
 let shownNoticeKey = "";
 
 const root = el("div", "acp-chat");
@@ -157,9 +160,12 @@ function openSettings(): void {
 /** What the agent's settings need from the person, in words (null: nothing). */
 function flagWhy(a: AcpAgentInfo, auth: boolean): string | null {
 	const ms = modelState(a);
+	const es = effortState(a);
 	if (ms === "failed") return "el modelo no se aplicó";
+	if (es === "failed") return "el effort no se aplicó";
 	if (auth || a.authRequired) return "falta conectar una cuenta";
 	if (ms === "pending") return "cambio de modelo pendiente";
+	if (es === "pending") return "cambio de effort pendiente";
 	return null;
 }
 
@@ -216,8 +222,18 @@ function renderHeader(s: ThreadState): void {
 		shownModelKey = modelKey;
 		modelRowEl = modelRow(a);
 	}
+	const effortKey = JSON.stringify([
+		a.name,
+		a.effort ?? null,
+		effortState(a),
+		a.effortApplied ?? null,
+	]);
+	if (effortKey !== shownEffortKey || !effortRowEl) {
+		shownEffortKey = effortKey;
+		effortRowEl = effortRow(a);
+	}
 	paintMenuFlag(a, auth);
-	const parts: HTMLElement[] = [privacyEl, runtimeEl, modelRowEl];
+	const parts: HTMLElement[] = [privacyEl, runtimeEl, modelRowEl, effortRowEl];
 	if (projectRowEl) parts.push(projectRowEl);
 	syncChildren(settingsPanel, parts);
 	const noticeKey = JSON.stringify([a.name, auth, a.loginMethods ?? []]);
@@ -324,6 +340,70 @@ function modelRow(a: AcpAgentInfo): HTMLElement {
 	const status = el("span", `acp-model-state acp-model-${ms}`, note);
 	status.setAttribute("role", "status");
 	row.append(el("span", undefined, "Modelo:"), select, save, status);
+	return row;
+}
+
+/**
+ * The agent's reasoning effort, applied like the model (by its runner, while
+ * idle). The levels are only the ones its adapter reported for the model in
+ * use: nothing here knows which levels exist.
+ */
+function effortRow(a: AcpAgentInfo): HTMLElement {
+	const row = el("div", "acp-chat-project acp-chat-effort");
+	const stored = a.effort ?? "default";
+	const levels = a.effortApplied?.levels ?? [];
+	const select = el("select", "acp-effort-select");
+	select.setAttribute("aria-label", "Effort del agente");
+	const values = levels.length > 0 ? [...levels] : ["default"];
+	// A stored level the adapter does not offer stays visible, so its error reads against it.
+	if (!values.includes(stored)) values.push(stored);
+	for (const v of values) select.append(new Option(effortLabel(v), v));
+	select.value = stored;
+	// Saved by an explicit button, never on `change` alone (keyboard type-ahead fires it).
+	const save = el("button", "btn sm", "Cambiar effort");
+	save.type = "button";
+	save.hidden = true;
+	select.addEventListener("change", () => (save.hidden = select.value === stored));
+	save.addEventListener("click", () => {
+		select.disabled = save.disabled = true;
+		void acpSetEffort(a.name, select.value === "default" ? null : select.value)
+			.then((info) => {
+				if (owned?.name === info.name) owned = { ...owned, ...info };
+				agentsBySession.set(info.sessionId, { ...a, ...info });
+				thread.updateAgent(info);
+			})
+			.catch((err: Error) => {
+				select.value = stored;
+				save.hidden = true;
+				showToast(`No se pudo cambiar el effort: ${err.message}`, true);
+			})
+			.finally(() => {
+				select.disabled = save.disabled = false;
+				renderHeader(thread.state);
+			});
+	});
+	const es = effortState(a);
+	const note =
+		es === "pending"
+			? `Se aplica cuando @${a.name} esté libre (el mensaje en curso termina con el effort anterior).`
+			: es === "failed"
+				? `El adaptador rechazó ${effortLabel(a.effort)}: ${a.effortApplied?.error ?? ""}`
+				: es === "applied"
+					? "Aplicado."
+					: "";
+	const status = el("span", `acp-effort-state acp-effort-${es}`, note);
+	status.setAttribute("role", "status");
+	row.append(el("span", undefined, "Effort:"), select, save, status);
+	if (levels.length === 0)
+		row.append(
+			el(
+				"span",
+				"acp-effort-note",
+				a.effortApplied
+					? "El modelo actual no ofrece effort"
+					: "Los niveles se conocen cuando el agente atienda su próximo mensaje",
+			),
+		);
 	return row;
 }
 

@@ -20,6 +20,7 @@ import {
 	type AgentLoad,
 	type AgentRow,
 	ClientIdConflictError,
+	effortOf,
 	type MessageRow,
 } from "../acp/agents.js";
 import { type AuthedRequest, requireAuth } from "../auth.js";
@@ -87,6 +88,8 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 		runtime: a.runtime,
 		model: a.model,
 		modelApplied: acp.modelAppliedOf(a.agent_id),
+		effort: a.effort ?? null,
+		effortApplied: acp.effortAppliedOf(a.agent_id),
 		projectId: a.project_id ?? null,
 		runnerSeenAt: acp.runnerSeenAt(a.agent_id),
 		running: loads.get(a.name)?.running ?? null,
@@ -233,19 +236,24 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 		}),
 	);
 
-	// PATCH /agents/:name {projectId?: string | null, model?: string} — join /
-	// leave a project; change the model (applied by the runner when idle).
+	// PATCH /agents/:name {projectId?: string | null, model?: string,
+	// effort?: string | null} — join / leave a project; change the model or the
+	// reasoning effort (both applied by the runner when idle).
 	router.patch(
 		"/agents/:name",
 		wrap(async (req, res) => {
 			const owner = ownerOnly(res);
 			if (!owner) return;
-			const body = (req.body ?? {}) as { projectId?: unknown; model?: unknown };
+			const body = (req.body ?? {}) as { projectId?: unknown; model?: unknown; effort?: unknown };
 			const hasProject = "projectId" in body;
 			const hasModel = "model" in body;
-			if (!hasProject && !hasModel)
-				return void res.status(400).json({ error: "projectId or model is required" });
+			const hasEffort = "effort" in body;
+			if (!hasProject && !hasModel && !hasEffort)
+				return void res.status(400).json({ error: "projectId, model or effort is required" });
 			const { projectId, model } = body;
+			const effort = effortOf(body.effort);
+			if (hasEffort && effort === undefined)
+				return void res.status(400).json({ error: "effort must be an effort level" });
 			if (hasProject && projectId !== null && typeof projectId !== "string")
 				return void res.status(400).json({ error: "projectId must be a project id or null" });
 			// Same rule as acpAgent.model at create (routes/sessions.ts).
@@ -257,6 +265,7 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 				? await acp.setProject(owner, req.params.name, projectId as string | null)
 				: null;
 			if (hasModel) row = await acp.setModel(owner, req.params.name, model as string);
+			if (hasEffort) row = await acp.setEffort(owner, req.params.name, effort ?? null);
 			if (!row) return void res.status(404).json({ error: "not-found" });
 			res.json(agentView(row, await acp.loads(owner)));
 		}),
@@ -407,6 +416,7 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 			// The model this agent should run, with every claim: the runner switches
 			// to it while idle, before it starts the next message.
 			res.setHeader("X-ST-Model", agent.model ?? acp.config.defaultModel);
+			res.setHeader("X-ST-Effort", agent.effort ?? "default");
 			const msg = await acp.claim(agent);
 			if (msg) return void res.json(await withContext(agent, msg));
 			const running = await acp.running(agent);
@@ -467,6 +477,17 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 			const agent = agentOnly(res);
 			if (!agent) return;
 			acp.setModelApplied(agent, req.body);
+			res.status(204).end();
+		}),
+	);
+
+	// What the adapter reported after the runner applied the effort.
+	router.post(
+		"/runner/effort",
+		wrap(async (req, res) => {
+			const agent = agentOnly(res);
+			if (!agent) return;
+			acp.setEffortApplied(agent, req.body);
 			res.status(204).end();
 		}),
 	);

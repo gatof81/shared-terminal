@@ -1,7 +1,7 @@
 /**
  * acp/acp.sqlite.test.ts — the ACP message API against a REAL SQLite (D1 is
  * SQLite): `fetch` to the D1 endpoint is answered by an in-memory database,
- * so the real migrations (v1…v22), the v22 reply trigger and indexes and the
+ * so the real migrations (v1…v23), the v22 reply trigger and indexes and the
  * real router run. Docker is a stub; the caller is `x-test-user` (person) or
  * a real `acp1.` agent token.
  *
@@ -830,6 +830,86 @@ describe("ACP messages: scope, replies, loop guard (v22)", () => {
 			error: null,
 		});
 		expect(events.some((e) => e.type === "agents")).toBe(true);
+	});
+
+	it("effort: stored per agent (default = NULL), sent with every claim, the adapter's report kept as sent", async () => {
+		const sid = "77777777-7777-4777-8777-777777777777";
+		db.prepare(
+			"INSERT INTO sessions (session_id, user_id, name, container_name, status) VALUES (?, ?, 'ef', ?, 'running')",
+		).run(sid, OWNER, `st-${sid.slice(0, 12)}`);
+		// At create: "default" is no pin (NULL), like leaving it out.
+		const created = await acp.create(sid, OWNER, "esfuerzo", { effort: null });
+		expect(created.effort).toBeNull();
+		tokens.esfuerzo = acp.tokenFor(created.agent_id);
+		const agentOf = async () =>
+			((await call(owner, "GET", "/agents")).body as Array<Record<string, unknown>>).find(
+				(a) => a.name === "esfuerzo",
+			)!;
+		const before = await agentOf();
+		expect(before).toMatchObject({ effort: null, effortApplied: null });
+		const claim = async () => {
+			const c = await call(as("esfuerzo"), "POST", "/runner/claim");
+			if (c.status === 200)
+				await call(as("esfuerzo"), "POST", `/runner/messages/${c.body.id}/result`, {
+					state: "done",
+					text: ".",
+				});
+			return c.headers.get("x-st-effort");
+		};
+		expect(await claim()).toBe("default");
+		for (const bad of ["High", "", 3, "x".repeat(33)])
+			expect((await call(owner, "PATCH", "/agents/esfuerzo", { effort: bad })).status).toBe(400);
+		expect(
+			(await call(as("esfuerzo"), "PATCH", "/agents/esfuerzo", { effort: "high" })).status,
+		).toBe(403);
+		const p = await call(owner, "PATCH", "/agents/esfuerzo", { effort: "xhigh" });
+		expect(p.status).toBe(200);
+		// Only the effort changed: model and project are kept. The backend does not
+		// judge the level: whether it exists for the model is the adapter's answer.
+		expect(p.body).toMatchObject({
+			effort: "xhigh",
+			model: before.model,
+			projectId: before.projectId,
+		});
+		expect(await claim()).toBe("xhigh");
+		const report = {
+			model: "claude-sonnet-5-5",
+			requested: "xhigh",
+			current: "high",
+			levels: ["default", "low", "medium", "high"],
+			error: "el adaptador no ofrece el nivel xhigh para este modelo",
+		};
+		expect((await call(as("esfuerzo"), "POST", "/runner/effort", report)).status).toBe(204);
+		expect((await agentOf()).effortApplied).toMatchObject(report);
+		// A report without `requested` is ignored; malformed levels become [].
+		await call(as("esfuerzo"), "POST", "/runner/effort", { current: "low" });
+		expect((await agentOf()).effortApplied).toMatchObject({ requested: "xhigh" });
+		await call(as("esfuerzo"), "POST", "/runner/effort", { requested: "xhigh", levels: [1, 2] });
+		expect((await agentOf()).effortApplied).toMatchObject({
+			model: null,
+			current: null,
+			levels: [],
+			error: null,
+		});
+		// "default" and null both clear the pin.
+		expect(
+			(await call(owner, "PATCH", "/agents/esfuerzo", { effort: "default" })).body,
+		).toMatchObject({
+			effort: null,
+		});
+		await call(owner, "PATCH", "/agents/esfuerzo", { effort: "low" });
+		expect((await call(owner, "PATCH", "/agents/esfuerzo", { effort: null })).body).toMatchObject({
+			effort: null,
+		});
+		expect(await claim()).toBe("default");
+	});
+
+	it("effort at create: the agent row starts with it", async () => {
+		const sid = "88888888-8888-4888-8888-888888888888";
+		db.prepare(
+			"INSERT INTO sessions (session_id, user_id, name, container_name, status) VALUES (?, ?, 'ef2', ?, 'running')",
+		).run(sid, OWNER, `st-${sid.slice(0, 12)}`);
+		expect((await acp.create(sid, OWNER, "con-effort", { effort: "max" })).effort).toBe("max");
 	});
 
 	it("events go only to the owner of the row", () => {

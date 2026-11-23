@@ -594,7 +594,13 @@ export async function createSession(
 	name: string,
 	envVars?: Record<string, string>,
 	config?: SessionConfigPayload,
-	acpAgent?: { name: string; projectId?: string | null; runtime?: string; model?: string },
+	acpAgent?: {
+		name: string;
+		projectId?: string | null;
+		runtime?: string;
+		model?: string;
+		effort?: string;
+	},
 ): Promise<CreateSessionResponse> {
 	const res = await apiFetch("/sessions", {
 		method: "POST",
@@ -1855,6 +1861,20 @@ export interface AcpAgentInfo {
 		error: string | null;
 		at: string;
 	} | null;
+	/** Stored reasoning effort (null: "default", the CLI decides). */
+	effort?: string | null;
+	/**
+	 * What the adapter reported after the runner last applied the effort:
+	 * `levels` are the ones it offers for `model` (the only source of levels).
+	 */
+	effortApplied?: {
+		model: string | null;
+		requested: string;
+		current: string | null;
+		levels: string[];
+		error: string | null;
+		at?: string;
+	} | null;
 	projectId?: string | null;
 	runnerSeenAt: string | null;
 	/** Message being worked on, if any. */
@@ -1948,6 +1968,12 @@ export const acpSetModel = (name: string, model: string) =>
 	acpJson<AcpAgentInfo>(`/agents/${encodeURIComponent(name)}`, {
 		method: "PATCH",
 		body: JSON.stringify({ model }),
+	});
+/** Change an agent's reasoning effort (null: default): applied by its runner while idle. */
+export const acpSetEffort = (name: string, effort: string | null) =>
+	acpJson<AcpAgentInfo>(`/agents/${encodeURIComponent(name)}`, {
+		method: "PATCH",
+		body: JSON.stringify({ effort }),
 	});
 export const acpAnswer = (
 	id: number,
