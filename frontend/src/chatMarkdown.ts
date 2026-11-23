@@ -8,7 +8,7 @@ import { renderMarkdown } from "./markdown.js";
 import { appRouteHash } from "./router.js";
 import { button, el } from "./ui.js";
 
-export function copyButton(label: string, text: () => string, title?: string): HTMLButtonElement {
+function copyButton(label: string, text: () => string, title?: string): HTMLButtonElement {
 	const b = button(
 		label,
 		"files-btn chat-copy",

@@ -190,7 +190,7 @@ describe("project routes", () => {
 		});
 	});
 
-	it("feature off: a pasted project hash is delivered to the session listeners as before", () => {
+	it("project routes off: a pasted project hash is delivered to the session listeners as before", () => {
 		start();
 		const seen: string[] = [];
 		onRoute((r) => seen.push(r ? routeHash(r) : "null"));
@@ -230,7 +230,7 @@ describe("project routes", () => {
 		expect(depth()).toBe(2);
 	});
 
-	it("feature on: Back onto a project page is not a session route change", () => {
+	it("project routes on: Back onto a project page is not a session route change", () => {
 		enableProjectRoutes(() => true);
 		start();
 		const seen: string[] = [];

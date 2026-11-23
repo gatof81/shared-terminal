@@ -264,7 +264,7 @@ export class MockBackend {
 	delays: Partial<Record<DelayKey, number>> = {};
 
 	// ── Projects ──
-	/** PROJECT_CHAT_ENABLED: `features.projectChat` + the /projects routes. */
+	/** The /projects routes (off: the mock answers them 404). */
 	projectChat = false;
 	projects: MockProject[] = [];
 	/** A status (e.g. 500) the project feed answers instead of the feed (0: normal). */
@@ -274,7 +274,7 @@ export class MockBackend {
 	private seq = 100;
 
 	// ── ACP ──
-	/** ACP_AGENTS_ENABLED: `features.acpAgents` + the /acp routes and /ws/acp. */
+	/** The /acp routes and /ws/acp (off: the mock answers them 404). */
 	acp = false;
 	acpAgents: MockAcpAgent[] = [];
 	/** GET /acp/agents: an optional delay before each answer. */
@@ -426,7 +426,7 @@ export class MockBackend {
 		route: Route,
 	): Promise<boolean> {
 		if (!/^\/projects(\/|$)/.test(path)) return false;
-		// Flag off: the paths do not exist (the same 404 as any unknown route).
+		// Off: the paths do not exist (the same 404 as any unknown route).
 		if (!this.projectChat) {
 			await json(404, { error: `No mock for ${method} ${path}` });
 			return true;
@@ -724,12 +724,6 @@ export class MockBackend {
 				isAdmin: this.current?.isAdmin ?? false,
 				isLead: this.current?.isLead ?? false,
 				resourceCaps: { cpuMaxCores: 8, memMaxMiB: 16384 },
-				// P3a: present only with the flag on (byte-identical answer otherwise).
-				...(this.projectChat
-					? {
-							features: { projectChat: true, ...(this.acp ? { acpAgents: true } : {}) },
-						}
-					: {}),
 			});
 		}
 		if (path === "/auth/login" && method === "POST") {

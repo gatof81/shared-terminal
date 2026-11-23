@@ -42,9 +42,9 @@ export type View = "terminal" | "files" | "git" | "chat";
 // ── Route ───────────────────────────────────────────────────────────────────
 //
 // The address bar mirrors (session, view, detail) — router.ts. Each view
-// registers what its "detail" is (the open file, diff, conversation or
-// tab) and how to show one; this module writes the route whenever the
-// view or a detail changes, and applies a route the browser hands back.
+// registers what its "detail" is (the open file, diff or tab) and how to
+// show one; this module writes the route whenever the view or a detail
+// changes, and applies a route the browser hands back.
 
 export interface RouteDetailHandler {
 	/** The detail on screen, or null. */

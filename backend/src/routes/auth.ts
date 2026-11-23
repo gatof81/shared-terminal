@@ -102,8 +102,9 @@ export function registerAuthRoutes(router: Router, ctx: RouteContext): void {
 			isAdmin,
 			isLead,
 			resourceCaps,
-			// Both features are always on now; the field stays because the
-			// deployed frontend reads it (absent ⇒ it hides Projects and agents).
+			// No frontend reads it any more; it stays constant because the VM100
+			// deploy kit compares it with host.conf FEATURE_ON (01-preflight
+			// against the old backend, 05-verify against the new one).
 			features: { projectChat: true, acpAgents: true },
 		});
 	});

@@ -263,7 +263,7 @@ export function disposeAllCurrentTerminals() {
 	// we just tore down — wipe it wholesale so a future session whose
 	// listTabs returns a recycled tabId doesn't inherit a stale dot.
 	clearAllBadges();
-	// Only the chips: #tab-tools (shell v2's font/search controls) stays.
+	// Only the chips: #tab-tools (the font/search controls) stays.
 	(document.getElementById("tab-strip") ?? terminalTabs).replaceChildren();
 	terminalTabs.style.display = "none";
 	terminalContainer.style.display = "none";
