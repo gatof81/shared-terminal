@@ -72,7 +72,6 @@ import { clearAllBadges } from "./tabActivity.js";
 import { resetTabTitle, setTitleParts } from "./tabTitle.js";
 import type { TerminalSession } from "./terminal.js";
 import { getView, isOverlayActive, onViewChange } from "./viewSwitch.js";
-import { initVvDebug } from "./vvDebug.js";
 
 // ── DOM refs ────────────────────────────────────────────────────────────────
 
@@ -136,51 +135,51 @@ const actionsBtn = document.getElementById("actions-btn") as HTMLButtonElement;
 // and as the URL bar shows/hides — we mirror its height into --app-vh so the
 // xterm host container refits to the space actually visible to the user.
 //
-// The visual viewport's OFFSET is mirrored too (--app-top). To reveal a
-// focused field (the Chat composer) Safari pans the visual viewport down.
-// It cannot scroll the page instead: with the keyboard up body is
-// `position: fixed` (base.css, `data-kb`), so the document has nothing to
-// scroll and the offset is relative to the same layout viewport body is
-// pinned to — `offsetTop` grows by up to the
-// keyboard's height. Laying the app out at y=0 with the visual height
-// then leaves it that far ABOVE the keyboard; translating body by the
-// offset puts it exactly in the visible band. Both are 0 on desktop.
+// The document itself must never stay scrolled. With the keyboard up the
+// layout viewport keeps its full height while the visual one shrinks, so
+// the document can still scroll by the difference — and iOS Safari does
+// scroll it, by exactly the keyboard's height, to reveal the focused field
+// (on-device log, #761: scrollY 279 = 673 − 394, every inner box at 0, our
+// layout already 394 px tall). That leaves the bar above the screen and the
+// composer at the top with an empty band under it. At scrollY 0 the layout
+// fits the visible band and Safari does not move it again, so any document
+// scroll is put back — in the next frame, once, not to fight the reveal
+// animation mid-step. The app has no page-level scrolling of its own
+// (every list scrolls inside its own box).
 //
-// `data-kb="open"` marks the soft keyboard as up (the visual viewport is
-// clearly shorter than the layout one): the bottom safe-area inset is for
-// the home indicator, which the keyboard already covers, so base.css
-// drops it then instead of leaving a strip between composer and keyboard.
+// `data-kb="open"` marks the soft keyboard as up: the bottom safe-area
+// inset is for the home indicator, which the keyboard already covers, so
+// base.css drops it then instead of leaving a strip between composer and
+// keyboard. Measured against the layout viewport (the root's clientHeight),
+// which the keyboard does not change: against `innerHeight` the flag stayed
+// off for seconds with the keyboard up in that log (vv 394 px, flag empty
+// until n23).
 const KEYBOARD_MIN_PX = 120;
 function syncViewportHeight() {
 	const vv = window.visualViewport;
 	const h = vv ? vv.height : window.innerHeight;
-	// Only at scale 1: under a pinch zoom `offsetTop` is the reader panning
-	// the magnified page, and translating body by it would make the content
-	// chase the gesture. The keyboard reveal happens at scale 1.
-	const unzoomed = !vv || Math.abs((vv.scale ?? 1) - 1) < 0.01;
-	// At scale 1 the visual viewport lies inside the layout viewport, so its
-	// offset can never exceed `innerHeight - height`. Clamping to that bound
-	// is geometry, not a guess: a stale offset Safari might still report
-	// after the keyboard closes (full height ⇒ bound 0) cannot push the app
-	// below the screen.
-	const maxTop = Math.max(0, window.innerHeight - h);
-	const top = vv && unzoomed ? Math.min(Math.max(0, vv.offsetTop), maxTop) : 0;
 	const root = document.documentElement;
 	root.style.setProperty("--app-vh", `${h}px`);
-	root.style.setProperty("--app-top", `${top}px`);
-	if (window.innerHeight - h > KEYBOARD_MIN_PX) root.dataset.kb = "open";
+	if (root.clientHeight - h > KEYBOARD_MIN_PX) root.dataset.kb = "open";
 	else delete root.dataset.kb;
+	pinDocument();
+}
+let pinQueued = false;
+function pinDocument() {
+	if (pinQueued || window.scrollY === 0) return;
+	pinQueued = true;
+	requestAnimationFrame(() => {
+		pinQueued = false;
+		if (window.scrollY !== 0) window.scrollTo(0, 0);
+	});
 }
 syncViewportHeight();
-// `scroll` matters on its own: Safari can pan (offsetTop) without a
-// height change, e.g. moving focus between fields with the keyboard up.
+// `scroll` matters on its own: Safari can move the visual viewport without
+// a height change, e.g. moving focus between fields with the keyboard up.
 window.visualViewport?.addEventListener("resize", syncViewportHeight);
 window.visualViewport?.addEventListener("scroll", syncViewportHeight);
 window.addEventListener("resize", syncViewportHeight);
-// `?vvdebug=1`: on-device measurements of the keyboard viewport (#616).
-// AFTER the viewport listeners: listeners run in registration order, so
-// each sample then shows what the app applied for that same event.
-initVvDebug();
+window.addEventListener("scroll", pinDocument, { passive: true });
 
 // ── Font size ───────────────────────────────────────────────────────────────
 // Persisted across reloads via localStorage. Mobile users want ~16 px on a

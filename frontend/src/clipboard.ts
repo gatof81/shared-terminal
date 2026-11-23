@@ -9,7 +9,7 @@
  * The fallback must never move the reader (owner report 2026-11-12:
  * "Copy report" lost the place in the conversation). Focusing a field is
  * what browsers scroll for — and on iOS Safari what pans the visual
- * viewport, which main.ts's --app-top then follows with the whole app. So
+ * viewport (or scroll the document, which main.ts puts back). So
  * the textarea sits pinned inside the visible area (top-left, 1 px,
  * 16 px font: no zoom-on-focus), is focused with `preventScroll`, selected
  * with setSelectionRange (iOS ignores select() on a readonly field), and
