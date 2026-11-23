@@ -1,9 +1,9 @@
 #!/bin/bash
 # install.sh — installs st-ops on VM100. Run by the OWNER, as root, from a reviewed checkout of main:
 #   sudo bash ops/st-ops/install.sh
-# Idempotent. It grants NOTHING: authorized_keys, identities and allowed_signers are created empty and never
-# overwritten, and a new st-ops.conf has SIGNED_VERBS=off (stage 1: only the verbs without a signature).
-# Granting a key and enabling the signed verbs are the owner's separate steps in README.md.
+# Idempotent. It grants NOTHING: authorized_keys and identities are created empty and never overwritten, and a new
+# st-ops.conf has WRITE_VERBS=off (stage 1: only the verbs that change nothing).
+# Granting a key and enabling the write verbs are the owner's separate steps in README.md.
 set -euo pipefail
 umask 022
 [[ $(id -u) == 0 ]] || { echo "run as root"; exit 1; }
@@ -25,7 +25,7 @@ install -d -o root -g root -m 0700 /var/lib/st-ops
 install -o root -g root -m 0755 "$here/bin/st-ops-dispatch" "$here/bin/st-ops-root" /usr/local/lib/st-ops/
 install -o root -g root -m 0644 "$here/lib/st-ops-lib.sh" /usr/local/lib/st-ops/
 [[ -f /etc/st-ops/st-ops.conf ]] || install -o root -g root -m 0644 "$here/etc/st-ops/st-ops.conf.example" /etc/st-ops/st-ops.conf
-for f in authorized_keys identities allowed_signers; do
+for f in authorized_keys identities; do
 	[[ -f /etc/st-ops/$f ]] || install -o root -g root -m 0644 /dev/null "/etc/st-ops/$f"
 done
 
@@ -45,5 +45,6 @@ fi
 systemctl reload ssh
 
 echo "installed. Keys granted: $(grep -cvE '^\s*(#|$)' /etc/st-ops/authorized_keys || true)"
-echo "signed verbs: $(grep -E '^SIGNED_VERBS=' /etc/st-ops/st-ops.conf || echo '?')"
-[[ -s /etc/st-ops/allowed_signers ]] || echo "NOTE: /etc/st-ops/allowed_signers is empty: no request can be approved."
+echo "write verbs: $(grep -E '^(WRITE|SIGNED)_VERBS=' /etc/st-ops/st-ops.conf || echo '?')"
+# The signature approval's file (before 2026-11-23) is no longer read; it is left for the owner to remove.
+[[ ! -e /etc/st-ops/allowed_signers ]] || echo "NOTE: /etc/st-ops/allowed_signers is no longer used (chat approval): remove it when convenient."

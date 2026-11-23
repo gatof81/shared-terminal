@@ -34,7 +34,7 @@ is_msg_id() { [[ $1 =~ ^[0-9]{1,12}$ ]]; }
 load_conf() {
 	local f="$ST_OPS_ETC/st-ops.conf" k v
 	[[ -f $f ]] || die conf "missing $f"
-	REPO_URL='' REQUIRED_WORKFLOW='' REQUIRED_CHECKS='' REQUEST_TTL='' APPROVAL_TTL='' SIGNED_VERBS='' COMPOSE_PROJECT=''
+	REPO_URL='' REQUIRED_WORKFLOW='' REQUIRED_CHECKS='' REQUEST_TTL='' APPROVAL_TTL='' WRITE_VERBS='' COMPOSE_PROJECT=''
 	while IFS='=' read -r k v; do
 		[[ -z $k || $k == \#* ]] && continue
 		v=${v#\"}; v=${v%\"}
@@ -44,12 +44,13 @@ load_conf() {
 		REQUIRED_CHECKS) REQUIRED_CHECKS=$v ;;
 		REQUEST_TTL) [[ $v =~ ^[0-9]{2,6}$ ]] || die conf "REQUEST_TTL"; REQUEST_TTL=$v ;;
 		APPROVAL_TTL) [[ $v =~ ^[0-9]{2,6}$ ]] || die conf "APPROVAL_TTL"; APPROVAL_TTL=$v ;;
-		SIGNED_VERBS) [[ $v == on || $v == off ]] || die conf "SIGNED_VERBS"; SIGNED_VERBS=$v ;;
+		# SIGNED_VERBS: its name before the chat approval (2026-11-23); an installed st-ops.conf keeps working.
+		WRITE_VERBS | SIGNED_VERBS) [[ $v == on || $v == off ]] || die conf "$k"; [[ -z $WRITE_VERBS ]] || die conf "WRITE_VERBS twice"; WRITE_VERBS=$v ;;
 		COMPOSE_PROJECT) [[ $v =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]] || die conf "COMPOSE_PROJECT"; COMPOSE_PROJECT=$v ;;
 		*) die conf "unknown key $k" ;;
 		esac
 	done <"$f"
-	[[ -n $REPO_URL && -n $REQUIRED_WORKFLOW && -n $REQUIRED_CHECKS && -n $REQUEST_TTL && -n $APPROVAL_TTL && -n $SIGNED_VERBS ]] || die conf "incomplete"
+	[[ -n $REPO_URL && -n $REQUIRED_WORKFLOW && -n $REQUIRED_CHECKS && -n $REQUEST_TTL && -n $APPROVAL_TTL && -n $WRITE_VERBS ]] || die conf "incomplete"
 }
 
 # identities: `<name> <SHA256:fingerprint> [<agent>]` per line. A key that is not listed gets nothing, even if sshd
@@ -216,8 +217,6 @@ kv_field() { # $1 = text, $2 = key. Exactly one line `KEY=value`; prints value.
 
 # ── Requests ─────────────────────────────────────────────────────────────
 
-SIGN_NAMESPACE="st-ops-deploy@shared-terminal"
-
 request_dir() { echo "$ST_OPS_STATE/requests/$1"; }
 # The data as the kit wants it: `r<RELEASE>.conf`, the name 01 checks against the RELEASE inside.
 data_file() { echo "$1/$(request_field "$1/request.txt" release).conf"; }
@@ -227,8 +226,43 @@ request_field() { # $1 = request file, $2 = key. Exactly one line `key: value`.
 	grep -E "^$2: " "$1" | sed "s/^$2: //"
 }
 
-verify_signature() { # $1 = request file, $2 = signature file. Only the `owner` principal, only our namespace.
-	ssh-keygen -Y verify -f "$ST_OPS_ETC/allowed_signers" -I owner -n "$SIGN_NAMESPACE" -s "$2" <"$1" >/dev/null 2>&1
+# The approval code of a request: what the owner writes in Chat ("OK r16-847526e"). It names the release and the
+# exact commit, so an "OK" for one release never approves another.
+approval_code() { # $1 = request file
+	local rel target
+	rel=$(request_field "$1" release) && target=$(request_field "$1" target) || return 1
+	printf '%s-%s' "$rel" "${target:0:7}"
+}
+
+# Clock slack between D1 (which stamps the message) and this host (which stamps the request).
+APPROVAL_CLOCK_SLACK=120
+
+# Whether ACP message $1 is the owner's approval of request dir $2 for agent $3. Like message_is_own_running, the
+# dispatcher has no D1 access: it asks the kit's read-only `owner-approval.sh` and believes only an exact answer.
+# What makes it the OWNER's: the backend writes from_id = owner only for a message sent with the owner's login
+# (an agent's `st send` is stored under its own name, and `owner` is a reserved agent name). On top of the kit's
+# own checks, the message must be newer than the request (an "OK" written before the proposal approves nothing)
+# and not already used by another request.
+owner_approves() { # $1 = message id, $2 = request dir, $3 = agent
+	local out rc code created d
+	code=$(approval_code "$2/request.txt") || return 1
+	created=$(request_field "$2/request.txt" created-epoch) || return 1
+	[[ $created =~ ^[0-9]+$ ]] || return 1
+	set +e
+	out=$(cd "$ST_OPS_KIT" && bash bin/owner-approval.sh "$1" "$3" "$code" </dev/null 2>/dev/null)
+	rc=$?
+	set -e
+	[[ $rc == 0 && $(tail -n 1 <<<"$out") == "RESULT owner-approval OK rc=0" ]] || return 1
+	[[ $(kv_field "$out" MESSAGE_ID) == "$1" && $(kv_field "$out" FROM) == owner && $(kv_field "$out" TO) == "$3" &&
+		$(kv_field "$out" KIND) == request && $(kv_field "$out" AGENT_EXISTS) == yes &&
+		$(kv_field "$out" OWNER_IS_TOKEN_OWNER) == yes && $(kv_field "$out" APPROVES_CODE) == yes ]] || return 1
+	local at
+	at=$(kv_field "$out" CREATED_EPOCH) && [[ $at =~ ^[0-9]+$ ]] || return 1
+	((at + APPROVAL_CLOCK_SLACK >= created)) || return 1
+	for d in "$ST_OPS_STATE"/requests/*/; do
+		[[ -f $d/approved/message && $(<"$d/approved/message") == "$1" ]] && return 1
+	done
+	return 0
 }
 
 now_epoch() { date -u +%s; }
@@ -267,7 +301,7 @@ forget_busy() { # $1 = request dir, $2 = step
 	rmdir "$1/steps/$2.started"
 }
 
-approval_expired() { # $1 = request dir. The owner's approval holds for the signed `approval-valid-for` only.
+approval_expired() { # $1 = request dir. The owner's approval holds for the request's `approval-valid-for` only.
 	local at ttl
 	[[ -e $1/approved ]] || return 1
 	[[ -f $1/approved/at ]] || return 0
@@ -325,21 +359,21 @@ open_request() { # $1 = id; sets D, refuses anything but an active request
 	[[ $st == active ]] || die request "request is $st"
 }
 
-# What runs is what was signed: the kit at the signed commit and the data with the signed hash — the copy this
-# server keeps and, once preflight froze them, the LOG's copies too.
-assert_signed_inputs() { # $1 = request dir
+# What runs is what the owner approved: the kit at the request's commit and the data with the request's hash — the
+# copy this server keeps and, once preflight froze them, the LOG's copies too.
+assert_request_inputs() { # $1 = request dir
 	local d=$1 sum head log
 	sum=$(request_field "$d/request.txt" release-conf-sha256)
 	head=$(request_field "$d/request.txt" kit-head)
-	[[ $(kit_head) == "$head" ]] || die kit "the kit is not at the signed commit $head"
-	[[ -f $(data_file "$d") && $(sha256sum <"$(data_file "$d")" | cut -d' ' -f1) == "$sum" ]] || die data "the release data differs from the signed one"
+	[[ $(kit_head) == "$head" ]] || die kit "the kit is not at the request's commit $head"
+	[[ -f $(data_file "$d") && $(sha256sum <"$(data_file "$d")" | cut -d' ' -f1) == "$sum" ]] || die data "the release data differs from the request's"
 	[[ -f $d/log ]] || return 0
 	log=$(<"$d/log")
-	frozen_ok "$log" "$sum" "$head" || die data "$log does not hold the signed data and kit commit"
+	frozen_ok "$log" "$sum" "$head" || die data "$log does not hold the request's data and kit commit"
 }
-# The copies preflight froze in its LOG (the later steps read those): release.conf = the signed bytes, run.conf
-# names the signed kit commit.
-frozen_ok() { # $1 = LOG, $2 = signed sha256, $3 = signed kit-head
+# The copies preflight froze in its LOG (the later steps read those): release.conf = the request's bytes, run.conf
+# names the request's kit commit.
+frozen_ok() { # $1 = LOG, $2 = the request's data sha256, $3 = its kit-head
 	[[ -f $1/release.conf && $(sha256sum <"$1/release.conf" | cut -d' ' -f1) == "$2" ]] &&
 		[[ -f $1/run.conf && $(grep -cx "KIT_HEAD=$3" "$1/run.conf") == 1 && $(grep -cx "RELEASE_CONF_SHA256=$2" "$1/run.conf") == 1 ]]
 }
@@ -389,14 +423,14 @@ verb_help() {
 	cat <<'TXT'
 st-ops verbs:
   help | status                       read-only
-  propose                             new request; release data on stdin; prints the text the owner signs
-  request-text <id>                   the exact bytes to sign (save as request.txt)
+  propose                             new request; release data on stdin; prints it and its approval code
+  request-text <id>                   the request as proposed
   preflight <id> [<message id>]       kit 01 with the request's data; records its LOG
-  approve <id>                        the owner's signature on stdin; enables the writing steps of <id>
+  approve <id> <message id>           the owner's chat message "OK <code>" to this agent; enables the writing steps
   step <id> <step> [<message id>]     next step, in order: backup offhost rollback-proof deploy acceptance
   verify <id>                         kit 05 (read-only), after deploy OK; repeatable, required before acceptance
   result <id> [<step>]                state of a request; the .result of a detached step
-  cancel <id>                         withdraw a request before any writing step
+  cancel <id>                         close a request (refused while a step's outcome is unknown)
 TXT
 }
 
@@ -408,7 +442,7 @@ verb_status() {
 			--format '{{.Image}} {{.ID}}' 2>/dev/null | head -1)
 	fi
 	echo "deployed-app: ${img:-not running}"
-	echo "signed-verbs: $SIGNED_VERBS"
+	echo "write-verbs: $WRITE_VERBS"
 	local d last=''
 	# Request ids start with their UTC time: the glob's (sorted) last one is the newest.
 	for d in "$ST_OPS_STATE"/requests/*/; do [[ -d $d ]] && last=$(basename "$d"); done
@@ -468,18 +502,19 @@ verb_propose() {
 		echo "release-conf:"
 		sed 's/^/  /' "$d/r$rel.conf"
 		echo "approval-valid-for: ${APPROVAL_TTL}s"
+		echo "approval-code: r$rel-${target:0:7}"
 		echo "created: $(date -u -d "@$now" +%FT%TZ)"
+		echo "created-epoch: $now"
 		echo "expires: $(date -u -d "@$exp" +%FT%TZ)"
 		echo "expires-epoch: $exp"
 	} >"$d/request.txt"
 	chmod 0644 "$d/request.txt"
-	echo "Request $id created. The owner signs EXACTLY these bytes (file request.txt):"
+	echo "Request $id created:"
 	echo "-----8<-----"
 	cat "$d/request.txt"
 	echo "-----8<-----"
-	echo "Save them with:   ssh st-ops request-text $id > request.txt"
-	echo "Owner:            ssh-keygen -Y sign -f <personal key> -n $SIGN_NAMESPACE request.txt"
-	echo "Operator:         ssh st-ops approve $id < request.txt.sig"
+	echo "Owner:            a chat message to the operator saying: OK r$rel-${target:0:7}"
+	echo "Operator:         ssh st-ops approve $id <id of that message>"
 }
 
 verb_request_text() {
@@ -493,7 +528,7 @@ verb_preflight() {
 	local log rel
 	with_lock
 	open_request "$1"
-	assert_signed_inputs "$D"
+	assert_request_inputs "$D"
 	exclude_args preflight "${2:-}"
 	run_step "$D" preflight "${EXCLUDE[@]}"
 	[[ $KIT_OUTCOME == OK ]] || return "$STEP_RC"
@@ -502,7 +537,7 @@ verb_preflight() {
 	rel=$(request_field "$D/request.txt" release)
 	log=$(grep -E '^LOG=' "$D/steps/preflight.out" | tail -1 || true)
 	log=${log#LOG=}
-	# The LOG must be the kit's own new directory for THIS target, owned by us (root), holding the signed data.
+	# The LOG must be the kit's own new directory for THIS target, owned by us (root), holding the request's data.
 	if [[ ${log%/*} == "$ST_OPS_LOG_BASE" && ${log##*/} =~ ^st-deploy-${rel}-${target:0:7}-[0-9]{8}T[0-9]{6}Z$ &&
 		-d $log && ! -L $log && $(stat -c %u "$log") == "$EUID" ]] &&
 		frozen_ok "$log" "$(request_field "$D/request.txt" release-conf-sha256)" "$(request_field "$D/request.txt" kit-head)"; then
@@ -517,27 +552,28 @@ verb_preflight() {
 }
 
 verb_approve() {
-	(($# == 1)) || die usage "approve <id>   (signature on stdin)"
-	[[ $SIGNED_VERBS == on ]] || die disabled "signed verbs are off on this host (install stage 1)"
-	local sig
+	(($# == 2)) || die usage "approve <id> <message id>   (the owner's chat message: OK <approval code>)"
+	[[ $WRITE_VERBS == on ]] || die disabled "write verbs are off on this host (install stage 1)"
 	is_request_id "$1" || die usage "invalid request id"
-	# An SSH signature is ~300 bytes armoured; anything much larger is not one.
-	sig=$(head -c 4096)
+	is_msg_id "$2" || die usage "invalid message id"
+	[[ -n $ST_OPS_AGENT ]] || die message "identity $ST_OPS_IDENT has no agent: only an agent's owner can approve to it"
 	with_lock
 	open_request "$1"
 	[[ -e $D/approved ]] && die request "already approved (an approval is used once)"
-	printf '%s\n' "$sig" >"$D/sig.candidate"
-	verify_signature "$D/request.txt" "$D/sig.candidate" || { rm -f "$D/sig.candidate"; die signature "not signed by the owner for this exact request"; }
-	assert_signed_inputs "$D"
-	mv "$D/sig.candidate" "$D/request.txt.sig"
+	[[ -f $D/request.txt && -n $(request_field "$D/request.txt" created-epoch) ]] ||
+		die request "a request proposed before the chat approval: propose it again"
+	owner_approves "$2" "$D" "$ST_OPS_AGENT" ||
+		die approval "message $2 is not the owner's \"OK $(approval_code "$D/request.txt")\" to $ST_OPS_AGENT written after the proposal"
+	assert_request_inputs "$D"
 	mkdir "$D/approved"
 	now_epoch >"$D/approved/at"
-	echo "approved $1 for $(request_field "$D/request.txt" approval-valid-for): next step is backup"
+	echo "$2" >"$D/approved/message"
+	echo "approved $1 by the owner's message $2 for $(request_field "$D/request.txt" approval-valid-for): next step is backup"
 }
 
 verb_step() {
 	(($# == 2 || $# == 3)) || die usage "step <id> <step> [<message id>]"
-	[[ $SIGNED_VERBS == on ]] || die disabled "signed verbs are off on this host (install stage 1)"
+	[[ $WRITE_VERBS == on ]] || die disabled "write verbs are off on this host (install stage 1)"
 	local s=$2 msg=${3:-} i prev=preflight
 	with_lock
 	open_request "$1"
@@ -553,7 +589,7 @@ verb_step() {
 	BUSY) forget_busy "$D" "$s" ;;
 	*) die order "$s already ran for this request" ;;
 	esac
-	assert_signed_inputs "$D"
+	assert_request_inputs "$D"
 	exclude_args "$s" "$msg"
 	run_step "$D" "$s" "${EXCLUDE[@]}"
 	settle "$D"
@@ -566,7 +602,7 @@ verb_verify() {
 	D=$(request_dir "$1")
 	[[ -f $D/request.txt ]] || die request "no such request"
 	[[ $(step_outcome "$D" deploy) == OK ]] || die order "deploy has not finished OK"
-	assert_signed_inputs "$D"
+	assert_request_inputs "$D"
 	run_kit "$D" verify
 	if [[ $KIT_OUTCOME == OK ]]; then echo OK >"$D/steps/verify"; else echo "FAIL rc=$STEP_RC" >"$D/steps/verify"; fi
 	return "$STEP_RC"
@@ -593,9 +629,14 @@ verb_cancel() {
 	local s
 	with_lock
 	open_request "$1"
-	for s in "${STEP_ORDER[@]}"; do [[ $(step_outcome "$D" "$s") == NONE ]] || die request "$s already started"; done
+	# Any time, so a request left halfway (a verify that failed on a kit bug, a deploy judged good by hand) does not
+	# block the next one until its approval lapses. Never while a step's outcome is unknown: that one is root's.
+	any_running "$D" && die request "a step's outcome is still unknown (RUNNING): root reviews it"
+	local ran=''
+	for s in preflight "${STEP_ORDER[@]}"; do [[ $(step_outcome "$D" "$s") == NONE ]] || ran+=" $s"; done
 	mkdir "$D/cancelled"
-	echo "cancelled $1"
+	echo "by $ST_OPS_IDENT at $(now_epoch); steps run:${ran:- none}" >"$D/cancelled/note"
+	echo "cancelled $1 (steps run:${ran:- none})"
 }
 
 st_ops_main() {

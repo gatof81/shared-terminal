@@ -1,7 +1,7 @@
 #!/bin/bash
 # ops/st-ops/test/run.sh — tests for st-ops, no root, no Docker, no network. `bash ops/st-ops/test/run.sh`
-# Real ssh-keygen signatures, real git repositories and a fake kit (a git repo whose scripts print `RESULT … rc=`);
-# GitHub and logger are stubbed.
+# Real git repositories and a fake kit (a git repo whose scripts print `RESULT … rc=`; its message-info.sh and
+# owner-approval.sh answer from fixtures); GitHub and logger are stubbed.
 # SC2015: `check && ok || ko` is the idiom here (ok never fails). SC2016: the fake kit's bodies are literal.
 # SC2317: the stubs are called by the sourced library.
 # shellcheck disable=SC2015,SC2016,SC2317
@@ -22,10 +22,8 @@ expect_rc() { # $1 = expected rc, $2 = label, rest = command
 expect_out() { grep -qE -- "$1" "$T/out" && ok || ko "$2: output lacks /$1/: $(head -c 400 "$T/out")"; }
 expect_no() { grep -qE -- "$1" "$T/out" && ko "$2: output has /$1/" || ok; }
 
-# ── Keys ──
-# ssh-keygen -Y sign asks before overwriting a .sig: always sign into a fresh file.
-sign() { rm -f "$2.sig"; ssh-keygen -q -Y sign -f "$1" -n "${3:-st-ops-deploy@shared-terminal}" "$2" 2>/dev/null </dev/null; }
-for k in owner other qa ops2 arq; do ssh-keygen -q -t ed25519 -N '' -C "$k" -f "$T/$k"; done
+# ── Keys (the operator identities' SSH keys) ──
+for k in other qa ops2 arq; do ssh-keygen -q -t ed25519 -N '' -C "$k" -f "$T/$k"; done
 fp() { ssh-keygen -lf "$T/$1.pub" | awk '{print $2}'; }
 fp_qa=$(fp qa) fp_ops2=$(fp ops2)
 
@@ -114,6 +112,19 @@ echo "message-info.sh \$*" >>"$T/kit.log"
 cat "$T/msg/\$1"; exit "\$(cat "$T/msg/\$1.rc" 2>/dev/null || echo 0)"
 EOF
 mkdir -p "$T/msg"
+# owner-approval.sh answers from $T/appr/<id> the same way.
+cat >"$ST_OPS_KIT/bin/owner-approval.sh" <<EOF
+#!/bin/bash
+echo "owner-approval.sh \$*" >>"$T/kit.log"
+[[ -f $T/appr/\$1 ]] || { echo "RESULT owner-approval FAIL rc=1"; exit 1; }
+cat "$T/appr/\$1"; exit "\$(cat "$T/appr/\$1.rc" 2>/dev/null || echo 0)"
+EOF
+mkdir -p "$T/appr"
+# $1 = id, $2 = FROM, $3 = TO, $4 = KIND, $5 = APPROVES_CODE, $6 = CREATED_EPOCH
+appr() {
+	printf 'MESSAGE_ID=%s\nFROM=%s\nTO=%s\nKIND=%s\nAGENT_EXISTS=yes\nOWNER_IS_TOKEN_OWNER=yes\nAPPROVES_CODE=%s\nCREATED_EPOCH=%s\nRESULT owner-approval OK rc=0\n' "$@" >"$T/appr/$1"
+	rm -f "$T/appr/$1.rc"
+}
 msg() { # $1 = id, $2 = TO, $3 = STATE, $4 = AGENT_EXISTS, $5 = OWNER_IS_TOKEN_OWNER
 	printf 'MESSAGE_ID=%s\nTO=%s\nFROM=architect\nKIND=request\nSTATE=%s\nAGENT_EXISTS=%s\nOWNER_IS_TOKEN_OWNER=%s\nOPEN=yes\nRESULT message-info OK rc=0\n' "$@" >"$T/msg/$1"
 	rm -f "$T/msg/$1.rc"
@@ -122,16 +133,15 @@ git -C "$ST_OPS_KIT" init -q && git -C "$ST_OPS_KIT" add -A && git -C "$ST_OPS_K
 kit_move() { git -C "$ST_OPS_KIT" -c user.name=t -c user.email=t@t commit -q --allow-empty -m moved; }
 
 # ── Config ──
-echo "owner namespaces=\"st-ops-deploy@shared-terminal\" $(cut -d' ' -f1,2 "$T/owner.pub")" >"$ST_OPS_ETC/allowed_signers"
 printf 'qa %s qa\nops2 %s\narq-ops %s arq\n' "$fp_qa" "$fp_ops2" "$(fp arq)" >"$ST_OPS_ETC/identities"
-conf() { # $1 = SIGNED_VERBS
+conf() { # $1 = WRITE_VERBS, $2 = its key name (SIGNED_VERBS before the chat approval)
 	cat >"$ST_OPS_ETC/st-ops.conf" <<EOF
 REPO_URL=https://github.com/example/shared-terminal.git
 REQUIRED_WORKFLOW=.github/workflows/ci.yml
 REQUIRED_CHECKS="Backend (tsc + vitest)|Frontend (tsc + vite build)"
 REQUEST_TTL=7200
 APPROVAL_TTL=21600
-SIGNED_VERBS=$1
+${2:-WRITE_VERBS}=$1
 EOF
 }
 conf on
@@ -182,8 +192,15 @@ DIST=/root/st-deploy-r12-0123abc-20261118T101010Z/new-image-dist-all.txt
 release() { printf '# r7\n\nRELEASE=7\nFROM=%s\nTARGET=%s\nP_DIST_FILE=%s\nIMAGE_NOTE=plain value\n' "$1" "$2" "${3:-$DIST}"; }
 propose() { release "$@" | st qa propose; }
 new_id() { grep -oE '^id: .*' "$T/out" | sed 's/^id: //'; }
-text() { st qa request-text "$1" >"$T/req.txt"; }
-approve() { text "$1"; sign "$T/owner" "$T/req.txt"; st qa approve "$1" <"$T/req.txt.sig"; }
+created_of() { st qa request-text "$1" | sed -n 's/^created-epoch: //p'; }
+code_of() { st qa request-text "$1" | sed -n 's/^approval-code: //p'; }
+# The owner's "OK <code>" to qa, a fresh message id each time, written just after the request.
+next_msg=5000
+approve() {
+	next_msg=$((next_msg + 1))
+	appr "$next_msg" owner qa request yes "$(($(created_of "$1") + 30))"
+	st qa approve "$1" "$next_msg"
+}
 cancel_active() { local d; for d in "$ST_OPS_STATE"/requests/*/; do st qa cancel "$(basename "$d")" >/dev/null 2>&1; done; }
 
 # ── Identity, verbs, words ──
@@ -191,7 +208,7 @@ expect_rc 2 "unknown key is denied" st other status
 expect_out "ERROR denied" "unknown key"
 expect_rc 0 "status" st qa status
 expect_out "^kit-head: [0-9a-f]{40}$" "status shows the kit commit"
-expect_out "^signed-verbs: on" "status shows the stage"
+expect_out "^write-verbs: on" "status shows the stage"
 expect_rc 2 "unknown verb" st qa deploy-now
 expect_rc 2 "invalid word" st qa result 'a/b'
 expect_rc 2 "invalid verb" st qa 'Rm'
@@ -236,16 +253,19 @@ expect_out "^  [0-9a-f]+ three \?\[31mred\?$" "text: commit subjects printable-o
 expect_out "^  ci: run 10 of .github/workflows/ci.yml: completed/success$" "text: CI run"
 expect_out "^runs-as: root \(kit" "text: runs-as"
 expect_out "^approval-valid-for: 21600s$" "text: approval window"
+expect_out "^approval-code: r7-${three:0:7}$" "text: approval code = release + sha7"
+expect_out "^created-epoch: [0-9]+$" "text: created-epoch"
+expect_out "^Owner: .*OK r7-${three:0:7}$" "propose tells what the owner writes"
 expect_out "^  IMAGE_NOTE=plain value$" "text: the data itself"
 [[ $(stat -c %a "$ST_OPS_STATE/requests/$id/r7.conf") == 600 ]] && ok || ko "r7.conf is 0600"
 [[ $(stat -c %a "$ST_OPS_STATE/requests/$id") == 700 ]] && ok || ko "request dir is 0700"
 expect_rc 2 "one active request at a time" propose "$base" "$two"
 expect_out "ERROR pending" "pending"
 
-# ── Stage 1: the signed verbs refuse ──
+# ── Stage 1: the write verbs refuse ──
 conf off
-text "$id"; sign "$T/owner" "$T/req.txt"
-expect_rc 2 "stage 1: approve refused" st qa approve "$id" <"$T/req.txt.sig"
+appr 900 owner qa request yes "$(($(created_of "$id") + 30))"
+expect_rc 2 "stage 1: approve refused" st qa approve "$id" 900
 expect_out "ERROR disabled" "disabled"
 expect_rc 2 "stage 1: step refused" st qa step "$id" backup
 touch "$T/busy-01"
@@ -257,7 +277,7 @@ expect_out "^step preflight: NONE$" "BUSY preflight is not consumed"
 expect_rc 0 "stage 1: preflight allowed (after BUSY)" st qa preflight "$id"
 conf on
 
-# ── Signatures ──
+# ── The owner's approval (a chat message) ──
 expect_out "^LOG=$T/root/st-deploy-r7-" "preflight prints the LOG"
 grep -qx "01-preflight.sh --release-file $ST_OPS_STATE/requests/$id/r7.conf" "$T/kit.log" && ok || ko "01 argv: $(grep 01- "$T/kit.log")"
 [[ -z $(git -C "$ST_OPS_KIT" status --porcelain) ]] && ok || ko "st-ops wrote into the kit"
@@ -265,18 +285,49 @@ expect_out "^RESULT 01-preflight OK rc=0$" "preflight passes the RESULT line"
 expect_rc 2 "preflight runs once" st qa preflight "$id"
 expect_rc 2 "step before approve" st qa step "$id" backup
 expect_out "ERROR approval" "not approved"
-sign "$T/other" "$T/req.txt"
-expect_rc 2 "signature by another key" st qa approve "$id" <"$T/req.txt.sig"
-expect_out "ERROR signature" "other key"
-sign "$T/owner" "$T/req.txt" other-namespace@x
-expect_rc 2 "signature in another namespace" st qa approve "$id" <"$T/req.txt.sig"
-sed 's/IMAGE_NOTE=plain value/IMAGE_NOTE=evil/' "$T/req.txt" >"$T/req2.txt"; sign "$T/owner" "$T/req2.txt"
-expect_rc 2 "signature over other bytes" st qa approve "$id" <"$T/req2.txt.sig"
-echo garbage | st qa approve "$id" >"$T/out" 2>&1; [[ $? == 2 ]] && ok || ko "garbage signature"
-[[ -z $(find "$ST_OPS_STATE" -name 'sig*' -o -name '*.candidate') ]] && ok || ko "rejected approvals leave no temp file"
-# Another request's signature: propose B, sign it, cancel it; its signature must not approve A (and vice versa).
+c=$(created_of "$id") code=$(code_of "$id")
+expect_rc 2 "approve: no message id" st qa approve "$id"
+expect_rc 2 "approve: not a message id" st qa approve "$id" abc
+expect_rc 2 "approve: unknown message" st qa approve "$id" 901
+expect_out "ERROR approval" "unknown message"
+grep -qx "owner-approval.sh 901 qa $code" "$T/kit.log" && ok || ko "owner-approval argv: $(grep owner-approval "$T/kit.log" | tail -1)"
+appr 902 architect qa request yes $((c + 30))
+expect_rc 2 "approve: written by an agent, not the owner" st qa approve "$id" 902
+appr 902 owner arq request yes $((c + 30))
+expect_rc 2 "approve: the owner's message to ANOTHER agent" st qa approve "$id" 902
+appr 902 owner qa reply yes $((c + 30))
+expect_rc 2 "approve: a reply" st qa approve "$id" 902
+appr 902 owner qa request no $((c + 30))
+expect_rc 2 "approve: the message does not say OK <code>" st qa approve "$id" 902
+appr 902 owner qa request yes $((c - 600))
+expect_rc 2 "approve: an OK written before the proposal" st qa approve "$id" 902
+appr 902 owner qa request yes $((c + 30)); sed -i 's/^OWNER_IS_TOKEN_OWNER=yes/OWNER_IS_TOKEN_OWNER=no/' "$T/appr/902"
+expect_rc 2 "approve: another owner's message" st qa approve "$id" 902
+appr 902 owner qa request yes $((c + 30)); sed -i 's/^AGENT_EXISTS=yes/AGENT_EXISTS=no/' "$T/appr/902"
+expect_rc 2 "approve: agent deleted" st qa approve "$id" 902
+appr 902 owner qa request yes $((c + 30)); echo 1 >"$T/appr/902.rc"
+expect_rc 2 "approve: kit rc != 0" st qa approve "$id" 902
+appr 902 owner qa request yes $((c + 30)); echo "trailing noise" >>"$T/appr/902"
+expect_rc 2 "approve: last line not RESULT" st qa approve "$id" 902
+appr 902 owner qa request yes $((c + 30)); sed -i '2a FROM=owner' "$T/appr/902"
+expect_rc 2 "approve: FROM repeated" st qa approve "$id" 902
+appr 902 owner qa request yes $((c + 30)); sed -i 's/^MESSAGE_ID=.*/MESSAGE_ID=1/' "$T/appr/902"
+expect_rc 2 "approve: answer about another message" st qa approve "$id" 902
+appr 902 owner qa request yes $((c + 30)); sed -i 's/^FROM=owner/FROM=owner2/' "$T/appr/902"
+expect_rc 2 "approve: FROM only prefixed by owner" st qa approve "$id" 902
+appr 902 owner qa request yes x
+expect_rc 2 "approve: CREATED_EPOCH not a number" st qa approve "$id" 902
+appr 902 owner qa request yes $((c + 30))
+expect_rc 2 "approve: identity without agent" st ops2 approve "$id" 902
+expect_out "has no agent" "no agent"
+expect_rc 2 "approve: the arq identity cannot use qa's approval" st arq approve "$id" 902
+[[ ! -e $ST_OPS_STATE/requests/$id/approved ]] && ok || ko "refused approvals leave no approval"
+# Clock slack: a message stamped by D1 a little before this host's request time still counts.
+appr 902 owner qa request yes $((c - 60))
 idA=$id
-expect_rc 0 "approve OK" approve "$idA"
+expect_rc 0 "approve OK" st qa approve "$idA" 902
+expect_out "approved $idA by the owner's message 902" "approve output"
+[[ $(cat "$ST_OPS_STATE/requests/$idA/approved/message") == 902 ]] && ok || ko "approval records its message"
 expect_rc 2 "approval used once" approve "$idA"
 expect_out "already approved" "reused"
 
@@ -304,7 +355,6 @@ grep -q "^02b-offhost.sh --detach $T/root/" "$T/kit.log" && ok || ko "offhost ge
 expect_rc 0 "result of a detached step" st qa result "$idA" offhost
 expect_out "^RESULT=OK$" "result shows the .result"
 expect_out "^step offhost: OK$" "result: offhost OK"
-expect_rc 2 "cancel after a writing step" st qa cancel "$idA"
 # Data changed after the signature (the copy st-ops keeps).
 cp "$ST_OPS_STATE/requests/$idA/r7.conf" "$T/keep"
 echo "EXTRA=1" >>"$ST_OPS_STATE/requests/$idA/r7.conf"
@@ -369,6 +419,7 @@ expect_out "^RESULT 05-verify OK rc=0$" "verify output"
 expect_rc 0 "acceptance" st qa step "$idA" acceptance
 expect_rc 0 "result after the last step" st qa result "$idA"
 expect_out "^state: closed done$" "request done"
+expect_rc 2 "a closed request cannot be cancelled" st qa cancel "$idA"
 [[ ! -e $T/07-ran ]] && ok || ko "07 ran"
 grep -q "07" <(grep -vE '^\s*#' "$here/lib/st-ops-lib.sh" | grep -E '0[0-9]-|0[0-9]b-') && ko "the lib names 07" || ok
 
@@ -420,19 +471,25 @@ expect_rc 0 "preflight with its own running message excluded" st qa preflight "$
 grep -qx "01-preflight.sh --release-file $ST_OPS_STATE/requests/$id/r7.conf --exclude-message 77" "$T/kit.log" && ok || ko "01 exclude argv"
 st qa cancel "$id" >/dev/null 2>&1
 
-# ── Expiry, cancel, another request's signature ──
+# ── Expiry, cancel, a message that already approved another request ──
 expect_rc 0 "propose" propose "$base" "$two"
-idB=$(new_id); text "$idB"; cp "$T/req.txt" "$T/reqB.txt"; sign "$T/owner" "$T/reqB.txt"
+idB=$(new_id)
 expect_rc 0 "cancel before writing steps" st qa cancel "$idB"
 expect_rc 0 "propose C" propose "$base" "$two"
 idC=$(new_id)
-expect_rc 2 "another request's signature" st qa approve "$idC" <"$T/reqB.txt.sig"
-expect_out "ERROR signature" "other request"
-expect_rc 2 "approve a cancelled request" st qa approve "$idB" <"$T/reqB.txt.sig"
+appr 902 owner qa request yes $(($(created_of "$idC") + 30))
+expect_rc 2 "a message that approved another request" st qa approve "$idC" 902
+expect_out "ERROR approval" "message reused"
+appr 903 owner qa request yes $(($(created_of "$idC") + 30))
+expect_rc 2 "approve a cancelled request" st qa approve "$idB" 903
 echo $(($(date -u +%s) + $(cat "$T/tick") + 7300)) >"$T/now"
-expect_rc 2 "expired" approve "$idC"
+expect_rc 2 "expired" st qa approve "$idC" 903
 expect_out "expired" "expired"
 rm "$T/now"
+# A request proposed before the chat approval (no created-epoch) cannot be approved by a message.
+sed -i '/^created-epoch: /d' "$ST_OPS_STATE/requests/$idC/request.txt"
+expect_rc 2 "a pre-chat request" st qa approve "$idC" 903
+expect_out "propose it again" "pre-chat request"
 # An approval lapses: no writing step after APPROVAL_TTL, and the request stops blocking new ones.
 st qa cancel "$idC" >/dev/null 2>&1
 expect_rc 0 "propose D" propose "$base" "$two"
@@ -447,14 +504,45 @@ expect_rc 0 "result D" st qa result "$idD"
 expect_out "^state: expired \(approval\)$" "lapsed state"
 expect_rc 0 "a lapsed request no longer blocks" propose "$base" "$two"
 rm "$T/now"
+# Back on the real clock D's approval holds again: close both so E starts alone.
+st qa cancel "$(new_id)" >/dev/null 2>&1; st qa cancel "$idD" >/dev/null 2>&1
+
+# Cancel after writing steps (R15: deployed, verify failed on a kit bug): allowed, and it unblocks the next request;
+# refused while a detached step's outcome is unknown.
+expect_rc 0 "propose E" propose "$base" "$two"
+idE=$(new_id)
+st qa preflight "$idE" >/dev/null 2>&1
+expect_rc 0 "approve E" approve "$idE"
+expect_rc 0 "backup E" st qa step "$idE" backup
+expect_rc 0 "offhost E" st qa step "$idE" offhost
+logE=$(cat "$ST_OPS_STATE/requests/$idE/log")
+mv "$logE/02b-offhost.result" "$T/keep-result"
+expect_rc 2 "cancel refused while a step is RUNNING" st qa cancel "$idE"
+expect_out "outcome is still unknown" "running"
+mv "$T/keep-result" "$logE/02b-offhost.result"
+expect_rc 2 "propose while E is active" propose "$base" "$two"
+expect_rc 0 "cancel after writing steps" st qa cancel "$idE"
+expect_out "steps run: preflight backup offhost" "cancel names the steps run"
+grep -q "^by qa at [0-9]*; steps run: preflight backup offhost$" "$ST_OPS_STATE/requests/$idE/cancelled/note" && ok || ko "cancel note"
+expect_rc 2 "no step after cancel" st qa step "$idE" rollback-proof
+expect_rc 0 "propose after cancelling E" propose "$base" "$two"
+st qa cancel "$(new_id)" >/dev/null 2>&1
+
+# The key's old name still works.
+conf on SIGNED_VERBS
+expect_rc 0 "SIGNED_VERBS is read as WRITE_VERBS" st qa status
+expect_out "^write-verbs: on" "legacy key"
+printf 'WRITE_VERBS=on\n' >>"$ST_OPS_ETC/st-ops.conf"
+expect_rc 2 "both names at once" st qa status
+conf on
 
 # ── install.sh grants nothing (static) ──
 inst="$here/install.sh"
 grep -qE 'install -o root -g root -m 0644 /dev/null "/etc/st-ops/\$f"' "$inst" && ok || ko "key files created empty"
 grep -qE '\[\[ -f /etc/st-ops/\$f \]\] \|\|' "$inst" && ok || ko "existing key files never overwritten"
-grep -nE 'authorized_keys|identities|allowed_signers' "$inst" | grep -vE '^[0-9]+:\s*#|for f in|grep -c|-s /etc/st-ops/allowed_signers' &&
+grep -nE 'authorized_keys|identities|allowed_signers' "$inst" | grep -vE '^[0-9]+:\s*#|for f in|grep -c|-e /etc/st-ops/allowed_signers' &&
 	ko "install.sh writes a key file" || ok
-grep -qx 'SIGNED_VERBS=off' "$here/etc/st-ops/st-ops.conf.example" && ok || ko "stage 1 by default"
+grep -qx 'WRITE_VERBS=off' "$here/etc/st-ops/st-ops.conf.example" && ok || ko "stage 1 by default"
 grep -qE 'usermod|gpasswd|useradd.* -G' "$inst" && ko "install.sh adds groups" || ok
 [[ $(grep -vE '^\s*(#|Defaults|$)' "$here/etc/sudoers.d/st-ops") == "st-ops ALL=(root) NOPASSWD: /usr/local/lib/st-ops/st-ops-root" ]] && ok || ko "sudoers: one line"
 
