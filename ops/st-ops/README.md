@@ -35,7 +35,8 @@ operador ──ssh st-ops──▶ sshd (Match User st-ops: ForceCommand, sin TT
 | `approve <id> <mensaje>` | el mensaje de Chat del owner al agente operador que es exactamente `OK <código>`, escrito después del `propose`, sin vencer, una sola vez | **es la aprobación** |
 | `step <id> <paso> [<mensaje>]` | el siguiente paso, en orden y una vez: `backup` (02), `offhost` (02b `--detach`), `rollback-proof` (03), `deploy` (04 `--detach`), `acceptance` (06) | tras `approve` |
 | `verify <id>` | 05 (solo lectura), después de `deploy` OK; repetible (vale el último), obligatorio antes de `acceptance` | no |
-| `result <id> [<paso>]` | estado del pedido y de cada paso; el `.result` de un paso desacoplado | no |
+| `chain <id>` | lo que `step <id> deploy` arranca solo en una unidad `st-ops-chain-<id>` (`systemd-run`): espera el `.result` de 04 (hasta 2 h), corre `verify` y, solo si dio OK, `acceptance`; corta en el primer resultado que no sea OK y no reintenta, no cancela ni hace rollback. Repetible a mano (solo hace lo que falta, en orden) | tras `approve` |
+| `result <id> [<paso>]` | estado del pedido y de cada paso, y la línea `chain:` (dónde está o dónde paró la cadena); el `.result` de un paso desacoplado | no |
 | `cancel <id>` | cierra un pedido activo, también después de pasos que escriben (no deshace nada; solo deja de aceptar pasos); se niega mientras un paso esté `RUNNING` | no |
 
 Un pedido activo a la vez. Termina con su primer paso fallido (`closed failed <paso>`), con `acceptance` OK
@@ -134,17 +135,21 @@ y el gate da BUSY.
    aprobación; el owner no descarga ni firma nada; cualquier otro texto en el mismo mensaje lo invalida. Plazo: `REQUEST_TTL` (24 h) desde el `propose`.
 3. **Desplegar** (el operador, trabajando en ESE mensaje, `<msg>` = su id): `approve <id> <msg>`; `step <id>
    backup`; `step <id> offhost` y `result <id> offhost` hasta `RESULT=OK`; `step <id> rollback-proof`; y solo si
-   los tres dieron OK, `step <id> deploy <msg>` — y termina el turno: el deploy reinicia el backend. Si la release
-   trae una migración, en la respuesta incluye la línea `PASS migration step` de `<LOG>/migrate-check.txt` y las
-   tablas del backup. Plazo: `APPROVAL_TTL` (24 h) desde el `approve`.
-4. **Verificar** (el owner, unos minutos después: "verificá"): `result <id> deploy`, `verify <id>` y `step <id>
-   acceptance`; el operador informa el resultado.
+   los tres dieron OK, `step <id> deploy <msg>` — y termina el turno: el deploy reinicia el backend. `step deploy`
+   deja corriendo la cadena (`chain`): cuando 04 termina OK, `verify` y después `acceptance` corren solos, sin otro
+   mensaje del owner y aunque el reinicio corte el turno del operador. Si la release trae una migración, en la
+   respuesta incluye la línea `PASS migration step` de `<LOG>/migrate-check.txt` y las tablas del backup. Plazo:
+   `APPROVAL_TTL` (24 h) desde el `approve`.
+4. **Informar** (el operador, en su próximo mensaje, o cuando el owner pregunte): `result <id>` muestra deploy,
+   verify, acceptance y la línea `chain:`; con `chain: done` el pedido queda `closed done`. Si la cadena paró
+   (`chain: stopped: …`), el operador informa con la salida (`steps/verify.out`, `steps/acceptance.out`) y no
+   repite nada sin que el owner lo decida; `verify` y `step acceptance` a mano siguen existiendo para ese caso.
 
 **BUSY** no cambió nada: se repite el mismo paso, con a lo sumo **3 intentos por paso** (contando todos los
 mensajes) y 5 minutos entre intentos; después el operador se detiene e informa (por ejemplo durante la ventana
 del backup nocturno, 08:00–09:00 UTC). El gate del deploy corre dentro de la unidad desacoplada, así que su BUSY
-aparece recién en `result` (paso 4): el operador relanza `step <id> deploy <msg del mensaje actual>`, termina el
-turno, y la verificación pasa a un mensaje más. **FAIL** cierra el camino: el operador no sigue e informa con la
+aparece recién en `result` (paso 4, `chain: stopped: deploy BUSY`): el operador relanza `step <id> deploy <msg del
+mensaje actual>`, que arranca otra cadena, y termina el turno. **FAIL** cierra el camino: el operador no sigue e informa con la
 salida. **Si el operador se interrumpe** a mitad de un mensaje, no se reenvía ese mensaje: se le pide `result <id>`
 en uno nuevo y se sigue desde el paso que falte (el despachador no deja repetir uno ya corrido). **Un pedido que
 quedó a medias** (por ejemplo deployado y con un verify que falló por un error del kit, ya juzgado por el owner) se

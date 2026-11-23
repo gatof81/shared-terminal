@@ -9,6 +9,7 @@
 # ── Output and audit ─────────────────────────────────────────────────────
 
 ST_OPS_IDENT=unknown
+ST_OPS_FP=''
 ST_OPS_AGENT=''
 ST_OPS_VERB=none
 ST_OPS_ARGS=''
@@ -63,6 +64,7 @@ resolve_ident() {
 			[[ -z $agent || $agent =~ ^[a-z][a-z0-9-]{1,31}$ ]] || die denied "bad agent name in identities"
 			ST_OPS_IDENT=$name
 			ST_OPS_AGENT=$agent
+			ST_OPS_FP=$fp
 			return 0
 		fi
 	done <"$ST_OPS_ETC/identities"
@@ -416,6 +418,23 @@ with_lock() {
 	flock -n 9 || die busy "another st-ops operation is running"
 }
 
+# ── The chain after deploy: verify, then acceptance, without the operator ──
+# 04 restarts the backend, which ends the operator's ACP turn: a second owner message ("verificá") was needed only
+# to run 05 and 06. Once `step deploy` launched 04, st-ops starts its own unit that waits for 04's .result and runs
+# verify and, only if verify is OK, acceptance — the same functions the verbs use, recorded the same way. It stops
+# on the first outcome that is not OK and never retries, cancels or rolls back anything: what follows a FAIL or a
+# BUSY is the operator's (`verify`, `step acceptance`) or root's, as before.
+CHAIN_POLL=15     # seconds between two reads of 04's .result
+CHAIN_WAIT=7200   # how long the chain waits for 04 before it stops (04 itself is not touched)
+chain_note() { # $1 = request dir, $2 = text. One line, the newest wins; `result` shows it.
+	echo "$2" >"$1/steps/chain"
+}
+# A transient root unit, so the chain outlives the SSH connection and the operator's turn. It is st-ops-root again,
+# with the caller's own key fingerprint: the identity, the audit line and every check are the verb's.
+chain_spawn() { # $1 = request id
+	systemd-run --quiet --collect --unit "st-ops-chain-$1" -- "$ST_OPS_LIB/st-ops-root" "$ST_OPS_FP" chain "$1"
+}
+
 # ── Verbs ────────────────────────────────────────────────────────────────
 
 verb_help() {
@@ -428,6 +447,7 @@ st-ops verbs:
   approve <id> <message id>           the owner's chat message "OK <code>" to this agent; enables the writing steps
   step <id> <step> [<message id>]     next step, in order: backup offhost rollback-proof deploy acceptance
   verify <id>                         kit 05 (read-only), after deploy OK; repeatable, required before acceptance
+  chain <id>                          after deploy: wait for it, then verify, then acceptance (step deploy starts it)
   result <id> [<step>]                state of a request; the .result of a detached step
   cancel <id>                         close a request (refused while a step's outcome is unknown)
 TXT
@@ -592,7 +612,77 @@ verb_step() {
 	exclude_args "$s" "$msg"
 	run_step "$D" "$s" "${EXCLUDE[@]}"
 	settle "$D"
+	if [[ $s == deploy && $KIT_OUTCOME == OK ]]; then
+		chain_note "$D" "queued: waits for deploy, then verify, then acceptance"
+		if chain_spawn "$1"; then
+			echo "st-ops: verify and acceptance follow on their own (unit st-ops-chain-$1); see: result $1"
+		else
+			chain_note "$D" "not started: the unit could not be created (run: chain $1)"
+			echo "st-ops: WARNING the chain unit could not be created: run 'chain $1' once deploy can be read"
+		fi
+	fi
 	return "$STEP_RC"
+}
+
+# On any exit the chain leaves its last word in `result`, and the verb's audit line is written as for every verb.
+chain_exit() { # $1 = exit code
+	[[ -f $D/steps/chain.done ]] || chain_note "$D" "stopped (rc=$1${ST_OPS_CODE:+ $ST_OPS_CODE}) at $(date -u +%FT%TZ)"
+	st_ops_audit "rc=$1 ${ST_OPS_CODE:+code=$ST_OPS_CODE}"
+}
+
+# The chain (see chain_spawn). Holds the st-ops lock from start to end (blocking: `step deploy` still holds it when
+# the unit starts), so no other verb interleaves with deploy → verify → acceptance; `status` and `result` take no
+# lock. Repeatable by hand: it only does what has not been done, in order, and never a step that already ran.
+verb_chain() {
+	(($# == 1)) || die usage "chain <id>"
+	[[ $WRITE_VERBS == on ]] || die disabled "write verbs are off on this host (install stage 1)"
+	local waited=0 out
+	is_request_id "$1" || die usage "invalid request id"
+	exec 9>"$ST_OPS_STATE/st-ops.lock"
+	flock -w 600 9 || die busy "another st-ops operation kept the lock for 10 minutes"
+	D=$(request_dir "$1")
+	[[ -f $D/request.txt ]] || die request "no such request"
+	[[ -e $D/approved ]] || die approval "request not approved by the owner"
+	local st
+	st=$(request_state "$D")
+	if [[ $st != active ]]; then
+		# A deploy whose .result already said FAIL closed the request before the unit ran: say so where the operator looks.
+		[[ $st == "closed done" ]] || chain_note "$D" "stopped: request is $st"
+		die request "request is $st"
+	fi
+	trap 'chain_exit $?' EXIT
+	rm -f "$D/steps/chain.done"
+	while :; do
+		out=$(step_outcome "$D" deploy)
+		[[ $out == RUNNING ]] || break
+		((waited < CHAIN_WAIT)) || { chain_note "$D" "stopped: deploy still RUNNING after ${CHAIN_WAIT}s (run: chain $1)"; touch "$D/steps/chain.done"; return 1; }
+		chain_note "$D" "waiting for deploy (${waited}s)"
+		sleep "$CHAIN_POLL"
+		waited=$((waited + CHAIN_POLL))
+	done
+	[[ $out == OK ]] || { chain_note "$D" "stopped: deploy $out"; touch "$D/steps/chain.done"; settle "$D"; return 1; }
+	if [[ $(step_outcome "$D" verify) != OK ]]; then
+		chain_note "$D" "running verify"
+		assert_request_inputs "$D"
+		run_kit "$D" verify
+		if [[ $KIT_OUTCOME == OK ]]; then echo OK >"$D/steps/verify"; else echo "FAIL rc=$STEP_RC" >"$D/steps/verify"; fi
+		[[ $KIT_OUTCOME == OK ]] || { chain_note "$D" "stopped: verify $KIT_OUTCOME rc=$STEP_RC"; touch "$D/steps/chain.done"; return "$STEP_RC"; }
+	fi
+	case $(step_outcome "$D" acceptance) in
+	OK) ;;
+	NONE | BUSY)
+		approval_expired "$D" && { chain_note "$D" "stopped: the owner's approval lapsed before acceptance"; touch "$D/steps/chain.done"; return 1; }
+		[[ $(step_outcome "$D" acceptance) == BUSY ]] && forget_busy "$D" acceptance
+		chain_note "$D" "running acceptance"
+		assert_request_inputs "$D"
+		run_step "$D" acceptance
+		settle "$D"
+		[[ $KIT_OUTCOME == OK ]] || { chain_note "$D" "stopped: acceptance $KIT_OUTCOME rc=$STEP_RC"; touch "$D/steps/chain.done"; return "$STEP_RC"; }
+		;;
+	*) chain_note "$D" "stopped: acceptance already $(step_outcome "$D" acceptance)"; touch "$D/steps/chain.done"; return 1 ;;
+	esac
+	chain_note "$D" "done: deploy OK, verify OK, acceptance OK"
+	touch "$D/steps/chain.done"
 }
 
 verb_verify() {
@@ -616,6 +706,7 @@ verb_result() {
 	echo "approved: $([[ -e $d/approved ]] && echo yes || echo no)"
 	[[ -f $d/log ]] && echo "log: $(<"$d/log")"
 	for s in preflight backup offhost rollback-proof deploy verify acceptance; do echo "step $s: $(step_outcome "$d" "$s")"; done
+	[[ -f $d/steps/chain ]] && echo "chain: $(<"$d/steps/chain")"
 	if (($# == 2)); then
 		[[ $STEP_DETACHED == *" $2 "* ]] || die usage "only a detached step has a .result: $STEP_DETACHED"
 		[[ -f $d/log && -f $(<"$d/log")/$(step_result_name "$2").result ]] || die result "no .result yet"
@@ -661,6 +752,7 @@ st_ops_main() {
 	approve) verb_approve "$@" ;;
 	step) verb_step "$@" ;;
 	verify) verb_verify "$@" ;;
+	chain) verb_chain "$@" ;;
 	result) verb_result "$@" ;;
 	cancel) verb_cancel "$@" ;;
 	*) die usage "unknown verb (try: help)" ;;
