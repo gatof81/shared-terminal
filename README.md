@@ -61,7 +61,7 @@ phone-friendly layout.
 | --- | --- | --- |
 | What runs | an agent driven over ACP by Shared Terminal's runner, plus tmux | tmux and whatever you start: a shell, Claude Code, any CLI |
 | Terminal / Files / Git | yes | yes |
-| Chat | the agent's messages, live activity and questions | Claude Code's conversation as **read-only history**, if capture is enabled |
+| Chat | the agent's messages, live activity and questions | none |
 | Talking to the agent | the message API (web or `st send`) | its Terminal |
 
 ### Create a traditional session
@@ -172,18 +172,19 @@ Read [docs/SECURITY.md](./docs/SECURITY.md) before exposing the backend to the i
   - agent ↔ agent messages through `st`, with automatic replies and a loop guard;
   - questions to you from Chat, and login from Chat or Terminal;
   - recovery without resending after a restart.
-- Conversation capture for traditional sessions, as read-only history (opt-in).
 
 **Retired** (2026-11-18): the Composer (typing into a CLI from the Chat), the Composer-based project
 conversation and agent consults (D1–D3), and the earlier project agent directory. Their old D1
 tables are still present but nothing reads them; removing them is a separate, owner-approved step.
+
+**Retired** (2026-11-22): conversation capture for traditional sessions (their read-only Chat) and
+the administrative container recreation. Their data stays on disk and in D1, unread.
 
 **Planned**
 
 - Agents other than Claude (Codex, Pi, OpenCode…) through ACP adapters.
 - Sessions on more than one host.
 - A structured way for an agent to declare long-running processes (today a provisional text marker).
-- Retiring the conversation capture once nothing needs it.
 
 **Known limitations**
 
@@ -204,7 +205,6 @@ tables are still present but nothing reads them; removing them is a separate, ow
 | [docs/API.md](./docs/API.md) | REST endpoints and WebSocket channels |
 | [docs/EXEC_API.md](./docs/EXEC_API.md) | HTTP exec API contract |
 | [docs/PROJECTS.md](./docs/PROJECTS.md) | Projects |
-| [docs/CONVERSATION.md](./docs/CONVERSATION.md) | Conversation capture contract (traditional sessions) |
 | [CONTRIBUTING.md](./CONTRIBUTING.md) | Workflow, branches, code style |
 
 ## License

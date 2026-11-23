@@ -210,39 +210,13 @@ RUN set -eux; \
 RUN userdel -r ubuntu || true \
     && useradd -m -s /bin/bash -u 1000 -U developer
 
-# ── Conversation hooks (docs/CONVERSATION.md §2.1–§2.3, §2.6) ───────────────
-# Inert on its own. The image only provides the fixed paths the hooks file
-# and the entrypoint refer to:
-#   - /etc/claude-code/managed-settings.d/, EMPTY here. When (and only when)
-#     the backend activates capture for a session it bind-mounts its
-#     per-session directory read-only over this one, with a conversation.json
-#     that adds the hooks. Nothing mounted (or an empty mount) ⇒ the CLI
-#     behaves exactly as without this block: no hook, no request.
-#   - /opt/st/hooks/session-start.sh, the SessionStart registration hook
-#     (the one event that can't use an http hook). It exits at once without
-#     a token in the environment, and bounds itself to ≤ 6 s otherwise.
-#   - /opt/st/hooks/relay.py, the loopback relay the hooks POST to (the CLI
-#     refuses HTTP hooks to private addresses such as st-backend's). The
-#     entrypoint starts it only when capture is effective; stdlib Python.
-# All are root-owned and not writable by `developer`, so the session user
-# can neither plant a managed-settings file nor swap the script a managed
-# hook runs. Created before `USER developer` below so they're root's.
-#   - /etc/st-control, empty: mount point of the backend's per-session
-#     control dir (3.0d, CONVERSATION.md §2.1), read-only, holding at most
-#     relay.enabled and defer-skill-seed. Nothing in it is a CLI setting.
-#   - /opt/st/seed-skills.sh, the default-skills copy the entrypoint runs on
-#     boot and the backend runs after a recreation (§2.7.3).
-RUN install -d -o root -g root -m 0755 /etc/claude-code /etc/claude-code/managed-settings.d /opt/st /opt/st/hooks /etc/st-control
-COPY hooks/session-start.sh hooks/relay.py /opt/st/hooks/
+# ── Default-skills seeding script ───────────────────────────────────────────
+# /opt/st/seed-skills.sh copies the default skills into the persisted
+# ~/.claude/skills on every boot (see the entrypoint). Root-owned and not
+# writable by `developer`; installed before `USER developer` below.
+RUN install -d -o root -g root -m 0755 /opt/st
 COPY hooks/seed-skills.sh /opt/st/seed-skills.sh
-RUN chown root:root /opt/st/hooks/session-start.sh /opt/st/hooks/relay.py /opt/st/seed-skills.sh \
-    && chmod 0755 /opt/st/hooks/session-start.sh /opt/st/hooks/relay.py /opt/st/seed-skills.sh
-
-# 3.0d: this image's entrypoint defers skill seeding on the control marker,
-# launches the relay on /etc/st-control/relay.enabled, and its relay answers
-# GET /st-relay/status. The backend checks this label on the image ID before
-# writing a marker or recreating onto it (CONVERSATION.md §2.7.2, §2.7.5).
-LABEL io.shared-terminal.conversation-relay="2"
+RUN chown root:root /opt/st/seed-skills.sh && chmod 0755 /opt/st/seed-skills.sh
 
 
 USER developer
@@ -304,10 +278,6 @@ RUN mkdir -p /home/developer/.npm-global
 #   - The pin governs only what the image bakes into a FRESH workspace.
 #     `claude --update` self-updates persisted in an existing workspace's
 #     .npm-global keep floating by design (see the paragraph above).
-# 2.1.308 is the floor docs/CONVERSATION.md §1 is written against (http
-# hooks with headers + allowedEnvVars, MessageDisplay, managed-settings.d,
-# `claude agents --json`); session-image/conversation-smoke.sh re-verifies
-# the hook contract against whatever version this pin names.
 ARG CLAUDE_CODE_VERSION=2.1.308
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 

@@ -27,10 +27,9 @@ agent (st send)┘      (stored before the 201)     └── results, replies, 
                                                         └──▶ /ws/acp ──▶ web
 ```
 
-**Traditional sessions** (no agent) are worked from their Terminal. If conversation capture is on
-(`CONVERSATION_ENABLED`), their Chat shows Claude Code's conversation as **read-only history**
-([CONVERSATION.md](./CONVERSATION.md)). The Composer — typing into a CLI in tmux from the Chat — and
-the Composer-based project conversation (D1–D3) were **removed** on 2026-11-18.
+**Traditional sessions** (no agent) are worked from their Terminal and have no Chat. The Composer —
+typing into a CLI in tmux from the Chat — and the Composer-based project conversation (D1–D3) were
+**removed** on 2026-11-18; the read-only conversation capture, on 2026-11-22.
 
 ## 2. Runtime independent of the image
 
@@ -221,12 +220,13 @@ session.
   - orphans its open questions;
   - makes its token stop working;
   - frees its name for a new agent.
-- **Recreating** an agent's container (admin recreation) keeps the read-only runtime mount; the
+- **Re-creating** an agent's container (soft delete + start) keeps the read-only runtime mount; the
   watchdog launches the runner in the new container, which resumes the same ACP session.
 - **Evidence.** The two items above are covered by the backend's unit tests (real SQLite, faked
   Docker). Their real-Docker check, `experiments/acp-agents/acp-r8-docker-check.mjs` (lab only,
-  `LAB=1`, disposable sessions), has not been run yet: until its result is published, treat the
-  container side (mount in the new container, one runner, resumed ACP session) as unverified.
+  `LAB=1`, disposable sessions), has not been run yet and covers the hard delete only: treat the
+  container side of a re-creation (mount in the new container, one runner, resumed ACP session) as
+  unverified.
 - **Stopping an agent.** Stop its session: no runner lives while the container is down.
 
 ## 10. Known limitations

@@ -418,27 +418,13 @@ fi
 # with no per-session setup. See the "Default Claude Code skills" block in the
 # Dockerfile for the source.
 #
-# The copy lives in /opt/st/seed-skills.sh (same semantics: refreshes the
-# managed skills, never touches other skills) so the backend can run exactly
-# the same step after a recreation commits. Deferred while the backend's
-# control marker /etc/st-control/defer-skill-seed exists (CONVERSATION.md
-# §2.7.3): during a recreation the new container must not write its image's
-# skills into the shared workspace before the commit — on any boot, so the
-# entrypoint never removes the marker (it is a read-only mount anyway), and
-# a control dir it can't examine counts as deferred (fail-closed). A
-# WARN, not a hard failure — a session missing the default skills still
-# works; the operator just loses the shared helpers.
-# The script decides fail-closed (see its header): 3 = deferred, 4 = the
-# control dir or marker can't be examined, so it doesn't seed either.
-seed_rc=0
-/opt/st/seed-skills.sh || seed_rc=$?
-case "$seed_rc" in
-0) ;;
-3) echo "[entrypoint] skill seeding deferred by /etc/st-control/defer-skill-seed" >&2 ;;
-4) echo "[entrypoint] WARN: skill seeding skipped: /etc/st-control can't be examined (fail-closed)" >&2 ;;
-*) echo "[entrypoint] WARN: couldn't seed default skills into ~/.claude/skills; " \
-        "sessions will start without the operator-curated skills." >&2 ;;
-esac
+# The copy lives in /opt/st/seed-skills.sh (refreshes the managed skills,
+# never touches other skills). A WARN, not a hard failure — a session missing
+# the default skills still works; the operator just loses the shared helpers.
+if ! /opt/st/seed-skills.sh; then
+        echo "[entrypoint] WARN: couldn't seed default skills into ~/.claude/skills; " \
+                "sessions will start without the operator-curated skills." >&2
+fi
 
 # Persist SSH client state across container replacement.
 #
@@ -498,73 +484,6 @@ fi
 if [ -d "$SSH_STATE_WS" ]; then
         chmod 700 "$SSH_STATE_WS" || true
         find "$SSH_STATE_WS" -type f -exec chmod 600 {} + 2>/dev/null || true
-fi
-
-# Conversation capture relay (docs/CONVERSATION.md §2.6). Started only when
-# capture is EFFECTIVE for this container: the backend injected the ingest
-# token AND mounted the managed hooks file. Otherwise nothing runs and no
-# port is opened — capture off costs no process at all.
-#
-# Claude Code refuses HTTP hooks to private addresses (st-backend on
-# sessions-net is one), so the hooks target this relay on 127.0.0.1, which
-# forwards to the backend. It is supervised by this small loop: restarted
-# after 1 s, the wait doubling up to 60 s while it keeps dying young (a port
-# taken by the user must not become a busy loop); each restart bumps
-# ST_RELAY_GENERATION so the relay can report the discontinuity. Both die
-# with the container. Above the readiness sentinel so the first `claude`
-# exec already finds the relay listening.
-#
-# MALLOC_MMAP_THRESHOLD_: bodies are up to 8 MiB; with glibc's dynamic
-# threshold, after the first one is freed later ones come from per-thread
-# arenas that never return memory, so a single burst would pin its peak RSS
-# for the container's life. A fixed threshold keeps every large body in its
-# own mapping, released to the OS as soon as it is delivered or dropped.
-#
-# 3.0d (CONVERSATION.md §2.6/§2.7.5): the supervisor starts whenever the
-# container has a token, but it does not launch the relay until capture is
-# authorized — /etc/st-control/relay.enabled (written by the backend only
-# with full authorization, on a read-only mount) or, for containers created
-# by a 3.0c backend, the hooks file itself. Polled every 0.5 s with a bash
-# `[ -e ]`, no extra process. Without a token there is no supervisor at all:
-# capture disabled ⇒ no relay. Once launched, a marker that disappears does
-# not stop it: it stays inert, as the contract documents for disabling
-# without a restart (the backend refuses whatever arrives).
-ST_MANAGED_HOOKS=/etc/claude-code/managed-settings.d/conversation.json
-ST_RELAY_ENABLED=/etc/st-control/relay.enabled
-relay_authorized() { [ -e "$ST_RELAY_ENABLED" ] || [ -f "$ST_MANAGED_HOOKS" ]; }
-if [ -n "${ST_INGEST_TOKEN:-}" ] && [ -f /opt/st/hooks/relay.py ]; then
-        relay_log=/dev/null
-        [ "${ST_HOOKS_DEBUG:-}" = 1 ] && relay_log=/tmp/st-relay.log
-        (
-                set +e
-                gen=0
-                delay=1
-                child=""
-                trap '[ -n "$child" ] && kill "$child" 2>/dev/null; exit 0' TERM INT
-                until relay_authorized; do sleep 0.5; done
-                while :; do
-                        started=$SECONDS
-                        MALLOC_MMAP_THRESHOLD_=131072 ST_RELAY_GENERATION=$gen \
-                                python3 -IS /opt/st/hooks/relay.py </dev/null >>"$relay_log" 2>&1 &
-                        child=$!
-                        wait "$child"
-                        [ $((SECONDS - started)) -ge 60 ] && delay=1
-                        sleep "$delay"
-                        delay=$((delay * 2 > 60 ? 60 : delay * 2))
-                        gen=$((gen + 1))
-                done
-        ) </dev/null >/dev/null 2>&1 &
-        # Wait (≤ 2 s) for the listener when capture is already authorized
-        # at boot, so a hook fired right after the sentinel doesn't meet a
-        # refused connection. Best-effort. When it is authorized later, the
-        # backend waits for the relay to identify itself before it writes
-        # the hooks file (§2.7.5).
-        if relay_authorized; then
-                for _ in $(seq 20); do
-                        (exec 3<>/dev/tcp/127.0.0.1/47613) 2>/dev/null && break
-                        sleep 0.1
-                done
-        fi
 fi
 
 # Runtime-readiness sentinel (#393), part 2 of 2: touched as the LAST
