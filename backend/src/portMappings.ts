@@ -155,27 +155,13 @@ export interface DispatchTarget {
  * cleanly, and the dispatcher's "session must be running" gate stops
  * a torn read from proxying to a stale host port in the meantime.
  */
-export async function setPortMappings(
-	sessionId: string,
-	mappings: PortMapping[],
-	mayContinue?: () => boolean,
-): Promise<void> {
+export async function setPortMappings(sessionId: string, mappings: PortMapping[]): Promise<void> {
 	// Invalidate before AND after the D1 work — see the cache header
 	// comment for the concurrent-lookup race this defends against.
 	invalidateCache(sessionId);
 	try {
-		// `mayContinue` (the recreation's epoch or lease, CONVERSATION.md
-		// §2.7.4) is asked before EACH statement: waiting on this promise
-		// can stop at a deadline, but its continuation would otherwise go
-		// on issuing INSERTs after the caller lost the right to write.
-		// Stopping halfway leaves the same torn table a crash would.
-		const proceed = (): void => {
-			if (mayContinue && !mayContinue()) throw new WriteStoppedError("port mappings");
-		};
-		proceed();
 		await d1Query("DELETE FROM sessions_port_mappings WHERE session_id = ?", [sessionId]);
 		for (const m of mappings) {
-			proceed();
 			await d1Query(
 				"INSERT INTO sessions_port_mappings (session_id, container_port, host_port, is_public) VALUES (?, ?, ?, ?)",
 				[sessionId, m.containerPort, m.hostPort, m.isPublic ? 1 : 0],
@@ -183,14 +169,6 @@ export async function setPortMappings(
 		}
 	} finally {
 		invalidateCache(sessionId);
-	}
-}
-
-/** A composite write stopped between its statements because the caller may no longer act. */
-export class WriteStoppedError extends Error {
-	constructor(what: string) {
-		super(`${what}: stopped, the caller may no longer write`);
-		this.name = "WriteStoppedError";
 	}
 }
 

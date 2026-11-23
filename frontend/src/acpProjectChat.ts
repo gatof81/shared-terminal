@@ -1,5 +1,4 @@
-// acpProjectChat.ts — ACP Project Chat (experimental, `features.acpAgents`),
-// the project page (`#/projects/<pid>`).
+// acpProjectChat.ts — ACP Project Chat, the project page (`#/projects/<pid>`).
 //
 // A project only groups agents and gives them a shared conversation: each
 // agent keeps its own session (environment, repository, terminal, ACP

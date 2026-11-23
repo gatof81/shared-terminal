@@ -1,11 +1,11 @@
 /**
  * mockBackend.ts — a deterministic stand-in for the Shared Terminal backend,
  * installed into a Playwright page with `page.route` (REST) and
- * `page.routeWebSocket` (terminal / conversation sockets).
+ * `page.routeWebSocket` (terminal / ACP sockets).
  *
  * It answers the routes the frontend flows touch with fixed, seeded data
  * (three users with different roles, a running session with tabs,
- * conversations, a workspace tree and a git repo, a stopped and a
+ * a workspace tree and a git repo, a stopped and a
  * terminated session, a foreign session for the permission tests) and
  * records what the app asked for, so a test can assert on behaviour
  * ("no request to a foreign session", "no resize sent on a view switch")
@@ -15,7 +15,6 @@
  */
 
 import type { Page, Route, WebSocketRoute } from "@playwright/test";
-import { normalizeTitle } from "../src/conversationTitle.js";
 
 // ── Seed data ───────────────────────────────────────────────────────────────
 
@@ -48,58 +47,6 @@ interface FsFile {
 	restricted?: boolean;
 }
 type FsNode = FsDir | FsFile;
-
-export interface ConversationEvent {
-	seq: number;
-	ts: string;
-	ev: string;
-	prompt_id: string | null;
-	turn_id: string | null;
-	agent_id: string | null;
-	pane: string | null;
-	data: Record<string, unknown>;
-}
-
-interface Conversation {
-	cid: string;
-	title: string;
-	kind: "interactive" | "headless";
-	status: string;
-	events: ConversationEvent[];
-	startedAt: string;
-	/** When the status was last evidenced; default: a minute before the fixed test clock. */
-	statusAt?: string;
-	statusEvidence?: string;
-	/** null = the conversation has no pane (binding lost). */
-	paneId?: string | null;
-	/** The tmux tab the conversation's pane lives in (default "tab-1"). */
-	tabId?: string | null;
-	/** Lost-event gaps reported in the list (default 0). */
-	gapsCount?: number;
-	/** `GET …/agents` (default none): the captured subagents of this conversation. */
-	agents?: Array<{
-		agentId: string;
-		agentType: string;
-		status: "running" | "done";
-		startedSeq: number;
-		endedSeq?: number;
-		toolCount: number;
-		hasResult: boolean;
-	}>;
-	/** v1.8 §6.2 owner metadata. */
-	customTitle?: string | null;
-	archivedAt?: string | null;
-	/**
-	 * The ST session the conversation belongs to. Untagged conversations are
-	 * listed for every session with history (the default); a session in
-	 * `scopedSessions` lists only the conversations tagged with it.
-	 */
-	sessionId?: string;
-	/** A delivered send is answered: an assistant message + `turn_end` under the send's prompt id. */
-	reply?: string;
-	/** Every send to this conversation is refused with this answer (e.g. 409 busy). */
-	sendError?: { status: number; error: string; detail?: string };
-}
 
 const T0 = Date.parse("2026-10-31T10:00:00Z");
 const iso = (offsetSec: number) => new Date(T0 + offsetSec * 1000).toISOString();
@@ -250,108 +197,6 @@ function seedFs(): FsDir {
 	};
 }
 
-function seedConversations(): Conversation[] {
-	const c1: ConversationEvent[] = [
-		{
-			seq: 1,
-			ts: iso(0),
-			ev: "user_prompt",
-			prompt_id: "p1",
-			turn_id: "t1",
-			agent_id: null,
-			pane: "%1",
-			data: { prompt: "Refactor the auth flow to use the new session cookie.", source: "user" },
-		},
-		{
-			seq: 2,
-			ts: iso(5),
-			ev: "tool_start",
-			prompt_id: "p1",
-			turn_id: "t1",
-			agent_id: null,
-			pane: "%1",
-			data: { tool_use_id: "tu1", tool_name: "Edit", summary: { path: "src/auth.ts" } },
-		},
-		{
-			seq: 3,
-			ts: iso(7),
-			ev: "tool_end",
-			prompt_id: "p1",
-			turn_id: "t1",
-			agent_id: null,
-			pane: "%1",
-			data: { tool_use_id: "tu1", tool_name: "Edit", duration_ms: 1800 },
-		},
-		{
-			seq: 4,
-			ts: iso(9),
-			ev: "assistant_delta",
-			prompt_id: "p1",
-			turn_id: "t1",
-			agent_id: null,
-			pane: "%1",
-			data: {
-				message_id: "m1",
-				index: 0,
-				delta: "Done. I moved the cookie check into `login()` and added a test.",
-				final: true,
-			},
-		},
-		{
-			seq: 5,
-			ts: iso(10),
-			ev: "turn_end",
-			prompt_id: "p1",
-			turn_id: "t1",
-			agent_id: null,
-			pane: "%1",
-			data: {
-				last_assistant_message: "Done. I moved the cookie check into `login()` and added a test.",
-			},
-		},
-	];
-	const c2: ConversationEvent[] = [
-		{
-			seq: 1,
-			ts: iso(-3000),
-			ev: "user_prompt",
-			prompt_id: "p9",
-			turn_id: "t9",
-			agent_id: null,
-			pane: "%2",
-			data: { prompt: "Fix the failing tests in packages/core.", source: "user" },
-		},
-		{
-			seq: 2,
-			ts: iso(-2990),
-			ev: "assistant_delta",
-			prompt_id: "p9",
-			turn_id: "t9",
-			agent_id: null,
-			pane: "%2",
-			data: { message_id: "m9", index: 0, delta: "All green now.", final: true },
-		},
-	];
-	return [
-		{
-			cid: "conv-1",
-			title: "Refactor auth flow",
-			kind: "interactive",
-			status: "waiting_input",
-			events: c1,
-			startedAt: iso(-10),
-		},
-		{
-			cid: "conv-2",
-			title: "Fix tests",
-			kind: "interactive",
-			status: "ended",
-			events: c2,
-			startedAt: iso(-3100),
-		},
-	];
-}
-
 const GIT_PATCH = `diff --git a/src/auth.ts b/src/auth.ts
 index 1111111..2222222 100644
 --- a/src/auth.ts
@@ -375,8 +220,6 @@ export type DelayKey =
 	| "gitStatus"
 	| "gitLog"
 	| "gitDiff"
-	| "conversations"
-	| "events"
 	| "projects";
 
 function delayKeyOf(path: string): DelayKey | null {
@@ -386,8 +229,6 @@ function delayKeyOf(path: string): DelayKey | null {
 	if (/\/git\/status$/.test(path)) return "gitStatus";
 	if (/\/git\/log$/.test(path)) return "gitLog";
 	if (/\/git\/diff$/.test(path)) return "gitDiff";
-	if (/\/conversations$/.test(path)) return "conversations";
-	if (/\/events$/.test(path)) return "events";
 	if (path === "/projects") return "projects";
 	return null;
 }
@@ -402,39 +243,16 @@ export interface TerminalSocket {
 	closed: boolean;
 }
 
-export interface ConversationSocket {
-	sessionId: string;
-	following: { cid: string; after: number } | null;
-	route: WebSocketRoute;
-}
-
 // ── The backend ─────────────────────────────────────────────────────────────
 
 export class MockBackend {
 	current: MockUser | null = null;
 	sessions: MockSession[] = seedSessions();
 	fs: FsDir = seedFs();
-	conversations: Conversation[] = seedConversations();
-	/** Which sessions have captured history (the list answers [] for the others). */
-	historySessions = new Set<string>([SESSION_IDS.running, SESSION_IDS.stopped]);
-	/** Sessions whose conversation list is only their own tagged conversations. */
-	scopedSessions = new Set<string>();
-	/** Capture state reported for the running session. */
-	capture = { requested: true, effective: true, effectiveAfterRestart: true };
 	/** Which push/notification shape the server reports. */
 	pushEnabled = false;
 	requests: Array<{ method: string; path: string }> = [];
 	terminalSockets: TerminalSocket[] = [];
-	conversationSockets: ConversationSocket[] = [];
-	/** v1.8 §6.2: the list says the owner metadata could not be read. */
-	metaUnavailable = false;
-	/**
-	 * The next rename/archive PATCH answers this instead (then clears). `afterWrite`: the change is
-	 * applied first — the real backend writes before it builds its answer, so a 5xx can follow a write.
-	 */
-	failNextMetaPatch: { status: number; error: string; afterWrite?: boolean } | null = null;
-	/** Hold every rename/archive answer this long (ms). */
-	metaPatchDelayMs = 0;
 	/** Set by a test to answer any route itself before the built-ins. */
 	override: ((method: string, path: string, route: Route) => Promise<boolean>) | null = null;
 	/**
@@ -787,21 +605,6 @@ export class MockBackend {
 
 	// ── Live pushes (from a test) ───────────────────────────────────────────
 
-	/** Append an event to a conversation and deliver it to the socket following it. */
-	pushConversationEvent(cid: string, ev: Omit<ConversationEvent, "seq">): ConversationEvent {
-		const conv = this.conversations.find((c) => c.cid === cid);
-		if (!conv) throw new Error(`no conversation ${cid}`);
-		const seq = (conv.events[conv.events.length - 1]?.seq ?? 0) + 1;
-		const event: ConversationEvent = { ...ev, seq };
-		conv.events.push(event);
-		for (const s of this.conversationSockets) {
-			if (s.following?.cid === cid) {
-				s.route.send(JSON.stringify({ type: "event", conv: cid, event }));
-			}
-		}
-		return event;
-	}
-
 	/**
 	 * Close every open terminal socket of a session with a FINAL code (1008:
 	 * the app does not retry), as the backend does for a terminated or
@@ -829,7 +632,7 @@ export class MockBackend {
 
 	private handleSocket(ws: WebSocketRoute): void {
 		const url = new URL(ws.url());
-		const parts = url.pathname.split("/").filter(Boolean); // ws, sessions|conversation|bootstrap, id
+		const parts = url.pathname.split("/").filter(Boolean); // ws, sessions|acp|bootstrap, id
 		const kind = parts[1];
 		const sessionId = decodeURIComponent(parts[2] ?? "");
 		if (!this.current) {
@@ -889,39 +692,6 @@ export class MockBackend {
 				this.acpSockets = this.acpSockets.filter((x) => x !== ws);
 			});
 			ws.send(JSON.stringify({ type: "hello" }));
-			return;
-		}
-		if (kind === "conversation") {
-			const sock: ConversationSocket = { sessionId, following: null, route: ws };
-			this.conversationSockets.push(sock);
-			ws.onMessage((raw) => {
-				const msg = JSON.parse(String(raw)) as { type: string; conv?: string; after?: number };
-				if (msg.type === "subscribe" && msg.conv !== undefined) {
-					const after = msg.after ?? 0;
-					sock.following = { cid: msg.conv, after };
-					const conv = this.conversations.find((c) => c.cid === msg.conv);
-					if (!conv) {
-						ws.send(JSON.stringify({ type: "error", code: "not-found", conv: msg.conv }));
-						return;
-					}
-					for (const event of conv.events) {
-						if (event.seq > after) {
-							ws.send(JSON.stringify({ type: "event", conv: conv.cid, event }));
-						}
-					}
-				}
-			});
-			ws.send(
-				JSON.stringify({
-					type: "hello",
-					conversations: this.conversations.map((c) => ({
-						cid: c.cid,
-						lastSeq: c.events[c.events.length - 1]?.seq ?? 0,
-						firstRetainedSeq: 1,
-						status: c.status,
-					})),
-				}),
-			);
 			return;
 		}
 		ws.close({ code: 1008, reason: "Unknown route" });
@@ -1081,7 +851,7 @@ export class MockBackend {
 			const s = this.session(id);
 			if (!s) return json(404, { error: "Session not found" });
 			const own = s.ownerUserId === me.userId;
-			// Read surfaces (files, git, conversations) are owner-only: a
+			// Read surfaces (files, git) are owner-only: a
 			// foreign session answers 404 exactly like a missing one.
 			if (!own && !me.isAdmin && !me.isLead) return json(404, { error: "Session not found" });
 			if (rest === "" && method === "GET") return json(200, this.serialize(s));
@@ -1235,82 +1005,6 @@ export class MockBackend {
 					});
 				}
 			}
-
-			// ── conversations ──
-			if (rest === "/conversations") {
-				const withCapture = url.searchParams.get("capture") !== "0";
-				return json(200, {
-					capture: withCapture ? this.capture : null,
-					conversations:
-						s.status === "failed" || !this.historySessions.has(s.sessionId)
-							? []
-							: this.conversations
-									.filter((c) =>
-										this.scopedSessions.has(s.sessionId)
-											? c.sessionId === s.sessionId
-											: c.sessionId === undefined,
-									)
-									.map((c) => this.summary(c)),
-					meta: this.metaUnavailable ? "unavailable" : "ok",
-				});
-			}
-			const agentsOf = /^\/conversations\/([^/]+)\/agents$/.exec(rest);
-			if (agentsOf && method === "GET") {
-				const c = this.conversations.find((x) => x.cid === decodeURIComponent(agentsOf[1]!));
-				if (!c) return json(404, { error: "Conversation not found" });
-				return json(200, { agents: c.agents ?? [] });
-			}
-			// v1.8 §6.2 — rename / archive (owner-only, per field, same title rules as the server).
-			const metaPatch = /^\/conversations\/([^/]+)$/.exec(rest);
-			if (metaPatch && method === "PATCH") {
-				if (!own) return json(404, { error: "Session not found" });
-				const conv = this.conversations.find((c) => c.cid === decodeURIComponent(metaPatch[1]!));
-				if (!conv) return json(404, { error: "conversation-not-found" });
-				if (this.metaPatchDelayMs > 0)
-					await new Promise((r) => setTimeout(r, this.metaPatchDelayMs));
-				const fail = this.failNextMetaPatch;
-				this.failNextMetaPatch = null;
-				if (fail && !fail.afterWrite) return json(fail.status, { error: fail.error });
-				const body = req.postDataJSON() as Record<string, unknown> | null;
-				const keys = body && typeof body === "object" ? Object.keys(body) : [];
-				if (
-					keys.length === 0 ||
-					keys.some((k) => k !== "title" && k !== "archived") ||
-					("archived" in (body ?? {}) && typeof body?.archived !== "boolean")
-				)
-					return json(400, { error: "invalid-body" });
-				if (body && "title" in body) {
-					const t = normalizeTitle(body.title);
-					if (!t.ok) return json(400, { error: t.code });
-					conv.customTitle = t.value;
-				}
-				if (body && typeof body.archived === "boolean") {
-					conv.archivedAt = body.archived ? (conv.archivedAt ?? iso(30 * 60)) : null;
-				}
-				if (fail) return json(fail.status, { error: fail.error });
-				return json(200, this.summary(conv));
-			}
-			const one = /^\/conversations\/([^/]+)\/events\/(\d+)$/.exec(rest);
-			if (one && method === "GET") {
-				const cid = decodeURIComponent(one[1]!);
-				const seq = Number(one[2]);
-				const e = this.conversations.find((c) => c.cid === cid)?.events.find((x) => x.seq === seq);
-				return e ? json(200, e) : json(404, { error: "Event not found" });
-			}
-			const ev = /^\/conversations\/([^/]+)\/events$/.exec(rest);
-			if (ev) {
-				const conv = this.conversations.find((c) => c.cid === decodeURIComponent(ev[1]!));
-				if (!conv) return json(404, { error: "Conversation not found" });
-				const before = Number(url.searchParams.get("before") ?? Number.POSITIVE_INFINITY);
-				const limit = Number(url.searchParams.get("limit") ?? 200);
-				const older = conv.events.filter((e) => e.seq < before);
-				const page = older.slice(Math.max(0, older.length - limit));
-				return json(200, {
-					events: page,
-					hasMore: page.length < older.length,
-					firstRetainedSeq: 1,
-				});
-			}
 		}
 		return json(404, { error: `No mock for ${method} ${path}` });
 	}
@@ -1360,32 +1054,6 @@ export class MockBackend {
 			rows: 40,
 			createdAt: s.createdAt,
 			lastConnectedAt: null,
-		};
-	}
-
-	private summary(c: Conversation) {
-		const last = c.events[c.events.length - 1];
-		return {
-			sessionId: c.cid,
-			kind: c.kind,
-			title: c.title,
-			status: c.status,
-			statusEvidence: c.statusEvidence ?? "hook",
-			// Fresh by default (the fixed test clock is T0 + 30 min): the list's
-			// "Active" section only shows live claims with recent evidence.
-			statusAt: c.statusAt ?? iso(29 * 60),
-			tabId: c.tabId === undefined ? "tab-1" : c.tabId,
-			paneId: c.paneId === undefined ? "%1" : c.paneId,
-			startedAt: c.startedAt,
-			endedAt: c.status === "ended" ? last?.ts : null,
-			lastEventAt: last?.ts ?? c.startedAt,
-			lastSeq: last?.seq ?? 0,
-			firstRetainedSeq: 1,
-			eventsCount: c.events.length,
-			gapsCount: c.gapsCount ?? 0,
-			claudeVersion: "2.1.314",
-			customTitle: this.metaUnavailable ? null : (c.customTitle ?? null),
-			archivedAt: this.metaUnavailable ? null : (c.archivedAt ?? null),
 		};
 	}
 

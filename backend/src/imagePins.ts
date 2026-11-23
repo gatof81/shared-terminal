@@ -44,7 +44,7 @@
  */
 
 import type Dockerode from "dockerode";
-import { RESERVED_NAME_RE } from "./recreate/ports.js";
+import { isNotFound, RESERVED_NAME_RE } from "./dockerErrors.js";
 
 export const PIN_REPO = process.env.SESSION_IMAGE_PIN_REPO ?? "shared-terminal-session-pin";
 export const LABEL_SESSION = "io.shared-terminal.session";
@@ -74,10 +74,6 @@ export interface PinDocker {
 	listImages(): Promise<Array<{ Id: string; RepoTags: string[] }>>;
 	removeTag(ref: string): Promise<void>;
 	inspectContainer(id: string): Promise<{ Id: string; Image: string } | null>;
-}
-
-function isNotFound(err: unknown): boolean {
-	return (err as { statusCode?: number })?.statusCode === 404;
 }
 
 export function pinDockerOf(docker: Dockerode): PinDocker {

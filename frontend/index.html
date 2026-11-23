@@ -95,23 +95,6 @@
              the session bar's place here (acpProjectChat.placeHeader). -->
         <div id="header-project" hidden></div>
         <h1 id="app-title">⬛ Shared Terminal</h1>
-        <!-- Cross-project conversation switcher (switcher.ts). Desktop: here;
-             phones: the sidebar drawer's button below (the merged header bar
-             has no room). -->
-        <button
-          id="switcher-btn"
-          type="button"
-          title="Go to a conversation (Ctrl+K / ⌘K)"
-          aria-label="Conversations Ctrl K — go to a conversation"
-          aria-keyshortcuts="Control+K Meta+K"
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <circle cx="11" cy="11" r="7"></circle>
-            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-          </svg>
-          <span>Conversations</span>
-          <kbd aria-hidden="true">Ctrl K</kbd>
-        </button>
         <div class="header-right">
           <span id="user-display"></span>
         </div>
@@ -135,7 +118,6 @@
           <!-- A box only for the tree layout on phones (projects.css puts the
                two on one row there); `display: contents` everywhere else. -->
           <div id="sidebar-actions">
-            <button id="sidebar-switcher-btn" type="button">Go to a conversation…</button>
             <button id="new-session-btn" class="btn primary sm" type="button">+ New session</button>
           </div>
           <!-- Projects & Agents (projectsView.ts). -->
@@ -206,7 +188,7 @@
                 </svg>
                 <span class="view-label">Git</span>
               </button>
-              <button id="view-chat-btn" type="button" aria-pressed="false" title="Claude conversations">
+              <button id="view-chat-btn" type="button" aria-pressed="false" title="Chat with the agent" hidden>
                 <svg class="view-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H8l-4 4z" /></svg>
                 <span class="view-label">Chat</span>
               </button>
@@ -350,40 +332,8 @@
               <div id="git-diff"></div>
             </div>
           </div>
-          <!-- Chat (Phase 3.1, read-only): the session's captured Claude
-               conversations. List left / thread right (+ an Agents panel)
-               on desktop, one pane at a time on mobile. Built in TS
-               (chatView.ts). -->
-          <div id="chat-view" hidden>
-            <div id="chat-header">
-              <button
-                id="chat-back-btn"
-                class="files-btn chat-back"
-                type="button"
-                aria-label="Back to conversations"
-                hidden
-              >
-                ‹
-              </button>
-              <div id="chat-summary"></div>
-              <button
-                id="chat-refresh-btn"
-                class="btn btn-icon sm"
-                type="button"
-                title="Refresh"
-                aria-label="Refresh conversations"
-              >
-                ↻
-              </button>
-            </div>
-            <div id="chat-body">
-              <div id="chat-list" aria-label="Conversations"></div>
-              <div id="chat-thread"></div>
-              <aside id="chat-agents" aria-label="Agents" hidden></aside>
-            </div>
-            <!-- Screen-reader announcements for final assistant messages (design §6.4). -->
-            <div id="chat-announcer" class="visually-hidden" aria-live="polite"></div>
-          </div>
+          <!-- Chat of an ACP agent's session (acpChat.ts). -->
+          <div id="chat-view" hidden></div>
           <!-- Project / agent page (P3a, projectsView.ts): shown OVER the
                session — its siblings only turn visibility:hidden, so the
                terminal keeps its box and its socket. -->

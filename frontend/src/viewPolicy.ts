@@ -8,15 +8,11 @@
  *      chose for it, else Chat — the agent is talked to there, and its
  *      chat (acpChat.ts) needs no container, so a stopped one too;
  *   1. the view the person last chose for THIS session (a tab click);
- *   2. Chat, when the session has captured history;
- *   3. Terminal for a running session, Files for a stopped one.
+ *   2. Terminal for a running session, Files for a stopped one.
  *
  * A route with an explicit view is applied by the router before any of
  * this runs, so it always wins. A saved view that cannot work without a
- * terminal (Terminal, Git on a stopped session) falls back to rule 2/3
- * rather than to an error box. The "has history" answer is remembered
- * per session so that selecting it again asks nothing; the Chat view
- * refreshes the memory every time its list loads.
+ * terminal (Terminal, Git on a stopped session) falls back to rule 2.
  *
  * Everything lives in localStorage, per browser: reads and writes are
  * wrapped, so a private window or blocked storage just means "no
@@ -26,14 +22,10 @@
 export type PolicyView = "terminal" | "files" | "git" | "chat";
 
 const VIEW_KEY = "st.view.";
-const HISTORY_KEY = "st.chat.hist.";
-const LAST_KEY = "st.chat.last.";
 
 export interface LandingInput {
 	/** The view the person chose last for this session, if any. */
 	pref: PolicyView | null;
-	/** Whether captured conversations exist; null = not known. */
-	hasHistory: boolean | null;
 	running: boolean;
 	/** Whether the session is an ACP agent's; null = not known (taken as no). */
 	isAgent: boolean | null;
@@ -45,108 +37,29 @@ export function chooseLanding(i: LandingInput): PolicyView {
 		if (i.pref !== null && (i.running || i.pref === "files" || i.pref === "chat")) return i.pref;
 		return "chat";
 	}
-	if (i.running) {
-		if (i.pref !== null) return i.pref;
-		return i.hasHistory === true ? "chat" : "terminal";
-	}
-	// No terminal to show: Files and Chat work on a stopped session; the
-	// others would open on their "session not running" state.
-	if (i.pref === "files" || i.pref === "chat") return i.pref;
-	return i.hasHistory === true ? "chat" : "files";
+	// Only an agent's session has a Chat.
+	const pref = i.pref === "chat" ? null : i.pref;
+	if (i.running) return pref ?? "terminal";
+	return "files";
 }
 
-export function isPolicyView(v: unknown): v is PolicyView {
+function isPolicyView(v: unknown): v is PolicyView {
 	return v === "terminal" || v === "files" || v === "git" || v === "chat";
 }
 
-function read(key: string): string | null {
+export function readViewPref(sessionId: string): PolicyView | null {
 	try {
-		return localStorage.getItem(key);
+		const v = localStorage.getItem(VIEW_KEY + sessionId);
+		return isPolicyView(v) ? v : null;
 	} catch {
 		return null;
 	}
 }
 
-function write(key: string, value: string | null): void {
+export function writeViewPref(sessionId: string, view: PolicyView): void {
 	try {
-		if (value === null) localStorage.removeItem(key);
-		else localStorage.setItem(key, value);
+		localStorage.setItem(VIEW_KEY + sessionId, view);
 	} catch {
 		/* per-browser convenience only */
 	}
-}
-
-export function readViewPref(sessionId: string): PolicyView | null {
-	const v = read(VIEW_KEY + sessionId);
-	return isPolicyView(v) ? v : null;
-}
-
-export function writeViewPref(sessionId: string, view: PolicyView): void {
-	write(VIEW_KEY + sessionId, view);
-}
-
-export function readHistoryHint(sessionId: string): boolean | null {
-	const v = read(HISTORY_KEY + sessionId);
-	return v === "1" ? true : v === "0" ? false : null;
-}
-
-export function writeHistoryHint(sessionId: string, has: boolean): void {
-	write(HISTORY_KEY + sessionId, has ? "1" : "0");
-}
-
-export function readLastConversation(sessionId: string): string | null {
-	const v = read(LAST_KEY + sessionId);
-	return v && v.length > 0 ? v : null;
-}
-
-export function writeLastConversation(sessionId: string, cid: string | null): void {
-	write(LAST_KEY + sessionId, cid);
-}
-
-// The last conversation's title, for the sidebar's "↳ last conversation"
-// link (no request needed to name it). Only ever shown next to the cid it was
-// written for: a title from another conversation is never paired with it.
-const LAST_TITLE_KEY = "st.chat.lastTitle.";
-
-export function readLastConversationTitle(sessionId: string, cid: string): string | null {
-	const v = read(LAST_TITLE_KEY + sessionId);
-	if (!v) return null;
-	const nl = v.indexOf("\n");
-	if (nl < 0 || v.slice(0, nl) !== cid) return null;
-	const title = v.slice(nl + 1);
-	return title.length > 0 ? title : null;
-}
-
-export function writeLastConversationTitle(sessionId: string, cid: string, title: string): void {
-	write(LAST_TITLE_KEY + sessionId, `${cid}\n${title}`);
-}
-
-export function clearLastConversationTitle(sessionId: string): void {
-	write(LAST_TITLE_KEY + sessionId, null);
-}
-
-/**
- * Titles are content (the list is owner-only): none may outlive the account
- * on this browser. Logout drops every stored one; the links come back the
- * next time Chat is opened in each project.
- */
-export function forgetAllLastConversationTitles(): void {
-	try {
-		const keys: string[] = [];
-		for (let i = 0; i < localStorage.length; i++) {
-			const k = localStorage.key(i);
-			if (k?.startsWith(LAST_TITLE_KEY)) keys.push(k);
-		}
-		for (const k of keys) localStorage.removeItem(k);
-	} catch {
-		// Storage unavailable: nothing was stored either.
-	}
-}
-
-/** Drop everything remembered for a session (hard delete). */
-export function forgetSession(sessionId: string): void {
-	write(VIEW_KEY + sessionId, null);
-	write(HISTORY_KEY + sessionId, null);
-	write(LAST_KEY + sessionId, null);
-	write(LAST_TITLE_KEY + sessionId, null);
 }

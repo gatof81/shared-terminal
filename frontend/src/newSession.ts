@@ -144,8 +144,7 @@ function setNewSessionModalMode(template: Template | null): void {
 	}
 }
 
-// Experimental ACP agent: the fields exist only when the backend announces
-// `features.acpAgents` (created here, so the markup is unchanged otherwise).
+// ACP agent fields (created here, so the markup is unchanged otherwise).
 // Agent name, the project it joins (existing or new) and, when more than one
 // adapter runtime is installed, which one.
 let acpAgentInput: HTMLInputElement | null = null;

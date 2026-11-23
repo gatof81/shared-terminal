@@ -30,9 +30,8 @@ test.describe("terminal invariant", () => {
 		// Every switch is pure on both layouts: the view tabs are always on screen.
 		await app.switchView("files");
 		await app.switchView("git");
-		await app.switchView("chat");
 		await app.switchView("terminal");
-		await app.switchView("chat");
+		await app.switchView("files");
 		await app.switchView("terminal");
 		await page.waitForTimeout(400);
 
@@ -44,7 +43,7 @@ test.describe("terminal invariant", () => {
 		const rowsAfter = await page.locator(".tab-pane.active .xterm-rows > div").count();
 		expect(rowsAfter).toBe(rowsBefore);
 		// Output that arrives while an overlay is up still lands in the terminal.
-		await app.switchView("chat");
+		await app.switchView("git");
 		backend.pushTerminalOutput(sock.sessionId, "\r\nstill here\r\n");
 		await app.switchView("terminal");
 		await expect(page.locator(".tab-pane.active")).toContainText("still here");

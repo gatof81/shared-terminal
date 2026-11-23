@@ -342,7 +342,7 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 		// reconcile() would later flip it to `stopped`, but the row stays
 		// forever and users see a zombie entry in their sidebar. Roll back
 		// the D1 row explicitly on any spawn failure.
-		// 3.0d lifecycle lock (CONVERSATION.md §2.7.2): the id is chosen
+		// Lifecycle lock: the id is chosen
 		// here so the lock is held from BEFORE the row exists until the
 		// create has either answered 201 or rolled back. Once the INSERT
 		// lands the id is visible (GET /sessions lists it), and without the
@@ -377,11 +377,6 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 					// Validated above; null collapses to undefined so the
 					// manager's `?? null` lands NULL either way.
 					externalRef: typeof externalRef === "string" ? externalRef : undefined,
-					// CONVERSATION_ALLOW_USERS (CONVERSATION.md §7) names the
-					// OWNER whose new sessions are born requested — the target
-					// of an on-behalf create (#420), not the admin calling.
-					conversationRequested:
-						ctx.conversationAllowUsers?.has(targetOwnerId.toLowerCase()) ?? false,
 				});
 				// #420 — audit every owner ≠ caller create. A log line (not a
 				// session_observe_log row): the observe-log models attach-shaped
@@ -838,13 +833,13 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 
 		try {
 			await sessions.assertOwnership(req.params.id, userId);
-			// One lifecycle lock across kill + terminate + purge + row drop
-			// (CONVERSATION.md §2.7.2), so a concurrent start/stop/recreate
+			// One lifecycle lock across kill + terminate + purge + row drop,
+			// so a concurrent start/stop
 			// can't interleave with the teardown — above all, nothing can
 			// be starting on the workspace while it is purged. The status
 			// is re-read under the lock: whoever held it before may have
 			// changed it.
-			await sessionLifecycleLock.run(req.params.id, hard ? "delete-hard" : "delete", async () => {
+			await sessionLifecycleLock.run(req.params.id, "delete", async () => {
 				const meta = await sessions.get(req.params.id);
 				if (!meta) throw new NotFoundError("Session not found");
 				// kill() runs on EVERY delete, `terminated` rows included
@@ -877,7 +872,7 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 				if (hard) {
 					// Wipe workspace files, then drop the row. The row is the
 					// only reference that lets a retry purge the workspace,
-					// uploads, `.st-control` and conversation data: a failed
+					// uploads and the leftover per-session dirs: a failed
 					// purge must surface (500 teardown-failed) and keep it —
 					// the session stays `terminated`, and `purgeWorkspace` is
 					// idempotent, so the next `?hard=true` converges.
@@ -956,7 +951,7 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			// safe path is `recreate it to retry`. 409 Conflict reflects
 			// "valid request, current state forbids it" — not 400 (the
 			// payload is fine) and not 403 (it's not an auth issue).
-			// Lifecycle lock (CONVERSATION.md §2.7.2): the status check, the
+			// Lifecycle lock: the status check, the
 			// audit row and the start run as one unit, and the status is
 			// re-read under the lock — a delete or stop that held it may have
 			// changed the session while we waited.
@@ -1182,13 +1177,9 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			// admin); skip the idle bump on a foreign edit.
 			const meta = await sessions.assertCanOperate(req.params.id, userId);
 			if (meta.userId !== userId) res.locals.skipIdleBump = true;
-			// Under the session's lifecycle lock (3.0d audit A2): a recreation
-			// writes the mappings from the config it read under the same lock
-			// (step 6 and its resolution passes), so an edit must not land
-			// between that read and that write. Behind a recreation this waits
-			// (≤ 6 min, then 409 busy); with one unresolved the lock's guard
-			// answers 409 recreate-unresolved. Config and existence are read
-			// again once the lock is held.
+			// Under the session's lifecycle lock: a start/stop rewrites or
+			// clears the mappings, so an edit must not interleave with one.
+			// Config and existence are read again once the lock is held.
 			const outcome = await sessionLifecycleLock.run(req.params.id, "ports", async () => {
 				if (!(await sessions.get(req.params.id))) return { gone: true } as const;
 				// Privileged-port gate: a port < 1024 needs CAP_NET_BIND_SERVICE,

@@ -8,7 +8,6 @@ import { DEFAULT_MEMORY_BYTES, DEFAULT_NANO_CPUS } from "../dockerManager.js";
 import { logger } from "../logger.js";
 import * as observeLog from "../observeLog.js";
 import { getDispatcherStats } from "../portDispatcher.js";
-import { RecreateRetainedError, RecreateUnresolvedError } from "../recreateAttempt.js";
 import {
 	EFFECTIVE_CPU_NANO_MAX,
 	EFFECTIVE_CPU_NANO_MIN,
@@ -36,7 +35,7 @@ import {
 } from "./shared.js";
 
 export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
-	const { sessions, docker, idleSweeper, conversation, recreation } = ctx;
+	const { sessions, docker, idleSweeper } = ctx;
 	const { adminStatsIp, adminActionIp } = ctx.limiters;
 	// ── Admin routes (#241) ────────────────────────────────────────────────
 	// Cross-user observability for operators. Gated by `requireAdmin`
@@ -89,21 +88,6 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 			// can render with discoverable min/max attributes without
 			// hard-coding values.
 			const resourceSnapshot = await collectResourceSnapshot(sessions, docker);
-			// 3.0d (CONVERSATION.md §7): aggregates only — no titles, no ids,
-			// and no Docker call or probe (`effectiveSessions` is an upper
-			// bound; the probed value is per session). Its own failure is
-			// isolated: the rest of the dashboard still answers.
-			let conversationStats: Record<string, unknown> | null = null;
-			if (conversation) {
-				try {
-					conversationStats = {
-						...(await conversation.adminStats()),
-						recreateOrphans: recreation?.stats.recreateOrphans ?? 0,
-					};
-				} catch (err) {
-					logger.warn(`[admin] conversation stats failed: ${(err as Error).message}`);
-				}
-			}
 			res.json({
 				bootedAt,
 				uptimeSeconds,
@@ -113,7 +97,6 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 				dispatcher: getDispatcherStats(),
 				d1: { callsSinceBoot: getD1CallsSinceBoot() },
 				resources: resourceSnapshot,
-				conversation: conversationStats,
 			});
 		} catch (err) {
 			logger.error(`[admin] stats failed: ${(err as Error).message}`);
@@ -327,10 +310,6 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 					res.status(409).json({ error: "busy" });
 					return;
 				}
-				if (err instanceof RecreateUnresolvedError) {
-					res.status(409).json({ error: "recreate-unresolved" });
-					return;
-				}
 				logger.error(`[admin] force-stop failed: ${(err as Error).message}`);
 				res.status(500).json({ error: "Internal server error" });
 			}
@@ -357,9 +336,8 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 					return;
 				}
 				// One lifecycle lock across the whole teardown, status
-				// re-read under it (CONVERSATION.md §2.7.2) — same as the
-				// owner's DELETE.
-				await sessionLifecycleLock.run(req.params.id, hard ? "delete-hard" : "delete", async () => {
+				// re-read under it — same as the owner's DELETE.
+				await sessionLifecycleLock.run(req.params.id, "delete", async () => {
 					const current = await sessions.get(req.params.id);
 					if (!current) return;
 					// Idempotent soft branch — only kill + terminate if not
@@ -396,16 +374,6 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 				}
 				if (err instanceof SessionBusyError) {
 					res.status(409).json({ error: "busy" });
-					return;
-				}
-				if (err instanceof RecreateUnresolvedError) {
-					res.status(409).json({ error: "recreate-unresolved" });
-					return;
-				}
-				if (err instanceof RecreateRetainedError) {
-					// §2.7.7: a carry-over or rollback still retains a container;
-					// purging the record would orphan it. approve / rollback first.
-					res.status(409).json({ error: "retained-present" });
 					return;
 				}
 				logger.error(`[admin] force-delete failed: ${(err as Error).message}`);

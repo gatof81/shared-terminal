@@ -1,7 +1,7 @@
-// chatScroll.ts — what the three chats share about scrolling: the ACP agent
-// chat and Project Chat (acpThread.ts) and the capture Chat (chatView.ts).
+// chatScroll.ts — what the chats share about scrolling: the ACP agent chat
+// and Project Chat (acpThread.ts).
 // Each thread keeps its own "is the reader at the end", its own count of what
-// is new below and its own reading anchor (a row key there, a seq here); this
+// is new below and its own reading anchor (a row key); this
 // module has the rule for "at the end", the search for the row being read,
 // and the "go to the end" button.
 //
@@ -28,8 +28,6 @@ export interface ChatEndButtonOptions {
 	scroller: () => HTMLElement | null;
 	/** The accessible name, in the view's language: `count` 0 is plain "go to the end". */
 	name: (count: number) => string;
-	/** Instead of scrolling (the capture Chat past its window's newest end reloads it). */
-	onJump?: () => boolean;
 	/** Called once the jump starts: the thread clears its count and marks the reader at the end. */
 	onJumped: () => void;
 	/**
@@ -44,8 +42,6 @@ export class ChatEndButton {
 	private readonly countEl: HTMLSpanElement;
 	private shown = false;
 	private count = 0;
-	/** Visible words that replace the count (the capture Chat's "N newer events · Jump to latest"). */
-	private text: string | null = null;
 	private jumpUntil = 0;
 	private jumpEl: HTMLElement | null = null;
 
@@ -76,8 +72,7 @@ export class ChatEndButton {
 	sync(count: number, atEnd: boolean): void {
 		const sc = this.opts.scroller();
 		if (atEnd) this.endJump();
-		if (this.text !== null) this.shown = true;
-		else if (atEnd || this.jumping || !sc || sc.clientHeight === 0) this.shown = false;
+		if (atEnd || this.jumping || !sc || sc.clientHeight === 0) this.shown = false;
 		else if (!this.shown) {
 			const away = sc.scrollHeight - sc.scrollTop - sc.clientHeight;
 			this.shown = count > 0 || away > Math.max(MIN_DISTANCE, sc.clientHeight);
@@ -86,20 +81,11 @@ export class ChatEndButton {
 		this.paint();
 	}
 
-	/** Words shown instead of the count, the button always up (null: back to the rule). */
-	setText(text: string | null): void {
-		if (text === this.text) return;
-		this.text = text;
-		if (text === null) this.shown = false;
-		this.paint();
-	}
-
-	/** A new chat (or conversation) is shown: nothing of the previous one's state. */
+	/** A new chat is shown: nothing of the previous one's state. */
 	reset(): void {
 		this.endJump();
 		this.shown = false;
 		this.count = 0;
-		this.text = null;
 		this.paint();
 	}
 
@@ -107,16 +93,12 @@ export class ChatEndButton {
 		this.shown = false;
 		this.count = 0;
 		this.paint();
-		if (this.opts.onJump?.()) {
-			this.opts.onJumped();
-			return;
-		}
 		const sc = this.opts.scroller();
 		this.opts.onJumped();
 		if (!sc) return;
 		const top = sc.scrollHeight;
 		if (matchMedia("(prefers-reduced-motion: reduce)").matches) {
-			// The capture Chat's scroller is `scroll-behavior: smooth` in CSS.
+			// Instant even where a scroller is `scroll-behavior: smooth` in CSS.
 			const prev = sc.style.scrollBehavior;
 			sc.style.scrollBehavior = "auto";
 			sc.scrollTop = top;
@@ -142,12 +124,12 @@ export class ChatEndButton {
 		this.el.hidden = !this.shown;
 		this.el.style.bottom = "";
 		if (this.shown) this.clear();
-		const words = this.text ?? (this.count > 99 ? "99+" : this.count > 0 ? String(this.count) : "");
+		const words = this.count > 99 ? "99+" : this.count > 0 ? String(this.count) : "";
 		// The arrow alone: a 36-px circle (chat.css).
 		this.el.classList.toggle("solo", words === "");
 		if (this.countEl.textContent !== words) this.countEl.textContent = words;
 		this.countEl.hidden = words === "";
-		const name = this.text ?? this.opts.name(this.count);
+		const name = this.opts.name(this.count);
 		if (this.el.getAttribute("aria-label") !== name) this.el.setAttribute("aria-label", name);
 	}
 

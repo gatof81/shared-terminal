@@ -11,23 +11,12 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test as base, expect, type Locator, type Page } from "@playwright/test";
-import { MockBackend, SESSION_IDS, type USERS } from "./mockBackend.js";
+import { MockBackend, type USERS } from "./mockBackend.js";
 
 /** The seed data is stamped around 2026-10-31T10:00Z; the page's clock sits 30 min later. */
 export const FIXED_NOW = "2026-10-31T10:30:00Z";
 
 export type View = "terminal" | "files" | "git" | "chat";
-
-/** Test options. */
-export interface AppOptions {
-	/**
-	 * What the browser remembers about the seeded sessions' views
-	 * (viewPolicy.ts). "legacy" (default) seeds Terminal for the running
-	 * session and Files for the others, which is what most specs start
-	 * from; "none" starts clean, for the landing policy's own spec.
-	 */
-	landing: "legacy" | "none";
-}
 
 const FONTS_DIR = fileURLToPath(new URL("./fonts/", import.meta.url));
 const FONT_CSS = `
@@ -234,29 +223,12 @@ export class App {
 	}
 }
 
-export const test = base.extend<AppOptions & { backend: MockBackend; app: App }>({
-	landing: ["legacy", { option: true }],
-	backend: async ({ page, landing }, use) => {
+export const test = base.extend<{ backend: MockBackend; app: App }>({
+	backend: async ({ page }, use) => {
 		const backend = new MockBackend();
 		await backend.install(page);
 		await installFonts(page);
 		await page.clock.setFixedTime(FIXED_NOW);
-		if (landing === "legacy") {
-			await page.addInitScript(
-				(prefs: Record<string, string>) => {
-					try {
-						for (const [k, v] of Object.entries(prefs)) localStorage.setItem(k, v);
-					} catch {
-						/* ignore */
-					}
-				},
-				{
-					[`st.view.${SESSION_IDS.running}`]: "terminal",
-					[`st.view.${SESSION_IDS.stopped}`]: "files",
-					[`st.view.${SESSION_IDS.terminated}`]: "files",
-				},
-			);
-		}
 		await use(backend);
 	},
 	app: async ({ page, backend, isMobile }, use) => {

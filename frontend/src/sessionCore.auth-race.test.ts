@@ -83,7 +83,6 @@ vi.mock("./main.js", () => ({
 const api = vi.hoisted(() => ({
 	listSessions: vi.fn(),
 	listTabs: vi.fn(),
-	fetchConversations: vi.fn(),
 	getSession: vi.fn(),
 	fetchAdminSessions: vi.fn(),
 	createTab: vi.fn(),
@@ -187,7 +186,6 @@ beforeEach(() => {
 	mainState.showToast.mockClear();
 	api.listSessions.mockReset();
 	api.listTabs.mockReset();
-	api.fetchConversations.mockReset();
 	api.isLoggedIn.mockReset().mockReturnValue(true);
 	// What main.ts handleLogout() does between accounts: every list request
 	// in flight is retired and "the list has loaded" is forgotten.

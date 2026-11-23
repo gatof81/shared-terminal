@@ -20,7 +20,7 @@
  * the toolbar): its height varies — it wraps on narrow screens and is
  * hidden entirely on mobile while the chrome drawer is collapsed.
  *
- * Each overlay module (filesView.ts, gitView.ts, chatView.ts) registers listeners
+ * Each overlay module (filesView.ts, gitView.ts, acpChat.ts) registers listeners
  * here; this module imports neither, so it can't form a cycle with them.
  */
 
@@ -35,7 +35,7 @@ import {
 } from "./main.js";
 import { navigate } from "./router.js";
 import { setGeometryFrozen } from "./terminalGeometry.js";
-import { chooseLanding, readHistoryHint, readViewPref, writeViewPref } from "./viewPolicy.js";
+import { chooseLanding, readViewPref, writeViewPref } from "./viewPolicy.js";
 
 export type View = "terminal" | "files" | "git" | "chat";
 
@@ -122,6 +122,11 @@ export function reflectRoute(opts: { push: boolean }): void {
 /** Show the view and detail a route names, for the ACTIVE session. */
 export function applyRouteView(next: View | null, detail: string | null): void {
 	pendingRoute = null;
+	// A Chat address for a traditional session (an old link): its landing.
+	if (next === "chat" && activeSessionId !== null && isAcpAgentSession(activeSessionId) === false) {
+		next = landingFor(activeSessionId, terminalAvailable());
+		detail = null;
+	}
 	applying = true;
 	try {
 		if (next !== null) setView(next);
@@ -188,11 +193,11 @@ let view: View = "terminal";
 // policy says).
 let forced = false;
 // True while sessionCore is deciding a session's landing view (it may be
-// waiting on the "has history" answer): the sync below must not land a
+// waiting on the agents list): the sync below must not land a
 // fallback of its own in the meantime, or the person would see two views.
 let landingOwner: string | null = null;
 // Bumped on every view the person chooses. A landing decided earlier
-// (sessionCore waits on the history answer) compares it before acting,
+// (sessionCore waits on the agents list) compares it before acting,
 // so a click made meanwhile is never overwritten.
 let choiceGen = 0;
 
@@ -302,7 +307,6 @@ export function setView(next: View, opts: { forced?: boolean; landing?: boolean 
 export function landingFor(sessionId: string, running: boolean): View {
 	return chooseLanding({
 		pref: readViewPref(sessionId),
-		hasHistory: readHistoryHint(sessionId),
 		running,
 		isAgent: isAcpAgentSession(sessionId),
 	});
@@ -329,6 +333,25 @@ function renderSwitch(): void {
 	}
 }
 
+/**
+ * Only an ACP agent's session has a Chat (acpChat.ts); a traditional one
+ * is worked from its Terminal. Re-read when the agents list lands
+ * (`st:acp-agents`): a session selected before it is not known yet.
+ */
+function renderChatTab(): boolean {
+	const has = activeSessionId !== null && isAcpAgentSession(activeSessionId) === true;
+	buttons.chat.hidden = !has;
+	return has;
+}
+if (typeof window !== "undefined")
+	window.addEventListener("st:acp-agents", () => {
+		// On Chat (a route applied before the list) of a session that is not an agent's: its landing.
+		if (!renderChatTab() && view === "chat" && activeSessionId !== null) {
+			const live = terminalAvailable();
+			landView(landingFor(activeSessionId, live), { forced: !live });
+		}
+	});
+
 function terminalAvailable(): boolean {
 	const s = sessions.find((x) => x.sessionId === activeSessionId);
 	return s?.status === "running" || currentTerminals.size > 0;
@@ -347,6 +370,7 @@ export function syncSessionViews(): void {
 		return;
 	}
 	viewSwitch.hidden = false;
+	const hasChat = renderChatTab();
 	const canTerminal = terminalAvailable();
 	// The Terminal view is always selectable: with no live terminal it
 	// shows the session's state and the action that applies (Start,
@@ -360,10 +384,12 @@ export function syncSessionViews(): void {
 	// the NEW session rather than racing a stale one.
 	for (const l of syncListeners) l();
 	if (landingOwner !== null && landingOwner === activeSessionId) return;
-	if (!canTerminal) {
-		// No terminal to show: land on what the policy says (Files or
-		// Chat, both work for stopped sessions). A user already on
-		// Files, Git or Chat stays where they are.
+	if (view === "chat" && !hasChat)
+		landView(landingFor(s.sessionId, canTerminal), { forced: !canTerminal });
+	else if (!canTerminal) {
+		// No terminal to show: land on what the policy says (Files, or
+		// an agent's Chat). A user already on Files, Git or Chat stays
+		// where they are.
 		if (view === "terminal") landView(landingFor(s.sessionId, false), { forced: true });
 	} else if (forced) {
 		// The terminal is back (Start): leave the fallback for the landing

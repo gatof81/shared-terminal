@@ -10,7 +10,7 @@ import type { Dirent } from "node:fs";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { type Duplex, Writable } from "node:stream";
+import type { Duplex } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import Dockerode from "dockerode";
 import {
@@ -18,7 +18,6 @@ import {
 	type RunningSessionForStats,
 	type StatsBySession,
 } from "./containerStats.js";
-import { withRelayNoProxy } from "./conversation/noProxy.js";
 import { d1Query } from "./db.js";
 import {
 	defaultExceptionsPath,
@@ -37,23 +36,6 @@ import { logger } from "./logger.js";
 import { clearPortMappings, mappingsFromConfig, setPortMappings } from "./portMappings.js";
 
 /**
- * Phase 3 — what DockerManager needs from the conversation subsystem,
- * kept as a narrow interface so dockerManager.ts never imports the
- * service (and its D1-backed modules) directly.
- */
-export interface SpawnCaptureResult {
-	env: string[];
-	binds: string[];
-	/** 3.0d (D6): create from exactly the image ID whose label was checked. */
-	imageId?: string;
-}
-export interface ConversationLifecycleHooks {
-	prepareSpawn(sessionId: string): Promise<SpawnCaptureResult>;
-	onSessionDown(sessionId: string): Promise<void>;
-	onSessionPurged(sessionId: string): Promise<void>;
-}
-
-/**
  * ACP agents (experimental, acp/agents.ts). `prepareSpawn` adds the agent's
  * extra binds (the read-only ACP runtime) to a NEW container; `onStarted`
  * fires after a container of the session starts (spawn and /start), so the
@@ -68,31 +50,7 @@ export interface AgentLifecycleHooks {
 	onPurged?(sessionId: string): Promise<void>;
 }
 
-import { INGEST_TOKEN_ENV, MANAGED_MOUNT_TARGET } from "./conversation/activation.js";
-import {
-	ATTESTATION_KEY_INFO,
-	type AttestationBasis,
-	signAttestation,
-	writeAttestation,
-} from "./conversation/captureAttestation.js";
-import {
-	CONTROL_MOUNT_TARGET,
-	type ContainerView,
-	RELAY_IMAGE_LABEL,
-	RELAY_IMAGE_LABEL_VALUE,
-	RELAY_PROBE_TIMEOUT_MS,
-	RELAY_STATUS_URL,
-} from "./conversation/captureAuth.js";
-import type { SessionNetworkView } from "./conversation/ingestOrigin.js";
-import type { LayerChange, PathKind } from "./recreate/layer.js";
-import {
-	type ExecResult,
-	isNotFound,
-	isNotModified,
-	type RecreateContainer,
-	type RecreateDockerPort,
-} from "./recreate/ports.js";
-import { deriveSubkey } from "./secrets.js";
+import { isNotFound, isNotModified } from "./dockerErrors.js";
 import {
 	decryptStoredEntries,
 	EFFECTIVE_CPU_NANO_MAX,
@@ -523,10 +481,6 @@ export type KillProcessGroupOutcome = "already-exited" | "terminated" | "killed"
 export class DockerManager {
 	private docker: Dockerode;
 	private sessions: SessionManager;
-	// Phase 3 — optional capture hooks (docs/CONVERSATION.md §2.4). Null
-	// until index.ts wires the ConversationService; every call site is
-	// best-effort so a capture failure never fails a session lifecycle op.
-	private conversation: ConversationLifecycleHooks | null = null;
 	private agents: AgentLifecycleHooks | null = null;
 	private shared = new Map<string /*targetKey*/, Promise<SharedExec>>();
 	private keyOf = new Map<string /*attachId*/, string /*targetKey*/>();
@@ -562,19 +516,6 @@ export class DockerManager {
 	// ownership cache — stale ids of long-gone containers are the
 	// only thing ever evicted.
 	private readonly runtimeReadyContainers = new Set<string>();
-
-	/** Phase 3 — wire the conversation subsystem's lifecycle hooks. */
-	/** 3.0d (CONVERSATION.md §2.7.4): `reconcile` leaves a session alone
-	 *  while a recreation of it is unresolved. */
-	private recreateUnresolved: ((sessionId: string) => Promise<boolean>) | null = null;
-
-	setRecreateUnresolvedCheck(check: ((sessionId: string) => Promise<boolean>) | null): void {
-		this.recreateUnresolved = check;
-	}
-
-	setConversationHooks(hooks: ConversationLifecycleHooks | null): void {
-		this.conversation = hooks;
-	}
 
 	setAgentHooks(hooks: AgentLifecycleHooks | null): void {
 		this.agents = hooks;
@@ -753,10 +694,6 @@ export class DockerManager {
 		// No chown — backend (typically root) owns the dir, container
 		// reads via the read-only mount; no need for it to own anything.
 
-		// Phase 3 — the hooks file + ingest token exist only when capture
-		// is requested AND the backend flag is on (§2.4 "spawn" row). A
-		// failure here must not block the session: log and spawn without
-		// capture (the list endpoint will report `effective: false`).
 		let agentBinds: string[] = [];
 		if (this.agents) {
 			try {
@@ -767,26 +704,11 @@ export class DockerManager {
 				);
 			}
 		}
-		let capture: SpawnCaptureResult = { env: [], binds: [] };
-		if (this.conversation) {
-			try {
-				capture = await this.conversation.prepareSpawn(sessionId);
-			} catch (err) {
-				logger.warn(
-					`[docker] conversation capture prepare failed for ${sessionId}: ${(err as Error).message}`,
-				);
-			}
-		}
 		// imagePins.ts (owner conditions P1/P2): the image this create uses, as
 		// an immutable id, pinned and verified BEFORE the create — or no create
 		// at all. Never the mutable tag: the container gets exactly the pinned
 		// image, so a rebuild racing this spawn can no longer take it.
-		const createImage = await this.imageForCreate(
-			capture.imageId ?? SESSION_IMAGE,
-			`spawn ${sessionId}`,
-		);
-		// §2.7.5.1 — only a container created HERE is attested, never one
-		// adopted under its name (that one was not created from the checked image).
+		const createImage = await this.imageForCreate(SESSION_IMAGE, `spawn ${sessionId}`);
 		let freshlyCreated = false;
 		const container = await this.createContainerReclaimingStaleName(
 			sessionId,
@@ -799,11 +721,9 @@ export class DockerManager {
 							meta,
 							config,
 							envArray,
-							// Only the image is overridden: `capture.imageId` still
-							// says whether capture was prepared (attestation below).
-							// ACP agent binds ride with the capture binds: both are
-							// extra mounts of a NEW container only.
-							{ ...capture, binds: [...capture.binds, ...agentBinds], imageId: createImage },
+							// ACP agent binds are extra mounts of a NEW container only.
+							agentBinds,
+							createImage,
 							uploadsHostDir,
 							meta.containerName,
 						),
@@ -866,13 +786,6 @@ export class DockerManager {
 			);
 			throw new SpawnPersistError(removal === "removed");
 		}
-		// §2.7.5.1 — capture prepared ⇒ the container was created from an image
-		// whose relay label was just checked: bind that fact to this container
-		// now, before it starts, so authorization no longer depends on Docker
-		// keeping the image. Best-effort: without it the image rule still applies.
-		if (capture.imageId && freshlyCreated)
-			await this.attestCaptureContainer(sessionId, containerId, "spawn", null);
-
 		await container.start();
 		this.agents?.onStarted(sessionId, containerId);
 
@@ -903,19 +816,17 @@ export class DockerManager {
 
 	/**
 	 * The full create options of a session container: env, binds, limits,
-	 * caps, network. Shared by spawn and by recreation (CONVERSATION.md
-	 * §2.7.2 step 1: N is created "with the env, binds, caps and network of
-	 * always"), so the two can never drift apart.
+	 * caps, network.
 	 */
 	private containerOptions(
 		sessionId: string,
 		meta: SessionMeta,
 		config: SessionConfigRecord | null,
 		envArray: string[],
-		capture: SpawnCaptureResult,
+		extraBinds: string[],
+		image: string,
 		uploadsHostDir: string,
 		name: string,
-		labels?: Record<string, string>,
 	): Dockerode.ContainerCreateOptions {
 		const hostname = sanitiseHostname(meta.name, sessionId);
 		// #384 — clamp CPU against the HOST too, not just the operator
@@ -946,13 +857,8 @@ export class DockerManager {
 		// from config below. Dropping host publishing removes the host attack
 		// surface AND makes opening/closing a port a live edit (no recreate).
 		return {
-			// With capture prepared, the exact image ID its relay label
-			// was checked on (D6): the tag could move in between.
-			Image: capture.imageId ?? SESSION_IMAGE,
+			Image: image,
 			name,
-			// Recreation (3.0d) labels N with its session and attempt; a
-			// spawn has none.
-			Labels: labels,
 			Hostname: hostname,
 			// `buildContainerEnv` returns a deduplicated `KEY=VALUE[]` array
 			// so the precedence is unambiguous regardless of which reader
@@ -963,21 +869,12 @@ export class DockerManager {
 			// programs the user runs may use either. Emitting a single
 			// entry per name closes that ambiguity. See `buildContainerEnv`
 			// for the precedence rules.
-			// Phase 3 §2.6 — with capture effective (capture.env set),
-			// a proxy in the session env must not swallow the hooks to
-			// the loopback relay; without a proxy the env is untouched.
-			Env:
-				capture.env.length > 0
-					? withRelayNoProxy(buildContainerEnv(sessionId, meta.name, envArray, capture.env))
-					: buildContainerEnv(sessionId, meta.name, envArray, capture.env),
+			Env: buildContainerEnv(sessionId, meta.name, envArray),
 			HostConfig: {
 				Binds: [
 					`${WORKSPACE_ROOT}/${sessionId}:/home/developer/workspace`,
 					`${uploadsHostDir}:/home/developer/uploads:ro`,
-					// Phase 3 — empty when capture is off for this
-					// deployment (behaviour-neutral); otherwise the
-					// per-session managed-settings dir, read-only.
-					...capture.binds,
+					...extraBinds,
 				],
 				// #190 (direct-proxy switch) — join the shared user-defined
 				// network so the backend can reach this container by name via
@@ -1558,10 +1455,6 @@ export class DockerManager {
 			);
 		}
 
-		// Phase 3 — every conversation of the session is `disconnected`
-		// once its container is gone. Best-effort, like the mapping clear.
-		await this.notifyConversationDown(sessionId);
-
 		// Destroy any shared exec and per-attach routing for this session.
 		// Match on equality or on `sessionId:…` prefix so this keeps working
 		// once per-tab targetKeys (sessionId:windowId) exist.
@@ -1600,55 +1493,39 @@ export class DockerManager {
 	 */
 	async purgeWorkspace(sessionId: string): Promise<void> {
 		const rootAbs = path.resolve(WORKSPACE_ROOT);
-		const sessionAbs = path.resolve(path.join(WORKSPACE_ROOT, sessionId));
-		const uploadsAbs = path.resolve(path.join(WORKSPACE_ROOT, ".uploads", sessionId));
+		// Everything of the session that lives under WORKSPACE_ROOT:
+		// the workspace itself; its uploads (out-of-workspace TOCTOU
+		// isolation — see writeUploadsImpl); and the dirs the removed
+		// conversation capture and container recreation left behind —
+		// `.conversations/<sid>` (event log), `.st-control/<sid>` (control
+		// dir, recreation records) and `.claude-managed/<sid>` (hooks
+		// file). Nothing reads those any more, but soft delete and backups
+		// keep them, so only a hard delete removes them.
+		const targets = [
+			path.join(WORKSPACE_ROOT, sessionId),
+			path.join(WORKSPACE_ROOT, ".uploads", sessionId),
+			path.join(WORKSPACE_ROOT, ".conversations", sessionId),
+			path.join(WORKSPACE_ROOT, ".st-control", sessionId),
+			path.join(WORKSPACE_ROOT, ".claude-managed", sessionId),
+		].map((t) => path.resolve(t));
 
-		// Safety: both resolved dirs must be strict children of rootAbs.
-		if (!sessionAbs.startsWith(rootAbs + path.sep)) {
-			throw new Error(
-				`[docker] refusing to purge workspace outside root (root=${rootAbs}, target=${sessionAbs})`,
-			);
+		// Safety: every resolved dir must be a strict child of rootAbs, checked
+		// for all of them before the first rm.
+		for (const target of targets) {
+			if (!target.startsWith(rootAbs + path.sep)) {
+				throw new Error(
+					`[docker] refusing to purge outside root (root=${rootAbs}, target=${target})`,
+				);
+			}
 		}
-		if (!uploadsAbs.startsWith(rootAbs + path.sep)) {
-			throw new Error(
-				`[docker] refusing to purge uploads outside root (root=${rootAbs}, target=${uploadsAbs})`,
-			);
-		}
-
-		try {
-			await fs.rm(sessionAbs, { recursive: true, force: true });
-			logger.info(`[docker] purged workspace dir ${sessionAbs}`);
-		} catch (err) {
-			logger.error(`[docker] failed to purge workspace ${sessionAbs}: ${(err as Error).message}`);
-			throw err;
-		}
-		// Per-session uploads dir lives at <WORKSPACE_ROOT>/.uploads/<sessionId>/
-		// (out-of-workspace TOCTOU isolation — see writeUploadsImpl). Hard
-		// delete must clean this too or uploaded files would persist
-		// forever for a row that no longer exists in D1.
-		try {
-			await fs.rm(uploadsAbs, { recursive: true, force: true });
-			logger.info(`[docker] purged uploads dir ${uploadsAbs}`);
-		} catch (err) {
-			logger.error(`[docker] failed to purge uploads ${uploadsAbs}: ${(err as Error).message}`);
-			throw err;
-		}
-		// 3.0d — the control dir (<WORKSPACE_ROOT>/.st-control/<sid>: the
-		// recreation record, later the relay markers) follows the same
-		// lifetime (CONVERSATION.md §2.1). Reaching this line means the
-		// lifecycle gate let the delete through, i.e. no recreation of
-		// this session is unresolved.
-		const controlAbs = path.resolve(path.join(WORKSPACE_ROOT, ".st-control", sessionId));
-		if (!controlAbs.startsWith(rootAbs + path.sep)) {
-			throw new Error(
-				`[docker] refusing to purge control dir outside root (root=${rootAbs}, target=${controlAbs})`,
-			);
-		}
-		try {
-			await fs.rm(controlAbs, { recursive: true, force: true });
-		} catch (err) {
-			logger.error(`[docker] failed to purge control dir ${controlAbs}: ${(err as Error).message}`);
-			throw err;
+		for (const target of targets) {
+			try {
+				await fs.rm(target, { recursive: true, force: true });
+				logger.info(`[docker] purged ${target}`);
+			} catch (err) {
+				logger.error(`[docker] failed to purge ${target}: ${(err as Error).message}`);
+				throw err;
+			}
 		}
 		// Best-effort: a failure leaves the agent's queue as it was (the next
 		// agent created under the same name still closes it), never blocks the
@@ -1659,19 +1536,6 @@ export class DockerManager {
 					`[docker] ACP agent cleanup for ${sessionId} failed: ${(err as Error).message}`,
 				);
 			});
-		}
-		// Phase 3 — the event log and the managed-settings dir live next
-		// to `.uploads` (out of the workspace) and follow the same
-		// lifetime: soft delete keeps them, hard delete purges them.
-		if (this.conversation) {
-			try {
-				await this.conversation.onSessionPurged(sessionId);
-			} catch (err) {
-				logger.error(
-					`[docker] failed to purge conversation data for ${sessionId}: ${(err as Error).message}`,
-				);
-				throw err;
-			}
 		}
 	}
 
@@ -2254,19 +2118,7 @@ export class DockerManager {
 				`[docker] failed to clear port mappings for session ${sessionId}: ${(err as Error).message}`,
 			);
 		}
-		await this.notifyConversationDown(sessionId);
 		logger.info(`[docker] stopped container for session ${sessionId}`);
-	}
-
-	private async notifyConversationDown(sessionId: string): Promise<void> {
-		if (!this.conversation) return;
-		try {
-			await this.conversation.onSessionDown(sessionId);
-		} catch (err) {
-			logger.warn(
-				`[docker] conversation onSessionDown failed for ${sessionId}: ${(err as Error).message}`,
-			);
-		}
 	}
 
 	/**
@@ -3290,402 +3142,6 @@ export class DockerManager {
 	 * `cmd` is argv, never a shell string. Callers compose it from fixed
 	 * literals plus validated operands — no shell parses it.
 	 */
-	// ── 3.0d capture authorization port (CONVERSATION.md §2.7.5–§2.7.6) ──
-
-	/**
-	 * The relay label of an image AS IT EXISTS NOW (§2.7.5 item 5, §2.7.6).
-	 * Deliberately not cached: an image ID's labels never change, but the
-	 * image can be deleted while containers keep running on it, and a deleted
-	 * image counts as unlabelled. A cache would keep a deleted image "relay"
-	 * until the backend restarted — the same Docker state authorizing
-	 * differently before and after a restart. The cost is one local Docker
-	 * read next to the container inspect that every caller already makes.
-	 */
-	private imageRelayInfo(imageId: string): Promise<{ exists: boolean; relay2: boolean }> {
-		return imageRelayInfoWith(this.docker, imageId);
-	}
-
-	/**
-	 * §2.7.5.1 — sign and persist the capability attestation of a container
-	 * the backend has JUST created. Re-checked here, not trusted from the
-	 * caller: the container's own image must exist now and carry the relay
-	 * label, and the container must carry it too. Best-effort and logged —
-	 * a missing attestation only means the image rule alone applies.
-	 */
-	async attestCaptureContainer(
-		sessionId: string,
-		containerId: string,
-		basis: AttestationBasis,
-		attemptId: string | null,
-		workspaceRoot = WORKSPACE_ROOT,
-		mayWrite: () => boolean = () => true,
-	): Promise<boolean> {
-		try {
-			const info = await this.docker.getContainer(containerId).inspect();
-			const image = await this.imageRelayInfo(info.Image);
-			if (!image.exists || !image.relay2)
-				throw new Error("its image does not exist or lacks the relay label");
-			if (info.Config?.Labels?.[RELAY_IMAGE_LABEL] !== RELAY_IMAGE_LABEL_VALUE)
-				throw new Error("the container lacks the relay label");
-			return await writeAttestation(
-				workspaceRoot,
-				signAttestation(
-					{ sessionId, containerId: info.Id, imageId: info.Image, basis, attemptId },
-					deriveSubkey(ATTESTATION_KEY_INFO),
-				),
-				mayWrite,
-			);
-		} catch (err) {
-			logger.warn(
-				`[docker] capture attestation (${basis}) for ${sessionId} (${containerId.slice(0, 12)}) failed: ${(err as Error).message}`,
-			);
-			return false;
-		}
-	}
-
-	/**
-	 * What capture authorization needs from the D1 container: running,
-	 * the token in its env (kept in memory only; the caller hashes it and
-	 * drops it), both mounts, and its OWN image's relay label. A 404 is
-	 * `{exists:false}`; any other daemon error propagates (fail-closed).
-	 */
-	inspectCapture(containerId: string): Promise<ContainerView> {
-		return inspectCaptureWith(this.docker, containerId);
-	}
-
-	/**
-	 * CONVERSATION.md §3.1.1 — the container's identity and addresses on
-	 * SESSIONS_NETWORK, inspected BY ID (no image lookup: this sits on the
-	 * ingest path). Throws on a daemon error; `{exists:false}` only for a 404.
-	 */
-	inspectSessionNetwork(containerId: string): Promise<SessionNetworkView> {
-		return inspectSessionNetworkWith(this.docker, containerId, SESSIONS_NETWORK);
-	}
-
-	/** The image a spawn would use now (by its immutable ID), or null if missing. */
-	async currentSessionImage(): Promise<{ imageId: string; relay2: boolean } | null> {
-		// One inspect of the tag gives both the ID and its labels, read now (no
-		// cache, like imageRelayInfo): no second lookup, so no window in which
-		// the image could vanish between the two.
-		let info: Dockerode.ImageInspectInfo;
-		try {
-			info = await this.docker.getImage(SESSION_IMAGE).inspect();
-		} catch (err) {
-			if (isNotFound(err)) return null;
-			throw err;
-		}
-		return {
-			imageId: info.Id,
-			relay2: info.Config?.Labels?.[RELAY_IMAGE_LABEL] === RELAY_IMAGE_LABEL_VALUE,
-		};
-	}
-
-	// ── Recreation port (3.0d, CONVERSATION.md §2.7) ───────────────────────
-
-	/**
-	 * The Docker side of `recreate/engine.ts`. No request here takes an
-	 * abort signal or a client timeout: the engine decides how long it
-	 * waits, and dockerd's answer, whenever it arrives, is the evidence of
-	 * how the request ended (§2.7.4).
-	 */
-	recreatePort(): RecreateDockerPort {
-		const d = this.docker;
-		return {
-			inspect: async (ref) => {
-				try {
-					return toRecreateContainer(await d.getContainer(ref).inspect());
-				} catch (err) {
-					if (isNotFound(err)) return null;
-					throw err;
-				}
-			},
-			changes: async (id) => ((await d.getContainer(id).changes()) as LayerChange[] | null) ?? [],
-			statPath: async (id, p) => {
-				let res: { headers?: Record<string, string>; resume?: () => void };
-				try {
-					res = await d.getContainer(id).infoArchive({ path: p });
-				} catch (err) {
-					if (isNotFound(err)) return null;
-					throw err;
-				}
-				res.resume?.();
-				const raw = res.headers?.["x-docker-container-path-stat"];
-				if (!raw) throw new Error("archive HEAD without a path stat");
-				const st = JSON.parse(Buffer.from(raw, "base64").toString("utf8")) as {
-					mode: number;
-					size?: number;
-					linkTarget?: string;
-				};
-				return {
-					kind: goModeKind(st.mode),
-					linkTarget: st.linkTarget || undefined,
-					size: typeof st.size === "number" ? st.size : undefined,
-				};
-			},
-			readArchive: async (id, p, maxBytes) => {
-				let stream: NodeJS.ReadableStream;
-				try {
-					stream = await d.getContainer(id).getArchive({ path: p });
-				} catch (err) {
-					if (isNotFound(err)) return null;
-					throw err;
-				}
-				// Past the cap the rest is drained, not destroyed: the request
-				// ends when dockerd ends it, like every other one.
-				const chunks: Buffer[] = [];
-				let size = 0;
-				let over = false;
-				await new Promise<void>((resolve, reject) => {
-					stream.on("data", (c: Buffer) => {
-						if (over) return;
-						size += c.length;
-						if (size > maxBytes) over = true;
-						else chunks.push(c);
-					});
-					stream.on("end", () => resolve());
-					stream.on("error", reject);
-				});
-				if (over) throw new Error(`archive of ${p} exceeds ${maxBytes} bytes`);
-				return Buffer.concat(chunks);
-			},
-			currentImage: () => this.currentSessionImage(),
-			buildCreate: async (sessionId, spec) => {
-				const meta = await this.sessions.getOrThrow(sessionId);
-				// No `loadConfigForSpawn` fallback here: a D1 blip must fail
-				// the recreation, not create an N without the session's env
-				// and caps (strict preservation, D2).
-				const config = await getSessionConfig(sessionId);
-				const decrypted =
-					config?.envVars && config.envVars.length > 0
-						? decryptStoredEntries(config.envVars)
-						: undefined;
-				// An ACP agent's N needs the same read-only runtime mount its O was
-				// spawned with: without it the runner can never start in N and the
-				// watchdog sees its restart loop "alive" forever. Unlike spawn, a
-				// failure here fails the build — strict preservation (D2).
-				const agentBinds = this.agents ? (await this.agents.prepareSpawn(sessionId)).binds : [];
-				return this.containerOptions(
-					sessionId,
-					meta,
-					config,
-					mergeEnvForSpawn(meta.envVars, decrypted),
-					{ env: spec.env, binds: [...spec.binds, ...agentBinds], imageId: spec.imageId },
-					path.join(WORKSPACE_ROOT, ".uploads", sessionId),
-					spec.name,
-					spec.labels,
-				);
-			},
-			create: async (options) =>
-				(await d.createContainer(options as Dockerode.ContainerCreateOptions)).id,
-			// imagePins.ts — the engine's own "pin image" (before create N) and
-			// "pin N" (after) requests; a failure stops the attempt before N exists.
-			pinImage: async (imageId, mayAct) => {
-				if (!mayAct()) throw new Error("epoch closed: no pin");
-				await this.imageForCreate(imageId, "recreate N");
-			},
-			verifyPinned: (containerId, imageId) =>
-				verifyCreated(pinDockerOf(d), containerId, imageId, { pins: pinsEnabled() }),
-			// §2.7.5.1 — its own request in the engine (after N's id is known), so
-			// "create N" stays one Docker call and a closed epoch writes nothing.
-			attest: (sid, id, attemptId, mayAct) =>
-				this.attestCaptureContainer(sid, id, "recreate", attemptId, WORKSPACE_ROOT, mayAct),
-			rename: async (id, name) => {
-				await d.getContainer(id).rename({ name });
-			},
-			start: async (id) => {
-				await d.getContainer(id).start();
-			},
-			stop: async (id) => {
-				try {
-					await d.getContainer(id).stop();
-				} catch (err) {
-					if ((err as { statusCode?: number }).statusCode !== 304) throw err; // already stopped
-				}
-			},
-			remove: async (id) => {
-				await d.getContainer(id).remove();
-			},
-			listByLabel: async (key, value) => {
-				const list = await d.listContainers({
-					all: true,
-					filters: { label: [value === undefined ? key : `${key}=${value}`] },
-				});
-				return list.map((c) => ({
-					id: c.Id,
-					name: (c.Names?.[0] ?? "").replace(/^\//, ""),
-					running: c.State === "running",
-					imageId: c.ImageID,
-					labels: c.Labels ?? {},
-					mounts: (c.Mounts ?? []).map((m) => m.Destination),
-					finishedAt: null, // a list entry has no State.FinishedAt; inspect() for that
-				}));
-			},
-			listByName: async (fragment) => {
-				const list = await d.listContainers({ all: true, filters: { name: [fragment] } });
-				return list.map((c) => ({
-					id: c.Id,
-					name: (c.Names?.[0] ?? "").replace(/^\//, ""),
-					running: c.State === "running",
-					imageId: c.ImageID,
-					labels: c.Labels ?? {},
-					mounts: (c.Mounts ?? []).map((m) => m.Destination),
-					finishedAt: null, // a list entry has no State.FinishedAt; inspect() for that
-				}));
-			},
-			exec: (containerId, cmd, timeoutMs, mayAct) =>
-				this.recreateExec(containerId, cmd, timeoutMs, mayAct),
-			execState: async (execId) => {
-				try {
-					const i = await d.getExec(execId).inspect();
-					return {
-						running: !!i.Running,
-						exitCode: !i.Running && typeof i.ExitCode === "number" ? i.ExitCode : null,
-					};
-				} catch (err) {
-					if (isNotFound(err)) return null;
-					throw err;
-				}
-			},
-			sizeRw: async (id) => {
-				const i = (await d
-					.getContainer(id)
-					.inspect({ size: true } as unknown as Dockerode.ContainerInspectOptions)) as {
-					SizeRw?: number;
-				};
-				return typeof i.SizeRw === "number" ? i.SizeRw : null;
-			},
-			copyPath: async (fromId, p, toId, destDir, mayAct) => {
-				// One tar stream from O's archive endpoint into N's; dockerd
-				// extracts as root, so uids, modes, symlinks and hard links are
-				// what the archive says. The source stream is counted; the
-				// upload resolves when dockerd has extracted everything.
-				if (!mayAct()) throw new Error(`copy of ${p} not started: the attempt may no longer act`);
-				const src = await d.getContainer(fromId).getArchive({ path: p });
-				// The GET is a wait: authorization may have been lost while it
-				// was pending (epoch closed, lease gone, shutdown). Nothing has
-				// been sent to N yet, so ask again before the PUT — a copy that
-				// lost its authority must not start writing N. Destroying the
-				// source releases the GET's connection to dockerd.
-				// Destroyed, not drained as `readArchive` does past its cap: that
-				// convention keeps a request running until dockerd ends it, but
-				// this GET has no effect in either container, may be gigabytes of
-				// layer, and nothing of it was sent to N — finishing it buys nothing.
-				// (dockerode types it as a bare ReadableStream; it is an IncomingMessage.)
-				if (!mayAct()) {
-					(src as NodeJS.ReadableStream & { destroy(): void }).destroy();
-					throw new Error(`copy of ${p} not started: the attempt may no longer act`);
-				}
-				let bytes = 0;
-				src.on("data", (c: Buffer) => {
-					bytes += c.length;
-				});
-				await d.getContainer(toId).putArchive(src, { path: destDir });
-				return { bytes };
-			},
-		};
-	}
-
-	/**
-	 * The recreation's exec (CONVERSATION.md §2.7.4). Not `execCapture`:
-	 * that one has a host-side backstop that destroys the stream and
-	 * reports the exit as unknown, which is what git's slot accounting
-	 * wants and must stay as it is. A recreation needs evidence instead:
-	 *   - nothing is cut on this side; the stream is read until dockerd
-	 *     ends it (the in-container `timeout -k` bounds the process);
-	 *   - the exit is taken ONLY from the exec's own inspect, after the
-	 *     stream is over. A broken stream, a failing inspect, `Running`
-	 *     still true or no numeric `ExitCode` is "termination unknown"
-	 *     (`exitCode: null`, with the exec id to ask again), never a
-	 *     failure — the process may still be running and writing.
-	 * Only a failure to create the exec instance throws: no process exists.
-	 */
-	private async recreateExec(
-		containerId: string,
-		cmd: string[],
-		timeoutMs: number,
-		mayAct: () => boolean = () => true,
-	): Promise<ExecResult> {
-		const timeoutSec = Math.max(1, Math.ceil(timeoutMs / 1000));
-		const exec = await this.docker.getContainer(containerId).exec({
-			Cmd: ["timeout", "-k", "2", String(timeoutSec), ...cmd],
-			AttachStdin: false,
-			AttachStdout: true,
-			AttachStderr: true,
-			Tty: false,
-			WorkingDir: "/home/developer/workspace",
-		});
-		// The create may answer after the caller stopped waiting (its epoch
-		// closed): a created exec that is never started runs nothing.
-		if (!mayAct()) throw new Error("recreation exec: not started, the caller may no longer act");
-		const MAX = 64 * 1024;
-		const chunks: Buffer[] = [];
-		let size = 0;
-		// Past the cap the output is drained, not cut: the stream must end
-		// on dockerd's side for the exit to be observable.
-		const stdout = new Writable({
-			write(c: Buffer, _e, cb) {
-				if (size < MAX) chunks.push(c.subarray(0, MAX - size));
-				size += c.length;
-				cb();
-			},
-		});
-		const stderr = new Writable({
-			write(_c, _e, cb) {
-				cb();
-			},
-		});
-		try {
-			const stream = await exec.start({ hijack: false, stdin: false });
-			await new Promise<void>((resolve) => {
-				this.docker.modem.demuxStream(stream, stdout, stderr);
-				stream.on("end", () => resolve());
-				stream.on("close", () => resolve());
-				stream.on("error", () => resolve());
-			});
-		} catch {
-			// The start may still have run the process: the inspect decides.
-		}
-		const out = Buffer.concat(chunks).toString("utf8");
-		try {
-			const info = await exec.inspect();
-			if (!info.Running && typeof info.ExitCode === "number") {
-				return { exitCode: info.ExitCode, stdout: out, execId: exec.id };
-			}
-		} catch {
-			// Unknown, below.
-		}
-		return { exitCode: null, stdout: out, execId: exec.id };
-	}
-
-	/**
-	 * One `GET /st-relay/status` from inside the container (D7): bounded
-	 * by curl's `-m` and the exec timeout; true only for a 204 carrying
-	 * `X-ST-Relay: 1` — "something listens" is not enough.
-	 */
-	async probeRelay(sessionId: string, containerId: string): Promise<boolean> {
-		const r = await this.execCapture(
-			sessionId,
-			[
-				"curl",
-				"-q",
-				"-s",
-				"-D",
-				"-",
-				"-o",
-				"/dev/null",
-				"--noproxy",
-				"*",
-				"-m",
-				String(RELAY_PROBE_TIMEOUT_MS / 1000),
-				RELAY_STATUS_URL,
-			],
-			{ containerId, maxBytes: 4096, timeoutMs: RELAY_PROBE_TIMEOUT_MS + 500 },
-		);
-		if (r.exitCode !== 0) return false;
-		const head = r.stdout.toString("latin1");
-		return /^HTTP\/1\.1 204\b/.test(head) && /^X-ST-Relay: 1\r?$/m.test(head);
-	}
-
 	async execCapture(
 		sessionId: string,
 		cmd: string[],
@@ -4011,20 +3467,8 @@ export class DockerManager {
 
 		for (const row of result.results) {
 			this.reconcileSessionsCheckedSinceBoot++;
-			// §2.7.4: an unresolved recreation means D1 and Docker may be
-			// mid-change by requests nobody can see answered; flipping the
-			// status or rewriting port mappings now could act on a state
-			// that is about to change. Fail-closed on a failing check.
-			if (this.recreateUnresolved) {
-				const unresolved = await this.recreateUnresolved(row.session_id).catch(() => true);
-				if (unresolved) {
-					logger.warn(`[docker] reconcile: ${row.session_id} skipped (recreate-unresolved)`);
-					continue;
-				}
-			}
 			if (!row.container_id) {
 				await this.sessions.updateStatus(row.session_id, "stopped");
-				await this.notifyConversationDown(row.session_id);
 				// Drop any leftover port mappings for the no-container
 				// case — same defensive intent as the running-but-
 				// stopped branch below.
@@ -4049,7 +3493,6 @@ export class DockerManager {
 				this.warnIfPreHardened(row.session_id, row.container_id, info.HostConfig);
 				if (!info.State.Running) {
 					await this.sessions.updateStatus(row.session_id, "stopped");
-					await this.notifyConversationDown(row.session_id);
 					// Same rationale as `stopContainer()`: a container
 					// Docker reports as not-running has its host ports
 					// detached (or about to be), so the mapping table
@@ -4100,7 +3543,6 @@ export class DockerManager {
 				const statusCode = (err as { statusCode?: number }).statusCode;
 				if (statusCode === 404) {
 					await this.sessions.recordContainerGone(row.session_id);
-					await this.notifyConversationDown(row.session_id);
 					// Container is genuinely gone — its host ports are
 					// freed; the dispatcher must not retain mappings.
 					try {
@@ -4227,10 +3669,6 @@ export function buildContainerEnv(
 	sessionId: string,
 	sessionName: string,
 	userEnv: string[],
-	// Phase 3 — infra entries at the same precedence as SESSION_ID (a
-	// user env var can't shadow `ST_INGEST_TOKEN`). Empty when capture
-	// is off.
-	infraEnv: string[] = [],
 ): string[] {
 	const out = new Map<string, string>();
 	// (3) Lowest-precedence defaults first.
@@ -4250,11 +3688,6 @@ export function buildContainerEnv(
 	// (1) Highest-precedence infra identity. Overwrites anything else.
 	out.set("SESSION_ID", sessionId);
 	out.set("SESSION_NAME", sessionName);
-	for (const entry of infraEnv) {
-		const eq = entry.indexOf("=");
-		if (eq <= 0) continue;
-		out.set(entry.slice(0, eq), entry.slice(eq + 1));
-	}
 	return Array.from(out, ([k, v]) => `${k}=${v}`);
 }
 
@@ -4323,107 +3756,4 @@ export function demuxDockerOutputAll(raw: Buffer): string {
 		off += size;
 	}
 	return Buffer.concat(chunks).toString("utf-8");
-}
-
-// ── Recreation port helpers ─────────────────────────────────────────────────
-
-function toRecreateContainer(info: Dockerode.ContainerInspectInfo): RecreateContainer {
-	return {
-		id: info.Id,
-		name: info.Name.replace(/^\//, ""),
-		running: info.State?.Running === true,
-		imageId: info.Image,
-		labels: info.Config?.Labels ?? {},
-		mounts: (info.Mounts ?? []).map((m) => m.Destination),
-		// Go's zero time while running or never started.
-		finishedAt:
-			info.State?.FinishedAt && !info.State.FinishedAt.startsWith("0001-")
-				? info.State.FinishedAt
-				: null,
-	};
-}
-
-/** Go's os.FileMode type bits, as dockerd reports them in the archive path stat. */
-export function goModeKind(mode: number): PathKind {
-	const has = (bit: number) => Math.floor(mode / 2 ** bit) % 2 === 1;
-	if (has(31)) return "dir";
-	if (has(27)) return "symlink";
-	if (has(24)) return "socket";
-	// named pipe, device, char device, irregular
-	if (has(25) || has(26) || has(21) || has(19)) return "other";
-	return "file";
-}
-
-// ── Capture inspection, shared with the attest CLI (§2.7.5.1) ─────────────
-
-export async function imageRelayInfoWith(
-	docker: Dockerode,
-	imageId: string,
-): Promise<{ exists: boolean; relay2: boolean }> {
-	let info: Dockerode.ImageInspectInfo;
-	try {
-		info = await docker.getImage(imageId).inspect();
-	} catch (err) {
-		// Gone while a container still runs on it — on the containerd image
-		// store a rebuild of the tag is enough (2026-11-03): the image rule
-		// then says "no label", and only a capability attestation for that
-		// exact container can keep it authorized (§2.7.5.1). Any other
-		// daemon error propagates (fail-closed).
-		if (isNotFound(err)) return { exists: false, relay2: false };
-		throw err;
-	}
-	return {
-		exists: true,
-		relay2: info.Config?.Labels?.[RELAY_IMAGE_LABEL] === RELAY_IMAGE_LABEL_VALUE,
-	};
-}
-
-export async function inspectSessionNetworkWith(
-	docker: Dockerode,
-	containerId: string,
-	network: string,
-): Promise<SessionNetworkView> {
-	let info: Dockerode.ContainerInspectInfo;
-	try {
-		info = await docker.getContainer(containerId).inspect();
-	} catch (err) {
-		if ((err as { statusCode?: number }).statusCode === 404) return { exists: false };
-		throw err;
-	}
-	const ep = info.NetworkSettings?.Networks?.[network];
-	const addresses = [ep?.IPAddress, ep?.GlobalIPv6Address].filter(
-		(a): a is string => typeof a === "string" && a.length > 0,
-	);
-	return { exists: true, id: info.Id, running: info.State?.Running === true, addresses };
-}
-
-export async function inspectCaptureWith(
-	docker: Dockerode,
-	containerId: string,
-): Promise<ContainerView> {
-	let info: Dockerode.ContainerInspectInfo;
-	try {
-		info = await docker.getContainer(containerId).inspect();
-	} catch (err) {
-		if ((err as { statusCode?: number }).statusCode === 404) return { exists: false };
-		throw err;
-	}
-	const env = info.Config?.Env ?? [];
-	const tokenEntry = env.find((e) => e.startsWith(`${INGEST_TOKEN_ENV}=`));
-	const token = tokenEntry ? tokenEntry.slice(INGEST_TOKEN_ENV.length + 1) || null : null;
-	const mounts = info.Mounts ?? [];
-	const mounted = (target: string) => mounts.some((m) => m.Destination === target);
-	const image = await imageRelayInfoWith(docker, info.Image);
-	return {
-		exists: true,
-		running: info.State?.Running === true,
-		token,
-		managedMount: mounted(MANAGED_MOUNT_TARGET),
-		controlMount: mounted(CONTROL_MOUNT_TARGET),
-		imageId: info.Image,
-		imageRelay2: image.relay2,
-		id: info.Id,
-		imageExists: image.exists,
-		labels: info.Config?.Labels ?? {},
-	};
 }

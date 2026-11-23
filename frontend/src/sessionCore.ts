@@ -18,7 +18,6 @@ import {
 	deleteSession,
 	deleteTab,
 	fetchAdminSessions,
-	fetchConversations,
 	getSession,
 	isAdmin,
 	isLead,
@@ -63,7 +62,6 @@ import {
 	projectRouteHash,
 	type Route,
 	readRoute,
-	routeHash,
 } from "./router.js";
 import {
 	type SessionActionContext,
@@ -74,13 +72,6 @@ import {
 import { badgeFor, clearBadge, recordOutput } from "./tabActivity.js";
 import { openTerminalSession, type SessionStatus } from "./terminal.js";
 import {
-	readHistoryHint,
-	readLastConversation,
-	readLastConversationTitle,
-	readViewPref,
-	writeHistoryHint,
-} from "./viewPolicy.js";
-import {
 	applyRouteView,
 	beginLanding,
 	beginRouteApply,
@@ -90,7 +81,6 @@ import {
 	getView,
 	landingFor,
 	landView,
-	onViewChange,
 	reflectRoute,
 	registerRouteDetail,
 	setView,
@@ -476,28 +466,6 @@ function reattachIfStarted(): void {
 	setActiveSessionId(null);
 	void openSession(id);
 }
-
-/**
- * Mark the "↳ last conversation" link that is the open conversation, in place:
- * in-app navigation writes the address with push/replaceState (no event, no
- * sidebar render), so the mark is re-synced on navigation, not only on polls.
- */
-export function syncLastConversationCurrent(): void {
-	const route = readRoute();
-	for (const b of sessionList.querySelectorAll<HTMLElement>(".session-last-conv")) {
-		const sid = b.closest<HTMLElement>(".session-item")?.dataset.sessionId;
-		const on =
-			route !== null &&
-			route.view === "chat" &&
-			route.sessionId === sid &&
-			route.detail === b.dataset.cid;
-		if (on) b.setAttribute("aria-current", "page");
-		else b.removeAttribute("aria-current");
-	}
-}
-
-// Leaving Chat (or coming back) changes which link is the open conversation.
-onViewChange(() => syncLastConversationCurrent());
 
 // ACP agents joined / left a project: their rows move between groups.
 if (typeof window !== "undefined")
@@ -1071,8 +1039,8 @@ function buildSessionItem(s: SessionInfo): HTMLElement {
 		void runSessionAction(s, s.status === "failed" ? "viewLog" : "open");
 	});
 	item.appendChild(select);
-	// With the "↳ last conversation" line the row has room between its
-	// controls; a tap there is a tap on the row (select), not a dead zone.
+	// A tap on the row's padding between its controls is a tap on the row
+	// (select), not a dead zone.
 	item.addEventListener("click", (e) => {
 		if (e.target === item) select.click();
 	});
@@ -1108,31 +1076,6 @@ function buildSessionItem(s: SessionInfo): HTMLElement {
 	actions.appendChild(more);
 	item.appendChild(actions);
 
-	// One click back to this project's last conversation, from anywhere.
-	// Named from what Chat remembered (no request); no status shown —
-	// knowing it would mean asking every project.
-	const lastCid = s.status === "failed" ? null : readLastConversation(s.sessionId);
-	const lastTitle = lastCid ? readLastConversationTitle(s.sessionId, lastCid) : null;
-	if (lastCid && lastTitle) {
-		const last = document.createElement("button");
-		last.type = "button";
-		last.className = "session-last-conv";
-		// Focus restore after each 5 s re-render finds controls by role.
-		last.dataset.role = "last-conv";
-		last.dataset.cid = lastCid;
-		const route = readRoute();
-		if (route?.sessionId === s.sessionId && route.view === "chat" && route.detail === lastCid)
-			last.setAttribute("aria-current", "page");
-		last.textContent = `↳ ${lastTitle}`;
-		last.title = `Open the last conversation: ${lastTitle}`;
-		last.setAttribute("aria-label", `Open the last conversation in ${s.name}: ${lastTitle}`);
-		last.addEventListener("click", () => {
-			const hash = routeHash({ sessionId: s.sessionId, view: "chat", detail: lastCid });
-			if (window.location.hash !== hash) window.location.hash = hash;
-		});
-		item.appendChild(last);
-	}
-
 	return item;
 }
 
@@ -1164,16 +1107,6 @@ sessionList.addEventListener("keydown", (e) => {
 // screen the way it already won the address.
 let wantedTabId: string | null = null;
 
-// How long the landing may wait for the "has history" answer of a session
-// opened for the first time in this browser (viewPolicy.ts). Past it the
-// session lands as if it had none; the Chat list corrects the memory.
-const LANDING_HISTORY_WAIT_MS = 1500;
-
-/** Is the session an ACP agent's: null until the list was read. */
-function agentKnown(sessionId: string): boolean | null {
-	return isAcpAgentSession(sessionId);
-}
-
 // How long a selection may wait for the agents list. It is read when the
 // session list first loads (refreshSessions), so normally it is in before
 // the first click and nothing waits; this only covers a click in the first
@@ -1192,37 +1125,19 @@ let agentsWaitSpent = false;
 /**
  * Resolve the landing view (UI unification §9, decision 1; viewPolicy.ts)
  * for a session being selected. Synchronous when everything it depends on
- * is known; otherwise the reads that decide it — is it an agent's session,
- * has it captured history — run now, once each, in parallel with the tab
- * listing, and the landing waits for them (bounded).
+ * is known; otherwise the read that decides it — is it an agent's session —
+ * runs now, in parallel with the tab listing, and the landing waits for it
+ * (bounded).
  */
 function decideLanding(sessionId: string, running: boolean): View | Promise<View> {
-	let agent = agentKnown(sessionId);
-	// The one wait of this page load was spent: decided without the list.
-	if (agent === null && agentsWaitSpent) agent = false;
-	const reads: Promise<unknown>[] = [];
+	// Known, or the one wait of this page load was spent: decided without the list.
+	if (isAcpAgentSession(sessionId) !== null || agentsWaitSpent)
+		return landingFor(sessionId, running);
 	// The one shared read of the agents list (acpStatusFeed.ts), bounded.
-	if (agent === null)
-		reads.push(
-			Promise.race([readAcpAgents(), sleep(LANDING_AGENTS_WAIT_MS)]).then(() => {
-				if (!acpAgentsLoaded()) agentsWaitSpent = true;
-			}),
-		);
-	// The history answer matters only for a session that is not known to be
-	// an agent's and has nothing remembered.
-	if (agent !== true && readViewPref(sessionId) === null && readHistoryHint(sessionId) === null)
-		reads.push(
-			Promise.race([
-				fetchConversations(sessionId, { capture: false })
-					.then((d) => writeHistoryHint(sessionId, d.conversations.length > 0))
-					.catch(() => null),
-				sleep(LANDING_HISTORY_WAIT_MS),
-			]),
-		);
-	if (reads.length === 0) return landingFor(sessionId, running);
-	// Each read carries its own bound (the agents' above, the history's here);
-	// the landing is decided once both are in or timed out.
-	return Promise.all(reads).then(() => landingFor(sessionId, running));
+	return Promise.race([readAcpAgents(), sleep(LANDING_AGENTS_WAIT_MS)]).then(() => {
+		if (!acpAgentsLoaded()) agentsWaitSpent = true;
+		return landingFor(sessionId, running);
+	});
 }
 
 function sleep(ms: number): Promise<void> {
@@ -1273,7 +1188,7 @@ async function openSessionBody(
 	// written, in place — selecting a session is not a history entry.
 	updateToolbar();
 	reflectRoute({ push: false });
-	// A landing that needs the history answer waits for it (bounded); the
+	// A landing that needs the agents list waits for it (bounded); the
 	// tab listing below runs meanwhile, so a running session loses nothing.
 	const land = async (): Promise<boolean> => {
 		if (landing === null) return true;
@@ -1724,28 +1639,20 @@ function updateChipBadge(tabId: string) {
 }
 
 /**
- * Show the Terminal on one of the active session's tabs (Chat's "Open
- * terminal" for a conversation: its pane lives in that tab, and landing on
- * whichever tab happened to be active sent people to the wrong Claude).
- * The Terminal is shown in every case; the tab is switched only on "opened".
- * "not-running": the session is down (the Terminal shows its stopped state,
- * nothing else to say); "unknown": not one of the session's tabs; "failed":
- * listed, but the switch did not happen — the caller says so.
+ * Show the Terminal on one of the active session's tabs (a tab created for
+ * the person, e.g. ACP "Conectar cuenta"). The Terminal is shown in every
+ * case; the tab is switched only when it is one of the session's tabs.
  */
-export function showTerminalTab(
-	tabId: string | null,
-): "opened" | "not-running" | "unknown" | "failed" {
+function showTerminalTab(tabId: string): void {
 	setView("terminal");
 	const s = sessions.find((x) => x.sessionId === activeSessionId);
-	if (!s || s.status !== "running") return "not-running";
-	if (tabId === null || !currentTabs.some((t) => t.tabId === tabId)) return "unknown";
+	if (!s || s.status !== "running") return;
+	if (!currentTabs.some((t) => t.tabId === tabId)) return;
 	try {
 		openTab(tabId);
 	} catch (err) {
 		showToast((err as Error).message, true);
-		return "failed";
 	}
-	return currentActiveTabId === tabId ? "opened" : "failed";
 }
 
 function openTab(tabId: string) {

@@ -5,9 +5,6 @@ name: Session Image
 # ~/.claude.json file-symlink-survives-config-write invariant, recreate
 # survival, and process-group cancellation with the backend's real
 # wrapper/kill scripts. See session-image/smoke-test.sh for the assertions.
-# A second step runs session-image/conversation-smoke.sh (Phase 3.0c): the
-# image's real CLI firing the conversation hooks from managed settings at the
-# real 3.0b ingest stack over a `st-backend` network alias.
 #
 # This workflow IS path-filtered, deliberately diverging from ci.yml's
 # no-filters stance. ci.yml avoids filters because its jobs have inputs
@@ -15,15 +12,10 @@ name: Session Image
 # workflow itself — can break a workspace without touching it), so a
 # filter there risks false negatives. This job's input set is exactly the
 # filtered set: the image build consumes only session-image/, and the
-# smoke tests additionally consume the exec scripts extracted from
-# backend/src/dockerManager.ts, the conversation receiver and hooks-file
-# builder under backend/src/conversation/, the recreation engine under
-# backend/src/recreate/ (with the attempt record and lifecycle lock), and
-# the `st-backend` alias in docker-compose.yml, and the D3 admission path
-# under backend/src/projects/conversation/ (its origin smoke runs the real
-# outbox watcher, collab and fan-out) — which is why those are in the
-# filter. The cost side is also different: a docker build is ~5 min of
-# critical path, not the <1 min ci.yml accepts as noise.
+# smoke tests additionally consume the exec and tmux scripts extracted from
+# backend/src/dockerManager.ts — which is why it is in the filter. The cost
+# side is also different: a docker build is ~5 min of critical path, not
+# the <1 min ci.yml accepts as noise.
 #
 # Consequence: this can NOT be a required check in branch protection — it
 # doesn't run on most PRs. It protects by running when its inputs change,
@@ -34,22 +26,12 @@ on:
     paths:
       - "session-image/**"
       - "backend/src/dockerManager.ts"
-      - "backend/src/conversation/**"
-      - "backend/src/recreate/**"
-      - "backend/src/recreateAttempt.ts"
-      - "backend/src/sessionLifecycleLock.ts"
-      - "docker-compose.yml"
       - ".github/workflows/session-image.yml"
   push:
     branches: [main]
     paths:
       - "session-image/**"
       - "backend/src/dockerManager.ts"
-      - "backend/src/conversation/**"
-      - "backend/src/recreate/**"
-      - "backend/src/recreateAttempt.ts"
-      - "backend/src/sessionLifecycleLock.ts"
-      - "docker-compose.yml"
       - ".github/workflows/session-image.yml"
 
 # Same shape as ci.yml: cancel superseded PR runs, never cancel main.
@@ -85,12 +67,6 @@ jobs:
         working-directory: backend
         run: npm ci
 
-      # The scripted model's own tests (no Docker, < 1 s). Its sha256 scenario
-      # hands a path to the CLI's Bash tool (D2 runbook P3.5); these pin the
-      # path rule so a later edit can't loosen it while every smoke stays green.
-      - name: mock-anthropic unit tests
-        run: node --test session-image/test/mock-anthropic.test.mjs
-
       # Plain `docker build`, no buildx cache: the job only runs when the
       # image's inputs changed, i.e. exactly when a cache would be cold.
       - name: Build session image
@@ -106,36 +82,3 @@ jobs:
       - name: tmux client release smoke test (#444, real Docker)
         working-directory: backend
         run: npx tsx src/tmuxClients.smoke.ts shared-terminal-session
-
-      # The real CLI against a scripted model (no secrets, no egress to the
-      # API) and the real ingest stack; prints and step-summarises the
-      # timings the 3.0c PR reports.
-      - name: Conversation hooks smoke test
-        run: ./session-image/conversation-smoke.sh shared-terminal-session
-
-      # 3.0d: the recreation engine against this real dockerd and image
-      # (docker diff, archives, renames, defer-skill-seed across N's boots,
-      # the relay identified on N). Disposable containers only, D1 in memory.
-      # Evidence for the recreation layer allowlist: what the real CLI
-      # leaves under /tmp in a stopped session container (names, types,
-      # sizes). Prints only; the assertions are in realDocker.smoke.ts.
-      - name: CLI /tmp layer evidence (real CLI)
-        run: ./session-image/test/cli-tmp-evidence.sh shared-terminal-session
-
-      - name: Recreation smoke test (real Docker)
-        working-directory: backend
-        env:
-          ST_CLI_PIN: "2.1.308"
-        run: npx tsx src/recreate/realDocker.smoke.ts shared-terminal-session
-
-      # 3.0d audit (#468 §10): recreation with data and `claude --resume`,
-      # ports through the real dispatcher, the backend process SIGKILLed
-      # mid-recreation (D8), the relay unavailable and killed, PATCH with an
-      # open and a new CLI tab, end-to-end revocation, a package in the layer
-      # blocking without effect. Disposable containers and network only; D1
-      # is a file (stated per scenario in the printed coverage matrix).
-      # Secrets compared by hash, never printed; output unfiltered, and on
-      # failure each container's own log is dumped.
-      - name: Recreation audit smoke test (real Docker)
-        working-directory: backend
-        run: npx tsx src/recreate/recreateAudit.smoke.ts shared-terminal-session

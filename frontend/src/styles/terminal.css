@@ -119,19 +119,17 @@
   }
 }
 
-/* The overlays' own bars (Files, Git, the capture Chat): one look — 36 px,
+/* The overlays' own bars (Files, Git): one look — 36 px,
    a soft line under them, the refresh as an icon button on the right. */
 #terminal-area #files-header,
-#terminal-area #git-header,
-#terminal-area #chat-header {
+#terminal-area #git-header {
   min-height: 36px;
   padding-top: 0;
   padding-bottom: 0;
   border-bottom-color: var(--c-border-soft);
 }
 #files-refresh-btn,
-#git-refresh-btn,
-#chat-refresh-btn {
+#git-refresh-btn {
   margin-left: auto;
 }
 /* The session's state: a .chip (base.css; sessionCore.setStatusBadge picks the tone). */

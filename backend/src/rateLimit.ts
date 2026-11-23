@@ -153,18 +153,6 @@ export interface RateLimitConfig {
 		ipMax: number;
 		ipWindowMs: number;
 	};
-	// Conversation list (`/sessions/:id/conversations`, Phase 3). One D1
-	// read plus a handful of small index-file reads per hit. Optional for
-	// the same reason as `fileBrowse`.
-	conversation?: {
-		ipMax: number;
-		ipWindowMs: number;
-	};
-	/** v1.8 §6.2 — rename/archive writes; optional so older fixtures type-check. */
-	conversationMeta?: {
-		ipMax: number;
-		ipWindowMs: number;
-	};
 	/** P3a — the project directory (`/projects/*`, docs/PROJECTS.md); optional likewise. */
 	project?: {
 		ipMax: number;
@@ -190,8 +178,6 @@ const DEFAULT_FILE_RAW_LIMIT = { ipMax: 120, ipWindowMs: 60 * 1000 };
 // 120/min: a status refresh is one request (four parallel git execs),
 // a file click is one more; nobody reviews two files a second for long.
 const DEFAULT_GIT_LIMIT = { ipMax: 120, ipWindowMs: 60 * 1000 };
-const DEFAULT_CONVERSATION_LIMIT = { ipMax: 300, ipWindowMs: 60 * 1000 };
-const DEFAULT_CONVERSATION_META_LIMIT = { ipMax: 60, ipWindowMs: 60 * 1000 };
 // A directory page polls one list every few seconds; each hit is ≤ 2 D1 reads.
 const DEFAULT_PROJECT_LIMIT = { ipMax: 120, ipWindowMs: 60 * 1000 };
 
@@ -268,8 +254,6 @@ export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
 	fileBrowse: DEFAULT_FILE_BROWSE_LIMIT,
 	fileRaw: DEFAULT_FILE_RAW_LIMIT,
 	git: DEFAULT_GIT_LIMIT,
-	conversation: DEFAULT_CONVERSATION_LIMIT,
-	conversationMeta: DEFAULT_CONVERSATION_META_LIMIT,
 	project: DEFAULT_PROJECT_LIMIT,
 };
 
@@ -290,8 +274,6 @@ export interface AuthRateLimiters {
 	fileBrowseIp: RateLimitRequestHandler;
 	fileRawIp: RateLimitRequestHandler;
 	gitIp: RateLimitRequestHandler;
-	conversationIp: RateLimitRequestHandler;
-	conversationMetaIp: RateLimitRequestHandler;
 	projectIp: RateLimitRequestHandler;
 }
 
@@ -405,22 +387,6 @@ export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
 		legacyHeaders: false,
 		message: { error: "Too many image previews from this IP, try again later", scope: "ip" },
 	});
-	const conversationCfg = cfg.conversation ?? DEFAULT_CONVERSATION_LIMIT;
-	const conversationIp = rateLimit({
-		windowMs: conversationCfg.ipWindowMs,
-		limit: conversationCfg.ipMax,
-		standardHeaders: "draft-7",
-		legacyHeaders: false,
-		message: { error: "Too many conversation requests from this IP, try again later", scope: "ip" },
-	});
-	const conversationMetaCfg = cfg.conversationMeta ?? DEFAULT_CONVERSATION_META_LIMIT;
-	const conversationMetaIp = rateLimit({
-		windowMs: conversationMetaCfg.ipWindowMs,
-		limit: conversationMetaCfg.ipMax,
-		standardHeaders: "draft-7",
-		legacyHeaders: false,
-		message: { error: "Too many conversation updates from this IP, try again later", scope: "ip" },
-	});
 	const projectCfg = cfg.project ?? DEFAULT_PROJECT_LIMIT;
 	const projectIp = rateLimit({
 		windowMs: projectCfg.ipWindowMs,
@@ -452,8 +418,6 @@ export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
 		fileBrowseIp,
 		fileRawIp,
 		gitIp,
-		conversationIp,
-		conversationMetaIp,
 		projectIp,
 	};
 }
