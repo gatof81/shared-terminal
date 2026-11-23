@@ -1877,8 +1877,8 @@ export interface AcpAgentInfo {
 	} | null;
 	projectId?: string | null;
 	runnerSeenAt: string | null;
-	/** Message being worked on, if any. */
-	running?: number | null;
+	/** Messages being worked on, oldest first (an agent with slots runs several at once). */
+	running?: number[];
 	pending?: number;
 	authRequired?: boolean;
 	/** An open question of this agent waits for the person. */
@@ -1938,12 +1938,30 @@ async function acpJson<T>(path: string, init?: RequestInit): Promise<T> {
 	return body;
 }
 
+/**
+ * `running` as a list of ids. The frontend (Pages) goes live at merge, the
+ * backend at its deploy: until then the backend answers one id or null
+ * (before slots), and a number reaching `.find`/`.includes` would throw.
+ */
+export function runningIds(r: unknown): number[] {
+	if (Array.isArray(r)) return r.filter((x): x is number => typeof x === "number");
+	return typeof r === "number" ? [r] : [];
+}
+const agentIn = (a: AcpAgentInfo): AcpAgentInfo => ({ ...a, running: runningIds(a.running) });
+const feedIn = (f: AcpFeed): AcpFeed => ({
+	...f,
+	...(f.agent ? { agent: agentIn(f.agent) } : {}),
+	...(f.agents ? { agents: f.agents.map(agentIn) } : {}),
+});
+
 const beforeQ = (before?: number | null) => (before ? `?before=${before}` : "");
-export const acpListAgents = () => acpJson<AcpAgentInfo[]>("/agents");
-export const acpFeed = (name: string, before?: number | null) =>
-	acpJson<AcpFeed>(`/agents/${encodeURIComponent(name)}/feed${beforeQ(before)}`);
-export const acpProjectFeed = (projectId: string, before?: number | null) =>
-	acpJson<AcpFeed>(`/projects/${encodeURIComponent(projectId)}/feed${beforeQ(before)}`);
+export const acpListAgents = async () => (await acpJson<AcpAgentInfo[]>("/agents")).map(agentIn);
+export const acpFeed = async (name: string, before?: number | null) =>
+	feedIn(await acpJson<AcpFeed>(`/agents/${encodeURIComponent(name)}/feed${beforeQ(before)}`));
+export const acpProjectFeed = async (projectId: string, before?: number | null) =>
+	feedIn(
+		await acpJson<AcpFeed>(`/projects/${encodeURIComponent(projectId)}/feed${beforeQ(before)}`),
+	);
 export const acpSend = (
 	to: string,
 	body: string,
@@ -1962,19 +1980,19 @@ export const acpSetProject = (name: string, projectId: string | null) =>
 	acpJson<AcpAgentInfo>(`/agents/${encodeURIComponent(name)}`, {
 		method: "PATCH",
 		body: JSON.stringify({ projectId }),
-	});
+	}).then(agentIn);
 /** Change an agent's model: applied by its runner while idle, without restarting anything. */
 export const acpSetModel = (name: string, model: string) =>
 	acpJson<AcpAgentInfo>(`/agents/${encodeURIComponent(name)}`, {
 		method: "PATCH",
 		body: JSON.stringify({ model }),
-	});
+	}).then(agentIn);
 /** Change an agent's reasoning effort (null: default): applied by its runner while idle. */
 export const acpSetEffort = (name: string, effort: string | null) =>
 	acpJson<AcpAgentInfo>(`/agents/${encodeURIComponent(name)}`, {
 		method: "PATCH",
 		body: JSON.stringify({ effort }),
-	});
+	}).then(agentIn);
 export const acpAnswer = (
 	id: number,
 	body: { action: "accept" | "decline"; content?: Record<string, unknown> },

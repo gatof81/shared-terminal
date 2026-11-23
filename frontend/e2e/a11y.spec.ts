@@ -91,7 +91,7 @@ test.describe("accessibility — axe on the main views", () => {
 		const set = (name: string, p: Record<string, unknown>) =>
 			Object.assign(backend.acpAgents.find((a) => a.name === name)!, p);
 		set("arq", { runnerSeenAt: "2026-10-31T10:29:58Z" });
-		set("dev", { runnerSeenAt: "2026-10-31T10:29:58Z", running: 12 });
+		set("dev", { runnerSeenAt: "2026-10-31T10:29:58Z", running: [12] });
 		set("solo", { runnerSeenAt: "2026-10-31T10:29:58Z", waitingInput: true });
 		backend.acpAgents.push({
 			...backend.acpAgents[0]!,

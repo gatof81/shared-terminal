@@ -321,7 +321,7 @@ function renderBar(): void {
 	const active = mode === "active";
 	// The message an agent works on, if this chat has it (or an earlier page may).
 	const target = (a: AcpAgentInfo) =>
-		typeof a.running === "number" && thread.placeOf(a.running) !== "elsewhere" ? a.running : null;
+		a.running?.find((id) => thread.placeOf(id) !== "elsewhere") ?? null;
 	const ck = JSON.stringify([
 		pid,
 		active,

@@ -92,7 +92,7 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 		effortApplied: acp.effortAppliedOf(a.agent_id),
 		projectId: a.project_id ?? null,
 		runnerSeenAt: acp.runnerSeenAt(a.agent_id),
-		running: loads.get(a.name)?.running ?? null,
+		running: loads.get(a.name)?.running ?? [],
 		pending: loads.get(a.name)?.pending ?? 0,
 		authRequired: acp.authRequired(a.agent_id),
 		loginMethods: acp
