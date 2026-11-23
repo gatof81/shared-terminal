@@ -811,7 +811,8 @@ describe("auth route rate limiting", () => {
 
 		expect(r1.status).toBe(200);
 		const body = await r1.json();
-		expect(body).not.toHaveProperty("features");
+		// Constant: the VM100 deploy kit checks it (see routes/auth.ts).
+		expect(body.features).toEqual({ projectChat: true, acpAgents: true });
 		expect(body).not.toHaveProperty("uiShell");
 		expect(r2.status).toBe(200);
 		expect(r3.status).toBe(200);
