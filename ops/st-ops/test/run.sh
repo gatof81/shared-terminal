@@ -86,15 +86,27 @@ log=$T/root/st-deploy-r$r-${t:0:7}-$(date -u +%Y%m%dT%H%M%SZ)
 mkdir -p "$log"; cp "$2" "$log/release.conf"
 printf "KIT_HEAD=%s\nRELEASE_CONF_SHA256=%s\nHOST_CONF_SHA256=x\n" "$(git rev-parse HEAD)" "$([[ -e $T/badsum ]] && echo 0 || sha256sum <"$2" | cut -d" " -f1)" >"$log/run.conf"
 echo "LOG=$log"'
+# 04 --detach --then-accept stands in for the whole unit: after a 04 that ended OK it leaves 05's result
+# ($T/unit-05: OK by default), 06's only if 05 was OK ($T/unit-06) and the unit's own — unless $T/unit-holds
+# says the unit is still running (the test then writes the files itself, as time passing would).
 detached='
 if [[ $1 == --detach ]]; then
-	if [[ -f $2/${n%.sh}.result ]]; then
-		grep -qx RESULT=BUSY "$2/${n%.sh}.result" || { echo "RESULT ${n%.sh} USAGE rc=2"; exit 2; }
-		mv "$2/${n%.sh}.result" "$2/${n%.sh}.result.busy-$(date -u +%s%N)"
+	L=$2 then=0; [[ $2 == --then-accept ]] && then=1 L=$3
+	wr() { printf "STEP=%s\nRESULT=%s\nRC=%s\nFINISHED=now\nLAST=x\n" "$1" "$2" "$([[ $2 == OK ]] && echo 0 || echo 1)" >"$L/$1.result"; }
+	if [[ -f $L/${n%.sh}.result ]]; then
+		grep -qx RESULT=BUSY "$L/${n%.sh}.result" || { echo "RESULT ${n%.sh} USAGE rc=2"; exit 2; }
+		mv "$L/${n%.sh}.result" "$L/${n%.sh}.result.busy-$(date -u +%s%N)"
 	fi
 	r=OK rc=0; [[ -e $T/fail-${n%%-*} ]] && r=FAIL rc=1
 	[[ -e $T/busy-${n%%-*} ]] && { rm "$T/busy-${n%%-*}"; r=BUSY rc=3; }
-	printf "STEP=%s\nRESULT=%s\nRC=%s\nFINISHED=now\nLAST=x\n" "${n%.sh}" "$r" "$rc" >"$2/${n%.sh}.result"
+	printf "STEP=%s\nRESULT=%s\nRC=%s\nFINISHED=now\nLAST=x\n" "${n%.sh}" "$r" "$rc" >"$L/${n%.sh}.result"
+	if [[ $then == 1 && ! -e $T/unit-holds ]]; then
+		if [[ $r == OK ]]; then
+			v=$(cat "$T/unit-05" 2>/dev/null || echo OK); wr 05-verify "$v"
+			[[ $v == OK ]] && wr 06-acp-acceptance "$(cat "$T/unit-06" 2>/dev/null || echo OK)"
+		fi
+		wr 04-then-accept x
+	fi
 	echo "RESULT ${n%.sh} OK rc=0"; exit 0
 fi'
 kit_script 02-backup.sh ''
@@ -406,8 +418,28 @@ expect_rc 2 "exclude: qa's running message asked by the arq identity" st arq ste
 msg 4242 qa running yes yes
 expect_rc 2 "exclude: a step that takes none" st qa step "$idA" acceptance 4242
 grep -q "^04-deploy" "$T/kit.log" && ko "deploy ran during refusals" || ok
+# The deploy's unit runs verify and acceptance itself. Here its own verify does not pass: the unit ends without
+# acceptance, and the verbs are the way on (the R16 case: a verify that failed on a kit bug).
+echo FAIL >"$T/unit-05"; touch "$T/unit-holds"
 expect_rc 0 "deploy with its own running message excluded" st qa step "$idA" deploy 4242
-grep -qx "04-deploy.sh --detach $log --exclude-message 4242" "$T/kit.log" && ok || ko "deploy argv: $(grep 04- "$T/kit.log")"
+expect_out "goes on by itself with verify and acceptance" "deploy says who verifies"
+grep -qx "04-deploy.sh --detach --then-accept $log --exclude-message 4242" "$T/kit.log" && ok || ko "deploy argv: $(grep 04- "$T/kit.log")"
+expect_rc 0 "result while the unit runs" st qa result "$idA"
+expect_out "^step verify: RUNNING$" "unit running: verify RUNNING"
+expect_out "^step acceptance: RUNNING$" "unit running: acceptance RUNNING"
+expect_out "^state: active$" "unit running: request active"
+expect_rc 2 "verify by hand while the unit runs" st qa verify "$idA"
+expect_out "still running its own verify and acceptance" "verify refused while the unit runs"
+expect_rc 2 "acceptance by hand while the unit runs" st qa step "$idA" acceptance
+expect_rc 2 "no cancel while the unit runs" st qa cancel "$idA"
+grep -qE "^0[56]-" "$T/kit.log" && ko "05/06 ran by hand while the unit was running" || ok
+unit_wr() { printf "STEP=%s\nRESULT=%s\nRC=%s\n" "$1" "$2" "$([[ $2 == OK ]] && echo 0 || echo 1)" >"$log/$1.result"; }
+unit_wr 05-verify FAIL; unit_wr 04-then-accept FAIL; rm "$T/unit-holds" "$T/unit-05"
+expect_rc 0 "result after the unit's verify failed" st qa result "$idA" verify
+expect_out "^step verify: FAIL$" "unit's verify FAIL"
+expect_out "^step acceptance: NONE$" "unit's verify FAIL: acceptance never ran"
+expect_out "^state: active$" "a failed verify does not close the request"
+expect_out "^RESULT=FAIL$" "result <id> verify shows the unit's .result"
 expect_rc 2 "acceptance before verify" st qa step "$idA" acceptance
 expect_out "verify has not finished OK" "verify first"
 touch "$T/fail-05"
@@ -422,6 +454,48 @@ expect_out "^state: closed done$" "request done"
 expect_rc 2 "a closed request cannot be cancelled" st qa cancel "$idA"
 [[ ! -e $T/07-ran ]] && ok || ko "07 ran"
 grep -q "07" <(grep -vE '^\s*#' "$here/lib/st-ops-lib.sh" | grep -E '0[0-9]-|0[0-9]b-') && ko "the lib names 07" || ok
+
+# ── One GO: the deploy's unit verifies and accepts; nobody asks for it ──
+one_go() { # a new request taken up to a launched deploy
+	sleep 1 # the fake 01 names its LOG by the second: a LOG of its own, as the real 01 gives
+	expect_rc 0 "propose (one GO)" propose "$base" "$two"
+	id=$(new_id)
+	st qa preflight "$id" >/dev/null 2>&1
+	expect_rc 0 "approve (one GO)" approve "$id"
+	for x in backup offhost rollback-proof; do expect_rc 0 "$x (one GO)" st qa step "$id" "$x"; done
+	log=$(cat "$ST_OPS_STATE/requests/$id/log")
+	: >"$T/kit.log"
+	expect_rc 0 "deploy (one GO)" st qa step "$id" deploy
+}
+one_go
+expect_rc 0 "result: deployed, verified, accepted" st qa result "$id"
+expect_out "^step verify: OK$" "one GO: verify OK"
+expect_out "^step acceptance: OK$" "one GO: acceptance OK"
+expect_out "^state: closed done$" "one GO: closed done with no further verb"
+grep -qE "^0[56]-" "$T/kit.log" && ko "one GO: st-ops ran 05/06 itself" || ok
+expect_rc 0 "result <id> acceptance" st qa result "$id" acceptance
+expect_out "^STEP=06-acp-acceptance$" "the unit's acceptance .result"
+expect_rc 2 "acceptance cannot run again" st qa step "$id" acceptance
+echo FAIL >"$T/unit-06"
+one_go
+rm "$T/unit-06"
+expect_rc 0 "result: the unit's acceptance failed" st qa result "$id"
+expect_out "^state: closed failed acceptance$" "one GO: a failed acceptance closes the request"
+touch "$T/busy-04"
+one_go
+expect_rc 0 "result: the unit's deploy was BUSY" st qa result "$id"
+expect_out "^step deploy: BUSY$" "one GO: BUSY deploy"
+expect_out "^step verify: NONE$" "one GO: BUSY deploy, nothing after it"
+expect_out "^state: active$" "one GO: BUSY keeps the request"
+expect_rc 0 "deploy relaunched after BUSY" st qa step "$id" deploy
+expect_rc 0 "result after the relaunch" st qa result "$id"
+expect_out "^state: closed done$" "one GO: relaunch ends done"
+touch "$T/fail-04"
+one_go
+rm "$T/fail-04"
+expect_rc 0 "result: the deploy failed" st qa result "$id"
+expect_out "^state: closed failed deploy$" "one GO: a failed deploy closes the request"
+expect_out "^step verify: NONE$" "one GO: nothing after a failed deploy"
 
 # ── Failures close the request; exit code is the kit's ──
 expect_rc 0 "propose after done" propose "$base" "$two"

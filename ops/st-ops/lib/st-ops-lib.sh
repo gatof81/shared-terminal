@@ -166,14 +166,21 @@ step_argv() {
 	backup) STEP_ARGV=(bash bin/02-backup.sh "$log") ;;
 	offhost) STEP_ARGV=(bash bin/02b-offhost.sh --detach "$log") ;;
 	rollback-proof) STEP_ARGV=(bash bin/03-rollback-proof.sh "$log") ;;
-	deploy) STEP_ARGV=(bash bin/04-deploy.sh --detach "$log") ;;
+	deploy) STEP_ARGV=(bash bin/04-deploy.sh --detach --then-accept "$log") ;;
 	verify) STEP_ARGV=(bash bin/05-verify.sh "$log") ;;
 	acceptance) STEP_ARGV=(bash bin/06-acp-acceptance.sh "$log") ;;
 	*) return 1 ;;
 	esac
 }
-# <LOG>/<name>.result of a detached step.
-step_result_name() { case $1 in offhost) echo 02b-offhost ;; deploy) echo 04-deploy ;; esac; }
+# <LOG>/<name>.result of a detached step — and of verify and acceptance when the deploy's unit ran them.
+step_result_name() {
+	case $1 in
+	offhost) echo 02b-offhost ;;
+	deploy) echo 04-deploy ;;
+	verify) echo 05-verify ;;
+	acceptance) echo 06-acp-acceptance ;;
+	esac
+}
 
 # One `KEY=value` line of the release data matching regex $3, printed; a missing or repeated key fails.
 data_value() { # $1 = file, $2 = key, $3 = value regex
@@ -277,8 +284,12 @@ request_expired() {
 # or never, if it was killed: never retried) or NONE. `verify` is repeatable: its last run counts.
 step_outcome() { # $1 = request dir, $2 = step
 	local d=$1 rec res
-	if [[ $2 == verify ]]; then cat "$d/steps/verify" 2>/dev/null || echo NONE; return 0; fi
-	[[ -d $d/steps/$2.started ]] || { echo NONE; return 0; }
+	# verify and acceptance run by a verb (steps/…) count over the ones the deploy's unit ran: they came later.
+	if [[ $2 == verify ]]; then cat "$d/steps/verify" 2>/dev/null || unit_outcome "$d" verify; return 0; fi
+	if [[ ! -d $d/steps/$2.started ]]; then
+		if [[ $2 == acceptance ]]; then unit_outcome "$d" acceptance; else echo NONE; fi
+		return 0
+	fi
 	rec=$(cat "$d/steps/$2" 2>/dev/null || true)
 	case $rec in
 	OK) echo OK ;;
@@ -291,6 +302,23 @@ step_outcome() { # $1 = request dir, $2 = step
 	'') echo RUNNING ;;
 	*) echo FAIL ;;
 	esac
+}
+
+# One GO: the deploy's unit (kit 04 --then-accept) goes on by itself with 05 and, if it passed, 06 — nobody asks
+# for them and no operator session has to outlive the backend restart. Their outcome is read from the kit's
+# <LOG>/05-verify.result and 06-acp-acceptance.result; <LOG>/04-then-accept.result means the unit has ended.
+# RUNNING = the deploy ended OK and the unit has not ended: 05 or 06 may be running, so neither is run by a verb
+# (two acceptances at once would create test data twice) and the request cannot be cancelled. NONE = the unit
+# ended without running that one (05 did not pass ⇒ 06 never ran): `verify` and `step acceptance` are the way on.
+unit_outcome() { # $1 = request dir, $2 = verify|acceptance
+	local d=$1 log res
+	[[ -f $d/log && $(step_outcome "$d" deploy) == OK ]] || { echo NONE; return 0; }
+	log=$(<"$d/log")
+	res="$log/$(step_result_name "$2").result"
+	if [[ -f $res ]]; then
+		if grep -qx 'RESULT=OK' "$res" && grep -qx 'RC=0' "$res"; then echo OK; else echo FAIL; fi
+	elif [[ -f $log/04-then-accept.result ]]; then echo NONE
+	else echo RUNNING; fi
 }
 
 # A BUSY step is set back to "not run", its output kept aside: BUSY means the kit's gate changed nothing.
@@ -426,9 +454,11 @@ st-ops verbs:
   request-text <id>                   the request as proposed
   preflight <id> [<message id>]       kit 01 with the request's data; records its LOG
   approve <id> <message id>           the owner's chat message "OK <code>" to this agent; enables the writing steps
-  step <id> <step> [<message id>]     next step, in order: backup offhost rollback-proof deploy acceptance
-  verify <id>                         kit 05 (read-only), after deploy OK; repeatable, required before acceptance
-  result <id> [<step>]                state of a request; the .result of a detached step
+  step <id> <step> [<message id>]     next step, in order: backup offhost rollback-proof deploy [acceptance]
+                                      deploy goes on by itself with verify and acceptance: read `result`
+  verify <id>                         kit 05 (read-only), after deploy OK; repeatable. Only needed, with
+                                      `step <id> acceptance`, when the deploy's own verify did not pass
+  result <id> [<step>]                state of a request; the .result of offhost, deploy, verify, acceptance
   cancel <id>                         close a request (refused while a step's outcome is unknown)
 TXT
 }
@@ -591,6 +621,7 @@ verb_step() {
 	assert_request_inputs "$D"
 	exclude_args "$s" "$msg"
 	run_step "$D" "$s" "${EXCLUDE[@]}"
+	[[ $s == deploy && $KIT_OUTCOME == OK ]] && echo "st-ops: the unit goes on by itself with verify and acceptance once the deploy ends OK: read \`result $1\`"
 	settle "$D"
 	return "$STEP_RC"
 }
@@ -601,6 +632,7 @@ verb_verify() {
 	D=$(request_dir "$1")
 	[[ -f $D/request.txt ]] || die request "no such request"
 	[[ $(step_outcome "$D" deploy) == OK ]] || die order "deploy has not finished OK"
+	[[ $(unit_outcome "$D" acceptance) == RUNNING ]] && die order "the deploy's unit is still running its own verify and acceptance: read \`result $1\`"
 	assert_request_inputs "$D"
 	run_kit "$D" verify
 	if [[ $KIT_OUTCOME == OK ]]; then echo OK >"$D/steps/verify"; else echo "FAIL rc=$STEP_RC" >"$D/steps/verify"; fi
@@ -617,7 +649,7 @@ verb_result() {
 	[[ -f $d/log ]] && echo "log: $(<"$d/log")"
 	for s in preflight backup offhost rollback-proof deploy verify acceptance; do echo "step $s: $(step_outcome "$d" "$s")"; done
 	if (($# == 2)); then
-		[[ $STEP_DETACHED == *" $2 "* ]] || die usage "only a detached step has a .result: $STEP_DETACHED"
+		[[ -n $(step_result_name "$2") ]] || die usage "steps with a .result: offhost deploy verify acceptance"
 		[[ -f $d/log && -f $(<"$d/log")/$(step_result_name "$2").result ]] || die result "no .result yet"
 		cat "$(<"$d/log")/$(step_result_name "$2").result"
 	fi

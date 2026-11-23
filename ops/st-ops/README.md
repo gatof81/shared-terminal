@@ -33,9 +33,9 @@ operador ──ssh st-ops──▶ sshd (Match User st-ops: ForceCommand, sin TT
 | `request-text <id>` | los bytes exactos del pedido | no |
 | `preflight <id> [<mensaje>]` | `01 --release-file <ruta absoluta de esos datos>`, una vez; registra su `LOG` | no |
 | `approve <id> <mensaje>` | el mensaje de Chat del owner al agente operador que es exactamente `OK <código>`, escrito después del `propose`, sin vencer, una sola vez | **es la aprobación** |
-| `step <id> <paso> [<mensaje>]` | el siguiente paso, en orden y una vez: `backup` (02), `offhost` (02b `--detach`), `rollback-proof` (03), `deploy` (04 `--detach`), `acceptance` (06) | tras `approve` |
-| `verify <id>` | 05 (solo lectura), después de `deploy` OK; repetible (vale el último), obligatorio antes de `acceptance` | no |
-| `result <id> [<paso>]` | estado del pedido y de cada paso; el `.result` de un paso desacoplado | no |
+| `step <id> <paso> [<mensaje>]` | el siguiente paso, en orden y una vez: `backup` (02), `offhost` (02b `--detach`), `rollback-proof` (03), `deploy` (04 `--detach --then-accept`: la unidad sigue sola con 05 y 06), `acceptance` (06; solo si la unidad no llegó a correrla) | tras `approve` |
+| `verify <id>` | 05 (solo lectura), después de `deploy` OK; repetible (vale el último). Solo hace falta, seguido de `step <id> acceptance`, cuando el verify de la unidad no pasó; se niega mientras la unidad sigue corriendo | no |
+| `result <id> [<paso>]` | estado del pedido y de cada paso; el `.result` de `offhost`, `deploy`, `verify` o `acceptance` | no |
 | `cancel <id>` | cierra un pedido activo, también después de pasos que escriben (no deshace nada; solo deja de aceptar pasos); se niega mientras un paso esté `RUNNING` | no |
 
 Un pedido activo a la vez. Termina con su primer paso fallido (`closed failed <paso>`), con `acceptance` OK
@@ -43,6 +43,14 @@ Un pedido activo a la vez. Termina con su primer paso fallido (`closed failed <p
 desacoplado se juzga por su `<LOG>/<nombre>.result` (`RESULT=OK` y `RC=0`). **BUSY** (exit 3, `RESULT … BUSY`, o
 `RESULT=BUSY` en el `.result`) significa "el gate del kit no cambió nada": el paso no se consume y se puede volver a
 pedir (su salida queda en `steps/<paso>.busy-<epoch>.out`). Un resultado desconocido nunca se reintenta. La salida de
+**Un solo GO:** la unidad del deploy (`04-then-accept.sh` del kit) corre 04 y, solo si terminó OK, 05 y, solo si
+05 pasó, 06; st-ops no lanza nada más: lee `<LOG>/05-verify.result`, `06-acp-acceptance.result` y
+`04-then-accept.result` (la unidad terminó) cada vez que se le pregunta. Mientras la unidad no terminó, `verify` y
+`acceptance` figuran `RUNNING` y no se pueden correr a mano ni cancelar el pedido. Un `acceptance` de la unidad OK
+cierra el pedido (`closed done`) y uno fallido también (`closed failed acceptance`); un `verify` de la unidad que
+no pasó deja el pedido activo, con `acceptance` en `NONE`: se sigue con `verify <id>` y `step <id> acceptance`.
+Un verify o acceptance corrido por verbo vale sobre el de la unidad (es posterior). La aprobación es la misma de
+siempre: sin `approve` no hay `deploy`, y sin `deploy` no hay unidad. La salida de
 cada paso llega tal cual (más la línea `RESULT`) y el código de salida del verbo es el del kit; un paso sin línea
 `RESULT` es FAIL. `07-mint-ui-token.sh`, rollback, `.env`, flags, imagen de sesión, recreaciones y cambios del kit
 no tienen verbo.
@@ -134,17 +142,20 @@ y el gate da BUSY.
    aprobación; el owner no descarga ni firma nada; cualquier otro texto en el mismo mensaje lo invalida. Plazo: `REQUEST_TTL` (24 h) desde el `propose`.
 3. **Desplegar** (el operador, trabajando en ESE mensaje, `<msg>` = su id): `approve <id> <msg>`; `step <id>
    backup`; `step <id> offhost` y `result <id> offhost` hasta `RESULT=OK`; `step <id> rollback-proof`; y solo si
-   los tres dieron OK, `step <id> deploy <msg>` — y termina el turno: el deploy reinicia el backend. Si la release
+   los tres dieron OK, `step <id> deploy <msg>`. La unidad del deploy sigue sola con la verificación (05) y la
+   aceptación (06): el operador espera consultando `result <id>` (cada pocos minutos, sin otro mensaje del owner)
+   hasta que el pedido quede `closed done` o un paso en FAIL, e informa el cierre con ese resultado. Si la release
    trae una migración, en la respuesta incluye la línea `PASS migration step` de `<LOG>/migrate-check.txt` y las
    tablas del backup. Plazo: `APPROVAL_TTL` (24 h) desde el `approve`.
-4. **Verificar** (el owner, unos minutos después: "verificá"): `result <id> deploy`, `verify <id>` y `step <id>
-   acceptance`; el operador informa el resultado.
+4. **Si el turno del operador se corta** (el deploy reinicia el backend): nada se pierde ni se repite. La unidad no
+   depende de su sesión y los resultados quedan en el host; el operador, al retomar (el aviso de recuperación de
+   su mensaje interrumpido, o cualquier mensaje posterior), corre `result <id>` e informa. Nadie tiene que escribir
+   "verificá".
 
 **BUSY** no cambió nada: se repite el mismo paso, con a lo sumo **3 intentos por paso** (contando todos los
 mensajes) y 5 minutos entre intentos; después el operador se detiene e informa (por ejemplo durante la ventana
 del backup nocturno, 08:00–09:00 UTC). El gate del deploy corre dentro de la unidad desacoplada, así que su BUSY
-aparece recién en `result` (paso 4): el operador relanza `step <id> deploy <msg del mensaje actual>`, termina el
-turno, y la verificación pasa a un mensaje más. **FAIL** cierra el camino: el operador no sigue e informa con la
+aparece recién en `result`: el operador relanza `step <id> deploy <msg del mensaje actual>` y sigue esperando. **FAIL** cierra el camino: el operador no sigue e informa con la
 salida. **Si el operador se interrumpe** a mitad de un mensaje, no se reenvía ese mensaje: se le pide `result <id>`
 en uno nuevo y se sigue desde el paso que falte (el despachador no deja repetir uno ya corrido). **Un pedido que
 quedó a medias** (por ejemplo deployado y con un verify que falló por un error del kit, ya juzgado por el owner) se
@@ -181,7 +192,7 @@ Todo está en `lib/st-ops-lib.sh`, sección "The kit's interface". Los pasos cor
 | backup | `02-backup.sh <LOG>` | línea `RESULT` |
 | offhost | `02b-offhost.sh --detach <LOG>` | `<LOG>/02b-offhost.result` |
 | rollback-proof | `03-rollback-proof.sh <LOG>` | línea `RESULT` |
-| deploy | `04-deploy.sh --detach <LOG> [--exclude-message <id>]` | `<LOG>/04-deploy.result` |
+| deploy | `04-deploy.sh --detach --then-accept <LOG> [--exclude-message <id>]` | `<LOG>/04-deploy.result`; de la misma unidad: `05-verify.result`, `06-acp-acceptance.result` y, al terminar, `04-then-accept.result` |
 | verify | `05-verify.sh <LOG>` | línea `RESULT` |
 | acceptance | `06-acp-acceptance.sh <LOG>` | línea `RESULT` |
 
