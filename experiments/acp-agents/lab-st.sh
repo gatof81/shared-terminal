@@ -38,6 +38,7 @@ up)
 		-e WORKSPACE_ROOT="$WS" -e SESSIONS_NETWORK=acplab-net -e SESSION_IMAGE=shared-terminal-session \
 		-e CLOUDFLARE_ACCOUNT_ID=lab -e CLOUDFLARE_API_TOKEN=lab -e D1_DATABASE_ID=lab -e D1_API_BASE=http://acplab-d1:8787 \
 		-e ACP_TEST_RUNTIME=1 -e ACP_DEFAULT_RUNTIME="claude-acp-${ADAPTER:-0.108.0}" -e ACP_DEFAULT_MODEL="${MODEL:-claude-sonnet-5-5}" \
+		-e ACP_MAX_RUNNING="${MAX_RUNNING:-6}" \
 		"$TAG" >/dev/null
 	sleep 5
 	docker logs acplab-backend 2>&1 | grep -E "ACP|listening|acp\]|migration 21|error" | head

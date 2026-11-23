@@ -20,7 +20,9 @@ import {
 	type AgentLoad,
 	type AgentRow,
 	ClientIdConflictError,
+	CONTEXT_RE,
 	effortOf,
+	MAX_SLOTS,
 	type MessageRow,
 } from "../acp/agents.js";
 import { type AuthedRequest, requireAuth } from "../auth.js";
@@ -28,7 +30,12 @@ import { logger } from "../logger.js";
 
 const CLIENT_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
 
-type Caller = { kind: "owner"; userId: string } | { kind: "agent"; agent: AgentRow };
+// An agent's credential names its context (NULL = default); `runner` = the
+// runner's own token (also the default context's), the only one that reaches
+// the runner routes.
+type Caller =
+	| { kind: "owner"; userId: string }
+	| { kind: "agent"; agent: AgentRow; context: string | null; runner: boolean };
 
 declare module "express-serve-static-core" {
 	interface Locals {
@@ -44,9 +51,9 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 	const identify = async (req: Request, res: Response, next: NextFunction) => {
 		const auth = req.headers.authorization ?? "";
 		if (auth.startsWith("Bearer acp1.")) {
-			const agent = await acp.verifyToken(auth.slice(7)).catch(() => null);
-			if (!agent) return void res.status(401).json({ error: "bad-agent-token" });
-			res.locals.acpCaller = { kind: "agent", agent };
+			const v = await acp.verifyToken(auth.slice(7)).catch(() => null);
+			if (!v) return void res.status(401).json({ error: "bad-agent-token" });
+			res.locals.acpCaller = { kind: "agent", ...v };
 			return next();
 		}
 		requireAuth(req, res, () => {
@@ -60,19 +67,29 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 	const ownerOf = (c: Caller) => (c.kind === "owner" ? c.userId : c.agent.owner_user_id);
 	const agentOnly = (res: Response): AgentRow | null => {
 		const c = caller(res);
-		if (c.kind !== "agent") {
-			res.status(403).json({ error: "agent-only" });
+		if (c.kind !== "agent" || !c.runner) {
+			res.status(403).json({ error: c.kind === "agent" ? "runner-only" : "agent-only" });
 			return null;
 		}
 		return c.agent;
 	};
+	// The runner's slot, from `?slot=` or the body's `slot` (1 when absent: a
+	// one-slot agent's runner never sends it).
+	const slotOf = (req: Request): number | null => {
+		const raw = req.query.slot ?? (req.body as { slot?: unknown } | undefined)?.slot ?? 1;
+		const n = Number(raw);
+		return Number.isInteger(n) && n >= 1 && n <= MAX_SLOTS ? n : null;
+	};
 	// What the runner puts in the prompt's header: where the message was
 	// posted and who else is there (names only).
+	// A named context's message also carries the credential its ACP session
+	// gets (recomputed, never stored): the runner cannot mint one.
 	const withContext = async (agent: AgentRow, msg: MessageRow) => ({
 		...msg,
 		project: msg.project_id
 			? await acp.projectContext(agent.owner_user_id, msg.project_id).catch(() => null)
 			: null,
+		contextToken: msg.context === null ? null : acp.tokenFor(agent.agent_id, msg.context),
 	});
 	const wrap =
 		(fn: (req: Request, res: Response) => Promise<void>) => (req: Request, res: Response) =>
@@ -90,6 +107,7 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 		modelApplied: acp.modelAppliedOf(a.agent_id),
 		effort: a.effort ?? null,
 		effortApplied: acp.effortAppliedOf(a.agent_id),
+		maxConcurrency: a.max_concurrency,
 		projectId: a.project_id ?? null,
 		runnerSeenAt: acp.runnerSeenAt(a.agent_id),
 		running: loads.get(a.name)?.running ?? null,
@@ -130,7 +148,10 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 		"/messages",
 		wrap(async (req, res) => {
 			const c = caller(res);
-			const { to, body, projectId, clientId } = (req.body ?? {}) as Record<string, unknown>;
+			const { to, body, projectId, clientId, context } = (req.body ?? {}) as Record<
+				string,
+				unknown
+			>;
 			const name = String(to ?? "").replace(/^@/, "");
 			const owner = ownerOf(c);
 			if (typeof body !== "string" || body.trim() === "")
@@ -149,6 +170,17 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 					.json({ error: "unknown-recipient", agents: (await acp.list(owner)).map((a) => a.name) });
 			let scope: string | null = null;
 			let depth = 0;
+			let fromContext: string | null = null;
+			if (context !== undefined && context !== null) {
+				// Only the person places a message in a context; an agent's request
+				// always goes to the recipient's default one.
+				if (c.kind !== "owner") return void res.status(403).json({ error: "context-owner-only" });
+				if (typeof context !== "string" || !CONTEXT_RE.test(context))
+					return void res.status(400).json({ error: "bad-context" });
+				// Named contexts run in slots ≥ 2: a one-slot agent would never take it.
+				if (target.max_concurrency < 2)
+					return void res.status(400).json({ error: "context-needs-slots", agent: target.name });
+			}
 			if (c.kind === "owner") {
 				if (projectId !== undefined && projectId !== null) {
 					if (typeof projectId !== "string" || !(await acp.ownsProject(owner, projectId)))
@@ -159,8 +191,18 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 				}
 			} else {
 				if (target.name === c.agent.name) return void res.status(400).json({ error: "self" });
-				const cur = await acp.running(c.agent);
-				depth = (cur?.depth ?? 0) + 1;
+				// The sender is the execution the credential names: the message
+				// running in its context. None ⇒ that execution ended (a process
+				// that outlived its message): refused, never re-attributed.
+				const cur = await acp.runningIn(c.agent, c.context);
+				if (!cur)
+					return void res.status(409).json({
+						error: "execution-ended",
+						message:
+							"the message this process was started for is no longer running: nothing was sent",
+					});
+				fromContext = c.context;
+				depth = cur.depth + 1;
 				if (depth > acp.config.maxDepth)
 					return void res.status(409).json({
 						error: "depth-limit",
@@ -178,6 +220,8 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 					projectId: scope,
 					depth,
 					clientId: typeof clientId === "string" ? clientId : null,
+					context: typeof context === "string" ? context : null,
+					fromContext,
 				})
 				.catch((err: unknown) => {
 					if (err instanceof ClientIdConflictError) return err;
@@ -237,19 +281,33 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 	);
 
 	// PATCH /agents/:name {projectId?: string | null, model?: string,
-	// effort?: string | null} — join / leave a project; change the model or the
-	// reasoning effort (both applied by the runner when idle).
+	// effort?: string | null, maxConcurrency?: 1..MAX_SLOTS} — join / leave a
+	// project; change the model or the reasoning effort (both applied by the
+	// runner when idle); change how many messages it runs at once (slots).
 	router.patch(
 		"/agents/:name",
 		wrap(async (req, res) => {
 			const owner = ownerOnly(res);
 			if (!owner) return;
-			const body = (req.body ?? {}) as { projectId?: unknown; model?: unknown; effort?: unknown };
+			const body = (req.body ?? {}) as {
+				projectId?: unknown;
+				model?: unknown;
+				effort?: unknown;
+				maxConcurrency?: unknown;
+			};
 			const hasProject = "projectId" in body;
 			const hasModel = "model" in body;
 			const hasEffort = "effort" in body;
-			if (!hasProject && !hasModel && !hasEffort)
-				return void res.status(400).json({ error: "projectId, model or effort is required" });
+			const hasSlots = "maxConcurrency" in body;
+			if (!hasProject && !hasModel && !hasEffort && !hasSlots)
+				return void res
+					.status(400)
+					.json({ error: "projectId, model, effort or maxConcurrency is required" });
+			const slots = Number(body.maxConcurrency);
+			if (hasSlots && !(Number.isInteger(slots) && slots >= 1 && slots <= MAX_SLOTS))
+				return void res
+					.status(400)
+					.json({ error: `maxConcurrency must be an integer 1..${MAX_SLOTS}` });
 			const { projectId, model } = body;
 			const effort = effortOf(body.effort);
 			if (hasEffort && effort === undefined)
@@ -266,6 +324,7 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 				: null;
 			if (hasModel) row = await acp.setModel(owner, req.params.name, model as string);
 			if (hasEffort) row = await acp.setEffort(owner, req.params.name, effort ?? null);
+			if (hasSlots) row = await acp.setMaxConcurrency(owner, req.params.name, slots);
 			if (!row) return void res.status(404).json({ error: "not-found" });
 			res.json(agentView(row, await acp.loads(owner)));
 		}),
@@ -400,26 +459,39 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 
 	router.get(
 		"/runner/running",
-		wrap(async (_req, res) => {
+		wrap(async (req, res) => {
 			const agent = agentOnly(res);
 			if (!agent) return;
-			const msg = await acp.running(agent);
+			const slot = slotOf(req);
+			if (slot === null) return void res.status(400).json({ error: "bad-slot" });
+			const msg = await acp.runningInSlot(agent, slot);
 			msg ? res.json(await withContext(agent, msg)) : res.status(204).end();
 		}),
 	);
 
 	router.post(
 		"/runner/claim",
-		wrap(async (_req, res) => {
+		wrap(async (req, res) => {
 			const agent = agentOnly(res);
 			if (!agent) return;
 			// The model this agent should run, with every claim: the runner switches
 			// to it while idle, before it starts the next message.
 			res.setHeader("X-ST-Model", agent.model ?? acp.config.defaultModel);
 			res.setHeader("X-ST-Effort", agent.effort ?? "default");
-			const msg = await acp.claim(agent);
+			const slot = slotOf(req);
+			if (slot === null) return void res.status(400).json({ error: "bad-slot" });
+			// `context`: the slot holds that context's session open (processes the
+			// agent left running there) and can take only its messages.
+			const only = (req.body as { context?: unknown } | undefined)?.context;
+			if (
+				only !== undefined &&
+				only !== null &&
+				(typeof only !== "string" || !CONTEXT_RE.test(only))
+			)
+				return void res.status(400).json({ error: "bad-context" });
+			const msg = await acp.claim(agent, slot, typeof only === "string" ? only : null);
 			if (msg) return void res.json(await withContext(agent, msg));
-			const running = await acp.running(agent);
+			const running = await acp.runningInSlot(agent, slot);
 			running ? res.status(409).json({ error: "running", id: running.id }) : res.status(204).end();
 		}),
 	);
@@ -429,11 +501,22 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 		wrap(async (req, res) => {
 			const agent = agentOnly(res);
 			if (!agent) return;
+			const slot = slotOf(req);
+			const { body, context } = (req.body ?? {}) as { body?: unknown; context?: unknown };
+			if (slot === null) return void res.status(400).json({ error: "bad-slot" });
+			if (
+				context !== undefined &&
+				context !== null &&
+				(typeof context !== "string" || !CONTEXT_RE.test(context))
+			)
+				return void res.status(400).json({ error: "bad-context" });
 			const msg = await acp.startSystemMessage(
 				agent,
-				String((req.body as { body?: unknown })?.body ?? ""),
+				String(body ?? ""),
+				slot,
+				typeof context === "string" ? context : null,
 			);
-			msg ? res.json(msg) : res.status(409).json({ error: "running" });
+			msg ? res.json(await withContext(agent, msg)) : res.status(409).json({ error: "running" });
 		}),
 	);
 
@@ -548,7 +631,9 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 			const agent = agentOnly(res);
 			if (!agent) return;
 			const note = String((req.body as { note?: unknown })?.note ?? "the agent restarted");
-			res.json(await acp.orphanQuestions(agent, note));
+			const slot = slotOf(req);
+			if (slot === null) return void res.status(400).json({ error: "bad-slot" });
+			res.json(await acp.orphanQuestions(agent, note, slot));
 		}),
 	);
 

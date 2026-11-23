@@ -1,7 +1,7 @@
 /**
  * acp/acp.sqlite.test.ts — the ACP message API against a REAL SQLite (D1 is
  * SQLite): `fetch` to the D1 endpoint is answered by an in-memory database,
- * so the real migrations (v1…v23), the v22 reply trigger and indexes and the
+ * so the real migrations (v1…v24), the v24 reply trigger and indexes and the
  * real router run. Docker is a stub; the caller is `x-test-user` (person) or
  * a real `acp1.` agent token.
  *
@@ -914,5 +914,203 @@ describe("ACP messages: scope, replies, loop guard (v22)", () => {
 
 	it("events go only to the owner of the row", () => {
 		expect(events.filter((e) => e.type === "message").every((e) => e.owner === OWNER)).toBe(true);
+	});
+});
+
+// v24: an agent runs up to max_concurrency messages at once, one per slot. The
+// claim is the whole distribution; a credential names the context it runs in.
+describe("ACP slots: contexts, caps and attribution (v24)", () => {
+	const SIDM = "99999999-9999-4999-8999-999999999999";
+	let multi: import("./agents.js").AgentRow;
+	const claim = (slot: number, context?: string) =>
+		call(as("multi"), "POST", "/runner/claim", { slot, ...(context ? { context } : {}) });
+	const settle = (id: number, text = ".") =>
+		call(as("multi"), "POST", `/runner/messages/${id}/result`, { state: "done", text });
+	const sendTo = (context?: string, body = "x") =>
+		call(owner, "POST", "/messages", { to: "multi", body, ...(context ? { context } : {}) });
+
+	beforeAll(async () => {
+		db.prepare(
+			"INSERT INTO sessions (session_id, user_id, name, container_name, status) VALUES (?, ?, 'multi', ?, 'running')",
+		).run(SIDM, OWNER, `st-${SIDM.slice(0, 12)}`);
+		multi = await acp.create(SIDM, OWNER, "multi", { projectId: "p-1" });
+		tokens.multi = acp.tokenFor(multi.agent_id);
+		tokens["multi@a"] = acp.tokenFor(multi.agent_id, "a");
+		tokens["multi@b"] = acp.tokenFor(multi.agent_id, "b");
+	});
+
+	it("v24 is recorded; an agent starts with one slot and a named context needs more", async () => {
+		expect(db.prepare("SELECT 1 FROM schema_migrations WHERE version = 24").get()).toBeTruthy();
+		expect(multi.max_concurrency).toBe(1);
+		expect((await sendTo("a")).body.error).toBe("context-needs-slots");
+		expect((await sendTo("Mal_Nombre")).body.error).toBe("bad-context");
+		expect((await call(owner, "PATCH", "/agents/multi", { maxConcurrency: 9 })).status).toBe(400);
+		const p = await call(owner, "PATCH", "/agents/multi", { maxConcurrency: 2 });
+		expect(p.body.maxConcurrency).toBe(2);
+		// Only the person places a message in a context.
+		await sendTo(undefined, "para que arquitecto trabaje");
+		const r = await call(as("multi"), "POST", "/runner/claim");
+		expect(
+			(await call(as("multi"), "POST", "/messages", { to: "developer", body: "y", context: "a" }))
+				.body.error,
+		).toBe("context-owner-only");
+		await settle(r.body.id);
+	});
+
+	it("slot 1 takes only the default context, slots ≥ 2 only named ones, one running per context, caps in the claim", async () => {
+		const m1 = (await sendTo(undefined, "default")).body;
+		const m2 = (await sendTo("a", "a-1")).body;
+		const m3 = (await sendTo("a", "a-2")).body;
+		const m4 = (await sendTo("b", "b-1")).body;
+		const c2 = await claim(2);
+		expect(c2.body).toMatchObject({ id: m2.id, slot: 2, context: "a" });
+		expect(c2.body.contextToken).toBe(tokens["multi@a"]);
+		const c1 = await claim(1);
+		expect(c1.body).toMatchObject({ id: m1.id, slot: 1, context: null, contextToken: null });
+		// slot 2 busy: 409; slot 3 does not exist with max 2: nothing.
+		expect((await claim(2)).status).toBe(409);
+		expect((await claim(3)).status).toBe(204);
+		// A third slot: m3 waits (context a is running), m4 goes.
+		await call(owner, "PATCH", "/agents/multi", { maxConcurrency: 3 });
+		const c3 = await claim(3);
+		expect(c3.body).toMatchObject({ id: m4.id, slot: 3, context: "b" });
+		expect((await call(as("multi"), "GET", "/runner/running?slot=2")).body.id).toBe(m2.id);
+		await settle(m2.id);
+		// A slot holding context b's session open takes only b: m3 (context a) is not for it.
+		await settle(m4.id);
+		expect((await claim(3, "b")).status).toBe(204);
+		expect((await claim(3)).body.id).toBe(m3.id);
+		await settle(m3.id);
+		await settle(m1.id);
+		await call(owner, "PATCH", "/agents/multi", { maxConcurrency: 2 });
+	});
+
+	it("the global cap (ACP_MAX_RUNNING) holds under concurrent claims", async () => {
+		const prev = acp.config.maxRunning;
+		acp.config.maxRunning = 1;
+		try {
+			await sendTo(undefined, "g1");
+			await sendTo("a", "g2");
+			const rs = await Promise.all([claim(1), claim(2), claim(1), claim(2)]);
+			const got = rs.filter((r) => r.status === 200);
+			expect(got).toHaveLength(1);
+			acp.config.maxRunning = 6;
+			const more = await Promise.all([claim(1), claim(2)]);
+			expect([...got, ...more].filter((r) => r.status === 200)).toHaveLength(2);
+			for (const r of [...got, ...more].filter((x) => x.status === 200)) await settle(r.body.id);
+		} finally {
+			acp.config.maxRunning = prev;
+		}
+	});
+
+	it("st send is attributed by its credential: its context's running message, the reply goes back to it; an ended execution is refused", async () => {
+		const md = (await sendTo(undefined, "default")).body;
+		const ma = (await sendTo("a", "contexto a")).body;
+		await claim(1);
+		await claim(2);
+		const fromA = await call(as("multi@a"), "POST", "/messages", {
+			to: "developer",
+			body: "desde a",
+		});
+		expect(fromA.status).toBe(201);
+		expect(fromA.body).toMatchObject({
+			from_id: "multi",
+			from_context: "a",
+			context: null,
+			depth: 1,
+		});
+		expect(fromA.body.project_id).toBeNull(); // ma is a direct message: the consult stays direct
+		const fromD = await call(as("multi"), "POST", "/messages", {
+			to: "developer",
+			body: "desde default",
+		});
+		expect(fromD.body).toMatchObject({ from_context: null });
+		// A context credential never reaches the runner routes.
+		expect((await call(as("multi@a"), "POST", "/runner/claim", { slot: 2 })).body.error).toBe(
+			"runner-only",
+		);
+		// The developer answers the one from context a: the reply lands in context a.
+		for (;;) {
+			const d = await call(as("developer"), "POST", "/runner/claim");
+			expect(d.status).toBe(200);
+			await call(as("developer"), "POST", `/runner/messages/${d.body.id}/result`, {
+				state: "done",
+				text: "listo",
+			});
+			if (d.body.id === fromA.body.id) break;
+		}
+		const reply = db
+			.prepare("SELECT context, to_id, kind FROM agent_messages WHERE reply_to = ?")
+			.get(fromA.body.id) as { context: string; to_id: string; kind: string };
+		expect(reply).toEqual({ context: "a", to_id: "multi", kind: "reply" });
+		// Context a's execution ends: a process it left behind cannot send any more.
+		await settle(ma.id);
+		const late = await call(as("multi@a"), "POST", "/messages", { to: "developer", body: "tarde" });
+		expect(late.status).toBe(409);
+		expect(late.body.error).toBe("execution-ended");
+		// …nor be taken for the next message of another context (b is not a).
+		const mb = (await sendTo("b", "contexto b")).body;
+		expect((await claim(2, "b")).body.id).toBe(mb.id);
+		expect(
+			(await call(as("multi@a"), "POST", "/messages", { to: "developer", body: "tarde 2" })).body
+				.error,
+		).toBe("execution-ended");
+		await settle(mb.id);
+		await settle(md.id);
+		// The reply waiting in context a is taken by a named-context slot.
+		const back = await claim(2);
+		expect(back.body).toMatchObject({ kind: "reply", context: "a", reply_to: fromA.body.id });
+		await settle(back.body.id);
+	});
+
+	it("a slot's restart orphans only its own questions; recovery runs in the interrupted message's slot and context", async () => {
+		const m1 = (await sendTo(undefined, "q1")).body;
+		const m2 = (await sendTo("a", "q2")).body;
+		await claim(1);
+		await claim(2);
+		const q1 = await call(as("multi"), "POST", "/runner/questions", {
+			messageId: m1.id,
+			request: { message: "?" },
+		});
+		const q2 = await call(as("multi"), "POST", "/runner/questions", {
+			messageId: m2.id,
+			request: { message: "?" },
+		});
+		expect([q1.body.message_id, q2.body.message_id]).toEqual([m1.id, m2.id]);
+		const o = await call(as("multi"), "POST", "/runner/questions-orphan", {
+			slot: 2,
+			note: "slot 2 reinició",
+		});
+		expect(o.body.map((q: { id: number }) => q.id)).toEqual([q2.body.id]);
+		// Slot 2 judges ITS message uncertain; slot 1's keeps running.
+		await call(as("multi"), "POST", `/runner/messages/${m2.id}/result`, {
+			state: "uncertain",
+			note: "x",
+		});
+		expect((await call(as("multi"), "GET", "/runner/running?slot=1")).body.id).toBe(m1.id);
+		const sys = await call(as("multi"), "POST", "/runner/system-message", {
+			slot: 2,
+			context: "a",
+			body: "[st-recovery] …",
+		});
+		expect(sys.body).toMatchObject({
+			slot: 2,
+			context: "a",
+			contextToken: tokens["multi@a"],
+			state: "running",
+		});
+		// Never a second running message in a context or a slot.
+		expect(
+			(
+				await call(as("multi"), "POST", "/runner/system-message", {
+					slot: 3,
+					context: "a",
+					body: "x",
+				})
+			).status,
+		).toBe(409);
+		await settle(sys.body.id);
+		await settle(m1.id);
+		await call(owner, "POST", `/questions/${q1.body.id}/answer`, { action: "cancel" });
 	});
 });

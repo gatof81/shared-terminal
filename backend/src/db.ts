@@ -875,6 +875,50 @@ export const MIGRATIONS: readonly Migration[] = [
 		description: "acp_agents.effort — per-agent reasoning effort (applied by the runner)",
 		apply: () => addColumnIfMissing("acp_agents", "effort TEXT"),
 	},
+	{
+		// Additive: NULL context = the default one (the workspace checkout, the
+		// only one there was), max_concurrency 1 = one slot (what every agent ran).
+		// A message running across the upgrade was taken by the only runner there
+		// was: slot 1, so that runner's restart judges it as its own.
+		version: 24,
+		description: "ACP slots — execution context per message, the slot that took it, per-agent cap",
+		apply: async () => {
+			await addColumnIfMissing("acp_agents", "max_concurrency INTEGER NOT NULL DEFAULT 1");
+			await addColumnIfMissing("agent_messages", "context TEXT");
+			await addColumnIfMissing("agent_messages", "from_context TEXT");
+			await addColumnIfMissing("agent_messages", "slot INTEGER");
+			await d1Batch([...ACP_SLOTS_DDL]);
+		},
+	},
+];
+
+/**
+ * v24. An agent runs up to `max_concurrency` messages at once, one per SLOT
+ * (a copy of the runner loop with its own adapter). A message's `context`
+ * says where it runs: NULL = the default context (the workspace checkout, the
+ * agent's ACP session of always, slot 1 only); a name = its own directory
+ * `.st/ctx/<name>/` and its own ACP session (slots ≥ 2). The claim keeps one
+ * running message per (agent, context), so two runs never share a checkout.
+ *
+ * `from_context` is the context an agent's request was sent FROM (taken from
+ * its credential, never from the body): the reply goes back there, so the
+ * continuation lands in the ACP session that asked. The recipient gets the
+ * request in its default context.
+ */
+export const ACP_SLOTS_DDL: readonly string[] = [
+	"UPDATE agent_messages SET slot = 1 WHERE state = 'running' AND slot IS NULL",
+	"CREATE INDEX IF NOT EXISTS idx_agent_messages_running ON agent_messages(state, owner_user_id, to_id)",
+	"DROP TRIGGER IF EXISTS trg_agent_message_reply",
+	`CREATE TRIGGER IF NOT EXISTS trg_agent_message_reply
+	AFTER UPDATE OF state ON agent_messages
+	WHEN OLD.state = 'running' AND NEW.state = 'done' AND NEW.kind = 'request'
+		AND EXISTS (SELECT 1 FROM acp_agents WHERE owner_user_id = NEW.owner_user_id AND name = NEW.from_id)
+	BEGIN
+		INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, reply_to, body, state, project_id, depth, context)
+		VALUES (NEW.owner_user_id, NEW.to_id, NEW.from_id, 'reply', NEW.id,
+			'Respuesta de @' || NEW.to_id || ' a tu mensaje #' || NEW.id || ':' || char(10) || char(10) || COALESCE(NEW.result_text, '(sin texto)'),
+			'pending', NEW.project_id, NEW.depth, NEW.from_context);
+	END`,
 ];
 
 /**

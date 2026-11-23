@@ -63,13 +63,15 @@ anything else is refused with `409 client-id-reused`, never answered with anothe
 | State | Meaning |
 | --- | --- |
 | `pending` | stored, waiting for the recipient |
-| `running` | claimed by the recipient's runner (at most one per agent) |
+| `running` | claimed by one of the recipient's slots (at most one per agent and context) |
 | `done` | the turn ended and every background task it started ended (or was declared persistent) |
 | `failed` | the turn ended with an error |
 | `uncertain` | the run was interrupted (runner, adapter or container died mid-turn) |
 
-- **FIFO, one at a time per agent.** The claim is one conditional UPDATE: the oldest `pending`, only
-  if nothing of that agent is `running`. Different agents work in parallel.
+- **FIFO, one at a time per agent and context.** The claim is one conditional UPDATE: the oldest
+  `pending` the claiming slot may run, only if nothing of its context is `running`, the slot is free,
+  the agent is under `max_concurrency` and the backend under `ACP_MAX_RUNNING`. Different agents work
+  in parallel. See §3b.
 - **Never resent.** An interrupted run becomes `uncertain`; only the person can requeue it
   (`POST /api/acp/messages/:id/requeue`). After a restart the agent receives one `system` message
   asking for a read-only report of what was left done or undone.
@@ -93,6 +95,45 @@ anything else is refused with `409 client-id-reused`, never answered with anothe
 > be revoked, and the process is not tracked after the message closes. Without it the message stays
 > `running` until the task ends (plus one check question after `BG_CHECK_MS`, 10 min). To be replaced
 > by a structured signal.
+
+### 3b. Slots and contexts (v24)
+
+An agent runs up to `max_concurrency` messages at once (1 by default; `PATCH /api/acp/agents/:name
+{maxConcurrency}`, 1–4), one per **slot**: a copy of the runner loop with its own adapter, lock
+(`/tmp/st-acp-runner-<k>.lock`), log (`/tmp/st-acp-runner-<k>.log`) and process
+(`node --no-warnings /opt/st-acp/st/runner.mjs <k>`), launched and watched one by one. Slot 1 keeps
+the names of always (`/tmp/st-acp-runner.lock`, `/tmp/st-acp-runner.log`, no argument): a one-slot
+agent is exactly the runner it was. Raising the cap launches the new slots at once; lowering it lets
+the extra slots finish and claim nothing more (their processes stay idle until the container
+restarts). `ACP_MAX_RUNNING` (6) caps the whole backend.
+
+A message's **context** says where it runs:
+
+- `NULL` — the default context: the workspace checkout and the agent's ACP session of always. Only
+  slot 1 runs it.
+- a name (`^[a-z0-9][a-z0-9-]{0,39}$`) — its own directory `<workspace>/.st/ctx/<name>/` (the cwd of
+  its own ACP session, `<workspace>/.st/acp/ctx/<name>.json`). Only slots ≥ 2 run it, so an agent
+  with cap 1 never takes one (sending one is refused: `400 context-needs-slots`).
+
+One running message per agent and context: two runs never share a directory or an ACP session.
+Only the person places a message in a context (`POST /api/acp/messages {context}`, cookie only); an
+agent's request always goes to the recipient's default context, and its **reply** comes back to the
+context it was sent from (`from_context`, taken from the sender's credential).
+
+A slot ≥ 2 opens (new or resumed) a context's session when it claims a message of it and closes it
+when it claims one of another context. `session/close` (and a resume) stops what that session left
+running, so a slot whose session still has an open task (a process declared `ST-PERSISTENT`) keeps
+that context and takes only its messages until the task ends.
+
+**Who sent a `st send`.** A named context's session gets its own credential
+(`acp1.<agentId>.<context>.<hmac>`, in the session's environment on new and resume); the default
+context's is the runner's. The backend attributes the send to the message running in the
+credential's context; if none is running, the execution that started the process has ended and the
+send is refused (`409 execution-ended`) — never re-attributed, never turned into a direct message.
+Not covered: a process left running by one message of a context that sends while a LATER message of
+the same context runs is attributed to that later message (same context, same directory). The
+credential cannot be per message: renewing a session's environment restarts its Claude process and
+stops what the agent left running.
 
 **Activity** (tool calls, background tasks, partial text) is pushed by the runner and kept **in
 backend memory** (last 500 events per agent). It is the live view; history is the messages. A backend
@@ -147,8 +188,8 @@ shows in that message's chat and nowhere else.
   content?}`); an agent's token is refused, and a second answer gets 409.
 - The runner marks the question `delivered` **before** handing the answer to the waiting request, so
   an answer is used at most once.
-- A runner restart loses the waiting request: open or answered-but-undelivered questions become
-  `orphaned`, never treated as answered. The agent is told in its recovery message; the person can
+- A runner restart loses the waiting request: open or answered-but-undelivered questions of that
+  slot's messages become `orphaned`, never treated as answered (another slot's stay open). The agent is told in its recovery message; the person can
   send the decision as a normal message instead.
 - URL-mode elicitations (an MCP OAuth) are declined: the runner declares only `form`.
 
@@ -175,6 +216,7 @@ session.
    | `ACP_DEFAULT_MODEL` | `claude-sonnet-5-5` | model when the create request names none |
    | `ACP_MESSAGE_MAX_BYTES` | `262144` | per-message cap |
    | `ACP_MAX_DEPTH` | `6` | agent → agent chain limit |
+   | `ACP_MAX_RUNNING` | `6` | messages running at once on this backend, all agents (each agent: `max_concurrency`) |
    | `ACP_TEST_RUNTIME` | unset | `1` installs the deterministic `st-test-agent` runtime |
    | `ACP_RUNTIME_DIR` | `<WORKSPACE_ROOT>/.acp-runtime` | runtime directory (same path on host and backend) |
    | `ACP_BACKEND_URL` | `http://st-backend:<PORT>` | how runners reach the backend over the sessions network |
@@ -187,7 +229,7 @@ session.
      --entrypoint bash shared-terminal-session /src/install.sh $WORKSPACE_ROOT/.acp-runtime 0.108.0
    ```
 
-3. **Restart the backend.** Migrations v21–v22 are additive and run at boot.
+3. **Restart the backend.** Migrations v21–v24 are additive and run at boot.
 
 4. **Create an agent session:** the New session form's agent fields (name, project, runtime), or `POST /api/sessions` with
    `acpAgent: {name, model?, runtime?, projectId?}`. The name is `[a-z][a-z0-9-]{1,31}`, unique per

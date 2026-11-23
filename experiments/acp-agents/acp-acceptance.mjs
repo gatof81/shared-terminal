@@ -67,11 +67,12 @@ async function api(method, path, body) {
 	return { status: res.status, body: json ?? text };
 }
 
-const send = async (to, body, projectId) => {
+const send = async (to, body, projectId, context) => {
 	const r = await api("POST", "/api/acp/messages", {
 		to,
 		body,
 		...(projectId ? { projectId } : {}),
+		...(context ? { context } : {}),
 		clientId: randomUUID(),
 	});
 	if (r.status !== 201) throw new Error(`send ${to}: ${r.status} ${JSON.stringify(r.body)}`);
@@ -316,6 +317,52 @@ async function main() {
 		JSON.stringify(efFailed),
 	);
 	await api("PATCH", `/api/acp/agents/${DEV}`, { effort: null });
+
+	// 6f. Slots (v24): @dev with max_concurrency 2 runs its default context (slot 1) and a named
+	// context (slot 2) at once; one context never twice at once; each run's `st send` — from the
+	// turn or from background — is attributed by its context's credential and the reply comes back
+	// to that context; a process that outlived its message cannot send; killing slot 2 leaves only
+	// its own message uncertain and the report runs in that context.
+	const cap = await api("PATCH", `/api/acp/agents/${DEV}`, { maxConcurrency: 2 });
+	check("max_concurrency 2 accepted", cap.status === 200 && cap.body?.maxConcurrency === 2, JSON.stringify(cap.body?.maxConcurrency));
+	const running = async () => (await agentFeed(DEV)).messages.filter((m) => m.to_id === DEV && m.state === "running");
+	const peak = { n: 0 };
+	const watch = setInterval(async () => {
+		peak.n = Math.max(peak.n, (await running().catch(() => [])).length);
+	}, 500);
+	const ov = [await send(DEV, "esperá 6", pid), await send(DEV, "esperá 6", pid, "s1")];
+	const both = await waitFor("both running", async () => ov.every((m) => m) && (await Promise.all(ov.map((m) => get(m.id)))).every((m) => m.state === "running"), 60_000);
+	check("default and context s1 run at the same time (slots 1 and 2)", !!both);
+	const ovDone = await Promise.all(ov.map((m) => waitMsg(m.id)));
+	check(
+		"both done; s1 ran in its own directory and slot",
+		ovDone.every((m) => m.state === "done") && ovDone[1].slot === 2 && /cwd \S+\/\.st\/ctx\/s1\)/.test(ovDone[1].result_text ?? ""),
+		short(ovDone[1].result_text),
+	);
+	const same = [await send(DEV, "esperá 2", pid, "s2"), await send(DEV, "esperá 2", pid, "s2")];
+	const sameDone = await Promise.all(same.map((m) => waitMsg(m.id)));
+	check("two messages of one context never overlap", Date.parse(sameDone[1].started_at) >= Date.parse(sameDone[0].finished_at), sameDone.map((m) => `${m.started_at}→${m.finished_at}`).join(" "));
+	const bgS1 = await send(DEV, `segundo plano 3: consultá a @${ARQ}: desde s1 en segundo plano`, pid, "s1");
+	const bgDone = await waitMsg(bgS1.id);
+	const fromS1 = (await agentFeed(ARQ)).messages.find((m) => m.body === "desde s1 en segundo plano");
+	check("a background st send of s1 is attributed to its run (from_context s1, depth 1)", bgDone.state === "done" && fromS1?.from_id === DEV && fromS1?.from_context === "s1" && fromS1?.depth === 1, JSON.stringify(fromS1 && { fc: fromS1.from_context, d: fromS1.depth }));
+	const back = await waitFor("reply in s1", async () => (await agentFeed(DEV)).messages.find((m) => m.kind === "reply" && m.reply_to === fromS1?.id && m.state === "done"), 90_000);
+	check("…and the reply came back to context s1, processed by slot 2", back?.context === "s1" && back?.slot === 2, back && `${back.context} slot ${back.slot}`);
+	const pers = await send(DEV, `persistente 6: consultá a @${ARQ}: tarde desde s1`, pid, "s1");
+	check("a message that leaves a persistent process closes", (await waitMsg(pers.id)).state === "done");
+	await sleep(9_000);
+	check("…and that process's later st send is refused (nothing written)", !(await agentFeed(ARQ)).messages.some((m) => m.body === "tarde desde s1"));
+	const k = [await send(DEV, "esperá 10", pid), await send(DEV, "esperá 10", pid, "s1")];
+	await waitFor("both running", async () => (await Promise.all(k.map((m) => get(m.id)))).every((m) => m.state === "running"), 60_000);
+	check("slot 2's runner killed", await execIn(sids[DEV], ["sh", "-c", "pkill -KILL -f '^node --no-warnings /opt/st-acp/st/runner.mjs 2$'; true"]));
+	const kDone = await Promise.all(k.map((m) => waitMsg(m.id)));
+	check("slot 1's message finished normally", kDone[0].state === "done", kDone[0].state);
+	check("only slot 2's message is uncertain, not rerun", kDone[1].state === "uncertain" && kDone[1].attempts === 1, `${kDone[1].state}/${kDone[1].attempts} ${short(kDone[1].note)}`);
+	const rep2 = await waitFor("recovery in s1", async () => (await agentFeed(DEV)).messages.find((m) => m.from_id === "system" && m.id > k[1].id && m.state === "done"), 90_000);
+	check("the read-only report ran in slot 2, context s1", rep2?.slot === 2 && rep2?.context === "s1", rep2 && `slot ${rep2.slot} ${rep2.context}`);
+	clearInterval(watch);
+	check("never more than max_concurrency running", peak.n <= 2, `peak ${peak.n}`);
+	await api("PATCH", `/api/acp/agents/${DEV}`, { maxConcurrency: 1 });
 
 	// 7. Terminal, Files and Git of the same agent session still answer.
 	const sid = sids[DEV];
