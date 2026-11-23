@@ -15,7 +15,7 @@ export interface AcpSessionEntry {
 	name: string;
 	projectId: string | null;
 	runnerSeenAt: string | null;
-	running: number | null;
+	running: number[];
 	pending: number;
 	authRequired: boolean;
 	waitingInput: boolean;
@@ -27,7 +27,7 @@ export interface AcpAgentRowLike {
 	name: string;
 	projectId?: string | null;
 	runnerSeenAt?: string | null;
-	running?: number | null;
+	running?: number[];
 	pending?: number;
 	authRequired?: boolean;
 	waitingInput?: boolean;
@@ -53,7 +53,7 @@ function entry(a: AcpAgentRowLike): AcpSessionEntry {
 		name: a.name,
 		projectId: a.projectId ?? null,
 		runnerSeenAt: a.runnerSeenAt ?? null,
-		running: a.running ?? null,
+		running: a.running ?? [],
 		pending: a.pending ?? 0,
 		authRequired: a.authRequired === true,
 		waitingInput: a.waitingInput === true,

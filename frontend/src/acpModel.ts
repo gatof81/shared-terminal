@@ -322,7 +322,12 @@ export function agentStatus(a: AgentStatusInput, now: number, authRequired = fal
 	if (a.waitingInput) return { label: "esperando tu respuesta", tone: "warn" };
 	const seen = a.runnerSeenAt ? now - Date.parse(a.runnerSeenAt) : Number.POSITIVE_INFINITY;
 	const queued = a.pending ? ` · ${a.pending} en espera` : "";
-	if (a.running) return { label: `trabajando en #${a.running}${queued}`, tone: "busy" };
+	if (a.running?.length) {
+		const ids = a.running.map((id) => `#${id}`);
+		const list =
+			ids.length > 1 ? `${ids.slice(0, -1).join(", ")} y ${ids[ids.length - 1]}` : ids[0];
+		return { label: `trabajando en ${list}${queued}`, tone: "busy" };
+	}
 	if (seen > RUNNER_FRESH_MS)
 		return {
 			label: a.runnerSeenAt ? `runner sin señal${queued}` : `runner sin conectar${queued}`,

@@ -1877,8 +1877,8 @@ export interface AcpAgentInfo {
 	} | null;
 	projectId?: string | null;
 	runnerSeenAt: string | null;
-	/** Message being worked on, if any. */
-	running?: number | null;
+	/** Messages being worked on, oldest first (an agent with slots runs several at once). */
+	running?: number[];
 	pending?: number;
 	authRequired?: boolean;
 	/** An open question of this agent waits for the person. */

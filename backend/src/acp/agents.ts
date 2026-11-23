@@ -164,8 +164,8 @@ export type AcpEvent =
 	| { type: "agents" };
 
 export interface AgentLoad {
-	/** Id of the message the agent is working on, if any. */
-	running: number | null;
+	/** Ids of the messages the agent is working on, oldest first (one per slot it runs). */
+	running: number[];
 	pending: number;
 }
 
@@ -487,16 +487,26 @@ export class AcpAgents {
 		return this.effortApplied.get(agentId) ?? null;
 	}
 
-	/** Running message and queue length per agent name (one query). */
+	/** Running messages and queue length per agent name (one query). */
 	async loads(ownerUserId: string): Promise<Map<string, AgentLoad>> {
-		const r = await d1Query<{ to_id: string; running: number | null; pending: number }>(
-			`SELECT to_id, MAX(CASE WHEN state = 'running' THEN id END) AS running,
+		const r = await d1Query<{ to_id: string; running: string | null; pending: number }>(
+			`SELECT to_id, group_concat(CASE WHEN state = 'running' THEN id END) AS running,
 				SUM(CASE WHEN state = 'pending' THEN 1 ELSE 0 END) AS pending
 			 FROM agent_messages WHERE owner_user_id = ? AND state IN ('pending', 'running') GROUP BY to_id`,
 			[ownerUserId],
 		);
 		return new Map(
-			r.results.map((x) => [x.to_id, { running: x.running ?? null, pending: Number(x.pending) }]),
+			r.results.map((x) => [
+				x.to_id,
+				{
+					running: String(x.running ?? "")
+						.split(",")
+						.filter(Boolean)
+						.map(Number)
+						.sort((a, b) => a - b),
+					pending: Number(x.pending),
+				},
+			]),
 		);
 	}
 

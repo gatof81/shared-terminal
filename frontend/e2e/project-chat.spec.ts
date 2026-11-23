@@ -185,7 +185,7 @@ test.describe("Project Chat (U-2)", () => {
 				state: "running",
 				project_id: PROJECT_IDS.hz,
 			});
-			backend.acpAgents.find((a) => a.name === "arq")!.running = m.id;
+			backend.acpAgents.find((a) => a.name === "arq")!.running = [m.id];
 			await page.setViewportSize({ width, height: 700 });
 			await app.login("alice", HZ);
 			const panel = await openPanel(page);
@@ -278,7 +278,7 @@ test.describe("Project Chat (U-2)", () => {
 			});
 			if (i === 6) running = m.id;
 		}
-		backend.acpAgents.find((a) => a.name === "arq")!.running = running;
+		backend.acpAgents.find((a) => a.name === "arq")!.running = [running];
 		await app.login("alice", HZ);
 		await expect(page.locator(THREAD)).toContainText("Tema 30 resuelto.");
 		const panel = await openPanel(page);
