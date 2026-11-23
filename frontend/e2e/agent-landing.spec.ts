@@ -157,7 +157,7 @@ test.describe("an agent's session lands on its Chat", () => {
  * the first frame that shows the session's landing view (`view`: Git for
  * my-project, whose saved view it is; Files for the stopped docs).
  */
-test.describe("the agents list never makes every selection wait", () => {
+test.describe("the agents list never makes every selection wait", { tag: "@any-viewport" }, () => {
 	test.beforeEach(async ({ page }) => {
 		await page.addInitScript(
 			(sid) => localStorage.setItem(`st.view.${sid}`, "git"),
@@ -219,7 +219,7 @@ test.describe("the agents list never makes every selection wait", () => {
 	});
 });
 
-test.describe("the agents list's background retry", () => {
+test.describe("the agents list's background retry", { tag: "@any-viewport" }, () => {
 	test("reads nothing while the tab is hidden; one read when it shows again", async ({
 		app,
 		backend,

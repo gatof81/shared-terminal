@@ -153,7 +153,7 @@ async function signIn(page: Page, user: string): Promise<void> {
 	await page.click("#auth-submit");
 }
 
-test.describe("auth transitions on the real cookie jar", () => {
+test.describe("auth transitions on the real cookie jar", { tag: "@any-viewport" }, () => {
 	let server: AuthServer;
 	test.beforeEach(async ({ backend, page }) => {
 		server = new AuthServer();
