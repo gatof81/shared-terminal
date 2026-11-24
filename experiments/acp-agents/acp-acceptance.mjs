@@ -67,12 +67,12 @@ async function api(method, path, body) {
 	return { status: res.status, body: json ?? text };
 }
 
-const send = async (to, body, projectId, context) => {
+const send = async (to, body, projectId, work) => {
 	const r = await api("POST", "/api/acp/messages", {
 		to,
 		body,
 		...(projectId ? { projectId } : {}),
-		...(context ? { context } : {}),
+		...(work ? { work } : {}),
 		clientId: randomUUID(),
 	});
 	if (r.status !== 201) throw new Error(`send ${to}: ${r.status} ${JSON.stringify(r.body)}`);
@@ -258,6 +258,22 @@ async function main() {
 		});
 		return (await r.text()).includes('"exit"');
 	};
+	// The same, with what it printed and its exit code.
+	const execOut = async (sid, script) => {
+		const r = await fetch(`${ST}/api/sessions/${sid}/exec`, {
+			method: "POST",
+			headers: { "content-type": "application/json", cookie },
+			body: JSON.stringify({ cmd: ["sh", "-c", script] }),
+		});
+		let out = "";
+		let code = null;
+		for (const line of (await r.text()).split("\n").filter(Boolean)) {
+			const e = JSON.parse(line);
+			if (e.type === "output") out += e.data;
+			if (e.type === "exit") code = e.exitCode;
+		}
+		return { code, out: out.trim() };
+	};
 	const taDir = "/home/developer/workspace/.st/acp/test-agent";
 	check("test agent set to require credentials (none present)", await execIn(sids[DEV], ["sh", "-c", `mkdir -p ${taDir} && touch ${taDir}/require-auth && rm -f $HOME/.claude/.credentials.json`]));
 	const needs = await send(DEV, "¿estás conectado?", pid);
@@ -318,50 +334,100 @@ async function main() {
 	);
 	await api("PATCH", `/api/acp/agents/${DEV}`, { effort: null });
 
-	// 6f. Slots (v24): @dev with max_concurrency 2 runs its default context (slot 1) and a named
-	// context (slot 2) at once; one context never twice at once; each run's `st send` — from the
+	// 6f. Slots (v24) and works (v26): @dev with max_concurrency 2 runs its default context (slot 1)
+	// and a work (slot 2) at once — each work its own worktree, made by the backend; one context never twice at once; each run's `st send` — from the
 	// turn or from background — is attributed by its context's credential and the reply comes back
 	// to that context; a process that outlived its message cannot send; killing slot 2 leaves only
 	// its own message uncertain and the report runs in that context.
 	const cap = await api("PATCH", `/api/acp/agents/${DEV}`, { maxConcurrency: 2 });
 	check("max_concurrency 2 accepted", cap.status === 200 && cap.body?.maxConcurrency === 2, JSON.stringify(cap.body?.maxConcurrency));
+	// Works need a git repo in the agent's workspace, with a remote (a bare one in the container's
+	// /tmp: "commits preserved" is checked against it).
+	const repo = await execOut(
+		sids[DEV],
+		"cd /home/developer/workspace && git init -q -b main && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m init && rm -rf /tmp/acc-remote.git && git init -q --bare -b main /tmp/acc-remote.git && git remote add origin /tmp/acc-remote.git && git push -q origin main && git remote set-head origin main && git rev-parse HEAD",
+	);
+	check("a git repo with a remote in @dev's workspace", repo.code === 0, short(repo.out));
+	// Work ids are never reused: one set per run.
+	const S1 = `${PREFIX}-s1`;
+	const S2 = `${PREFIX}-s2`;
+	const works = {};
+	for (const id of [S1, S2]) {
+		const w = await api("POST", "/api/acp/works", { agent: DEV, id });
+		works[id] = w.body;
+		check(`work ${id} created: worktree on work/${id}, its ports`, w.status === 201 && w.body?.state === "active" && w.body?.branch === `work/${id}` && w.body?.baseSha === repo.out.split("\n").at(-1), JSON.stringify(w.body));
+	}
+	check("creating it again returns it", (await api("POST", "/api/acp/works", { agent: DEV, id: S1 })).status === 200);
 	const running = async () => (await agentFeed(DEV)).messages.filter((m) => m.to_id === DEV && m.state === "running");
 	const peak = { n: 0 };
 	const watch = setInterval(async () => {
 		peak.n = Math.max(peak.n, (await running().catch(() => [])).length);
 	}, 500);
-	const ov = [await send(DEV, "esperá 6", pid), await send(DEV, "esperá 6", pid, "s1")];
+	const ov = [await send(DEV, "esperá 6", pid), await send(DEV, "esperá 6", pid, S1)];
 	const both = await waitFor("both running", async () => ov.every((m) => m) && (await Promise.all(ov.map((m) => get(m.id)))).every((m) => m.state === "running"), 60_000);
-	check("default and context s1 run at the same time (slots 1 and 2)", !!both);
+	check("default and work s1 run at the same time (slots 1 and 2)", !!both);
 	const ovDone = await Promise.all(ov.map((m) => waitMsg(m.id)));
 	check(
-		"both done; s1 ran in its own directory and slot",
-		ovDone.every((m) => m.state === "done") && ovDone[1].slot === 2 && /cwd \S+\/\.st\/ctx\/s1\)/.test(ovDone[1].result_text ?? ""),
+		"both done; s1 ran in its own worktree and slot",
+		ovDone.every((m) => m.state === "done") && ovDone[1].slot === 2 && (ovDone[1].result_text ?? "").includes(`cwd /home/developer/workspace/.st/ctx/${S1} · trabajo ${S1}`),
 		short(ovDone[1].result_text),
 	);
-	const same = [await send(DEV, "esperá 2", pid, "s2"), await send(DEV, "esperá 2", pid, "s2")];
+	const same = [await send(DEV, "esperá 2", pid, S2), await send(DEV, "esperá 2", pid, S2)];
 	const sameDone = await Promise.all(same.map((m) => waitMsg(m.id)));
 	check("two messages of one context never overlap", Date.parse(sameDone[1].started_at) >= Date.parse(sameDone[0].finished_at), sameDone.map((m) => `${m.started_at}→${m.finished_at}`).join(" "));
-	const bgS1 = await send(DEV, `segundo plano 3: consultá a @${ARQ}: desde s1 en segundo plano`, pid, "s1");
+	const bgS1 = await send(DEV, `segundo plano 3: consultá a @${ARQ}: desde s1 en segundo plano`, pid, S1);
 	const bgDone = await waitMsg(bgS1.id);
 	const fromS1 = (await agentFeed(ARQ)).messages.find((m) => m.body === "desde s1 en segundo plano");
-	check("a background st send of s1 is attributed to its run (from_context s1, depth 1)", bgDone.state === "done" && fromS1?.from_id === DEV && fromS1?.from_context === "s1" && fromS1?.depth === 1, JSON.stringify(fromS1 && { fc: fromS1.from_context, d: fromS1.depth }));
+	check("a background st send of s1 is attributed to its run (from_context s1, depth 1)", bgDone.state === "done" && fromS1?.from_id === DEV && fromS1?.from_context === S1 && fromS1?.depth === 1, JSON.stringify(fromS1 && { fc: fromS1.from_context, d: fromS1.depth }));
 	const back = await waitFor("reply in s1", async () => (await agentFeed(DEV)).messages.find((m) => m.kind === "reply" && m.reply_to === fromS1?.id && m.state === "done"), 90_000);
-	check("…and the reply came back to context s1, processed by slot 2", back?.context === "s1" && back?.slot === 2, back && `${back.context} slot ${back.slot}`);
-	const pers = await send(DEV, `persistente 6: consultá a @${ARQ}: tarde desde s1`, pid, "s1");
+	check("…and the reply came back to context s1, processed by slot 2", back?.context === S1 && back?.slot === 2, back && `${back.context} slot ${back.slot}`);
+	const pers = await send(DEV, `persistente 6: consultá a @${ARQ}: tarde desde s1`, pid, S1);
 	check("a message that leaves a persistent process closes", (await waitMsg(pers.id)).state === "done");
 	await sleep(9_000);
 	check("…and that process's later st send is refused (nothing written)", !(await agentFeed(ARQ)).messages.some((m) => m.body === "tarde desde s1"));
-	const k = [await send(DEV, "esperá 10", pid), await send(DEV, "esperá 10", pid, "s1")];
+	const k = [await send(DEV, "esperá 10", pid), await send(DEV, "esperá 10", pid, S1)];
 	await waitFor("both running", async () => (await Promise.all(k.map((m) => get(m.id)))).every((m) => m.state === "running"), 60_000);
 	check("slot 2's runner killed", await execIn(sids[DEV], ["sh", "-c", "pkill -KILL -f '^node --no-warnings /opt/st-acp/st/runner.mjs 2$'; true"]));
 	const kDone = await Promise.all(k.map((m) => waitMsg(m.id)));
 	check("slot 1's message finished normally", kDone[0].state === "done", kDone[0].state);
 	check("only slot 2's message is uncertain, not rerun", kDone[1].state === "uncertain" && kDone[1].attempts === 1, `${kDone[1].state}/${kDone[1].attempts} ${short(kDone[1].note)}`);
 	const rep2 = await waitFor("recovery in s1", async () => (await agentFeed(DEV)).messages.find((m) => m.from_id === "system" && m.id > k[1].id && m.state === "done"), 90_000);
-	check("the read-only report ran in slot 2, context s1", rep2?.slot === 2 && rep2?.context === "s1", rep2 && `slot ${rep2.slot} ${rep2.context}`);
+	check("the read-only report ran in slot 2, context s1", rep2?.slot === 2 && rep2?.context === S1, rep2 && `slot ${rep2.slot} ${rep2.context}`);
 	clearInterval(watch);
 	check("never more than max_concurrency running", peak.n <= 2, `peak ${peak.n}`);
+
+	// 6g. Works (v26): ports, close, clean. A server in s1's port range is s1's (st port check from
+	// s1: exit 0; from s2: exit 1, naming s1). Closing refuses --work; cleaning is held by the live
+	// server (a process of the work), and the slot releases s1's session only once it is gone; then
+	// the worktree is removed (without --force) and the branch stays. Uncommitted changes hold it.
+	await api("PATCH", `/api/acp/agents/${DEV}`, { maxConcurrency: 3 });
+	const port = works[S1].portBase;
+	const srv = await waitMsg((await send(DEV, "servidor", pid, S1)).id);
+	check("a server started in work s1, on its ST_PORT_BASE", srv.state === "done" && srv.result_text?.includes(`puerto ${port}`), short(srv.result_text));
+	const own = await waitMsg((await send(DEV, `st: port check ${port}`, pid, S1)).id);
+	check("st port check from s1: it is its own (exit 0)", own.result_text?.includes("exit 0"), short(own.result_text, 160));
+	const other = await waitMsg((await send(DEV, `st: port check ${port}`, pid, S2)).id);
+	check("st port check from s2: someone else's, naming s1 (exit 1)", other.result_text?.includes("exit 1") && other.result_text?.includes(`«${S1}»`), short(other.result_text, 160));
+	const closed = await api("POST", `/api/acp/works/${S1}/close`);
+	check("work s1 closed", closed.status === 200 && closed.body?.state === "closed", JSON.stringify(closed.body?.state));
+	const into = await api("POST", "/api/acp/messages", { to: DEV, body: "x", work: S1 });
+	check("--work into a closed work: 409 work-not-active", into.status === 409 && into.body?.error === "work-not-active", JSON.stringify(into.body));
+	const held = await api("POST", `/api/acp/works/${S1}/clean`);
+	check("cleaning s1 with its server alive: cleanup-pending, the process named", held.status === 409 && held.body?.error === "cleanup-pending" && held.body.reasons.some((r) => r.startsWith("proceso")), JSON.stringify(held.body));
+	await execIn(sids[DEV], ["sh", "-c", "pkill -f 'st-work-server$'; true"]);
+	const released = await waitFor("s1's session released", async () => (await execOut(sids[DEV], `grep -h 'released the session of work ${S1}' /tmp/st-acp-runner-*.log`)).code === 0, 90_000);
+	check("…with the server gone, the slot released s1's ACP session", !!released);
+	const cleaned = await api("POST", `/api/acp/works/${S1}/clean`);
+	check("then s1 is cleaned", cleaned.status === 200 && cleaned.body?.state === "cleaned", JSON.stringify(cleaned.body?.state ?? cleaned.body));
+	const after = await execOut(sids[DEV], `cd /home/developer/workspace && test ! -e .st/ctx/${S1} && git rev-parse --verify --quiet work/${S1}`);
+	check("…the worktree is gone and branch work/s1 stays", after.code === 0, short(after.out));
+	await execIn(sids[DEV], ["sh", "-c", `echo x > /home/developer/workspace/.st/ctx/${S2}/sin-commit.txt`]);
+	await api("POST", `/api/acp/works/${S2}/close`);
+	const dirty = await api("POST", `/api/acp/works/${S2}/clean`);
+	check("uncommitted changes hold s2 (cleanup-pending)", dirty.status === 409 && dirty.body?.reasons?.some((r) => r.includes("sin-commit.txt")), JSON.stringify(dirty.body));
+	await execIn(sids[DEV], ["sh", "-c", `rm /home/developer/workspace/.st/ctx/${S2}/sin-commit.txt`]);
+	const s2Clean = await waitFor("s2 cleaned", async () => (await api("POST", `/api/acp/works/${S2}/clean`)).body?.state === "cleaned", 90_000);
+	check("once removed, s2 is cleaned (its session released first)", !!s2Clean);
 	await api("PATCH", `/api/acp/agents/${DEV}`, { maxConcurrency: 1 });
 
 	// 7. Terminal, Files and Git of the same agent session still answer.
