@@ -3,18 +3,20 @@
 // complementing acp-acceptance.mjs §6f. What it adds:
 //   P1 global cap (ACP_MAX_RUNNING): two agents with max_concurrency 2 each, 4 long messages at once — the
 //      backend never runs more than MAX_RUNNING, and the 4th starts only when one ends;
-//   P2 independent ACP contexts: the default context and context "a" keep their own ACP session (message count
-//      and cwd reported by the test agent), never the other's;
-//   P3 questions: two open at once (default + "a"), each answered in its own message;
-//   P4 caps refused at the API: maxConcurrency out of range, a context for a one-slot agent;
+//   P2 independent ACP contexts: the default context and a work (v26, its own worktree .st/ctx/<id>) keep their
+//      own ACP session (message count and cwd reported by the test agent), never the other's;
+//   P3 questions: two open at once (default + work), each answered in its own message;
+//   P4 caps refused at the API: maxConcurrency out of range, a work for a one-slot agent, a bad work id;
 //   P4b processes: one runner + one adapter per slot (cap 1 → 1, cap 2 → 2);
-//   P5 lowering the cap: after maxConcurrency → 1 a context is refused and the default context keeps working; the
+//   P5 lowering the cap: after maxConcurrency → 1 a message into a work is refused and the default context keeps working; the
 //      idle slot 2 stays until the container restarts (known limit of #744, checked as such);
 //   P7 depth (#746): a recursive chain of consults is cut — 6 nested requests at depths 1..6, the 7th refused
 //      with depth-limit, every request answered at its depth − 1;
 //   P8 rounds (#746): `rondas 8` — 8 consults of one agent to another under one person's message, all at depth 1,
 //      one root, none refused (neither depth-limit nor chain-budget), and no 9th;
 //   P6 resources: memory.events (oom/oom_kill) of the agents' session containers stays 0, memory.peak printed.
+// Named contexts exist only as works (`POST /api/acp/works`, a git worktree made by the backend), so each agent's
+// workspace gets a git repo first; work ids are never reused, so they carry the run's PREFIX.
 // Run the lab with MAX_RUNNING=3:
 //   SRC=<checkout> MAX_RUNNING=3 ./experiments/acp-agents/lab-st.sh up
 //   ST=http://127.0.0.1:3101 MAX_RUNNING=3 node experiments/acp-agents/slots-pilot.mjs
@@ -27,6 +29,7 @@ const MAX_RUNNING = Number(process.env.MAX_RUNNING ?? 3);
 const PREFIX = process.env.PREFIX ?? `p${randomBytes(2).toString("hex")}`;
 const A1 = `${PREFIX}-a1`;
 const A2 = `${PREFIX}-a2`;
+const W = { [A1]: `${A1}-w`, [A2]: `${A2}-w` };
 let cookie = "";
 let failures = 0;
 const created = { sessions: [], project: null };
@@ -66,12 +69,12 @@ async function api(method, path, body) {
 	} catch {}
 	return { status: res.status, body: json ?? text };
 }
-const send = async (to, body, projectId, context) => {
+const send = async (to, body, projectId, work) => {
 	const r = await api("POST", "/api/acp/messages", {
 		to,
 		body,
 		...(projectId ? { projectId } : {}),
-		...(context ? { context } : {}),
+		...(work ? { work } : {}),
 		clientId: randomUUID(),
 	});
 	if (r.status !== 201) throw new Error(`send ${to}: ${r.status} ${JSON.stringify(r.body)}`);
@@ -98,7 +101,7 @@ const agents = async () => (await api("GET", "/api/acp/agents")).body;
 const agentFeed = async (n) => (await api("GET", `/api/acp/agents/${n}/feed`)).body;
 const short = (s, n = 110) => (s ?? "").replace(/\s+/g, " ").slice(0, n);
 const sessionCount = (text) => Number(/sesión ACP: (\d+) mensajes/.exec(text ?? "")?.[1] ?? Number.NaN);
-const cwdOf = (text) => /cwd (\S+)\)/.exec(text ?? "")?.[1] ?? null;
+const cwdOf = (text) => /cwd (\S+)/.exec(text ?? "")?.[1] ?? null;
 // stdout of a command in a session container (exec API, NDJSON events).
 async function execOut(sid, cmd) {
 	await auth();
@@ -138,15 +141,25 @@ async function main() {
 	for (const name of [A1, A2])
 		check(`runner of @${name} online`, !!(await waitFor(async () => (await agents()).find((a) => a.name === name && a.runnerSeenAt))));
 
+	// Works need a git repo in the agent's workspace (no remote: the base falls back to HEAD; nothing here cleans).
+	for (const name of [A1, A2]) {
+		const out = await execOut(sids[name], [
+			"sh",
+			"-c",
+			"cd /home/developer/workspace && git init -q -b main && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m init && echo repo-ok",
+		]);
+		check(`a git repo in @${name}'s workspace`, out.includes("repo-ok"), short(out));
+	}
+
 	// P4. Caps refused at the API.
-	const ctx1 = await api("POST", "/api/acp/messages", { to: A1, body: "hola", projectId: pid, context: "a", clientId: randomUUID() });
-	check("P4 a context for a one-slot agent is refused (400 context-needs-slots)", ctx1.status === 400 && ctx1.body?.error === "context-needs-slots", `${ctx1.status} ${JSON.stringify(ctx1.body)}`);
+	const ctx1 = await api("POST", "/api/acp/works", { agent: A1, id: W[A1] });
+	check("P4 a work for a one-slot agent is refused (400 context-needs-slots)", ctx1.status === 400 && ctx1.body?.error === "context-needs-slots", `${ctx1.status} ${JSON.stringify(ctx1.body)}`);
 	for (const bad of [0, 5, 1.5, "2"]) {
 		const r = await api("PATCH", `/api/acp/agents/${A1}`, { maxConcurrency: bad });
 		check(`P4 maxConcurrency ${JSON.stringify(bad)} refused`, r.status === 400, String(r.status));
 	}
-	const badCtx = await api("POST", "/api/acp/messages", { to: A1, body: "hola", projectId: pid, context: "../x", clientId: randomUUID() });
-	check("P4 a context name outside [a-z0-9-] is refused", badCtx.status === 400, String(badCtx.status));
+	const badCtx = await api("POST", "/api/acp/works", { agent: A1, id: "../x" });
+	check("P4 a work id outside [a-z0-9-] is refused (400 bad-work-id)", badCtx.status === 400 && badCtx.body?.error === "bad-work-id", `${badCtx.status} ${JSON.stringify(badCtx.body)}`);
 	// P4b. A one-slot agent runs exactly one runner and one adapter (no extra slot's resources).
 	const procs = async (sid) => {
 		const out = await execOut(sid, ["sh", "-c", "pgrep -fc '^node --no-warnings /opt/st-acp/st/runner\\.mjs'; pgrep -fc 'test-agent\\.mjs'"]);
@@ -166,12 +179,16 @@ async function main() {
 		return c.runners === 2 && c.adapters === 2 ? c : null;
 	}, 60_000);
 	check("P4b @A1 with max_concurrency 2: two runners, two adapters", !!two, JSON.stringify(two ?? (await procs(sids[A1]))));
+	for (const name of [A1, A2]) {
+		const w = await api("POST", "/api/acp/works", { agent: name, id: W[name] });
+		if (!check(`work ${W[name]} of @${name} created (worktree on work/${W[name]})`, w.status === 201 && w.body?.state === "active" && w.body?.branch === `work/${W[name]}`, `${w.status} ${JSON.stringify(w.body)}`)) return;
+	}
 	const before = { [A1]: await cgroup(sids[A1]), [A2]: await cgroup(sids[A2]) };
 
 	// P1. Global cap: 4 long runs that could all start (2 agents × 2 slots), at most MAX_RUNNING at once. The peak
 	// comes from the backend's own started_at/finished_at (two separate feed reads could add up a run that ended
 	// between them and the one that replaced it).
-	const four = [await send(A1, "esperá 12", pid), await send(A1, "esperá 12", pid, "a"), await send(A2, "esperá 12", pid), await send(A2, "esperá 12", pid, "a")];
+	const four = [await send(A1, "esperá 12", pid), await send(A1, "esperá 12", pid, W[A1]), await send(A2, "esperá 12", pid), await send(A2, "esperá 12", pid, W[A2])];
 	const fourDone = await Promise.all(four.map((m) => waitMsg(m.id)));
 	check("P1 all four done", fourDone.every((m) => m.state === "done"), fourDone.map((m) => m.state).join(","));
 	const edges = fourDone.flatMap((m) => [[Date.parse(m.started_at), 1], [Date.parse(m.finished_at), -1]]).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
@@ -185,19 +202,19 @@ async function main() {
 		check("P1 the run over the cap started only after another ended", starts[MAX_RUNNING] >= firstEnd - 1000, `start ${new Date(starts[MAX_RUNNING]).toISOString()} first end ${new Date(firstEnd).toISOString()}`);
 	}
 
-	// P2. Independent ACP contexts: each keeps its own session (message count) and directory.
+	// P2. Independent ACP contexts (default and the work): each keeps its own session (message count) and directory.
 	const d1 = await waitMsg((await send(A1, "hola default", pid)).id);
-	const a1 = await waitMsg((await send(A1, "hola a", pid, "a")).id);
-	const a2 = await waitMsg((await send(A1, "hola a otra vez", pid, "a")).id);
+	const a1 = await waitMsg((await send(A1, "hola a", pid, W[A1])).id);
+	const a2 = await waitMsg((await send(A1, "hola a otra vez", pid, W[A1])).id);
 	const d2 = await waitMsg((await send(A1, "hola default otra vez", pid)).id);
-	check("P2 context a counts only its own messages", sessionCount(a2.result_text) === sessionCount(a1.result_text) + 1, `${short(a1.result_text, 60)} → ${short(a2.result_text, 60)}`);
+	check("P2 the work counts only its own messages", sessionCount(a2.result_text) === sessionCount(a1.result_text) + 1, `${short(a1.result_text, 60)} → ${short(a2.result_text, 60)}`);
 	check("P2 the default context counts only its own", sessionCount(d2.result_text) === sessionCount(d1.result_text) + 1, `${sessionCount(d1.result_text)} → ${sessionCount(d2.result_text)}`);
-	check("P2 cwd: default = workspace, a = .st/ctx/a", cwdOf(d1.result_text) === "/home/developer/workspace" && /\/\.st\/ctx\/a$/.test(cwdOf(a1.result_text) ?? ""), `${cwdOf(d1.result_text)} | ${cwdOf(a1.result_text)}`);
-	check("P2 slots: default in 1, a in 2", d1.slot === 1 && d2.slot === 1 && a1.slot === 2 && a2.slot === 2, [d1, a1, a2, d2].map((m) => m.slot).join(","));
+	check(`P2 cwd: default = workspace, the work = .st/ctx/${W[A1]}`, cwdOf(d1.result_text) === "/home/developer/workspace" && cwdOf(a1.result_text) === `/home/developer/workspace/.st/ctx/${W[A1]}`, `${cwdOf(d1.result_text)} | ${cwdOf(a1.result_text)}`);
+	check("P2 slots: default in 1, the work in 2", d1.slot === 1 && d2.slot === 1 && a1.slot === 2 && a2.slot === 2, [d1, a1, a2, d2].map((m) => m.slot).join(","));
 
-	// P3. Two questions open at once, one per context; each answer lands in its own message.
+	// P3. Two questions open at once, one per context (default and the work); each answer lands in its own message.
 	const qd = await send(A1, "preguntá: ¿base? | Postgres | SQLite", pid);
-	const qa = await send(A1, "preguntá: ¿color? | rojo | verde", pid, "a");
+	const qa = await send(A1, "preguntá: ¿color? | rojo | verde", pid, W[A1]);
 	const open = await waitFor(async () => {
 		const qs = (await (await api("GET", `/api/acp/projects/${pid}/feed`)).body)?.questions?.filter((q) => q.state === "open") ?? [];
 		const byMsg = Object.fromEntries(qs.map((q) => [q.message_id, q]));
@@ -211,11 +228,11 @@ async function main() {
 		check("P3 each answer reached its own run", /Elegiste: SQLite/.test(rd.result_text ?? "") && /Elegiste: verde/.test(ra.result_text ?? ""), `${short(rd.result_text, 40)} | ${short(ra.result_text, 40)}`);
 	}
 
-	// P5. Lowering the cap: slot 2 takes nothing more; a new context message is refused.
+	// P5. Lowering the cap: slot 2 takes nothing more; a new message into the (still active) work is refused.
 	const low = await api("PATCH", `/api/acp/agents/${A1}`, { maxConcurrency: 1 });
 	check("P5 max_concurrency back to 1", low.status === 200 && low.body?.maxConcurrency === 1, String(low.status));
-	const after = await api("POST", "/api/acp/messages", { to: A1, body: "hola", projectId: pid, context: "a", clientId: randomUUID() });
-	check("P5 a context message is refused once the cap is 1", after.status === 400, String(after.status));
+	const after = await api("POST", "/api/acp/messages", { to: A1, body: "hola", projectId: pid, work: W[A1], clientId: randomUUID() });
+	check("P5 a message into the work is refused once the cap is 1 (400 context-needs-slots)", after.status === 400 && after.body?.error === "context-needs-slots", `${after.status} ${JSON.stringify(after.body)}`);
 	const dflt = await waitMsg((await send(A1, "hola", pid)).id);
 	check("P5 the default context keeps working in slot 1", dflt.state === "done" && dflt.slot === 1, `${dflt.state} slot ${dflt.slot}`);
 	// #744: lowering the cap leaves the extra slot idle (it claims nothing) until the container restarts — a known
