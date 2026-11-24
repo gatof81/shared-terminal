@@ -2201,7 +2201,7 @@ export class AcpThread {
 			if (n.toLowerCase().includes(q)) {
 				const a = this.agents.get(n)!;
 				const st = teamState(a, { here, titleOf: this.titleOf, interrupted: false });
-				out.push({ key: n, label: `@${n}`, sub: st.full ?? st.label });
+				out.push({ key: n, label: `@${n}`, sub: st.label });
 			}
 		return out;
 	}
@@ -2344,7 +2344,7 @@ export class AcpThread {
 					c.team || c.agents.includes(n),
 					face,
 					`@${n}`,
-					c.team ? "en Todo el equipo" : (st.full ?? st.label),
+					c.team ? "en Todo el equipo" : st.label,
 					c.team,
 				),
 			);

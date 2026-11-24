@@ -1899,13 +1899,13 @@ export interface AcpAgentInfo {
 	queue?: AcpMessageRef[];
 	/** v27: its requests to other agents not answered yet. */
 	waitingFor?: Array<AcpMessageRef & { agent: string }>;
-	/** v27: its open question to the person, if any. */
-	question?: { id: number; messageId: number | null; conversationId: string | null } | null;
 	/**
-	 * A topic (or work) its slot is kept in by a process it left running
-	 * there (#761): it cannot switch to another topic until that ends.
+	 * A slot kept in a topic (or a work) by a process the agent left running
+	 * there (#761): it cannot take another topic until that process ends.
 	 */
 	heldBy?: Array<{ conversationId: string | null; work: string | null; since: string }>;
+	/** v27: its open question to the person, if any. */
+	question?: { id: number; messageId: number | null; conversationId: string | null } | null;
 	/** Login methods its adapter advertises (terminal-auth), for "Conectar cuenta". */
 	loginMethods?: Array<{ id: string; name: string; description: string }>;
 }

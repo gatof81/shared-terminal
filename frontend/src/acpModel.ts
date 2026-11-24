@@ -559,8 +559,8 @@ export function messagePlace(
 export interface TeamState {
 	label: string;
 	tone: "ok" | "busy" | "warn" | "err" | "idle";
-	/** The whole sentence where the short label leaves something out (a tooltip). */
-	full?: string;
+	/** The rail's words when they differ from `label` (#757 b: a held slot reads «ocupado»). */
+	short?: string;
 }
 
 export function teamState(
@@ -582,23 +582,20 @@ export function teamState(
 	const queued = a.queue?.length ?? a.pending ?? 0;
 	const inQueue = queued ? ` · ${queued} en cola` : "";
 	const running = a.runningIn ?? (a.running ?? []).map((id) => ({ id, conversationId: null }));
-	if (running.length) {
+	// A slot held by a process it left running (#757 b): busy in that topic
+	// even with no message running — «ocupado en «X» · proceso en curso».
+	const held = a.heldBy ?? [];
+	const process = held.length ? " · proceso en curso" : "";
+	if (running.length || held.length) {
 		if (ctx.here !== null && running.some((r) => r.conversationId === ctx.here))
 			return { label: `trabajando aquí${inQueue}`, tone: "busy" };
-		const titled = running
+		const titled = [...running, ...held]
 			.map((r) => (r.conversationId ? ctx.titleOf(r.conversationId) : null))
 			.find((t): t is string => t !== null);
-		return { label: `${titled ? `ocupado en «${titled}»` : "ocupado"}${inQueue}`, tone: "busy" };
-	}
-	// Kept in a topic by a process it left running there (#757 b): on the
-	// rail «ocupado»; the whole sentence where there is room.
-	const held = a.heldBy?.[0];
-	if (held) {
-		const t = held.conversationId ? ctx.titleOf(held.conversationId) : null;
 		return {
-			label: `ocupado${inQueue}`,
+			label: `${titled ? `ocupado en «${titled}»` : "ocupado"}${process}${inQueue}`,
 			tone: "busy",
-			full: `${t ? `ocupado en «${t}»` : "ocupado"} · proceso en curso${inQueue}`,
+			...(process ? { short: `ocupado${inQueue}` } : {}),
 		};
 	}
 	const waiting = a.waitingFor?.[0];
