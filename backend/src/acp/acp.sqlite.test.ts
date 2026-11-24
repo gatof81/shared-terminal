@@ -1415,7 +1415,7 @@ describe("ACP works: creation, delegation (v26)", () => {
 		fx.freeKb = 1024 * 1024;
 		try {
 			const r = await create(owner, "lleno");
-			expect(r.body).toMatchObject({ error: "low-disk", freeMb: 1024, minFreeMb: 3072 });
+			expect(r.body).toMatchObject({ error: "low-disk", freeMb: 1024, minFreeMb: 20480 });
 		} finally {
 			fx.freeKb = 50 * 1024 * 1024;
 		}

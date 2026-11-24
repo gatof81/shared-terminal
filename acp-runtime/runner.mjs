@@ -96,6 +96,7 @@ const PROTOCOL = [
 	"Cualquier otra tarea en segundo plano es trabajo pendiente: esperá su resultado antes de dar el pedido por terminado.",
 	'Para encargar un trabajo aislado (su propio worktree, rama work/<id> y puertos): st work new @agente <id>, y después st send @agente --work <id> "texto"; st work list, st work close <id> y st work clean <id> completan el ciclo.',
 	"En un trabajo usá solo los puertos de tu rango (ST_PORT_BASE a ST_PORT_BASE+99). Después de levantar un servidor comprobá con st port check <puerto> que quien escucha es tu proceso: un HTTP 200 no prueba nada. Si el bind falla, no uses el servidor de otro. Si una herramienta no permite cambiar de puerto, decilo y no la corras en paralelo.",
+	"Al terminar un trabajo, st work clean no borra el worktree si quedan archivos ignorados que no sean node_modules/ o dist/ (test-results/, playwright-report/, coverage/, un .env…): no es un fallo; si no los necesitás, borralos vos y repetí st work clean; si los necesitás, preservalos antes.",
 ].join(" ");
 
 const log = (...a) => console.log(new Date().toISOString(), `[${AGENT}${SLOT === 1 ? "" : `#${SLOT}`}]`, ...a);

@@ -91,7 +91,7 @@ services:
       - ACP_MAX_DEPTH=${ACP_MAX_DEPTH:-6}
       - ACP_MAX_CHAIN=${ACP_MAX_CHAIN:-40}
       - ACP_MAX_RUNNING=${ACP_MAX_RUNNING:-6}
-      - ACP_WORK_MIN_FREE_MB=${ACP_WORK_MIN_FREE_MB:-3072}
+      - ACP_WORK_MIN_FREE_MB=${ACP_WORK_MIN_FREE_MB:-20480}
       # 1 ⇒ also installs the deterministic test adapter as runtime
       # `st-test-agent` (no model, no credentials) for end-to-end checks.
       - ACP_TEST_RUNTIME=${ACP_TEST_RUNTIME:-}
