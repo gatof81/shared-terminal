@@ -56,6 +56,8 @@ export interface AcpConfig {
 	maxRunning: number;
 	/** Round budget: agent → agent requests allowed under one person's message (ACP_MAX_CHAIN). */
 	maxChain: number;
+	/** Free space the agent's workspace must have to create a work (ACP_WORK_MIN_FREE_MB). */
+	workMinFreeMb: number;
 	/** Install the deterministic test adapter as runtime `st-test-agent` (ACP_TEST_RUNTIME=1). */
 	testRuntime: boolean;
 }
@@ -71,6 +73,7 @@ export function acpConfigFromEnv(workspaceRoot: string, port: number): AcpConfig
 		maxDepth: Number(env.ACP_MAX_DEPTH ?? DEFAULT_MAX_DEPTH),
 		maxRunning: Number(env.ACP_MAX_RUNNING ?? 6),
 		maxChain: Number(env.ACP_MAX_CHAIN ?? 40),
+		workMinFreeMb: Number(env.ACP_WORK_MIN_FREE_MB ?? 3072),
 		testRuntime: env.ACP_TEST_RUNTIME === "1",
 		backendUrl: env.ACP_BACKEND_URL ?? `http://st-backend:${port}`,
 		// src/acp (tsx) and dist/acp (image, which copies it to /acp-runtime)

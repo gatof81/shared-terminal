@@ -39,6 +39,78 @@ vi.mock("../auth.js", async (orig) => {
 });
 
 let db: DatabaseSyncT;
+
+// The agent containers, for works (acp/works.ts runs three fixed scripts in
+// them): what is on disk per session — directories, old ACP sessions, branches
+// — and how the next exec behaves. Recognised by what each script does.
+type Disk = { dirs: Set<string>; sessions: Set<string>; branches: Set<string> };
+const disks = new Map<string, Disk>();
+const diskOf = (sid: string) => {
+	let d = disks.get(sid);
+	if (!d) {
+		d = { dirs: new Set(), sessions: new Set(), branches: new Set() };
+		disks.set(sid, d);
+	}
+	return d;
+};
+const fx = {
+	running: true,
+	freeKb: 50 * 1024 * 1024,
+	repo: true,
+	/** The worktree add: "ok", fails ("fail": nothing made), "throw" after making it, "cut" making nothing, "half" (branch only). */
+	create: "ok" as "ok" | "fail" | "throw" | "cut" | "half",
+	calls: [] as string[],
+};
+const out = (s: string, exitCode = 0) => ({
+	stdout: Buffer.from(s),
+	stderr: Buffer.alloc(0),
+	exitCode,
+	truncated: false,
+	timedOut: false,
+});
+const container = {
+	runningContainerId: async (name: string) => (fx.running ? `cid-${name}` : null),
+	execCapture: async (sid: string, cmd: string[]) => {
+		const [script, , id, arg] = cmd.slice(2);
+		const d = diskOf(sid);
+		if (script.includes("free_kb")) {
+			fx.calls.push(`preflight ${id} ${arg}`);
+			if (!fx.repo) return out("not-a-repo\n");
+			const lines = [`free_kb=${fx.freeKb}`];
+			if (d.dirs.has(id)) lines.push("exists=directory");
+			if (d.sessions.has(id)) lines.push("exists=session");
+			if (d.branches.has(id)) lines.push("exists=branch");
+			if (arg === "no-such-ref") lines.push(`bad-base=${arg}`);
+			else
+				lines.push(
+					`base=${arg || "origin/main"}`,
+					`sha=${arg === "v1" ? "1".repeat(40) : "b".repeat(40)}`,
+				);
+			return out(`${lines.join("\n")}\n`);
+		}
+		if (script.includes("worktree add")) {
+			fx.calls.push(`create ${id} ${arg}`);
+			const mode = fx.create;
+			fx.create = "ok";
+			if (mode === "fail" || mode === "cut") {
+				if (mode === "cut") throw new Error("exec stream cut");
+				return out("", 6);
+			}
+			if (mode === "half") {
+				d.branches.add(id);
+				return out("", 6);
+			}
+			d.dirs.add(id);
+			d.branches.add(id);
+			if (mode === "throw") throw new Error("exec stream cut");
+			return out("created\n");
+		}
+		fx.calls.push(`inspect ${id}`);
+		if (d.dirs.has(id))
+			return out(d.branches.has(id) ? `state=ok\nsha=${"b".repeat(40)}\n` : "state=other\n");
+		return out(d.branches.has(id) ? "state=branch-only\n" : "state=none\n");
+	},
+};
 const realFetch = globalThis.fetch;
 
 function run(sql: string, params: unknown[]) {
@@ -125,6 +197,8 @@ beforeAll(async () => {
 	const { AcpAgents, acpConfigFromEnv } = await import("./agents.js");
 	const { buildAcpRouter } = await import("../routes/acp.js");
 	acp = new AcpAgents({ ...acpConfigFromEnv("/nonexistent", 3001), maxDepth: 2 }, {} as never);
+	const { AcpWorks } = await import("./works.js");
+	const works = new AcpWorks(acp.config, container as never);
 	acp.onEvent((owner, ev) =>
 		events.push({ owner, type: ev.type, ...(ev.type === "message" ? { id: ev.message.id } : {}) }),
 	);
@@ -134,7 +208,7 @@ beforeAll(async () => {
 	const alien = await acp.create(SID.alien, OTHER, "ajeno");
 	for (const a of [arq, dev, solo, alien]) tokens[a.name] = acp.tokenFor(a.agent_id);
 	const app = express();
-	app.use("/api/acp", buildAcpRouter(acp));
+	app.use("/api/acp", buildAcpRouter(acp, works));
 	server = app.listen(0);
 	base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/acp`;
 });
@@ -944,8 +1018,8 @@ describe("ACP slots: contexts, caps and attribution (v24)", () => {
 		call(as("multi"), "POST", "/runner/claim", { slot, ...(context ? { context } : {}) });
 	const settle = (id: number, text = ".") =>
 		call(as("multi"), "POST", `/runner/messages/${id}/result`, { state: "done", text });
-	const sendTo = (context?: string, body = "x") =>
-		call(owner, "POST", "/messages", { to: "multi", body, ...(context ? { context } : {}) });
+	const sendTo = (work?: string, body = "x") =>
+		call(owner, "POST", "/messages", { to: "multi", body, ...(work ? { work } : {}) });
 
 	beforeAll(async () => {
 		db.prepare(
@@ -955,24 +1029,32 @@ describe("ACP slots: contexts, caps and attribution (v24)", () => {
 		tokens.multi = acp.tokenFor(multi.agent_id);
 		tokens["multi@a"] = acp.tokenFor(multi.agent_id, "a");
 		tokens["multi@b"] = acp.tokenFor(multi.agent_id, "b");
+		// Named contexts are works (v26): these two are active, as if created.
+		for (const [id, port] of [
+			["a", 20000],
+			["b", 20100],
+		])
+			db.prepare(
+				"INSERT INTO agent_works (owner_user_id, id, agent_id, project_id, branch, base_sha, port_base, state, created_by) VALUES (?, ?, ?, 'p-1', ?, 'abc', ?, 'active', 'owner')",
+			).run(OWNER, id, multi.agent_id, `work/${id}`, port);
 	});
 
 	it("v24 is recorded; an agent starts with one slot and a named context needs more", async () => {
 		expect(db.prepare("SELECT 1 FROM schema_migrations WHERE version = 24").get()).toBeTruthy();
 		expect(multi.max_concurrency).toBe(1);
 		expect((await sendTo("a")).body.error).toBe("context-needs-slots");
-		expect((await sendTo("Mal_Nombre")).body.error).toBe("bad-context");
+		expect((await sendTo("Mal_Nombre")).body.error).toBe("bad-work-id");
 		expect((await call(owner, "PATCH", "/agents/multi", { maxConcurrency: 9 })).status).toBe(400);
 		expect((await call(owner, "PATCH", "/agents/multi", { maxConcurrency: "2" })).status).toBe(400);
 		const p = await call(owner, "PATCH", "/agents/multi", { maxConcurrency: 2 });
 		expect(p.body.maxConcurrency).toBe(2);
-		// Only the person places a message in a context.
-		await sendTo(undefined, "para que arquitecto trabaje");
+		// A work is its agent's: another one cannot be sent into it.
+		await sendTo(undefined, "para que multi trabaje");
 		const r = await call(as("multi"), "POST", "/runner/claim");
 		expect(
-			(await call(as("multi"), "POST", "/messages", { to: "developer", body: "y", context: "a" }))
-				.body.error,
-		).toBe("context-owner-only");
+			(await call(as("multi"), "POST", "/messages", { to: "developer", body: "y", work: "a" })).body
+				.error,
+		).toBe("work-not-yours");
 		await settle(r.body.id);
 	});
 
@@ -984,8 +1066,20 @@ describe("ACP slots: contexts, caps and attribution (v24)", () => {
 		const c2 = await claim(2);
 		expect(c2.body).toMatchObject({ id: m2.id, slot: 2, context: "a" });
 		expect(c2.body.contextToken).toBe(tokens["multi@a"]);
+		expect(c2.body.work).toEqual({
+			id: "a",
+			branch: "work/a",
+			dir: "/home/developer/workspace/.st/ctx/a",
+			portBase: 20000,
+		});
 		const c1 = await claim(1);
-		expect(c1.body).toMatchObject({ id: m1.id, slot: 1, context: null, contextToken: null });
+		expect(c1.body).toMatchObject({
+			id: m1.id,
+			slot: 1,
+			context: null,
+			contextToken: null,
+			work: null,
+		});
 		// slot 2 busy: 409; slot 3 does not exist with max 2: nothing.
 		expect((await claim(2)).status).toBe(409);
 		expect((await claim(3)).status).toBe(204);
@@ -1209,5 +1303,217 @@ describe("ACP chains: depth is nesting, rounds have a budget (v25)", () => {
 		} finally {
 			acp.config.maxChain = prev;
 		}
+	});
+});
+
+// v26: a named context exists only as a work, created by the backend (in the
+// agent's container) before its first message.
+describe("ACP works: creation, delegation (v26)", () => {
+	const SIDW = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+	const SIDV = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+	const create = (who: Who, id: string, extra: Record<string, unknown> = {}, agent = "obrero") =>
+		call(who, "POST", "/works", { agent, id, ...extra });
+	const row = (id: string) =>
+		db.prepare("SELECT * FROM agent_works WHERE owner_user_id = ? AND id = ?").get(OWNER, id) as
+			| { state: string; note: string | null; port_base: number; base_sha: string | null }
+			| undefined;
+
+	beforeAll(async () => {
+		for (const [sid, name] of [
+			[SIDW, "obrero"],
+			[SIDV, "vecino"],
+		]) {
+			db.prepare(
+				"INSERT INTO sessions (session_id, user_id, name, container_name, status) VALUES (?, ?, ?, ?, 'running')",
+			).run(sid, OWNER, name, `st-${sid.slice(0, 12)}`);
+			const a = await acp.create(sid, OWNER, name, { projectId: "p-1" });
+			tokens[name] = acp.tokenFor(a.agent_id);
+			await acp.setMaxConcurrency(OWNER, name, 3);
+		}
+	});
+
+	it("v26 is recorded; the person creates a work: worktree on work/<id>, ports, active", async () => {
+		expect(db.prepare("SELECT 1 FROM schema_migrations WHERE version = 26").get()).toBeTruthy();
+		const r = await create(owner, "st-42");
+		expect(r.status).toBe(201);
+		expect(r.body).toMatchObject({
+			id: "st-42",
+			agent: "obrero",
+			projectId: "p-1",
+			branch: "work/st-42",
+			dir: "/home/developer/workspace/.st/ctx/st-42",
+			baseSha: "b".repeat(40),
+			portBase: 20000,
+			state: "active",
+			createdBy: "owner",
+		});
+		expect(fx.calls.slice(-2)).toEqual(["preflight st-42 ", `create st-42 ${"b".repeat(40)}`]);
+		// The same POST again: the same work, nothing run in the container.
+		fx.calls = [];
+		const again = await create(owner, "st-42");
+		expect(again.status).toBe(200);
+		expect(again.body.portBase).toBe(20000);
+		expect(fx.calls).toEqual([]);
+		// The base, when given, is what the worktree starts from.
+		expect((await create(owner, "st-43", { base: "v1" })).body.baseSha).toBe("1".repeat(40));
+	});
+
+	it("who may create: the person, or an agent of the recipient's project; caps and session first", async () => {
+		const byAgent = await create(as("arquitecto"), "por-arq");
+		expect(byAgent.status).toBe(201);
+		expect(byAgent.body.createdBy).toBe("arquitecto");
+		expect((await create(as("solo"), "por-solo")).body.error).toBe("work-other-project");
+		expect((await create(as("ajeno"), "x-1")).body.error).toBe("unknown-recipient");
+		expect((await create(owner, "dev-1", {}, "developer")).body.error).toBe("context-needs-slots");
+		fx.running = false;
+		try {
+			expect((await create(owner, "parado")).status).toBe(409);
+			expect((await create(owner, "parado")).body.error).toBe("session-not-running");
+		} finally {
+			fx.running = true;
+		}
+		expect(row("parado")).toBeUndefined();
+		for (const [id, base] of [
+			["Mal", undefined],
+			["ok-1", "-x"],
+			["ok-1", "a..b"],
+			["ok-1", "main@{1}"],
+		])
+			expect((await create(owner, id as string, base ? { base } : {})).status).toBe(400);
+		expect((await create(owner, "ok-1", { base: "no-such-ref" })).body.error).toBe("bad-base");
+		// A work id is the owner's, for one agent, never reused.
+		const other = await create(owner, "st-42", {}, "vecino");
+		expect(other.status).toBe(409);
+		expect(other.body).toMatchObject({ error: "work-exists" });
+	});
+
+	it("never over what is there; disk and repo are checked first — nothing is written", async () => {
+		const d = diskOf(SIDW);
+		d.sessions.add("e2p-a");
+		d.dirs.add("e2p-b");
+		d.branches.add("e2p-c");
+		for (const [id, found] of [
+			["e2p-a", "session"],
+			["e2p-b", "directory"],
+			["e2p-c", "branch"],
+		]) {
+			const r = await create(owner, id);
+			expect(r.status).toBe(409);
+			expect(r.body).toMatchObject({ error: "work-path-exists", found: [found] });
+			expect(row(id)).toBeUndefined();
+		}
+		fx.freeKb = 1024 * 1024;
+		try {
+			const r = await create(owner, "lleno");
+			expect(r.body).toMatchObject({ error: "low-disk", freeMb: 1024, minFreeMb: 3072 });
+		} finally {
+			fx.freeKb = 50 * 1024 * 1024;
+		}
+		fx.repo = false;
+		try {
+			expect((await create(owner, "sin-repo")).body.error).toBe("not-a-repo");
+		} finally {
+			fx.repo = true;
+		}
+		expect(row("lleno")).toBeUndefined();
+	});
+
+	it("an error or unknown outcome of the worktree add: the real state decides", async () => {
+		// Made, but the answer was lost: active.
+		fx.create = "throw";
+		const lost = await create(owner, "perdido");
+		expect(lost.status).toBe(201);
+		expect(row("perdido")?.state).toBe("active");
+		// Nothing made: stays creating, and the same POST creates it.
+		fx.create = "cut";
+		const cut = await create(owner, "cortado");
+		expect(cut.status).toBe(409);
+		expect(cut.body).toMatchObject({ error: "work-incomplete", found: "none" });
+		await vi.waitFor(() => expect(row("cortado")?.note).toMatch(/repetí el pedido/));
+		expect(row("cortado")?.state).toBe("creating");
+		const retry = await create(owner, "cortado");
+		expect(retry.status).toBe(201);
+		expect(row("cortado")).toMatchObject({ state: "active", note: null });
+		// Something else (a branch without its worktree): left as is, said, never replaced.
+		fx.create = "half";
+		const half = await create(owner, "a-medias");
+		expect(half.body).toMatchObject({ error: "work-incomplete", found: "branch-only" });
+		fx.calls = [];
+		const again = await create(owner, "a-medias");
+		expect(again.body).toMatchObject({ error: "work-incomplete", found: "branch-only" });
+		expect(fx.calls).toEqual(["inspect a-medias"]);
+		expect(row("a-medias")?.state).toBe("creating");
+	});
+
+	it("port blocks: the lowest free among the agent's works not cleaned, unique under concurrency", async () => {
+		const ports = (
+			db
+				.prepare(
+					"SELECT port_base FROM agent_works w JOIN acp_agents a ON a.agent_id = w.agent_id WHERE a.name = 'obrero' AND state != 'cleaned' ORDER BY port_base",
+				)
+				.all() as Array<{ port_base: number }>
+		).map((r) => r.port_base);
+		expect(new Set(ports).size).toBe(ports.length);
+		expect(ports).toEqual(ports.map((_, i) => 20000 + 100 * i));
+		// Concurrent creations never share a block.
+		const rs = await Promise.all(["c-1", "c-2", "c-3"].map((id) => create(owner, id)));
+		const got = rs.map((r) => r.body.portBase);
+		expect(new Set(got).size).toBe(3);
+		// A cleaned work frees its block; its id stays taken.
+		db.prepare(
+			"UPDATE agent_works SET state = 'cleaned' WHERE owner_user_id = ? AND id = 'st-42'",
+		).run(OWNER);
+		const reuse = await create(owner, "reusa");
+		expect(reuse.body.portBase).toBe(20000);
+		expect((await create(owner, "st-42")).body).toMatchObject({
+			error: "work-exists",
+			state: "cleaned",
+		});
+		// Another agent's blocks are its own.
+		expect((await create(owner, "del-vecino", {}, "vecino")).body.portBase).toBe(20000);
+	});
+
+	it("delegation: --work runs in that work's context; only an active work of the recipient, of the sender's project", async () => {
+		const send = (who: Who, work: string, to = "obrero") =>
+			call(who, "POST", "/messages", { to, body: `en ${work}`, work });
+		expect((await send(owner, "no-existe")).body.error).toBe("work-not-found");
+		expect((await send(owner, "del-vecino")).body.error).toBe("work-not-yours");
+		expect((await send(owner, "a-medias")).body).toMatchObject({
+			error: "work-not-active",
+			state: "creating",
+		});
+		expect((await send(owner, "st-42")).body.error).toBe("work-not-active");
+		const ok = await send(owner, "por-arq");
+		expect(ok.status).toBe(201);
+		expect(ok.body.context).toBe("por-arq");
+		// An agent: from a running message, into a work of its project.
+		const m = (await call(owner, "POST", "/messages", { to: "arquitecto", body: "delegá" })).body;
+		const c = await call(as("arquitecto"), "POST", "/runner/claim");
+		expect(c.body.id).toBe(m.id);
+		const del = await send(as("arquitecto"), "perdido");
+		expect(del.status).toBe(201);
+		expect(del.body).toMatchObject({ context: "perdido", from_id: "arquitecto", depth: 1 });
+		// solo is in no project: never into a work.
+		expect((await send(as("solo"), "perdido")).body.error).toBe("work-other-project");
+		await call(as("arquitecto"), "POST", `/runner/messages/${c.body.id}/result`, {
+			state: "done",
+			text: ".",
+		});
+		// The free `context` field is gone: ignored, the message runs in the default context.
+		const free = await call(owner, "POST", "/messages", {
+			to: "obrero",
+			body: "x",
+			context: "libre",
+		});
+		expect(free.body.context).toBeNull();
+	});
+
+	it("GET /works: the person sees all; an agent its own and its project's", async () => {
+		const all = (await call(owner, "GET", "/works")).body as Array<{ id: string; agent: string }>;
+		expect(all.map((w) => w.id)).toEqual(expect.arrayContaining(["a", "st-42", "del-vecino"]));
+		const solo = (await call(as("solo"), "GET", "/works")).body;
+		expect(solo).toEqual([]);
+		const arq = (await call(as("arquitecto"), "GET", "/works")).body as Array<{ id: string }>;
+		expect(arq.map((w) => w.id)).toContain("st-42");
 	});
 });
