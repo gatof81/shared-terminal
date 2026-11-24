@@ -219,9 +219,9 @@ async function main() {
 	check(`W1 ${WA} again: idempotent (same row, no second worktree)`, (await works(DEV)).filter((x) => x.id === WA).length === 1, consultOf(again.result_text));
 
 	// W2. @arq delegates both to @dev, each with `st send --work`; each task runs long enough to overlap.
-	// CONTRACT: directive `delegá <id> a @x: <texto>` → `st send @x --work <id> "<texto>"`.
+	// Directive `delegá en <id> a @x: <texto>` → `st send @x --work <id> "<texto>"`.
 	const delegate = async (from, w, text) => {
-		const m = await waitMsg((await send(from, `delegá ${w} a @${DEV}: ${text}`, pid)).id);
+		const m = await waitMsg((await send(from, `delegá en ${w} a @${DEV}: ${text}`, pid)).id);
 		return { sent: m, req: m.state === "done" ? await requestTo(pid, from, w, text, m.id - 1, false) : null };
 	};
 	const da = await delegate(ARQ, WA, "esperá 20");
@@ -301,15 +301,15 @@ async function main() {
 	check("W9 the reply to @rev's request came back to @rev's default context", !!replyToRev && replyToRev.to_id === REV && !workOf(replyToRev), `${replyToRev?.to_id} ${workOf(replyToRev)}`);
 
 	// W11. One server per work, each in its range; `st port check` tells mine from the other's; a bind on a taken
-	// port is detected. CONTRACT: directives `servidor <n>` (a process `st-work-server` on ST_PORT_BASE+n, cwd =
+	// port is detected. Directives `servidor` (a process `st-work-server` on ST_PORT_BASE, cwd =
 	// the work, declared ST-PERSISTENT, answers «puerto <p>»), `puerto <p>` (`st port check <p>`, answers its output
 	// and «exit <code>»), `ocupá <p>` (tries to bind p and answers the error or «bound»).
 	const onWork = async (w, text) => {
 		const d = await delegate(ARQ, w, text);
 		return d.req ? await waitMsg(d.req.id) : null;
 	};
-	const sva = await onWork(WA, "servidor 1");
-	const svb = await onWork(WB, "servidor 1");
+	const sva = await onWork(WA, "servidor");
+	const svb = await onWork(WB, "servidor");
 	const [pa, pb] = [sva, svb].map((m) => Number(/puerto (\d+)/.exec(m?.result_text ?? "")?.[1] ?? Number.NaN));
 	check("W11 two servers, each in its own range (100 apart or more)", Number.isFinite(pa) && Number.isFinite(pb) && Math.abs(pa - pb) >= 100, `${pa} | ${pb} (${consultOf(sva?.result_text)} | ${consultOf(svb?.result_text)})`);
 	check("W11 both servers' messages closed (ST-PERSISTENT)", sva?.state === "done" && svb?.state === "done", `${sva?.state}/${svb?.state}`);
@@ -342,17 +342,17 @@ async function main() {
 
 	// W12. Cleanup is conservative. st-b still has its server (W11) ⇒ cleanup-pending with a process reason; after
 	// the pilot stops that server, a useful ignored `.env` ⇒ cleanup-pending naming it. Nothing removed either
-	// time. CONTRACT: directives `cerrá trabajo @x <id>` / `limpiá trabajo @x <id>` (`st work close|clean`); the
+	// time. Directives `cerrá <id>` / `limpiá <id>` (`st work close|clean`, answer + «exit <code>»). CONTRACT: the
 	// reasons as the row reports them.
 	const op = async (text) => waitMsg((await send(ARQ, text, pid)).id);
 	// An agent outside the project cannot close or clean the work (its own `st` gets the refusal).
 	for (const verb of ["cerrá", "limpiá"]) {
-		const o = await waitMsg((await send(OUT, `${verb} trabajo @${DEV} ${WB}`)).id);
+		const o = await waitMsg((await send(OUT, `${verb} ${WB}`)).id);
 		check(`W12 @${OUT} (outside the project): «${verb}» on st-b refused`, (exitOfAny(o) ?? 0) !== 0 && (await work(DEV, WB))?.state === "active", short(o.result_text, 120));
 	}
 	const reasons = (row, m) => JSON.stringify(row?.reasons ?? row?.cleanupReasons ?? row?.cleanup_reasons ?? m?.result_text ?? "");
-	const cl1 = await op(`cerrá trabajo @${DEV} ${WB}`);
-	const cn1 = await op(`limpiá trabajo @${DEV} ${WB}`);
+	const cl1 = await op(`cerrá ${WB}`);
+	const cn1 = await op(`limpiá ${WB}`);
 	const rowB1 = await work(DEV, WB);
 	check(
 		"W12 a live process in st-b ⇒ cleanup-pending (process), worktree kept",
@@ -360,7 +360,7 @@ async function main() {
 		`${short(cl1.result_text, 60)} | ${short(cn1.result_text, 80)} | ${reasons(rowB1, cn1)}`,
 	);
 	await sh(dev, `for p in $(pgrep -f st-work-server); do readlink /proc/$p/cwd | grep -q '/.st/ctx/${WB}' && kill $p; done; sleep 1; echo SECRET=1 > ${WS}/.st/ctx/${WB}/.env`);
-	const cn2 = await op(`limpiá trabajo @${DEV} ${WB}`);
+	const cn2 = await op(`limpiá ${WB}`);
 	const rowB2 = await work(DEV, WB);
 	check(
 		// Each attempt re-evaluates everything and returns every reason in force: require each, never "only".
@@ -375,8 +375,8 @@ async function main() {
 	await op(`trabajo nuevo @${DEV} ${WC}`);
 	const cc = await onWork(WC, "commit c.txt: descartable");
 	const sc = await acpSession(WC);
-	const cl3 = await op(`cerrá trabajo @${DEV} ${WC}`);
-	const cn3 = await op(`limpiá trabajo @${DEV} ${WC}`);
+	const cl3 = await op(`cerrá ${WC}`);
+	const cn3 = await op(`limpiá ${WC}`);
 	const rowC = await work(DEV, WC);
 	const goneC = (await sh(dev, `cd ${WS}; test -e .st/ctx/${WC} && echo dir; git worktree list --porcelain | grep -c '/.st/ctx/${WC}$'`)).trim();
 	check("W13 st-c cleaned: worktree removed (dir and git's list)", goneC === "0", `${goneC} · ${short(cc?.result_text, 50)} | ${short(cl3.result_text, 50)} | ${short(cn3.result_text, 50)} | ${JSON.stringify(rowC)}`);
