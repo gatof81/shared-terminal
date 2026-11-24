@@ -45,6 +45,14 @@ done
 SSH_ORIGINAL_COMMAND=status PATH="$T/fakebin:$PATH" bash "$here/bin/st-ops-dispatch" >"$T/out" 2>&1
 [[ $? == 2 ]] && ok || ko "dispatch without SSH_USER_AUTH must refuse"
 
+# systemd-run records its argv; $T/sdrun-fail makes it fail.
+cat >"$T/fakebin/systemd-run" <<EOF
+#!/bin/bash
+printf '%s\n' "\$*" >>"$T/systemd-run.log"
+[[ ! -e $T/sdrun-fail ]]
+EOF
+chmod +x "$T/fakebin/systemd-run"
+
 # ── Upstream repo (stands in for GitHub) ──
 up="$T/upstream"
 git init -q -b main "$up"
@@ -185,6 +193,9 @@ st() {
 		# A clock one second ahead per call: request ids (second resolution) never collide here.
 		tick=$(($(cat "$T/tick" 2>/dev/null || echo 0) + 1)); echo "$tick" >"$T/tick"
 		now_epoch() { if [[ -f $T/now ]]; then cat "$T/now"; else echo $(($(date -u +%s) + tick)); fi; }
+		# The chain's unit: a fake systemd-run records it (the tests then run `chain` as the unit would).
+		PATH="$T/fakebin:$PATH"
+		CHAIN_POLL=1 CHAIN_WAIT=1
 		st_ops_main "$(fp "$who")" "$@"
 	)
 }
@@ -408,6 +419,12 @@ expect_rc 2 "exclude: a step that takes none" st qa step "$idA" acceptance 4242
 grep -q "^04-deploy" "$T/kit.log" && ko "deploy ran during refusals" || ok
 expect_rc 0 "deploy with its own running message excluded" st qa step "$idA" deploy 4242
 grep -qx "04-deploy.sh --detach $log --exclude-message 4242" "$T/kit.log" && ok || ko "deploy argv: $(grep 04- "$T/kit.log")"
+grep -qx -- "--quiet --collect --unit st-ops-chain-$idA -- $here/lib/st-ops-root $fp_qa chain $idA" "$T/systemd-run.log" && ok ||
+	ko "deploy starts the chain unit: $(cat "$T/systemd-run.log")"
+expect_out "verify and acceptance follow on their own" "deploy announces the chain"
+expect_rc 0 "result shows the queued chain" st qa result "$idA"
+expect_out "^chain: queued" "chain queued"
+# The chain unit did not run here (fake systemd-run): the operator's verbs still work as before.
 expect_rc 2 "acceptance before verify" st qa step "$idA" acceptance
 expect_out "verify has not finished OK" "verify first"
 touch "$T/fail-05"
@@ -527,6 +544,74 @@ grep -q "^by qa at [0-9]*; steps run: preflight backup offhost$" "$ST_OPS_STATE/
 expect_rc 2 "no step after cancel" st qa step "$idE" rollback-proof
 expect_rc 0 "propose after cancelling E" propose "$base" "$two"
 st qa cancel "$(new_id)" >/dev/null 2>&1
+
+# ── The chain after deploy: verify, then acceptance, without the operator ──
+upto_deploy() { # $1 = request id: preflight … deploy, all OK
+	sleep 1 # the fake 01 names its LOG by the second: two requests for the same target must not share one
+	st qa preflight "$1" >/dev/null 2>&1; approve "$1" >/dev/null 2>&1
+	for s in backup offhost rollback-proof; do st qa step "$1" "$s" >/dev/null 2>&1; done
+	st qa step "$1" deploy
+}
+expect_rc 0 "propose F" propose "$base" "$two"
+idF=$(new_id)
+expect_rc 2 "chain before approve" st qa chain "$idF"
+expect_out "ERROR approval" "chain needs the owner's approval"
+expect_rc 0 "deploy F" upto_deploy "$idF"
+logF=$(cat "$ST_OPS_STATE/requests/$idF/log")
+expect_rc 0 "chain F: deploy OK, verify OK, acceptance OK" st qa chain "$idF"
+grep -qx "05-verify.sh $logF" "$T/kit.log" && grep -qx "06-acp-acceptance.sh $logF" "$T/kit.log" && ok || ko "chain ran 05 and 06 on F's LOG"
+expect_rc 0 "result F" st qa result "$idF"
+expect_out "^state: closed done$" "the chain closes the request"
+expect_out "^step verify: OK$" "verify recorded"
+expect_out "^step acceptance: OK$" "acceptance recorded"
+expect_out "^chain: done" "chain done"
+expect_rc 2 "chain on a closed request" st qa chain "$idF"
+grep -q "ident=qa verb=chain args=\[$idF\] rc=0" "$T/audit.log" && ok || ko "the chain is audited as the caller's identity"
+
+# A failed verify stops the chain: acceptance does not run; the operator's verbs take over.
+expect_rc 0 "propose G" propose "$base" "$two"
+idG=$(new_id)
+expect_rc 0 "deploy G" upto_deploy "$idG"
+logG=$(cat "$ST_OPS_STATE/requests/$idG/log")
+touch "$T/fail-05"
+expect_rc 1 "chain G stops on verify FAIL" st qa chain "$idG"
+rm "$T/fail-05"
+grep -q "06-acp-acceptance.sh $logG" "$T/kit.log" && ko "acceptance ran after a failed verify" || ok
+expect_rc 0 "result G" st qa result "$idG"
+expect_out "^step acceptance: NONE$" "no acceptance"
+expect_out "^chain: stopped: verify FAIL rc=1$" "chain says where it stopped"
+expect_out "^state: active$" "the request waits for the operator"
+expect_rc 0 "verify G by hand" st qa verify "$idG"
+expect_rc 0 "acceptance G by hand" st qa step "$idG" acceptance
+
+# A deploy whose outcome is still unknown: the chain waits CHAIN_WAIT, then stops without touching anything.
+expect_rc 0 "propose H" propose "$base" "$two"
+idH=$(new_id)
+expect_rc 0 "deploy H" upto_deploy "$idH"
+logH=$(cat "$ST_OPS_STATE/requests/$idH/log")
+mv "$logH/04-deploy.result" "$T/keep-result"
+expect_rc 1 "chain H: deploy still RUNNING" st qa chain "$idH"
+grep -q "05-verify.sh $logH" "$T/kit.log" && ko "verify ran while deploy was RUNNING" || ok
+expect_rc 0 "result H" st qa result "$idH"
+expect_out "^chain: stopped: deploy still RUNNING" "chain timed out"
+mv "$T/keep-result" "$logH/04-deploy.result"
+expect_rc 0 "chain H again once deploy is readable" st qa chain "$idH"
+expect_rc 0 "result H done" st qa result "$idH"
+expect_out "^state: closed done$" "H done"
+
+# A failed deploy: no verify; and a unit that cannot be created is reported, the deploy launch is not undone.
+expect_rc 0 "propose I" propose "$base" "$two"
+idI=$(new_id)
+touch "$T/fail-04" "$T/sdrun-fail"
+expect_rc 0 "deploy I launches (its .result says FAIL)" upto_deploy "$idI"
+rm "$T/fail-04" "$T/sdrun-fail"
+expect_out "WARNING the chain unit could not be created" "unit failure reported"
+expect_rc 2 "chain I stops on deploy FAIL" st qa chain "$idI"
+logI=$(cat "$ST_OPS_STATE/requests/$idI/log")
+grep -q "05-verify.sh $logI" "$T/kit.log" && ko "verify ran after a failed deploy" || ok
+expect_rc 0 "result I" st qa result "$idI"
+expect_out "^state: closed failed deploy$" "I closed by the deploy"
+expect_out "^chain: stopped: request is closed failed deploy$" "chain stopped on deploy"
 
 # The key's old name is refused (the install renames it).
 conf on SIGNED_VERBS

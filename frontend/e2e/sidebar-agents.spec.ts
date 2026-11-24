@@ -18,7 +18,7 @@ test.describe("sidebar: agents and their state", () => {
 		const set = (name: string, p: Record<string, unknown>) =>
 			Object.assign(backend.acpAgents.find((a) => a.name === name)!, { runnerSeenAt: FRESH }, p);
 		set("arq", {});
-		set("dev", { running: 12 });
+		set("dev", { running: [12] });
 		set("solo", { waitingInput: true });
 		const base = backend.acpAgents[0]!;
 		backend.acpAgents.push({
@@ -77,7 +77,7 @@ test.describe("sidebar: agents and their state", () => {
 		const arq = app.sessionRow("hz-architect").locator(".session-agent-status");
 		await expect(arq).toHaveText("libre");
 		const row = backend.addAcpMessage({ to_id: "arq", body: "@arq revisá", state: "running" });
-		backend.acpAgents.find((a) => a.name === "arq")!.running = row.id;
+		backend.acpAgents.find((a) => a.name === "arq")!.running = [row.id];
 		backend.pushAcp({ type: "message", message: row });
 		await expect(arq).toHaveText("trabajando");
 		await expect(page.locator("#chat-view")).toBeHidden();
@@ -212,7 +212,7 @@ test.describe("sidebar: agent state re-reads (clock running)", { tag: "@any-view
 		backend,
 		page,
 	}) => {
-		backend.acpAgents.find((a) => a.name === "dev")!.running = 12;
+		backend.acpAgents.find((a) => a.name === "dev")!.running = [12];
 		await app.login("alice");
 		await app.openSidebar();
 		await expect(app.sessionRow("hz-dev-2").locator(".session-agent-status")).toHaveText(

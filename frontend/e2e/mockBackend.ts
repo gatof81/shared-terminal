@@ -92,7 +92,7 @@ export interface MockAcpAgent {
 	model: string | null;
 	projectId: string | null;
 	runnerSeenAt: string | null;
-	running: number | null;
+	running: number[];
 	pending: number;
 	authRequired?: boolean;
 	loginMethods?: Array<{ id: string; name: string; description: string }>;
@@ -320,7 +320,7 @@ export class MockBackend {
 			projectId,
 			// Just before the page clock (FIXED_NOW): the status reads "libre", not "sin señal".
 			runnerSeenAt: iso(1790),
-			running: null,
+			running: [],
 			pending: 0,
 			// As its runner reports after the first claim: the CLI's default effort.
 			effort: null,

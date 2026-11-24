@@ -362,7 +362,7 @@ describe("ACP messages: scope, replies, loop guard (v22)", () => {
 		expect(
 			af.body.messages.some((m: { project_id: string | null }) => m.project_id === "p-1"),
 		).toBe(true);
-		expect(af.body.agent).toMatchObject({ name: "arquitecto", projectId: "p-1", running: null });
+		expect(af.body.agent).toMatchObject({ name: "arquitecto", projectId: "p-1", running: [] });
 		expect(af.body.agent.pending).toBe(
 			db
 				.prepare(
@@ -910,6 +910,24 @@ describe("ACP messages: scope, replies, loop guard (v22)", () => {
 			"INSERT INTO sessions (session_id, user_id, name, container_name, status) VALUES (?, ?, 'ef2', ?, 'running')",
 		).run(sid, OWNER, `st-${sid.slice(0, 12)}`);
 		expect((await acp.create(sid, OWNER, "con-effort", { effort: "max" })).effort).toBe("max");
+	});
+
+	it("/agents lists every message an agent is running, oldest first", async () => {
+		const ids = [1, 2].map(
+			(n) =>
+				(
+					db
+						.prepare(
+							"INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, body, state) VALUES (?, 'owner', 'solo', 'request', ?, 'running') RETURNING id",
+						)
+						.get(OWNER, `a la vez ${n}`) as { id: number }
+				).id,
+		);
+		const solo = (await call(owner, "GET", "/agents")).body.find(
+			(a: { name: string }) => a.name === "solo",
+		);
+		expect(solo.running).toEqual(ids);
+		db.prepare(`UPDATE agent_messages SET state = 'done' WHERE id IN (${ids.join(",")})`).run();
 	});
 
 	it("events go only to the owner of the row", () => {
