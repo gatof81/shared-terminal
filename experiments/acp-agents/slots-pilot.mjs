@@ -152,14 +152,21 @@ async function main() {
 	}
 
 	// P4. Caps refused at the API.
-	const ctx1 = await api("POST", "/api/acp/works", { agent: A1, id: W[A1] });
-	check("P4 a work for a one-slot agent is refused (400 context-needs-slots)", ctx1.status === 400 && ctx1.body?.error === "context-needs-slots", `${ctx1.status} ${JSON.stringify(ctx1.body)}`);
+	const oneSlot = await api("POST", "/api/acp/works", { agent: A1, id: W[A1] });
+	check("P4 a work for a one-slot agent is refused (400 context-needs-slots)", oneSlot.status === 400 && oneSlot.body?.error === "context-needs-slots", `${oneSlot.status} ${JSON.stringify(oneSlot.body)}`);
 	for (const bad of [0, 5, 1.5, "2"]) {
 		const r = await api("PATCH", `/api/acp/agents/${A1}`, { maxConcurrency: bad });
 		check(`P4 maxConcurrency ${JSON.stringify(bad)} refused`, r.status === 400, String(r.status));
 	}
-	const badCtx = await api("POST", "/api/acp/works", { agent: A1, id: "../x" });
-	check("P4 a work id outside [a-z0-9-] is refused (400 bad-work-id)", badCtx.status === 400 && badCtx.body?.error === "bad-work-id", `${badCtx.status} ${JSON.stringify(badCtx.body)}`);
+	const badId = await api("POST", "/api/acp/works", { agent: A1, id: "../x" });
+	check("P4 a work id outside [a-z0-9-] is refused (400 bad-work-id)", badId.status === 400 && badId.body?.error === "bad-work-id", `${badId.status} ${JSON.stringify(badId.body)}`);
+	// A refusal writes nothing: no row and no worktree. W[A1] is created later with this same id, and a leftover
+	// `creating` row would be absorbed silently by that create's idempotent path.
+	const list = await api("GET", "/api/acp/works");
+	const left = Array.isArray(list.body) ? list.body.filter((w) => w.agent === A1 || w.id === W[A1]) : null;
+	check("P4 the refused creations left no work row", list.status === 200 && left?.length === 0, `${list.status} ${JSON.stringify(left ?? list.body)}`);
+	const dir = await execOut(sids[A1], ["sh", "-c", `test -e /home/developer/workspace/.st/ctx/${W[A1]} && echo present || echo absent`]);
+	check(`P4 …nor a .st/ctx/${W[A1]} directory`, dir.trim() === "absent", dir.trim());
 	// P4b. A one-slot agent runs exactly one runner and one adapter (no extra slot's resources).
 	const procs = async (sid) => {
 		const out = await execOut(sid, ["sh", "-c", "pgrep -fc '^node --no-warnings /opt/st-acp/st/runner\\.mjs'; pgrep -fc 'test-agent\\.mjs'"]);
