@@ -197,9 +197,12 @@ export function startAcpStatusFeed(): void {
 			case "message": {
 				// Patched only: the period confirms (and fills the queue count).
 				const m = ev.message;
-				if (m.state === "running") patchAcpAgent(m.to_id, { running: m.id });
-				else if (FINAL.has(m.state) && acpEntryByName(m.to_id)?.running === m.id)
-					patchAcpAgent(m.to_id, { running: null });
+				// An agent with slots runs several at once: the list gains or loses this one only.
+				const cur = acpEntryByName(m.to_id)?.running ?? [];
+				if (m.state === "running" && !cur.includes(m.id))
+					patchAcpAgent(m.to_id, { running: [...cur, m.id].sort((a, b) => a - b) });
+				else if (FINAL.has(m.state) && cur.includes(m.id))
+					patchAcpAgent(m.to_id, { running: cur.filter((id) => id !== m.id) });
 				return;
 			}
 			case "question":

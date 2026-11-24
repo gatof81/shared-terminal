@@ -129,9 +129,13 @@ describe("activity", () => {
 		const base = { name: "a", sessionId: "s", runtime: "r", model: null };
 		expect(agentStatus({ ...base, runnerSeenAt: "2026-11-18T09:59:58Z" }, now).label).toBe("libre");
 		expect(
-			agentStatus({ ...base, runnerSeenAt: "2026-11-18T09:59:58Z", running: 7, pending: 2 }, now)
+			agentStatus({ ...base, runnerSeenAt: "2026-11-18T09:59:58Z", running: [7], pending: 2 }, now)
 				.label,
 		).toBe("trabajando en #7 · 2 en espera");
+		// An agent with slots works on several at once: all of them, oldest first.
+		expect(
+			agentStatus({ ...base, runnerSeenAt: "2026-11-18T09:59:58Z", running: [7, 9] }, now).label,
+		).toBe("trabajando en #7 y #9");
 		expect(agentStatus({ ...base, runnerSeenAt: null }, now).tone).toBe("off");
 		expect(agentStatus({ ...base, runnerSeenAt: null, authRequired: true }, now).label).toBe(
 			"esperando login",
@@ -145,13 +149,13 @@ describe("activity", () => {
 			return [st.word, st.tone, st.asks, st.label];
 		};
 		expect(short({ runnerSeenAt: fresh })).toEqual(["libre", "ok", false, "libre"]);
-		expect(short({ runnerSeenAt: fresh, running: 7 })).toEqual([
+		expect(short({ runnerSeenAt: fresh, running: [7] })).toEqual([
 			"trabajando",
 			"busy",
 			false,
 			"trabajando en #7",
 		]);
-		expect(short({ runnerSeenAt: fresh, running: 7, waitingInput: true })).toEqual([
+		expect(short({ runnerSeenAt: fresh, running: [7], waitingInput: true })).toEqual([
 			"te espera",
 			"warn",
 			true,
