@@ -75,6 +75,8 @@ anything else is refused with `409 client-id-reused`, never answered with anothe
 - **Never resent.** An interrupted run becomes `uncertain`; only the person can requeue it
   (`POST /api/acp/messages/:id/requeue`). After a restart the agent receives one `system` message
   asking for a read-only report of what was left done or undone.
+- **Reviewed, not requeued.** The person may instead mark it reviewed (`POST …/:id/review`, §4b): it
+  leaves the inbox and stays `uncertain`.
 - A message given back before its prompt left (e.g. the agent is not logged in) returns to `pending`,
   not `uncertain`.
 - **Done means idle.** The runner closes a message only when the prompt is answered **and** every
@@ -114,8 +116,8 @@ restarts). `ACP_MAX_RUNNING` (6) caps the whole backend.
 
 A message's **context** says where it runs:
 
-- `NULL` — the default context: the workspace checkout and the agent's ACP session of always. Only
-  slot 1 runs it.
+- `NULL` — the default context: the workspace checkout. Only slot 1 runs it, with **one ACP session per
+  conversation** (v27, below).
 - a name (`^[a-z0-9][a-z0-9-]{0,39}$`) — a **work** (3c): its own git worktree
   `<workspace>/.st/ctx/<name>/` (the cwd of its own ACP session, `<workspace>/.st/acp/ctx/<name>.json`).
   Only slots ≥ 2 run it, so an agent with cap 1 never takes one (`400 context-needs-slots`).
@@ -134,6 +136,21 @@ context that never ran, one whose slot moved on to another context, or one whose
 lowered cap. `session/close` (and a resume) stops what that session left
 running, so a slot whose session still has an open task (a process declared `ST-PERSISTENT`) keeps
 that context and takes only its messages until the task ends.
+
+**Slot 1: one ACP session per conversation (v27).** Slot 1 generalizes what slots ≥ 2 do with works:
+its session key is the conversation of the message it takes — `<workspace>/.st/acp/conv/<id>.json`,
+cwd = the main checkout; a message with no conversation uses `session.json`, the session of always.
+Taking a message of another conversation closes the open session (`session/close`) and opens
+(`session/new` or `session/resume`) the new one; model and effort are re-applied as after any resume.
+Nothing is opened at start: only for a message it claims, or for the report about an interrupted one
+(in that message's conversation; a question orphaned with no interrupted run: `session.json`). So at
+most one conversation session is open per agent, and inactive topics hold no process. A session with
+an open task (a process declared `ST-PERSISTENT`) is never closed: slot 1 then claims only that
+conversation's messages (`POST /runner/claim {conversation: <id>|null}`) and the rest wait `pending`
+until the task ends. The claim still keeps one running message in the default context per agent, so
+two runs never share the main checkout; parallel code goes through works. A message with `work` runs
+in its work's session (slot ≥ 2) and keeps its conversation. The runner's protocol tells the agent not
+to leave persistent processes or edit code in parallel from a conversation: that is what a work is for.
 
 **Who sent a `st send`.** A named context's session gets its own credential
 (`acp1.<agentId>.<context>.<hmac>`, in the session's environment on new and resume); the default
@@ -224,6 +241,132 @@ A message's `project_id` is its **scope**:
 - **Live:** `/ws/acp` pushes every message row, question and activity batch to the owner's browsers.
   The client loads a page over REST (`…/feed?before=` for older pages), applies pushed rows by id,
   reloads after a reconnect, and polls slowly only while the socket is down.
+
+## 4b. Conversations (v27)
+
+A **conversation** is a topic of a project. The project's agents are one shared team: any of them takes
+part in any topic by being addressed; there is no membership. Everything a post sets off stays in its
+conversation. Messages with `conversation_id` NULL (everything before v27, direct messages, posts with
+`projectId` and no conversation) are the **Archive**: the individual chat and the old Project Chat feeds
+show only those.
+
+### Endpoints (owner cookie only; an agent token gets 403; foreign or missing = 404)
+
+| Endpoint | Does |
+| --- | --- |
+| `POST /api/acp/conversations {projectId, title, clientRequestId}` | Creates a topic in a live project of the owner. Idempotent by `clientRequestId` (UUID v4): a retry answers `200 {…, replayed: true}`; the same id with another project/title is `409 idempotency-conflict`; an answer D1 lost and the read-back cannot resolve is `503 outcome-unknown` (retry with the same id). `title`: 1–120 chars, no control chars. |
+| `GET /api/acp/projects/:pid/conversations[?archived=1]` | The project's topics (live, or only archived), most recently active first. |
+| `PATCH /api/acp/conversations/:id {title}` | Renames. |
+| `POST /api/acp/conversations/:id/archive` | Archives (idempotent): leaves the list, takes no new post (`409 conversation-archived`); its history and feed stay. |
+| `POST /api/acp/conversations/:id/read {at}` | Read mark: see below. Only advances. |
+| `GET /api/acp/conversations/:id/feed[?before=<id>]` | `{conversation, agents, questions, messages, activity, activitySeq, maxMessageBytes}` — like the project feed: 100 messages per page, oldest first, full rows; `questions` = those asked while working on the page's messages; `agents` = the project's agents with their state. |
+| `GET /api/acp/inbox` | The global inbox (below). |
+| `POST /api/acp/messages/:id/review` | "Dar por revisada" (below). |
+
+A conversation as the API shows it:
+
+```json
+{ "id": "…uuid…", "projectId": "…", "title": "Optimización de CI",
+  "createdAt": "…", "lastActivityAt": "…", "archivedAt": null, "readAt": "…" | null,
+  "recipients": {"agents": ["architect", "qa"]} | {"team": true} | null,
+  "unread": 3, "needsAction": false }
+```
+
+- `lastActivityAt` moves (D1 triggers) with every row written in the topic and every result
+  (`done`/`failed`/`uncertain`) — the person's posts, the agents' consults and replies, the notices.
+- `recipients`: who the person's last post in this topic went to — the chips the composer shows by
+  default. A new topic has `null`: it starts empty.
+- `needsAction`: an open question of one of its messages, or an `uncertain` run not reviewed.
+
+### Posting
+
+`POST /api/acp/messages` from the person:
+
+| Body | Result |
+| --- | --- |
+| `{conversationId, to: "@a", body, clientId?}` | one row in the conversation (`project_id` = the conversation's project). Answer: the row (as before). |
+| `{conversationId, to: ["a", "b"], body, clientId}` | one row per recipient under one `clientId` (required). Answer: `{messages: [rows], replayed}`. |
+| `{conversationId, team: true, body, clientId}` | the project's agents **now** (who joins later does not get it), one row each, every row `team: 1` — for "→ Todo el equipo (N)". `to` must be absent. |
+| `{to, body, projectId?}` without `conversationId` | the Archive's paths the current UI uses (direct, or the old Project Chat): `conversation_id` NULL. They go away with the old UI. |
+
+Every recipient must be in the conversation's project (`400 not-in-project`); `projectId`, if sent too,
+must be the conversation's (`400 project-mismatch`); lists and `team` need a conversation
+(`400 conversation-required`); `work` takes one recipient (`400 work-needs-one-recipient`). A retry with
+the same `clientId` finds every row it wrote (and writes the ones a cut attempt did not). Every
+post stores the conversation's `recipients`.
+
+### Inheritance (nothing to choose for an agent)
+
+- An agent's `st send` takes the **conversation and scope** of the message it is running when the
+  recipient is in that project; otherwise it is direct, with no conversation. An agent sending
+  `conversationId`, a list or `team` gets `400 conversation-inherited`.
+- The reply to a request (trigger) and the notice of an unfinished request (`unfinished:failed|uncertain`)
+  copy the request's conversation.
+- A question to the person belongs to the conversation of the message it was asked from
+  (`agent_questions.message_id` → the message).
+- The runner's recovery message after a restart carries `recovery_of` = the interrupted message and
+  lives in its conversation and scope.
+- A message with `work` keeps its conversation too (`conversation_id` and `context` both set).
+- `agent_works.conversation_id` (`conversationId` in the work's view): the topic it was created from —
+  the running message's for an agent, `POST /works {…, conversationId}` for the person (an agent of
+  that project).
+
+### Read state
+
+`read_at` is a **time**, not a message id: a person's message gets its result on the same row when the
+agent finishes, long after its id was shown, so an id mark would count every result as seen. A row's
+*event time* is `finished_at` for a person's message that ended `done` with a result, and `created_at`
+for anything else. The client posts `{at}` = the newest event time it has on screen (ISO with ms, as the
+rows carry them); the server keeps the max (a time in the future counts as now). Nothing marks a topic
+read but that POST.
+
+`unread` = rows of the topic not written by the person with `created_at > read_at`, plus the person's
+messages ended `done` with a result and `finished_at > read_at`.
+
+### Inbox
+
+`GET /api/acp/inbox` →
+
+```json
+{ "count": 2,
+  "action": { "questions": [question rows + conversation_id, project_id],
+              "interrupted": [uncertain message rows without reviewed_at] },
+  "results": [the person's messages done with a result, unseen, in live conversations],
+  "reports": [system recovery messages whose recovery_of is one of the interrupted] }
+```
+
+`count` = questions + interrupted (the badge). `results` is informative. Every project, and the
+Archive too (an interruption there is no less one: `conversation_id` null). Up to 200 per section.
+
+### Reviewing an interruption
+
+`POST /api/acp/messages/:id/review` marks an `uncertain` message `reviewed_at` (state unchanged, nothing
+written or sent; a repeat keeps the first time); not `uncertain` → `409 not-uncertain`. The facts the
+review shows are already on the rows: `finished_at` and `note` (why it was cut), and the recovery report
+(`reports`, or the row with `recovery_of` = the id in the feed). `requeue` is unchanged except that it
+clears `reviewed_at` (interrupted again, it needs a new review).
+
+### Agents' state
+
+`GET /api/acp/agents` (and every feed's `agents`) adds, per agent, the facts for the vocabulary of
+PROPUESTA §4 (never slots):
+
+```json
+{ "runningIn":  [{"id": 12, "conversationId": "…", "work": null}],
+  "queue":      [{"id": 15, "conversationId": "…", "work": null}],
+  "waitingFor": [{"id": 13, "agent": "qa", "conversationId": "…", "work": null}],
+  "question":   {"id": 4, "messageId": 12, "conversationId": "…"} | null,
+  "waitingInput": true, "running": [12], "pending": 1 }
+```
+
+`queue` is in id order (position = index; the claim takes the oldest its slot may run). `waitingFor` =
+its requests to other agents not finished yet (pending or running), from a run that is open or closed.
+
+### Live
+
+`/ws/acp` pushes rows with every v27 column (`conversation_id`, `team`, `reviewed_at`, `recovery_of`)
+and a `{type: "conversation", conversation}` frame (the view above) on create, rename, archive, read
+and every post's recipients. `lastActivityAt` changes ride the message frames.
 
 ## 5. Agent ↔ agent: the `st` CLI
 

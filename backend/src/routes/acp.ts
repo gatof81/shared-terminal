@@ -24,12 +24,22 @@ import {
 	effortOf,
 	MAX_SLOTS,
 	type MessageRow,
+	type OpenQuestion,
 } from "../acp/agents.js";
+import {
+	AcpConversations,
+	ConversationError,
+	type ConversationRow,
+	conversationView,
+	type Recipients,
+} from "../acp/conversations.js";
 import { type AcpWorks, WorkError, workDir, workView } from "../acp/works.js";
 import { type AuthedRequest, requireAuth } from "../auth.js";
 import { logger } from "../logger.js";
 
 const CLIENT_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
+/** Recipients of one post (`to` as a list). */
+const MAX_RECIPIENTS = 16;
 
 // An agent's credential names its context (NULL = default); `runner` = the
 // runner's own token (also the default context's), the only one that reaches
@@ -46,6 +56,7 @@ declare module "express-serve-static-core" {
 
 export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 	const router = Router();
+	const conversations = new AcpConversations(acp);
 	router.use(express.json({ limit: acp.config.maxMessageBytes + 64 * 1024 }));
 
 	// Bearer acp1.* ⇒ agent; anything else ⇒ the cookie session.
@@ -87,10 +98,17 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 	// gets (recomputed, never stored): the runner cannot mint one — and the
 	// work it is (branch, directory, ports) for the prompt's header and the
 	// session's environment.
+	// Its conversation (id and title): the runner keys slot 1's ACP session by it.
 	const withContext = async (agent: AgentRow, msg: MessageRow) => {
 		const work = msg.context === null ? null : await works.get(agent.owner_user_id, msg.context);
+		const conv = msg.conversation_id
+			? await conversations.get(agent.owner_user_id, msg.conversation_id).catch(() => null)
+			: null;
 		return {
 			...msg,
+			conversation: msg.conversation_id
+				? { id: msg.conversation_id, title: conv?.title ?? null }
+				: null,
 			project: msg.project_id
 				? await acp.projectContext(agent.owner_user_id, msg.project_id).catch(() => null)
 				: null,
@@ -101,6 +119,8 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 		};
 	};
 	const refuse = (res: Response, err: unknown) => {
+		if (err instanceof ConversationError)
+			return void res.status(err.status).json({ error: err.code });
 		if (!(err instanceof WorkError)) throw err;
 		res.status(err.status).json({ error: err.code, ...err.detail });
 	};
@@ -111,8 +131,18 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 				if (!res.headersSent) res.status(500).json({ error: "internal" });
 			});
 
-	const agentView = (a: AgentRow, loads: Map<string, AgentLoad>, waiting?: Set<string>) => ({
+	// The agent's state in the words of the UI (PROPUESTA §4), never slots:
+	// what it runs and where, its queue, what it waits for, its open question.
+	const agentView = (
+		a: AgentRow,
+		loads: Map<string, AgentLoad>,
+		waiting?: Map<string, OpenQuestion[]>,
+	) => ({
 		waitingInput: waiting?.has(a.name) ?? false,
+		question: waiting?.get(a.name)?.[0] ?? null,
+		runningIn: loads.get(a.name)?.runningIn ?? [],
+		queue: loads.get(a.name)?.queue ?? [],
+		waitingFor: loads.get(a.name)?.waitingFor ?? [],
 		name: a.name,
 		sessionId: a.session_id,
 		runtime: a.runtime,
@@ -150,13 +180,21 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 		}),
 	);
 
-	// POST /messages {to, body, projectId?, clientId?, work?} — persisted (D1 INSERT)
-	// before the 201. The sender is the credential. A person chooses the scope
-	// (`projectId`: Project Chat; absent: a direct message). An agent does not:
-	// its message takes the scope of the message it is working on when the
-	// recipient takes part in that project, and is direct otherwise — so an
-	// exchange started in Project Chat stays there and a private one stays
-	// private, whatever the agent writes.
+	// POST /messages {to, body, conversationId?, team?, projectId?, clientId?, work?}
+	// — persisted (D1 INSERT) before the 201. The sender is the credential.
+	//
+	// The person posts in a CONVERSATION (`conversationId`, v27): the project is
+	// the conversation's, every recipient must take part in it, `to` may name
+	// several agents and `team: true` sends to all of the project's agents
+	// (resolved now: one row per agent under one `clientId`, each marked `team`).
+	// Without a conversation: `projectId` posts in the old Project Chat and
+	// nothing a direct message — the paths the current UI uses until it moves
+	// to conversations; they leave `conversation_id` NULL (the Archive).
+	//
+	// An agent chooses nothing: its message takes the scope AND conversation of
+	// the message it is working on when the recipient takes part in that
+	// project, and is direct (no conversation) otherwise — so an exchange
+	// started in a topic stays there and a private one stays private.
 	router.post(
 		"/messages",
 		wrap(async (req, res) => {
@@ -167,6 +205,8 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 				projectId,
 				clientId,
 				work,
+				conversationId,
+				team,
 				context: freeContext,
 			} = (req.body ?? {}) as Record<string, unknown>;
 			// The free `context` is gone (v26): a caller still sending it meant an
@@ -178,7 +218,6 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 					message:
 						"el campo context ya no existe: usá work (un trabajo creado con POST /api/acp/works)",
 				});
-			const name = String(to ?? "").replace(/^@/, "");
 			const owner = ownerOf(c);
 			if (typeof body !== "string" || body.trim() === "")
 				return void res.status(400).json({ error: "empty-body" });
@@ -189,12 +228,65 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 					.json({ error: "too-large", maxBytes: acp.config.maxMessageBytes, bytes });
 			if (clientId !== undefined && (typeof clientId !== "string" || !CLIENT_ID_RE.test(clientId)))
 				return void res.status(400).json({ error: "bad-client-id" });
-			const target = await acp.byName(owner, name);
-			if (!target)
-				return void res
-					.status(400)
-					.json({ error: "unknown-recipient", agents: (await acp.list(owner)).map((a) => a.name) });
-			let scope: string | null = null;
+			const isTeam = team === true;
+			if (team !== undefined && team !== null && typeof team !== "boolean")
+				return void res.status(400).json({ error: "bad-team" });
+			const hasConv = conversationId !== undefined && conversationId !== null;
+			const many = Array.isArray(to) || isTeam;
+			if (c.kind === "agent" && (hasConv || many))
+				return void res.status(400).json({
+					error: "conversation-inherited",
+					message:
+						"un agente escribe a un destinatario; la conversación es la del mensaje que está ejecutando",
+				});
+			if (many && !hasConv) return void res.status(400).json({ error: "conversation-required" });
+			if (isTeam && to !== undefined && to !== null)
+				return void res.status(400).json({ error: "team-and-to" });
+			// Several rows under one id: a retry must find them, never add copies.
+			if (many && typeof clientId !== "string")
+				return void res.status(400).json({ error: "client-id-required" });
+
+			let conv: ConversationRow | null = null;
+			if (hasConv) {
+				conv =
+					typeof conversationId === "string"
+						? await conversations.get(owner, conversationId)
+						: null;
+				if (!conv) return void res.status(404).json({ error: "conversation-not-found" });
+				if (conv.archived_at) return void res.status(409).json({ error: "conversation-archived" });
+				if (projectId !== undefined && projectId !== null && projectId !== conv.project_id)
+					return void res.status(400).json({ error: "project-mismatch" });
+			}
+
+			// The recipients, all resolved before anything is written.
+			const all = await acp.list(owner);
+			let targets: AgentRow[];
+			if (isTeam) {
+				targets = all.filter((a) => a.project_id === conv?.project_id);
+				if (!targets.length) return void res.status(400).json({ error: "no-recipients" });
+			} else {
+				const names = (Array.isArray(to) ? to : [to]).map((n) => String(n ?? "").replace(/^@/, ""));
+				if (!names.length || names.length > MAX_RECIPIENTS)
+					return void res.status(400).json({ error: "bad-recipients", max: MAX_RECIPIENTS });
+				targets = [];
+				for (const n of [...new Set(names)]) {
+					const a = all.find((x) => x.name === n);
+					if (!a)
+						return void res
+							.status(400)
+							.json({ error: "unknown-recipient", name: n, agents: all.map((x) => x.name) });
+					if (conv && a.project_id !== conv.project_id)
+						return void res.status(400).json({ error: "not-in-project", agent: a.name });
+					targets.push(a);
+				}
+			}
+			const hasWork = work !== undefined && work !== null;
+			if (hasWork && targets.length > 1)
+				return void res.status(400).json({ error: "work-needs-one-recipient" });
+			const target = targets[0];
+
+			let scope: string | null = conv?.project_id ?? null;
+			let convId: string | null = conv?.id ?? null;
 			let depth = 0;
 			let fromContext: string | null = null;
 			let rootId: number | null = null;
@@ -202,7 +294,7 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 			// The work must be the recipient's and active; an agent delegates only
 			// a work of its own project. Without it: the recipient's default context.
 			let context: string | null = null;
-			if (work !== undefined && work !== null) {
+			if (hasWork) {
 				if (typeof work !== "string" || !CONTEXT_RE.test(work))
 					return void res.status(400).json({ error: "bad-work-id" });
 				const w = await works.get(owner, work);
@@ -226,7 +318,7 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 				context = work;
 			}
 			if (c.kind === "owner") {
-				if (projectId !== undefined && projectId !== null) {
+				if (!conv && projectId !== undefined && projectId !== null) {
 					if (typeof projectId !== "string" || !(await acp.ownsProject(owner, projectId)))
 						return void res.status(404).json({ error: "project-not-found" });
 					if (target.project_id !== projectId)
@@ -260,42 +352,64 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 						error: "depth-limit",
 						message: `chain of agent requests longer than ${acp.config.maxDepth}: answer with what you have instead of asking further`,
 					});
-				if (cur?.project_id && target.project_id === cur.project_id) scope = cur.project_id;
+				// Scope and conversation go together: both, or neither.
+				const inScope = Boolean(cur.project_id && target.project_id === cur.project_id);
+				scope = inScope ? cur.project_id : null;
+				convId = inScope ? cur.conversation_id : null;
 			}
 			const from = c.kind === "owner" ? "owner" : c.agent.name;
-			const r = await acp
-				.send({
-					ownerUserId: owner,
-					from,
-					to: target.name,
-					body,
-					projectId: scope,
-					depth,
-					clientId: typeof clientId === "string" ? clientId : null,
-					context,
-					fromContext,
-					rootId,
-				})
-				.catch((err: unknown) => {
-					if (err instanceof ClientIdConflictError) return err;
-					throw err;
-				});
-			if (r instanceof ClientIdConflictError)
-				return void res.status(409).json({ error: "client-id-reused", id: r.existingId });
-			res.status(r.replayed ? 200 : 201).json({ ...r.message, replayed: r.replayed });
+			const sent: Array<{ message: MessageRow; replayed: boolean }> = [];
+			for (const t of targets) {
+				const r = await acp
+					.send({
+						ownerUserId: owner,
+						from,
+						to: t.name,
+						body,
+						projectId: scope,
+						depth,
+						clientId: typeof clientId === "string" ? clientId : null,
+						context,
+						fromContext,
+						rootId,
+						conversationId: convId,
+						team: isTeam,
+					})
+					.catch((err: unknown) => {
+						if (err instanceof ClientIdConflictError) return err;
+						throw err;
+					});
+				if (r instanceof ClientIdConflictError)
+					return void res.status(409).json({ error: "client-id-reused", id: r.existingId });
+				sent.push(r);
+			}
+			if (conv) {
+				const recipients: Recipients = isTeam
+					? { team: true }
+					: { agents: targets.map((t) => t.name) };
+				await conversations.setRecipients(owner, conv.id, recipients);
+			}
+			const replayed = sent.every((r) => r.replayed);
+			if (!many) {
+				const r = sent[0];
+				return void res.status(r.replayed ? 200 : 201).json({ ...r.message, replayed: r.replayed });
+			}
+			res.status(replayed ? 200 : 201).json({ messages: sent.map((r) => r.message), replayed });
 		}),
 	);
 
-	// POST /works {agent, id, base?} — creates work `id` for `agent` (its
-	// worktree on branch work/<id>, made in the agent's container) before its
-	// first message. The person, or an agent of the recipient's project (a
-	// project there must be). Repeating the same POST returns the work.
+	// POST /works {agent, id, base?, conversationId?} — creates work `id` for
+	// `agent` (its worktree on branch work/<id>, made in the agent's container)
+	// before its first message. The person, or an agent of the recipient's
+	// project (a project there must be). Repeating the same POST returns the
+	// work. Its conversation of origin (v27): the person names it; an agent's is
+	// the conversation of the message it is running.
 	router.post(
 		"/works",
 		wrap(async (req, res) => {
 			const c = caller(res);
 			const owner = ownerOf(c);
-			const { agent, id, base } = (req.body ?? {}) as Record<string, unknown>;
+			const { agent, id, base, conversationId } = (req.body ?? {}) as Record<string, unknown>;
 			const target = await acp.byName(owner, String(agent ?? "").replace(/^@/, ""));
 			if (!target)
 				return void res
@@ -309,8 +423,22 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 				(target.project_id === null || target.project_id !== c.agent.project_id)
 			)
 				return void res.status(403).json({ error: "work-other-project", agent: target.name });
+			let origin: string | null = null;
+			if (c.kind === "agent")
+				origin = (await acp.runningIn(c.agent, c.context))?.conversation_id ?? null;
+			else if (conversationId !== undefined && conversationId !== null) {
+				const conv =
+					typeof conversationId === "string"
+						? await conversations.get(owner, conversationId)
+						: null;
+				if (!conv) return void res.status(404).json({ error: "conversation-not-found" });
+				if (conv.project_id !== target.project_id)
+					return void res.status(400).json({ error: "not-in-project", agent: target.name });
+				origin = conv.id;
+			}
 			try {
 				const r = await works.create({
+					conversationId: origin,
 					ownerUserId: owner,
 					createdBy: c.kind === "owner" ? "owner" : c.agent.name,
 					target,
@@ -487,8 +615,9 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 		}),
 	);
 
-	// The individual chat: everything to or from the agent (any scope), the
-	// agent's retained live activity. Later changes arrive over /ws/acp.
+	// The individual chat, now the Archive's: everything to or from the agent
+	// outside any conversation (any scope), the agent's retained live activity.
+	// Later changes arrive over /ws/acp.
 	router.get(
 		"/agents/:name/feed",
 		wrap(async (req, res) => {
@@ -497,7 +626,7 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 			const agent = await acp.byName(owner, req.params.name);
 			if (!agent) return void res.status(404).json({ error: "not-found" });
 			const [messages, loads, waiting] = await Promise.all([
-				acp.messages(owner, { agent: agent.name, before: beforeOf(req) }),
+				acp.messages(owner, { agent: agent.name, archive: true, before: beforeOf(req) }),
 				acp.loads(owner),
 				acp.waitingAgents(owner),
 			]);
@@ -516,8 +645,9 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 		}),
 	);
 
-	// Project Chat: only what was posted in the project, its agents' state and
-	// activity. A direct message never appears here.
+	// The old Project Chat, now the Archive's: what was posted in the project
+	// outside any conversation, its agents' state and activity. A direct
+	// message never appears here.
 	router.get(
 		"/projects/:pid/feed",
 		wrap(async (req, res) => {
@@ -529,7 +659,7 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 			const [all, loads, messages, waiting] = await Promise.all([
 				acp.list(owner),
 				acp.loads(owner),
-				acp.messages(owner, { projectId: pid, before: beforeOf(req) }),
+				acp.messages(owner, { projectId: pid, archive: true, before: beforeOf(req) }),
 				acp.waitingAgents(owner),
 			]);
 			const agents = all.filter((a) => a.project_id === pid);
@@ -557,6 +687,125 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 			if (!owner) return;
 			const msg = await acp.requeue(owner, Number(req.params.id));
 			msg ? res.json(msg) : res.status(409).json({ error: "not-uncertain" });
+		}),
+	);
+
+	// POST /messages/:id/review — "Dar por revisada": the person reviewed an
+	// interrupted (`uncertain`) run and does not requeue it. It leaves the
+	// inbox; its state stays and nothing is sent.
+	router.post(
+		"/messages/:id/review",
+		wrap(async (req, res) => {
+			const owner = ownerOnly(res);
+			if (!owner) return;
+			const msg = await acp.review(owner, Number(req.params.id));
+			if (msg) return void res.json(msg);
+			const cur = await acp.message(owner, Number(req.params.id));
+			cur
+				? res.status(409).json({ error: "not-uncertain", state: cur.state })
+				: res.status(404).json({ error: "not-found" });
+		}),
+	);
+
+	// ── Conversations (v27, owner) ────────────────────────────────────────
+
+	const conversationRoute = (fn: (owner: string, req: Request, res: Response) => Promise<void>) =>
+		wrap(async (req, res) => {
+			const owner = ownerOnly(res);
+			if (!owner) return;
+			res.setHeader("Cache-Control", "no-store");
+			try {
+				await fn(owner, req, res);
+			} catch (err) {
+				refuse(res, err);
+			}
+		});
+
+	// POST /conversations {projectId, title, clientRequestId} — idempotent by
+	// clientRequestId (a retry answers 200 with `replayed`).
+	router.post(
+		"/conversations",
+		conversationRoute(async (owner, req, res) => {
+			const r = await conversations.create(owner, req.body);
+			res.status(r.replayed ? 200 : 201).json({ ...conversationView(r.row), replayed: r.replayed });
+		}),
+	);
+
+	// GET /projects/:pid/conversations[?archived=1] — most recently active first,
+	// each with `unread` and `needsAction`.
+	router.get(
+		"/projects/:pid/conversations",
+		conversationRoute(async (owner, req, res) => {
+			if (!(await acp.ownsProject(owner, req.params.pid)))
+				return void res.status(404).json({ error: "project-not-found" });
+			const rows = await conversations.list(owner, req.params.pid, req.query.archived === "1");
+			res.json(rows.map(conversationView));
+		}),
+	);
+
+	// PATCH /conversations/:id {title}
+	router.patch(
+		"/conversations/:id",
+		conversationRoute(async (owner, req, res) => {
+			res.json(conversationView(await conversations.rename(owner, req.params.id, req.body)));
+		}),
+	);
+
+	// POST /conversations/:id/archive — idempotent; no new post from the person after it.
+	router.post(
+		"/conversations/:id/archive",
+		conversationRoute(async (owner, req, res) => {
+			res.json(conversationView(await conversations.archive(owner, req.params.id)));
+		}),
+	);
+
+	// POST /conversations/:id/read {at} — the newest event time the client has
+	// shown (conversations.ts); only advances.
+	router.post(
+		"/conversations/:id/read",
+		conversationRoute(async (owner, req, res) => {
+			const at = (req.body as { at?: unknown } | undefined)?.at;
+			res.json(conversationView(await conversations.read(owner, req.params.id, at)));
+		}),
+	);
+
+	// GET /conversations/:id/feed[?before=] — one topic: its messages (paged
+	// like the other feeds), the questions asked while working on them, the
+	// project's agents with their state and activity.
+	router.get(
+		"/conversations/:id/feed",
+		conversationRoute(async (owner, req, res) => {
+			const conv = await conversations.get(owner, req.params.id);
+			if (!conv) return void res.status(404).json({ error: "conversation-not-found" });
+			const [all, loads, messages, waiting, summary] = await Promise.all([
+				acp.list(owner),
+				acp.loads(owner),
+				acp.messages(owner, { conversationId: conv.id, before: beforeOf(req) }),
+				acp.waitingAgents(owner),
+				conversations.summary(owner, conv.id),
+			]);
+			const agents = all.filter((a) => a.project_id === conv.project_id);
+			res.json({
+				conversation: conversationView(summary ?? conv),
+				agents: agents.map((a) => agentView(a, loads, waiting)),
+				questions: await acp.questionsFor(
+					owner,
+					messages.map((m) => m.id),
+					[],
+				),
+				maxMessageBytes: acp.config.maxMessageBytes,
+				messages,
+				activity: Object.fromEntries(agents.map((a) => [a.name, acp.activitySince(a.agent_id)])),
+				activitySeq: acp.currentActivitySeq,
+			});
+		}),
+	);
+
+	// GET /inbox — every project's pending attention (conversations.ts `inbox`).
+	router.get(
+		"/inbox",
+		conversationRoute(async (owner, _req, res) => {
+			res.json(await conversations.inbox(owner));
 		}),
 	);
 
@@ -654,7 +903,22 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 				const w = await works.get(agent.owner_user_id, open);
 				if (w?.state !== "active") res.setHeader("X-ST-Release", open);
 			}
-			const msg = await acp.claim(agent, slot, typeof only === "string" ? only : null);
+			// `conversation` (slot 1): the same for the conversation whose session it
+			// holds with processes in it; null = the session of no conversation.
+			const body = (req.body ?? {}) as { conversation?: unknown };
+			const keepConv = "conversation" in body ? body.conversation : undefined;
+			if (
+				keepConv !== undefined &&
+				keepConv !== null &&
+				(typeof keepConv !== "string" || !/^[0-9a-f-]{36}$/.test(keepConv))
+			)
+				return void res.status(400).json({ error: "bad-conversation" });
+			const msg = await acp.claim(
+				agent,
+				slot,
+				typeof only === "string" ? only : null,
+				keepConv as string | null | undefined,
+			);
 			if (msg) return void res.json(await withContext(agent, msg));
 			const running = await acp.runningInSlot(agent, slot);
 			running ? res.status(409).json({ error: "running", id: running.id }) : res.status(204).end();
@@ -667,7 +931,11 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 			const agent = agentOnly(res);
 			if (!agent) return;
 			const slot = slotOf(req);
-			const { body, context } = (req.body ?? {}) as { body?: unknown; context?: unknown };
+			const { body, context, recoveryOf } = (req.body ?? {}) as {
+				body?: unknown;
+				context?: unknown;
+				recoveryOf?: unknown;
+			};
 			if (slot === null) return void res.status(400).json({ error: "bad-slot" });
 			if (
 				context !== undefined &&
@@ -680,6 +948,7 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 				String(body ?? ""),
 				slot,
 				typeof context === "string" ? context : null,
+				typeof recoveryOf === "number" && Number.isInteger(recoveryOf) ? recoveryOf : null,
 			);
 			msg ? res.json(await withContext(agent, msg)) : res.status(409).json({ error: "running" });
 		}),

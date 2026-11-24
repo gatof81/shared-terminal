@@ -6,6 +6,11 @@
  *   GET /sessions/:id/git/diff?path=&area=[&oldPath=][&dir=]  one file's patch
  *   GET /sessions/:id/git/log[?dir=]                 recent commits
  *
+ * Each takes an optional `work=<id>` instead of `dir`: git then runs on
+ * that work's worktree (`-C .st/ctx/<id>`, routes/workRoot.ts), whose top
+ * level must be exactly that directory; `status` answers the work's view
+ * (branch, dir, base, ports, state) and `root: ""`.
+ *
  * Strictly read-only: there is no stage / commit / checkout / reset /
  * push here, and nothing a client sends is ever interpreted as a
  * command — see gitReadOnly.ts for the argv discipline and for WHY git
@@ -36,6 +41,7 @@ import { InFlightLimiter } from "../inFlightLimiter.js";
 import { logger } from "../logger.js";
 import { isRestrictedPath, type WorkspaceFsError } from "../workspaceFiles.js";
 import { assertOwnedByOr404, handleSessionError, type RouteContext } from "./shared.js";
+import { resolveWorkParam, type WorkRef } from "./workRoot.js";
 
 // Concurrency: each request is 1–4 docker execs holding up to 2 MiB of
 // output apiece. Per user, one status refresh plus one diff in flight is
@@ -128,15 +134,27 @@ export function registerGitRoutes(router: Router, ctx: RouteContext): void {
 	async function prepare(
 		req: Request,
 		res: Response,
-	): Promise<{ runner: ReturnType<typeof makeGitRunner>; dir: string; done: () => void } | null> {
+	): Promise<{
+		runner: ReturnType<typeof makeGitRunner>;
+		dir: string;
+		work: WorkRef | undefined;
+		done: () => void;
+	} | null> {
 		const { userId } = req as AuthedRequest;
-		const dir = validateGitDir(req.query.dir);
+		const withWork = req.query.work !== undefined;
+		// With `work` the directory is the backend's, never the client's.
+		if (withWork && req.query.dir !== undefined) {
+			res.status(400).json({ error: "query params 'dir' and 'work' are exclusive" });
+			return null;
+		}
+		const dir = withWork ? "" : validateGitDir(req.query.dir);
 		if (typeof dir !== "string") {
 			sendFsError(res, dir);
 			return null;
 		}
 		// Ownership BEFORE anything else; foreign == missing.
 		await assertOwnedByOr404(sessions, req.params.id, userId);
+		const work = await resolveWorkParam(req.query.work, req.params.id, userId);
 		const meta = await sessions.getOrThrow(req.params.id);
 		if (meta.status !== "running" || !meta.containerId) {
 			res.status(409).json({
@@ -155,21 +173,31 @@ export function registerGitRoutes(router: Router, ctx: RouteContext): void {
 		// Git output is a snapshot of a tree that changes under the user —
 		// never let any cache answer for it.
 		res.setHeader("Cache-Control", "no-store");
-		return { runner: makeGitRunner(docker, req.params.id, meta.containerId), dir, done };
+		// A work's `dir` is built here from the proven id; it bypasses
+		// validateGitDir's `.st` refusal on purpose and is checked instead
+		// by `exactRoot`: git's real top level must be exactly this dir.
+		const runner = makeGitRunner(docker, req.params.id, meta.containerId, {
+			exactRoot: work !== undefined,
+		});
+		return { runner, dir: work ? `.st/ctx/${work.id}` : dir, work, done };
 	}
 
 	/** prepare → work → answer, with the slot held until the work settled. */
 	async function serve(
 		req: Request,
 		res: Response,
-		work: (runner: ReturnType<typeof makeGitRunner>, dir: string) => Promise<unknown>,
+		work: (
+			runner: ReturnType<typeof makeGitRunner>,
+			dir: string,
+			ref: WorkRef | undefined,
+		) => Promise<unknown>,
 	): Promise<void> {
 		let done: (() => void) | null = null;
 		try {
 			const prepared = await prepare(req, res);
 			if (!prepared) return;
 			done = prepared.done;
-			const body = await work(prepared.runner, prepared.dir);
+			const body = await work(prepared.runner, prepared.dir, prepared.work);
 			// A client that left mid-work gets nothing written; the slot
 			// is still released only now, when git has actually finished.
 			if (!res.writableEnded && !res.destroyed) res.json(body);
@@ -198,7 +226,13 @@ export function registerGitRoutes(router: Router, ctx: RouteContext): void {
 	}
 
 	router.get("/sessions/:id/git/status", requireAuth, gitIp, (req, res) =>
-		serve(req, res, (runner, dir) => getGitStatus(runner, dir)),
+		serve(req, res, async (runner, dir, work) => {
+			const status = await getGitStatus(runner, dir);
+			if (!work) return status;
+			// `root` is what the client passes back as `dir`; with a work it
+			// passes `work` instead, and the worktree is its root.
+			return { ...(status.repo ? { ...status, root: "" } : status), work: work.view };
+		}),
 	);
 
 	router.get("/sessions/:id/git/diff", requireAuth, gitIp, async (req, res) => {

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// End-to-end acceptance of ACP agents + Project Chat, through the same HTTP
+// End-to-end acceptance of ACP agents + project conversations, through the same HTTP
 // API the web uses, against a REAL Shared Terminal (lab or production). Agents
 // run the deterministic test adapter (runtime `st-test-agent`, backend with
 // ACP_TEST_RUNTIME=1): no model, no credentials; everything else is real —
@@ -67,11 +67,13 @@ async function api(method, path, body) {
 	return { status: res.status, body: json ?? text };
 }
 
-const send = async (to, body, projectId, work) => {
+// The project's conversation the scenario posts in (v27); `inProject` = post there.
+let CONV = null;
+const send = async (to, body, inProject, work, conversationId = CONV) => {
 	const r = await api("POST", "/api/acp/messages", {
 		to,
 		body,
-		...(projectId ? { projectId } : {}),
+		...(inProject ? { conversationId } : {}),
 		...(work ? { work } : {}),
 		clientId: randomUUID(),
 	});
@@ -98,6 +100,16 @@ async function waitFor(what, fn, ms = 120_000) {
 const agents = async () => (await api("GET", "/api/acp/agents")).body;
 const agentFeed = async (n) => (await api("GET", `/api/acp/agents/${n}/feed`)).body;
 const projectFeed = async (pid) => (await api("GET", `/api/acp/projects/${pid}/feed`)).body;
+const convFeed = async (id = CONV) => (await api("GET", `/api/acp/conversations/${id}/feed`)).body;
+// Everything to or from an agent, any conversation (the Archive feed shows none of them).
+const msgsOf = async (n) => ({ messages: (await api("GET", `/api/acp/messages?agent=${n}`)).body });
+// The test agent's count of prompts in its ACP session: the LAST one (a reply quotes the other agent's).
+const countOf = (text) => Number([...(text ?? "").matchAll(/sesión ACP: (\d+)/g)].at(-1)?.[1] ?? 0);
+const newConv = async (pid, title) => {
+	const r = await api("POST", "/api/acp/conversations", { projectId: pid, title, clientRequestId: randomUUID() });
+	if (r.status !== 201) throw new Error(`conversation: ${r.status} ${JSON.stringify(r.body)}`);
+	return r.body.id;
+};
 const short = (s, n = 110) => (s ?? "").replace(/\s+/g, " ").slice(0, n);
 const runnerOnline = async (name) =>
 	(await agents()).find((a) => a.name === name && a.runnerSeenAt && Date.now() - Date.parse(a.runnerSeenAt) < 15_000);
@@ -127,37 +139,39 @@ async function main() {
 	for (const name of [ARQ, DEV])
 		check(`runner of @${name} online`, !!(await waitFor(`runner ${name}`, () => runnerOnline(name), 90_000)));
 	const pf0 = await projectFeed(pid);
-	check("Project Chat lists both agents", JSON.stringify(pf0.agents.map((a) => a.name).sort()) === JSON.stringify([ARQ, DEV].sort()));
+	check("the project lists both agents", JSON.stringify(pf0.agents.map((a) => a.name).sort()) === JSON.stringify([ARQ, DEV].sort()));
+	CONV = await newConv(pid, `Aceptación ${PREFIX}`);
+	check("a conversation in the project", !!CONV, CONV);
 
-	// 2. Project Chat → @arq, who consults @dev (st send) and gets the answer.
+	// 2. A conversation → @arq, who consults @dev (st send) and gets the answer.
 	const m1 = await send(ARQ, `@${ARQ} consultá a @${DEV}: ¿qué versión de Node hay en tu sesión?`, pid);
-	check("Project Chat message persisted at once (pending, project scope)", m1.state === "pending" && m1.project_id === pid);
+	check("message persisted at once (pending, in the conversation and its project)", m1.state === "pending" && m1.project_id === pid && m1.conversation_id === CONV);
 	const d1 = await waitMsg(m1.id);
 	check("@arq finished its turn", d1.state === "done", short(d1.result_text));
 	const consult = await waitFor("consult", async () =>
-		(await projectFeed(pid)).messages.find((m) => m.from_id === ARQ && m.to_id === DEV && m.kind === "request"),
+		(await convFeed()).messages.find((m) => m.from_id === ARQ && m.to_id === DEV && m.kind === "request"),
 	);
-	check("@arq's consult to @dev is in Project Chat (st send, depth 1)", !!consult && consult.depth === 1, consult && `#${consult.id}`);
+	check("@arq's consult to @dev is in the conversation (st send, depth 1)", !!consult && consult.depth === 1 && consult.conversation_id === CONV, consult && `#${consult.id}`);
 	const c2 = consult && (await waitMsg(consult.id));
 	check("@dev answered the consult", c2?.state === "done", short(c2?.result_text));
 	const reply = await waitFor("reply", async () =>
-		(await projectFeed(pid)).messages.find((m) => m.kind === "reply" && m.reply_to === consult?.id),
+		(await convFeed()).messages.find((m) => m.kind === "reply" && m.reply_to === consult?.id),
 	);
-	check("the answer came back to @arq as a reply correlated to the consult, in Project Chat", !!reply && reply.to_id === ARQ && reply.project_id === pid);
+	check("the answer came back to @arq as a reply correlated to the consult, in the conversation", !!reply && reply.to_id === ARQ && reply.conversation_id === CONV);
 	const r2 = reply && (await waitMsg(reply.id));
 	check("@arq processed the answer", r2?.state === "done" && /Recibí la respuesta de @/.test(r2?.result_text ?? ""), short(r2?.result_text));
 	const loopFree = await waitFor("no loop", async () => {
 		await sleep(4_000);
-		const ms = (await projectFeed(pid)).messages;
+		const ms = (await convFeed()).messages;
 		return ms.every((m) => m.state === "done") && !ms.some((m) => m.kind === "reply" && m.reply_to === reply?.id) ? ms : null;
 	}, 30_000);
-	check("the exchange ended by itself (no reply to a reply)", !!loopFree, loopFree && `${loopFree.length} messages in Project Chat`);
+	check("the exchange ended by itself (no reply to a reply)", !!loopFree, loopFree && `${loopFree.length} messages in the conversation`);
 
 	// 3. Individual chat: a direct message stays private.
 	const dm = await send(DEV, "Mensaje directo: decime algo corto.");
 	const dmd = await waitMsg(dm.id);
 	check("direct message answered", dmd.state === "done" && dmd.project_id === null, short(dmd.result_text));
-	check("…and it is not in Project Chat", !(await projectFeed(pid)).messages.some((m) => m.id === dm.id));
+	check("…and it is not in the conversation", !(await convFeed()).messages.some((m) => m.id === dm.id));
 	check("…but it is in @dev's individual chat", (await agentFeed(DEV)).messages.some((m) => m.id === dm.id));
 
 	// 4. Sending while busy: never blocked, processed in order.
@@ -188,8 +202,8 @@ async function main() {
 	check("…and is done when the task ends", bgEnd.state === "done", `${(Date.parse(bgEnd.finished_at) - Date.parse(bgEnd.started_at)) / 1000}s`);
 
 	// 6. Restart while working: pending survives, the interrupted one is uncertain and NOT repeated.
-	const before = await agentFeed(ARQ);
-	const countBefore = Number(/sesión ACP: (\d+)/.exec(before.messages.filter((m) => m.result_text).at(-1)?.result_text ?? "")?.[1] ?? 0);
+	const before = await msgsOf(ARQ);
+	const countBefore = countOf(before.messages.filter((m) => m.to_id === ARQ && m.conversation_id === CONV && m.result_text).at(-1)?.result_text);
 	const work = await send(ARQ, "esperá 60", pid);
 	await waitMsg(work.id, ["running"], 30_000);
 	const p1 = await send(ARQ, "pendiente 1 tras el reinicio", pid);
@@ -201,7 +215,7 @@ async function main() {
 	const unc = await waitMsg(work.id, ["uncertain", "failed", "done"], 120_000);
 	check("the interrupted message is uncertain", unc.state === "uncertain", short(unc.note));
 	const recov = await waitFor("recovery", async () =>
-		(await agentFeed(ARQ)).messages.find((m) => m.from_id === "system" && m.id > work.id && m.state === "done"),
+		(await msgsOf(ARQ)).messages.find((m) => m.from_id === "system" && m.id > work.id && m.state === "done"),
 	);
 	check("Shared Terminal asked @arq for a read-only report (no redo)", !!recov, short(recov?.result_text));
 	const pp = [await waitMsg(p1.id), await waitMsg(p2.id)];
@@ -209,15 +223,15 @@ async function main() {
 	await sleep(3_000);
 	const again = await get(work.id);
 	check("the uncertain message was not run again", again.state === "uncertain" && again.attempts === 1, `${again.state} attempts=${again.attempts}`);
-	const countAfter = Number(/sesión ACP: (\d+)/.exec(pp[1].result_text ?? "")?.[1] ?? 0);
+	const countAfter = countOf(pp[1].result_text);
 	check("ACP context kept across the container restart (same ACP session)", countAfter > countBefore, `${countBefore} → ${countAfter} prompts`);
 
 	// 6c. Questions (ACP elicitation): asked, visible after any "browser close", answered once, delivered once.
 	const openQ = async (msgId) =>
-		(await projectFeed(pid)).questions?.find((q) => q.message_id === msgId && q.state === "open");
+		(await convFeed()).questions?.find((q) => q.message_id === msgId && q.state === "open");
 	const ask1 = await send(ARQ, "preguntá: ¿Qué base de datos usamos? | SQLite | Postgres", pid);
 	const q1 = await waitFor("question", () => openQ(ask1.id), 60_000);
-	check("the agent's question is registered and shown in Project Chat (open)", !!q1, q1 && `#${q1.id}`);
+	check("the agent's question is registered and shown in the conversation (open)", !!q1, q1 && `#${q1.id}`);
 	check("…the agent shows as waiting for the person", (await agents()).find((a) => a.name === ARQ)?.waitingInput === true);
 	check("…the message stays running while it waits", (await get(ask1.id)).state === "running");
 	await sleep(8_000); // nobody looking: the question just waits, durable
@@ -229,7 +243,7 @@ async function main() {
 	check("answered once; a second answer is refused", ans.status === 200 && dup.status === 409, `${ans.status} ${dup.status}`);
 	const a1 = await waitMsg(ask1.id);
 	check("the agent got the answer in the same turn and continued", a1.state === "done" && /Elegiste: Postgres/.test(a1.result_text ?? ""), short(a1.result_text));
-	const q1d = (await projectFeed(pid)).questions.find((q) => q.id === q1?.id);
+	const q1d = (await convFeed()).questions.find((q) => q.id === q1?.id);
 	check("…the question reads delivered", q1d?.state === "delivered");
 
 	// 6d. Restart during a question: no false answer, no duplicate run.
@@ -239,7 +253,7 @@ async function main() {
 	await api("POST", `/api/sessions/${sids[ARQ]}/start`);
 	const u2 = await waitMsg(ask2.id, ["uncertain", "failed", "done"], 120_000);
 	check("the message interrupted during the question is uncertain, not done", u2.state === "uncertain", short(u2.note));
-	const q2o = await waitFor("orphaned", async () => (await projectFeed(pid)).questions.find((q) => q.id === q2?.id && q.state === "orphaned"), 60_000);
+	const q2o = await waitFor("orphaned", async () => (await convFeed()).questions.find((q) => q.id === q2?.id && q.state === "orphaned"), 60_000);
 	check("the question is marked 'not delivered' (orphaned), never answered", !!q2o, short(q2o?.note));
 	const late = await api("POST", `/api/acp/questions/${q2?.id}/answer`, { action: "accept", content: { question_0: "sí" } });
 	check("answering it afterwards is refused (nothing to deliver to)", late.status === 409, JSON.stringify(late.body));
@@ -279,13 +293,13 @@ async function main() {
 	const needs = await send(DEV, "¿estás conectado?", pid);
 	const waiting = await waitFor("auth required", async () => (await agents()).find((a) => a.name === DEV && a.authRequired), 60_000);
 	check("the agent reports it needs a login; the message waits (not failed, not uncertain)", !!waiting && (await get(needs.id)).state !== "uncertain", waiting && JSON.stringify(waiting.loginMethods));
-	const ctxBefore = Number(/sesión ACP: (\d+)/.exec((await agentFeed(DEV)).messages.filter((m) => m.result_text).at(-1)?.result_text ?? "")?.[1] ?? 0);
+	const ctxBefore = countOf((await msgsOf(DEV)).messages.filter((m) => m.to_id === DEV && m.conversation_id === CONV && !m.context && m.result_text).at(-1)?.result_text);
 	const method = waiting?.loginMethods?.[0]?.id;
 	const login = await api("POST", `/api/acp/agents/${DEV}/login`, { methodId: method });
 	check("Conectar cuenta opens a terminal tab running the adapter's login", login.status === 201 && /^tab-/.test(login.body?.tabId ?? ""), JSON.stringify(login.body));
 	const resumed = await waitMsg(needs.id, ["done", "uncertain", "failed"], 120_000);
 	check("after the login the agent resumes by itself and answers the waiting message", resumed.state === "done" && resumed.attempts >= 1, short(resumed.result_text));
-	const ctxAfter = Number(/sesión ACP: (\d+)/.exec(resumed.result_text ?? "")?.[1] ?? 0);
+	const ctxAfter = countOf(resumed.result_text);
 	check("same ACP session (context kept) across the adapter restart", ctxAfter > ctxBefore, `${ctxBefore} → ${ctxAfter}`);
 	check("the agent no longer reports a missing login", !(await agents()).find((a) => a.name === DEV)?.authRequired);
 	await execIn(sids[DEV], ["sh", "-c", `rm -f ${taDir}/require-auth`]);
@@ -358,7 +372,7 @@ async function main() {
 		check(`work ${id} created: worktree on work/${id}, its ports`, w.status === 201 && w.body?.state === "active" && w.body?.branch === `work/${id}` && w.body?.baseSha === repo.out.split("\n").at(-1), JSON.stringify(w.body));
 	}
 	check("creating it again returns it", (await api("POST", "/api/acp/works", { agent: DEV, id: S1 })).status === 200);
-	const running = async () => (await agentFeed(DEV)).messages.filter((m) => m.to_id === DEV && m.state === "running");
+	const running = async () => (await msgsOf(DEV)).messages.filter((m) => m.to_id === DEV && m.state === "running");
 	const peak = { n: 0 };
 	const watch = setInterval(async () => {
 		peak.n = Math.max(peak.n, (await running().catch(() => [])).length);
@@ -377,21 +391,21 @@ async function main() {
 	check("two messages of one context never overlap", Date.parse(sameDone[1].started_at) >= Date.parse(sameDone[0].finished_at), sameDone.map((m) => `${m.started_at}→${m.finished_at}`).join(" "));
 	const bgS1 = await send(DEV, `segundo plano 3: consultá a @${ARQ}: desde s1 en segundo plano`, pid, S1);
 	const bgDone = await waitMsg(bgS1.id);
-	const fromS1 = (await agentFeed(ARQ)).messages.find((m) => m.body === "desde s1 en segundo plano");
+	const fromS1 = (await msgsOf(ARQ)).messages.find((m) => m.body === "desde s1 en segundo plano");
 	check("a background st send of s1 is attributed to its run (from_context s1, depth 1)", bgDone.state === "done" && fromS1?.from_id === DEV && fromS1?.from_context === S1 && fromS1?.depth === 1, JSON.stringify(fromS1 && { fc: fromS1.from_context, d: fromS1.depth }));
-	const back = await waitFor("reply in s1", async () => (await agentFeed(DEV)).messages.find((m) => m.kind === "reply" && m.reply_to === fromS1?.id && m.state === "done"), 90_000);
+	const back = await waitFor("reply in s1", async () => (await msgsOf(DEV)).messages.find((m) => m.kind === "reply" && m.reply_to === fromS1?.id && m.state === "done"), 90_000);
 	check("…and the reply came back to context s1, processed by slot 2", back?.context === S1 && back?.slot === 2, back && `${back.context} slot ${back.slot}`);
 	const pers = await send(DEV, `persistente 6: consultá a @${ARQ}: tarde desde s1`, pid, S1);
 	check("a message that leaves a persistent process closes", (await waitMsg(pers.id)).state === "done");
 	await sleep(9_000);
-	check("…and that process's later st send is refused (nothing written)", !(await agentFeed(ARQ)).messages.some((m) => m.body === "tarde desde s1"));
+	check("…and that process's later st send is refused (nothing written)", !(await msgsOf(ARQ)).messages.some((m) => m.body === "tarde desde s1"));
 	const k = [await send(DEV, "esperá 10", pid), await send(DEV, "esperá 10", pid, S1)];
 	await waitFor("both running", async () => (await Promise.all(k.map((m) => get(m.id)))).every((m) => m.state === "running"), 60_000);
 	check("slot 2's runner killed", await execIn(sids[DEV], ["sh", "-c", "pkill -KILL -f '^node --no-warnings /opt/st-acp/st/runner.mjs 2$'; true"]));
 	const kDone = await Promise.all(k.map((m) => waitMsg(m.id)));
 	check("slot 1's message finished normally", kDone[0].state === "done", kDone[0].state);
 	check("only slot 2's message is uncertain, not rerun", kDone[1].state === "uncertain" && kDone[1].attempts === 1, `${kDone[1].state}/${kDone[1].attempts} ${short(kDone[1].note)}`);
-	const rep2 = await waitFor("recovery in s1", async () => (await agentFeed(DEV)).messages.find((m) => m.from_id === "system" && m.id > k[1].id && m.state === "done"), 90_000);
+	const rep2 = await waitFor("recovery in s1", async () => (await msgsOf(DEV)).messages.find((m) => m.from_id === "system" && m.id > k[1].id && m.state === "done"), 90_000);
 	check("the read-only report ran in slot 2, context s1", rep2?.slot === 2 && rep2?.context === S1, rep2 && `slot ${rep2.slot} ${rep2.context}`);
 	clearInterval(watch);
 	check("never more than max_concurrency running", peak.n <= 2, `peak ${peak.n}`);
@@ -429,6 +443,65 @@ async function main() {
 	const s2Clean = await waitFor("s2 cleaned", async () => (await api("POST", `/api/acp/works/${S2}/clean`)).body?.state === "cleaned", 90_000);
 	check("once removed, s2 is cleaned (its session released first)", !!s2Clean);
 	await api("PATCH", `/api/acp/agents/${DEV}`, { maxConcurrency: 1 });
+
+	// 6h. Conversations (v27, B2): slot 1 keeps one ACP session per conversation. Two topics with @arq
+	// keep their own count when alternating; what a message sets off (consult, reply, question, an
+	// interrupted run and its report) stays in its topic; a message to @arq busy in another topic waits
+	// pending and runs after; a session with a live task is never closed (the other topic waits).
+	const TA = await newConv(pid, `Tema A ${PREFIX}`);
+	const TB = await newConv(pid, `Tema B ${PREFIX}`);
+	const inA = (body) => send(ARQ, body, true, undefined, TA);
+	const inB = (body) => send(ARQ, body, true, undefined, TB);
+	const seq = [];
+	for (const [send1, body] of [[inA, "uno A"], [inB, "uno B"], [inA, "dos A"], [inB, "dos B"]]) seq.push(await waitMsg((await send1(body)).id));
+	check(
+		"two conversations with @arq keep their own ACP session count when alternating",
+		seq.every((m) => m.state === "done") && countOf(seq[2].result_text) === countOf(seq[0].result_text) + 1 && countOf(seq[3].result_text) === countOf(seq[1].result_text) + 1,
+		seq.map((m) => countOf(m.result_text)).join(","),
+	);
+	check("…and a new topic starts a new session (count 1)", countOf(seq[0].result_text) === 1 && countOf(seq[1].result_text) === 1);
+	const cB = await waitMsg((await inB(`consultá a @${DEV}: ¿algo del tema B?`)).id);
+	const consultB = (await convFeed(TB)).messages.find((m) => m.from_id === ARQ && m.to_id === DEV && m.kind === "request");
+	check("a consult from topic B stays in B", cB.state === "done" && consultB?.conversation_id === TB, consultB && `#${consultB.id}`);
+	const replyB = await waitFor("reply in B", async () => (await convFeed(TB)).messages.find((m) => m.kind === "reply" && m.reply_to === consultB?.id && m.state === "done"), 90_000);
+	check("…its reply comes back in B and runs in B's session", !!replyB && countOf(replyB.result_text) === countOf(cB.result_text) + 1, replyB && `${countOf(cB.result_text)} → ${countOf(replyB.result_text)}`);
+	check("…and none of it is in topic A", !(await convFeed(TA)).messages.some((m) => m.id === consultB?.id || m.id === replyB?.id));
+	const askA = await inA("preguntá: ¿Seguimos? | sí | no");
+	const qA = await waitFor("question in A", async () => (await convFeed(TA)).questions?.find((q) => q.message_id === askA.id && q.state === "open"), 60_000);
+	check("a question asked in topic A is in A, not in B", !!qA && !(await convFeed(TB)).questions.some((q) => q.id === qA.id));
+	const inboxQ = (await api("GET", "/api/acp/inbox")).body;
+	check("…and in the inbox, with its conversation", inboxQ.action?.questions?.some((q) => q.id === qA?.id && q.conversation_id === TA), `count ${inboxQ.count}`);
+	const waitB = await inB("en cola mientras A espera");
+	await sleep(3_000);
+	const arqState = (await agents()).find((a) => a.name === ARQ);
+	check(
+		"a message to @arq busy in another topic waits pending; the agent's state says where it works and what is queued",
+		(await get(waitB.id)).state === "pending" && arqState?.runningIn?.[0]?.conversationId === TA && arqState?.queue?.some((q) => q.id === waitB.id && q.conversationId === TB) && arqState?.question?.conversationId === TA,
+		JSON.stringify({ runningIn: arqState?.runningIn, queue: arqState?.queue, question: arqState?.question }),
+	);
+	await api("POST", `/api/acp/questions/${qA?.id}/answer`, { action: "accept", content: { question_0: "sí" } });
+	const [aDone, bDone] = [await waitMsg(askA.id), await waitMsg(waitB.id)];
+	check("…and runs after A's message, in B's session", bDone.state === "done" && Date.parse(bDone.started_at) >= Date.parse(aDone.finished_at) && countOf(bDone.result_text) > countOf(seq[3].result_text), `${aDone.finished_at} → ${bDone.started_at}`);
+	const persA = await waitMsg((await inA(`persistente 8: consultá a @${DEV}: tarde desde A`)).id);
+	const afterPers = await inB("tras el proceso de A");
+	await sleep(4_000);
+	check("a live task in A's session keeps @arq in A: B's message still waits", persA.state === "done" && (await get(afterPers.id)).state === "pending");
+	const ap = await waitMsg(afterPers.id);
+	check("…and runs once the task ended", ap.state === "done" && Date.parse(ap.started_at) - Date.parse(persA.finished_at) >= 6_000, `${(Date.parse(ap.started_at) - Date.parse(persA.finished_at)) / 1000}s`);
+	const longA = await inA("esperá 60");
+	await waitMsg(longA.id, ["running"], 30_000);
+	await api("POST", `/api/sessions/${sids[ARQ]}/stop`);
+	await api("POST", `/api/sessions/${sids[ARQ]}/start`);
+	const uA = await waitMsg(longA.id, ["uncertain", "failed", "done"], 120_000);
+	const repA = await waitFor("report in A", async () => (await convFeed(TA)).messages.find((m) => m.recovery_of === longA.id && m.state === "done"), 120_000);
+	check("an interrupted run in A is uncertain; its read-only report is in A, linked, in A's session", uA.state === "uncertain" && !!repA && repA.from_id === "system" && countOf(repA.result_text) > countOf(persA.result_text), repA && `#${repA.id} ${countOf(repA.result_text)}`);
+	const inboxU = (await api("GET", "/api/acp/inbox")).body;
+	check("…it is in the inbox with its report", inboxU.action?.interrupted?.some((m) => m.id === longA.id) && inboxU.reports?.some((m) => m.recovery_of === longA.id));
+	const rv = await api("POST", `/api/acp/messages/${longA.id}/review`);
+	const inboxR = (await api("GET", "/api/acp/inbox")).body;
+	check("reviewed: out of the inbox, still uncertain, not run again", rv.status === 200 && !inboxR.action.interrupted.some((m) => m.id === longA.id) && (await get(longA.id)).attempts === 1 && (await get(longA.id)).state === "uncertain");
+	const bLast = await waitMsg((await inB("sigo en B")).id);
+	check("topic B's session continues after the restart", bLast.state === "done" && countOf(bLast.result_text) > countOf(ap.result_text), `${countOf(ap.result_text)} → ${countOf(bLast.result_text)}`);
 
 	// 7. Terminal, Files and Git of the same agent session still answer.
 	const sid = sids[DEV];
