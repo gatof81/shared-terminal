@@ -72,7 +72,7 @@ test.describe("a topic's recipients and their states", () => {
 		await expect(field(page)).toHaveValue("");
 		// Before sending: who will queue it, and why (the agents' real state).
 		await expect(notes(page)).toHaveText(
-			"@dev está ocupado en «Optimización de CI»: tu mensaje queda en cola",
+			"Le queda en cola a @dev (ocupado en «Optimización de CI»).",
 		);
 		await shot(page, "1-before", info.project.name);
 		await field(page).fill("revisá el contraste de los chips");

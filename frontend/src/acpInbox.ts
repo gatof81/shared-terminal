@@ -88,6 +88,10 @@ export function openInbox(opener?: Element | null): void {
 	render();
 	refreshInbox(0);
 	unsub = onInbox(() => render());
+	// Wide: the panel opens by what opened it — under the header's icon on
+	// the right, under the rail's row on the left.
+	const fromHeader = opener instanceof Element && opener.id === "inbox-btn";
+	root!.classList.toggle("from-header", fromHeader);
 	dialog!.open(opener ?? document.activeElement);
 }
 

@@ -74,7 +74,7 @@ function topicStates(backend: MockBackend): void {
 		depth: 1,
 		created_at: at(1400),
 	});
-	backend.addAcpMessage({
+	const cut = backend.addAcpMessage({
 		to_id: "qa",
 		body: "@qa medí también la variante sin shards.",
 		project_id: hz,
@@ -83,6 +83,33 @@ function topicStates(backend: MockBackend): void {
 		note: "se reinició el runner de @qa",
 		created_at: at(1500),
 		finished_at: at(1550),
+	});
+	// What the review shows besides the cut: its last activity and the report.
+	backend.acpActivity = {
+		qa: [
+			{
+				seq: 1,
+				at: at(1540),
+				messageId: cut.id,
+				kind: "tool",
+				toolCallId: "t1",
+				title: "Bash",
+				detail: "npm run test:e2e -- --shard=1/1",
+				status: "in_progress",
+			},
+		],
+	};
+	backend.addAcpMessage({
+		from_id: "system",
+		to_id: "qa",
+		body: "Tu ejecución anterior se interrumpió: informá de solo lectura qué quedó hecho.",
+		project_id: hz,
+		conversation_id: c,
+		recovery_of: cut.id,
+		state: "done",
+		result_text: "Llegué a lanzar 1 corrida sin shards; no hice commits ni cambié archivos.",
+		created_at: at(1560),
+		finished_at: at(1580),
 	});
 	const conv = backend.acpConversations.find((x) => x.id === c)!;
 	conv.readAt = at(1799);
@@ -204,6 +231,8 @@ test.describe("visual", () => {
 		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/c/${CONV_IDS.backend}`);
 		await page.getByRole("button", { name: "Revisar interrupción" }).click();
 		const review = page.locator(".acp-review-card");
+		await expect(review.locator(".acp-review-facts")).toContainText("Última actividad");
+		await expect(review.locator(".acp-review-report")).toContainText("no hice commits");
 		await review.getByText("Reencolar el mensaje original…").click();
 		await expect(review.getByRole("button", { name: "Reencolar", exact: true })).toBeDisabled();
 		await shot(page, "review");

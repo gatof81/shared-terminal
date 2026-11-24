@@ -142,7 +142,7 @@ export function openReview(m: AcpMessage, ctx: ReviewContext = {}): void {
 	const status = el("p", "acp-review-status");
 	status.setAttribute("role", "status");
 	const reviewed = Boolean(m.reviewed_at) || m.state !== "uncertain";
-	const done = el("button", "btn primary acp-review-done", "Dar por revisada, sin reencolar");
+	const done = el("button", "btn acp-review-done", "Dar por revisada, sin reencolar");
 	done.type = "button";
 	if (reviewed) {
 		done.disabled = true;
@@ -196,7 +196,7 @@ export function openReview(m: AcpMessage, ctx: ReviewContext = {}): void {
 		check,
 		el("span", undefined, "Revisé el estado y acepto que puede repetir operaciones."),
 	);
-	const requeue = el("button", "btn sm acp-review-requeue-btn", "Reencolar");
+	const requeue = el("button", "btn sm danger acp-review-requeue-btn", "Reencolar");
 	requeue.type = "button";
 	requeue.disabled = true;
 	check.addEventListener("change", () => {
@@ -245,5 +245,5 @@ function time(iso: string): string {
 	const d = new Date(iso);
 	return Number.isNaN(d.getTime())
 		? ""
-		: d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+		: d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
 }

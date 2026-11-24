@@ -208,12 +208,16 @@ button.acp-work-chip:hover {
 	list-style: none;
 	text-align: left;
 }
+/* Avatar · name · state on one line; a state that does not fit goes on
+   under ITSELF (its own column), never under the avatar. */
 .acp-rs {
-	display: flex;
-	flex-wrap: wrap;
-	align-items: center;
-	gap: 2px 7px;
+	display: grid;
+	grid-template-columns: 20px auto minmax(0, 1fr);
+	align-items: start;
+	column-gap: 7px;
+	row-gap: 2px;
 	font-size: 0.8rem;
+	line-height: 20px;
 	color: var(--c-text-2);
 }
 .acp-rs-name {
@@ -221,15 +225,14 @@ button.acp-work-chip:hover {
 	color: hsl(var(--acp-hue, 210) 55% 66%);
 }
 .acp-rs-state {
-	display: inline-flex;
-	flex-wrap: wrap;
-	align-items: center;
-	gap: 0 5px;
 	min-width: 0;
 	color: var(--c-muted);
+	overflow-wrap: anywhere;
 }
 .acp-rs-dot {
-	flex: none;
+	display: inline-block;
+	margin-right: 5px;
+	vertical-align: 1px;
 	width: 7px;
 	height: 7px;
 	border-radius: 50%;
@@ -265,8 +268,7 @@ button.acp-work-chip:hover {
 	color: var(--c-err-soft);
 }
 .acp-rs-note {
-	flex-basis: 100%;
-	padding-left: 27px;
+	grid-column: 3;
 	font-size: 0.76rem;
 	color: var(--c-muted);
 }
@@ -307,9 +309,13 @@ button.acp-rs-check:hover {
 	border-color: var(--c-ok);
 }
 @media (max-width: 768px) {
-	.acp-rs-check,
-	.acp-rs .acp-link {
+	.acp-rs-check {
 		min-height: 32px;
+	}
+	/* A bigger target that does not move the row: padding taken back by margin. */
+	.acp-rs .acp-link {
+		padding: 8px 6px;
+		margin: -8px -6px;
 	}
 }
 
@@ -648,5 +654,62 @@ button.rail-attention:hover {
 	}
 	.acp-review-ack {
 		align-items: center;
+	}
+}
+
+/* A phone: the person's message with state rows takes the whole width, so
+   each row keeps name and state together. */
+@media (max-width: 768px) {
+	.acp-post:has(.acp-rs-list) > .acp-out {
+		align-self: stretch;
+		max-width: none;
+	}
+	.acp-to-note {
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+}
+
+/* Pendientes from the header's icon (wide): under the icon, on the right. */
+.modal.acp-inbox.from-header {
+	justify-content: flex-end;
+}
+.modal.acp-inbox.from-header .acp-inbox-card {
+	margin: 56px 8px 0 0;
+}
+
+/* The review's main action: the accent, like the app's other main actions. */
+.btn.acp-review-done {
+	background: var(--c-accent-strong);
+	border-color: var(--c-accent-strong);
+	color: #fff;
+}
+.btn.acp-review-done:hover:not(:disabled) {
+	background: var(--c-accent);
+	border-color: var(--c-accent);
+}
+/* A phone (≤ 760 px): the review takes the screen; «Cerrar» stays in view. */
+.acp-review-card {
+	display: flex;
+	flex-direction: column;
+}
+.acp-review-scroll {
+	flex: 1 1 auto;
+}
+@media (max-width: 760px) {
+	.modal.acp-review .modal-backdrop {
+		display: none;
+	}
+	.acp-review-card {
+		width: 100vw;
+		max-width: none;
+		height: var(--app-vh, 100dvh);
+		max-height: none;
+		border: 0;
+		border-radius: 0;
+	}
+	.acp-review-card > .modal-actions {
+		flex: none;
 	}
 }

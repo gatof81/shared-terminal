@@ -292,6 +292,7 @@ export class AcpThread {
 		openReview(m, {
 			where: this.conversation?.title ?? null,
 			activity: this.lastActivity(m.id),
+			report: this.messages.find((x) => x.recovery_of === m.id) ?? null,
 			onChanged: (row) => this.applyRow(row),
 		});
 	/**
@@ -2143,17 +2144,21 @@ export class AcpThread {
 		}
 		this.chipBox.replaceChildren(...nodes);
 		// Under the field: who it reaches, and who will queue it (dato real: /agents).
+		// At most two lines (one each; CSS cuts the end — a topic's title — on a phone).
 		const lines: string[] = [];
 		const to = c.team ? names : c.agents;
 		if (c.team && names.length)
 			lines.push(`Llega a ${names.map((n) => `@${n}`).join(", ")}, a cada uno por separado.`);
-		for (const n of to) {
+		const queued = to.flatMap((n) => {
 			const busy = busyElsewhere(this.agents.get(n), this.topicId(), this.titleOf);
-			if (busy)
-				lines.push(
-					`@${n} ${busy.startsWith("ocupado") ? `está ${busy}` : busy}: tu mensaje queda en cola`,
-				);
-		}
+			return busy ? [`@${n} (${busy})`] : [];
+		});
+		if (queued.length)
+			lines.push(
+				`${queued.length > 1 ? "Les" : "Le"} queda en cola a ${
+					queued.length > 1 ? `${queued.slice(0, -1).join(", ")} y ${queued.at(-1)}` : queued[0]
+				}.`,
+			);
 		this.toNotes.replaceChildren(...lines.map((l) => el("div", "acp-to-note", l)));
 		this.toNotes.hidden = lines.length === 0;
 	}
@@ -2551,7 +2556,7 @@ function time(iso: string): string {
 	const d = new Date(iso);
 	return Number.isNaN(d.getTime())
 		? ""
-		: d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+		: d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
 }
 
 /** An agent's avatar + @name, in its colour (also the Project Chat header's). */
