@@ -2236,6 +2236,36 @@ describe("ACP conversations (v27)", () => {
 		expect(outside.body).toMatchObject({ conversation_id: null, project_id: null });
 		await call(as("ana"), "POST", `/runner/messages/${m.id}/result`, { state: "done", text: "." });
 	});
+
+	it("a consult inside the project whose run is interrupted: the unfinished notice stays in the conversation", async () => {
+		const sent = await call(owner, "POST", "/messages", {
+			to: "ana",
+			body: "revisá con beto",
+			conversationId: c1,
+		});
+		const m = (await call(as("ana"), "POST", "/runner/claim")).body;
+		expect(m.id).toBe(sent.body.id);
+		const consult = await call(as("ana"), "POST", "/messages", { to: "beto", body: "¿estado?" });
+		expect(consult.body).toMatchObject({ conversation_id: c1, project_id: PC });
+		// beto may have older messages queued: run them first.
+		let b = (await call(as("beto"), "POST", "/runner/claim")).body;
+		while (b.id !== consult.body.id) {
+			await call(as("beto"), "POST", `/runner/messages/${b.id}/result`, {
+				state: "done",
+				text: ".",
+			});
+			b = (await call(as("beto"), "POST", "/runner/claim")).body;
+		}
+		await call(as("beto"), "POST", `/runner/messages/${b.id}/result`, {
+			state: "uncertain",
+			note: "corte",
+		});
+		const notice = db
+			.prepare("SELECT * FROM agent_messages WHERE reply_to = ? AND note = 'unfinished:uncertain'")
+			.get(consult.body.id) as Record<string, unknown>;
+		expect(notice).toMatchObject({ conversation_id: c1, project_id: PC, to_id: "ana" });
+		await call(as("ana"), "POST", `/runner/messages/${m.id}/result`, { state: "done", text: "." });
+	});
 });
 
 type MessageRowT = import("./agents.js").MessageRow;
