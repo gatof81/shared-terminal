@@ -1847,6 +1847,8 @@ export interface AcpMessage {
 	project_id?: string | null;
 	depth?: number;
 	client_id?: string | null;
+	/** Execution context: null = the agent's default one; else the work (`st work`) it runs in. */
+	context?: string | null;
 }
 
 export interface AcpAgentInfo {
