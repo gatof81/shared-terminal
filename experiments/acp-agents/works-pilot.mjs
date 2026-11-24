@@ -15,6 +15,7 @@
 //   W11 one server per work in its own range (ST_PORT_BASE); `st port check` tells mine from the other's;
 //       a bind on a taken port is detected;
 //   W12 a useful ignored file (.env) or a live process keep `st work clean` from removing (cleanup-pending + reason);
+//       an agent outside the project is refused;
 //   W13 a disposable work (st-c) is closed and cleaned: worktree gone, branch and ACP session kept, main checkout
 //       untouched;
 //   P6  memory.peak / oom / oom_kill of @dev's container, and disk before/after.
@@ -33,6 +34,8 @@ const PREFIX = process.env.PREFIX ?? `w${randomBytes(2).toString("hex")}`;
 const ARQ = `${PREFIX}-arq`;
 const DEV = `${PREFIX}-dev`;
 const REV = `${PREFIX}-rev`;
+// An agent of no project: close/clean of another project's work must be refused (D7: any agent of the SAME project).
+const OUT = `${PREFIX}-out`;
 const [WA, WB, WC] = [`${PREFIX}-st-a`, `${PREFIX}-st-b`, `${PREFIX}-st-c`];
 const WS = "/home/developer/workspace";
 // The lab's "remote": a bare repo inside @dev's container, outside the workspace (a push there is the "PR").
@@ -155,6 +158,10 @@ async function requestTo(pid, from, w, text, afterId, wait = true) {
 	);
 	return row && wait ? await waitMsg(row.id, 180_000) : row;
 }
+const exitOfAny = (m) => {
+	const x = /exit (\d+)/.exec(m?.result_text ?? "");
+	return x ? Number(x[1]) : null;
+};
 const overlapMs = (a, b) => Math.min(ms(a.finished_at), ms(b.finished_at)) - Math.max(ms(a.started_at), ms(b.started_at));
 
 // ── Scenario ──────────────────────────────────────────────────────────────────
@@ -172,7 +179,11 @@ async function main() {
 		sids[name] = r.body.sessionId;
 		created.sessions.push(r.body.sessionId);
 	}
-	for (const name of [ARQ, DEV, REV])
+	const ro = await api("POST", "/api/sessions", { name: `works ${OUT}`, acpAgent: { name: OUT, runtime: "st-test-agent" } });
+	check(`session with @${OUT} (no project)`, ro.status === 201, `${ro.status}`);
+	sids[OUT] = ro.body.sessionId;
+	created.sessions.push(ro.body.sessionId);
+	for (const name of [ARQ, DEV, REV, OUT])
 		check(`runner of @${name} online`, !!(await waitFor(async () => (await agents()).find((a) => a.name === name && a.runnerSeenAt))));
 	const dev = sids[DEV];
 	const mc = await api("PATCH", `/api/acp/agents/${DEV}`, { maxConcurrency: 3 });
@@ -329,6 +340,11 @@ async function main() {
 	// time. CONTRACT: directives `cerrá trabajo @x <id>` / `limpiá trabajo @x <id>` (`st work close|clean`); the
 	// reasons as the row reports them.
 	const op = async (text) => waitMsg((await send(ARQ, text, pid)).id);
+	// An agent outside the project cannot close or clean the work (its own `st` gets the refusal).
+	for (const verb of ["cerrá", "limpiá"]) {
+		const o = await waitMsg((await send(OUT, `${verb} trabajo @${DEV} ${WB}`)).id);
+		check(`W12 @${OUT} (outside the project): «${verb}» on st-b refused`, (exitOfAny(o) ?? 0) !== 0 && (await work(DEV, WB))?.state === "active", short(o.result_text, 120));
+	}
 	const reasons = (row, m) => JSON.stringify(row?.reasons ?? row?.cleanupReasons ?? row?.cleanup_reasons ?? m?.result_text ?? "");
 	const cl1 = await op(`cerrá trabajo @${DEV} ${WB}`);
 	const cn1 = await op(`limpiá trabajo @${DEV} ${WB}`);
@@ -342,8 +358,9 @@ async function main() {
 	const cn2 = await op(`limpiá trabajo @${DEV} ${WB}`);
 	const rowB2 = await work(DEV, WB);
 	check(
+		// Each attempt re-evaluates everything and returns every reason in force: require each, never "only".
 		"W12 a useful ignored .env in st-b ⇒ cleanup-pending naming .env, file kept",
-		rowB2?.state === "cleanup-pending" && /\.env/.test(reasons(rowB2, cn2)) && !/process|proceso/i.test(reasons(rowB2, cn2)) && (await sh(dev, `test -f ${WS}/.st/ctx/${WB}/.env && echo y`)).includes("y"),
+		rowB2?.state === "cleanup-pending" && /\.env/.test(reasons(rowB2, cn2)) && (await sh(dev, `test -f ${WS}/.st/ctx/${WB}/.env && echo y`)).includes("y"),
 		`${short(cn2.result_text, 80)} | ${reasons(rowB2, cn2)}`,
 	);
 	check("W12 st-a untouched by st-b's cleanup", (await work(DEV, WA))?.state === "active" && (await branch(WA)) === `work/${WA}`, JSON.stringify(await work(DEV, WA)));
