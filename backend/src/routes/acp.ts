@@ -195,7 +195,14 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 					return void res.status(409).json({ error: "work-not-yours", work, agent: target.name });
 				if (w.state !== "active")
 					return void res.status(409).json({ error: "work-not-active", work, state: w.state });
-				if (c.kind === "agent" && (w.project_id === null || w.project_id !== c.agent.project_id))
+				// The work's project, and the recipient still in it: an agent that moved
+				// to another project no longer takes work delegated from the old one.
+				if (
+					c.kind === "agent" &&
+					(w.project_id === null ||
+						w.project_id !== c.agent.project_id ||
+						w.project_id !== target.project_id)
+				)
 					return void res.status(403).json({ error: "work-other-project", work });
 				// Named contexts run in slots ≥ 2 (the cap may have been lowered since).
 				if (target.max_concurrency < 2)
@@ -310,13 +317,18 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 			res.status(404).json({ error: "work-not-found" });
 			return null;
 		}
-		if (c.kind === "agent" && (w.project_id === null || w.project_id !== c.agent.project_id)) {
-			res.status(403).json({ error: "work-other-project" });
-			return null;
-		}
 		const agent = (await acp.list(w.owner_user_id)).find((a) => a.agent_id === w.agent_id);
 		if (!agent) {
 			res.status(404).json({ error: "work-not-found" });
+			return null;
+		}
+		if (
+			c.kind === "agent" &&
+			(w.project_id === null ||
+				w.project_id !== c.agent.project_id ||
+				w.project_id !== agent.project_id)
+		) {
+			res.status(403).json({ error: "work-other-project" });
 			return null;
 		}
 		return { w, agent };

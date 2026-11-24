@@ -80,7 +80,7 @@ echo "free_kb=$(df -Pk . | awk 'NR==2 {print $4}')"
 [ -e ".st/ctx/$id" ] && echo exists=directory
 [ -e ".st/acp/ctx/$id.json" ] && echo exists=session
 git show-ref --verify --quiet "refs/heads/work/$id" && echo exists=branch
-timeout 30 git fetch --quiet origin >/dev/null 2>&1 || echo fetch=failed
+timeout 20 git fetch --quiet origin >/dev/null 2>&1 || echo fetch=failed
 if [ -z "$base" ]; then base=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || base=HEAD; fi
 sha=$(git rev-parse --verify --quiet --end-of-options "$base^{commit}") || { echo "bad-base=$base"; exit 0; }
 echo "base=$base"
@@ -388,6 +388,8 @@ export class AcpWorks {
 					: found === "other"
 						? "hay un directorio en .st/ctx/<id> que no es el worktree de work/<id>: revisalo a mano"
 						: "no se pudo comprobar el estado del worktree: repetí el pedido";
+		// Best effort: the note only explains the row; the answer already says it,
+		// and a failed write must not turn this refusal into a 500.
 		void d1Query(
 			"UPDATE agent_works SET note = ? WHERE owner_user_id = ? AND id = ? AND state = 'creating'",
 			[note, row.owner_user_id, row.id],

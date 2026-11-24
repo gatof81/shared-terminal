@@ -1504,6 +1504,11 @@ describe("ACP works: creation, delegation (v26)", () => {
 		expect(del.body).toMatchObject({ context: "perdido", from_id: "arquitecto", depth: 1 });
 		// solo is in no project: never into a work.
 		expect((await send(as("solo"), "perdido")).body.error).toBe("work-other-project");
+		// The recipient moved to another project: its old project no longer delegates to it.
+		db.prepare("UPDATE acp_agents SET project_id = 'p-2' WHERE name = 'obrero'").run();
+		const moved = await send(as("arquitecto"), "perdido");
+		db.prepare("UPDATE acp_agents SET project_id = 'p-1' WHERE name = 'obrero'").run();
+		expect(moved.body.error).toBe("work-other-project");
 		await call(as("arquitecto"), "POST", `/runner/messages/${c.body.id}/result`, {
 			state: "done",
 			text: ".",
