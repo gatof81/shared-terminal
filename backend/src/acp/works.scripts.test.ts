@@ -21,9 +21,11 @@ const env = {
 	GIT_COMMITTER_EMAIL: "t@t",
 };
 const git = (...a: string[]) => execFileSync("git", a, { env }).toString().trim();
-// In a session container every process is the agent user's; a CI host has
-// others' (unreadable): the process sweep looks only at this user's, as there.
-const OWN_PROCS = 'for p in $(for q in /proc/[0-9]*; do [ -O "$q" ] && echo "$q"; done); do';
+// In a session container every process is the agent user's and readable; a CI
+// host has others' (and non-dumpable ones of this user): the sweep looks only at
+// the readable ones of this user, as there.
+const OWN_PROCS =
+	'for p in $(for q in /proc/[0-9]*; do [ -O "$q" ] && readlink "$q/cwd" >/dev/null 2>&1 && [ -r "$q/environ" ] && echo "$q"; done); do';
 function run(script: string, ...args: string[]) {
 	const text = script.replaceAll(WORKSPACE, ws).replace("for p in /proc/[0-9]*; do", OWN_PROCS);
 	const r = spawnSync("sh", ["-c", text, "sh", ...args], { env });
