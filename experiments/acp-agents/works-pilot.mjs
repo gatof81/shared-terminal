@@ -120,9 +120,12 @@ const work = async (agent, id) => (await works(agent)).find((w) => w.id === id) 
 // The work a message row runs in (#751: the row keeps `context` = the work's id; the person POSTs `work`).
 const workOf = (m) => m?.context ?? null;
 const short = (s, n = 110) => (s ?? "").replace(/\s+/g, " ").slice(0, n);
-const sessionCount = (text) => Number(/sesión ACP: (\d+) mensajes/.exec(text ?? "")?.[1] ?? Number.NaN);
+// The LAST occurrence is the answering agent's own context line: an answer to a reply first quotes the other
+// agent's text, which carries that agent's context line (lab #750 OPS-RESULT 2, W9).
+const last = (re, text) => [...(text ?? "").matchAll(re)].at(-1)?.[1] ?? null;
+const sessionCount = (text) => Number(last(/sesión ACP: (\d+) mensajes/g, text) ?? Number.NaN);
 // The test agent's context line: «… · cwd <dir> · trabajo <ST_WORK|->[ · desde el trabajo <id>])» (#752).
-const cwdOf = (text) => /cwd (\S+) · trabajo /.exec(text ?? "")?.[1] ?? null;
+const cwdOf = (text) => last(/cwd (\S+) · trabajo /g, text);
 const ms = (iso) => Date.parse(iso);
 
 // stdout + exit code of a command in a session container (exec API, NDJSON events).
