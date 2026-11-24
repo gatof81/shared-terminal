@@ -1669,7 +1669,7 @@ export class AcpThread {
 					el(
 						"div",
 						"acp-typing",
-						m.state === "pending" ? "En cola: lo toma cuando termine lo anterior." : "Trabajando…",
+						m.state === "pending" ? "En cola — lo toma en cuanto se libere." : "Trabajando…",
 					),
 				);
 		}
@@ -1998,8 +1998,8 @@ export class AcpThread {
 		const parts: string[] = [];
 		if (this.sending) parts.push(this.sending > 1 ? `Enviando (${this.sending})…` : "Enviando…");
 		// A topic says it per recipient, under each message.
-		if (running && !topic) parts.push(`${running} en curso`);
-		if (queued && !topic) parts.push(`${queued} en espera`);
+		if (running && !topic) parts.push(`${running} trabajando`);
+		if (queued && !topic) parts.push(`${queued} en cola`);
 		// UTF-8 takes at most 3 bytes per UTF-16 unit: below that bound nothing
 		// can be near the limit, and typing does not encode the text each key.
 		const text = this.input.value;

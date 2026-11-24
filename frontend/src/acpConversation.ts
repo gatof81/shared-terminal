@@ -287,7 +287,7 @@ async function archiveTopic(c: AcpConversation): Promise<void> {
 	const ok = await confirmDialog({
 		title: `Archivar «${c.title}»`,
 		message:
-			"Sale de la lista de conversaciones y no admite mensajes nuevos. Su historial sigue legible desde «Ver archivadas».",
+			"Sale de la lista de conversaciones y no admite mensajes nuevos. Su historial sigue legible desde «Conversaciones archivadas», en el panel del proyecto.",
 		confirmLabel: "Archivar",
 		danger: true,
 	}).catch(() => false);

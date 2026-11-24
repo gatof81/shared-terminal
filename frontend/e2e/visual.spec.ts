@@ -150,7 +150,12 @@ test.describe("visual", () => {
 
 	test("project rail", async ({ app, backend, page }) => {
 		backend.enableConversations();
-		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		// Wide, the rail beside a topic («Optimización de CI», so «Rediseño»
+		// keeps its unread: entering bare would open the most recent and read it).
+		await app.login(
+			"alice",
+			`#/projects/${PROJECT_IDS.hz}${app.mobile ? "" : `/c/${CONV_IDS.ci}`}`,
+		);
 		await expect(page.locator(".rail-body .rail-agent")).toHaveCount(2);
 		await expect(page.locator(".rail-body .rail-unread")).toHaveText("1");
 		await shot(page, "project-rail");
@@ -168,6 +173,9 @@ test.describe("visual", () => {
 		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/c/${CONV_IDS.ui}`);
 		await expect(page.locator("#project-view .acp-divider")).toBeVisible();
 		await expect(page.locator("#ps-topic-title")).toHaveText("Rediseño de UI/UX");
+		// What was on screen is marked read: the open topic's count goes (wide,
+		// where the rail shows), at a time the read mark's answer decides.
+		await expect(page.locator(".rail-conv[aria-current] .rail-unread")).toHaveCount(0);
 		await shot(page, "project-topic");
 	});
 

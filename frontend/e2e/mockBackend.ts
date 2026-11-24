@@ -362,7 +362,7 @@ export class MockBackend {
 			runtime: "claude-acp-0.108.0",
 			model: null,
 			projectId,
-			// Just before the page clock (FIXED_NOW): the status reads "libre", not "sin señal".
+			// Just before the page clock (FIXED_NOW): the status reads "disponible", not "sin señal".
 			runnerSeenAt: iso(1790),
 			running: [],
 			pending: 0,
