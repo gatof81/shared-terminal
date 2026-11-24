@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<title>Shared Terminal · Prototipo 3A</title>
+<link rel="stylesheet" href="proto.css">
+</head>
+<body data-view="chat" data-m="home">
+<div id="app">
+	<!-- ── Rail: proyecto, pendientes, conversaciones, equipo, trabajos, archivo ── -->
+	<aside id="rail" aria-label="Proyecto">
+		<div class="rail-head">
+			<button id="project-btn" class="proj-btn" aria-haspopup="menu"><span class="proj-mark">ST</span><span id="project-name">Shared Terminal</span><span class="caret">▾</span></button>
+			<button class="inbox-btn" data-open-inbox aria-label="Pendientes"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 9.5V13h12V9.5M2 9.5 4 3h8l2 6.5M2 9.5h3.5l1 1.5h3l1-1.5H14"/></svg><b class="badge" data-badge></b></button>
+		</div>
+		<div class="rail-scroll">
+			<button class="attn-row" data-open-inbox><span class="attn-dot"></span><span data-attn-text>Nada pendiente</span><span class="chev">›</span></button>
+			<div class="sec"><span>Conversaciones</span><button class="icon-btn" id="new-conv" aria-label="Nueva conversación">+</button></div>
+			<ul id="conv-list" class="list"></ul>
+			<div class="sec"><span>Equipo</span></div>
+			<ul id="team-list" class="list"></ul>
+			<div class="sec"><span>Trabajos</span><button class="icon-btn" id="works-toggle" aria-label="Mostrar cerrados">⋯</button></div>
+			<ul id="work-list" class="list"></ul>
+			<div class="sec"><span>Archivo · solo lectura</span></div>
+			<ul id="archive-list" class="list"></ul>
+		</div>
+		<div class="rail-foot"><span class="me">D</span><span>Diego</span><span class="muted small">· Sesiones · Ajustes</span></div>
+	</aside>
+
+	<main id="main">
+		<!-- ── Conversación ── -->
+		<section id="chat" aria-label="Conversación">
+			<header class="bar chat-bar">
+				<button class="back m-only" data-go-home aria-label="Volver">‹</button>
+				<div class="titles"><h1 id="conv-title"></h1><div id="conv-sub" class="sub"></div></div>
+				<div id="conv-people" class="people"></div>
+				<button class="inbox-btn m-only" data-open-inbox aria-label="Pendientes"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 9.5V13h12V9.5M2 9.5 4 3h8l2 6.5M2 9.5h3.5l1 1.5h3l1-1.5H14"/></svg><b class="badge" data-badge></b></button>
+				<button class="icon-btn" id="conv-menu" aria-label="Más">⋯</button>
+			</header>
+			<div id="thread" class="thread" tabindex="-1"></div>
+			<button id="new-pill" class="pill" hidden></button>
+			<footer id="composer" class="composer">
+				<div class="to-row"><span class="to-label">Para</span><div id="to-chips" class="chips"></div><button id="to-add" class="chip add" aria-haspopup="listbox">+</button></div>
+				<div class="field"><textarea id="input" rows="1" placeholder="Escribí… (@ menciona)"></textarea><button id="send" class="send" aria-label="Enviar">➤</button></div>
+				<div id="mention-pop" class="pop" role="listbox" hidden></div>
+				<div id="queue-note" class="queue-note" hidden></div>
+			</footer>
+			<footer id="readonly" class="readonly" hidden>Archivo de solo lectura — estas conversaciones no tienen tema ni continuidad. <button class="btn" id="continue-archive">Continuar en una conversación nueva</button></footer>
+		</section>
+
+		<!-- ── Herramientas: agente → workspace → herramienta ── -->
+		<section id="tools" aria-label="Herramientas">
+			<header class="bar tools-bar">
+				<button class="back" id="tools-back"><span>‹</span> <span id="tools-back-label">Volver</span></button>
+				<div class="selectors">
+					<label class="sel"><span class="sel-k">Agente</span><select id="sel-agent"></select></label>
+					<label class="sel" id="sel-ws-wrap"><span class="sel-k">Workspace</span><select id="sel-ws"></select></label>
+					<div class="seg" role="tablist" id="tool-seg">
+						<button role="tab" data-tool="files">Files</button><button role="tab" data-tool="git">Git</button><button role="tab" data-tool="terminal">Terminal</button>
+					</div>
+				</div>
+				<button class="inbox-btn m-only" data-open-inbox aria-label="Pendientes"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 9.5V13h12V9.5M2 9.5 4 3h8l2 6.5M2 9.5h3.5l1 1.5h3l1-1.5H14"/></svg><b class="badge" data-badge></b></button>
+			</header>
+			<div id="where" class="where"></div>
+			<div id="tool-body" class="tool-body"></div>
+		</section>
+	</main>
+</div>
+
+<!-- ── Pendientes ── -->
+<div id="inbox" class="inbox" hidden role="dialog" aria-label="Pendientes">
+	<header class="bar"><h2>Pendientes</h2><span class="muted small">todos los proyectos</span><button class="icon-btn" data-close-inbox aria-label="Cerrar">✕</button></header>
+	<div id="inbox-body"></div>
+</div>
+<div id="scrim" hidden></div>
+<div id="menu" class="menu" hidden role="menu"></div>
+<dialog id="new-dialog">
+	<form method="dialog">
+		<h2>Nueva conversación</h2>
+		<label>Tema<input id="nd-title" placeholder="Ej.: Rediseño de notificaciones" required></label>
+		<fieldset><legend>Para (primer mensaje)</legend><div id="nd-team" class="nd-team"></div></fieldset>
+		<label>Mensaje<textarea id="nd-body" rows="3" placeholder="Qué querés resolver en este tema"></textarea></label>
+		<p class="muted small">El equipo es del proyecto: cualquier agente puede sumarse después con @.</p>
+		<div class="row-end"><button value="cancel" class="btn ghost">Cancelar</button><button value="ok" class="btn primary">Crear</button></div>
+	</form>
+</dialog>
+<div id="proto-note" class="proto-note">Prototipo 3A · datos simulados</div>
+<script src="data.js"></script>
+<script src="proto.js"></script>
+</body>
+</html>
