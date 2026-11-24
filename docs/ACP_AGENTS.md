@@ -148,7 +148,7 @@ work's first message — never by the runner, which fails a message whose direct
 
 - `POST /api/acp/works {agent, id, base?}` (`st work new @agente <id> [--base <ref>]`): the person,
   or an agent of the recipient's project. The recipient needs `max_concurrency ≥ 2`, a running
-  session and `ACP_WORK_MIN_FREE_MB` (3072) free in its workspace (else 400 `context-needs-slots`,
+  session and `ACP_WORK_MIN_FREE_MB` (20480: above the 15 GiB the nightly backup needs) free in its workspace (else 400 `context-needs-slots`,
   409 `session-not-running` / `low-disk`). In the agent's container (fixed scripts under
   `docker exec`, like the Git view; only `id` and `base` reach them, as positional arguments):
   refuse if `.st/ctx/<id>`, `.st/acp/ctx/<id>.json` or branch `work/<id>` exists (409
@@ -276,7 +276,7 @@ session.
    | `ACP_MAX_DEPTH` | `6` | agent → agent nesting limit |
    | `ACP_MAX_CHAIN` | `40` | agent → agent requests under one person's message |
    | `ACP_MAX_RUNNING` | `6` | messages running at once on this backend, all agents (each agent: `max_concurrency`) |
-   | `ACP_WORK_MIN_FREE_MB` | `3072` | free space an agent's workspace needs to create a work |
+   | `ACP_WORK_MIN_FREE_MB` | `20480` | free space an agent's workspace needs to create a work |
    | `ACP_TEST_RUNTIME` | unset | `1` installs the deterministic `st-test-agent` runtime |
    | `ACP_RUNTIME_DIR` | `<WORKSPACE_ROOT>/.acp-runtime` | runtime directory (same path on host and backend) |
    | `ACP_BACKEND_URL` | `http://st-backend:<PORT>` | how runners reach the backend over the sessions network |

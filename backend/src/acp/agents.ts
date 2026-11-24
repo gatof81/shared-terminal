@@ -73,7 +73,10 @@ export function acpConfigFromEnv(workspaceRoot: string, port: number): AcpConfig
 		maxDepth: Number(env.ACP_MAX_DEPTH ?? DEFAULT_MAX_DEPTH),
 		maxRunning: Number(env.ACP_MAX_RUNNING ?? 6),
 		maxChain: Number(env.ACP_MAX_CHAIN ?? 40),
-		workMinFreeMb: Number(env.ACP_WORK_MIN_FREE_MB ?? 3072),
+		// 20 GiB: the workspace shares its filesystem with everything else, and the
+		// nightly backup refuses to run under 15 GiB free — a lower floor would let
+		// works be created long after the host stopped getting backups.
+		workMinFreeMb: Number(env.ACP_WORK_MIN_FREE_MB ?? 20480),
 		testRuntime: env.ACP_TEST_RUNTIME === "1",
 		backendUrl: env.ACP_BACKEND_URL ?? `http://st-backend:${port}`,
 		// src/acp (tsx) and dist/acp (image, which copies it to /acp-runtime)
