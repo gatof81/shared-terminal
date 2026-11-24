@@ -73,7 +73,9 @@ test.describe("project rail and topics", () => {
 				closedAt: at(200),
 			},
 		];
-		await app.login("alice", RAIL);
+		// Wide, the rail sits beside a topic («Optimización de CI» here, so the
+		// unread one stays unread); a phone's project screen is the rail.
+		await app.login("alice", app.mobile ? RAIL : topic(CONV_IDS.ci));
 		await expect(rail(page)).toBeVisible();
 		await expect(page.locator(".rail-project-name")).toHaveText("Educación HZ");
 		// Most recently active first; «Rediseño» has an answer not seen yet.
@@ -88,7 +90,7 @@ test.describe("project rail and topics", () => {
 		const team = rail(page).locator(".rail-agent");
 		await expect(team.filter({ hasText: "@arq" })).toContainText("disponible");
 		await expect(team.filter({ hasText: "@dev" })).toContainText(
-			"ocupado en «Optimización de CI» · 1 en cola",
+			app.mobile ? "ocupado en «Optimización de CI» · 1 en cola" : "trabajando aquí · 1 en cola",
 		);
 		// Works: the active one; the closed ones on demand.
 		await expect(rail(page).locator(".rail-work")).toHaveCount(1);
@@ -143,11 +145,13 @@ test.describe("project rail and topics", () => {
 		await page.getByRole("button", { name: "Acciones de la conversación" }).click();
 		await page.getByRole("menuitem", { name: "Archivar" }).click();
 		await page.locator(".dialog-card .modal-danger-action").click();
-		// The project in the topic's place; the topic leaves the list, readable on demand.
-		await expect(page).toHaveURL(new RegExp(`${RAIL}$`));
+		// The topic leaves the list (a phone goes back up to the rail; a wide
+		// screen opens the project's most recent topic), readable on demand.
+		if (app.mobile) await expect(page).toHaveURL(new RegExp(`${RAIL}$`));
+		else await expect(page).toHaveURL(new RegExp(`/c/${CONV_IDS.ui}$`));
 		await expect(convRow(page, "Carga y estrés")).toHaveCount(0);
 		expect(created.archivedAt).not.toBeNull();
-		await rail(page).getByRole("button", { name: "Ver archivadas" }).click();
+		await rail(page).getByRole("button", { name: "Conversaciones archivadas" }).click();
 		await convRow(page, "Carga y estrés").click();
 		await expect(page.locator("#project-view .ps-topic")).toContainText(
 			"Conversación archivada · solo lectura",
@@ -274,6 +278,35 @@ test.describe("project rail and topics", () => {
 		await expect(page.locator(THREAD)).toContainText("¿qué falta del prototipo?");
 		await expect.poll(place).toEqual(before);
 		expect(app.errors).toEqual([]);
+	});
+
+	test("wide: entering a project opens its last topic, else the most recent one", async ({
+		app,
+		page,
+	}) => {
+		test.skip(app.mobile, "a phone's project screen is the rail");
+		await app.login("alice", RAIL);
+		// Most recently active, in the project's place (no entry of its own).
+		await expect(page).toHaveURL(new RegExp(`${topic(CONV_IDS.ui)}$`));
+		await convRow(page, "Mejoras del backend").click();
+		await expect(page.locator("#ps-topic-title")).toHaveText("Mejoras del backend");
+		await page.goto(`/${RAIL}`);
+		await expect(page).toHaveURL(new RegExp(`${topic(CONV_IDS.backend)}$`));
+		expect(app.errors).toEqual([]);
+	});
+
+	test("wide: a project without topics says so, with its one action", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		test.skip(app.mobile, "a phone's project screen is the rail");
+		backend.acpConversations = [];
+		await app.login("alice", RAIL);
+		await expect(page.locator(".ps-home-title")).toHaveText("Sin conversaciones todavía");
+		await expect(
+			page.locator(".ps-home").getByRole("button", { name: "Nueva conversación" }),
+		).toBeVisible();
 	});
 
 	test("a project that is not there says so, with no empty rail", async ({ app, page }) => {

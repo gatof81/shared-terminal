@@ -37,7 +37,7 @@ test.describe("sidebar: agents and their state", () => {
 		await app.openSidebar();
 		const state = (name: string) => app.sessionRow(name).locator(".session-agent-status");
 		await expect(app.sessionRow("hz-architect").locator(".session-agent-tag")).toHaveText("@arq");
-		await expect(state("hz-architect")).toHaveText("libre");
+		await expect(state("hz-architect")).toHaveText("disponible");
 		await expect(state("hz-dev-2")).toHaveText("trabajando");
 		await expect(state("hz-design")).toHaveText("login");
 		await expect(state("scratch")).toHaveText("te espera");
@@ -75,7 +75,7 @@ test.describe("sidebar: agents and their state", () => {
 		await app.login("alice");
 		await app.openSidebar();
 		const arq = app.sessionRow("hz-architect").locator(".session-agent-status");
-		await expect(arq).toHaveText("libre");
+		await expect(arq).toHaveText("disponible");
 		const row = backend.addAcpMessage({ to_id: "arq", body: "@arq revisá", state: "running" });
 		backend.acpAgents.find((a) => a.name === "arq")!.running = [row.id];
 		backend.pushAcp({ type: "message", message: row });
@@ -160,7 +160,10 @@ test.describe("sidebar: agent state re-reads (clock running)", { tag: "@any-view
 	const reads = (backend: { requests: Array<{ path: string }> }) =>
 		backend.requests.filter((r) => r.path === "/acp/agents").length;
 
-	test("a question answered right after a read: 'libre' within 4 s", async ({ app, backend }) => {
+	test("a question answered right after a read: 'disponible' within 4 s", async ({
+		app,
+		backend,
+	}) => {
 		backend.acpAgents.find((a) => a.name === "arq")!.waitingInput = true;
 		await app.login("alice");
 		await app.openSidebar();
@@ -171,7 +174,7 @@ test.describe("sidebar: agent state re-reads (clock running)", { tag: "@any-view
 		// (re)connect re-read still pending): only a read after it can say so.
 		backend.acpAgents.find((a) => a.name === "arq")!.waitingInput = false;
 		backend.pushAcp({ type: "question", question: { id: 9, agent: "arq", state: "answered" } });
-		await expect(arq).toHaveText("libre", { timeout: 4_000 });
+		await expect(arq).toHaveText("disponible", { timeout: 4_000 });
 	});
 
 	test("a read in flight when the question closes does not count: one more read follows", async ({
@@ -203,7 +206,7 @@ test.describe("sidebar: agent state re-reads (clock running)", { tag: "@any-view
 		backend.pushAcp({ type: "question", question: { id: 9, agent: "arq", state: "answered" } });
 		await page.waitForTimeout(300);
 		release!();
-		await expect(arq).toHaveText("libre", { timeout: 4_000 });
+		await expect(arq).toHaveText("disponible", { timeout: 4_000 });
 		expect(reads(backend)).toBe(before + 2);
 	});
 

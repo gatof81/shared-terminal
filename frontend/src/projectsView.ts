@@ -64,6 +64,7 @@ import {
 	onRailChange,
 	patchConversation,
 	railBody,
+	railConversations,
 	railHead,
 	repaintRail,
 	resetRail,
@@ -321,7 +322,7 @@ const homeEl = el("div", "ps-home");
 const homeTitle = el("h2", "ps-home-title", "Elegí una conversación");
 homeTitle.tabIndex = -1;
 const homeNote = el("p", "ps-home-note");
-const homeNew = button("Nueva conversación", "btn primary sm", () => {
+const homeNew = button("Nueva conversación", "btn sm ps-new", () => {
 	if (shown) void newConversationFlow(shown);
 });
 homeEl.append(homeTitle, homeNote, homeNew);
@@ -340,6 +341,7 @@ function syncSpace(r: ProjectRoute, prevPid: string | null, prevPage: ProjectPag
 	document.body.classList.add("project-space-on");
 	document.body.classList.toggle("ps-on-topic", topic !== null);
 	showRail(r.projectId, topic);
+	if (topic) rememberTopic(r.projectId, topic);
 	if (topic) {
 		// From the rail (a phone's project screen, or the sidebar) by a tap,
 		// not Back / Forward: ‹ is then the browser's Back.
@@ -354,6 +356,7 @@ function syncSpace(r: ProjectRoute, prevPid: string | null, prevPage: ProjectPag
 		pageEl.replaceChildren(spaceEl);
 	placeSpace();
 	paintSpace();
+	openTopicIfWide();
 	if (topicChanged || prevPage !== page) {
 		// The page's heading, for a screen reader (a phone's project screen has
 		// none of its own: the rail's head is the app's header there).
@@ -363,16 +366,61 @@ function syncSpace(r: ProjectRoute, prevPid: string | null, prevPage: ProjectPag
 	}
 }
 
+// ── The topic a wide screen opens ──────────────────────────────────────────
+// Wide, the rail is beside the topic: entering a project opens its last
+// topic visited in this browser, else its most recently active one (in the
+// project's place, not a new entry, so Back leaves the project as it came).
+// The empty main area is only for a project without topics. A phone's
+// project screen IS the rail: nothing opens by itself there.
+
+const LAST_TOPIC_KEY = "st.lastTopic";
+
+function lastTopics(): Record<string, string> {
+	try {
+		const v = JSON.parse(localStorage.getItem(LAST_TOPIC_KEY) ?? "{}");
+		return v && typeof v === "object" ? (v as Record<string, string>) : {};
+	} catch {
+		return {};
+	}
+}
+
+function rememberTopic(pid: string, cid: string): void {
+	try {
+		localStorage.setItem(LAST_TOPIC_KEY, JSON.stringify({ ...lastTopics(), [pid]: cid }));
+	} catch {
+		/* storage off: the most recent topic opens instead */
+	}
+}
+
+function openTopicIfWide(): void {
+	if (shownPage !== "home" || !shown || phoneMq?.matches) return;
+	const list = railConversations();
+	if (!list?.length) return;
+	const last = lastTopics()[shown];
+	const pick = list.find((c) => c.id === last) ?? list[0]!;
+	navigateProject(
+		{ projectId: shown, page: "conversation", conversationId: pick.id },
+		{ replace: true },
+	);
+}
+
 /** What the space says about the project itself, and the tab's title. */
 function paintSpace(): void {
 	if (!shown || shownPage === null || shownPage === "chat") return;
 	const name = projectName(shown);
 	const gone = projectsLoaded() && name === null;
-	homeTitle.textContent = gone ? "Proyecto no encontrado" : "Elegí una conversación";
+	const list = railConversations();
+	homeTitle.textContent = gone
+		? "Proyecto no encontrado"
+		: list?.length === 0
+			? "Sin conversaciones todavía"
+			: "";
 	homeNote.textContent = gone
 		? "No existe o fue archivado. El historial de un proyecto archivado se lee en su Project Chat anterior."
-		: "Elegí un tema del panel, o empezá uno nuevo: cada tema es una conversación con el equipo del proyecto.";
-	homeNew.hidden = gone;
+		: list?.length === 0
+			? "Cada tema es una conversación con el equipo del proyecto."
+			: "";
+	homeNew.hidden = gone || list?.length !== 0;
 	// Nothing of a rail for a project that is not there: the sidebar keeps its
 	// sessions, and a phone shows this line instead of an empty project screen.
 	document.body.classList.toggle("ps-gone", gone);
@@ -677,7 +725,10 @@ function wire(): void {
 	window.addEventListener("st:projects-changed", () => void loadProjects());
 	onProjectFeed(onFeed);
 	onAddressWrite(() => sync());
-	onRailChange(() => paintSpace());
+	onRailChange(() => {
+		paintSpace();
+		openTopicIfWide();
+	});
 	configureRail({
 		newProject: () => void openCreateProjectDialog(),
 		renameProject: (pid) => void renameFlow(pid, projectName(pid) ?? ""),

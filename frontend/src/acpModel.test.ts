@@ -131,11 +131,13 @@ describe("activity", () => {
 	it("agent status words", () => {
 		const now = Date.parse("2026-11-18T10:00:00Z");
 		const base = { name: "a", sessionId: "s", runtime: "r", model: null };
-		expect(agentStatus({ ...base, runnerSeenAt: "2026-11-18T09:59:58Z" }, now).label).toBe("libre");
+		expect(agentStatus({ ...base, runnerSeenAt: "2026-11-18T09:59:58Z" }, now).label).toBe(
+			"disponible",
+		);
 		expect(
 			agentStatus({ ...base, runnerSeenAt: "2026-11-18T09:59:58Z", running: [7], pending: 2 }, now)
 				.label,
-		).toBe("trabajando en #7 · 2 en espera");
+		).toBe("trabajando en #7 · 2 en cola");
 		// An agent with slots works on several at once: all of them, oldest first.
 		expect(
 			agentStatus({ ...base, runnerSeenAt: "2026-11-18T09:59:58Z", running: [7, 9] }, now).label,
@@ -152,7 +154,7 @@ describe("activity", () => {
 			const st = sidebarAgentStatus(a, now);
 			return [st.word, st.tone, st.asks, st.label];
 		};
-		expect(short({ runnerSeenAt: fresh })).toEqual(["libre", "ok", false, "libre"]);
+		expect(short({ runnerSeenAt: fresh })).toEqual(["disponible", "ok", false, "disponible"]);
 		expect(short({ runnerSeenAt: fresh, running: [7] })).toEqual([
 			"trabajando",
 			"busy",
@@ -194,13 +196,13 @@ describe("activity", () => {
 			sidebarAgentStatus({ runnerSeenAt: stale }, now, Date.parse("2026-11-18T09:57:30Z")).word,
 		).toBe("sin señal");
 		// A fresh report after the start: the ordinary state.
-		expect(sidebarAgentStatus({ runnerSeenAt: fresh }, now, now - 30_000).word).toBe("libre");
-		// Queued but idle: still the "libre" word, the queue in the full label.
+		expect(sidebarAgentStatus({ runnerSeenAt: fresh }, now, now - 30_000).word).toBe("disponible");
+		// Queued but idle: still the "disponible" word, the queue in the full label.
 		expect(short({ runnerSeenAt: fresh, pending: 2 })).toEqual([
-			"libre",
+			"disponible",
 			"ok",
 			false,
-			"2 en espera",
+			"2 en cola",
 		]);
 	});
 });

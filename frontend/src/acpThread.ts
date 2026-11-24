@@ -1301,7 +1301,7 @@ export class AcpThread {
 					el(
 						"div",
 						"acp-typing",
-						m.state === "pending" ? "En cola: lo toma cuando termine lo anterior." : "Trabajando…",
+						m.state === "pending" ? "En cola — lo toma en cuanto se libere." : "Trabajando…",
 					),
 				);
 		}
@@ -1498,7 +1498,9 @@ export class AcpThread {
 		this.input.disabled = !writable;
 		this.syncSendBtn();
 		this.composer.classList.toggle("acp-composer-off", this.composerMode === "off");
-		const picks = writable && this.source?.kind !== "agent" && this.agents.size > 1;
+		// A topic has no "+" in its field: its recipients' row ("Para", F2) holds
+		// it, and on a phone those 44 px are what let the placeholder fit whole.
+		const picks = writable && this.source?.kind === "project" && this.agents.size > 1;
 		this.pickBtn.hidden = !picks;
 		// The surface's states (acp-chat.css): no "+" column, a refused send, locked.
 		this.surface.classList.toggle("no-plus", !picks);
@@ -1731,8 +1733,8 @@ export class AcpThread {
 		}
 		const parts: string[] = [];
 		if (this.sending) parts.push(this.sending > 1 ? `Enviando (${this.sending})…` : "Enviando…");
-		if (running) parts.push(`${running} en curso`);
-		if (queued) parts.push(`${queued} en espera`);
+		if (running) parts.push(`${running} trabajando`);
+		if (queued) parts.push(`${queued} en cola`);
 		// UTF-8 takes at most 3 bytes per UTF-16 unit: below that bound nothing
 		// can be near the limit, and typing does not encode the text each key.
 		const text = this.input.value;
