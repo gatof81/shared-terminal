@@ -79,6 +79,11 @@ export function railAgents(): readonly AcpAgentInfo[] {
 	return agents;
 }
 
+/** The shown project's live topics, most recently active first; null until read. */
+export function railConversations(): readonly AcpConversation[] | null {
+	return convsRead === "ok" ? convs : null;
+}
+
 /** A topic of the shown project as its list says (live or archived), if known. */
 export function railConversation(id: string): AcpConversation | null {
 	return convs.find((c) => c.id === id) ?? archived?.find((c) => c.id === id) ?? null;
@@ -129,7 +134,7 @@ const convHead = sectionHead("Conversaciones", "Nueva conversación", () => {
 });
 const convList = el("ul", "rail-list rail-convs");
 const convNote = el("p", "rail-note");
-const archivedToggle = el("button", "rail-more", "Ver archivadas");
+const archivedToggle = el("button", "rail-more", "Conversaciones archivadas");
 archivedToggle.type = "button";
 archivedToggle.addEventListener("click", () => {
 	showArchived = !showArchived;
@@ -488,7 +493,7 @@ function paint(): void {
 			: convsRead === "error"
 				? "No se pudieron cargar las conversaciones; reintentando."
 				: "Sin conversaciones todavía. Creá una con +.";
-	archivedToggle.textContent = showArchived ? "Ocultar archivadas" : "Ver archivadas";
+	archivedToggle.textContent = showArchived ? "Ocultar archivadas" : "Conversaciones archivadas";
 	archivedToggle.setAttribute("aria-expanded", String(showArchived));
 
 	// Equipo
@@ -608,13 +613,30 @@ function agentRow(a: AcpAgentInfo, st: { label: string; tone: string }): HTMLEle
 	face.setAttribute("aria-hidden", "true");
 	face.append(el("span", `rail-dot tone-${st.tone}`));
 	const text = el("span", "rail-row-text");
-	text.append(
-		el("span", "rail-row-title", `@${a.name}`),
-		el("span", `rail-row-sub tone-${st.tone}`, st.label),
-	);
+	text.append(el("span", "rail-row-title", `@${a.name}`), stateLine(st));
 	link.append(face, text);
 	li.append(link);
 	return li;
+}
+
+/**
+ * The state's line: when it names a topic, only the topic's title gives way
+ * (an ellipsis inside «…»); what follows it — «· 1 en cola» — always shows.
+ */
+function stateLine(st: { label: string; tone: string }): HTMLElement {
+	const sub = el("span", `rail-row-sub rail-state tone-${st.tone}`);
+	sub.title = st.label;
+	const m = /^(.*?«)(.+)(»)(.*)$/.exec(st.label);
+	if (!m) {
+		sub.textContent = st.label;
+		return sub;
+	}
+	sub.append(
+		el("span", "rail-state-fixed", m[1]!),
+		el("span", "rail-state-topic", m[2]!),
+		el("span", "rail-state-fixed", `${m[3]}${m[4]}`),
+	);
+	return sub;
 }
 
 function workRow(w: AcpWork, words: string): HTMLElement {

@@ -515,6 +515,11 @@ a.rail-row:focus-visible,
   .ps-topic {
     padding: 0;
   }
+  /* A topic: ‹ is the way back up (to the rail); the ☰ beside it would be a
+     second, heavier way out. The header keeps its height (44-px controls). */
+  body.ps-on-topic header #sidebar-toggle {
+    display: none;
+  }
   .ps-back {
     display: grid;
     place-items: center;
@@ -534,4 +539,37 @@ a.rail-row:focus-visible,
   #header-project .ps-topic-sub {
     font-size: 11.5px;
   }
+}
+
+/* An agent's state naming a topic: only the title gives way; the queue stays. */
+.rail-state {
+  display: flex;
+  min-width: 0;
+  white-space: nowrap;
+}
+.rail-state-fixed {
+  flex: none;
+}
+.rail-state-topic {
+  flex: 0 1 auto;
+  min-width: 2ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* The project without topics: its one action, in the accent (not the green of "New session"). */
+.ps-new {
+  min-height: 36px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: var(--radius-s);
+  background: var(--c-accent-strong);
+  color: #fff;
+  font-weight: 600;
+}
+.ps-new:hover {
+  background: var(--c-accent);
+}
+.ps-new:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
 }

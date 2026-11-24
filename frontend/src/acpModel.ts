@@ -64,8 +64,8 @@ export function effortLabel(level: string | null | undefined): string {
 }
 
 export const STATE_LABEL: Record<string, string> = {
-	pending: "pendiente",
-	running: "en curso",
+	pending: "en cola",
+	running: "trabajando",
 	done: "hecho",
 	failed: "falló",
 	uncertain: "incierto",
@@ -326,7 +326,7 @@ export function agentStatus(a: AgentStatusInput, now: number, authRequired = fal
 	if (authRequired || a.authRequired) return { label: "esperando login", tone: "warn" };
 	if (a.waitingInput) return { label: "esperando tu respuesta", tone: "warn" };
 	const seen = a.runnerSeenAt ? now - Date.parse(a.runnerSeenAt) : Number.POSITIVE_INFINITY;
-	const queued = a.pending ? ` · ${a.pending} en espera` : "";
+	const queued = a.pending ? ` · ${a.pending} en cola` : "";
 	if (a.running?.length) {
 		const ids = a.running.map((id) => `#${id}`);
 		const list =
@@ -338,7 +338,7 @@ export function agentStatus(a: AgentStatusInput, now: number, authRequired = fal
 			label: a.runnerSeenAt ? `runner sin señal${queued}` : `runner sin conectar${queued}`,
 			tone: "off",
 		};
-	return { label: a.pending ? `${a.pending} en espera` : "libre", tone: "ok" };
+	return { label: a.pending ? `${a.pending} en cola` : "disponible", tone: "ok" };
 }
 
 /**
@@ -398,7 +398,7 @@ export function sidebarAgentStatus(
 					? "trabajando"
 					: st.tone === "off"
 						? "sin señal"
-						: "libre";
+						: "disponible";
 	return { ...st, word, asks: st.tone === "warn" };
 }
 
