@@ -555,6 +555,21 @@ describe("a topic's timeline (3B F2)", () => {
 		]);
 		expect(items.map((i) => i.key)).toEqual(["post:1", "result:2", "consult:3", "result:1"]);
 	});
+	it("a recovery request is not shown; its report is, as a result", () => {
+		const items = topicTimeline([
+			msg(1, { state: "uncertain", created_at: t(0) }),
+			msg(2, {
+				from_id: "system",
+				to_id: "dev",
+				recovery_of: 1,
+				created_at: t(1),
+				state: "done",
+				result_text: "R",
+				finished_at: t(2),
+			}),
+		]);
+		expect(items.map((i) => i.key)).toEqual(["post:1", "result:2"]);
+	});
 	it("a consult's answer is nested: no result item; its delivery only when it came late", () => {
 		const consult = msg(1, {
 			from_id: "a",

@@ -1265,6 +1265,7 @@ export class AcpThread {
 				m.finished_at,
 				m.recovery_of ?? null,
 				this.rowState(m).label,
+				this.messages.find((x) => x.recovery_of === m.id)?.result_text ? "r" : "",
 				[...this.questions.values()]
 					.filter((q) => q.message_id === m.id)
 					.map((q) => `${q.id}:${q.state}`),
@@ -1354,6 +1355,11 @@ export class AcpThread {
 				ver.setAttribute("aria-label", `Ver la respuesta de @${m.to_id}`);
 				ver.addEventListener("click", () => this.goToResult(m.id));
 				state.append(" · ", ver);
+			}
+			if (st.kind === "interrupted" || st.kind === "reviewed") {
+				const report = this.messages.find((x) => x.recovery_of === m.id);
+				if (report && !report.result_text)
+					state.append(" · ", el("span", "acp-rs-muted", "informe pedido"));
 			}
 			if (st.kind === "interrupted") {
 				const review = el("button", "btn sm acp-review-btn", "Revisar interrupción");
