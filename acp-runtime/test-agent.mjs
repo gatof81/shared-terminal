@@ -10,6 +10,13 @@
 //   consultá a @x: <texto>   → runs `st send @x "<texto>"`, ends the turn
 //   esperá <N>               → a tool call that takes N seconds
 //   segundo plano <N>        → an async task that ends N seconds after the turn
+//   segundo plano <N>: consultá a @x: <texto>
+//                            → the same task runs `st send` when it ends (a
+//                              background process speaking for its message)
+//   persistente <N>: consultá a @x: <texto>
+//                            → the task is declared ST-PERSISTENT (the message
+//                              closes) and runs `st send` N s later: a process
+//                              that outlived its message
 //   preguntá: <q> | a | b    → asks the person (ACP elicitation/create, the form
 //                              claude-agent-acp makes of AskUserQuestion) and
 //                              continues with the answer
@@ -18,7 +25,10 @@
 // acknowledged. Every answer carries how many prompts this ACP session has
 // seen and the session's model and effort — the session (count, model, effort)
 // survives runner and container restarts, which is what the tests check
-// continuity with. Effort levels per model are test-only (opus: five, sonnet or
+// continuity with. Like claude-agent-acp, each LOADED session has its own
+// environment (`_meta.claudeCode.options.env` of new/resume, over the
+// adapter's) and cwd — what its `st` runs with; `session/close` unloads it
+// and stops its background tasks. Effort levels per model are test-only (opus: five, sonnet or
 // no model: three, haiku: none — the option is absent, like the real adapter).
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -38,12 +48,24 @@ if (process.argv.includes("--login")) {
 	process.exit(0);
 }
 const DIR = `${process.env.RUNNER_STATE ?? `${process.env.HOME}/.st-test-agent`}/test-agent`;
-const FILE = `${DIR}/sessions.json`;
+// One file per session: the adapters of an agent's slots share this directory,
+// each with the sessions it has loaded (like the real one: a file per session).
+const fileOf = (id) => `${DIR}/session-${id}.json`;
 mkdirSync(DIR, { recursive: true });
-const sessions = existsSync(FILE) ? JSON.parse(readFileSync(FILE, "utf8")) : {};
+const sessions = new Proxy(
+	{},
+	{
+		get(cache, id) {
+			if (typeof id === "string" && !(id in cache) && existsSync(fileOf(id))) cache[id] = JSON.parse(readFileSync(fileOf(id), "utf8"));
+			return cache[id];
+		},
+	},
+);
 const save = () => {
-	writeFileSync(`${FILE}.tmp`, JSON.stringify(sessions));
-	renameSync(`${FILE}.tmp`, FILE);
+	for (const [id, s] of Object.entries(sessions)) {
+		writeFileSync(`${fileOf(id)}.tmp`, JSON.stringify(s));
+		renameSync(`${fileOf(id)}.tmp`, fileOf(id));
+	}
 };
 
 const out = (m) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...m })}\n`);
@@ -59,6 +81,26 @@ const ask = (method, params) =>
 		waiting.set(id, { resolve, reject });
 		out({ id, method, params });
 	});
+
+// Loaded sessions: id → { env, cwd, timers }. Not persisted (a resume brings them again).
+const loaded = new Map();
+const load = (params, sessionId) =>
+	loaded.set(sessionId, { env: params._meta?.claudeCode?.options?.env ?? {}, cwd: params.cwd, timers: new Set() });
+const stSend = (sessionId, to, text) =>
+	new Promise((resolve) => {
+		const l = loaded.get(sessionId);
+		execFile("st", ["send", `@${to}`, text], { timeout: 30_000, env: { ...process.env, ...l?.env }, cwd: l?.cwd }, (err, stdout, stderr) =>
+			resolve(err ? `error: ${stderr || err.message}` : stdout.trim()),
+		);
+	});
+const later = (sessionId, ms, fn) => {
+	const timers = loaded.get(sessionId)?.timers;
+	const t = setTimeout(() => {
+		timers?.delete(t);
+		fn();
+	}, ms);
+	timers?.add(t);
+};
 
 const modelOf = (s) => s.model ?? process.env.ANTHROPIC_MODEL ?? null;
 function levelsOf(model) {
@@ -95,20 +137,30 @@ async function prompt(sessionId, text) {
 		await sleep(150);
 		update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: t.slice(half) } });
 	};
-	const ctx = `(sesión ACP: ${s.prompts} mensajes · modelo ${modelOf(s) ?? "default"} · effort ${s.effort ?? "default"})`;
+	const ctx = `(sesión ACP: ${s.prompts} mensajes · modelo ${modelOf(s) ?? "default"} · effort ${s.effort ?? "default"} · cwd ${loaded.get(sessionId)?.cwd ?? "?"})`;
 	let m;
 	if (/^\[st-recovery\]/.test(header) || /^\[st-recovery\]/.test(body) || header.includes("de @system")) {
 		await say(`Reporte de @${ME}: no repetí nada; el mensaje interrumpido quedó sin rehacer. ${ctx}`);
 	} else if ((m = /^Respuesta de @([a-z][a-z0-9-]*) a tu mensaje #(\d+):\s*([\s\S]*)$/.exec(body))) {
 		await say(`Recibí la respuesta de @${m[1]} a #${m[2]}: «${m[3].trim().split("\n")[0].slice(0, 160)}» ${ctx}`);
+	} else if ((m = /(segundo plano|persistente) (\d+):\s*consult[aá] a @([a-z][a-z0-9-]*):\s*([\s\S]+)$/i.exec(body))) {
+		const [, how, secs, to, text] = m;
+		const taskId = `bg-${randomUUID().slice(0, 8)}`;
+		update(sessionId, { sessionUpdate: "async_task_spawned", asyncTaskId: taskId, taskType: "shell", name: `st send en ${secs} s` });
+		later(sessionId, Number(secs) * 1000, async () => {
+			const result = await stSend(sessionId, to, text.trim());
+			console.error(`[test-agent] ${taskId}: st send → ${result}`);
+			update(sessionId, { sessionUpdate: "async_task_state_update", asyncTaskId: taskId, state: "completed" });
+		});
+		await say(
+			how.toLowerCase() === "persistente"
+				? `Dejé un proceso corriendo que va a consultar a @${to}. ${ctx}\nST-PERSISTENT: ${taskId} st send diferido`
+				: `En segundo plano (${taskId}) voy a consultar a @${to} en ${secs} s. ${ctx}`,
+		);
 	} else if ((m = /consult[aá] a @([a-z][a-z0-9-]*):\s*([\s\S]+)$/i.exec(body))) {
 		const id = `t${++tool}`;
 		update(sessionId, { sessionUpdate: "tool_call", toolCallId: id, title: `st send @${m[1]}`, kind: "execute", status: "pending" });
-		const result = await new Promise((resolve) =>
-			execFile("st", ["send", `@${m[1]}`, m[2].trim()], { timeout: 30_000 }, (err, stdout, stderr) =>
-				resolve(err ? `error: ${stderr || err.message}` : stdout.trim()),
-			),
-		);
+		const result = await stSend(sessionId, m[1], m[2].trim());
 		update(sessionId, {
 			sessionUpdate: "tool_call_update",
 			toolCallId: id,
@@ -188,10 +240,18 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
 			const sessionId = randomUUID();
 			sessions[sessionId] = { prompts: 0 };
 			save();
+			load(params, sessionId);
 			result = { sessionId, configOptions: configOptions(sessions[sessionId]) };
 		} else if (method === "session/resume") {
 			if (!sessions[params.sessionId]) throw Object.assign(new Error("unknown session"), { code: -32002 });
+			// Like the real adapter: reloading restarts the session — what it left running stops.
+			for (const t of loaded.get(params.sessionId)?.timers ?? []) clearTimeout(t);
+			load(params, params.sessionId);
 			result = { configOptions: configOptions(sessions[params.sessionId]) };
+		} else if (method === "session/close") {
+			for (const t of loaded.get(params.sessionId)?.timers ?? []) clearTimeout(t);
+			loaded.delete(params.sessionId);
+			result = {};
 		} else if (method === "session/set_mode") result = {};
 		else if (method === "session/set_config_option" && params.configId === "model") {
 			// Like claude-agent-acp: the session's model, kept with the session

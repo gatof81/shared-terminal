@@ -16,16 +16,40 @@
 // state without repeating effects. Own state (RUNNER_STATE, in the workspace,
 // so it survives a re-created container): the ACP session id and one event log
 // per message.
+//
+// SLOTS. An agent may run several messages at once: one copy of this loop per
+// slot (`runner.mjs <k>`, k ≥ 2; no argument = slot 1), each with its own
+// adapter, lock and log, launched and watched by the backend. The backend's
+// claim is the whole distribution (which slot takes what, caps): this file
+// knows only its own slot.
+// - Slot 1 is the runner of always: the default context (the workspace
+//   checkout), its one ACP session (session.json), opened at start.
+// - A slot k ≥ 2 takes only messages of NAMED contexts. Each context has its
+//   own directory (<workspace>/.st/ctx/<name>/, the session's cwd) and its own
+//   ACP session (<state>/ctx/<name>.json), opened (new or resumed) when the
+//   slot claims a message of it and closed when it claims one of another
+//   context. `session/close` (and a resume) kills what the session left running
+//   — verified against claude-agent-acp 0.108.0 — so a slot never closes a
+//   session with an open task (a process declared ST-PERSISTENT): it keeps that
+//   context and claims only its messages until the process ends.
+// - The `st` credential of a named context (`acp1.<agent>.<context>.<hmac>`,
+//   from the claim) goes into that session's environment
+//   (`_meta.claudeCode.options.env`, on new AND resume: without it a resumed
+//   session falls back to the adapter's own). The adapter of a slot ≥ 2 has no
+//   ST_TOKEN of its own, so a session that missed it speaks for nobody.
 import { spawn } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 const env = process.env;
+const SLOT = Number(process.argv[2] ?? 1);
 const AGENT = env.ST_AGENT;
 const API = `${env.ST_URL}/api/acp`;
 const CWD = env.AGENT_CWD;
 const STATE = env.RUNNER_STATE;
-const SESSION_FILE = `${STATE}/session.json`;
+// Default context (slot 1): the session file and cwd of always. A named one: its own.
+const sessionFile = (ctx) => (ctx === null ? `${STATE}/session.json` : `${STATE}/ctx/${ctx}.json`);
+const cwdOf = (ctx) => (ctx === null ? CWD : `${CWD}/.st/ctx/${ctx}`);
 const LOG_DIR = `${STATE}/log`;
 const IDLE_SETTLE_MS = 2_000; // idle must hold this long (a shutdown also closes tasks)
 const STARTUP_WINDOW_MS = 3_000; // what the resume itself triggers arrives within this
@@ -68,13 +92,14 @@ const PROTOCOL = [
 	"Cualquier otra tarea en segundo plano es trabajo pendiente: esperá su resultado antes de dar el pedido por terminado.",
 ].join(" ");
 
-const log = (...a) => console.log(new Date().toISOString(), `[${AGENT}]`, ...a);
+const log = (...a) => console.log(new Date().toISOString(), `[${AGENT}${SLOT === 1 ? "" : `#${SLOT}`}]`, ...a);
 const marker = (msg) => {
 	const where = msg.project
 		? ` · Project Chat «${msg.project.name}» (participantes: ${msg.project.agents.map((a) => `@${a}`).join(", ")})`
 		: msg.from_id === "system"
 			? ""
 			: " · mensaje directo";
+	const ctx = msg.context ? ` · contexto «${msg.context}» (directorio propio: ${cwdOf(msg.context)})` : "";
 	// The agent's final text on a reply is stored but delivered to nobody (a reply
 	// never produces a reply: the loop guard). Said on every reply, not only in the
 	// protocol: an agent that answered a reply in its final text believed it was
@@ -83,7 +108,7 @@ const marker = (msg) => {
 		msg.kind === "reply"
 			? ` · respuesta a tu mensaje #${msg.reply_to}; tu texto final no se le entrega a @${msg.from_id}: si tenés que decirle algo, usá st send @${msg.from_id}`
 			: "";
-	return `[st-msg #${msg.id} de @${msg.from_id}${where}${kind}]`;
+	return `[st-msg #${msg.id} de @${msg.from_id}${where}${ctx}${kind}]`;
 };
 
 async function api(method, path, body) {
@@ -216,7 +241,8 @@ function checkIdle() {
 const asked = new Map(); // rpc id → question id
 async function ask(rpcId, params) {
 	if (params?.mode && params.mode !== "form") return write({ id: rpcId, result: { action: "decline" } });
-	const messageId = current?.msg.id ?? null;
+	// The question belongs to the message running in the session that asks (one per slot).
+	const messageId = current && params?.sessionId === open?.sessionId ? current.msg.id : null;
 	const q = await api("POST", "/runner/questions", { messageId, request: params });
 	if (q.status !== 201) {
 		log(`question not registered (${q.status}); cancelling it`);
@@ -263,7 +289,12 @@ function withdraw(rpcId) {
 }
 
 // ── ACP connection: newline-delimited JSON-RPC over the adapter's stdio ──
-const adapter = spawn(env.ACP_AGENT_CMD, [], { stdio: ["pipe", "pipe", "inherit"] });
+// Slot ≥ 2: no ST_TOKEN in the adapter's environment — each session gets its
+// context's credential, and a session that missed it gets none (401), never
+// the default context's.
+const adapterEnv = { ...env };
+if (SLOT !== 1) delete adapterEnv.ST_TOKEN;
+const adapter = spawn(env.ACP_AGENT_CMD, [], { stdio: ["pipe", "pipe", "inherit"], env: adapterEnv });
 let nextId = 0;
 const pending = new Map();
 const write = (m) => adapter.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", ...m })}\n`);
@@ -284,7 +315,8 @@ createInterface({ input: adapter.stdout }).on("line", (line) => {
 		pending.delete(m.id);
 		return m.error ? p?.reject(Object.assign(new Error(m.error.message), { data: m.error })) : p?.resolve(m.result);
 	}
-	if (m.method === "session/update") return onUpdate(m.params.update);
+	// One session at a time per slot: what a session this slot closed still says is not its business.
+	if (m.method === "session/update") return m.params.sessionId === open?.sessionId ? onUpdate(m.params.update) : undefined;
 	if (m.method === "session/request_permission") {
 		// bypassPermissions is set on the session; this answers what still asks.
 		const opt = m.params.options.find((o) => o.kind.startsWith("allow")) ?? m.params.options[0];
@@ -304,7 +336,12 @@ adapter.on("exit", (code, signal) => {
 	else process.exit(1);
 });
 
-async function openSession() {
+// The ACP session this slot has open: { ctx, sessionId } (slot 1: the default
+// context's, from start to exit).
+let open = null;
+let initialized = false;
+
+async function initialize() {
 	const init = await request("initialize", {
 		protocolVersion: 1,
 		// elicitation.form: Claude's AskUserQuestion (and MCP form elicitations)
@@ -323,22 +360,48 @@ async function openSession() {
 		.filter((m) => m?._meta?.["terminal-auth"]?.command)
 		.map((m) => ({ id: m.id, name: m.name, description: m.description, terminal: m._meta["terminal-auth"] }));
 	await api("POST", "/runner/auth-methods", { methods });
+	initialized = true;
+}
+
+// Opens (new or resumed) the ACP session of context `ctx` (null = default),
+// closing the one this slot had open — never one with an open task: the claim
+// keeps such a slot on its context (see the header).
+async function openSession(ctx = null, token = null) {
+	if (!initialized) await initialize();
+	if (open?.ctx === ctx) return open.sessionId;
+	if (open) {
+		await request("session/close", { sessionId: open.sessionId }).catch((err) => log(`close ${open.sessionId}: ${err.message}`));
+		log(`closed the session of context ${open.ctx}`);
+		open = null;
+	}
 	const systemPrompt = { mode: "append", content: [{ type: "text", text: PROTOCOL }] };
+	const cwd = cwdOf(ctx);
+	mkdirSync(cwd, { recursive: true });
+	const file = sessionFile(ctx);
+	// A named context's session speaks with its context's credential (header).
+	const _meta = token ? { claudeCode: { options: { env: { ST_TOKEN: token } } } } : undefined;
 	let sessionId;
-	if (existsSync(SESSION_FILE)) {
-		sessionId = JSON.parse(readFileSync(SESSION_FILE, "utf8")).sessionId;
-		keepConfigOptions(await request("session/resume", { sessionId, cwd: CWD, mcpServers: [], systemPrompt }));
-		log(`resumed session ${sessionId}`);
+	if (existsSync(file)) {
+		sessionId = JSON.parse(readFileSync(file, "utf8")).sessionId;
+		open = { ctx, sessionId }; // before the request: what the resume itself sets off is this session's
+		keepConfigOptions(await request("session/resume", { sessionId, cwd, mcpServers: [], systemPrompt, _meta }));
+		log(`resumed session ${sessionId}${ctx ? ` (context ${ctx})` : ""}`);
 	} else {
-		const created = await request("session/new", { cwd: CWD, mcpServers: [], systemPrompt });
+		const created = await request("session/new", { cwd, mcpServers: [], systemPrompt, _meta });
 		keepConfigOptions(created);
 		sessionId = created.sessionId;
-		writeFileSync(`${SESSION_FILE}.tmp`, JSON.stringify({ sessionId, cwd: CWD }));
-		renameSync(`${SESSION_FILE}.tmp`, SESSION_FILE);
-		log(`new session ${sessionId}`);
+		open = { ctx, sessionId };
+		mkdirSync(`${STATE}/ctx`, { recursive: true });
+		writeFileSync(`${file}.tmp`, JSON.stringify({ sessionId, cwd }));
+		renameSync(`${file}.tmp`, file);
+		log(`new session ${sessionId}${ctx ? ` (context ${ctx})` : ""}`);
 	}
 	// The ACP equivalent of --dangerously-skip-permissions, for this session only.
 	await request("session/set_mode", { sessionId, modeId: "bypassPermissions" });
+	// Model and effort are per session and a resume goes back to the launch-time
+	// model: the next claim applies and reports both again.
+	modelTried = null;
+	effortTried = null;
 	return sessionId;
 }
 
@@ -594,22 +657,28 @@ async function settleInterrupted(msg) {
 }
 
 async function main() {
-	log(`starting; adapter ${env.ACP_AGENT_CMD}, cwd ${CWD}, model ${env.ANTHROPIC_MODEL ?? "default"}`);
+	log(`starting slot ${SLOT}; adapter ${env.ACP_AGENT_CMD}, cwd ${CWD}, model ${env.ANTHROPIC_MODEL ?? "default"}`);
 	mkdirSync(CWD, { recursive: true });
-	const sessionId = await openSession();
-	// Questions of a previous run waited on ACP requests that died with it.
+	// Slot 1: the default context's session, open from the start (as always).
+	// A slot ≥ 2 opens one only for a message it claims (or recovers).
+	if (SLOT === 1) await openSession();
+	else await initialize();
+	// Questions of this slot's previous run waited on ACP requests that died with it.
 	const orphaned = await api("POST", "/runner/questions-orphan", {
+		slot: SLOT,
 		note: "el agente se reinició antes de recibir la respuesta: no se usó",
 	});
 	if (orphaned.body?.length) log(`${orphaned.body.length} question(s) of the previous run orphaned`);
-	const running = await api("GET", "/runner/running");
+	const running = await api("GET", `/runner/running?slot=${SLOT}`);
 	const interrupted = running.status === 200 ? { msg: running.body, note: await settleInterrupted(running.body) } : null;
+	// The report about an interrupted run goes to the session of ITS context.
+	if (SLOT !== 1 && interrupted?.note) await openSession(interrupted.msg.context, interrupted.msg.contextToken);
 	// What the resume itself sets off (e.g. Claude Code's "didn't finish before
 	// the previous session ended" notification of a killed task, which opens a
 	// turn of its own that only a prompt closes) shows up right after it.
-	await new Promise((ok) => setTimeout(ok, STARTUP_WINDOW_MS));
+	if (open) await new Promise((ok) => setTimeout(ok, STARTUP_WINDOW_MS));
 	const orphanTurns = [...live].filter(([, t]) => t.taskType === "turn").map(([id]) => id);
-	if (interrupted?.note || orphanTurns.length || orphaned.body?.length) {
+	if (open && (interrupted?.note || orphanTurns.length || orphaned.body?.length)) {
 		// The controlled continuation: one message from Shared Terminal, sent now
 		// (not behind the idle gate — this prompt is what the adapter closes the
 		// orphan turn with). It asks for a report, never a redo.
@@ -623,8 +692,8 @@ async function main() {
 		]
 			.filter(Boolean)
 			.join(" ");
-		const sys = await api("POST", "/runner/system-message", { body });
-		if (sys.status === 200) await run(sessionId, sys.body);
+		const sys = await api("POST", "/runner/system-message", { body, slot: SLOT, context: open.ctx });
+		if (sys.status === 200) await run(open.sessionId, sys.body);
 	}
 	for (;;) {
 		// After "not authenticated", the adapter (and the Claude process it
@@ -649,15 +718,33 @@ async function main() {
 			await new Promise((ok) => setTimeout(ok, 500));
 			continue;
 		}
-		const r = await api("POST", "/runner/claim");
+		// A slot ≥ 2 whose session still has an open task (a process the agent
+		// left running) cannot close it: it takes only that context's messages.
+		const keep = SLOT !== 1 && open && live.size ? open.ctx : null;
+		const r = await api("POST", "/runner/claim", { slot: SLOT, ...(keep ? { context: keep } : {}) });
+		if (r.status === 200 && r.body.context !== (open?.ctx ?? null)) {
+			try {
+				await openSession(r.body.context, r.body.contextToken);
+			} catch (err) {
+				// Nothing was sent to the agent: the message failed, it did not run.
+				log(`message #${r.body.id}: cannot open the session of context ${r.body.context}: ${err.message}`);
+				await api("POST", `/runner/messages/${r.body.id}/result`, {
+					state: "failed",
+					note: `no se pudo abrir la sesión ACP del contexto ${r.body.context}: ${String(err.message).slice(0, 200)}`,
+				});
+				continue;
+			}
+		}
 		// Idle here, by construction: switch before the claimed message starts.
-		await applyModel(sessionId, r.model);
-		await applyEffort(sessionId, r.effort ?? "default");
-		if (r.status === 200) await run(sessionId, r.body);
+		if (open) {
+			await applyModel(open.sessionId, r.model);
+			await applyEffort(open.sessionId, r.effort ?? "default");
+		}
+		if (r.status === 200) await run(open.sessionId, r.body);
 		else if (r.status === 409) {
 			// Something of ours is `running` while we run nothing: our claim
 			// landed but its answer was lost. Judge it like a restart would.
-			const cur = await api("GET", "/runner/running");
+			const cur = await api("GET", `/runner/running?slot=${SLOT}`);
 			if (cur.status === 200 && !current) await settleInterrupted(cur.body);
 		} else await new Promise((ok) => setTimeout(ok, 2_000));
 	}

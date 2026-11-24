@@ -112,7 +112,7 @@ describe("db:migrate-check (release gate)", () => {
 		expect(r.failures).toEqual([]);
 		expect(r.ok).toBe(true);
 		expect(r.schemaFrom).toBe(19);
-		expect(r.schemaTo).toBe(23);
+		expect(r.schemaTo).toBe(24);
 		const by = Object.fromEntries(r.tables.map((t) => [t.name, t]));
 		expect(by.users).toMatchObject({
 			jsonlRows: 2,
@@ -180,7 +180,7 @@ describe("db:migrate-check (release gate)", () => {
 		expect(r.failures).toEqual(
 			expect.arrayContaining([
 				"schema_migrations: v20 not recorded",
-				"schema_migrations: v23 not recorded",
+				"schema_migrations: v24 not recorded",
 			]),
 		);
 	});
@@ -222,13 +222,13 @@ describe("db:migrate-check (release gate)", () => {
 		expect(JSON.stringify(r)).not.toContain(SECRET);
 	});
 
-	it("PASS from a v20 backup to the latest (v23): data unchanged, the ACP tables new and empty", async () => {
+	it("PASS from a v20 backup to the latest (v24): data unchanged, the ACP tables new and empty", async () => {
 		await writeBackup(fixture(), { schemaVersion: 20 });
 		const r = await runMigrateCheck(dir);
 		expect(r.failures).toEqual([]);
 		expect(r.ok).toBe(true);
 		expect(r.schemaFrom).toBe(20);
-		expect(r.schemaTo).toBe(23);
+		expect(r.schemaTo).toBe(24);
 		expect(r.newTables).toEqual(
 			expect.arrayContaining([
 				{ name: "acp_agents", rows: 0 },
@@ -239,7 +239,7 @@ describe("db:migrate-check (release gate)", () => {
 	});
 
 	it("refuses a backup already at the build's latest migration, a directory without a manifest, and a manifest it does not understand", async () => {
-		await writeBackup(fixture(), { schemaVersion: 23 });
+		await writeBackup(fixture(), { schemaVersion: 24 });
 		await expect(runMigrateCheck(dir)).rejects.toThrow(RefusedError);
 		await expect(runMigrateCheck(dir)).rejects.toThrow(/BEFORE deploying/);
 		await fs.rm(path.join(dir, "manifest.json"));
@@ -251,7 +251,7 @@ describe("db:migrate-check (release gate)", () => {
 		expect(netCalls).toEqual([]);
 	});
 
-	it("PASS from a v21 backup with ACP rows to v23: existing agents and messages unchanged, new columns empty", async () => {
+	it("PASS from a v21 backup with ACP rows to v24: existing agents and messages unchanged, new columns empty", async () => {
 		const t = fixture() as Record<string, Array<Record<string, unknown>>>;
 		t.acp_agents = [
 			{
@@ -288,7 +288,7 @@ describe("db:migrate-check (release gate)", () => {
 		expect(r.failures).toEqual([]);
 		expect(r.ok).toBe(true);
 		expect(r.schemaFrom).toBe(21);
-		expect(r.schemaTo).toBe(23);
+		expect(r.schemaTo).toBe(24);
 		const acp = r.tables.filter((x) => x.name === "acp_agents" || x.name === "agent_messages");
 		expect(
 			acp.map((x) => [x.name, x.rowsBefore, x.rowsAfter, x.hashBefore === x.hashAfter]),

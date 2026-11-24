@@ -15,6 +15,7 @@ const row = {
 	runtime: "claude-acp-0.108.0",
 	model: "claude-sonnet-5-5",
 	created_at: "2026-11-17 00:00:00",
+	max_concurrency: 1,
 };
 vi.mock("../db.js", () => ({ d1Query: vi.fn(async () => ({ results: [row] })) }));
 
@@ -117,6 +118,46 @@ describe("ACP runner watchdog", () => {
 		await Promise.all([a, b]);
 		expect(calls.probes).toBe(1);
 		expect(calls.launches).toHaveLength(1);
+	});
+});
+
+describe("ACP runner watchdog with slots", () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		row.max_concurrency = 1;
+	});
+
+	it("each slot is probed on its own; only the dead one is launched, with its own lock, log and argument", async () => {
+		row.max_concurrency = 2;
+		const probes = [{ exitCode: 0 }, { exitCode: 1 }]; // slot 1 alive (busy or not), slot 2 dead
+		const { acp, calls } = await make({
+			running: "c1",
+			probe: async () => probes.shift() as Probe,
+		});
+		await acp.watchdogTick();
+		expect(calls.probes).toBe(2);
+		expect(calls.launches).toHaveLength(1);
+		expect(calls.launches[0].slice(0, 3)).toEqual(["flock", "-n", "/tmp/st-acp-runner-2.lock"]);
+		expect(calls.launches[0][5]).toBe(
+			"while true; do node --no-warnings /opt/st-acp/st/runner.mjs 2 >> /tmp/st-acp-runner-2.log 2>&1; sleep 3; done",
+		);
+		expect(calls.launches[0].at(-1)).toBe("st-acp-runner-loop-2");
+	});
+
+	it("a one-slot agent launches exactly the runner of always", async () => {
+		const { acp, calls } = await make({ running: "c1", probe: { exitCode: 1 } });
+		await acp.watchdogTick();
+		expect(calls.launches).toEqual([
+			[
+				"flock",
+				"-n",
+				"/tmp/st-acp-runner.lock",
+				"sh",
+				"-c",
+				"while true; do node --no-warnings /opt/st-acp/st/runner.mjs >> /tmp/st-acp-runner.log 2>&1; sleep 3; done",
+				"st-acp-runner-loop",
+			],
+		]);
 	});
 });
 
