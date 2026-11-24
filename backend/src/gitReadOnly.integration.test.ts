@@ -32,12 +32,12 @@ const d = HAVE_GIT ? describe : describe.skip;
 let workspace: string;
 
 // Mirrors execCapture: same env, cwd = the workspace, byte cap on stdout.
-function localRunner(): GitRunner {
+function localRunner(cwd: string = workspace): GitRunner {
 	return {
-		workspaceDir: realpathSync(workspace),
+		workspaceDir: realpathSync(cwd),
 		run: async (argv, maxBytes): Promise<CaptureResult> => {
 			const r = spawnSync(argv[0] as string, argv.slice(1), {
-				cwd: workspace,
+				cwd,
 				env: {
 					...process.env,
 					...GIT_ENV,
@@ -387,5 +387,72 @@ d("against real git", () => {
 		} finally {
 			await fs.rm(lock, { force: true });
 		}
+	});
+});
+
+// ── A work's worktree (`?work=`, routes/workRoot.ts) ────────────────────────
+// The route runs `-C .st/ctx/<id>` with `exactRoot`: git's top level must be
+// exactly the worktree. Real `git worktree add` here, because what matters is
+// what git reports for a linked worktree (its `.git` is a FILE) and for a
+// worktree whose `.git` is gone (discovery climbs to the main checkout).
+d("work worktree against real git", () => {
+	let main: string;
+	const exact = (): GitRunner => ({ ...localRunner(main), exactRoot: true });
+
+	beforeAll(async () => {
+		main = mkdtempSync(path.join(os.tmpdir(), "st-git-work-"));
+		git(main, "init", "-q", "-b", "main");
+		await fs.writeFile(path.join(main, "MAIN.txt"), "main\n");
+		await fs.writeFile(path.join(main, ".gitignore"), ".st/\n");
+		git(main, "add", "-A");
+		git(main, "commit", "-qm", "main-subject");
+		git(main, "worktree", "add", "-q", ".st/ctx/w1", "-b", "work/w1");
+		await fs.writeFile(path.join(main, ".st/ctx/w1/feature.ts"), "new\n");
+		await fs.writeFile(path.join(main, ".st/ctx/w1/MAIN.txt"), "changed in work\n");
+		// A work dir that is NOT a worktree (its `.git` missing): discovery
+		// climbs to the main checkout.
+		await fs.mkdir(path.join(main, ".st/ctx/broken"), { recursive: true });
+	});
+
+	afterAll(async () => {
+		if (main) await fs.rm(main, { recursive: true, force: true });
+	});
+
+	it("status/diff/log of the worktree, on its branch", async () => {
+		const st = await getGitStatus(exact(), ".st/ctx/w1");
+		expect(st.repo).toBe(true);
+		if (!st.repo) return;
+		expect(st.branch).toBe("work/w1");
+		expect(st.root).toBe(".st/ctx/w1");
+		expect(st.changes.map((c) => `${c.area}:${c.path}`).sort()).toEqual([
+			"unstaged:MAIN.txt",
+			"untracked:feature.ts",
+		]);
+		const diff = await getGitDiff(exact(), ".st/ctx/w1", {
+			path: "MAIN.txt",
+			oldPath: null,
+			area: "unstaged",
+		});
+		expect(diff.patch).toContain("+changed in work");
+		const un = await getGitDiff(exact(), ".st/ctx/w1", {
+			path: "feature.ts",
+			oldPath: null,
+			area: "untracked",
+		});
+		expect(un.patch).toContain("+new");
+		expect((await getGitLog(exact(), ".st/ctx/w1"))[0]?.subject).toBe("main-subject");
+	});
+
+	it("a work dir without its own `.git` is refused: git found the MAIN checkout", async () => {
+		await expect(getGitStatus(exact(), ".st/ctx/broken")).rejects.toMatchObject({
+			code: "outside-workspace",
+		});
+		await expect(getGitLog(exact(), ".st/ctx/broken")).rejects.toMatchObject({
+			code: "outside-workspace",
+		});
+		// The same dir in workspace mode (no exactRoot) passes as a subdir of
+		// the main repository — exactly what exactRoot exists to stop.
+		const loose = await getGitStatus(localRunner(main), ".st/ctx/broken");
+		expect(loose.repo).toBe(true);
 	});
 });
