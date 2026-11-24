@@ -98,6 +98,14 @@
         <div class="header-right">
           <span id="user-display"></span>
         </div>
+        <!-- Pendientes (acpInbox.ts): every project's questions and interrupted
+             runs, on every screen; the count is what requires the person. -->
+        <button id="inbox-btn" type="button" aria-label="Pendientes">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" aria-hidden="true">
+            <path d="M3 13l3-8h12l3 8v6H3zM3 13h5l1 3h6l1-3h5"></path>
+          </svg>
+          <span class="inbox-count" hidden></span>
+        </button>
         <!-- The user menu (templates, invites, groups, admin, notifications,
              logout; main.ts). Under 400 px the drawer's footer holds them. -->
         <button

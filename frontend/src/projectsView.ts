@@ -19,10 +19,14 @@ import {
 	placeTopicHeader,
 	refusal,
 	resetTopic,
+	revealInTopic,
 	suspendTopic,
 	topicHeader,
 	topicPage,
+	writeInTopic,
 } from "./acpConversation.js";
+import { configureInbox, mountInboxButton, openInbox, resetInboxPanel } from "./acpInbox.js";
+import { resetInbox, startInbox } from "./acpInboxStore.js";
 import {
 	acpProjectPage,
 	onProjectFeed,
@@ -34,7 +38,8 @@ import {
 	setProjectPageMode,
 	suspendAcpProject,
 } from "./acpProjectChat.js";
-import { resetAcpAgents } from "./acpRegistry.js";
+import { acpSessionOf, resetAcpAgents } from "./acpRegistry.js";
+import { configureReview } from "./acpReview.js";
 import { stopAcpStatusFeed } from "./acpStatusFeed.js";
 import type { FeedStatus } from "./acpThread.js";
 import {
@@ -69,6 +74,7 @@ import {
 	repaintRail,
 	resetRail,
 	showRail,
+	topicTitle,
 } from "./projectRail.js";
 import {
 	disableProjectRoutes,
@@ -81,6 +87,7 @@ import {
 	projectRouteHash,
 	pushSessionAddress,
 	readProjectRoute,
+	routeHash,
 } from "./router.js";
 import { renderSessionList, sessionListLoaded } from "./sessionCore.js";
 import { setTitlePage } from "./tabTitle.js";
@@ -747,7 +754,29 @@ function wire(): void {
 		},
 		settings: (opener) =>
 			window.dispatchEvent(new CustomEvent("st:open-user-menu", { detail: { opener } })),
+		openInbox: (opener) => openInbox(opener),
 	});
+	// Pendientes and «Revisar interrupción» lead into a topic, or — for the
+	// Archive (no topic) — into the agent's own chat.
+	const agentChat = (agent: string) => {
+		const sid = acpSessionOf(agent);
+		if (sid) window.location.hash = routeHash({ sessionId: sid, view: "chat", detail: null });
+	};
+	configureInbox({
+		titleOf: topicTitle,
+		goTo: (t, opts) => {
+			if (t.conversationId && t.projectId)
+				revealInTopic(t.projectId, t.conversationId, t.id, opts.result);
+			else agentChat(t.agent);
+		},
+	});
+	configureReview({
+		writeNew: (m) => {
+			if (m.conversation_id && m.project_id) writeInTopic(m.project_id, m.conversation_id, m.to_id);
+			else agentChat(m.to_id);
+		},
+	});
+	mountInboxButton();
 	newProjectBtn?.addEventListener("click", () => void openCreateProjectDialog());
 	// A session row or the session bar used while the page is up: the page
 	// gives way to the session (and Back returns to it).
@@ -773,6 +802,7 @@ export function startProjects(): void {
 	renderSection();
 	void loadProjects();
 	void refreshAcpAgents();
+	startInbox();
 	sync();
 	if (pollTimer) clearInterval(pollTimer);
 	pollTimer = setInterval(() => {
@@ -793,6 +823,8 @@ export function resetProjects(): void {
 	resetAcpProject();
 	resetRail();
 	resetTopic();
+	resetInboxPanel();
+	resetInbox();
 	loadError = false;
 	canCreate = true;
 	headerFor = null;

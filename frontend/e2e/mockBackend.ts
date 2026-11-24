@@ -330,6 +330,8 @@ export class MockBackend {
 	private acpSeq = 0;
 	/** v27 topics (none until `enableConversations()`). */
 	acpConversations: MockConversation[] = [];
+	/** Every review / requeue the app posted, in order. */
+	reviewCalls: Array<{ id: number; verb: "review" | "requeue" }> = [];
 	/** Every `POST /acp/conversations/:id/read` body's `at`, by topic, in order. */
 	readMarks: Record<string, string[]> = {};
 	acpWorks: Array<Record<string, unknown>> = [];
@@ -748,14 +750,62 @@ export class MockBackend {
 		}
 		if (await this.handleConversations(method, path, req, json, page)) return true;
 		if (path === "/acp/inbox" && method === "GET") {
-			const questions = this.acpQuestions.filter((q) => q.state === "open");
+			// Like the backend: a question carries its message's topic and project.
+			const questions = this.acpQuestions
+				.filter((q) => q.state === "open")
+				.map((q) => {
+					const m = this.acpMessages.find((x) => x.id === q.message_id);
+					return {
+						...q,
+						conversation_id: m?.conversation_id ?? null,
+						project_id: m?.project_id ?? null,
+					};
+				});
 			const interrupted = this.acpMessages.filter((m) => m.state === "uncertain" && !m.reviewed_at);
+			// The person's messages answered after their topic's read mark (live topics only).
+			const results = this.acpMessages.filter((m) => {
+				if (m.from_id !== "owner" || m.state !== "done" || !m.result_text) return false;
+				const c = this.acpConversations.find((x) => x.id === m.conversation_id);
+				if (!c || c.archivedAt) return false;
+				return c.readAt === null || Date.parse(m.finished_at ?? "") > Date.parse(c.readAt);
+			});
+			const ids = new Set(interrupted.map((m) => m.id));
 			await json(200, {
 				count: questions.length + interrupted.length,
 				action: { questions, interrupted },
-				results: [],
-				reports: [],
+				results,
+				reports: this.acpMessages.filter((m) => m.recovery_of && ids.has(m.recovery_of)),
 			});
+			return true;
+		}
+		const verb = /^\/acp\/messages\/(\d+)\/(review|requeue)$/.exec(path);
+		if (verb && method === "POST") {
+			const m = this.acpMessages.find((x) => x.id === Number(verb[1]));
+			if (!m) {
+				await json(404, { error: "not-found" });
+				return true;
+			}
+			if (m.state !== "uncertain") {
+				await json(409, { error: "not-uncertain", state: m.state });
+				return true;
+			}
+			this.reviewCalls.push({ id: m.id, verb: verb[2] as "review" | "requeue" });
+			if (verb[2] === "review") m.reviewed_at ??= iso(1798);
+			else Object.assign(m, { state: "pending", reviewed_at: null, finished_at: null });
+			this.pushAcp({ type: "message", message: m });
+			await json(200, m);
+			return true;
+		}
+		const answer = /^\/acp\/questions\/(\d+)\/answer$/.exec(path);
+		if (answer && method === "POST") {
+			const q = this.acpQuestions.find((x) => x.id === Number(answer[1]));
+			if (!q || q.state !== "open") {
+				await json(409, { error: "not-open" });
+				return true;
+			}
+			Object.assign(q, { state: "answered", answer: req.postData(), answered_at: iso(1798) });
+			this.pushAcp({ type: "question", question: q });
+			await json(200, q);
 			return true;
 		}
 		if (path === "/acp/works" && method === "GET") {
@@ -804,7 +854,8 @@ export class MockBackend {
 		}
 		if (path === "/acp/messages" && method === "POST") {
 			const b = JSON.parse(req.postData() ?? "{}") as {
-				to: string | string[];
+				to?: string | string[];
+				team?: boolean;
 				body: string;
 				projectId?: string;
 				clientId?: string;
@@ -820,7 +871,10 @@ export class MockBackend {
 					await json(409, { error: "conversation-archived" });
 					return true;
 				}
-				const names = (Array.isArray(b.to) ? b.to : [b.to]).map((n) => n.replace(/^@/, ""));
+				// «Todo el equipo»: the project's agents now, one row each, marked `team`.
+				const names = b.team
+					? this.acpAgents.filter((a) => a.projectId === c.projectId).map((a) => a.name)
+					: (Array.isArray(b.to) ? b.to : [b.to ?? ""]).map((n) => n.replace(/^@/, ""));
 				const bad = names.find(
 					(n) => this.acpAgents.find((a) => a.name === n)?.projectId !== c.projectId,
 				);
@@ -836,12 +890,16 @@ export class MockBackend {
 						conversation_id: c.id,
 						client_id: b.clientId ?? null,
 						created_at: iso(1780 + this.acpSeq),
+						team: b.team ? 1 : null,
 					}),
 				);
-				c.recipients = { agents: names };
+				c.recipients = b.team ? { team: true } : { agents: names };
 				for (const row of rows) this.pushAcp({ type: "message", message: row });
 				this.pushConversation(c.id);
-				await json(201, Array.isArray(b.to) ? { messages: rows, replayed: false } : rows[0]);
+				await json(
+					201,
+					Array.isArray(b.to) || b.team ? { messages: rows, replayed: false } : rows[0],
+				);
 				return true;
 			}
 			if (typeof b.to !== "string" || !this.acpAgents.some((a) => a.name === b.to)) {

@@ -5,21 +5,26 @@ import {
 	answerText,
 	applyEdits,
 	authFromActivity,
+	busyElsewhere,
+	chipsOf,
 	effortLabel,
 	effortState,
 	eventTime,
 	groupThread,
 	isUnread,
 	mapThroughEdits,
+	mentionQuery,
 	modelLabel,
 	modelState,
 	parseMentions,
 	questionForm,
 	recipientRow,
+	recipientState,
 	recipientsOf,
 	setRecipient,
 	sidebarAgentStatus,
 	teamState,
+	topicTimeline,
 	upsert,
 	workTag,
 } from "./acpModel.js";
@@ -523,5 +528,121 @@ describe("read state", () => {
 		expect(isUnread(msg(2, { from_id: "qa", created_at: "2026-11-24T10:00:00.000Z" }), null)).toBe(
 			true,
 		);
+	});
+});
+
+describe("a topic's timeline (3B F2)", () => {
+	const t = (min: number) => new Date(Date.UTC(2026, 10, 24, 10, min)).toISOString();
+	it("one post per client id; each answer is its own item at the time it landed", () => {
+		const items = topicTimeline([
+			msg(1, {
+				to_id: "a",
+				client_id: "k",
+				created_at: t(0),
+				state: "done",
+				result_text: "A",
+				finished_at: t(9),
+			}),
+			msg(2, {
+				to_id: "b",
+				client_id: "k",
+				created_at: t(0),
+				state: "done",
+				result_text: "B",
+				finished_at: t(3),
+			}),
+			msg(3, { from_id: "a", to_id: "b", created_at: t(5), state: "running" }),
+		]);
+		expect(items.map((i) => i.key)).toEqual(["post:1", "result:2", "consult:3", "result:1"]);
+	});
+	it("a consult's answer is nested: no result item; its delivery only when it came late", () => {
+		const consult = msg(1, {
+			from_id: "a",
+			to_id: "b",
+			created_at: t(0),
+			state: "done",
+			result_text: "R",
+			finished_at: t(4),
+		});
+		const reply = (at: number) =>
+			msg(3, {
+				from_id: "b",
+				to_id: "a",
+				kind: "reply",
+				reply_to: 1,
+				body: "R",
+				created_at: t(at),
+			});
+		expect(topicTimeline([consult, reply(4)]).map((i) => i.key)).toEqual(["consult:1"]);
+		const late = topicTimeline([consult, msg(2, { created_at: t(2) }), reply(6)]);
+		expect(late.map((i) => i.key)).toEqual(["consult:1", "post:2", "reply:3"]);
+		expect(late.at(-1)).toMatchObject({ kind: "reply", consult: { id: 1 } });
+		// Its consult on an earlier page: the delivery is the only place to read it.
+		expect(topicTimeline([reply(6)])[0]).toMatchObject({ kind: "reply", consult: null });
+	});
+});
+
+describe("recipient rows (3B F2)", () => {
+	const titleOf = (id: string) => (id === "c2" ? "Optimización de CI" : null);
+	const base = { titleOf, asking: false, login: false, activity: null };
+	it("a queue says why: busy in another topic, held by a process, or free soon", () => {
+		const m = msg(1, { conversation_id: "c1" });
+		expect(recipientState(m, base).label).toBe("en cola — lo toma en cuanto se libere");
+		expect(
+			recipientState(m, {
+				...base,
+				agent: { runningIn: [{ id: 9, conversationId: "c2", work: null }] },
+			}).label,
+		).toBe("en cola — ocupado en «Optimización de CI»");
+		expect(
+			recipientState(m, {
+				...base,
+				agent: { heldBy: [{ conversationId: "c2", work: null, since: "" }] },
+			}).label,
+		).toBe("en cola — ocupado en «Optimización de CI» · proceso en curso");
+		// A work runs in a slot of its own: it does not hold a topic's message back.
+		expect(
+			recipientState(m, {
+				...base,
+				agent: { runningIn: [{ id: 9, conversationId: "c2", work: "w" }] },
+			}).label,
+		).toBe("en cola — lo toma en cuanto se libere");
+	});
+	it("running, a question, answered, interrupted and reviewed", () => {
+		expect(recipientState(msg(1, { state: "running" }), { ...base, activity: "Edit" }).label).toBe(
+			"trabajando · Edit",
+		);
+		expect(recipientState(msg(1, { state: "running" }), { ...base, asking: true }).label).toBe(
+			"espera tu decisión",
+		);
+		expect(recipientState(msg(1, { state: "done", result_text: "x" }), base).label).toBe(
+			"respondió",
+		);
+		expect(recipientState(msg(1, { state: "uncertain" }), base).kind).toBe("interrupted");
+		expect(recipientState(msg(1, { state: "uncertain", reviewed_at: "x" }), base).label).toBe(
+			"interrumpida · revisada, no reencolada",
+		);
+	});
+	it("busy before sending: only what holds the topic slot elsewhere", () => {
+		expect(
+			busyElsewhere({ runningIn: [{ id: 1, conversationId: "c1", work: null }] }, "c1", titleOf),
+		).toBe(null);
+		expect(
+			busyElsewhere({ question: { id: 1, messageId: 2, conversationId: "c2" } }, "c1", titleOf),
+		).toBe("espera tu decisión en «Optimización de CI»");
+	});
+});
+
+describe("composer chips (3B F2)", () => {
+	it("a topic's recipients as the server keeps them; a new topic starts empty", () => {
+		expect(chipsOf(null)).toEqual({ team: false, agents: [] });
+		expect(chipsOf({ team: true })).toEqual({ team: true, agents: [] });
+		expect(chipsOf({ agents: ["a", "b"] })).toEqual({ team: false, agents: ["a", "b"] });
+	});
+	it("the @query right before the caret", () => {
+		expect(mentionQuery("hola @de", 8)).toEqual({ query: "de", start: 5 });
+		expect(mentionQuery("@", 1)).toEqual({ query: "", start: 0 });
+		expect(mentionQuery("mail@x", 6)).toBeNull();
+		expect(mentionQuery("@de y", 5)).toBeNull();
 	});
 });

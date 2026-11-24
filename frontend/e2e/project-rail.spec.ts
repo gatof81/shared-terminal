@@ -112,8 +112,12 @@ test.describe("project rail and topics", () => {
 		});
 		backend.pushAcp({ type: "agents" });
 		backend.pushAcp({ type: "message", message: backend.acpMessages.at(-1) });
-		await expect(page.locator(".rail-inbox")).toHaveAttribute("aria-label", "Pendientes: 1");
-		await expect(page.locator(".rail-attention")).toHaveText("1 te espera");
+		await expect(page.locator("#inbox-btn")).toHaveAttribute(
+			"aria-label",
+			"Pendientes: 1 te espera",
+		);
+		// The unseen answer of «Rediseño de UI/UX» is counted apart, never in the badge.
+		await expect(page.locator(".rail-attention")).toHaveText("1 te espera · 1 resultado nuevo");
 		await expect(team.filter({ hasText: "@arq" })).toContainText("ejecución interrumpida");
 		expect(app.errors).toEqual([]);
 	});

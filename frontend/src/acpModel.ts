@@ -620,3 +620,183 @@ export function isUnread(m: AcpMessage, readAt: string | null): boolean {
 	if (m.from_id === "owner" && !(m.state === "done" && m.result_text)) return false;
 	return readAt === null || Date.parse(eventTime(m)) > Date.parse(readAt);
 }
+
+// ── A topic's thread (3B F2) ────────────────────────────────────────────────
+//
+// A topic reads as a timeline: the person's post (one logical message, one
+// state row per recipient), an agent's consult with its answer nested, the
+// Shared Terminal notes, and each RESULT as its own item when it arrived —
+// an answer is news at the time it lands, not at the time it was asked.
+
+export type TopicItem =
+	/** The person's message: one row per recipient (one client id). */
+	| { kind: "post"; key: string; at: number; messages: AcpMessage[] }
+	/** An agent asks another: the answer goes nested in it. */
+	| { kind: "consult"; key: string; at: number; message: AcpMessage }
+	| { kind: "system"; key: string; at: number; message: AcpMessage }
+	/**
+	 * The answer to a consult, delivered to the agent that asked. Its text is
+	 * already nested in the consult: shown only as a reference when it came
+	 * late (something else between them), or in full when the consult is not
+	 * in the thread (an earlier page).
+	 */
+	| { kind: "reply"; key: string; at: number; message: AcpMessage; consult: AcpMessage | null }
+	/** What an agent answered (a post's, a delivered reply's, a note's), when it answered. */
+	| { kind: "result"; key: string; at: number; message: AcpMessage };
+
+function timeOf(iso: string | null | undefined): number {
+	const t = iso ? Date.parse(iso) : Number.NaN;
+	return Number.isNaN(t) ? 0 : t;
+}
+
+export function topicTimeline(messages: readonly AcpMessage[]): TopicItem[] {
+	const byId = new Map(messages.map((m) => [m.id, m]));
+	const out: TopicItem[] = [];
+	for (const it of groupThread(messages)) {
+		const ms = it.kind === "post" ? it.messages : [it.message];
+		const m = ms[0]!;
+		const at = timeOf(m.created_at);
+		if (m.from_id === "owner") out.push({ kind: "post", key: `post:${m.id}`, at, messages: ms });
+		else if (m.kind === "reply")
+			out.push({
+				kind: "reply",
+				key: `reply:${m.id}`,
+				at,
+				message: m,
+				consult: m.reply_to !== null ? (byId.get(m.reply_to) ?? null) : null,
+			});
+		else if (m.from_id === "system")
+			out.push({ kind: "system", key: `system:${m.id}`, at, message: m });
+		else out.push({ kind: "consult", key: `consult:${m.id}`, at, message: m });
+		// A consult's answer is nested in it; every other answer is its own item.
+		for (const r of ms)
+			if (
+				r.result_text &&
+				!(r.kind === "request" && r.from_id !== "owner" && r.from_id !== "system")
+			)
+				out.push({
+					kind: "result",
+					key: `result:${r.id}`,
+					at: timeOf(r.finished_at ?? r.created_at),
+					message: r,
+				});
+	}
+	// Stable: items written at the same instant keep the order they were made in.
+	const sorted = out
+		.map((item, i) => ({ item, i }))
+		.sort((a, b) => a.item.at - b.item.at || a.i - b.i)
+		.map((x) => x.item);
+	// A reply right after its consult says nothing the consult does not.
+	return sorted.filter((item, i) => {
+		if (item.kind !== "reply" || !item.consult) return true;
+		const prev = sorted[i - 1];
+		return !(prev && prev.kind === "consult" && prev.message.id === item.consult.id);
+	});
+}
+
+/** The messages an item shows (the anchor's ids). */
+export function itemMessages(item: TopicItem): AcpMessage[] {
+	return item.kind === "post" ? item.messages : [item.message];
+}
+
+/** What the agents' facts say about one of them, as far as a message to it in `here` goes. */
+type BusyInput = Pick<AcpAgentInfo, "runningIn" | "heldBy" | "question">;
+
+/**
+ * Why a message to `a` in topic `here` would wait for something else, in
+ * the fixed words: busy in another topic («ocupado en «X»», «… · proceso
+ * en curso» when a process it left there holds it) or waiting for the
+ * person there. Only the topic slot counts: a work runs elsewhere and does
+ * not hold a topic's message back. Null: nothing elsewhere holds it.
+ */
+export function busyElsewhere(
+	a: BusyInput | undefined,
+	here: string | null,
+	titleOf: (id: string) => string | null,
+): string | null {
+	if (!a) return null;
+	const named = (id: string | null) => {
+		const t = id ? titleOf(id) : null;
+		return t ? ` en «${t}»` : "";
+	};
+	const run = a.runningIn?.find((r) => r.work === null && r.conversationId !== here);
+	if (run) return `ocupado${named(run.conversationId)}`;
+	const held = a.heldBy?.find((h) => h.work === null && h.conversationId !== here);
+	if (held) return `ocupado${named(held.conversationId)} · proceso en curso`;
+	const q = a.question;
+	if (q && q.conversationId !== here) return `espera tu decisión${named(q.conversationId)}`;
+	return null;
+}
+
+export type RecipientKind =
+	| "running"
+	| "pending"
+	| "waiting"
+	| "login"
+	| "done"
+	| "failed"
+	| "interrupted"
+	| "reviewed";
+
+/**
+ * One recipient's row under the person's message (PROPUESTA §3): each
+ * advances on its own, from the backend's states — never a timer, never an
+ * aggregate progress of the message.
+ */
+export function recipientState(
+	m: AcpMessage,
+	ctx: {
+		agent?: BusyInput;
+		titleOf: (id: string) => string | null;
+		/** An open question of this message. */
+		asking: boolean;
+		/** The agent waits for a login. */
+		login: boolean;
+		/** Its latest activity, if any (a tool, a task). */
+		activity: string | null;
+	},
+): { kind: RecipientKind; label: string } {
+	if (m.state === "running" && ctx.asking) return { kind: "waiting", label: "espera tu decisión" };
+	if (ctx.login && (m.state === "pending" || m.state === "running"))
+		return { kind: "login", label: "esperando login" };
+	if (m.state === "running")
+		return {
+			kind: "running",
+			label: ctx.activity ? `trabajando · ${ctx.activity}` : "trabajando",
+		};
+	if (m.state === "pending") {
+		const why = m.context ? null : busyElsewhere(ctx.agent, m.conversation_id ?? null, ctx.titleOf);
+		return { kind: "pending", label: `en cola — ${why ?? "lo toma en cuanto se libere"}` };
+	}
+	if (m.state === "done") return { kind: "done", label: m.result_text ? "respondió" : "terminó" };
+	if (m.state === "failed") return { kind: "failed", label: "falló" };
+	return m.reviewed_at
+		? { kind: "reviewed", label: "interrumpida · revisada, no reencolada" }
+		: { kind: "interrupted", label: "interrumpida" };
+}
+
+/** «→ Todo el equipo (N)»: every row of the post went to the whole team. */
+export function isTeamPost(ms: readonly AcpMessage[]): boolean {
+	return ms.length > 0 && ms.every((m) => m.team === 1);
+}
+
+/** The recipients a topic's composer starts with: the topic's own, as the server keeps them. */
+export interface Chips {
+	team: boolean;
+	agents: string[];
+}
+
+export function chipsOf(
+	recipients: { agents: string[] } | { team: true } | null | undefined,
+): Chips {
+	if (!recipients) return { team: false, agents: [] };
+	if ("team" in recipients) return { team: true, agents: [] };
+	return { team: false, agents: [...recipients.agents] };
+}
+
+/** The `@query` being typed right before the caret, if any (the mention menu's filter). */
+export function mentionQuery(text: string, caret: number): { query: string; start: number } | null {
+	const m = /(^|[\s(,;:])@([A-Za-z0-9_-]*)$/.exec(text.slice(0, caret));
+	if (!m) return null;
+	return { query: m[2]!, start: caret - m[2]!.length - 1 };
+}
