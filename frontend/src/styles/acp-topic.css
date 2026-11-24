@@ -365,8 +365,10 @@ button.acp-rs-check:hover {
 	display: inline-grid;
 	place-items: center;
 	flex-shrink: 0;
-	width: 36px;
-	height: 36px;
+	/* As tall as the header's other controls (the account's 32 px): a taller
+	   one would grow the header on every screen and take rows off the terminal. */
+	width: 32px;
+	height: 32px;
 	padding: 0;
 	border: 0;
 	border-radius: 8px;
