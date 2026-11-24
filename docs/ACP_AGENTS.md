@@ -356,8 +356,14 @@ PROPUESTA §4 (never slots):
   "queue":      [{"id": 15, "conversationId": "…", "work": null}],
   "waitingFor": [{"id": 13, "agent": "qa", "conversationId": "…", "work": null}],
   "question":   {"id": 4, "messageId": 12, "conversationId": "…"} | null,
+  "heldBy":     [{"conversationId": "…", "work": null, "since": "…"}],
   "waitingInput": true, "running": [12], "pending": 1 }
 ```
+
+`heldBy`: `[{conversationId, work, since}]` — a slot kept in a conversation (or work) by a process the
+agent left running there, so it cannot switch to another topic («ocupado en «X» · proceso en curso»).
+The runner reports it with every claim (the claim's own `conversation`/`context` restriction), a claim
+without it clears it; memory only, not shown past 60 s without a claim. Empty otherwise.
 
 `queue` is in id order (position = index; the claim takes the oldest its slot may run). `waitingFor` =
 its requests to other agents not finished yet (pending or running), from a run that is open or closed.
