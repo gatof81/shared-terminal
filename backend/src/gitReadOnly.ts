@@ -122,6 +122,14 @@ export interface GitRunner {
 	run(argv: string[], maxBytes: number): Promise<CaptureResult>;
 	/** Absolute, symlink-free path of the workspace as git sees it (the cwd of every run). */
 	workspaceDir: string;
+	/**
+	 * The repository must have its top level exactly at `dir` (not merely
+	 * contain it). Set for a work's worktree (`dir` = `.st/ctx/<id>`): a
+	 * worktree whose `.git` file is missing or broken would otherwise let
+	 * git discover the MAIN checkout above it, and `dir` would pass as a
+	 * subdirectory of that repository.
+	 */
+	exactRoot?: boolean;
 }
 
 // Git is told, through the environment, to never block, never write and
@@ -171,8 +179,10 @@ export function makeGitRunner(
 	docker: Pick<DockerManager, "execCapture">,
 	sessionId: string,
 	containerId: string,
+	opts: { exactRoot?: boolean } = {},
 ): GitRunner {
 	return {
+		exactRoot: opts.exactRoot === true,
 		run: (argv, maxBytes) =>
 			docker.execCapture(sessionId, argv, {
 				containerId,
@@ -541,11 +551,16 @@ export function countPatchSections(patch: string): number {
  * `core.worktree` pointing elsewhere — fails the comparison even though
  * every path segment looked fine.
  */
-export function checkRepoLocation(workspaceDir: string, dir: string, stdout: string): string {
+export function checkRepoLocation(
+	workspaceDir: string,
+	dir: string,
+	stdout: string,
+	exactRoot = false,
+): string {
 	const [toplevel = "", prefix = ""] = stdout.split("\n");
 	const expected = dir === "" ? workspaceDir : `${workspaceDir}/${dir}`;
 	const actual = prefix === "" ? toplevel : `${toplevel}/${prefix.replace(/\/$/, "")}`;
-	if (toplevel === "" || actual !== expected) {
+	if (toplevel === "" || actual !== expected || (exactRoot && prefix !== "")) {
 		throw new GitError(
 			"outside-workspace",
 			"This directory resolves to a repository outside the workspace (through a symlink or a redirected worktree)",
@@ -627,7 +642,12 @@ export async function getGitStatus(runner: GitRunner, dir: string): Promise<GitS
 	// to be where `dir` says (see checkRepoLocation): a location we can't
 	// verify is an error, not a degraded answer.
 	if (prefix.exitCode !== 0) throw classifyFailure(prefix, "git rev-parse");
-	const prefixStr = checkRepoLocation(runner.workspaceDir, dir, prefix.stdout.toString("utf-8"));
+	const prefixStr = checkRepoLocation(
+		runner.workspaceDir,
+		dir,
+		prefix.stdout.toString("utf-8"),
+		runner.exactRoot,
+	);
 	const parsed = parsePorcelainV2(splitNulRecords(status.stdout, status.truncated));
 	// numstat failing (e.g. a corrupt index) degrades to "no counts"
 	// rather than failing the whole view.
@@ -657,7 +677,7 @@ export async function getGitStatus(runner: GitRunner, dir: string): Promise<GitS
 async function assertRepoLocation(runner: GitRunner, dir: string): Promise<void> {
 	const res = await runner.run(REV_PARSE_LOCATION(dir), 64 * 1024);
 	if (res.exitCode !== 0) throw classifyFailure(res, "git rev-parse");
-	checkRepoLocation(runner.workspaceDir, dir, res.stdout.toString("utf-8"));
+	checkRepoLocation(runner.workspaceDir, dir, res.stdout.toString("utf-8"), runner.exactRoot);
 }
 
 async function findRepoCandidates(runner: GitRunner): Promise<string[]> {
