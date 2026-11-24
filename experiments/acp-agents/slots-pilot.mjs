@@ -7,7 +7,13 @@
 //      and cwd reported by the test agent), never the other's;
 //   P3 questions: two open at once (default + "a"), each answered in its own message;
 //   P4 caps refused at the API: maxConcurrency out of range, a context for a one-slot agent;
-//   P5 lowering the cap: after maxConcurrency → 1 nothing more runs in slot 2;
+//   P4b processes: one runner + one adapter per slot (cap 1 → 1, cap 2 → 2);
+//   P5 lowering the cap: after maxConcurrency → 1 a context is refused and the default context keeps working; the
+//      idle slot 2 stays until the container restarts (known limit of #744, checked as such);
+//   P7 depth (#746): a recursive chain of consults is cut — 6 nested requests at depths 1..6, the 7th refused
+//      with depth-limit, every request answered at its depth − 1;
+//   P8 rounds (#746): `rondas 8` — 8 consults of one agent to another under one person's message, all at depth 1,
+//      one root, none refused (neither depth-limit nor chain-budget), and no 9th;
 //   P6 resources: memory.events (oom/oom_kill) of the agents' session containers stays 0, memory.peak printed.
 // Run the lab with MAX_RUNNING=3:
 //   SRC=<checkout> MAX_RUNNING=3 ./experiments/acp-agents/lab-st.sh up
@@ -216,6 +222,49 @@ async function main() {
 	// limit: two processes are expected here, and the check says so.
 	const lowered = await procs(sids[A1]);
 	check(`P5 after lowering to 1, @${A1} keeps the idle slot 2 until its container restarts (known limit, #744): two runners, two adapters`, lowered.runners === 2 && lowered.adapters === 2, JSON.stringify(lowered));
+
+	// P7. A recursive chain is cut at ACP_MAX_DEPTH (6): seven nested consults alternating @A1 ⇄ @A2 — each agent
+	// unwraps one "consultá a @x:" and sends the rest. Requests land at depths 1..6; the 7th is refused.
+	const projectRows = async () => (await api("GET", `/api/acp/projects/${pid}/feed`)).body?.messages ?? [];
+	const ofRoot = (rows, root) => rows.filter((m) => m.root_id === root);
+	let nested = "fin de la cadena";
+	for (let i = 7; i >= 1; i--) nested = `consultá a @${i % 2 ? A2 : A1}: ${nested}`;
+	const r7 = await send(A1, nested, pid);
+	const chain = await waitFor(async () => {
+		const rows = ofRoot(await projectRows(), r7.id);
+		const reqs = rows.filter((m) => m.kind === "request");
+		const reps = rows.filter((m) => m.kind === "reply");
+		const deepest = reqs.find((m) => m.depth === 6);
+		return reqs.length >= 6 && reps.length >= 6 && deepest?.state === "done" && reps.every((m) => m.state === "done") ? { reqs, reps, deepest } : null;
+	}, 180_000);
+	if (check("P7 the chain settled (6 requests and 6 replies done)", !!chain)) {
+		const depths = chain.reqs.map((m) => m.depth).sort((a, b) => a - b);
+		check("P7 requests at depths 1..6 under the person's message, no 7th", depths.join(",") === "1,2,3,4,5,6", depths.join(","));
+		check("P7 the 7th consult was refused with depth-limit", /depth-limit/.test(chain.deepest.result_text ?? ""), short(chain.deepest.result_text, 160));
+		const byId = Object.fromEntries(chain.reqs.map((m) => [m.id, m]));
+		check(
+			"P7 each reply comes back at its request's depth − 1",
+			chain.reps.every((r) => byId[r.reply_to] && r.depth === byId[r.reply_to].depth - 1),
+			chain.reps.map((r) => `${byId[r.reply_to]?.depth}→${r.depth}`).join(" "),
+		);
+	}
+
+	// P8. Rounds are not nesting: 8 consults of @A1 to @A2, one per reply, all at depth 1 under one root.
+	const r8 = await send(A1, `rondas 8: consultá a @${A2}: ronda`, pid);
+	const rounds = await waitFor(async () => {
+		const rows = ofRoot(await projectRows(), r8.id);
+		const reqs = rows.filter((m) => m.kind === "request");
+		const reps = rows.filter((m) => m.kind === "reply");
+		return reqs.length >= 8 && reps.length >= 8 && [...reqs, ...reps].every((m) => m.state === "done") ? { reqs, reps } : null;
+	}, 240_000);
+	if (check("P8 eight rounds settled (8 requests and 8 replies done)", !!rounds)) {
+		await sleep(5_000);
+		const rows = ofRoot(await projectRows(), r8.id);
+		const reqs = rows.filter((m) => m.kind === "request");
+		check("P8 exactly 8 requests, all @A1 → @A2 at depth 1", reqs.length === 8 && reqs.every((m) => m.from_id === A1 && m.to_id === A2 && m.depth === 1), reqs.map((m) => `${m.from_id}→${m.to_id}@${m.depth}`).join(" "));
+		const refused = rows.filter((m) => /depth-limit|chain-budget/.test(m.result_text ?? ""));
+		check("P8 no round refused (depth-limit / chain-budget)", refused.length === 0, refused.map((m) => `#${m.id}: ${short(m.result_text, 80)}`).join(" | "));
+	}
 
 	// P6. Resources of the two session containers.
 	for (const name of [A1, A2]) {
