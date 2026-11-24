@@ -161,7 +161,23 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 		"/messages",
 		wrap(async (req, res) => {
 			const c = caller(res);
-			const { to, body, projectId, clientId, work } = (req.body ?? {}) as Record<string, unknown>;
+			const {
+				to,
+				body,
+				projectId,
+				clientId,
+				work,
+				context: freeContext,
+			} = (req.body ?? {}) as Record<string, unknown>;
+			// The free `context` is gone (v26): a caller still sending it meant an
+			// isolated directory, and ignoring it would run the message in the
+			// agent's main checkout.
+			if (freeContext !== undefined && freeContext !== null)
+				return void res.status(400).json({
+					error: "context-removed",
+					message:
+						"el campo context ya no existe: usá work (un trabajo creado con POST /api/acp/works)",
+				});
 			const name = String(to ?? "").replace(/^@/, "");
 			const owner = ownerOf(c);
 			if (typeof body !== "string" || body.trim() === "")
@@ -301,7 +317,9 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 					id,
 					base: typeof base === "string" ? base : null,
 				});
-				res.status(r.created ? 201 : 200).json(workView({ ...r.work, agent: target.name }));
+				res
+					.status(r.created ? 201 : 200)
+					.json({ ...workView({ ...r.work, agent: target.name }), base: r.base ?? null });
 			} catch (err) {
 				refuse(res, err);
 			}

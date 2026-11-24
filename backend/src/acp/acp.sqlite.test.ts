@@ -1357,6 +1357,7 @@ describe("ACP works: creation, delegation (v26)", () => {
 			createdBy: "owner",
 		});
 		expect(fx.calls.slice(-2)).toEqual(["preflight st-42 ", `create st-42 ${"b".repeat(40)}`]);
+		expect(r.body.base).toBe("origin/main");
 		// The same POST again: the same work, nothing run in the container.
 		fx.calls = [];
 		const again = await create(owner, "st-42");
@@ -1478,6 +1479,15 @@ describe("ACP works: creation, delegation (v26)", () => {
 			error: "work-exists",
 			state: "cleaned",
 		});
+		// A ceiling: no block past 60000.
+		const full = db.prepare(
+			"INSERT INTO agent_works (owner_user_id, id, agent_id, branch, port_base, state, created_by) SELECT ?, ?, agent_id, 'work/x', ?, 'closed', 'owner' FROM acp_agents WHERE name = 'vecino'",
+		);
+		for (let k = 0; k <= 399; k++) full.run(OWNER, `relleno-${k}`, 20000 + 100 * k);
+		const none = await create(owner, "sin-puertos", {}, "vecino");
+		expect(none.status).toBe(409);
+		expect(none.body.error).toBe("no-free-ports");
+		db.prepare("DELETE FROM agent_works WHERE id LIKE 'relleno-%'").run();
 		// Another agent's blocks are its own.
 		expect((await create(owner, "del-vecino", {}, "vecino")).body.portBase).toBe(20000);
 	});
@@ -1513,13 +1523,14 @@ describe("ACP works: creation, delegation (v26)", () => {
 			state: "done",
 			text: ".",
 		});
-		// The free `context` field is gone: ignored, the message runs in the default context.
+		// The free `context` field is gone: refused, never run in the default context.
 		const free = await call(owner, "POST", "/messages", {
 			to: "obrero",
 			body: "x",
 			context: "libre",
 		});
-		expect(free.body.context).toBeNull();
+		expect(free.status).toBe(400);
+		expect(free.body.error).toBe("context-removed");
 	});
 
 	it("GET /works: the person sees all; an agent its own and its project's", async () => {

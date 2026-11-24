@@ -35,6 +35,8 @@ type Shell = (script: string, ...args: string[]) => ReturnType<DockerManager["ex
 export const workDir = (id: string) => `${WORKSPACE}/.st/ctx/${id}`;
 const PORT_FIRST = 20000;
 const PORT_SPAN = 100;
+/** The last block (…+99 = 59999): a work never gets a port past 60000. */
+const PORT_LAST_BLOCK = 59900;
 const EXEC_TIMEOUT_MS = 90_000;
 
 export type WorkState = "creating" | "active" | "closed" | "cleanup-pending" | "cleaned";
@@ -203,7 +205,7 @@ export class AcpWorks {
 		target: AgentRow;
 		id: string;
 		base?: string | null;
-	}): Promise<{ work: WorkRow; created: boolean }> {
+	}): Promise<{ work: WorkRow; created: boolean; base?: string }> {
 		const { ownerUserId, target, id } = m;
 		if (!WORK_ID_RE.test(id)) throw new WorkError(400, "bad-work-id");
 		const base = m.base ?? "";
@@ -251,6 +253,9 @@ export class AcpWorks {
 				minFreeMb: this.config.workMinFreeMb,
 			});
 		const sha = pre.get("sha")?.[0];
+		// The ref the worktree started from, as resolved (with no base and no
+		// origin/HEAD it is the main checkout's HEAD): said in the answer.
+		const resolved = pre.get("base")?.[0];
 		if (!sha) throw new WorkError(500, "preflight-failed");
 
 		if (!row) {
@@ -270,9 +275,10 @@ export class AcpWorks {
 		} catch (err) {
 			logger.warn(`[acp] work ${id} of @${target.name}: worktree add: ${(err as Error).message}`);
 		}
-		if (ok) return { work: await this.activate(row, sha), created: true };
+		if (ok) return { work: await this.activate(row, sha), created: true, base: resolved };
 		const seen = await this.inspect(sh, id).catch(() => ({ state: "unknown", sha: null }));
-		if (seen.state === "ok") return { work: await this.activate(row, seen.sha), created: true };
+		if (seen.state === "ok")
+			return { work: await this.activate(row, seen.sha), created: true, base: resolved };
 		throw this.incomplete(row, seen.state);
 	}
 
@@ -428,7 +434,7 @@ export class AcpWorks {
 					CASE WHEN NOT EXISTS (SELECT 1 FROM agent_works WHERE agent_id = ?3 AND state != 'cleaned' AND port_base = ?7) THEN ?7
 					ELSE (SELECT MIN(w.port_base) + ?8 FROM agent_works w WHERE w.agent_id = ?3 AND w.state != 'cleaned'
 						AND NOT EXISTS (SELECT 1 FROM agent_works v WHERE v.agent_id = ?3 AND v.state != 'cleaned' AND v.port_base = w.port_base + ?8))
-					END AS p) WHERE true
+					END AS p) WHERE p <= ?9
 				 ON CONFLICT DO NOTHING RETURNING *`,
 				[
 					ownerUserId,
@@ -439,11 +445,22 @@ export class AcpWorks {
 					createdBy,
 					PORT_FIRST,
 					PORT_SPAN,
+					PORT_LAST_BLOCK,
 				],
 			);
 			if (r.results[0]) return r.results[0];
 			const prior = await this.get(ownerUserId, id);
 			if (prior) return prior;
+			// Nothing written and no row of that id: a concurrent INSERT took the
+			// block (try again) — or there is no block left under the ceiling.
+			const used = await d1Query<{ n: number }>(
+				"SELECT COUNT(*) AS n FROM agent_works WHERE agent_id = ? AND state != 'cleaned'",
+				[target.agent_id],
+			);
+			if (Number(used.results[0]?.n ?? 0) >= (PORT_LAST_BLOCK - PORT_FIRST) / PORT_SPAN + 1)
+				throw new WorkError(409, "no-free-ports", {
+					reason: `el agente ya tiene ${used.results[0]?.n} trabajos sin limpiar: no quedan bloques de puertos por debajo de ${PORT_LAST_BLOCK + PORT_SPAN}`,
+				});
 		}
 		throw new WorkError(503, "port-allocation-failed");
 	}

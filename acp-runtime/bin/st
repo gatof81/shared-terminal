@@ -30,6 +30,8 @@ const REASONS = {
 	"work-busy": "el trabajo tiene mensajes pendientes o en curso",
 	"work-not-closed": "primero cerralo (st work close)",
 	"cleanup-pending": "no se limpió: quedó pendiente",
+	"no-free-ports": "el agente no tiene bloques de puertos libres: limpiá trabajos viejos",
+	"context-removed": "el campo context ya no existe: usá --work",
 };
 
 async function call(method, path, body) {
@@ -81,7 +83,7 @@ if (cmd === "send") {
 	const [base, rest] = option(args.slice(1), "--base");
 	if (rest.length !== 2) usage();
 	const w = await call("POST", "/works", { agent: rest[0], id: rest[1], ...(base ? { base } : {}) });
-	console.log(`trabajo ${workLine(w)} · base ${w.baseSha?.slice(0, 12)}`);
+	console.log(`trabajo ${workLine(w)} · base ${w.base ? `${w.base} @ ` : ""}${w.baseSha}`);
 } else if (cmd === "work" && args[0] === "list") {
 	const all = await call("GET", "/works");
 	if (!all.length) console.log("no hay trabajos");

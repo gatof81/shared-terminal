@@ -158,8 +158,12 @@ work's first message — never by the runner, which fails a message whose direct
   real state: the worktree on its branch ⇒ `active`; nothing ⇒ the same POST creates it; anything
   else stays `creating` with a `note` (409 `work-incomplete`). Repeating a POST returns the work.
 - Ports: `port_base` = 20000 + 100·k, the lowest block free among the agent's works not `cleaned`
-  (a partial unique index). The work's session gets `ST_WORK` and `ST_PORT_BASE` in its environment
+  (a partial unique index), never past 60000 (409 `no-free-ports`). The answer to a creation names
+  the base it resolved (`base`, with `baseSha`): with no base and no `origin/HEAD` it is the main
+  checkout's `HEAD`. The work's session gets `ST_WORK` and `ST_PORT_BASE` in its environment
   (with its credential), and every message's header names the work, branch, directory and ports.
+- The free `context` field is gone: a message that still sends it is refused (400
+  `context-removed`), never run in the default context.
 - `{work}` on a message: the work must exist (404 `work-not-found`), be the recipient's (409
   `work-not-yours`) and `active` (409 `work-not-active`); an agent sender must share its project
   (403 `work-other-project`). Claim, slots, caps, depth and rounds are unchanged.
