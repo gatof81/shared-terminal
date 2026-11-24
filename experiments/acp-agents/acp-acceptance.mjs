@@ -300,7 +300,7 @@ async function main() {
 	const ef = await api("PATCH", `/api/acp/agents/${DEV}`, { effort: "xhigh" });
 	check("effort change accepted and stored", ef.status === 200 && ef.body?.effort === "xhigh", JSON.stringify(ef.body?.effort));
 	const onXhigh = await waitMsg((await send(DEV, "¿qué effort usás?", pid)).id);
-	check("the next message runs on the new effort", onXhigh.state === "done" && /effort xhigh\)/.test(onXhigh.result_text ?? ""), short(onXhigh.result_text));
+	check("the next message runs on the new effort", onXhigh.state === "done" && /effort xhigh( ·|\))/.test(onXhigh.result_text ?? ""), short(onXhigh.result_text));
 	const efApplied = (await agents()).find((a) => a.name === DEV)?.effortApplied;
 	check(
 		"the runner reports the effort as applied with the adapter's levels",
@@ -309,7 +309,7 @@ async function main() {
 	);
 	await api("PATCH", `/api/acp/agents/${DEV}`, { model: "claude-sonnet-5-5" });
 	const onSonnet = await waitMsg((await send(DEV, "¿y ahora?", pid)).id);
-	check("a model without that level drops it (effort default)", /effort default\)/.test(onSonnet.result_text ?? ""), short(onSonnet.result_text));
+	check("a model without that level drops it (effort default)", /effort default( ·|\))/.test(onSonnet.result_text ?? ""), short(onSonnet.result_text));
 	const efFailed = (await agents()).find((a) => a.name === DEV)?.effortApplied;
 	check(
 		"the runner reports the missing level as an error, with the new model's levels",
