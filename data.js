@@ -51,6 +51,9 @@ window.DATA = (() => {
 		M({ conv: "ui", from: "developer", to: ["designer"], kind: "reply", replyTo: "c1", body: "Ya es una lista (`recipients[]`, una fila por destinatario bajo un mismo `client_id`). Falta solo la opción «todo el equipo».", t: "10:14" }),
 		M({ conv: "ui", from: "system", body: "@qa se sumó a este tema (mencionado por @designer).", t: "10:15" }),
 		M({ id: "q-ui-run", conv: "ui", from: "owner", to: ["designer"], body: "Prepará un prototipo navegable con datos simulados.", t: "10:20", status: "running", activity: "Editando design/3a/proto.css · 4 min" }),
+		M({ conv: "ui", from: "owner", to: ["architect", "developer", "designer", "qa"], team: true, body: "Mañana reviso el prototipo con ustedes: anoten acá lo que los bloquee.", t: "10:22",
+			rs: { architect: "pending", developer: "pending", designer: "pending", qa: "done" } }),
+		M({ conv: "ui", from: "qa", to: ["owner"], body: "Sin bloqueos de mi lado; preparo los criterios de aceptación cuando esté la propuesta.", t: "10:23" }),
 		M({ id: "q-ui-dev", conv: "ui", from: "owner", to: ["developer"], body: "Cuando puedas: ¿cuánto cuesta reanudar una sesión ACP que estuvo inactiva?", t: "10:24", status: "pending" }),
 
 		M({ conv: "ci", from: "owner", to: ["qa", "developer"], body: "El job de e2e tarda 14 minutos. Quiero bajarlo sin perder cobertura.", t: "08:40" }),
@@ -59,9 +62,15 @@ window.DATA = (() => {
 		M({ conv: "ci", from: "developer", to: ["owner"], body: "Abrí el trabajo `ci-cache` (rama work/ci-cache, base main@3bda155).", t: "09:03", work: "ci-cache" }),
 		M({ id: "ci-run", conv: "ci", from: "owner", to: ["developer"], body: "Seguí con el build compartido y avisá a @qa cuando esté para medir.", t: "09:40", status: "running", work: "ci-cache", activity: "npm run test:e2e · 212/318 · 6 min" }),
 		M({ id: "c2", conv: "ci", from: "qa", to: ["developer"], kind: "consult", body: "Cuando termines, pasame el SHA para medir 3 corridas contra main.", t: "09:52", status: "pending" }),
-		M({ id: "ci-unc", conv: "ci", from: "owner", to: ["qa"], body: "Medí también la variante sin shards.", t: "09:55", status: "uncertain", note: "La ejecución se interrumpió (se reinició el runner de @qa). No se reenvía sola." }),
+		M({ id: "ci-unc", conv: "ci", from: "owner", to: ["qa"], body: "Medí también la variante sin shards.", t: "09:55", status: "uncertain",
+			cut: { at: "09:57", why: "se reinició el runner de @qa", last: "Bash · npm run test:e2e -- --shard=1/1 (sin resultado)" } }),
+		M({ conv: "ci", from: "qa", to: ["owner"], kind: "report", reportFor: "ci-unc", body: "Informe de la interrupción (solo lectura): llegué a lanzar 1 corrida sin shards, que quedó a la mitad. No hice commits ni cambié archivos; quedó un proceso de Playwright que ya no corre.", t: "09:58" }),
 
 		M({ conv: "be", from: "owner", to: ["architect"], body: "Diseñá sesiones ACP por agente y conversación, abiertas bajo demanda, sin un worktree por chat.", t: "09:15" }),
+		M({ id: "c3", conv: "be", from: "architect", to: ["developer"], kind: "consult", body: "¿Abrir la sesión ACP por tema rompe la afinidad de slots de #756?", t: "09:20" }),
+		M({ conv: "be", from: "owner", to: ["architect"], body: "Considerá también qué pasa con los trabajos abiertos.", t: "09:31" }),
+		M({ id: "c3r", conv: "be", from: "developer", to: ["architect"], kind: "reply", replyTo: "c3", body: "No la rompe: la afinidad sigue siendo por contexto y el tema pasa a ser un contexto más. Cambia solo la clave.", t: "09:47" }),
+		M({ conv: "be", from: "system", kind: "late", body: "", link: "c3r", ref: { who: "developer", of: "architect", at: "09:20" }, t: "09:47" }),
 		M({ conv: "be", from: "architect", to: ["owner"], body: "Esquema listo: la sesión es (agente, conversación); se reanuda al llegar un mensaje y se libera inactiva. Me falta una decisión tuya.", t: "09:48" }),
 		M({ id: "qst", conv: "be", from: "architect", to: ["owner"], kind: "question", body: "¿Cuándo liberamos una sesión inactiva?", options: ["A los 10 min sin mensajes", "Solo al llegar al tope de slots", "Lo hablamos"], t: "09:49", status: "open" }),
 

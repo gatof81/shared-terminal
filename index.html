@@ -85,6 +85,20 @@
 		<div class="row-end"><button value="cancel" class="btn ghost">Cancelar</button><button value="ok" class="btn primary">Crear</button></div>
 	</form>
 </dialog>
+<dialog id="unc-dialog" aria-labelledby="unc-title">
+	<h2 id="unc-title">Revisar interrupción</h2>
+	<div id="unc-body"></div>
+	<div class="unc-acts">
+		<button class="btn primary" id="unc-reviewed">Dar por revisada, sin reencolar</button>
+		<button class="btn" id="unc-new">Escribirle un mensaje nuevo</button>
+	</div>
+	<details id="unc-more"><summary>Reencolar el mensaje original…</summary>
+		<p class="small">Vuelve a poner <b>este mismo mensaje</b> en la cola de <span id="unc-requeue-who"></span> (no crea una copia). Lo ejecuta desde el principio y puede repetir lo que ya hizo.</p>
+		<label class="ack"><input type="checkbox" id="unc-ack"> Revisé el estado y acepto que puede repetir operaciones.</label>
+		<button class="btn danger" id="unc-requeue" disabled>Reencolar</button>
+	</details>
+	<div class="row-end"><button class="btn ghost" id="unc-cancel">Cerrar</button></div>
+</dialog>
 <div id="proto-note" class="proto-note">Prototipo 3A · datos simulados</div>
 <script src="data.js"></script>
 <script src="proto.js"></script>

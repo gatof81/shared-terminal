@@ -10,7 +10,7 @@
 	const S = {
 		project: "st", conv: "ui", view: "chat", m: "home",
 		lastConv: { st: "ui", hz: "hz1", notas: null },
-		pos: {}, recips: {}, drafts: {},
+		pos: {}, recips: {}, team: {}, drafts: {},
 		tools: { agent: "developer", ws: "main", tool: "files", file: null, change: null },
 		showClosed: false, resizes: 0, clock: 0,
 	};
@@ -82,7 +82,7 @@
 		const convs = D.convs.filter((c) => c.project === S.project && !c.archive);
 		$("#conv-list").innerHTML = convs.map((c) => {
 			const ms = msgsOf(c.id);
-			const last = ms.filter((m) => m.kind !== "reply").at(-1);
+			const last = ms.filter((m) => m.kind !== "reply" && m.from !== "system").at(-1);
 			const unread = unreadIn(c.id);
 			const q = ms.some((m) => m.kind === "question" && m.status === "open");
 			const unc = ms.some((m) => m.to.some((a) => stOf(m, a) === "uncertain"));
@@ -116,27 +116,38 @@
 		for (const m of msgsOf(cid)) { if (m.from !== "owner" && m.from !== "system") set.add(m.from); m.to.forEach((a) => a !== "owner" && set.add(a)); }
 		return [...set].filter((a) => D.agents[a]);
 	}
-	function ownerFoot(m) {
-		const parts = [];
-		for (const a of m.to) {
-			const s = stOf(m, a);
-			const run = runOf(a);
-			if (run && run.msg === m.id) parts.push(`<span class="state running"><span class="dot"></span>@${a} trabajando · ${esc(run.activity)}</span>`);
-			else if (s === "pending") {
-				const st = status(a, m.conv);
-				const why = st.k === "elsewhere" ? `@${a} está ocupado en <button class="link" data-goto-conv="${st.conv}">«${esc(conv(st.conv).title)}»</button>; lo toma al terminar`
-					: st.k === "waitOwner" ? `@${a} espera tu decisión en <button class="link" data-goto-msg="${st.msg}">«${esc(conv(st.conv).title)}»</button>`
-					: `@${a} lo toma en cuanto se libere`;
-				parts.push(`<span class="state pending"><span class="dot"></span>En cola — ${why}</span>`);
-			} else if (s === "uncertain") parts.push(`<span class="state uncertain"><span class="dot"></span>${esc(m.note || "Interrumpida")}</span> <button class="btn small" data-requeue="${m.id}" data-a="${a}">Reenviar a @${a}</button>`);
+	// Estado de UN destinatario: cada uno avanza por separado; no hay un "progreso del mensaje".
+	function recipState(m, a) {
+		const s = stOf(m, a);
+		const run = runOf(a);
+		if (run && run.msg === m.id) return { k: "running", html: `trabajando · ${esc(run.activity)}` };
+		if (s === "pending") {
+			const st = status(a, m.conv);
+			const why = st.k === "elsewhere" ? `ocupado en <button class="link" data-goto-conv="${st.conv}">«${esc(conv(st.conv).title)}»</button>, lo toma al terminar`
+				: st.k === "waitOwner" ? `espera tu decisión en <button class="link" data-goto-msg="${st.msg}">«${esc(conv(st.conv).title)}»</button>`
+				: "lo toma en cuanto se libere";
+			return { k: "pending", html: `en cola — ${why}` };
 		}
-		return parts.join("<br>");
+		if (s === "uncertain") return { k: "uncertain", html: `interrumpida · <button class="btn small" data-review="${m.id}" data-a="${a}">Revisar interrupción</button>` };
+		if (s === "reviewed") return { k: "reviewed", html: "interrumpida · revisada, no reencolada" };
+		const ms = msgsOf(m.conv);
+		const reply = ms.slice(ms.indexOf(m) + 1).find((x) => x.from === a && x.kind !== "report");
+		return { k: "done", reply: reply?.id, html: reply ? `respondió · <button class="link" data-goto-msg="${reply.id}">ver</button>` : "terminó" };
+	}
+	function ownerFoot(m) {
+		const rows = m.to.map((a) => [a, recipState(m, a)]);
+		if (rows.every(([, r]) => r.k === "done")) {
+			if (rows.length === 1) return "";
+			return `<span class="rs-done">${rows.map(([a, r]) => `<button class="rs-chip" ${r.reply ? `data-goto-msg="${r.reply}"` : ""}>✓ @${a}</button>`).join("")}</span>`;
+		}
+		return `<ul class="rs-list" aria-label="Estado por destinatario">${rows.map(([a, r]) => `<li>${av(a, "sm")}<span class="rs-name">@${a}</span><span class="state ${r.k}"><span class="dot"></span>${r.html}</span></li>`).join("")}</ul>`;
 	}
 	function msgHTML(m, unseenStart) {
 		let out = unseenStart ? `<div class="divider" id="new-divider">Nuevos desde tu última visita</div>` : "";
-		if (m.from === "system") return `${out}<div class="sys" id="${m.id}">${md(m.body)}${m.link ? ` · <button class="link" data-goto-msg="${m.link}">ver</button>` : ""}</div>`;
+		if (m.kind === "late") return `${out}<div class="sys late" id="${m.id}">↳ @${m.ref.who} respondió la consulta de @${m.ref.of} (${m.ref.at}) · <button class="link" data-goto-msg="${m.link}">Ir a la respuesta ↑</button></div>`;
+		if (m.from === "system") return `${out}<div class="sys" id="${m.id}">${md(m.body)}</div>`;
 		const to = m.to.filter((a) => !(m.from !== "owner" && a === "owner" && m.to.length === 1));
-		const toTxt = m.kind === "consult" ? `consulta a ${to.map(name).join(", ")}` : to.length ? `→ ${to.map(name).join(", ")}` : "";
+		const toTxt = m.kind === "consult" ? `consulta a ${to.map(name).join(", ")}` : m.team ? `→ <span class="team-to" title="${to.map(name).join(", ")}">Todo el equipo (${to.length})</span>` : to.length ? `→ ${to.map(name).join(", ")}` : "";
 		const work = m.work ? `<button class="work-chip" data-work="${m.work}" title="Abrir el workspace del trabajo">⎇ ${esc(m.work)}</button>` : "";
 		let body = `<div class="body">${md(m.body)}</div>`;
 		if (m.kind === "consult") {
@@ -152,7 +163,7 @@
 		if (m.kind === "result") body = `<div class="result">${md(m.body)}</div>`;
 		const foot = m.from === "owner" ? ownerFoot(m) : "";
 		const feet = [foot, work].filter(Boolean).join(" ");
-		return `${out}<div class="msg ${m.from === "owner" ? "owner" : ""}" id="${m.id}">${m.from === "owner" ? av("owner") : `<button data-agent-menu="${m.from}" aria-label="@${m.from}">${av(m.from)}</button>`}<div class="head"><span class="who" ${m.from !== "owner" ? `style="color:hsl(${D.agents[m.from].hue} 70% 72%)"` : ""}>${name(m.from)}</span><span class="to">${toTxt}</span>${m.kind === "result" ? '<span class="tag">resultado</span>' : ""}<span class="time">${m.t}</span></div>${body}${feet ? `<div class="foot">${feet}</div>` : ""}</div>`;
+		return `${out}<div class="msg ${m.from === "owner" ? "owner" : ""}" id="${m.id}">${m.from === "owner" ? av("owner") : `<button data-agent-menu="${m.from}" aria-label="@${m.from}">${av(m.from)}</button>`}<div class="head"><span class="who" ${m.from !== "owner" ? `style="color:hsl(${D.agents[m.from].hue} 70% 72%)"` : ""}>${name(m.from)}</span><span class="to">${toTxt}</span>${m.kind === "result" ? '<span class="tag">resultado</span>' : m.kind === "report" ? '<span class="tag">informe de interrupción</span>' : ""}<span class="time">${m.t}</span></div>${body}${feet ? `<div class="foot">${feet}</div>` : ""}</div>`;
 	}
 	function renderThread(opts = {}) {
 		const th = $("#thread");
@@ -219,33 +230,37 @@
 	}
 
 	// ── Destinatarios ──
+	// Los chips se conservan DENTRO del tema (por defecto, los de tu último mensaje en él);
+	// un tema nuevo empieza sin destinatarios salvo los que elijas al crearlo.
 	function defaultRecips(cid) {
 		const last = msgsOf(cid).filter((m) => m.from === "owner").at(-1);
-		return last ? [...last.to] : [];
+		if (last?.team) S.team[cid] = true;
+		return last && !last.team ? [...last.to] : [];
 	}
-	const recips = () => (S.recips[S.conv] ??= defaultRecips(S.conv));
+	const recips = () => (S.team[S.conv] ? [...teamOf(S.project)] : (S.recips[S.conv] ??= defaultRecips(S.conv)));
 	function renderChips() {
 		if (!S.conv) return;
 		const team = teamOf(S.project);
+		recips();
+		const all = S.team[S.conv];
 		const r = recips();
-		const all = team.length && team.every((a) => r.includes(a));
 		$("#to-chips").innerHTML = all
-			? `<span class="chip">Todo el equipo <button class="x" data-unchip="*" aria-label="Quitar">×</button></span>`
+			? `<span class="chip team-chip" title="Los agentes del proyecto al enviar; quien se sume después no lo recibe"><span class="stack">${team.map((a) => av(a, "sm")).join("")}</span>Todo el equipo · ${team.length}<button class="x" data-unchip="*" aria-label="Quitar todo el equipo">×</button></span>`
 			: r.map((a) => { const st = status(a, S.conv); const busy = ["elsewhere", "waitOwner", "uncertain"].includes(st.k);
 				return `<span class="chip">${av(a, "sm")}@${a}${busy ? `<span class="busy">· ${st.short || st.t}</span>` : ""}<button class="x" data-unchip="${a}" aria-label="Quitar @${a}">×</button></span>`; }).join("")
 				|| `<span class="muted small">nadie — elegí con + o escribí @</span>`;
 		const busy = r.map((a) => [a, status(a, S.conv)]).filter(([, st]) => ["elsewhere", "waitOwner"].includes(st.k));
+		const lines = [];
+		if (all) lines.push(`Llega a ${team.map((a) => `@${a}`).join(", ")}, a cada uno por separado.`);
+		const q = busy.map(([a, st]) => st.k === "elsewhere" ? `@${a} (ocupado en «${esc(conv(st.conv).title)}»)` : `@${a} (espera tu decisión)`);
+		if (q.length) lines.push(`Le${q.length > 1 ? "s" : ""} queda en cola a ${q.join(" y ")}.`);
 		const note = $("#queue-note");
-		note.hidden = !busy.length;
-		note.innerHTML = busy.map(([a, st]) => st.k === "elsewhere"
-			? `@${a} está ocupado en «${esc(conv(st.conv).title)}»: tu mensaje queda en cola y lo toma al terminar.`
-			: `@${a} espera tu decisión en «${esc(conv(st.conv).title)}»; hasta entonces no toma mensajes.`).join("<br>");
-		$("#send").disabled = false;
+		note.hidden = !lines.length;
+		note.innerHTML = lines.join("<br>");
 	}
 	function addRecip(a) {
-		const r = recips();
-		if (a === "*") { S.recips[S.conv] = [...teamOf(S.project)]; }
-		else if (!r.includes(a)) r.push(a);
+		if (a === "*") { S.team[S.conv] = true; S.recips[S.conv] = []; }
+		else if (!S.team[S.conv]) { const r = recips(); if (!r.includes(a)) r.push(a); }
 		renderChips();
 	}
 	function mentionMenu(filter) {
@@ -262,12 +277,12 @@
 		const text = ta.value.trim();
 		if (!text) return;
 		const mentioned = [...text.matchAll(/@([a-z]+)/g)].map((x) => x[1]).filter((a) => teamOf(S.project).includes(a));
-		mentioned.forEach((a) => addRecip(a));
+		if (!S.team[S.conv]) mentioned.forEach((a) => addRecip(a));
 		const to = [...recips()];
 		if (!to.length) { $("#to-add").focus(); $(".to-row").animate([{ transform: "translateX(-4px)" }, { transform: "translateX(4px)" }, { transform: "none" }], 200); return; }
 		const rs = {};
 		for (const a of to) rs[a] = "pending";
-		const m = { id: `n${Date.now()}`, conv: S.conv, from: "owner", to, body: text, t: now(), rs, sim: true };
+		const m = { id: `n${Date.now()}`, conv: S.conv, from: "owner", to, team: !!S.team[S.conv], body: text, t: now(), rs, sim: true };
 		D.messages.push(m);
 		ta.value = ""; S.drafts[S.conv] = ""; autoGrow();
 		const th = $("#thread");
@@ -296,7 +311,7 @@
 		// Una respuesta tardía a una consulta queda en su lugar (anidada) y además se anuncia al final.
 		if (rep.replyTo) {
 			const ms = msgsOf(r.conv).filter((m) => m.kind !== "reply");
-			if (ms.at(-1)?.id !== rep.replyTo) D.messages.push({ id: `s${Date.now()}`, conv: r.conv, from: "system", to: [], body: `↳ @${r.agent} respondió la consulta de @${src.from}`, link: reply.id, t: now() });
+			if (ms.at(-1)?.id !== rep.replyTo) D.messages.push({ id: `s${Date.now()}`, conv: r.conv, from: "system", kind: "late", to: [], body: "", link: reply.id, ref: { who: r.agent, of: src.from, at: src.t }, t: now() });
 		}
 	}
 	function tick() {
@@ -323,7 +338,7 @@
 			const p = proj(x.c.project);
 			const where = `${p.id !== S.project ? `${esc(p.name)} › ` : ""}${esc(x.c.title)}`;
 			if (x.type === "q") return `<div class="ib-item action" ><span>${av(x.m.from, "sm")}</span><button class="what" style="text-align:left" data-goto-msg="${x.m.id}"><span class="where2">${where}</span><br>@${x.m.from} pregunta: ${esc(x.m.body)}</button><div class="acts">${x.m.options.map((o) => `<button class="btn small" data-answer="${x.m.id}">${esc(o)}</button>`).join("")}</div></div>`;
-			if (x.type === "u") return `<div class="ib-item action err"><span>${av(x.a, "sm")}</span><button class="what" style="text-align:left" data-goto-msg="${x.m.id}"><span class="where2">${where}</span><br>Se interrumpió tu mensaje a @${x.a}: «${esc(x.m.body)}»</button><div class="acts"><button class="btn small" data-requeue="${x.m.id}" data-a="${x.a}">Reenviar</button><button class="btn small ghost" data-goto-msg="${x.m.id}">Ver</button></div></div>`;
+			if (x.type === "u") return `<div class="ib-item action err"><span>${av(x.a, "sm")}</span><button class="what" style="text-align:left" data-goto-msg="${x.m.id}"><span class="where2">${where}</span><br>Se interrumpió tu mensaje a @${x.a}: «${esc(x.m.body)}»</button><div class="acts"><button class="btn small" data-review="${x.m.id}" data-a="${x.a}">Revisar interrupción</button><button class="btn small ghost" data-goto-msg="${x.m.id}">Ver en el tema</button></div></div>`;
 			return `<button class="ib-item" data-goto-msg="${x.m.id}"><span>${av(x.m.from, "sm")}</span><span class="what"><span class="where2">${where}</span><br>@${x.m.from}: ${esc(x.m.body)}</span></button>`;
 		};
 		$("#inbox-body").innerHTML =
@@ -464,8 +479,7 @@ developer@st-${a}:~/workspace/.st/ctx/${w.id}$ ` : "npm run dev\n\n  VITE v6  re
 		else if (d.gotoMsg) {
 			hideMenu(); closeInbox();
 			const m = D.messages.find((x) => x.id === d.gotoMsg);
-			const target = m.kind === "reply" ? m.replyTo : m.id;
-			openConv(m.conv, { msg: target });
+			openConv(m.conv, { msg: m.id });
 		}
 		else if ("openInbox" in d) $("#inbox").hidden ? openInbox() : closeInbox();
 		else if ("closeInbox" in d) closeInbox();
@@ -484,14 +498,8 @@ developer@st-${a}:~/workspace/.st/ctx/${w.id}$ ` : "npm run dev\n\n  VITE v6  re
 			if (!$("#inbox").hidden) renderInbox();
 			refreshOpenThread();
 		}
-		else if (d.requeue) {
-			const m = D.messages.find((x) => x.id === d.requeue);
-			if (m.rs) m.rs[d.a] = "pending"; else m.status = "pending";
-			m.note = null;
-			if (!$("#inbox").hidden) renderInbox();
-			refreshOpenThread();
-		}
-		else if (d.unchip) { S.recips[S.conv] = d.unchip === "*" ? [] : recips().filter((a) => a !== d.unchip); renderChips(); }
+		else if (d.review) { closeInbox(); review(d.review, d.a); }
+		else if (d.unchip) { if (d.unchip === "*") { S.team[S.conv] = false; S.recips[S.conv] = []; } else S.recips[S.conv] = recips().filter((a) => a !== d.unchip); renderChips(); }
 		else if (d.pick) { pickMention(d.pick); }
 		else if ("goHome" in d) { savePos(); S.m = "home"; applyBody(); renderRail(); route(); }
 		else if (t.id === "to-add") { mentionMenu(""); }
@@ -545,12 +553,50 @@ developer@st-${a}:~/workspace/.st/ctx/${w.id}$ ` : "npm run dev\n\n  VITE v6  re
 			const id = `c${Date.now()}`;
 			D.convs.push({ id, project: S.project, title: $("#nd-title").value.trim() });
 			const picked = [...dlg.querySelectorAll("input[type=checkbox]:checked")].map((i) => i.value);
-			S.recips[id] = picked.includes("*") ? [...teamOf(S.project)] : picked;
+			S.team[id] = picked.includes("*");
+			S.recips[id] = S.team[id] ? [] : picked;
 			openConv(id);
 			const body = $("#nd-body").value.trim();
-			if (body && S.recips[id].length) { ta.value = body; send(); }
+			if (body && (S.team[id] || S.recips[id].length)) { ta.value = body; send(); }
 		};
 	}
+
+	// ── Revisar una interrupción: nunca un reintento de un clic ──
+	function review(id, a) {
+		const m = D.messages.find((x) => x.id === id);
+		const c = conv(m.conv);
+		const rep = D.messages.find((x) => x.reportFor === id);
+		const dlg = $("#unc-dialog");
+		$("#unc-body").innerHTML = `<p class="muted small">Tu mensaje a @${a} en «${esc(c.title)}» · ${m.t}</p>
+			<blockquote>${md(m.body)}</blockquote>
+			<dl class="facts"><dt>Se interrumpió</dt><dd>${m.cut ? `${m.cut.at} — ${esc(m.cut.why)}` : "—"}</dd>
+			<dt>Última actividad</dt><dd>${m.cut ? `<code>${esc(m.cut.last)}</code>` : "desconocida"}</dd></dl>
+			<p class="warn-box">Puede haber hecho parte del trabajo (comandos, archivos, commits, mensajes a otros agentes). Nada se reenvía solo.</p>
+			${rep ? `<div class="report"><b>Informe de @${a}</b> <span class="muted small">(solo lectura, ${rep.t})</span><br>${md(rep.body.replace(/^Informe de la interrupción \(solo lectura\): /, ""))}</div>` : `<div class="report muted">@${a} recibió el pedido de un informe de solo lectura; todavía no respondió.</div>`}
+			<div class="row-wrap"><button class="btn small" data-tools="${a}|main|git" data-close-unc>Ver cambios en Git</button><button class="btn small" data-tools="${a}|main|terminal" data-close-unc>Abrir Terminal</button></div>`;
+		$("#unc-ack").checked = false; $("#unc-requeue").disabled = true; $("#unc-more").open = false;
+		$("#unc-requeue-who").textContent = `@${a}`;
+		dlg.dataset.id = id; dlg.dataset.a = a;
+		dlg.showModal();
+		$("#unc-reviewed").focus();
+	}
+	function closeReview(action) {
+		const dlg = $("#unc-dialog");
+		const m = D.messages.find((x) => x.id === dlg.dataset.id), a = dlg.dataset.a;
+		const set = (v) => (m.rs ? (m.rs[a] = v) : (m.status = v));
+		if (action === "reviewed") set("reviewed");
+		if (action === "requeue") set("pending"); // requeue del owner: el MISMO mensaje vuelve a la cola, no una copia
+		dlg.close();
+		if (action === "new") { openConv(m.conv); S.team[m.conv] = false; S.recips[m.conv] = [a]; renderChips(); $("#input").focus(); }
+		if (!$("#inbox").hidden) renderInbox();
+		refreshOpenThread();
+	}
+	$("#unc-ack").addEventListener("change", (e) => ($("#unc-requeue").disabled = !e.target.checked));
+	$("#unc-reviewed").addEventListener("click", () => closeReview("reviewed"));
+	$("#unc-new").addEventListener("click", () => closeReview("new"));
+	$("#unc-requeue").addEventListener("click", () => closeReview("requeue"));
+	$("#unc-cancel").addEventListener("click", () => $("#unc-dialog").close());
+	$("#unc-dialog").addEventListener("click", (e) => { if (e.target.closest("[data-close-unc]")) $("#unc-dialog").close(); });
 
 	// ── Arranque ──
 	if (!fromHash()) { if (mobile()) { S.m = "home"; applyBody(); renderRail(); renderChatChrome(); renderThread(); } else openConv("ui"); }
