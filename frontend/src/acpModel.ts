@@ -559,12 +559,21 @@ export function messagePlace(
 export interface TeamState {
 	label: string;
 	tone: "ok" | "busy" | "warn" | "err" | "idle";
+	/** The rail's words when they differ from `label` (#757 b: a held slot reads «ocupado»). */
+	short?: string;
 }
 
 export function teamState(
 	a: Pick<
 		AcpAgentInfo,
-		"runningIn" | "running" | "queue" | "pending" | "waitingFor" | "question" | "waitingInput"
+		| "runningIn"
+		| "running"
+		| "queue"
+		| "pending"
+		| "waitingFor"
+		| "question"
+		| "waitingInput"
+		| "heldBy"
 	>,
 	ctx: { here: string | null; titleOf: (id: string) => string | null; interrupted: boolean },
 ): TeamState {
@@ -573,13 +582,21 @@ export function teamState(
 	const queued = a.queue?.length ?? a.pending ?? 0;
 	const inQueue = queued ? ` · ${queued} en cola` : "";
 	const running = a.runningIn ?? (a.running ?? []).map((id) => ({ id, conversationId: null }));
-	if (running.length) {
+	// A slot held by a process it left running (#757 b): busy in that topic
+	// even with no message running — «ocupado en «X» · proceso en curso».
+	const held = a.heldBy ?? [];
+	const process = held.length ? " · proceso en curso" : "";
+	if (running.length || held.length) {
 		if (ctx.here !== null && running.some((r) => r.conversationId === ctx.here))
 			return { label: `trabajando aquí${inQueue}`, tone: "busy" };
-		const titled = running
+		const titled = [...running, ...held]
 			.map((r) => (r.conversationId ? ctx.titleOf(r.conversationId) : null))
 			.find((t): t is string => t !== null);
-		return { label: `${titled ? `ocupado en «${titled}»` : "ocupado"}${inQueue}`, tone: "busy" };
+		return {
+			label: `${titled ? `ocupado en «${titled}»` : "ocupado"}${process}${inQueue}`,
+			tone: "busy",
+			...(process ? { short: `ocupado${inQueue}` } : {}),
+		};
 	}
 	const waiting = a.waitingFor?.[0];
 	if (waiting) return { label: `esperando a @${waiting.agent}`, tone: "idle" };

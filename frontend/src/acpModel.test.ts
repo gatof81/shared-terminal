@@ -485,6 +485,16 @@ describe("teamState (the seven words)", () => {
 		expect(teamState({ ...busy, waitingInput: true }, ctx).label).toBe("espera tu decisión");
 		expect(teamState(busy, { ...ctx, interrupted: true }).label).toBe("ejecución interrumpida");
 	});
+	it("a slot held by a process it left running is busy in that topic (#757 b)", () => {
+		const held = { heldBy: [{ conversationId: "c2", work: null, since: "" }] };
+		expect(teamState(held, ctx).label).toBe("ocupado en «Optimización de CI» · proceso en curso");
+		expect(
+			teamState({ ...held, queue: [{ id: 5, conversationId: "c1", work: null }] }, ctx).label,
+		).toBe("ocupado en «Optimización de CI» · proceso en curso · 1 en cola");
+		expect(
+			teamState({ heldBy: [{ conversationId: null, work: "ci-cache", since: "" }] }, ctx).label,
+		).toBe("ocupado · proceso en curso");
+	});
 	it("waits for another agent, or only has a queue", () => {
 		expect(
 			teamState({ waitingFor: [{ id: 4, agent: "qa", conversationId: "c1", work: null }] }, ctx)

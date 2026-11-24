@@ -118,6 +118,24 @@ test.describe("project rail and topics", () => {
 		expect(app.errors).toEqual([]);
 	});
 
+	test("a slot held by a process: the rail says «ocupado», the queue shown, the whole state on hover", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		const dev = backend.acpAgents.find((a) => a.name === "dev")!;
+		dev.running = [];
+		dev.runningIn = [];
+		dev.heldBy = [{ conversationId: CONV_IDS.ci, work: null, since: at(1700) }];
+		await app.login("alice", app.mobile ? RAIL : topic(CONV_IDS.backend));
+		const state = rail(page).locator(".rail-agent", { hasText: "@dev" }).locator(".rail-state");
+		await expect(state).toHaveText("ocupado · 1 en cola");
+		await expect(state).toHaveAttribute(
+			"title",
+			"ocupado en «Optimización de CI» · proceso en curso · 1 en cola",
+		);
+	});
+
 	test("create, rename and archive a topic", async ({ app, backend, page }) => {
 		await app.login("alice", RAIL);
 		await rail(page).getByRole("button", { name: "Nueva conversación" }).click();

@@ -107,6 +107,7 @@ export interface MockAcpAgent {
 		work: string | null;
 	}>;
 	question?: { id: number; messageId: number | null; conversationId: string | null } | null;
+	heldBy?: Array<{ conversationId: string | null; work: string | null; since: string }>;
 	modelApplied?: { requested: string; current: string | null; error: string | null } | null;
 	effort?: string | null;
 	effortApplied?: {
