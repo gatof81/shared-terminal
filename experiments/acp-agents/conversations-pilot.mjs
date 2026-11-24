@@ -258,8 +258,11 @@ async function main() {
 	}, 30_000);
 	check("C7 the open question is in the global inbox (with its topic) and counts", !!inboxQ && inboxQ.action.questions.some((q) => q.message_id === qq.id && q.conversation_id === T1) && inboxQ.count >= 1, short(JSON.stringify(inboxQ?.action?.questions), 160));
 	check("C7 T1 needs action while the question is open", (await topic(T1))?.needsAction === true, "");
-	const openQ = ((await api("GET", `/api/acp/projects/${pid}/feed`)).body?.questions ?? []).find((q) => q.message_id === qq.id && q.state === "open");
-	if (openQ) await api("POST", `/api/acp/questions/${openQ.id}/answer`, { action: "accept", content: { question_0: "SQLite" } });
+	// The question's id from the inbox (the project feed serves only the Archive since B1). Not finding it is a
+	// FAIL, never a silent skip: an unanswered question keeps @B's only slot busy and starves what follows.
+	const openQ = (inboxQ?.action?.questions ?? []).find((q) => q.message_id === qq.id && q.state === "open");
+	if (check("C7 the open question is answerable (found in the inbox)", !!openQ, short(JSON.stringify(openQ), 80)))
+		await api("POST", `/api/acp/questions/${openQ.id}/answer`, { action: "accept", content: { question_0: "SQLite" } });
 	const qDone = await waitMsg(qq.id);
 	check("C6 the question's run inherits T1", qDone.state === "done" && topicOf(qDone) === T1 && /Elegiste: SQLite/.test(qDone.result_text ?? ""), short(qDone.result_text, 60));
 	// Read mark by time (§4b): the newest event on screen (finished_at of a person's result, else created_at).
@@ -370,7 +373,9 @@ async function main() {
 	const l2 = await topics(pid2);
 	check("C10 the other project's list has only its topic", Array.isArray(l2) && l2.length === 1 && l2[0].id === tx.body?.id, short(JSON.stringify(l2), 120));
 	const xr = await waitMsg((await post(X, `consultá a @${A}: hola`, pid2, tx.body?.id)).id);
-	check("C10 @X (other project) can't consult @A", /error|rechaz|refused|403|404|409/i.test(xr.result_text ?? ""), short(xr.result_text, 120));
+	// A run working in a topic cannot consult an agent of another project: 409 recipient-other-project, no row.
+	check("C10 @X (other project) can't consult @A from its topic (recipient-other-project)", /recipient-other-project/.test(xr.result_text ?? ""), short(xr.result_text, 120));
+	check("C10 …and nothing was written for @A", !(await api("GET", `/api/acp/agents/${A}/feed`)).body?.messages?.some((m) => m.from_id === X), "");
 
 	// Resources.
 	const cg = await cgroup(sids[A]);
