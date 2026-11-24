@@ -907,6 +907,85 @@ export const MIGRATIONS: readonly Migration[] = [
 		description: "agent_works — a named execution context is a work: worktree, branch, ports",
 		apply: () => d1Batch([...ACP_WORKS_DDL]),
 	},
+	{
+		// Additive: NULL conversation_id = what every message was before (the
+		// Archive: direct chats and the old Project Chat), team 0, not reviewed.
+		version: 27,
+		description: "ACP conversations — topics per project; a message's conversation, team, review",
+		apply: async () => {
+			await addColumnIfMissing("agent_messages", "conversation_id TEXT");
+			await addColumnIfMissing("agent_messages", "team INTEGER NOT NULL DEFAULT 0");
+			await addColumnIfMissing("agent_messages", "reviewed_at TEXT");
+			await addColumnIfMissing("agent_messages", "recovery_of INTEGER");
+			await addColumnIfMissing("agent_works", "conversation_id TEXT");
+			await d1Batch([...ACP_CONVERSATIONS_DDL]);
+		},
+	},
+];
+
+/**
+ * v27. A CONVERSATION is a topic of a project (acp/conversations.ts): the
+ * person's messages are posted in one, and everything they set off — the
+ * agents' consults, the replies, the notices of an unfinished request, the
+ * questions to the person (through their message) and the recovery report
+ * after an interrupted run — stays in it. `agent_messages.conversation_id`
+ * NULL = the Archive (direct chats and the old Project Chat), read-only.
+ *
+ * - The reply trigger copies the request's conversation, as it copies its scope.
+ * - `last_activity_at` is moved by triggers on every row written in the
+ *   conversation and every terminal state, so no write path can forget it.
+ * - `read_at`: the newest thing the person has seen in it (an ISO time, see
+ *   conversations.ts for why a time and not a message id); it only advances.
+ * - `recipients`: the recipients of the person's last post in it (JSON
+ *   `{"agents":[…]}` or `{"team":true}`), shown again as the next post's.
+ * - `team` on a message: it was sent to "the whole team", resolved at send
+ *   into one row per agent of the project.
+ * - `reviewed_at`: the person reviewed an `uncertain` run and chose NOT to
+ *   requeue it (a requeue clears it). `recovery_of`: on the runner's system
+ *   message after a restart, the interrupted message it reports on.
+ */
+export const ACP_CONVERSATIONS_DDL: readonly string[] = [
+	`CREATE TABLE IF NOT EXISTS conversations (
+		id                TEXT PRIMARY KEY,
+		owner_user_id     TEXT NOT NULL REFERENCES users(id),
+		project_id        TEXT NOT NULL REFERENCES projects(project_id),
+		title             TEXT NOT NULL,
+		client_request_id TEXT NOT NULL,
+		request_hash      TEXT NOT NULL,
+		created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+		last_activity_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+		archived_at       TEXT,
+		read_at           TEXT,
+		recipients        TEXT,
+		UNIQUE (owner_user_id, client_request_id)
+	)`,
+	"CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(owner_user_id, project_id, last_activity_at)",
+	"CREATE INDEX IF NOT EXISTS idx_agent_messages_conversation ON agent_messages(owner_user_id, conversation_id, id)",
+	"CREATE INDEX IF NOT EXISTS idx_agent_messages_recovery ON agent_messages(owner_user_id, recovery_of)",
+	`CREATE TRIGGER IF NOT EXISTS trg_conversation_activity_insert
+	AFTER INSERT ON agent_messages WHEN NEW.conversation_id IS NOT NULL
+	BEGIN
+		UPDATE conversations SET last_activity_at = MAX(last_activity_at, NEW.created_at)
+		WHERE id = NEW.conversation_id AND owner_user_id = NEW.owner_user_id;
+	END`,
+	`CREATE TRIGGER IF NOT EXISTS trg_conversation_activity_state
+	AFTER UPDATE OF state ON agent_messages
+	WHEN NEW.conversation_id IS NOT NULL AND OLD.state != NEW.state AND NEW.state IN ('done', 'failed', 'uncertain')
+	BEGIN
+		UPDATE conversations SET last_activity_at = MAX(last_activity_at, COALESCE(NEW.finished_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))
+		WHERE id = NEW.conversation_id AND owner_user_id = NEW.owner_user_id;
+	END`,
+	"DROP TRIGGER IF EXISTS trg_agent_message_reply",
+	`CREATE TRIGGER IF NOT EXISTS trg_agent_message_reply
+	AFTER UPDATE OF state ON agent_messages
+	WHEN OLD.state = 'running' AND NEW.state = 'done' AND NEW.kind = 'request'
+		AND EXISTS (SELECT 1 FROM acp_agents WHERE owner_user_id = NEW.owner_user_id AND name = NEW.from_id)
+	BEGIN
+		INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, reply_to, body, state, project_id, depth, context, root_id, conversation_id)
+		VALUES (NEW.owner_user_id, NEW.to_id, NEW.from_id, 'reply', NEW.id,
+			'Respuesta de @' || NEW.to_id || ' a tu mensaje #' || NEW.id || ':' || char(10) || char(10) || COALESCE(NEW.result_text, '(sin texto)'),
+			'pending', NEW.project_id, MAX(NEW.depth - 1, 0), NEW.from_context, NEW.root_id, NEW.conversation_id);
+	END`,
 ];
 
 /**

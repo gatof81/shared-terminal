@@ -709,7 +709,13 @@ async function main() {
 		]
 			.filter(Boolean)
 			.join(" ");
-		const sys = await api("POST", "/runner/system-message", { body, slot: SLOT, context: open.ctx });
+		// Linked to the interrupted message (when there is one): the report "Revisar interrupción" shows.
+		const sys = await api("POST", "/runner/system-message", {
+			body,
+			slot: SLOT,
+			context: open.ctx,
+			...(interrupted?.note ? { recoveryOf: interrupted.msg.id } : {}),
+		});
 		if (sys.status === 200) await run(open.sessionId, sys.body);
 	}
 	for (;;) {

@@ -46,6 +46,8 @@ export interface WorkRow {
 	id: string;
 	agent_id: string;
 	project_id: string | null;
+	/** The conversation it was created from (v27); NULL = none. */
+	conversation_id: string | null;
 	branch: string;
 	base_sha: string | null;
 	port_base: number;
@@ -205,6 +207,8 @@ export class AcpWorks {
 		target: AgentRow;
 		id: string;
 		base?: string | null;
+		/** Its conversation of origin; only recorded when the work is created. */
+		conversationId?: string | null;
 	}): Promise<{ work: WorkRow; created: boolean; base?: string }> {
 		const { ownerUserId, target, id } = m;
 		if (!WORK_ID_RE.test(id)) throw new WorkError(400, "bad-work-id");
@@ -259,7 +263,7 @@ export class AcpWorks {
 		if (!sha) throw new WorkError(500, "preflight-failed");
 
 		if (!row) {
-			row = await this.insert(ownerUserId, id, target, m.createdBy);
+			row = await this.insert(ownerUserId, id, target, m.createdBy, m.conversationId ?? null);
 			if (row.agent_id !== target.agent_id || row.state !== "creating")
 				// A concurrent POST of the same id won the INSERT: its outcome is the answer.
 				return this.create(m);
@@ -426,11 +430,12 @@ export class AcpWorks {
 		id: string,
 		target: AgentRow,
 		createdBy: string,
+		conversationId: string | null,
 	): Promise<WorkRow> {
 		for (let attempt = 0; attempt < 3; attempt++) {
 			const r = await d1Query<WorkRow>(
-				`INSERT INTO agent_works (owner_user_id, id, agent_id, project_id, branch, port_base, state, created_by)
-				 SELECT ?1, ?2, ?3, ?4, ?5, p, 'creating', ?6 FROM (SELECT
+				`INSERT INTO agent_works (owner_user_id, id, agent_id, project_id, branch, port_base, state, created_by, conversation_id)
+				 SELECT ?1, ?2, ?3, ?4, ?5, p, 'creating', ?6, ?10 FROM (SELECT
 					CASE WHEN NOT EXISTS (SELECT 1 FROM agent_works WHERE agent_id = ?3 AND state != 'cleaned' AND port_base = ?7) THEN ?7
 					ELSE (SELECT MIN(w.port_base) + ?8 FROM agent_works w WHERE w.agent_id = ?3 AND w.state != 'cleaned'
 						AND NOT EXISTS (SELECT 1 FROM agent_works v WHERE v.agent_id = ?3 AND v.state != 'cleaned' AND v.port_base = w.port_base + ?8))
@@ -446,6 +451,7 @@ export class AcpWorks {
 					PORT_FIRST,
 					PORT_SPAN,
 					PORT_LAST_BLOCK,
+					conversationId,
 				],
 			);
 			if (r.results[0]) return r.results[0];
@@ -472,6 +478,7 @@ export function workView(w: WorkRow & { agent?: string }) {
 		id: w.id,
 		agent: w.agent,
 		projectId: w.project_id,
+		conversationId: w.conversation_id ?? null,
 		branch: w.branch,
 		dir: workDir(w.id),
 		baseSha: w.base_sha,

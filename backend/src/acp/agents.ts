@@ -180,6 +180,14 @@ export interface MessageRow {
 	slot: number | null;
 	/** The person's message this agent chain started from (v25); NULL = this is a root. */
 	root_id: number | null;
+	/** The conversation (v27) it belongs to; NULL = the Archive (before conversations). */
+	conversation_id: string | null;
+	/** 1 = the person sent it to "the whole team" (one row per agent, resolved at send). */
+	team: number;
+	/** The person reviewed this `uncertain` run without requeueing it (v27). */
+	reviewed_at: string | null;
+	/** On the runner's recovery message: the interrupted message it reports on (v27). */
+	recovery_of: number | null;
 }
 
 export type QuestionState = "open" | "answered" | "delivered" | "withdrawn" | "orphaned";
@@ -205,12 +213,34 @@ export type AcpEvent =
 	| { type: "message"; message: MessageRow }
 	| { type: "question"; question: QuestionRow }
 	| { type: "activity"; agent: string; events: ActivityEvent[] }
-	| { type: "agents" };
+	| { type: "agents" }
+	| { type: "conversation"; conversation: Record<string, unknown> };
+
+/** A message as an agent's state names it: where it is (conversation, work). */
+export interface MessageRef {
+	id: number;
+	conversationId: string | null;
+	/** The work it runs in; null = the agent's main checkout. */
+	work: string | null;
+}
 
 export interface AgentLoad {
 	/** Ids of the messages the agent is working on, oldest first (one per slot it runs). */
 	running: number[];
 	pending: number;
+	/** The same running messages, with their conversation and work. */
+	runningIn: MessageRef[];
+	/** Its queue in id order (the claim's order within a context). */
+	queue: MessageRef[];
+	/** Its requests to other agents not answered yet: what it waits for. */
+	waitingFor: Array<MessageRef & { agent: string }>;
+}
+
+/** An open question to the person: the agent stands still until it is answered. */
+export interface OpenQuestion {
+	id: number;
+	messageId: number | null;
+	conversationId: string | null;
 }
 
 export interface LoginMethod {
@@ -309,6 +339,11 @@ export class AcpAgents {
 	onEvent(fn: (ownerUserId: string, ev: AcpEvent) => void): () => void {
 		this.listeners.add(fn);
 		return () => this.listeners.delete(fn);
+	}
+
+	/** For the other ACP modules (conversations): the same live channel. */
+	emit(ownerUserId: string, ev: AcpEvent): void {
+		this.publish(ownerUserId, ev);
 	}
 
 	private publish(ownerUserId: string, ev: AcpEvent): void {
@@ -542,27 +577,45 @@ export class AcpAgents {
 		return this.effortApplied.get(agentId) ?? null;
 	}
 
-	/** Running messages and queue length per agent name (one query). */
+	/**
+	 * Every agent's running messages, queue and unanswered requests, with their
+	 * conversation and work (one query: the open rows are few).
+	 */
 	async loads(ownerUserId: string): Promise<Map<string, AgentLoad>> {
-		const r = await d1Query<{ to_id: string; running: string | null; pending: number }>(
-			`SELECT to_id, group_concat(CASE WHEN state = 'running' THEN id END) AS running,
-				SUM(CASE WHEN state = 'pending' THEN 1 ELSE 0 END) AS pending
-			 FROM agent_messages WHERE owner_user_id = ? AND state IN ('pending', 'running') GROUP BY to_id`,
+		const r = await d1Query<
+			Pick<
+				MessageRow,
+				"id" | "from_id" | "to_id" | "kind" | "state" | "conversation_id" | "context"
+			>
+		>(
+			`SELECT id, from_id, to_id, kind, state, conversation_id, context FROM agent_messages
+			 WHERE owner_user_id = ? AND state IN ('pending', 'running') ORDER BY id`,
 			[ownerUserId],
 		);
-		return new Map(
-			r.results.map((x) => [
-				x.to_id,
-				{
-					running: String(x.running ?? "")
-						.split(",")
-						.filter(Boolean)
-						.map(Number)
-						.sort((a, b) => a - b),
-					pending: Number(x.pending),
-				},
-			]),
-		);
+		const out = new Map<string, AgentLoad>();
+		const of = (name: string) => {
+			let l = out.get(name);
+			if (!l) {
+				l = { running: [], pending: 0, runningIn: [], queue: [], waitingFor: [] };
+				out.set(name, l);
+			}
+			return l;
+		};
+		for (const m of r.results) {
+			const ref = { id: m.id, conversationId: m.conversation_id ?? null, work: m.context ?? null };
+			const to = of(m.to_id);
+			if (m.state === "running") {
+				to.running.push(m.id);
+				to.runningIn.push(ref);
+			} else {
+				to.pending++;
+				to.queue.push(ref);
+			}
+			// An agent's request not finished yet: its sender waits for the answer.
+			if (m.kind === "request" && m.from_id !== "owner" && m.from_id !== "system")
+				of(m.from_id).waitingFor.push({ ...ref, agent: m.to_id });
+		}
+		return out;
 	}
 
 	async nameTaken(ownerUserId: string, name: string): Promise<boolean> {
@@ -672,6 +725,10 @@ export class AcpAgents {
 		fromContext?: string | null;
 		/** The chain's root (an agent's request); NULL = a person's message, a root itself. */
 		rootId?: number | null;
+		/** The conversation it is posted in (v27); NULL = the Archive's direct/Project Chat. */
+		conversationId?: string | null;
+		/** Sent by the person to the whole team (one row per agent). */
+		team?: boolean;
 	}): Promise<{ message: MessageRow; replayed: boolean }> {
 		const params = [
 			m.ownerUserId,
@@ -684,9 +741,11 @@ export class AcpAgents {
 			m.context ?? null,
 			m.fromContext ?? null,
 			m.rootId ?? null,
+			m.conversationId ?? null,
+			m.team ? 1 : 0,
 		];
 		const r = await d1Query<MessageRow>(
-			"INSERT OR IGNORE INTO agent_messages (owner_user_id, from_id, to_id, kind, body, state, project_id, depth, client_id, context, from_context, root_id) VALUES (?, ?, ?, 'request', ?, 'pending', ?, ?, ?, ?, ?, ?) RETURNING *",
+			"INSERT OR IGNORE INTO agent_messages (owner_user_id, from_id, to_id, kind, body, state, project_id, depth, client_id, context, from_context, root_id, conversation_id, team) VALUES (?, ?, ?, 'request', ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *",
 			params,
 		);
 		if (r.results[0])
@@ -706,7 +765,9 @@ export class AcpAgents {
 			p.from_id !== m.from ||
 			p.body !== m.body ||
 			p.project_id !== (m.projectId ?? null) ||
-			p.context !== (m.context ?? null)
+			p.context !== (m.context ?? null) ||
+			p.conversation_id !== (m.conversationId ?? null) ||
+			Boolean(p.team) !== Boolean(m.team)
 		)
 			throw new ClientIdConflictError(p.id);
 		return { message: p, replayed: true };
@@ -716,11 +777,19 @@ export class AcpAgents {
 	 * A page of messages, newest `limit` before `before` (exclusive), oldest
 	 * first. `agent`: everything to or from that agent, any scope (its
 	 * individual chat — the owner's view of the agent's whole inbox).
-	 * `projectId`: only what was posted in that project.
+	 * `projectId`: only what was posted in that project. `conversationId`: only
+	 * that conversation. `archive`: only what belongs to no conversation (the
+	 * Archive the old individual chat and Project Chat now show).
 	 */
 	async messages(
 		ownerUserId: string,
-		filter: { agent?: string | null; projectId?: string | null; before?: number | null },
+		filter: {
+			agent?: string | null;
+			projectId?: string | null;
+			conversationId?: string | null;
+			archive?: boolean;
+			before?: number | null;
+		},
 		limit = 100,
 	): Promise<MessageRow[]> {
 		const r = await d1Query<MessageRow>(
@@ -728,8 +797,18 @@ export class AcpAgents {
 				AND (?2 IS NULL OR to_id = ?2 OR from_id = ?2)
 				AND (?3 IS NULL OR project_id = ?3)
 				AND (?4 IS NULL OR id < ?4)
+				AND (?6 IS NULL OR conversation_id = ?6)
+				AND (?7 = 0 OR conversation_id IS NULL)
 			 ORDER BY id DESC LIMIT ?5) ORDER BY id`,
-			[ownerUserId, filter.agent ?? null, filter.projectId ?? null, filter.before ?? null, limit],
+			[
+				ownerUserId,
+				filter.agent ?? null,
+				filter.projectId ?? null,
+				filter.before ?? null,
+				limit,
+				filter.conversationId ?? null,
+				filter.archive ? 1 : 0,
+			],
 		);
 		return r.results;
 	}
@@ -850,20 +929,26 @@ export class AcpAgents {
 	 * after an interrupted run, in the ACP session of the interrupted message's
 	 * context. Same guards as a claim — never a second running message in the
 	 * slot or the context, caps respected.
+	 *
+	 * `recoveryOf`: the interrupted message it reports on — this agent's own
+	 * (anything else is not linked). The report is linked to it (`recovery_of`,
+	 * what "Revisar interrupción" shows) and lives in its conversation and scope.
 	 */
 	async startSystemMessage(
 		agent: AgentRow,
 		body: string,
 		slot = 1,
 		context: string | null = null,
+		recoveryOf: number | null = null,
 	): Promise<MessageRow | null> {
 		const r = await d1Query<MessageRow>(
-			`INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, body, state, attempts, started_at, slot, context)
-			 SELECT ?1, 'system', ?2, 'request', ?6, 'running', 1, ${NOW}, ?3, ?4
+			`INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, body, state, attempts, started_at, slot, context, recovery_of, conversation_id, project_id)
+			 SELECT ?1, 'system', ?2, 'request', ?6, 'running', 1, ${NOW}, ?3, ?4, o.id, o.conversation_id, o.project_id
+			 FROM (SELECT 1) LEFT JOIN agent_messages o ON o.owner_user_id = ?1 AND o.to_id = ?2 AND o.id = ?7
 			 WHERE NOT EXISTS (SELECT 1 FROM agent_messages x WHERE x.owner_user_id = ?1 AND x.to_id = ?2 AND x.state = 'running' AND x.context IS ?4)
 			 AND ${RUN_GUARD}
 			 RETURNING *`,
-			[agent.owner_user_id, agent.name, slot, context, this.config.maxRunning, body],
+			[agent.owner_user_id, agent.name, slot, context, this.config.maxRunning, body, recoveryOf],
 		);
 		return this.published(r.results[0]);
 	}
@@ -945,14 +1030,14 @@ export class AcpAgents {
 	 */
 	private async noticeUnfinished(ownerUserId: string, id: number): Promise<void> {
 		const r = await d1Query<MessageRow>(
-			`INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, reply_to, body, state, project_id, depth, note, context, root_id)
+			`INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, reply_to, body, state, project_id, depth, note, context, root_id, conversation_id)
 			 SELECT m.owner_user_id, m.to_id, m.from_id, 'reply', m.id,
 				'Tu mensaje #' || m.id || ' a @' || m.to_id || ' no terminó: ' ||
 				CASE m.state WHEN 'failed' THEN 'falló' ELSE 'se interrumpió y su estado es incierto: pudo haber hecho parte del trabajo' END ||
 				COALESCE(' — ' || m.note, '') || '. No hay respuesta de @' || m.to_id || ' para ese pedido. ' ||
 				'No lo repitas ni lo reenvíes por tu cuenta: puede haber tenido efectos, y si se reintenta lo decide la persona. ' ||
 				'Decí en tu respuesta que ese pedido no terminó y seguí solo con lo que no dependa de él.',
-				'pending', m.project_id, MAX(m.depth - 1, 0), 'unfinished:' || m.state, m.from_context, m.root_id
+				'pending', m.project_id, MAX(m.depth - 1, 0), 'unfinished:' || m.state, m.from_context, m.root_id, m.conversation_id
 			 FROM agent_messages m
 			 WHERE m.owner_user_id = ?1 AND m.id = ?2 AND m.kind = 'request' AND m.state IN ('failed', 'uncertain')
 			 AND EXISTS (SELECT 1 FROM acp_agents a WHERE a.owner_user_id = m.owner_user_id AND a.name = m.from_id)
@@ -1012,10 +1097,27 @@ export class AcpAgents {
 		return this.published(r.results[0]);
 	}
 
-	/** A person's decision, never automatic. */
+	/**
+	 * A person's decision, never automatic. A requeued message is no longer a
+	 * reviewed interruption: if it is interrupted again, it needs a new review.
+	 */
 	async requeue(ownerUserId: string, id: number): Promise<MessageRow | null> {
 		const r = await d1Query<MessageRow>(
-			"UPDATE agent_messages SET state = 'pending', note = 'requeued by owner' WHERE id = ? AND owner_user_id = ? AND state = 'uncertain' RETURNING *",
+			"UPDATE agent_messages SET state = 'pending', note = 'requeued by owner', reviewed_at = NULL WHERE id = ? AND owner_user_id = ? AND state = 'uncertain' RETURNING *",
+			[id, ownerUserId],
+		);
+		return this.published(r.results[0]);
+	}
+
+	/**
+	 * The person reviewed an interrupted run and does NOT requeue it: it leaves
+	 * the inbox. Only `uncertain`; the state stays, nothing is created or sent.
+	 * Repeating it keeps the first review's time.
+	 */
+	async review(ownerUserId: string, id: number): Promise<MessageRow | null> {
+		const r = await d1Query<MessageRow>(
+			`UPDATE agent_messages SET reviewed_at = COALESCE(reviewed_at, ${NOW})
+			 WHERE id = ? AND owner_user_id = ? AND state = 'uncertain' RETURNING *`,
 			[id, ownerUserId],
 		);
 		return this.published(r.results[0]);
@@ -1129,13 +1231,26 @@ export class AcpAgents {
 		return r.results;
 	}
 
-	/** Agents (of this owner) waiting for the person right now. */
-	async waitingAgents(ownerUserId: string): Promise<Set<string>> {
-		const r = await d1Query<{ agent: string }>(
-			"SELECT DISTINCT agent FROM agent_questions WHERE owner_user_id = ? AND state = 'open'",
+	/** Agents (of this owner) waiting for the person right now: their open questions, oldest first. */
+	async waitingAgents(ownerUserId: string): Promise<Map<string, OpenQuestion[]>> {
+		const r = await d1Query<{
+			id: number;
+			agent: string;
+			message_id: number | null;
+			conversation_id: string | null;
+		}>(
+			`SELECT q.id, q.agent, q.message_id, m.conversation_id FROM agent_questions q
+			 LEFT JOIN agent_messages m ON m.id = q.message_id AND m.owner_user_id = q.owner_user_id
+			 WHERE q.owner_user_id = ? AND q.state = 'open' ORDER BY q.id`,
 			[ownerUserId],
 		);
-		return new Set(r.results.map((x) => x.agent));
+		const out = new Map<string, OpenQuestion[]>();
+		for (const q of r.results) {
+			const list = out.get(q.agent) ?? [];
+			list.push({ id: q.id, messageId: q.message_id, conversationId: q.conversation_id ?? null });
+			out.set(q.agent, list);
+		}
+		return out;
 	}
 
 	// ── Login (the adapter's terminal-auth methods) ─────────────────────────
