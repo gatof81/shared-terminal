@@ -86,8 +86,13 @@ anything else is refused with `409 client-id-reused`, never answered with anothe
   correlated `reply` (`note: unfinished:<state>`) saying so. The reply tells the agent not to repeat
   or resend the request (it may have had effects) and that a retry is the person's decision. Nothing
   re-sends it.
-- **Loop guard.** A person's message has depth 0; a request an agent sends while working on a
-  message of depth *d* has depth *d+1*, refused past `ACP_MAX_DEPTH` (6) with 409 `depth-limit`.
+- **Loop guard.** Depth measures nesting: a person's message has depth 0; a request an agent sends
+  while working on a message of depth *d* has depth *d+1*, refused past `ACP_MAX_DEPTH` (6) with 409
+  `depth-limit`; the reply brings the asker back to *d* (request depth − 1), so rounds of consult and
+  answer do not add up. Rounds have their own budget: every request and reply of a chain carries
+  `root_id` (the person's message it started from) and past `ACP_MAX_CHAIN` (40) agent requests under
+  one root a send is refused with 409 `chain-budget` (“informá el estado y esperá a la persona”). A new
+  message from the person starts a new budget.
 - Pending messages survive backend, runner and container restarts: they are rows in D1.
 
 > **Provisional.** A background process meant to keep running (a dev server) is declared by the agent
@@ -215,7 +220,8 @@ session.
    | `ACP_DEFAULT_RUNTIME` | `claude-acp-0.108.0` | adapter directory for new agents |
    | `ACP_DEFAULT_MODEL` | `claude-sonnet-5-5` | model when the create request names none |
    | `ACP_MESSAGE_MAX_BYTES` | `262144` | per-message cap |
-   | `ACP_MAX_DEPTH` | `6` | agent → agent chain limit |
+   | `ACP_MAX_DEPTH` | `6` | agent → agent nesting limit |
+   | `ACP_MAX_CHAIN` | `40` | agent → agent requests under one person's message |
    | `ACP_MAX_RUNNING` | `6` | messages running at once on this backend, all agents (each agent: `max_concurrency`) |
    | `ACP_TEST_RUNTIME` | unset | `1` installs the deterministic `st-test-agent` runtime |
    | `ACP_RUNTIME_DIR` | `<WORKSPACE_ROOT>/.acp-runtime` | runtime directory (same path on host and backend) |
@@ -229,7 +235,7 @@ session.
      --entrypoint bash shared-terminal-session /src/install.sh $WORKSPACE_ROOT/.acp-runtime 0.108.0
    ```
 
-3. **Restart the backend.** Migrations v21–v24 are additive and run at boot.
+3. **Restart the backend.** Migrations v21–v25 are additive and run at boot.
 
 4. **Create an agent session:** the New session form's agent fields (name, project, runtime), or `POST /api/sessions` with
    `acpAgent: {name, model?, runtime?, projectId?}`. The name is `[a-z][a-z0-9-]{1,31}`, unique per

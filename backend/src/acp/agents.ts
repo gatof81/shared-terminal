@@ -54,6 +54,8 @@ export interface AcpConfig {
 	maxDepth: number;
 	/** Messages running at once on this backend, all agents together (ACP_MAX_RUNNING). */
 	maxRunning: number;
+	/** Round budget: agent → agent requests allowed under one person's message (ACP_MAX_CHAIN). */
+	maxChain: number;
 	/** Install the deterministic test adapter as runtime `st-test-agent` (ACP_TEST_RUNTIME=1). */
 	testRuntime: boolean;
 }
@@ -68,6 +70,7 @@ export function acpConfigFromEnv(workspaceRoot: string, port: number): AcpConfig
 		watchdogMs: Number(env.ACP_WATCHDOG_MS ?? 30_000),
 		maxDepth: Number(env.ACP_MAX_DEPTH ?? DEFAULT_MAX_DEPTH),
 		maxRunning: Number(env.ACP_MAX_RUNNING ?? 6),
+		maxChain: Number(env.ACP_MAX_CHAIN ?? 40),
 		testRuntime: env.ACP_TEST_RUNTIME === "1",
 		backendUrl: env.ACP_BACKEND_URL ?? `http://st-backend:${port}`,
 		// src/acp (tsx) and dist/acp (image, which copies it to /acp-runtime)
@@ -169,6 +172,8 @@ export interface MessageRow {
 	from_context: string | null;
 	/** Slot that took it while running (v24); kept afterwards as a record. */
 	slot: number | null;
+	/** The person's message this agent chain started from (v25); NULL = this is a root. */
+	root_id: number | null;
 }
 
 export type QuestionState = "open" | "answered" | "delivered" | "withdrawn" | "orphaned";
@@ -656,6 +661,8 @@ export class AcpAgents {
 		context?: string | null;
 		/** An agent sender's context (from its credential): where the reply goes back. */
 		fromContext?: string | null;
+		/** The chain's root (an agent's request); NULL = a person's message, a root itself. */
+		rootId?: number | null;
 	}): Promise<{ message: MessageRow; replayed: boolean }> {
 		const params = [
 			m.ownerUserId,
@@ -667,9 +674,10 @@ export class AcpAgents {
 			m.clientId ?? null,
 			m.context ?? null,
 			m.fromContext ?? null,
+			m.rootId ?? null,
 		];
 		const r = await d1Query<MessageRow>(
-			"INSERT OR IGNORE INTO agent_messages (owner_user_id, from_id, to_id, kind, body, state, project_id, depth, client_id, context, from_context) VALUES (?, ?, ?, 'request', ?, 'pending', ?, ?, ?, ?, ?) RETURNING *",
+			"INSERT OR IGNORE INTO agent_messages (owner_user_id, from_id, to_id, kind, body, state, project_id, depth, client_id, context, from_context, root_id) VALUES (?, ?, ?, 'request', ?, 'pending', ?, ?, ?, ?, ?, ?) RETURNING *",
 			params,
 		);
 		if (r.results[0])
@@ -761,6 +769,15 @@ export class AcpAgents {
 			[agent.owner_user_id, agent.name, context],
 		);
 		return r.results[0] ?? null;
+	}
+
+	/** Agent → agent requests already sent under one root (the round budget). */
+	async chainRequests(ownerUserId: string, rootId: number): Promise<number> {
+		const r = await d1Query<{ n: number }>(
+			"SELECT COUNT(*) AS n FROM agent_messages WHERE owner_user_id = ? AND root_id = ? AND kind = 'request'",
+			[ownerUserId, rootId],
+		);
+		return Number(r.results[0]?.n ?? 0);
 	}
 
 	/** The message one slot of this agent took and has not settled (at most one). */
@@ -905,14 +922,14 @@ export class AcpAgents {
 	 */
 	private async noticeUnfinished(ownerUserId: string, id: number): Promise<void> {
 		const r = await d1Query<MessageRow>(
-			`INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, reply_to, body, state, project_id, depth, note, context)
+			`INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, reply_to, body, state, project_id, depth, note, context, root_id)
 			 SELECT m.owner_user_id, m.to_id, m.from_id, 'reply', m.id,
 				'Tu mensaje #' || m.id || ' a @' || m.to_id || ' no terminó: ' ||
 				CASE m.state WHEN 'failed' THEN 'falló' ELSE 'se interrumpió y su estado es incierto: pudo haber hecho parte del trabajo' END ||
 				COALESCE(' — ' || m.note, '') || '. No hay respuesta de @' || m.to_id || ' para ese pedido. ' ||
 				'No lo repitas ni lo reenvíes por tu cuenta: puede haber tenido efectos, y si se reintenta lo decide la persona. ' ||
 				'Decí en tu respuesta que ese pedido no terminó y seguí solo con lo que no dependa de él.',
-				'pending', m.project_id, m.depth, 'unfinished:' || m.state, m.from_context
+				'pending', m.project_id, MAX(m.depth - 1, 0), 'unfinished:' || m.state, m.from_context, m.root_id
 			 FROM agent_messages m
 			 WHERE m.owner_user_id = ?1 AND m.id = ?2 AND m.kind = 'request' AND m.state IN ('failed', 'uncertain')
 			 AND EXISTS (SELECT 1 FROM acp_agents a WHERE a.owner_user_id = m.owner_user_id AND a.name = m.from_id)
