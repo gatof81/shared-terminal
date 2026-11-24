@@ -13,7 +13,7 @@
 //   W10 a controlled interruption (kill of the slot's runner) leaves st-b's message uncertain, not re-run, and
 //       st-a's concurrent message done;
 //   W11 one server per work in its own range (ST_PORT_BASE); `st port check` tells mine from the other's;
-//       a server started on a taken port is detected by `st port check`;
+//       a bind on a taken port is detected;
 //   W12 a useful ignored file (.env) or a live process keep `st work clean` from removing (cleanup-pending + reason);
 //       an agent outside the project is refused;
 //   W13 a disposable work (st-c) is closed and cleaned: worktree gone, branch and ACP session kept, main checkout
@@ -25,7 +25,7 @@
 // Removes the sessions and the project it created (KEEP=1 keeps them). One PASS/FAIL line per check; exit 1 on
 // any failure.
 //
-// Written for #751 + #752: the agents act through the test agent's `st: <args>` and `servidor [puerto]`.
+// Written for #751 + #752: the agents act through the test agent's `st: <args>`, `servidor`, `commit` and `ocupá`.
 import { randomBytes, randomUUID } from "node:crypto";
 
 const ST = process.env.ST ?? "http://127.0.0.1:3101";
@@ -121,7 +121,8 @@ const work = async (agent, id) => (await works(agent)).find((w) => w.id === id) 
 const workOf = (m) => m?.context ?? null;
 const short = (s, n = 110) => (s ?? "").replace(/\s+/g, " ").slice(0, n);
 const sessionCount = (text) => Number(/sesión ACP: (\d+) mensajes/.exec(text ?? "")?.[1] ?? Number.NaN);
-const cwdOf = (text) => /cwd (\S+)\)/.exec(text ?? "")?.[1] ?? null;
+// The test agent's context line: «… · cwd <dir> · trabajo <ST_WORK|->[ · desde el trabajo <id>])» (#752).
+const cwdOf = (text) => /cwd (\S+) · trabajo /.exec(text ?? "")?.[1] ?? null;
 const ms = (iso) => Date.parse(iso);
 
 // stdout + exit code of a command in a session container (exec API, NDJSON events).
@@ -268,10 +269,11 @@ async function main() {
 	check("W6 each work has its own ACP session", !!sa && !!sb && sa !== sb, `${short(sa, 60)} | ${short(sb, 60)}`);
 	check("W6 slots: works not in slot 1 and not in the same slot", ma.slot > 1 && mb.slot > 1 && ma.slot !== mb.slot, `${ma.slot}/${mb.slot}`);
 
-	// W7. Independent results: a commit per branch, pushed to the bare remote ("PR"). The test agent has no model
-	// and no git directive: the pilot makes each commit inside that work's worktree, as its agent would.
-	for (const [w, f] of [[WA, "a.txt"], [WB, "b.txt"]])
-		await sh(dev, `cd ${WS}/.st/ctx/${w} && echo ${w} > ${f} && git add ${f} && git commit -qm "resultado ${w}" && git push -q origin HEAD`);
+	// W7. Independent results: @dev commits in each work and pushes it to the bare remote ("PR"), with the test
+	// agent's `commit <archivo>: <texto>` (write, add, commit, push origin HEAD in the session's cwd).
+	const cma = await onWork(WA, "commit a.txt: resultado A");
+	const cmb = await onWork(WB, "commit b.txt: resultado B");
+	check("W7 each commit on its own branch, push exit 0", new RegExp(`rama work/${WA},.*push exit 0`).test(cma?.result_text ?? "") && new RegExp(`rama work/${WB},.*push exit 0`).test(cmb?.result_text ?? ""), `${short(cma?.result_text, 90)} | ${short(cmb?.result_text, 90)}`);
 	const refs = await sh(dev, `git -C ${REMOTE} for-each-ref --format='%(refname:short)' refs/heads/work/`);
 	check("W7 both branches pushed to the remote", refs.includes(`work/${WA}`) && refs.includes(`work/${WB}`), short(refs, 160));
 	const files = async (w) => (await sh(dev, `git -C ${REMOTE} diff --name-only main work/${w} 2>&1`)).trim();
@@ -296,14 +298,15 @@ async function main() {
 		? await waitFor(async () => (await projectRows(pid)).find((m) => m.kind === "request" && m.id > corr.id && m.from_id === DEV && m.to_id === REV) ?? null, 30_000)
 		: null;
 	check("W9 @dev's consult from st-a is marked as coming from st-a (from_context)", back?.from_context === WA, `${back?.id} from_context ${back?.from_context}`);
+	const backDone = back ? await waitMsg(back.id) : null;
+	check("W9 @rev's header named the work («desde el trabajo …»)", (backDone?.result_text ?? "").includes(`desde el trabajo ${WA}`), short(backDone?.result_text, 160));
 	const replyToDev = back ? await waitFor(async () => (await projectRows(pid)).find((m) => m.kind === "reply" && m.reply_to === back.id && m.state === "done") ?? null, 60_000) : null;
 	check("W9 @rev's reply came back to @dev's st-a context", !!replyToDev && workOf(replyToDev) === WA && cwdOf(replyToDev.result_text) === `${WS}/.st/ctx/${WA}`, `${workOf(replyToDev)} ${cwdOf(replyToDev?.result_text)}`);
 	const replyToRev = corr ? await waitFor(async () => (await projectRows(pid)).find((m) => m.kind === "reply" && m.reply_to === corr.id && m.state === "done") ?? null, 60_000) : null;
 	check("W9 the reply to @rev's request came back to @rev's default context", !!replyToRev && replyToRev.to_id === REV && !workOf(replyToRev), `${replyToRev?.to_id} ${workOf(replyToRev)}`);
 
 	// W11. One server per work, each on its own ST_PORT_BASE; `st port check` tells mine (0) from the other's (1)
-	// and from a free port (2). A server started on st-b's taken port from st-a answers as if it had started (the
-	// #750 incident: a silent start) — `st port check` from st-a is what detects it is not st-a's.
+	// and from a free port (2); a bind from st-a on st-b's taken port fails with EADDRINUSE (`ocupá <p>`).
 	const sva = await onWork(WA, "servidor");
 	const svb = await onWork(WB, "servidor");
 	const portOf = (m) => Number(/puerto (\d+)/.exec(m?.result_text ?? "")?.[1] ?? Number.NaN);
@@ -320,11 +323,10 @@ async function main() {
 	check("W11 st port check from st-a: its own server ⇒ exit 0", own.code === 0, short(own.text, 140));
 	check("W11 st port check from st-a: st-b's server ⇒ exit 1 (not yours)", foreign.code === 1, short(foreign.text, 140));
 	check("W11 st port check from st-a: a free port ⇒ exit 2", free.code === 2, short(free.text, 140));
-	const clash = await onWork(WA, `servidor ${pb}`);
-	const clashCheck = await portCheck(WA, pb);
-	check("W11 a server on st-b's taken port: st-a's check says it is not st-a's (exit 1)", clashCheck.code === 1, `${short(clash?.result_text, 70)} | ${short(clashCheck.text, 100)}`);
-	const srvCount = Number((await sh(dev, "pgrep -fc 'st-test-server$'")).trim());
-	check("W11 the clashing server did not survive (two servers left)", srvCount === 2, String(srvCount));
+	const clash = await onWork(WA, `ocupá ${pb}`);
+	check("W11 a bind from st-a on st-b's taken port is detected (EADDRINUSE)", /ocupá \d+: EADDRINUSE/.test(clash?.result_text ?? ""), short(clash?.result_text, 120));
+	const srvCount = Number((await sh(dev, "pgrep -fc 'st-work-server$'")).trim());
+	check("W11 exactly the two servers run", srvCount === 2, String(srvCount));
 
 	// W10. Controlled interruption: st-a and st-b run at once; st-b's slot runner is killed (-9). st-b's message is
 	// uncertain and not re-run; st-a's ends done in its own context; st-a's session is untouched.
@@ -364,7 +366,7 @@ async function main() {
 		cn1.code !== 0 && rowB1?.state === "cleanup-pending" && /proceso \d+ .*(cwd en el trabajo|ST_WORK)/.test(rowB1?.note ?? "") && (await sh(dev, `test -d ${WS}/.st/ctx/${WB} && echo y`)).includes("y"),
 		short(rowB1?.note, 200),
 	);
-	await sh(dev, `for p in $(pgrep -f 'st-test-server$'); do readlink /proc/$p/cwd | grep -q '/.st/ctx/${WB}$' && kill $p; done; sleep 1; echo SECRET=1 > ${WS}/.st/ctx/${WB}/.env`);
+	await sh(dev, `for p in $(pgrep -f 'st-work-server$'); do readlink /proc/$p/cwd | grep -q '/.st/ctx/${WB}$' && kill $p; done; sleep 1; echo SECRET=1 > ${WS}/.st/ctx/${WB}/.env`);
 	const cn2 = await st(ARQ, `work clean ${WB}`);
 	const rowB2 = await work(DEV, WB);
 	check(
@@ -374,14 +376,13 @@ async function main() {
 	);
 	check("W12 st-a untouched by st-b's cleanup", (await work(DEV, WA))?.state === "active" && (await branch(WA)) === `work/${WA}`, JSON.stringify(await work(DEV, WA)));
 	// st-a's server keeps its slot on st-a (a session with an open task is not closed): stop it so W13 has a slot.
-	await sh(dev, "pkill -f 'st-test-server$'; true");
+	await sh(dev, "pkill -f 'st-work-server$'; true");
 
 	// W13. A disposable work: created, one commit pushed, closed and cleaned ⇒ worktree gone, branch and ACP
 	// session record kept, main checkout identical, and the idle slot closed st-c's ACP session (it asks every
 	// OPEN_ASK_MS, 30 s, whether its open work is still active).
 	await st(ARQ, `work new @${DEV} ${WC}`);
-	const cc = await onWork(WC, "hola st-c");
-	await sh(dev, `cd ${WS}/.st/ctx/${WC} && echo c > c.txt && git add c.txt && git commit -qm descartable && git push -q origin HEAD`);
+	const cc = await onWork(WC, "commit c.txt: descartable");
 	const sc = await acpSession(WC);
 	const cl3 = await st(ARQ, `work close ${WC}`);
 	const released = await waitFor(async () => (await sh(dev, `grep -h 'released the session of work ${WC} ' /tmp/st-acp-runner*.log 2>/dev/null | tail -1`)).trim() || null, 120_000);
