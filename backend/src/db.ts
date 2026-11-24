@@ -902,6 +902,11 @@ export const MIGRATIONS: readonly Migration[] = [
 			await d1Batch([...ACP_CHAIN_DDL]);
 		},
 	},
+	{
+		version: 26,
+		description: "agent_works — a named execution context is a work: worktree, branch, ports",
+		apply: () => d1Batch([...ACP_WORKS_DDL]),
+	},
 ];
 
 /**
@@ -917,6 +922,35 @@ export const MIGRATIONS: readonly Migration[] = [
  * root, an agent's send is refused (acp/agents.ts). A new message from the
  * person is a new root.
  */
+/**
+ * v26. A named execution context exists only as a WORK (acp/works.ts): the
+ * backend creates its git worktree `.st/ctx/<id>` on branch `work/<id>` in the
+ * agent's container before its first message. Rows are never deleted — an id
+ * is never reused, not even after `cleaned`, so no old ACP session of that
+ * context (`.st/acp/ctx/<id>.json`) is ever picked up again. `port_base`: the
+ * work's 100 ports (20000 + 100·k), unique among the agent's works that are
+ * not `cleaned` (the partial index is what makes the allocation atomic).
+ */
+export const ACP_WORKS_DDL: readonly string[] = [
+	`CREATE TABLE IF NOT EXISTS agent_works (
+		owner_user_id TEXT NOT NULL REFERENCES users(id),
+		id            TEXT NOT NULL,
+		agent_id      TEXT NOT NULL REFERENCES acp_agents(agent_id) ON DELETE CASCADE,
+		project_id    TEXT,
+		branch        TEXT NOT NULL,
+		base_sha      TEXT,
+		port_base     INTEGER NOT NULL,
+		state         TEXT NOT NULL CHECK (state IN ('creating', 'active', 'closed', 'cleanup-pending', 'cleaned')),
+		note          TEXT,
+		created_by    TEXT NOT NULL,
+		created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+		closed_at     TEXT,
+		cleaned_at    TEXT,
+		PRIMARY KEY (owner_user_id, id)
+	)`,
+	"CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_works_port ON agent_works(agent_id, port_base) WHERE state != 'cleaned'",
+];
+
 export const ACP_CHAIN_DDL: readonly string[] = [
 	"CREATE INDEX IF NOT EXISTS idx_agent_messages_root ON agent_messages(owner_user_id, root_id)",
 	"DROP TRIGGER IF EXISTS trg_agent_message_reply",

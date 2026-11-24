@@ -116,14 +116,14 @@ A message's **context** says where it runs:
 
 - `NULL` — the default context: the workspace checkout and the agent's ACP session of always. Only
   slot 1 runs it.
-- a name (`^[a-z0-9][a-z0-9-]{0,39}$`) — its own directory `<workspace>/.st/ctx/<name>/` (the cwd of
-  its own ACP session, `<workspace>/.st/acp/ctx/<name>.json`). Only slots ≥ 2 run it, so an agent
-  with cap 1 never takes one (sending one is refused: `400 context-needs-slots`).
+- a name (`^[a-z0-9][a-z0-9-]{0,39}$`) — a **work** (3c): its own git worktree
+  `<workspace>/.st/ctx/<name>/` (the cwd of its own ACP session, `<workspace>/.st/acp/ctx/<name>.json`).
+  Only slots ≥ 2 run it, so an agent with cap 1 never takes one (`400 context-needs-slots`).
 
 One running message per agent and context: two runs never share a directory or an ACP session.
-Only the person places a message in a context (`POST /api/acp/messages {context}`, cookie only); an
-agent's request always goes to the recipient's default context, and its **reply** comes back to the
-context it was sent from (`from_context`, taken from the sender's credential).
+A message goes into a work with `POST /api/acp/messages {work}` (`st send @x --work <id>`); without
+it, into the recipient's default context. An agent's **reply** comes back to the context it was sent
+from (`from_context`, taken from the sender's credential).
 
 A slot ≥ 2 opens (new or resumed) a context's session when it claims a message of it and closes it
 when it claims one of another context. `session/close` (and a resume) stops what that session left
@@ -139,6 +139,31 @@ Not covered: a process left running by one message of a context that sends while
 the same context runs is attributed to that later message (same context, same directory). The
 credential cannot be per message: renewing a session's environment restarts its Claude process and
 stops what the agent left running.
+
+### 3c. Works (v26)
+
+A named context exists only as a work: a row of `agent_works` (never deleted: an id is never reused,
+so no old ACP session of it is ever resumed) and a git worktree the backend creates **before** the
+work's first message — never by the runner, which fails a message whose directory is missing.
+
+- `POST /api/acp/works {agent, id, base?}` (`st work new @agente <id> [--base <ref>]`): the person,
+  or an agent of the recipient's project. The recipient needs `max_concurrency ≥ 2`, a running
+  session and `ACP_WORK_MIN_FREE_MB` (3072) free in its workspace (else 400 `context-needs-slots`,
+  409 `session-not-running` / `low-disk`). In the agent's container (fixed scripts under
+  `docker exec`, like the Git view; only `id` and `base` reach them, as positional arguments):
+  refuse if `.st/ctx/<id>`, `.st/acp/ctx/<id>.json` or branch `work/<id>` exists (409
+  `work-path-exists`, nothing replaced), then `git worktree add .st/ctx/<id> -b work/<id> <base>`
+  (base: the given ref, or the remote's default branch after a best-effort `git fetch`).
+- The row is `creating` before git and `active` after. An error or unknown outcome inspects the
+  real state: the worktree on its branch ⇒ `active`; nothing ⇒ the same POST creates it; anything
+  else stays `creating` with a `note` (409 `work-incomplete`). Repeating a POST returns the work.
+- Ports: `port_base` = 20000 + 100·k, the lowest block free among the agent's works not `cleaned`
+  (a partial unique index). The work's session gets `ST_WORK` and `ST_PORT_BASE` in its environment
+  (with its credential), and every message's header names the work, branch, directory and ports.
+- `{work}` on a message: the work must exist (404 `work-not-found`), be the recipient's (409
+  `work-not-yours`) and `active` (409 `work-not-active`); an agent sender must share its project
+  (403 `work-other-project`). Claim, slots, caps, depth and rounds are unchanged.
+- `GET /api/acp/works` (`st work list`): the person sees all; an agent its own and its project's.
 
 **Activity** (tool calls, background tasks, partial text) is pushed by the runner and kept **in
 backend memory** (last 500 events per agent). It is the live view; history is the messages. A backend
@@ -223,6 +248,7 @@ session.
    | `ACP_MAX_DEPTH` | `6` | agent → agent nesting limit |
    | `ACP_MAX_CHAIN` | `40` | agent → agent requests under one person's message |
    | `ACP_MAX_RUNNING` | `6` | messages running at once on this backend, all agents (each agent: `max_concurrency`) |
+   | `ACP_WORK_MIN_FREE_MB` | `3072` | free space an agent's workspace needs to create a work |
    | `ACP_TEST_RUNTIME` | unset | `1` installs the deterministic `st-test-agent` runtime |
    | `ACP_RUNTIME_DIR` | `<WORKSPACE_ROOT>/.acp-runtime` | runtime directory (same path on host and backend) |
    | `ACP_BACKEND_URL` | `http://st-backend:<PORT>` | how runners reach the backend over the sessions network |

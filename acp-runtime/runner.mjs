@@ -24,8 +24,9 @@
 // knows only its own slot.
 // - Slot 1 is the runner of always: the default context (the workspace
 //   checkout), its one ACP session (session.json), opened at start.
-// - A slot k ≥ 2 takes only messages of NAMED contexts. Each context has its
-//   own directory (<workspace>/.st/ctx/<name>/, the session's cwd) and its own
+// - A slot k ≥ 2 takes only messages of NAMED contexts — works (backend
+//   acp/works.ts). Each has its own directory, the git worktree the backend
+//   made (<workspace>/.st/ctx/<name>/, the session's cwd), and its own
 //   ACP session (<state>/ctx/<name>.json), opened (new or resumed) when the
 //   slot claims a message of it and closed when it claims one of another
 //   context. `session/close` (and a resume) kills what the session left running
@@ -33,7 +34,8 @@
 //   session with an open task (a process declared ST-PERSISTENT): it keeps that
 //   context and claims only its messages until the process ends.
 // - The `st` credential of a named context (`acp1.<agent>.<context>.<hmac>`,
-//   from the claim) goes into that session's environment
+//   from the claim) goes into that session's environment, with ST_WORK and
+//   ST_PORT_BASE (the work's 100 ports)
 //   (`_meta.claudeCode.options.env`, on new AND resume: without it a resumed
 //   session falls back to the adapter's own). The adapter of a slot ≥ 2 has no
 //   ST_TOKEN of its own, so a session that missed it speaks for nobody.
@@ -99,7 +101,11 @@ const marker = (msg) => {
 		: msg.from_id === "system"
 			? ""
 			: " · mensaje directo";
-	const ctx = msg.context ? ` · contexto «${msg.context}» (directorio propio: ${cwdOf(msg.context)})` : "";
+	const ctx = msg.context
+		? ` · trabajo «${msg.context}» · rama ${msg.work?.branch ?? `work/${msg.context}`} · directorio ${cwdOf(msg.context)}${msg.work ? ` · puertos ${msg.work.portBase}–${msg.work.portBase + 99}` : ""}`
+		: "";
+	// Where the sender wrote from: a correction goes back there with --work.
+	const from = msg.from_context && msg.kind === "request" ? ` · desde el trabajo «${msg.from_context}» de @${msg.from_id}` : "";
 	// The agent's final text on a reply is stored but delivered to nobody (a reply
 	// never produces a reply: the loop guard). Said on every reply, not only in the
 	// protocol: an agent that answered a reply in its final text believed it was
@@ -108,7 +114,7 @@ const marker = (msg) => {
 		msg.kind === "reply"
 			? ` · respuesta a tu mensaje #${msg.reply_to}; tu texto final no se le entrega a @${msg.from_id}: si tenés que decirle algo, usá st send @${msg.from_id}`
 			: "";
-	return `[st-msg #${msg.id} de @${msg.from_id}${where}${ctx}${kind}]`;
+	return `[st-msg #${msg.id} de @${msg.from_id}${where}${ctx}${from}${kind}]`;
 };
 
 async function api(method, path, body) {
@@ -366,7 +372,7 @@ async function initialize() {
 // Opens (new or resumed) the ACP session of context `ctx` (null = default),
 // closing the one this slot had open — never one with an open task: the claim
 // keeps such a slot on its context (see the header).
-async function openSession(ctx = null, token = null) {
+async function openSession(ctx = null, token = null, work = null) {
 	if (!initialized) await initialize();
 	if (open?.ctx === ctx) return open.sessionId;
 	if (open) {
@@ -376,10 +382,15 @@ async function openSession(ctx = null, token = null) {
 	}
 	const systemPrompt = { mode: "append", content: [{ type: "text", text: PROTOCOL }] };
 	const cwd = cwdOf(ctx);
-	mkdirSync(cwd, { recursive: true });
+	// A named context is a work: its worktree is made by the backend before its
+	// first message. Never created here — a missing one fails the message.
+	if (ctx !== null && !existsSync(cwd)) throw new Error(`el directorio del trabajo ${cwd} no existe`);
 	const file = sessionFile(ctx);
-	// A named context's session speaks with its context's credential (header).
-	const _meta = token ? { claudeCode: { options: { env: { ST_TOKEN: token } } } } : undefined;
+	// A named context's session speaks with its context's credential and knows
+	// its work and ports (header).
+	const sessionEnv = token ? { ST_TOKEN: token } : null;
+	if (sessionEnv && work) Object.assign(sessionEnv, { ST_WORK: work.id, ST_PORT_BASE: String(work.portBase) });
+	const _meta = sessionEnv ? { claudeCode: { options: { env: sessionEnv } } } : undefined;
 	let sessionId;
 	if (existsSync(file)) {
 		sessionId = JSON.parse(readFileSync(file, "utf8")).sessionId;
@@ -672,7 +683,7 @@ async function main() {
 	const running = await api("GET", `/runner/running?slot=${SLOT}`);
 	const interrupted = running.status === 200 ? { msg: running.body, note: await settleInterrupted(running.body) } : null;
 	// The report about an interrupted run goes to the session of ITS context.
-	if (SLOT !== 1 && interrupted?.note) await openSession(interrupted.msg.context, interrupted.msg.contextToken);
+	if (SLOT !== 1 && interrupted?.note) await openSession(interrupted.msg.context, interrupted.msg.contextToken, interrupted.msg.work);
 	// What the resume itself sets off (e.g. Claude Code's "didn't finish before
 	// the previous session ended" notification of a killed task, which opens a
 	// turn of its own that only a prompt closes) shows up right after it.
@@ -724,7 +735,7 @@ async function main() {
 		const r = await api("POST", "/runner/claim", { slot: SLOT, ...(keep ? { context: keep } : {}) });
 		if (r.status === 200 && r.body.context !== (open?.ctx ?? null)) {
 			try {
-				await openSession(r.body.context, r.body.contextToken);
+				await openSession(r.body.context, r.body.contextToken, r.body.work);
 			} catch (err) {
 				// Nothing was sent to the agent: the message failed, it did not run.
 				log(`message #${r.body.id}: cannot open the session of context ${r.body.context}: ${err.message}`);

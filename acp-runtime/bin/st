@@ -1,28 +1,88 @@
 #!/usr/bin/env node
 // st — the agent's side of the Shared Terminal message API (same API the person
 // uses from the web). The sender is the token (ST_TOKEN), never an argument.
-//   st send @agent "text"      st send @agent -f file.md      st agents
-//   st list                    st get <id>
+//   st send @agent [--work <id>] "text"   st send @agent [--work <id>] -f file.md
+//   st work new @agent <id> [--base <ref>]   st work list
+//   st agents   st list   st get <id>
 import { readFileSync } from "node:fs";
 
 const [cmd, ...args] = process.argv.slice(2);
 const API = `${process.env.ST_URL}/api/acp`;
 const headers = { authorization: `Bearer ${process.env.ST_TOKEN ?? ""}`, "content-type": "application/json" };
 
+// The backend's refusals, said in a line: the code's meaning and the details it sent.
+const REASONS = {
+	"unknown-recipient": "no hay un agente con ese nombre",
+	"work-not-found": "ese trabajo no existe (crealo con st work new)",
+	"work-not-yours": "ese trabajo es de otro agente",
+	"work-not-active": "ese trabajo ya no está activo",
+	"work-other-project": "el trabajo o el agente es de otro proyecto",
+	"work-exists": "ese id de trabajo ya existe",
+	"work-path-exists": "ya hay algo de ese id en el workspace del agente",
+	"work-incomplete": "el trabajo quedó a medio crear",
+	"context-needs-slots": "el agente corre un solo mensaje a la vez: un trabajo necesita maxConcurrency ≥ 2",
+	"session-not-running": "la sesión del agente no está corriendo",
+	"low-disk": "poco espacio libre en el workspace del agente",
+	"not-a-repo": "el workspace del agente no es un repositorio git",
+	"bad-work-id": "id de trabajo inválido (minúsculas, dígitos y guiones, hasta 40)",
+	"bad-base": "ref base inválida o inexistente",
+	"execution-ended": "el mensaje para el que corre este proceso ya terminó: no se envió nada",
+};
+
 async function call(method, path, body) {
 	const res = await fetch(API + path, { method, headers, body: body && JSON.stringify(body) });
 	const text = await res.text();
 	if (!res.ok) {
-		console.error(`st: ${res.status} ${text}`);
+		let e = null;
+		try {
+			e = JSON.parse(text);
+		} catch {}
+		if (!e?.error) console.error(`st: ${res.status} ${text}`);
+		else {
+			const { error, ...detail } = e;
+			const extra = Object.entries(detail)
+				.map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`)
+				.join("; ");
+			console.error(`st: ${REASONS[error] ?? error} (${error}${extra ? `; ${extra}` : ""})`);
+		}
 		process.exit(1);
 	}
 	return text ? JSON.parse(text) : null;
 }
 
-if (cmd === "send" && args.length >= 2) {
-	const body = args[1] === "-f" ? readFileSync(args[2], "utf8") : args.slice(1).join(" ");
-	const m = await call("POST", "/messages", { to: args[0], body });
-	console.log(`mensaje #${m.id} para @${m.to_id}: ${m.state} (persistido${m.project_id ? ", en el proyecto" : ", directo"})`);
+// `--name value` anywhere among the arguments; the rest in order.
+function option(list, name) {
+	const i = list.indexOf(name);
+	if (i < 0) return [null, list];
+	if (!list[i + 1]) usage();
+	return [list[i + 1], [...list.slice(0, i), ...list.slice(i + 2)]];
+}
+function usage() {
+	console.error(
+		'uso: st send @agente [--work <id>] "texto" | st send @agente [--work <id>] -f archivo | st work new @agente <id> [--base <ref>] | st work list | st agents | st list | st get <id>',
+	);
+	process.exit(2);
+}
+const workLine = (w) =>
+	`${w.id} · @${w.agent} · ${w.state} · rama ${w.branch} · puertos ${w.portBase}–${w.portBase + 99}${w.note ? ` · ${w.note}` : ""}`;
+
+if (cmd === "send") {
+	const [work, rest] = option(args, "--work");
+	if (rest.length < 2) usage();
+	const body = rest[1] === "-f" ? readFileSync(rest[2], "utf8") : rest.slice(1).join(" ");
+	const m = await call("POST", "/messages", { to: rest[0], body, ...(work ? { work } : {}) });
+	console.log(
+		`mensaje #${m.id} para @${m.to_id}${m.context ? ` en el trabajo ${m.context}` : ""}: ${m.state} (persistido${m.project_id ? ", en el proyecto" : ", directo"})`,
+	);
+} else if (cmd === "work" && args[0] === "new") {
+	const [base, rest] = option(args.slice(1), "--base");
+	if (rest.length !== 2) usage();
+	const w = await call("POST", "/works", { agent: rest[0], id: rest[1], ...(base ? { base } : {}) });
+	console.log(`trabajo ${workLine(w)} · base ${w.baseSha?.slice(0, 12)}`);
+} else if (cmd === "work" && args[0] === "list") {
+	const all = await call("GET", "/works");
+	if (!all.length) console.log("no hay trabajos");
+	for (const w of all) console.log(workLine(w));
 } else if (cmd === "agents") {
 	const me = process.env.ST_AGENT;
 	const all = await call("GET", "/agents");
@@ -34,7 +94,4 @@ if (cmd === "send" && args.length >= 2) {
 		console.log(`#${m.id} ${m.kind} @${m.from_id} -> @${m.to_id} ${m.state}${m.reply_to ? ` (re #${m.reply_to})` : ""} | ${m.body.replace(/\s+/g, " ").slice(0, 70)}`);
 } else if (cmd === "get" && args[0]) {
 	console.log(JSON.stringify(await call("GET", `/messages/${args[0]}`), null, 2));
-} else {
-	console.error('uso: st send @agente "texto" | st send @agente -f archivo | st agents | st list | st get <id>');
-	process.exit(2);
-}
+} else usage();
