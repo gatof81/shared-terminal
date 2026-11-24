@@ -123,6 +123,11 @@ export const TABLES: ReadonlyArray<{ name: string; orderBy: string; sinceSchema?
 	{ name: "agent_messages", orderBy: "id", sinceSchema: 21 },
 	{ name: "agent_questions", orderBy: "id", sinceSchema: 22 },
 	{ name: "agent_works", orderBy: "owner_user_id, id", sinceSchema: 26 },
+	// v27. AFTER agent_messages although nothing references it from there:
+	// replaying a message INSERT fires the activity trigger, which would move a
+	// restored conversation's last_activity_at — restored after them, the
+	// backup's own value is what stays.
+	{ name: "conversations", orderBy: "owner_user_id, id", sinceSchema: 27 },
 ];
 
 export interface BackupManifest {

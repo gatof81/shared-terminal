@@ -112,7 +112,7 @@ describe("db:migrate-check (release gate)", () => {
 		expect(r.failures).toEqual([]);
 		expect(r.ok).toBe(true);
 		expect(r.schemaFrom).toBe(19);
-		expect(r.schemaTo).toBe(26);
+		expect(r.schemaTo).toBe(27);
 		const by = Object.fromEntries(r.tables.map((t) => [t.name, t]));
 		expect(by.users).toMatchObject({
 			jsonlRows: 2,
@@ -222,13 +222,13 @@ describe("db:migrate-check (release gate)", () => {
 		expect(JSON.stringify(r)).not.toContain(SECRET);
 	});
 
-	it("PASS from a v20 backup to the latest (v26): data unchanged, the ACP tables new and empty", async () => {
+	it("PASS from a v20 backup to the latest (v27): data unchanged, the ACP tables new and empty", async () => {
 		await writeBackup(fixture(), { schemaVersion: 20 });
 		const r = await runMigrateCheck(dir);
 		expect(r.failures).toEqual([]);
 		expect(r.ok).toBe(true);
 		expect(r.schemaFrom).toBe(20);
-		expect(r.schemaTo).toBe(26);
+		expect(r.schemaTo).toBe(27);
 		expect(r.newTables).toEqual(
 			expect.arrayContaining([
 				{ name: "acp_agents", rows: 0 },
@@ -239,7 +239,7 @@ describe("db:migrate-check (release gate)", () => {
 	});
 
 	it("refuses a backup already at the build's latest migration, a directory without a manifest, and a manifest it does not understand", async () => {
-		await writeBackup(fixture(), { schemaVersion: 26 });
+		await writeBackup(fixture(), { schemaVersion: 27 });
 		await expect(runMigrateCheck(dir)).rejects.toThrow(RefusedError);
 		await expect(runMigrateCheck(dir)).rejects.toThrow(/BEFORE deploying/);
 		await fs.rm(path.join(dir, "manifest.json"));
@@ -288,7 +288,7 @@ describe("db:migrate-check (release gate)", () => {
 		expect(r.failures).toEqual([]);
 		expect(r.ok).toBe(true);
 		expect(r.schemaFrom).toBe(21);
-		expect(r.schemaTo).toBe(26);
+		expect(r.schemaTo).toBe(27);
 		const acp = r.tables.filter((x) => x.name === "acp_agents" || x.name === "agent_messages");
 		expect(
 			acp.map((x) => [x.name, x.rowsBefore, x.rowsAfter, x.hashBefore === x.hashAfter]),

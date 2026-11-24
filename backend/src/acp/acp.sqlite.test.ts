@@ -1737,3 +1737,492 @@ describe("ACP slots: context affinity", () => {
 		await done(f2.id);
 	});
 });
+
+// v27: conversations — a project's topics. Agents of their own, in a project
+// of its own, so nothing earlier suites left queued gets in the way.
+describe("ACP conversations (v27)", () => {
+	const PC = "p-c";
+	const SIDS: Record<string, string> = {
+		ana: "a0000000-0000-4000-8000-000000000001",
+		beto: "a0000000-0000-4000-8000-000000000002",
+		caro: "a0000000-0000-4000-8000-000000000003",
+		fuera: "a0000000-0000-4000-8000-000000000004",
+	};
+	const crid = (n: number) => `c0000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+	const newConv = (n: number, title = `Tema ${n}`, projectId = PC) =>
+		call(owner, "POST", "/conversations", { projectId, title, clientRequestId: crid(n) });
+	const row = (id: number) =>
+		db.prepare("SELECT * FROM agent_messages WHERE id = ?").get(id) as Record<string, unknown>;
+	let c1: string;
+	let c2: string;
+
+	beforeAll(async () => {
+		db.prepare(
+			"INSERT INTO projects (project_id, owner_user_id, name, client_request_id, request_hash) VALUES (?, ?, 'Conversaciones', 'c-pc', 'h')",
+		).run(PC, OWNER);
+		for (const [name, sid] of Object.entries(SIDS)) {
+			db.prepare(
+				"INSERT INTO sessions (session_id, user_id, name, container_name, status) VALUES (?, ?, ?, ?, 'running')",
+			).run(sid, OWNER, name, `st-${sid.slice(0, 12)}`);
+			const a = await acp.create(sid, OWNER, name, { projectId: name === "fuera" ? "p-2" : PC });
+			tokens[name] = acp.tokenFor(a.agent_id);
+		}
+	});
+
+	it("v27 is recorded; a conversation is created once per clientRequestId, in a live project of the owner", async () => {
+		expect(db.prepare("SELECT 1 FROM schema_migrations WHERE version = 27").get()).toBeTruthy();
+		const a = await newConv(1, "Optimización de CI");
+		expect(a.status).toBe(201);
+		expect(a.body).toMatchObject({
+			projectId: PC,
+			title: "Optimización de CI",
+			replayed: false,
+			unread: 0,
+			needsAction: false,
+			recipients: null,
+			archivedAt: null,
+			readAt: null,
+		});
+		c1 = a.body.id;
+		const again = await newConv(1, "Optimización de CI");
+		expect(again.status).toBe(200);
+		expect(again.body).toMatchObject({ id: c1, replayed: true });
+		expect((await newConv(1, "Otro título")).body.error).toBe("idempotency-conflict");
+		expect((await newConv(9, "x", "p-x")).status).toBe(404);
+		expect((await newConv(9, "  ")).body.error).toBe("invalid-title");
+		expect(
+			(
+				await call(owner, "POST", "/conversations", {
+					projectId: PC,
+					title: "x",
+					clientRequestId: "no",
+				})
+			).body.error,
+		).toBe("invalid-client-request-id");
+		expect(
+			(
+				await call(as("ana"), "POST", "/conversations", {
+					projectId: PC,
+					title: "x",
+					clientRequestId: crid(8),
+				})
+			).status,
+		).toBe(403);
+		c2 = (await newConv(2, "Diseño")).body.id;
+		expect(events.some((e) => e.type === "conversation")).toBe(true);
+	});
+
+	it("a post to several agents: one row each under one clientId, in the conversation and its project; a retry is the same rows", async () => {
+		const send = () =>
+			call(owner, "POST", "/messages", {
+				to: ["@ana", "beto"],
+				body: "revisen el pipeline",
+				conversationId: c1,
+				clientId: "multi-0001",
+			});
+		const r = await send();
+		expect(r.status).toBe(201);
+		expect(
+			r.body.messages.map((m: MessageRowT) => [m.to_id, m.conversation_id, m.project_id, m.team]),
+		).toEqual([
+			["ana", c1, PC, 0],
+			["beto", c1, PC, 0],
+		]);
+		const again = await send();
+		expect(again.status).toBe(200);
+		expect(again.body.replayed).toBe(true);
+		expect(again.body.messages.map((m: MessageRowT) => m.id)).toEqual(
+			r.body.messages.map((m: MessageRowT) => m.id),
+		);
+		// Recipients must be of the conversation's project; several need a clientId.
+		expect(
+			(
+				await call(owner, "POST", "/messages", {
+					to: ["fuera"],
+					body: "x",
+					conversationId: c1,
+					clientId: "multi-0002",
+				})
+			).body.error,
+		).toBe("not-in-project");
+		expect(
+			(
+				await call(owner, "POST", "/messages", {
+					to: ["ana", "beto"],
+					body: "x",
+					conversationId: c1,
+				})
+			).body.error,
+		).toBe("client-id-required");
+		expect((await call(owner, "POST", "/messages", { to: ["ana"], body: "x" })).body.error).toBe(
+			"conversation-required",
+		);
+		expect(
+			(
+				await call(owner, "POST", "/messages", {
+					to: "ana",
+					body: "x",
+					conversationId: c1,
+					projectId: "p-1",
+				})
+			).body.error,
+		).toBe("project-mismatch");
+		expect(
+			(await call(owner, "POST", "/messages", { to: "ana", body: "x", conversationId: crid(77) }))
+				.status,
+		).toBe(404);
+		const list = await call(owner, "GET", `/projects/${PC}/conversations`);
+		expect(list.body.find((c: { id: string }) => c.id === c1).recipients).toEqual({
+			agents: ["ana", "beto"],
+		});
+	});
+
+	it("the whole team: resolved at send into one row per agent of the project, each marked team", async () => {
+		const r = await call(owner, "POST", "/messages", {
+			team: true,
+			body: "a todos",
+			conversationId: c2,
+			clientId: "team-0001",
+		});
+		expect(r.status).toBe(201);
+		expect(r.body.messages.map((m: MessageRowT) => [m.to_id, m.team])).toEqual([
+			["ana", 1],
+			["beto", 1],
+			["caro", 1],
+		]);
+		expect(
+			(
+				await call(owner, "POST", "/messages", {
+					team: true,
+					to: "ana",
+					body: "x",
+					conversationId: c2,
+					clientId: "team-0002",
+				})
+			).body.error,
+		).toBe("team-and-to");
+		const conv = (await call(owner, "GET", `/conversations/${c2}/feed`)).body.conversation;
+		expect(conv.recipients).toEqual({ team: true });
+	});
+
+	it("an agent's consult inherits the conversation; the reply and the unfinished notice stay in it; outside the project it is direct", async () => {
+		const m = (await call(as("ana"), "POST", "/runner/claim")).body;
+		expect(m).toMatchObject({
+			conversation_id: c1,
+			conversation: { id: c1, title: "Optimización de CI" },
+		});
+		const consult = await call(as("ana"), "POST", "/messages", { to: "caro", body: "¿cache?" });
+		expect(consult.body).toMatchObject({ conversation_id: c1, project_id: PC, depth: 1 });
+		const outside = await call(as("ana"), "POST", "/messages", { to: "fuera", body: "privado" });
+		expect(outside.body).toMatchObject({ conversation_id: null, project_id: null });
+		// An agent picks no conversation, team or list.
+		expect(
+			(await call(as("ana"), "POST", "/messages", { to: "caro", body: "x", conversationId: c2 }))
+				.body.error,
+		).toBe("conversation-inherited");
+		await call(as("ana"), "POST", `/runner/messages/${m.id}/result`, {
+			state: "done",
+			text: "listo",
+		});
+		// caro takes the consult (c2's team message is older: it goes first).
+		await work("caro");
+		const cc = (await call(as("caro"), "POST", "/runner/claim")).body;
+		expect(cc.id).toBe(consult.body.id);
+		await call(as("caro"), "POST", `/runner/messages/${cc.id}/result`, {
+			state: "done",
+			text: "sí",
+		});
+		const reply = db
+			.prepare("SELECT * FROM agent_messages WHERE reply_to = ? AND kind = 'reply'")
+			.get(cc.id) as Record<string, unknown>;
+		expect(reply).toMatchObject({ conversation_id: c1, project_id: PC, to_id: "ana" });
+		// fuera's run of the private consult is interrupted: the notice is direct, like the consult.
+		const f = (await call(as("fuera"), "POST", "/runner/claim")).body;
+		await call(as("fuera"), "POST", `/runner/messages/${f.id}/result`, {
+			state: "uncertain",
+			note: "corte",
+		});
+		const notice = db
+			.prepare("SELECT * FROM agent_messages WHERE reply_to = ? AND note = 'unfinished:uncertain'")
+			.get(f.id) as Record<string, unknown>;
+		expect(notice).toMatchObject({ conversation_id: null, to_id: "ana" });
+		// Drain ana's queue (c2's team row, caro's reply, the notice) for the next tests.
+		await work("ana");
+		await work("ana");
+		await work("ana");
+	});
+
+	it("an interrupted run in a conversation: its notice and its recovery report stay there, linked; review and requeue", async () => {
+		const sent = await call(owner, "POST", "/messages", {
+			to: "beto",
+			body: "deploy",
+			conversationId: c1,
+		});
+		// beto has the c1 multi-post and c2's team message before it.
+		await work("beto");
+		await work("beto");
+		const m = (await call(as("beto"), "POST", "/runner/claim")).body;
+		expect(m.id).toBe(sent.body.id);
+		await call(as("beto"), "POST", `/runner/messages/${m.id}/result`, {
+			state: "uncertain",
+			note: "runner restarted",
+		});
+		const sys = await call(as("beto"), "POST", "/runner/system-message", {
+			body: "[st-recovery] …",
+			recoveryOf: m.id,
+		});
+		expect(sys.body).toMatchObject({
+			from_id: "system",
+			recovery_of: m.id,
+			conversation_id: c1,
+			project_id: PC,
+		});
+		await call(as("beto"), "POST", `/runner/messages/${sys.body.id}/result`, {
+			state: "done",
+			text: "informe: nada hecho",
+		});
+		// Another agent's message id is not linked: no link, no conversation.
+		const foreign = await call(as("beto"), "POST", "/runner/system-message", {
+			body: "[st-recovery] …",
+			recoveryOf: (
+				db
+					.prepare(
+						"SELECT id FROM agent_messages WHERE to_id = 'ana' AND conversation_id IS NOT NULL",
+					)
+					.get() as {
+					id: number;
+				}
+			).id,
+		});
+		expect(foreign.body).toMatchObject({ recovery_of: null, conversation_id: null });
+		await call(as("beto"), "POST", `/runner/messages/${foreign.body.id}/result`, {
+			state: "done",
+			text: ".",
+		});
+		const inbox = await call(owner, "GET", "/inbox");
+		expect(inbox.body.action.interrupted.map((x: MessageRowT) => x.id)).toContain(m.id);
+		expect(inbox.body.reports.find((x: MessageRowT) => x.recovery_of === m.id).result_text).toBe(
+			"informe: nada hecho",
+		);
+		const before = inbox.body.count;
+		const conv = (await call(owner, "GET", `/projects/${PC}/conversations`)).body.find(
+			(c: { id: string }) => c.id === c1,
+		);
+		expect(conv.needsAction).toBe(true);
+		// Reviewed: out of the inbox, still uncertain, nothing new written.
+		const rows = (db.prepare("SELECT COUNT(*) AS n FROM agent_messages").get() as { n: number }).n;
+		const rv = await call(owner, "POST", `/messages/${m.id}/review`);
+		expect(rv.body).toMatchObject({ state: "uncertain" });
+		expect(rv.body.reviewed_at).toBeTruthy();
+		expect((db.prepare("SELECT COUNT(*) AS n FROM agent_messages").get() as { n: number }).n).toBe(
+			rows,
+		);
+		expect((await call(owner, "GET", "/inbox")).body.count).toBe(before - 1);
+		expect((await call(owner, "POST", `/messages/${sys.body.id}/review`)).status).toBe(409);
+		expect((await call(as("beto"), "POST", `/messages/${m.id}/review`)).status).toBe(403);
+		// A requeue clears the review: interrupted again, it needs a new one.
+		await call(owner, "POST", `/messages/${m.id}/requeue`);
+		expect(row(m.id).reviewed_at).toBeNull();
+		const again = (await call(as("beto"), "POST", "/runner/claim")).body;
+		expect(again.id).toBe(m.id);
+		await call(as("beto"), "POST", `/runner/messages/${m.id}/result`, {
+			state: "uncertain",
+			note: "otra vez",
+		});
+		expect(
+			(await call(owner, "GET", "/inbox")).body.action.interrupted.map((x: MessageRowT) => x.id),
+		).toContain(m.id);
+		await call(owner, "POST", `/messages/${m.id}/review`);
+	});
+
+	it("a question to the person is in the conversation of its message, in the inbox, and in the agent's state", async () => {
+		const sent = await call(owner, "POST", "/messages", {
+			to: "caro",
+			body: "elegí",
+			conversationId: c2,
+		});
+		// caro: c2 team message was done by work(); this one is next.
+		const m = (await call(as("caro"), "POST", "/runner/claim")).body;
+		expect(m.id).toBe(sent.body.id);
+		const q = await call(as("caro"), "POST", "/runner/questions", {
+			messageId: m.id,
+			request: { message: "¿A o B?" },
+		});
+		const feed = await call(owner, "GET", `/conversations/${c2}/feed`);
+		expect(feed.body.questions.map((x: { id: number }) => x.id)).toContain(q.body.id);
+		expect((await call(owner, "GET", `/conversations/${c1}/feed`)).body.questions).toEqual([]);
+		const inbox = await call(owner, "GET", "/inbox");
+		expect(
+			inbox.body.action.questions.find((x: { id: number }) => x.id === q.body.id),
+		).toMatchObject({
+			conversation_id: c2,
+			project_id: PC,
+		});
+		const caro = feed.body.agents.find((a: { name: string }) => a.name === "caro");
+		expect(caro).toMatchObject({
+			waitingInput: true,
+			question: { id: q.body.id, messageId: m.id, conversationId: c2 },
+			runningIn: [{ id: m.id, conversationId: c2, work: null }],
+		});
+		await call(owner, "POST", `/questions/${q.body.id}/answer`, {
+			action: "accept",
+			content: { x: "A" },
+		});
+		await call(as("caro"), "POST", `/runner/questions/${q.body.id}/delivered`);
+		await call(as("caro"), "POST", `/runner/messages/${m.id}/result`, { state: "done", text: "A" });
+	});
+
+	it("agents' state: queue with conversation, and the requests it waits on", async () => {
+		const busy = await call(owner, "POST", "/messages", {
+			to: "beto",
+			body: "largo",
+			conversationId: c1,
+		});
+		const queued = await call(owner, "POST", "/messages", {
+			to: "beto",
+			body: "después",
+			conversationId: c2,
+		});
+		const m = (await call(as("beto"), "POST", "/runner/claim")).body;
+		expect(m.id).toBe(busy.body.id);
+		const ask = await call(as("beto"), "POST", "/messages", { to: "ana", body: "¿dato?" });
+		const agents = (await call(owner, "GET", "/agents")).body as Array<Record<string, unknown>>;
+		expect(agents.find((a) => a.name === "beto")).toMatchObject({
+			runningIn: [{ id: busy.body.id, conversationId: c1, work: null }],
+			queue: [{ id: queued.body.id, conversationId: c2, work: null }],
+			pending: 1,
+			waitingFor: [{ id: ask.body.id, agent: "ana", conversationId: c1, work: null }],
+		});
+		await call(as("beto"), "POST", `/runner/messages/${m.id}/result`, {
+			state: "done",
+			text: "ok",
+		});
+		await work("ana");
+		expect(
+			(await call(owner, "GET", "/agents")).body.find((a: { name: string }) => a.name === "beto")
+				.waitingFor,
+		).toEqual([]);
+		await work("beto"); // the reply
+		await work("beto"); // the queued one
+	});
+
+	it("isolation: a conversation's feed shows only it; the Archive feeds show no conversation", async () => {
+		const legacy = await call(owner, "POST", "/messages", {
+			to: "ana",
+			body: "viejo chat",
+			projectId: PC,
+		});
+		expect(legacy.body.conversation_id).toBeNull();
+		const f1 = (await call(owner, "GET", `/conversations/${c1}/feed`)).body
+			.messages as MessageRowT[];
+		const f2 = (await call(owner, "GET", `/conversations/${c2}/feed`)).body
+			.messages as MessageRowT[];
+		expect(f1.length).toBeGreaterThan(0);
+		expect(f1.every((m) => m.conversation_id === c1)).toBe(true);
+		expect(f2.every((m) => m.conversation_id === c2)).toBe(true);
+		const pf = (await call(owner, "GET", `/projects/${PC}/feed`)).body.messages as MessageRowT[];
+		expect(pf.map((m) => m.id)).toEqual([legacy.body.id]);
+		const af = (await call(owner, "GET", "/agents/ana/feed")).body.messages as MessageRowT[];
+		expect(af.every((m) => m.conversation_id === null)).toBe(true);
+		expect(af.map((m) => m.id)).toContain(legacy.body.id);
+		// Another owner sees nothing of it.
+		expect((await call({ user: OTHER }, "GET", `/conversations/${c1}/feed`)).status).toBe(404);
+		expect((await call({ user: OTHER }, "GET", `/projects/${PC}/conversations`)).status).toBe(404);
+		expect(
+			(
+				await call({ user: OTHER }, "POST", `/conversations/${c1}/read`, {
+					at: new Date().toISOString(),
+				})
+			).status,
+		).toBe(404);
+		await work("ana");
+	});
+
+	it("read state: unseen = others' rows and the person's results after read_at; it only advances; results are listed until seen", async () => {
+		const c3 = (await newConv(3, "Lectura")).body.id as string;
+		const sent = await call(owner, "POST", "/messages", {
+			to: "caro",
+			body: "calculá",
+			conversationId: c3,
+		});
+		const listed = async () =>
+			(await call(owner, "GET", `/projects/${PC}/conversations`)).body.find(
+				(c: { id: string }) => c.id === c3,
+			);
+		expect((await listed()).unread).toBe(0);
+		// The person reads (their own message) BEFORE the result exists.
+		const t0 = new Date().toISOString();
+		expect((await call(owner, "POST", `/conversations/${c3}/read`, { at: t0 })).body.readAt).toBe(
+			t0,
+		);
+		await new Promise((ok) => setTimeout(ok, 5));
+		const m = (await call(as("caro"), "POST", "/runner/claim")).body;
+		await call(as("caro"), "POST", `/runner/messages/${m.id}/result`, {
+			state: "done",
+			text: "42",
+		});
+		expect(m.id).toBe(sent.body.id);
+		// The result is unseen although its row is older than the read mark.
+		expect((await listed()).unread).toBe(1);
+		const inbox = await call(owner, "GET", "/inbox");
+		expect(inbox.body.results.map((x: MessageRowT) => x.id)).toContain(m.id);
+		const fin = row(m.id).finished_at as string;
+		await call(owner, "POST", `/conversations/${c3}/read`, { at: fin });
+		expect((await listed()).unread).toBe(0);
+		expect(
+			(await call(owner, "GET", "/inbox")).body.results.map((x: MessageRowT) => x.id),
+		).not.toContain(m.id);
+		// Never backwards; a bad time is refused.
+		expect((await call(owner, "POST", `/conversations/${c3}/read`, { at: t0 })).body.readAt).toBe(
+			fin,
+		);
+		expect(
+			(await call(owner, "POST", `/conversations/${c3}/read`, { at: "ayer" })).body.error,
+		).toBe("invalid-at");
+		// last_activity_at moved with the result.
+		expect((await listed()).lastActivityAt).toBe(fin);
+	});
+
+	it("rename, archive: an archived conversation leaves the list and takes no post; works record their conversation", async () => {
+		expect(
+			(await call(owner, "PATCH", `/conversations/${c2}`, { title: "Diseño v2" })).body.title,
+		).toBe("Diseño v2");
+		const a = await call(owner, "POST", `/conversations/${c2}/archive`);
+		expect(a.body.archivedAt).toBeTruthy();
+		const live = (await call(owner, "GET", `/projects/${PC}/conversations`)).body.map(
+			(c: { id: string }) => c.id,
+		);
+		expect(live).not.toContain(c2);
+		const arch = (await call(owner, "GET", `/projects/${PC}/conversations?archived=1`)).body.map(
+			(c: { id: string }) => c.id,
+		);
+		expect(arch).toEqual([c2]);
+		expect(
+			(await call(owner, "POST", "/messages", { to: "ana", body: "x", conversationId: c2 })).body
+				.error,
+		).toBe("conversation-archived");
+		// A work created by the person from a conversation.
+		await call(owner, "PATCH", "/agents/ana", { maxConcurrency: 2 });
+		const w = await call(owner, "POST", "/works", {
+			agent: "ana",
+			id: "conv-work",
+			conversationId: c1,
+		});
+		expect(w.status).toBe(201);
+		expect(w.body.conversationId).toBe(c1);
+		expect(
+			(await call(owner, "POST", "/works", { agent: "fuera", id: "conv-w2", conversationId: c1 }))
+				.body.error,
+		).toBe("not-in-project");
+		// A work and a conversation on one message: both are kept.
+		const both = await call(owner, "POST", "/messages", {
+			to: "ana",
+			body: "en el trabajo",
+			conversationId: c1,
+			work: "conv-work",
+		});
+		expect(both.body).toMatchObject({ conversation_id: c1, context: "conv-work" });
+	});
+});
+
+type MessageRowT = import("./agents.js").MessageRow;
