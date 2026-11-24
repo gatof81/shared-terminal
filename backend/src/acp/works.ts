@@ -30,6 +30,8 @@ export const WORK_ID_RE = CONTEXT_RE;
 // no `..` (no ranges), no `//`, `@{` or a trailing `/`/`.lock`.
 const BASE_RE = /^(?!-)(?!.*\.\.)(?!.*\/\/)(?!.*@\{)(?!.*\/$)(?!.*\.lock$)[A-Za-z0-9._/-]{1,200}$/;
 export const WORKSPACE = "/home/developer/workspace";
+const NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
+type Shell = (script: string, ...args: string[]) => ReturnType<DockerManager["execCapture"]>;
 export const workDir = (id: string) => `${WORKSPACE}/.st/ctx/${id}`;
 const PORT_FIRST = 20000;
 const PORT_SPAN = 100;
@@ -78,7 +80,7 @@ echo "free_kb=$(df -Pk . | awk 'NR==2 {print $4}')"
 [ -e ".st/ctx/$id" ] && echo exists=directory
 [ -e ".st/acp/ctx/$id.json" ] && echo exists=session
 git show-ref --verify --quiet "refs/heads/work/$id" && echo exists=branch
-git fetch --quiet origin >/dev/null 2>&1 || echo fetch=failed
+timeout 30 git fetch --quiet origin >/dev/null 2>&1 || echo fetch=failed
 if [ -z "$base" ]; then base=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || base=HEAD; fi
 sha=$(git rev-parse --verify --quiet --end-of-options "$base^{commit}") || { echo "bad-base=$base"; exit 0; }
 echo "base=$base"
@@ -99,6 +101,50 @@ fi
 top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)
 br=$(git -C "$dir" symbolic-ref --quiet --short HEAD 2>/dev/null)
 if [ "$top" = "$dir" ] && [ "$br" = "work/$id" ]; then echo state=ok; echo "sha=$(git -C "$dir" rev-parse HEAD)"; else echo state=other; fi`;
+// Ignored paths a cleaning may lose: regenerable build output only. Fixed list
+// (D8): anything else ignored — a .env, test results, screenshots — holds it.
+const REGENERABLE = ["node_modules", "dist"];
+// Every check of a cleaning ($3 = "remove": and, with no reason, the removal).
+// One `reason=` line per doubt; any doubt ⇒ nothing is removed. Processes: one
+// with its cwd in the worktree or ST_WORK=<id> in its environment (the work's
+// ACP session, a server it left) — and one that cannot be read is a doubt too.
+// Commits: the branch tip reachable from a local remote-tracking ref, or listed
+// by `git ls-remote origin` (refs/pull/N/head survives a squash merge whose
+// branch was deleted), or still the base. Ignored paths with --ignored=matching:
+// each ignored path itself, never a parent directory that only holds ignored
+// content (the default mode would report `web/` for `web/dist/`).
+// `git worktree remove` WITHOUT --force;
+// branch, ACP session file and transcript stay.
+export const CLEAN = String.raw`id=$1 base=$2 mode=$3 dir=${ws}/.st/ctx/$1
+cd ${ws} || exit 3
+[ -e "$dir" ] || { echo absent; exit 0; }
+bad=0
+r() { echo "reason=$*"; bad=1; }
+for p in /proc/[0-9]*; do
+	pid=$(basename "$p")
+	[ "$pid" = "$$" ] && continue
+	# A zombie has no cwd and runs nothing; one that ended meanwhile is gone.
+	[ "$(sed -n 's/.*) \(.\).*/\1/p' "$p/stat" 2>/dev/null)" = Z ] && continue
+	cwd=$(readlink "$p/cwd" 2>/dev/null)
+	if [ -z "$cwd" ]; then [ -d "$p" ] && r "proceso $pid ilegible"; continue; fi
+	cmd=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null | cut -c1-60)
+	case "$cwd" in "$dir" | "$dir"/*) r "proceso $pid ($cmd) con cwd en el trabajo"; continue ;; esac
+	if ! e=$(tr '\0' '\n' < "$p/environ" 2>/dev/null); then [ -d "$p" ] && r "proceso $pid ilegible"; continue; fi
+	printf '%s\n' "$e" | grep -qxF "ST_WORK=$id" && r "proceso $pid ($cmd) del trabajo (ST_WORK)"
+done
+st=$(git -C "$dir" status --porcelain 2>/dev/null) || r "git status falló"
+[ -n "$st" ] && r "cambios sin commitear: $(printf '%s\n' "$st" | head -5 | tr '\n' ' ')"
+if tip=$(git rev-parse --verify --quiet "refs/heads/work/$id"); then
+	if [ "$tip" != "$base" ] && [ -z "$(git for-each-ref --count=1 --contains "$tip" refs/remotes)" ]; then
+		if ls=$(timeout 30 git ls-remote origin 2>/dev/null); then
+			printf '%s\n' "$ls" | grep -q "^$tip[[:space:]]" || r "commits sin publicar: la punta de work/$id ($tip) no está en ninguna ref remota"
+		else r "git ls-remote origin falló: no se puede comprobar que los commits estén publicados"; fi
+	fi
+else r "no existe la rama work/$id"; fi
+ig=$(git -C "$dir" status --porcelain --ignored=matching 2>/dev/null | sed -n 's/^!! //p' | grep -Ev '(^|/)(${REGENERABLE.join("|")})/$')
+[ -n "$ig" ] && r "archivos ignorados que se perderían: $(printf '%s\n' "$ig" | head -5 | tr '\n' ' ')"
+[ "$bad" = 0 ] && [ "$mode" = remove ] || exit 0
+if out=$(git worktree remove "$dir" 2>&1); then echo removed; else r "git worktree remove falló: $out"; fi`;
 
 function parse(out: Buffer): Map<string, string[]> {
 	const m = new Map<string, string[]>();
@@ -173,16 +219,8 @@ export class AcpWorks {
 		// Named contexts run in slots ≥ 2: a one-slot agent would never take one.
 		if (target.max_concurrency < 2)
 			throw new WorkError(400, "context-needs-slots", { agent: target.name });
-		const containerId = await this.docker.runningContainerId(
-			`st-${target.session_id.slice(0, 12)}`,
-		);
-		if (!containerId) throw new WorkError(409, "session-not-running", { agent: target.name });
-		const sh = (script: string, ...args: string[]) =>
-			this.docker.execCapture(target.session_id, ["sh", "-c", script, "sh", ...args], {
-				containerId,
-				maxBytes: 16 * 1024,
-				timeoutMs: EXEC_TIMEOUT_MS,
-			});
+		const sh = await this.shell(target);
+		if (!sh) throw new WorkError(409, "session-not-running", { agent: target.name });
 
 		// A row left `creating` by an earlier attempt: what is really there decides.
 		if (row) {
@@ -235,10 +273,103 @@ export class AcpWorks {
 		throw this.incomplete(row, seen.state);
 	}
 
-	private async inspect(
-		sh: (script: string, ...args: string[]) => ReturnType<DockerManager["execCapture"]>,
-		id: string,
-	): Promise<{ state: string; sha: string | null }> {
+	/** Runs one of the fixed scripts in the agent's container; null if it is not running. */
+	private async shell(target: AgentRow): Promise<Shell | null> {
+		const containerId = await this.docker.runningContainerId(
+			`st-${target.session_id.slice(0, 12)}`,
+		);
+		if (!containerId) return null;
+		return (script, ...args) =>
+			this.docker.execCapture(target.session_id, ["sh", "-c", script, "sh", ...args], {
+				containerId,
+				maxBytes: 16 * 1024,
+				timeoutMs: EXEC_TIMEOUT_MS,
+				env: { GIT_TERMINAL_PROMPT: "0" },
+			});
+	}
+
+	/** Messages of the work that are still to run or running (ids). */
+	private async busy(w: WorkRow): Promise<number[]> {
+		const r = await d1Query<{ id: number }>(
+			`SELECT m.id FROM agent_messages m JOIN acp_agents a ON a.owner_user_id = m.owner_user_id AND a.name = m.to_id
+			 WHERE m.owner_user_id = ? AND a.agent_id = ? AND m.context = ? AND m.state IN ('pending', 'running') ORDER BY m.id`,
+			[w.owner_user_id, w.agent_id, w.id],
+		);
+		return r.results.map((x) => x.id);
+	}
+
+	/**
+	 * active → closed: no message of it pending or running (checked in the
+	 * UPDATE itself). From then on nothing more is sent into it; nothing is
+	 * removed. No reopening.
+	 */
+	async close(w: WorkRow): Promise<WorkRow> {
+		const r = await d1Query<WorkRow>(
+			`UPDATE agent_works SET state = 'closed', closed_at = ${NOW}
+			 WHERE owner_user_id = ?1 AND id = ?2 AND state = 'active'
+				AND NOT EXISTS (SELECT 1 FROM agent_messages m JOIN acp_agents a ON a.owner_user_id = m.owner_user_id AND a.name = m.to_id
+					WHERE m.owner_user_id = ?1 AND a.agent_id = ?3 AND m.context = ?2 AND m.state IN ('pending', 'running'))
+			 RETURNING *`,
+			[w.owner_user_id, w.id, w.agent_id],
+		);
+		if (r.results[0]) {
+			logger.info(`[acp] work ${w.id} closed`);
+			return r.results[0];
+		}
+		const now = await this.get(w.owner_user_id, w.id);
+		if (now?.state !== "active")
+			throw new WorkError(409, "work-not-active", { state: now?.state ?? null });
+		throw new WorkError(409, "work-busy", { messages: await this.busy(w) });
+	}
+
+	/**
+	 * closed | cleanup-pending → cleaned, only when nothing can be lost (CLEAN's
+	 * checks, plus no message of it pending or running); any doubt ⇒
+	 * `cleanup-pending` with every reason, and nothing is removed. Explicit only:
+	 * nothing cleans by itself.
+	 */
+	async clean(w: WorkRow, target: AgentRow): Promise<WorkRow> {
+		if (w.state !== "closed" && w.state !== "cleanup-pending")
+			throw new WorkError(409, "work-not-closed", { state: w.state });
+		const reasons: string[] = [];
+		const busy = await this.busy(w);
+		if (busy.length)
+			reasons.push(`mensajes pendientes o en curso: ${busy.map((id) => `#${id}`).join(", ")}`);
+		const sh = await this.shell(target);
+		let done = false;
+		if (!sh) reasons.push("la sesión del agente no está corriendo: no se puede comprobar");
+		else {
+			try {
+				const res = await sh(CLEAN, w.id, w.base_sha ?? "", reasons.length ? "check" : "remove");
+				const out = parse(res.stdout);
+				reasons.push(...(out.get("reason") ?? []));
+				done = out.has("removed") || out.has("absent");
+				if (!done && !reasons.length)
+					reasons.push(`no se pudo comprobar (exit ${res.exitCode ?? "desconocido"})`);
+			} catch (err) {
+				reasons.push(`no se pudo comprobar: ${(err as Error).message}`);
+			}
+		}
+		if (done && !reasons.length) {
+			const r = await d1Query<WorkRow>(
+				`UPDATE agent_works SET state = 'cleaned', cleaned_at = ${NOW}, note = NULL
+				 WHERE owner_user_id = ? AND id = ? AND state IN ('closed', 'cleanup-pending') RETURNING *`,
+				[w.owner_user_id, w.id],
+			);
+			if (r.results[0]) {
+				logger.info(`[acp] work ${w.id} cleaned (worktree removed, branch ${w.branch} kept)`);
+				return r.results[0];
+			}
+		}
+		const note = reasons.join("; ").slice(0, 2000);
+		await d1Query(
+			"UPDATE agent_works SET state = 'cleanup-pending', note = ? WHERE owner_user_id = ? AND id = ? AND state IN ('closed', 'cleanup-pending')",
+			[note, w.owner_user_id, w.id],
+		);
+		throw new WorkError(409, "cleanup-pending", { reasons });
+	}
+
+	private async inspect(sh: Shell, id: string): Promise<{ state: string; sha: string | null }> {
 		const r = await sh(INSPECT, id);
 		const out = parse(r.stdout);
 		return { state: out.get("state")?.[0] ?? "unknown", sha: out.get("sha")?.[0] ?? null };

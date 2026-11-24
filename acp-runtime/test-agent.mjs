@@ -21,6 +21,13 @@
 //                            → the task is declared ST-PERSISTENT (the message
 //                              closes) and runs `st send` N s later: a process
 //                              that outlived its message
+//   st: <args>               → runs `st <args>` (st work new|list|close|clean,
+//                              st send --work, st port check …) as a tool call
+//                              and answers with its exit code and output
+//   servidor [puerto]        → starts an HTTP server on that port (default
+//                              ST_PORT_BASE) in the session's cwd and
+//                              environment, declared ST-PERSISTENT; it lives
+//                              until it is killed or the session closes
 //   preguntá: <q> | a | b    → asks the person (ACP elicitation/create, the form
 //                              claude-agent-acp makes of AskUserQuestion) and
 //                              continues with the answer
@@ -34,7 +41,7 @@
 // adapter's) and cwd — what its `st` runs with; `session/close` unloads it
 // and stops its background tasks. Effort levels per model are test-only (opus: five, sonnet or
 // no model: three, haiku: none — the option is absent, like the real adapter).
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
@@ -89,7 +96,23 @@ const ask = (method, params) =>
 // Loaded sessions: id → { env, cwd, timers }. Not persisted (a resume brings them again).
 const loaded = new Map();
 const load = (params, sessionId) =>
-	loaded.set(sessionId, { env: params._meta?.claudeCode?.options?.env ?? {}, cwd: params.cwd, timers: new Set() });
+	loaded.set(sessionId, { env: params._meta?.claudeCode?.options?.env ?? {}, cwd: params.cwd, timers: new Set(), procs: new Set() });
+/** What a session left running stops with it (close or resume), like the real adapter. */
+const unload = (sessionId) => {
+	const l = loaded.get(sessionId);
+	for (const t of l?.timers ?? []) clearTimeout(t);
+	for (const p of l?.procs ?? []) p.kill();
+};
+/** `st <args>` with the session's environment and cwd: {code, out}. */
+const stRun = (sessionId, args) =>
+	new Promise((resolve) => {
+		const l = loaded.get(sessionId);
+		execFile("st", args, { timeout: 60_000, env: { ...process.env, ...l?.env }, cwd: l?.cwd }, (err, stdout, stderr) =>
+			resolve({ code: err ? (typeof err.code === "number" ? err.code : 1) : 0, out: `${stdout}${stderr}`.trim() }),
+		);
+	});
+// "a b \"c d\"" → ["a", "b", "c d"]
+const argv = (line) => [...line.matchAll(/"([^"]*)"|(\S+)/g)].map((m) => m[1] ?? m[2]);
 const stSend = (sessionId, to, text) =>
 	new Promise((resolve) => {
 		const l = loaded.get(sessionId);
@@ -171,6 +194,29 @@ async function prompt(sessionId, text) {
 			save();
 			await say(`${got} ${ctx}`);
 		}
+	} else if ((m = /^st:\s*(.+)$/im.exec(body))) {
+		const id = `t${++tool}`;
+		update(sessionId, { sessionUpdate: "tool_call", toolCallId: id, title: `st ${m[1]}`, kind: "execute", status: "in_progress" });
+		const r = await stRun(sessionId, argv(m[1]));
+		update(sessionId, { sessionUpdate: "tool_call_update", toolCallId: id, status: r.code === 0 ? "completed" : "failed" });
+		await say(`st ${m[1]} → exit ${r.code}: ${r.out} ${ctx}`);
+	} else if ((m = /^servidor(?: (\d+))?\s*$/im.exec(body))) {
+		const l = loaded.get(sessionId);
+		const port = Number(m[1] ?? l?.env?.ST_PORT_BASE);
+		const taskId = `srv-${randomUUID().slice(0, 8)}`;
+		const srv = spawn(process.execPath, ["-e", "require('http').createServer((q, r) => r.end('ok')).listen(Number(process.argv[1]))", String(port), "st-test-server"], {
+			cwd: l?.cwd,
+			env: { ...process.env, ...l?.env },
+			stdio: "ignore",
+		});
+		l?.procs.add(srv);
+		update(sessionId, { sessionUpdate: "async_task_spawned", asyncTaskId: taskId, taskType: "shell", name: `servidor en ${port}` });
+		srv.on("exit", () => {
+			l?.procs.delete(srv);
+			update(sessionId, { sessionUpdate: "async_task_state_update", asyncTaskId: taskId, state: "completed" });
+		});
+		await sleep(500);
+		await say(`Servidor en el puerto ${port} (pid ${srv.pid}). ${ctx}\nST-PERSISTENT: ${taskId} servidor en ${port}`);
 	} else if ((m = /rondas (\d+):\s*consult[aá] a @([a-z][a-z0-9-]*):\s*([\s\S]+)$/i.exec(body))) {
 		const [, n, to, text] = m;
 		s.rounds = { to, text: text.trim(), left: Math.max(Number(n) - 1, 0) };
@@ -271,11 +317,11 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
 		} else if (method === "session/resume") {
 			if (!sessions[params.sessionId]) throw Object.assign(new Error("unknown session"), { code: -32002 });
 			// Like the real adapter: reloading restarts the session — what it left running stops.
-			for (const t of loaded.get(params.sessionId)?.timers ?? []) clearTimeout(t);
+			unload(params.sessionId);
 			load(params, params.sessionId);
 			result = { configOptions: configOptions(sessions[params.sessionId]) };
 		} else if (method === "session/close") {
-			for (const t of loaded.get(params.sessionId)?.timers ?? []) clearTimeout(t);
+			unload(params.sessionId);
 			loaded.delete(params.sessionId);
 			result = {};
 		} else if (method === "session/set_mode") result = {};

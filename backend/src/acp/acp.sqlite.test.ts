@@ -60,6 +60,8 @@ const fx = {
 	/** The worktree add: "ok", fails ("fail": nothing made), "throw" after making it, "cut" making nothing, "half" (branch only). */
 	create: "ok" as "ok" | "fail" | "throw" | "cut" | "half",
 	calls: [] as string[],
+	/** What the cleaning script reports (its reason lines, or removed / absent). */
+	clean: ["removed"] as string[],
 };
 const out = (s: string, exitCode = 0) => ({
 	stdout: Buffer.from(s),
@@ -87,6 +89,13 @@ const container = {
 					`sha=${arg === "v1" ? "1".repeat(40) : "b".repeat(40)}`,
 				);
 			return out(`${lines.join("\n")}\n`);
+		}
+		if (script.includes("worktree remove")) {
+			fx.calls.push(`clean ${id} ${cmd[6]}`);
+			const said = fx.clean;
+			fx.clean = ["removed"];
+			// "check" mode never removes, so it never says so.
+			return out(`${said.filter((l) => cmd[6] === "remove" || l !== "removed").join("\n")}\n`);
 		}
 		if (script.includes("worktree add")) {
 			fx.calls.push(`create ${id} ${arg}`);
@@ -1515,5 +1524,138 @@ describe("ACP works: creation, delegation (v26)", () => {
 		expect(solo).toEqual([]);
 		const arq = (await call(as("arquitecto"), "GET", "/works")).body as Array<{ id: string }>;
 		expect(arq.map((w) => w.id)).toContain("st-42");
+	});
+});
+
+describe("ACP works: close, clean, the slot's session (v26)", () => {
+	const SIDC = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+	let w = "";
+	const mk = async (id: string) => {
+		const r = await call(owner, "POST", "/works", { agent: "cerrador", id });
+		expect(r.status).toBe(201);
+		return r.body;
+	};
+	const act = (who: Who, id: string, verb: "close" | "clean") =>
+		call(who, "POST", `/works/${id}/${verb}`);
+	const state = (id: string) =>
+		db
+			.prepare("SELECT state, note, closed_at, cleaned_at FROM agent_works WHERE id = ?")
+			.get(id) as {
+			state: string;
+			note: string | null;
+			closed_at: string | null;
+			cleaned_at: string | null;
+		};
+
+	beforeAll(async () => {
+		db.prepare(
+			"INSERT INTO sessions (session_id, user_id, name, container_name, status) VALUES (?, ?, 'cerrador', ?, 'running')",
+		).run(SIDC, OWNER, `st-${SIDC.slice(0, 12)}`);
+		const a = await acp.create(SIDC, OWNER, "cerrador", { projectId: "p-1" });
+		tokens.cerrador = acp.tokenFor(a.agent_id);
+		await acp.setMaxConcurrency(OWNER, "cerrador", 2);
+		w = (await mk("cierre")).id;
+	});
+
+	it("close: refused while a message of it is pending or running; then closed, and --work refuses it", async () => {
+		const m = (await call(owner, "POST", "/messages", { to: "cerrador", body: "x", work: w })).body;
+		expect((await act(owner, w, "close")).body).toMatchObject({
+			error: "work-busy",
+			messages: [m.id],
+		});
+		const c = await call(as("cerrador"), "POST", "/runner/claim", { slot: 2 });
+		expect(c.body.id).toBe(m.id);
+		expect((await act(owner, w, "close")).body.error).toBe("work-busy");
+		await call(as("cerrador"), "POST", `/runner/messages/${m.id}/result`, {
+			state: "done",
+			text: ".",
+		});
+		expect((await act(as("solo"), w, "close")).body.error).toBe("work-other-project");
+		// An agent of the work's project may close it.
+		const closed = await act(as("arquitecto"), w, "close");
+		expect(closed.status).toBe(200);
+		expect(closed.body.state).toBe("closed");
+		expect(state(w).closed_at).toBeTruthy();
+		expect((await act(owner, w, "close")).body).toMatchObject({
+			error: "work-not-active",
+			state: "closed",
+		});
+		expect(
+			(await call(owner, "POST", "/messages", { to: "cerrador", body: "y", work: w })).body,
+		).toMatchObject({ error: "work-not-active", state: "closed" });
+		expect((await act(owner, "no-existe", "close")).status).toBe(404);
+	});
+
+	it("the claim tells a slot holding a work that is no longer active to release its session", async () => {
+		const open = (id: string) =>
+			call(as("cerrador"), "POST", "/runner/claim", { slot: 2, open: id });
+		expect((await open(w)).headers.get("x-st-release")).toBe(w);
+		const live = (await mk("sigue")).id;
+		expect((await open(live)).headers.get("x-st-release")).toBeNull();
+		expect(
+			(await call(as("cerrador"), "POST", "/runner/claim", { slot: 2 })).headers.get(
+				"x-st-release",
+			),
+		).toBeNull();
+	});
+
+	it("clean: only from closed; every doubt leaves it cleanup-pending with all the reasons; then cleaned", async () => {
+		expect((await act(owner, "sigue", "clean")).body).toMatchObject({
+			error: "work-not-closed",
+			state: "active",
+		});
+		fx.clean = [
+			"reason=cambios sin commitear: ?? a.txt",
+			"reason=proceso 42 (vite) con cwd en el trabajo",
+		];
+		const held = await act(owner, w, "clean");
+		expect(held.status).toBe(409);
+		expect(held.body).toEqual({
+			error: "cleanup-pending",
+			reasons: ["cambios sin commitear: ?? a.txt", "proceso 42 (vite) con cwd en el trabajo"],
+		});
+		expect(state(w)).toMatchObject({
+			state: "cleanup-pending",
+			note: "cambios sin commitear: ?? a.txt; proceso 42 (vite) con cwd en el trabajo",
+		});
+		// A stopped session cannot be checked: a doubt, nothing removed.
+		fx.running = false;
+		try {
+			expect((await act(owner, w, "clean")).body.reasons).toEqual([
+				"la sesión del agente no está corriendo: no se puede comprobar",
+			]);
+		} finally {
+			fx.running = true;
+		}
+		// A message of it still pending (sent before the close): a doubt, checked without removing.
+		db.prepare(
+			"INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, body, state, context) VALUES (?, 'owner', 'cerrador', 'request', 'tarde', 'pending', ?)",
+		).run(OWNER, w);
+		fx.calls = [];
+		const late = await act(owner, w, "clean");
+		expect(late.body.reasons[0]).toMatch(/^mensajes pendientes o en curso: #\d+$/);
+		expect(fx.calls).toEqual([`clean ${w} check`]);
+		db.prepare("UPDATE agent_messages SET state = 'failed' WHERE body = 'tarde'").run();
+		// Nothing in the way: removed, cleaned; the id stays taken.
+		const ok = await act(as("arquitecto"), w, "clean");
+		expect(ok.status).toBe(200);
+		expect(ok.body).toMatchObject({ state: "cleaned", note: null });
+		expect(state(w).cleaned_at).toBeTruthy();
+		expect((await act(owner, w, "clean")).body).toMatchObject({
+			error: "work-not-closed",
+			state: "cleaned",
+		});
+		expect((await call(owner, "POST", "/works", { agent: "cerrador", id: w })).body.error).toBe(
+			"work-exists",
+		);
+	});
+
+	it("a cleaning whose removal was done but not confirmed finishes on the next try (absent)", async () => {
+		const id = (await mk("ausente")).id;
+		await act(owner, id, "close");
+		fx.clean = ["reason=no se pudo comprobar"];
+		expect((await act(owner, id, "clean")).status).toBe(409);
+		fx.clean = ["absent"];
+		expect((await act(owner, id, "clean")).body.state).toBe("cleaned");
 	});
 });

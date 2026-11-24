@@ -301,6 +301,53 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 		}),
 	);
 
+	// POST /works/:id/close | /works/:id/clean — the person, or an agent of the
+	// work's project (a project there must be).
+	const ownWork = async (req: Request, res: Response) => {
+		const c = caller(res);
+		const w = await works.get(ownerOf(c), String(req.params.id));
+		if (!w) {
+			res.status(404).json({ error: "work-not-found" });
+			return null;
+		}
+		if (c.kind === "agent" && (w.project_id === null || w.project_id !== c.agent.project_id)) {
+			res.status(403).json({ error: "work-other-project" });
+			return null;
+		}
+		const agent = (await acp.list(w.owner_user_id)).find((a) => a.agent_id === w.agent_id);
+		if (!agent) {
+			res.status(404).json({ error: "work-not-found" });
+			return null;
+		}
+		return { w, agent };
+	};
+	router.post(
+		"/works/:id/close",
+		wrap(async (req, res) => {
+			const found = await ownWork(req, res);
+			if (!found) return;
+			try {
+				res.json(workView({ ...(await works.close(found.w)), agent: found.agent.name }));
+			} catch (err) {
+				refuse(res, err);
+			}
+		}),
+	);
+	router.post(
+		"/works/:id/clean",
+		wrap(async (req, res) => {
+			const found = await ownWork(req, res);
+			if (!found) return;
+			try {
+				res.json(
+					workView({ ...(await works.clean(found.w, found.agent)), agent: found.agent.name }),
+				);
+			} catch (err) {
+				refuse(res, err);
+			}
+		}),
+	);
+
 	// GET /works — the person: all of theirs; an agent: its own and its project's.
 	router.get(
 		"/works",
@@ -569,6 +616,14 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 				(typeof only !== "string" || !CONTEXT_RE.test(only))
 			)
 				return void res.status(400).json({ error: "bad-context" });
+			// `open`: the work whose ACP session this slot holds (sent now and then).
+			// No longer active ⇒ told to close it — the runner does, idle and with no
+			// open task (a process it left wins: the session stays).
+			const open = (req.body as { open?: unknown } | undefined)?.open;
+			if (typeof open === "string" && CONTEXT_RE.test(open)) {
+				const w = await works.get(agent.owner_user_id, open);
+				if (w?.state !== "active") res.setHeader("X-ST-Release", open);
+			}
 			const msg = await acp.claim(agent, slot, typeof only === "string" ? only : null);
 			if (msg) return void res.json(await withContext(agent, msg));
 			const running = await acp.runningInSlot(agent, slot);
