@@ -193,9 +193,11 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 	// to conversations; they leave `conversation_id` NULL (the Archive).
 	//
 	// An agent chooses nothing: its message takes the scope AND conversation of
-	// the message it is working on when the recipient takes part in that
-	// project, and is direct (no conversation) otherwise — so an exchange
-	// started in a topic stays there and a private one stays private.
+	// the message it is working on. From a topic the recipient must be of that
+	// project (409 recipient-other-project otherwise); from a run with no
+	// conversation it is scoped when the recipient takes part in that project
+	// and direct otherwise — so an exchange started in a topic stays there and
+	// a private one stays private.
 	router.post(
 		"/messages",
 		wrap(async (req, res) => {
@@ -352,6 +354,17 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 					return void res.status(409).json({
 						error: "depth-limit",
 						message: `chain of agent requests longer than ${acp.config.maxDepth}: answer with what you have instead of asking further`,
+					});
+				// A request from a topic never leaves its project: sent as a direct
+				// message it would carry the topic's content to another project and
+				// live only in the read-only Archive, its reply landing back in the
+				// topic with no visible request. Runs without a conversation (the old
+				// Project Chat, agents without a project) keep the direct fallback.
+				if (cur.conversation_id && target.project_id !== cur.project_id)
+					return void res.status(409).json({
+						error: "recipient-other-project",
+						agent: target.name,
+						message: `@${target.name} no es de este proyecto: no se envió nada`,
 					});
 				// Scope and conversation go together: both, or neither.
 				const inScope = Boolean(cur.project_id && target.project_id === cur.project_id);

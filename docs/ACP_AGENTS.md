@@ -297,9 +297,13 @@ post stores the conversation's `recipients`.
 
 ### Inheritance (nothing to choose for an agent)
 
-- An agent's `st send` takes the **conversation and scope** of the message it is running when the
-  recipient is in that project; otherwise it is direct, with no conversation. An agent sending
-  `conversationId`, a list or `team` gets `400 conversation-inherited`.
+- An agent's `st send` takes the **conversation and scope** of the message it is running; a request
+  from a topic never leaves its project: a recipient outside the conversation's project (or in none) is
+  `409 recipient-other-project` («@x no es de este proyecto: no se envió nada») and no row is written.
+  Only a run with no conversation (the Archive's paths, agents without a project) keeps the old rule:
+  scope when the recipient is in that project, direct otherwise. A `work` outside the sender's project
+  is still `403 work-other-project`. An agent sending `conversationId`, a list or `team` gets
+  `400 conversation-inherited`.
 - The reply to a request (trigger) and the notice of an unfinished request (`unfinished:failed|uncertain`)
   copy the request's conversation.
 - A question to the person belongs to the conversation of the message it was asked from
