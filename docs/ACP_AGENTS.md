@@ -116,8 +116,8 @@ restarts). `ACP_MAX_RUNNING` (6) caps the whole backend.
 
 A message's **context** says where it runs:
 
-- `NULL` — the default context: the workspace checkout and the agent's ACP session of always. Only
-  slot 1 runs it.
+- `NULL` — the default context: the workspace checkout. Only slot 1 runs it, with **one ACP session per
+  conversation** (v27, below).
 - a name (`^[a-z0-9][a-z0-9-]{0,39}$`) — a **work** (3c): its own git worktree
   `<workspace>/.st/ctx/<name>/` (the cwd of its own ACP session, `<workspace>/.st/acp/ctx/<name>.json`).
   Only slots ≥ 2 run it, so an agent with cap 1 never takes one (`400 context-needs-slots`).
@@ -136,6 +136,21 @@ context that never ran, one whose slot moved on to another context, or one whose
 lowered cap. `session/close` (and a resume) stops what that session left
 running, so a slot whose session still has an open task (a process declared `ST-PERSISTENT`) keeps
 that context and takes only its messages until the task ends.
+
+**Slot 1: one ACP session per conversation (v27).** Slot 1 generalizes what slots ≥ 2 do with works:
+its session key is the conversation of the message it takes — `<workspace>/.st/acp/conv/<id>.json`,
+cwd = the main checkout; a message with no conversation uses `session.json`, the session of always.
+Taking a message of another conversation closes the open session (`session/close`) and opens
+(`session/new` or `session/resume`) the new one; model and effort are re-applied as after any resume.
+Nothing is opened at start: only for a message it claims, or for the report about an interrupted one
+(in that message's conversation; a question orphaned with no interrupted run: `session.json`). So at
+most one conversation session is open per agent, and inactive topics hold no process. A session with
+an open task (a process declared `ST-PERSISTENT`) is never closed: slot 1 then claims only that
+conversation's messages (`POST /runner/claim {conversation: <id>|null}`) and the rest wait `pending`
+until the task ends. The claim still keeps one running message in the default context per agent, so
+two runs never share the main checkout; parallel code goes through works. A message with `work` runs
+in its work's session (slot ≥ 2) and keeps its conversation. The runner's protocol tells the agent not
+to leave persistent processes or edit code in parallel from a conversation: that is what a work is for.
 
 **Who sent a `st send`.** A named context's session gets its own credential
 (`acp1.<agentId>.<context>.<hmac>`, in the session's environment on new and resume); the default

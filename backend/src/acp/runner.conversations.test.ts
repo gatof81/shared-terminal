@@ -1,0 +1,331 @@
+/**
+ * acp/runner.conversations.test.ts — the REAL runner (acp-runtime/runner.mjs)
+ * driving the deterministic test adapter (acp-runtime/test-agent.mjs) against
+ * the REAL /api/acp router on an in-memory SQLite (D1 is SQLite), with no
+ * Docker: two runner processes on the host, their state in a temp dir.
+ *
+ * What it pins (B2, v27): slot 1 keeps one ACP session per conversation —
+ * resumed on demand, its own count when alternating —, opens nothing at
+ * start, never closes a session with an open task (the next conversation
+ * waits), a message to an agent busy in another topic waits `pending` and
+ * runs after, and after a restart the interrupted message is reported on in
+ * its own conversation's session.
+ */
+
+import { type ChildProcess, spawn } from "node:child_process";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import type http from "node:http";
+import { createRequire } from "node:module";
+import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import type { DatabaseSync as DatabaseSyncT } from "node:sqlite";
+import express from "express";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+
+const { DatabaseSync } = createRequire(import.meta.url)(
+	"node:sqlite",
+) as typeof import("node:sqlite");
+
+vi.mock("../auth.js", async (orig) => {
+	const real = (await orig()) as Record<string, unknown>;
+	return {
+		...real,
+		requireAuth: (
+			req: { headers: Record<string, string | undefined>; userId?: string },
+			res: { status: (n: number) => { json: (b: unknown) => void } },
+			next: () => void,
+		) => {
+			const u = req.headers["x-test-user"];
+			if (!u) return void res.status(401).json({ error: "unauthenticated" });
+			req.userId = u;
+			next();
+		},
+	};
+});
+
+const RUNTIME = path.resolve(__dirname, "../../../acp-runtime");
+const OWNER = "u-owner";
+const PID = "p-r";
+const realFetch = globalThis.fetch;
+let db: DatabaseSyncT;
+let server: http.Server;
+let url = "";
+let tmp = "";
+const tokens: Record<string, string> = {};
+const runners = new Map<string, ChildProcess>();
+const logs = new Map<string, string>();
+
+function run(sql: string, params: unknown[]) {
+	try {
+		const st = db.prepare(sql);
+		const bind = params.map((p) => (typeof p === "boolean" ? Number(p) : p)) as Array<
+			string | number | null
+		>;
+		if (/^\s*(SELECT|PRAGMA|WITH)\b/i.test(sql) || /\bRETURNING\b/i.test(sql))
+			return {
+				success: true,
+				errors: [],
+				result: [{ results: st.all(...bind), success: true, meta: {} }],
+			};
+		const info = st.run(...bind);
+		return {
+			success: true,
+			errors: [],
+			result: [{ results: [], success: true, meta: { changes: Number(info.changes) } }],
+		};
+	} catch (err) {
+		return { success: false, errors: [{ message: (err as Error).message }], result: [] };
+	}
+}
+
+const stateOf = (name: string) => path.join(tmp, name, "state");
+
+/** One agent's slot-1 runner, as `ensureRunner` launches it (without the restart loop). */
+function startRunner(name: string) {
+	const ws = path.join(tmp, name, "workspace");
+	const p = spawn(process.execPath, ["--no-warnings", path.join(RUNTIME, "runner.mjs")], {
+		env: {
+			...process.env,
+			HOME: path.join(tmp, name, "home"),
+			ST_URL: url,
+			ST_TOKEN: tokens[name],
+			ST_AGENT: name,
+			ACP_AGENT_CMD: path.join(tmp, "agent"),
+			AGENT_CWD: ws,
+			RUNNER_STATE: stateOf(name),
+			PATH: `${path.join(RUNTIME, "bin")}:${process.env.PATH}`,
+		},
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	const keep = (b: Buffer) => logs.set(name, (logs.get(name) ?? "") + b.toString());
+	p.stdout?.on("data", keep);
+	p.stderr?.on("data", keep);
+	runners.set(name, p);
+	return p;
+}
+
+async function call(method: string, p: string, body?: unknown) {
+	const res = await realFetch(`${url}/api/acp${p}`, {
+		method,
+		headers: { "content-type": "application/json", "x-test-user": OWNER },
+		...(body === undefined ? {} : { body: JSON.stringify(body) }),
+	});
+	const text = await res.text();
+	return { status: res.status, body: text ? JSON.parse(text) : null };
+}
+type Msg = import("./agents.js").MessageRow;
+const msg = (id: number) =>
+	db.prepare("SELECT * FROM agent_messages WHERE id = ?").get(id) as unknown as Msg;
+async function until<T>(
+	what: string,
+	fn: () => T | null | undefined | false,
+	ms = 30_000,
+): Promise<T> {
+	const end = Date.now() + ms;
+	for (;;) {
+		const v = fn();
+		if (v) return v;
+		if (Date.now() > end)
+			throw new Error(`timed out waiting for ${what}\n${[...logs.values()].join("\n")}`);
+		await new Promise((ok) => setTimeout(ok, 200));
+	}
+}
+const settled = (id: number, ms?: number) =>
+	until(
+		`#${id} settled`,
+		() => {
+			const m = msg(id);
+			return ["done", "failed", "uncertain"].includes(m.state) ? m : null;
+		},
+		ms,
+	);
+// The LAST one: a reply's answer quotes the other agent's, count included.
+const count = (m: Msg) =>
+	Number([...(m.result_text ?? "").matchAll(/sesión ACP: (\d+)/g)].at(-1)?.[1] ?? Number.NaN);
+const post = async (to: string, body: string, conversationId: string) =>
+	(await call("POST", "/messages", { to, body, conversationId })).body as Msg;
+
+let A = "";
+let B = "";
+
+beforeAll(async () => {
+	vi.stubEnv("CLOUDFLARE_ACCOUNT_ID", "acct");
+	vi.stubEnv("CLOUDFLARE_API_TOKEN", "tok");
+	vi.stubEnv("D1_DATABASE_ID", "dbid");
+	vi.stubEnv("SECRETS_ENCRYPTION_KEY", Buffer.alloc(32, 7).toString("base64"));
+	db = new DatabaseSync(":memory:");
+	db.exec("PRAGMA foreign_keys = ON");
+	vi.stubGlobal(
+		"fetch",
+		vi.fn(async (u: string | URL, init?: RequestInit) => {
+			if (!String(u).includes("/d1/database/")) return realFetch(u, init);
+			const body = JSON.parse(String(init?.body)) as
+				| { sql: string; params?: unknown[] }
+				| Array<{ sql: string; params?: unknown[] }>;
+			if (Array.isArray(body)) {
+				const results = body.map((b) => run(b.sql, b.params ?? []));
+				const bad = results.find((r) => !r.success);
+				return new Response(
+					JSON.stringify(
+						bad ?? { success: true, errors: [], result: results.flatMap((r) => r.result) },
+					),
+				);
+			}
+			return new Response(JSON.stringify(run(body.sql, body.params ?? [])));
+		}),
+	);
+	const { migrateDb } = await import("../db.js");
+	await migrateDb();
+	db.prepare("INSERT INTO users (id, username, password_hash) VALUES (?, 'owner', 'x')").run(OWNER);
+	db.prepare(
+		"INSERT INTO projects (project_id, owner_user_id, name, client_request_id, request_hash) VALUES (?, ?, 'Runner', 'c-r', 'h')",
+	).run(PID, OWNER);
+	const { AcpAgents, acpConfigFromEnv } = await import("./agents.js");
+	const { AcpWorks } = await import("./works.js");
+	const { buildAcpRouter } = await import("../routes/acp.js");
+	const acp = new AcpAgents(acpConfigFromEnv("/nonexistent", 3001), {} as never);
+	tmp = mkdtempSync(path.join(tmpdir(), "st-runner-conv-"));
+	writeFileSync(
+		path.join(tmp, "agent"),
+		`#!/bin/sh\nexec "${process.execPath}" "${path.join(RUNTIME, "test-agent.mjs")}" "$@"\n`,
+		{ mode: 0o755 },
+	);
+	for (const [i, name] of ["rc", "rd"].entries()) {
+		const sid = `b0000000-0000-4000-8000-00000000000${i}`;
+		db.prepare(
+			"INSERT INTO sessions (session_id, user_id, name, container_name, status) VALUES (?, ?, ?, ?, 'running')",
+		).run(sid, OWNER, name, `st-${sid.slice(0, 12)}`);
+		const a = await acp.create(sid, OWNER, name, { projectId: PID, runtime: "st-test-agent" });
+		tokens[name] = acp.tokenFor(a.agent_id);
+	}
+	const app = express();
+	app.use("/api/acp", buildAcpRouter(acp, new AcpWorks(acp.config, {} as never)));
+	server = app.listen(0, "127.0.0.1");
+	await new Promise((ok) => server.once("listening", ok));
+	url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+	const conv = async (n: number, title: string) =>
+		(
+			await call("POST", "/conversations", {
+				projectId: PID,
+				title,
+				clientRequestId: `d0000000-0000-4000-8000-00000000000${n}`,
+			})
+		).body.id as string;
+	A = await conv(1, "Tema A");
+	B = await conv(2, "Tema B");
+	startRunner("rc");
+	startRunner("rd");
+}, 30_000);
+
+afterAll(async () => {
+	for (const p of runners.values()) p.kill("SIGKILL");
+	// The adapters die with their stdin; give them a moment before the dir goes.
+	await new Promise((ok) => setTimeout(ok, 300));
+	server?.close();
+	rmSync(tmp, { recursive: true, force: true });
+	vi.unstubAllGlobals();
+	vi.unstubAllEnvs();
+});
+
+describe("runner slot 1: one ACP session per conversation (B2)", () => {
+	it("opens nothing at start; alternating two conversations, each keeps its own session and count", async () => {
+		// Started and idle: no session file yet (nothing opened just to be closed).
+		await until("runner rc claiming", () => (logs.get("rc") ?? "").includes("starting slot 1"));
+		await new Promise((ok) => setTimeout(ok, 1_500));
+		expect(existsSync(path.join(stateOf("rc"), "session.json"))).toBe(false);
+		const a1 = await settled((await post("rc", "uno", A)).id);
+		const b1 = await settled((await post("rc", "uno", B)).id);
+		const a2 = await settled((await post("rc", "dos", A)).id);
+		const b2 = await settled((await post("rc", "dos", B)).id);
+		expect([a1, b1, a2, b2].map((m) => m.state)).toEqual(["done", "done", "done", "done"]);
+		expect([count(a1), count(b1), count(a2), count(b2)]).toEqual([1, 1, 2, 2]);
+		expect(readdirSync(path.join(stateOf("rc"), "conv")).sort()).toEqual(
+			[`${A}.json`, `${B}.json`].sort(),
+		);
+		expect(existsSync(path.join(stateOf("rc"), "session.json"))).toBe(false);
+	}, 60_000);
+
+	it("a message to an agent busy in another conversation waits pending and runs after", async () => {
+		const busy = await post("rc", "esperá 3", A);
+		await until("busy running", () => msg(busy.id).state === "running");
+		const next = await post("rc", "después", B);
+		await new Promise((ok) => setTimeout(ok, 1_000));
+		expect(msg(next.id).state).toBe("pending");
+		const agents = (await call("GET", "/agents")).body as Array<Record<string, unknown>>;
+		expect(agents.find((a) => a.name === "rc")).toMatchObject({
+			runningIn: [{ id: busy.id, conversationId: A }],
+			queue: [{ id: next.id, conversationId: B }],
+		});
+		const [d1, d2] = [await settled(busy.id), await settled(next.id)];
+		expect(d2.started_at && d1.finished_at && d2.started_at >= d1.finished_at).toBe(true);
+		expect(count(d2)).toBe(3); // B's third, in B's session
+	}, 60_000);
+
+	it("never closes a session with an open task: the next conversation waits until it ends", async () => {
+		const pers = await settled((await post("rc", "persistente 5: consultá a @rd: tarde", A)).id);
+		expect(pers.state).toBe("done");
+		const next = await post("rc", "tras el proceso", B);
+		await new Promise((ok) => setTimeout(ok, 2_500));
+		expect(msg(next.id).state).toBe("pending"); // A's session holds a live task
+		const d = await settled(next.id);
+		expect(
+			Date.parse(d.started_at as string) - Date.parse(pers.finished_at as string),
+		).toBeGreaterThanOrEqual(4_000);
+		// The process outlived its message: its st send was refused, nothing reached @rd.
+		expect(
+			db.prepare("SELECT COUNT(*) AS n FROM agent_messages WHERE body = 'tarde'").get(),
+		).toEqual({ n: 0 });
+	}, 60_000);
+
+	it("a consult and its reply stay in the conversation; the reply runs in that conversation's session", async () => {
+		const m = await settled((await post("rc", "consultá a @rd: ¿hola?", B)).id);
+		const consult = await until(
+			"consult",
+			() =>
+				db
+					.prepare(
+						"SELECT * FROM agent_messages WHERE from_id = 'rc' AND to_id = 'rd' AND body = '¿hola?'",
+					)
+					.get() as Msg | undefined,
+		);
+		expect(consult.conversation_id).toBe(B);
+		await settled(consult.id);
+		const reply = await until(
+			"reply",
+			() =>
+				db
+					.prepare("SELECT * FROM agent_messages WHERE reply_to = ? AND kind = 'reply'")
+					.get(consult.id) as Msg | undefined,
+		);
+		expect(reply.conversation_id).toBe(B);
+		const r = await settled(reply.id);
+		expect(count(r)).toBe(count(m) + 1);
+	}, 60_000);
+
+	it("after a runner restart the interrupted message is uncertain and its report runs in its conversation's session", async () => {
+		const before = count(await settled((await post("rc", "antes", A)).id));
+		const long = await post("rc", "esperá 30", A);
+		await until("long running", () => msg(long.id).state === "running");
+		await new Promise((ok) => setTimeout(ok, 500));
+		runners.get("rc")?.kill("SIGKILL");
+		await new Promise((ok) => setTimeout(ok, 500));
+		startRunner("rc");
+		const u = await settled(long.id);
+		expect(u.state).toBe("uncertain");
+		const report = await until(
+			"report",
+			() =>
+				db.prepare("SELECT * FROM agent_messages WHERE recovery_of = ?").get(long.id) as
+					| Msg
+					| undefined,
+		);
+		expect(report).toMatchObject({ from_id: "system", conversation_id: A, project_id: PID });
+		const r = await settled(report.id);
+		// A's session: the interrupted prompt and the report both counted there.
+		expect(count(r)).toBe(before + 2);
+		expect(msg(long.id).attempts).toBe(1);
+		const b = await settled((await post("rc", "sigo", B)).id);
+		expect(count(b)).toBeGreaterThan(3);
+	}, 90_000);
+});

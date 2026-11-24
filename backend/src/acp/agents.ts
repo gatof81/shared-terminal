@@ -887,6 +887,10 @@ export class AcpAgents {
 	 *   so the default ACP session is only ever open in slot 1, as before slots;
 	 * - `onlyContext`: a slot holding a context it cannot close (processes the
 	 *   agent left running there) takes only that context's messages;
+	 * - `onlyConversation` (slot 1, v27): the same for the conversation whose
+	 *   ACP session slot 1 holds open with processes in it — given (a string,
+	 *   or null for the session of no conversation), only that conversation's
+	 *   messages; undefined = any;
 	 * - AFFINITY (named contexts): a context's message goes to the slot L that
 	 *   last started one of that context while L may still hold its ACP session
 	 *   — L's latest message is of that context and L ≤ max_concurrency. A slot
@@ -903,6 +907,7 @@ export class AcpAgents {
 		agent: AgentRow,
 		slot = 1,
 		onlyContext: string | null = null,
+		onlyConversation?: string | null,
 	): Promise<MessageRow | null> {
 		this.touch(agent.agent_id);
 		const r = await d1Query<MessageRow>(
@@ -910,6 +915,7 @@ export class AcpAgents {
 			 WHERE id = (SELECT m.id FROM agent_messages m WHERE m.owner_user_id = ?1 AND m.to_id = ?2 AND m.state = 'pending'
 				AND (CASE WHEN ?3 = 1 THEN m.context IS NULL ELSE m.context IS NOT NULL END)
 				AND (?4 IS NULL OR m.context = ?4)
+				AND (?6 = 0 OR m.conversation_id IS ?7)
 				AND NOT EXISTS (SELECT 1 FROM agent_messages x WHERE x.owner_user_id = ?1 AND x.to_id = ?2 AND x.state = 'running' AND x.context IS m.context)
 				AND (m.context IS NULL OR ${LAST_SLOT} IS NULL OR ${LAST_SLOT} = ?3
 					OR ${LAST_SLOT} > (SELECT max_concurrency FROM acp_agents WHERE owner_user_id = ?1 AND name = ?2)
@@ -918,7 +924,15 @@ export class AcpAgents {
 				ORDER BY m.id LIMIT 1)
 			 AND ${RUN_GUARD}
 			 RETURNING *`,
-			[agent.owner_user_id, agent.name, slot, onlyContext, this.config.maxRunning],
+			[
+				agent.owner_user_id,
+				agent.name,
+				slot,
+				onlyContext,
+				this.config.maxRunning,
+				onlyConversation === undefined ? 0 : 1,
+				onlyConversation ?? null,
+			],
 		);
 		return this.published(r.results[0]);
 	}
