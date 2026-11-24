@@ -9,7 +9,8 @@
 //   W6  each work has its own branch (work/<id>), directory (.st/ctx/<id>) and ACP session;
 //   W7  independent results: one commit per branch, pushed to the lab's bare remote ("PR"), one file each;
 //   W8  @rev (the lab's qa) asks @dev for a correction on st-a with `st send --work`;
-//   W9  it lands in st-a's context and ACP session; the reply comes back to @rev's context;
+//   W9  it lands in st-a's context and ACP session; the reply comes back to @rev's context; every message of a
+//       work goes back to the slot that holds its session (affinity, #756);
 //   W10 a controlled interruption (kill of the slot's runner) leaves st-b's message uncertain, not re-run, and
 //       st-a's concurrent message done;
 //   W11 one server per work in its own range (ST_PORT_BASE); `st port check` tells mine from the other's;
@@ -350,6 +351,25 @@ async function main() {
 	}
 	// Let the recovery report of the interrupted run (a system message in st-b's context) settle first.
 	await waitFor(async () => !(await projectRows(pid)).concat((await api("GET", `/api/acp/agents/${DEV}/feed`)).body?.messages ?? []).some((m) => workOf(m) === WB && ["pending", "running"].includes(m.state)), 120_000);
+
+	// W9b. Affinity slot <-> work (#756): a slot keeps a work's ACP session open after its message, so every later
+	// message of that work must go back to that slot, never to the other free one (a second slot would open the same
+	// session again: two adapters on one transcript, and a stale copy for the next message). One coincidence proves
+	// nothing (two free slots, 50 %), so the check covers EVERY message @dev ran in st-a and st-b up to here:
+	// delegations, commits, the correction of W8, the reply that came back, servers, port checks, the interrupted
+	// run and its recovery report (a restarted slot keeps its work).
+	const devRows = new Map();
+	for (const m of [...(await projectRows(pid)), ...((await api("GET", `/api/acp/agents/${DEV}/feed`)).body?.messages ?? [])])
+		if (m.to_id === DEV && m.slot != null && (workOf(m) === WA || workOf(m) === WB)) devRows.set(m.id, m);
+	const slotsOf = (w) => [...new Set([...devRows.values()].filter((m) => workOf(m) === w).map((m) => m.slot))];
+	const [sla, slb] = [slotsOf(WA), slotsOf(WB)];
+	const countOf = (w) => [...devRows.values()].filter((m) => workOf(m) === w).length;
+	check(
+		"W9b every message of st-a ran in one slot, every one of st-b in another (affinity, #756)",
+		sla.length === 1 && slb.length === 1 && sla[0] !== slb[0] && countOf(WA) >= 5 && countOf(WB) >= 3,
+		`st-a: ${countOf(WA)} msgs in slots [${sla}] · st-b: ${countOf(WB)} msgs in slots [${slb}]`,
+	);
+	check("W9b the correction of W8 went back to st-a's slot while st-b's slot was free", !!corr && corr.slot === ma.slot, `${corr?.slot} vs ${ma.slot}`);
 
 	// W12. Cleanup is conservative and checked by the backend, not by permission. An agent outside the project is
 	// refused. st-b (closed; its server from W11 still alive, the uncertain message does not block) ⇒
