@@ -158,12 +158,40 @@ work's first message — never by the runner, which fails a message whose direct
   real state: the worktree on its branch ⇒ `active`; nothing ⇒ the same POST creates it; anything
   else stays `creating` with a `note` (409 `work-incomplete`). Repeating a POST returns the work.
 - Ports: `port_base` = 20000 + 100·k, the lowest block free among the agent's works not `cleaned`
-  (a partial unique index). The work's session gets `ST_WORK` and `ST_PORT_BASE` in its environment
+  (a partial unique index), never past 60000 (409 `no-free-ports`). The answer to a creation names
+  the base it resolved (`base`, with `baseSha`): with no base and no `origin/HEAD` it is the main
+  checkout's `HEAD`. The work's session gets `ST_WORK` and `ST_PORT_BASE` in its environment
   (with its credential), and every message's header names the work, branch, directory and ports.
+- The free `context` field is gone: a message that still sends it is refused (400
+  `context-removed`), never run in the default context.
 - `{work}` on a message: the work must exist (404 `work-not-found`), be the recipient's (409
   `work-not-yours`) and `active` (409 `work-not-active`); an agent sender must share its project
   (403 `work-other-project`). Claim, slots, caps, depth and rounds are unchanged.
 - `GET /api/acp/works` (`st work list`): the person sees all; an agent its own and its project's.
+- **Ports.** The protocol tells the agent to use only its range and to check with
+  `st port check <port>` that the listener is its own process — an HTTP 200 proves nothing. From
+  `/proc` (the socket's inode in `/proc/net/tcp{,6}`, then the process holding it): exit 0 when that
+  process has the caller's `ST_WORK` or its cwd in the caller's worktree (default context: cwd in the
+  workspace, outside `.st/ctx/`, no `ST_WORK`); 1 someone else's (named); 2 nobody; 3 cannot tell.
+- **Close** (`POST /api/acp/works/:id/close`, `st work close`; the person or an agent of the work's
+  project): refused while a message of it is `pending`/`running` (409 `work-busy`); `closed` from
+  then on (`--work` ⇒ 409 `work-not-active`); nothing removed, no reopening.
+- **Releasing the session.** A slot ≥ 2 holding a work's ACP session says so in its claim (`open`,
+  every 30 s); a work no longer `active` gets `X-ST-Release` back and the runner closes that session
+  — idle and with no open task only: a process the agent left (`ST-PERSISTENT`) wins and the
+  session stays. The session file and transcript are kept.
+- **Clean** (`POST /api/acp/works/:id/clean`, `st work clean`; same callers; from `closed` or
+  `cleanup-pending`; explicit only, never automatic). Any doubt ⇒ nothing removed, state
+  `cleanup-pending` with the reasons in `note` and a 409 listing them all: a message of it pending
+  or running; a process with its cwd in the worktree or `ST_WORK=<id>` in its environment (an
+  unreadable one counts); `git status --porcelain` not empty; the branch tip neither reachable from a
+  remote-tracking ref, nor listed by `git ls-remote origin` (a squash-merged PR's `refs/pull/N/head`),
+  nor still the base (a failing `ls-remote` is a doubt); an ignored path that is not a
+  `node_modules/` or `dist/` directory (`--ignored=matching`; the list is fixed). Then
+  `git worktree remove` WITHOUT `--force` ⇒ `cleaned`. The branch `work/<id>`, `.st/acp` and the
+  transcript are never deleted; there is no garbage collection of old works.
+- Lowering `max_concurrency` still leaves the extra slots' processes alive until the container
+  restarts (an agent that runs works keeps its cap, e.g. 3).
 
 **Activity** (tool calls, background tasks, partial text) is pushed by the runner and kept **in
 backend memory** (last 500 events per agent). It is the live view; history is the messages. A backend

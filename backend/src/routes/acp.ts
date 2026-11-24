@@ -161,7 +161,23 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 		"/messages",
 		wrap(async (req, res) => {
 			const c = caller(res);
-			const { to, body, projectId, clientId, work } = (req.body ?? {}) as Record<string, unknown>;
+			const {
+				to,
+				body,
+				projectId,
+				clientId,
+				work,
+				context: freeContext,
+			} = (req.body ?? {}) as Record<string, unknown>;
+			// The free `context` is gone (v26): a caller still sending it meant an
+			// isolated directory, and ignoring it would run the message in the
+			// agent's main checkout.
+			if (freeContext !== undefined && freeContext !== null)
+				return void res.status(400).json({
+					error: "context-removed",
+					message:
+						"el campo context ya no existe: usá work (un trabajo creado con POST /api/acp/works)",
+				});
 			const name = String(to ?? "").replace(/^@/, "");
 			const owner = ownerOf(c);
 			if (typeof body !== "string" || body.trim() === "")
@@ -195,7 +211,14 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 					return void res.status(409).json({ error: "work-not-yours", work, agent: target.name });
 				if (w.state !== "active")
 					return void res.status(409).json({ error: "work-not-active", work, state: w.state });
-				if (c.kind === "agent" && (w.project_id === null || w.project_id !== c.agent.project_id))
+				// The work's project, and the recipient still in it: an agent that moved
+				// to another project no longer takes work delegated from the old one.
+				if (
+					c.kind === "agent" &&
+					(w.project_id === null ||
+						w.project_id !== c.agent.project_id ||
+						w.project_id !== target.project_id)
+				)
 					return void res.status(403).json({ error: "work-other-project", work });
 				// Named contexts run in slots ≥ 2 (the cap may have been lowered since).
 				if (target.max_concurrency < 2)
@@ -294,7 +317,61 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 					id,
 					base: typeof base === "string" ? base : null,
 				});
-				res.status(r.created ? 201 : 200).json(workView({ ...r.work, agent: target.name }));
+				res
+					.status(r.created ? 201 : 200)
+					.json({ ...workView({ ...r.work, agent: target.name }), base: r.base ?? null });
+			} catch (err) {
+				refuse(res, err);
+			}
+		}),
+	);
+
+	// POST /works/:id/close | /works/:id/clean — the person, or an agent of the
+	// work's project (a project there must be).
+	const ownWork = async (req: Request, res: Response) => {
+		const c = caller(res);
+		const w = await works.get(ownerOf(c), String(req.params.id));
+		if (!w) {
+			res.status(404).json({ error: "work-not-found" });
+			return null;
+		}
+		const agent = (await acp.list(w.owner_user_id)).find((a) => a.agent_id === w.agent_id);
+		if (!agent) {
+			res.status(404).json({ error: "work-not-found" });
+			return null;
+		}
+		if (
+			c.kind === "agent" &&
+			(w.project_id === null ||
+				w.project_id !== c.agent.project_id ||
+				w.project_id !== agent.project_id)
+		) {
+			res.status(403).json({ error: "work-other-project" });
+			return null;
+		}
+		return { w, agent };
+	};
+	router.post(
+		"/works/:id/close",
+		wrap(async (req, res) => {
+			const found = await ownWork(req, res);
+			if (!found) return;
+			try {
+				res.json(workView({ ...(await works.close(found.w)), agent: found.agent.name }));
+			} catch (err) {
+				refuse(res, err);
+			}
+		}),
+	);
+	router.post(
+		"/works/:id/clean",
+		wrap(async (req, res) => {
+			const found = await ownWork(req, res);
+			if (!found) return;
+			try {
+				res.json(
+					workView({ ...(await works.clean(found.w, found.agent)), agent: found.agent.name }),
+				);
 			} catch (err) {
 				refuse(res, err);
 			}
@@ -569,6 +646,14 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 				(typeof only !== "string" || !CONTEXT_RE.test(only))
 			)
 				return void res.status(400).json({ error: "bad-context" });
+			// `open`: the work whose ACP session this slot holds (sent now and then).
+			// No longer active ⇒ told to close it — the runner does, idle and with no
+			// open task (a process it left wins: the session stays).
+			const open = (req.body as { open?: unknown } | undefined)?.open;
+			if (typeof open === "string" && CONTEXT_RE.test(open)) {
+				const w = await works.get(agent.owner_user_id, open);
+				if (w?.state !== "active") res.setHeader("X-ST-Release", open);
+			}
 			const msg = await acp.claim(agent, slot, typeof only === "string" ? only : null);
 			if (msg) return void res.json(await withContext(agent, msg));
 			const running = await acp.runningInSlot(agent, slot);

@@ -2,9 +2,9 @@
 // st — the agent's side of the Shared Terminal message API (same API the person
 // uses from the web). The sender is the token (ST_TOKEN), never an argument.
 //   st send @agent [--work <id>] "text"   st send @agent [--work <id>] -f file.md
-//   st work new @agent <id> [--base <ref>]   st work list
-//   st agents   st list   st get <id>
-import { readFileSync } from "node:fs";
+//   st work new @agent <id> [--base <ref>]   st work list   st work close|clean <id>
+//   st port check <port>   st agents   st list   st get <id>
+import { readdirSync, readFileSync, readlinkSync } from "node:fs";
 
 const [cmd, ...args] = process.argv.slice(2);
 const API = `${process.env.ST_URL}/api/acp`;
@@ -27,6 +27,11 @@ const REASONS = {
 	"bad-work-id": "id de trabajo inválido (minúsculas, dígitos y guiones, hasta 40)",
 	"bad-base": "ref base inválida o inexistente",
 	"execution-ended": "el mensaje para el que corre este proceso ya terminó: no se envió nada",
+	"work-busy": "el trabajo tiene mensajes pendientes o en curso",
+	"work-not-closed": "primero cerralo (st work close)",
+	"cleanup-pending": "no se limpió: quedó pendiente",
+	"no-free-ports": "el agente no tiene bloques de puertos libres: limpiá trabajos viejos",
+	"context-removed": "el campo context ya no existe: usá --work",
 };
 
 async function call(method, path, body) {
@@ -59,7 +64,7 @@ function option(list, name) {
 }
 function usage() {
 	console.error(
-		'uso: st send @agente [--work <id>] "texto" | st send @agente [--work <id>] -f archivo | st work new @agente <id> [--base <ref>] | st work list | st agents | st list | st get <id>',
+		'uso: st send @agente [--work <id>] "texto" | st send @agente [--work <id>] -f archivo | st work new @agente <id> [--base <ref>] | st work list | st work close|clean <id> | st port check <puerto> | st agents | st list | st get <id>',
 	);
 	process.exit(2);
 }
@@ -78,11 +83,16 @@ if (cmd === "send") {
 	const [base, rest] = option(args.slice(1), "--base");
 	if (rest.length !== 2) usage();
 	const w = await call("POST", "/works", { agent: rest[0], id: rest[1], ...(base ? { base } : {}) });
-	console.log(`trabajo ${workLine(w)} · base ${w.baseSha?.slice(0, 12)}`);
+	console.log(`trabajo ${workLine(w)} · base ${w.base ? `${w.base} @ ` : ""}${w.baseSha}`);
 } else if (cmd === "work" && args[0] === "list") {
 	const all = await call("GET", "/works");
 	if (!all.length) console.log("no hay trabajos");
 	for (const w of all) console.log(workLine(w));
+} else if (cmd === "work" && (args[0] === "close" || args[0] === "clean") && args[1]) {
+	const w = await call("POST", `/works/${encodeURIComponent(args[1])}/${args[0]}`);
+	console.log(`trabajo ${workLine(w)}${args[0] === "clean" ? " · worktree retirado; la rama queda" : ""}`);
+} else if (cmd === "port" && args[0] === "check" && /^\d{1,5}$/.test(args[1] ?? "")) {
+	process.exit(portCheck(Number(args[1])));
 } else if (cmd === "agents") {
 	const me = process.env.ST_AGENT;
 	const all = await call("GET", "/agents");
@@ -95,3 +105,82 @@ if (cmd === "send") {
 } else if (cmd === "get" && args[0]) {
 	console.log(JSON.stringify(await call("GET", `/messages/${args[0]}`), null, 2));
 } else usage();
+
+// ── st port check ─────────────────────────────────────────────────────────
+// Who listens on a TCP port in this container, and whether it is the caller's:
+// a process whose environment carries the caller's ST_WORK or whose cwd is in
+// the caller's worktree (default context: cwd in the workspace, outside
+// .st/ctx/, and no ST_WORK). From /proc only (no ss, no dependency): the
+// listening socket's inode in /proc/net/tcp{,6}, then the process holding it.
+// Exit 0 = yours; 1 = someone else's; 2 = nobody listens; 3 = cannot tell.
+function portCheck(port) {
+	const ws = process.env.AGENT_CWD ?? "/home/developer/workspace";
+	const mine = process.env.ST_WORK || null;
+	const inodes = new Set();
+	for (const f of ["/proc/net/tcp", "/proc/net/tcp6"]) {
+		let lines = [];
+		try {
+			lines = readFileSync(f, "utf8").trim().split("\n").slice(1);
+		} catch {}
+		for (const l of lines) {
+			const c = l.trim().split(/\s+/);
+			if (c[3] === "0A" && Number.parseInt(c[1].split(":")[1], 16) === port) inodes.add(c[9]);
+		}
+	}
+	if (!inodes.size) {
+		console.log(`nadie escucha en el puerto ${port}`);
+		return 2;
+	}
+	const holders = [];
+	for (const pid of readdirSync("/proc").filter((d) => /^\d+$/.test(d))) {
+		let fds = [];
+		try {
+			fds = readdirSync(`/proc/${pid}/fd`);
+		} catch {
+			continue;
+		}
+		for (const fd of fds) {
+			let link = "";
+			try {
+				link = readlinkSync(`/proc/${pid}/fd/${fd}`);
+			} catch {}
+			const m = /^socket:\[(\d+)\]$/.exec(link);
+			if (m && inodes.has(m[1])) {
+				holders.push(pid);
+				break;
+			}
+		}
+	}
+	if (!holders.length) {
+		console.log(`el puerto ${port} está en uso, pero no se puede ver qué proceso escucha: no lo des por tuyo`);
+		return 3;
+	}
+	const who = holders.map((pid) => {
+		let cwd = "";
+		let work = null;
+		let cmd = "";
+		try {
+			cwd = readlinkSync(`/proc/${pid}/cwd`);
+			work = readFileSync(`/proc/${pid}/environ`, "utf8").split("\0").find((e) => e.startsWith("ST_WORK="))?.slice(8) || null;
+			cmd = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").join(" ").trim().slice(0, 80);
+		} catch {
+			return { pid, readable: false };
+		}
+		const inDir = (d) => cwd === d || cwd.startsWith(`${d}/`);
+		const own = mine ? work === mine || inDir(`${ws}/.st/ctx/${mine}`) : !work && inDir(ws) && !inDir(`${ws}/.st/ctx`);
+		const owner = work ? `del trabajo «${work}»` : inDir(`${ws}/.st/ctx`) ? `de ${cwd}` : inDir(ws) ? "del contexto por defecto" : `con cwd ${cwd}`;
+		return { pid, readable: true, own, owner, cmd };
+	});
+	const bad = who.find((w) => !w.readable);
+	if (bad) {
+		console.log(`el puerto ${port} lo escucha el proceso ${bad.pid}, que no se puede leer: no lo des por tuyo`);
+		return 3;
+	}
+	const other = who.find((w) => !w.own);
+	if (other) {
+		console.log(`el puerto ${port} NO es tuyo: lo escucha el proceso ${other.pid} (${other.cmd}) ${other.owner}`);
+		return 1;
+	}
+	console.log(`el puerto ${port} es tuyo: lo escucha el proceso ${who.map((w) => `${w.pid} (${w.cmd})`).join(", ")}`);
+	return 0;
+}
