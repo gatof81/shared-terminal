@@ -1060,7 +1060,7 @@ export class AcpThread {
 		head.append(name, this.badge(m));
 		// Two works of one agent run at once: the tag tells their messages apart.
 		const work = workTag(m);
-		if (work) head.append(el("span", "acp-msg-time", work));
+		if (work) head.append(el("span", "acp-msg-work", work));
 		head.append(meta);
 		sub.append(head, ...this.outcome(m));
 		return sub;
