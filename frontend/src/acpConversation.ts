@@ -21,6 +21,7 @@ import {
 	patchConversation,
 	railAgents,
 	railConversation,
+	topicTitle,
 } from "./projectRail.js";
 import { depth, navigateProject, projectRouteHash } from "./router.js";
 import { setTitlePage } from "./tabTitle.js";
@@ -61,9 +62,11 @@ let state: ThreadState | null = null;
 /** Whether the person reached this topic from the project's rail (‹ is then Back). */
 let fromRail = false;
 
+thread.titleOf = topicTitle;
 thread.onState = (s) => {
 	state = s;
 	paint();
+	revealPending();
 };
 onRailChange(() => paint());
 
@@ -96,7 +99,63 @@ export function topicPage(
 	thread.open({ kind: "conversation", conversationId, projectId });
 	state = thread.state;
 	paint();
+	queueMicrotask(revealPending);
 	return root;
+}
+
+// ── Going to a message from elsewhere (Pendientes, a review) ────────────────
+
+/** A message to show once its topic's feed is read («Ver en el tema»). */
+let pendingReveal: { cid: string; id: number; result: boolean } | null = null;
+
+/**
+ * Opens topic `conversationId` of project `projectId` at message `id`
+ * (its answer's own item when `result`), highlighted.
+ */
+export function revealInTopic(
+	projectId: string,
+	conversationId: string,
+	id: number,
+	result: boolean,
+): void {
+	pendingReveal = { cid: conversationId, id, result };
+	if (cid === conversationId && root.isConnected) revealPending();
+	else navigateProject({ projectId, page: "conversation", conversationId });
+}
+
+function revealPending(): void {
+	const p = pendingReveal;
+	if (!p || p.cid !== cid || !root.isConnected) return;
+	if (state?.feed === "loading") return;
+	pendingReveal = null;
+	if (state?.feed === "not-found") return;
+	// After the frame that lays the feed out (the thread renders on the next one).
+	requestAnimationFrame(() => {
+		void thread.revealMessage(p.id, { result: p.result }).then((found) => {
+			if (found === "earlier")
+				thread.showNotice(
+					`El mensaje #${p.id} está más atrás en el historial: «Cargar anteriores» sigue buscando.`,
+				);
+			else if (found === "missing")
+				thread.showNotice(`No se encontró el mensaje #${p.id} en este tema.`);
+		});
+	});
+}
+
+/**
+ * Where a message's `⎇ <work>` chip leads: Herramientas on that work (3B
+ * F4 plugs it in; until then the chip only names the work).
+ */
+export function onTopicWork(open: ((agent: string, work: string) => void) | null): void {
+	thread.onOpenWork = open;
+}
+
+/** «Escribirle un mensaje nuevo»: topic `conversationId`, with `agent` as its recipient. */
+export function writeInTopic(projectId: string, conversationId: string, agent: string): void {
+	thread.presetRecipients(conversationId, [agent]);
+	if (cid !== conversationId || !root.isConnected)
+		navigateProject({ projectId, page: "conversation", conversationId });
+	requestAnimationFrame(() => thread.input.focus());
 }
 
 /** Off screen: stop following (DOM and state kept for a quick return). */

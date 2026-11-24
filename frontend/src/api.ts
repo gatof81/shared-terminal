@@ -1901,6 +1901,11 @@ export interface AcpAgentInfo {
 	waitingFor?: Array<AcpMessageRef & { agent: string }>;
 	/** v27: its open question to the person, if any. */
 	question?: { id: number; messageId: number | null; conversationId: string | null } | null;
+	/**
+	 * A topic (or work) its slot is kept in by a process it left running
+	 * there (#761): it cannot switch to another topic until that ends.
+	 */
+	heldBy?: Array<{ conversationId: string | null; work: string | null; since: string }>;
 	/** Login methods its adapter advertises (terminal-auth), for "Conectar cuenta". */
 	loginMethods?: Array<{ id: string; name: string; description: string }>;
 }
@@ -2066,11 +2071,24 @@ export const acpReadConversation = (id: string, at: string) =>
 		method: "POST",
 		body: JSON.stringify({ at }),
 	});
-/** A post in a topic: one row per recipient under one client id. */
-export const acpPost = (conversationId: string, to: string[], body: string, clientId: string) =>
+/**
+ * A post in a topic: one row per recipient under one client id. `team`:
+ * the project's agents as of now («Todo el equipo»), resolved by the server.
+ */
+export const acpPost = (
+	conversationId: string,
+	to: string[] | "team",
+	body: string,
+	clientId: string,
+) =>
 	acpJson<{ messages: AcpMessage[]; replayed?: boolean }>("/messages", {
 		method: "POST",
-		body: JSON.stringify({ conversationId, to, body, clientId }),
+		body: JSON.stringify({
+			conversationId,
+			...(to === "team" ? { team: true } : { to }),
+			body,
+			clientId,
+		}),
 	});
 export const acpInbox = () => acpJson<AcpInbox>("/inbox");
 export const acpWorks = () => acpJson<AcpWork[]>("/works");
@@ -2109,3 +2127,6 @@ export function openAcpSocket(): WebSocket {
 }
 export const acpRequeue = (id: number) =>
 	acpJson<AcpMessage>(`/messages/${id}/requeue`, { method: "POST" });
+/** «Dar por revisada, sin reencolar»: the interrupted message leaves Pendientes; nothing is sent. */
+export const acpReview = (id: number) =>
+	acpJson<AcpMessage>(`/messages/${id}/review`, { method: "POST" });

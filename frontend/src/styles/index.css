@@ -29,3 +29,5 @@
 @import "./acp-chat.css";
 /* The project rail and topics (3B): after the chat it reuses. */
 @import "./rail.css";
+/* A topic's composer, per-recipient states, Pendientes and the review (3B F2/F3). */
+@import "./acp-topic.css";
