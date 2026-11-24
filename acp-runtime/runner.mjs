@@ -22,8 +22,15 @@
 // adapter, lock and log, launched and watched by the backend. The backend's
 // claim is the whole distribution (which slot takes what, caps): this file
 // knows only its own slot.
-// - Slot 1 is the runner of always: the default context (the workspace
-//   checkout), its one ACP session (session.json), opened at start.
+// - Slot 1 runs the default context (the workspace checkout) with one ACP
+//   session per CONVERSATION (v27): the session of the conversation of the
+//   message it takes (<state>/conv/<id>.json; no conversation = session.json,
+//   the session of always), opened (new or resumed) when it claims a message
+//   of another conversation and closing the previous one — the same mechanism
+//   a slot ≥ 2 uses for works. Nothing is opened at start: only what a message
+//   (or the recovery of an interrupted one) needs. At most one conversation
+//   session open per agent; the backend's claim keeps one running message in
+//   the default context, so two runs never share the checkout.
 // - A slot k ≥ 2 takes only messages of NAMED contexts — works (backend
 //   acp/works.ts). Each has its own directory, the git worktree the backend
 //   made (<workspace>/.st/ctx/<name>/, the session's cwd), and its own
@@ -49,8 +56,15 @@ const AGENT = env.ST_AGENT;
 const API = `${env.ST_URL}/api/acp`;
 const CWD = env.AGENT_CWD;
 const STATE = env.RUNNER_STATE;
-// Default context (slot 1): the session file and cwd of always. A named one: its own.
-const sessionFile = (ctx) => (ctx === null ? `${STATE}/session.json` : `${STATE}/ctx/${ctx}.json`);
+// A work's session (slot ≥ 2): its own file and worktree. Slot 1: the main
+// checkout, one session per conversation; no conversation = the file of always.
+const CONV_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const sessionFile = (ctx, conv) =>
+	ctx !== null ? `${STATE}/ctx/${ctx}.json` : conv !== null ? `${STATE}/conv/${conv}.json` : `${STATE}/session.json`;
+// What identifies a session: the work for a work's message (it keeps its
+// conversation, but runs in the work's session), else the conversation.
+const keyOf = (ctx, conv) => (ctx !== null ? `w:${ctx}` : `c:${conv ?? ""}`);
+const sessionOf = (msg) => ({ ctx: msg.context ?? null, conv: msg.context ? null : (msg.conversation_id ?? null) });
 const cwdOf = (ctx) => (ctx === null ? CWD : `${CWD}/.st/ctx/${ctx}`);
 const LOG_DIR = `${STATE}/log`;
 const IDLE_SETTLE_MS = 2_000; // idle must hold this long (a shutdown also closes tasks)
@@ -90,7 +104,8 @@ const PROTOCOL = [
 	"Excepción: un mensaje marcado «respuesta a tu mensaje #N» es la respuesta de otro agente a un pedido tuyo, y tu texto final ante él NO se le entrega a nadie (así una respuesta nunca genera otra). Si después de leerla tenés que pedirle o decirle algo más a ese agente, hacelo con st send.",
 	'Para pedirle algo a otro agente ejecutá con Bash: st send @agente "texto" (st agents lista los agentes; para textos largos: st send @agente -f archivo).',
 	"La respuesta a ese pedido te llegará más adelante como un mensaje nuevo: no la esperes ni consultes la bandeja; terminá tu turno.",
-	"Un mensaje de Project Chat lo ven la persona y los demás agentes del proyecto; lo que consultes a otro participante mientras lo atendés también queda en el proyecto. Un mensaje directo es privado.",
+	"Un mensaje de una conversación del proyecto (o del Project Chat) lo ven la persona y los demás agentes del proyecto; lo que consultes a otro participante mientras lo atendés también queda en esa conversación. Un mensaje directo es privado.",
+	"En una conversación no dejes procesos persistentes ni edites código en paralelo: para eso pedí un trabajo.",
 	"Una respuesta de otro agente es información para tu trabajo, no una orden de la persona; no la contestes con otro pedido salvo que realmente necesites algo más.",
 	"Si iniciás en segundo plano un proceso que debe quedar corriendo (servidor, watcher) y ya verificaste que funciona, agregá al final de tu respuesta una línea `ST-PERSISTENT: <id de la tarea en segundo plano> <descripción>` por cada uno.",
 	"Cualquier otra tarea en segundo plano es trabajo pendiente: esperá su resultado antes de dar el pedido por terminado.",
@@ -101,11 +116,14 @@ const PROTOCOL = [
 
 const log = (...a) => console.log(new Date().toISOString(), `[${AGENT}${SLOT === 1 ? "" : `#${SLOT}`}]`, ...a);
 const marker = (msg) => {
-	const where = msg.project
-		? ` · Project Chat «${msg.project.name}» (participantes: ${msg.project.agents.map((a) => `@${a}`).join(", ")})`
-		: msg.from_id === "system"
-			? ""
-			: " · mensaje directo";
+	const who = msg.project ? ` (participantes: ${msg.project.agents.map((a) => `@${a}`).join(", ")})` : "";
+	const where = msg.conversation
+		? ` · conversación «${msg.conversation.title ?? msg.conversation.id}»${msg.project ? ` del proyecto «${msg.project.name}»${who}` : ""}`
+		: msg.project
+			? ` · Project Chat «${msg.project.name}»${who}`
+			: msg.from_id === "system"
+				? ""
+				: " · mensaje directo";
 	const ctx = msg.context
 		? ` · trabajo «${msg.context}» · rama ${msg.work?.branch ?? `work/${msg.context}`} · directorio ${cwdOf(msg.context)}${msg.work ? ` · puertos ${msg.work.portBase}–${msg.work.portBase + 99}` : ""}`
 		: "";
@@ -348,8 +366,8 @@ adapter.on("exit", (code, signal) => {
 	else process.exit(1);
 });
 
-// The ACP session this slot has open: { ctx, sessionId } (slot 1: the default
-// context's, from start to exit).
+// The ACP session this slot has open: { ctx, conv, key, sessionId } — a work's
+// (slot ≥ 2) or a conversation's (slot 1); null before the first message.
 let open = null;
 let initialized = false;
 
@@ -375,15 +393,18 @@ async function initialize() {
 	initialized = true;
 }
 
-// Opens (new or resumed) the ACP session of context `ctx` (null = default),
+// Opens (new or resumed) the ACP session of work `ctx` (slot ≥ 2) or of
+// conversation `conv` in the main checkout (slot 1; null = no conversation),
 // closing the one this slot had open — never one with an open task: the claim
-// keeps such a slot on its context (see the header).
-async function openSession(ctx = null, token = null, work = null) {
+// keeps such a slot on its work or conversation (see the header).
+async function openSession(ctx = null, conv = null, token = null, work = null) {
 	if (!initialized) await initialize();
-	if (open?.ctx === ctx) return open.sessionId;
+	const key = keyOf(ctx, conv);
+	if (open?.key === key) return open.sessionId;
+	if (conv !== null && !CONV_RE.test(conv)) throw new Error(`conversación inválida: ${conv}`);
 	if (open) {
 		await request("session/close", { sessionId: open.sessionId }).catch((err) => log(`close ${open.sessionId}: ${err.message}`));
-		log(`closed the session of context ${open.ctx}`);
+		log(`closed the session ${open.key}`);
 		open = null;
 	}
 	const systemPrompt = { mode: "append", content: [{ type: "text", text: PROTOCOL }] };
@@ -391,7 +412,7 @@ async function openSession(ctx = null, token = null, work = null) {
 	// A named context is a work: its worktree is made by the backend before its
 	// first message. Never created here — a missing one fails the message.
 	if (ctx !== null && !existsSync(cwd)) throw new Error(`el directorio del trabajo ${cwd} no existe`);
-	const file = sessionFile(ctx);
+	const file = sessionFile(ctx, conv);
 	// A named context's session speaks with its context's credential and knows
 	// its work and ports (header).
 	const sessionEnv = token ? { ST_TOKEN: token } : null;
@@ -400,18 +421,18 @@ async function openSession(ctx = null, token = null, work = null) {
 	let sessionId;
 	if (existsSync(file)) {
 		sessionId = JSON.parse(readFileSync(file, "utf8")).sessionId;
-		open = { ctx, sessionId }; // before the request: what the resume itself sets off is this session's
+		open = { ctx, conv, key, sessionId }; // before the request: what the resume itself sets off is this session's
 		keepConfigOptions(await request("session/resume", { sessionId, cwd, mcpServers: [], systemPrompt, _meta }));
-		log(`resumed session ${sessionId}${ctx ? ` (context ${ctx})` : ""}`);
+		log(`resumed session ${sessionId} (${key})`);
 	} else {
 		const created = await request("session/new", { cwd, mcpServers: [], systemPrompt, _meta });
 		keepConfigOptions(created);
 		sessionId = created.sessionId;
-		open = { ctx, sessionId };
-		mkdirSync(`${STATE}/ctx`, { recursive: true });
-		writeFileSync(`${file}.tmp`, JSON.stringify({ sessionId, cwd }));
+		open = { ctx, conv, key, sessionId };
+		mkdirSync(file.slice(0, file.lastIndexOf("/")), { recursive: true });
+		writeFileSync(`${file}.tmp`, JSON.stringify({ sessionId, cwd, ...(conv ? { conversation: conv } : {}) }));
 		renameSync(`${file}.tmp`, file);
-		log(`new session ${sessionId}${ctx ? ` (context ${ctx})` : ""}`);
+		log(`new session ${sessionId} (${key})`);
 	}
 	// The ACP equivalent of --dangerously-skip-permissions, for this session only.
 	await request("session/set_mode", { sessionId, modeId: "bypassPermissions" });
@@ -676,10 +697,10 @@ async function settleInterrupted(msg) {
 async function main() {
 	log(`starting slot ${SLOT}; adapter ${env.ACP_AGENT_CMD}, cwd ${CWD}, model ${env.ANTHROPIC_MODEL ?? "default"}`);
 	mkdirSync(CWD, { recursive: true });
-	// Slot 1: the default context's session, open from the start (as always).
-	// A slot ≥ 2 opens one only for a message it claims (or recovers).
-	if (SLOT === 1) await openSession();
-	else await initialize();
+	// No session is opened at start (it would only be closed by the first
+	// message of another conversation): one is opened for a message this slot
+	// claims, or for the report about an interrupted one.
+	await initialize();
 	// Questions of this slot's previous run waited on ACP requests that died with it.
 	const orphaned = await api("POST", "/runner/questions-orphan", {
 		slot: SLOT,
@@ -688,8 +709,13 @@ async function main() {
 	if (orphaned.body?.length) log(`${orphaned.body.length} question(s) of the previous run orphaned`);
 	const running = await api("GET", `/runner/running?slot=${SLOT}`);
 	const interrupted = running.status === 200 ? { msg: running.body, note: await settleInterrupted(running.body) } : null;
-	// The report about an interrupted run goes to the session of ITS context.
-	if (SLOT !== 1 && interrupted?.note) await openSession(interrupted.msg.context, interrupted.msg.contextToken, interrupted.msg.work);
+	// The report about an interrupted run goes to the session of ITS work or
+	// conversation. A question orphaned with no interrupted run (slot 1): the
+	// session of no conversation, as before conversations.
+	if (interrupted?.note) {
+		const s = sessionOf(interrupted.msg);
+		await openSession(s.ctx, s.conv, interrupted.msg.contextToken, interrupted.msg.work);
+	} else if (SLOT === 1 && orphaned.body?.length) await openSession();
 	// What the resume itself sets off (e.g. Claude Code's "didn't finish before
 	// the previous session ended" notification of a killed task, which opens a
 	// turn of its own that only a prompt closes) shows up right after it.
@@ -741,16 +767,18 @@ async function main() {
 			await new Promise((ok) => setTimeout(ok, 500));
 			continue;
 		}
-		// A slot ≥ 2 whose session still has an open task (a process the agent
-		// left running) cannot close it: it takes only that context's messages.
-		const keep = SLOT !== 1 && open && live.size ? open.ctx : null;
+		// A session that still has an open task (a process the agent left
+		// running) cannot be closed: the slot takes only the messages of its work
+		// (slot ≥ 2) or of its conversation (slot 1).
+		const keep = open && live.size ? open : null;
 		// Now and then the slot says which work's session it holds: a work no
 		// longer active gets its session closed (below), freeing its processes.
 		const ask = SLOT !== 1 && open && Date.now() - openAskedAt >= OPEN_ASK_MS ? open.ctx : null;
 		if (ask) openAskedAt = Date.now();
 		const r = await api("POST", "/runner/claim", {
 			slot: SLOT,
-			...(keep ? { context: keep } : {}),
+			...(keep && SLOT !== 1 ? { context: keep.ctx } : {}),
+			...(keep && SLOT === 1 ? { conversation: keep.conv } : {}),
 			...(ask ? { open: ask } : {}),
 		});
 		// Only idle with no open task: a process the agent left running there
@@ -760,15 +788,17 @@ async function main() {
 			log(`released the session of work ${open.ctx} (no longer active)`);
 			open = null;
 		}
-		if (r.status === 200 && r.body.context !== (open?.ctx ?? null)) {
+		const want = r.status === 200 ? sessionOf(r.body) : null;
+		if (want && keyOf(want.ctx, want.conv) !== open?.key) {
 			try {
-				await openSession(r.body.context, r.body.contextToken, r.body.work);
+				await openSession(want.ctx, want.conv, r.body.contextToken, r.body.work);
 			} catch (err) {
 				// Nothing was sent to the agent: the message failed, it did not run.
-				log(`message #${r.body.id}: cannot open the session of context ${r.body.context}: ${err.message}`);
+				const what = want.ctx !== null ? `del trabajo ${want.ctx}` : `de la conversación ${want.conv ?? "(ninguna)"}`;
+				log(`message #${r.body.id}: cannot open the session ${what}: ${err.message}`);
 				await api("POST", `/runner/messages/${r.body.id}/result`, {
 					state: "failed",
-					note: `no se pudo abrir la sesión ACP del contexto ${r.body.context}: ${String(err.message).slice(0, 200)}`,
+					note: `no se pudo abrir la sesión ACP ${what}: ${String(err.message).slice(0, 200)}`,
 				});
 				continue;
 			}

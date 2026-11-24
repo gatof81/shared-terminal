@@ -903,7 +903,22 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 				const w = await works.get(agent.owner_user_id, open);
 				if (w?.state !== "active") res.setHeader("X-ST-Release", open);
 			}
-			const msg = await acp.claim(agent, slot, typeof only === "string" ? only : null);
+			// `conversation` (slot 1): the same for the conversation whose session it
+			// holds with processes in it; null = the session of no conversation.
+			const body = (req.body ?? {}) as { conversation?: unknown };
+			const keepConv = "conversation" in body ? body.conversation : undefined;
+			if (
+				keepConv !== undefined &&
+				keepConv !== null &&
+				(typeof keepConv !== "string" || !/^[0-9a-f-]{36}$/.test(keepConv))
+			)
+				return void res.status(400).json({ error: "bad-conversation" });
+			const msg = await acp.claim(
+				agent,
+				slot,
+				typeof only === "string" ? only : null,
+				keepConv as string | null | undefined,
+			);
 			if (msg) return void res.json(await withContext(agent, msg));
 			const running = await acp.runningInSlot(agent, slot);
 			running ? res.status(409).json({ error: "running", id: running.id }) : res.status(204).end();
