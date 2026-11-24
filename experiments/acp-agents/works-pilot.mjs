@@ -86,7 +86,7 @@ const send = async (to, body, projectId, work) => {
 		to,
 		body,
 		...(projectId ? { projectId } : {}),
-		...(work ? { work } : {}), // CONTRACT: the person's field for a work (`context` is gone)
+		...(work ? { work } : {}),
 		clientId: randomUUID(),
 	});
 	if (r.status !== 201) throw new Error(`send ${to}: ${r.status} ${JSON.stringify(r.body)}`);
@@ -111,14 +111,15 @@ async function waitFor(fn, ms = 90_000) {
 }
 const agents = async () => (await api("GET", "/api/acp/agents")).body;
 const projectRows = async (pid) => (await api("GET", `/api/acp/projects/${pid}/feed`)).body?.messages ?? [];
-// CONTRACT: the works of an agent (rows of agent_works: id, state, branch, dir, created_at, cleanup reasons).
+// The person's view of the works (#751: GET /api/acp/works, workView fields: id, agent, state, branch, dir,
+// portBase, note, createdAt…), filtered to one agent. CONTRACT (PR 2): the cleanup-pending reasons' field.
 const works = async (agent) => {
-	const r = await api("GET", `/api/acp/agents/${agent}/works`);
-	return Array.isArray(r.body) ? r.body : (r.body?.works ?? []);
+	const r = await api("GET", "/api/acp/works");
+	return (Array.isArray(r.body) ? r.body : []).filter((w) => w.agent === agent);
 };
-const work = async (agent, id) => (await works(agent)).find((w) => w.id === id || w.name === id) ?? null;
-// CONTRACT: which work a message row belongs to.
-const workOf = (m) => m?.work ?? m?.context ?? null;
+const work = async (agent, id) => (await works(agent)).find((w) => w.id === id) ?? null;
+// The work a message row runs in (#751: the row keeps `context` = the work's id; the person POSTs `work`).
+const workOf = (m) => m?.context ?? null;
 const short = (s, n = 110) => (s ?? "").replace(/\s+/g, " ").slice(0, n);
 const sessionCount = (text) => Number(/sesión ACP: (\d+) mensajes/.exec(text ?? "")?.[1] ?? Number.NaN);
 const cwdOf = (text) => /cwd (\S+)\)/.exec(text ?? "")?.[1] ?? null;
@@ -203,8 +204,10 @@ async function main() {
 	const consultOf = (text) => short(text, 160);
 
 	// W1. @arq creates both works for @dev (`st work new`). CONTRACT: test-agent directive `trabajo nuevo @x <id>`.
+	const newMsg = {};
 	for (const w of [WA, WB]) {
 		const m = await waitMsg((await send(ARQ, `trabajo nuevo @${DEV} ${w}`, pid)).id);
+		newMsg[w] = m;
 		check(`W1 @${ARQ} created ${w} for @${DEV}`, m.state === "done" && !/error|rechaz|refused/i.test(m.result_text ?? ""), consultOf(m.result_text));
 	}
 	const rowsAfterNew = { [WA]: await work(DEV, WA), [WB]: await work(DEV, WB) };
@@ -213,7 +216,7 @@ async function main() {
 		check(`W1 ${w} is an active work row of @${DEV}`, rowsAfterNew[w]?.state === "active", JSON.stringify(rowsAfterNew[w]));
 	// Idempotent: the same `new` again is not a second work and not an error that leaves debris.
 	const again = await waitMsg((await send(ARQ, `trabajo nuevo @${DEV} ${WA}`, pid)).id);
-	check(`W1 ${WA} again: idempotent (same row, no second worktree)`, (await works(DEV)).filter((x) => (x.id ?? x.name) === WA).length === 1, consultOf(again.result_text));
+	check(`W1 ${WA} again: idempotent (same row, no second worktree)`, (await works(DEV)).filter((x) => x.id === WA).length === 1, consultOf(again.result_text));
 
 	// W2. @arq delegates both to @dev, each with `st send --work`; each task runs long enough to overlap.
 	// CONTRACT: directive `delegá <id> a @x: <texto>` → `st send @x --work <id> "<texto>"`.
@@ -237,8 +240,10 @@ async function main() {
 		const row = rowsAfterNew[w];
 		check(
 			`W3 ${w}: worktree created before its first ACP message`,
-			!!row && ms(row.created_at ?? row.createdAt) <= ms(m.started_at) && treesAfterNew.includes(`${WS}/.st/ctx/${w}`),
-			`created ${row?.created_at ?? row?.createdAt} · first claim ${m.started_at}`,
+			// `st work new` answers only once the worktree exists (the row turns active after git): the message that
+			// ran it ended before @dev claimed the work's first message, and the worktree was listed in between.
+			!!row && ms(newMsg[w].finished_at) <= ms(m.started_at) && treesAfterNew.includes(`${WS}/.st/ctx/${w}`),
+			`st work new ended ${newMsg[w].finished_at} · first claim ${m.started_at}`,
 		);
 	}
 	// W4. Real parallelism, from the backend's timestamps.
