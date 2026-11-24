@@ -665,9 +665,12 @@ export function topicTimeline(messages: readonly AcpMessage[]): TopicItem[] {
 				message: m,
 				consult: m.reply_to !== null ? (byId.get(m.reply_to) ?? null) : null,
 			});
-		else if (m.from_id === "system")
-			out.push({ kind: "system", key: `system:${m.id}`, at, message: m });
-		else out.push({ kind: "consult", key: `consult:${m.id}`, at, message: m });
+		// The runner's request for a recovery report is not the person's to
+		// read (an internal prompt): only the report itself — its result —
+		// shows; the interrupted message's row says «informe pedido» meanwhile.
+		else if (m.from_id === "system") {
+			if (!m.recovery_of) out.push({ kind: "system", key: `system:${m.id}`, at, message: m });
+		} else out.push({ kind: "consult", key: `consult:${m.id}`, at, message: m });
 		// A consult's answer is nested in it; every other answer is its own item.
 		for (const r of ms)
 			if (

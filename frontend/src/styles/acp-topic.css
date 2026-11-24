@@ -213,7 +213,8 @@ button.acp-work-chip:hover {
 .acp-rs {
 	display: grid;
 	grid-template-columns: 20px auto minmax(0, 1fr);
-	align-items: start;
+	/* Name and state on the same first line, whatever a button in the state measures. */
+	align-items: baseline;
 	column-gap: 7px;
 	row-gap: 2px;
 	font-size: 0.8rem;
@@ -714,4 +715,8 @@ button.rail-attention:hover {
 	.acp-review-card > .modal-actions {
 		flex: none;
 	}
+}
+.acp-rs-muted {
+	color: var(--c-muted);
+	opacity: 0.8;
 }
