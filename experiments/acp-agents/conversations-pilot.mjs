@@ -9,7 +9,8 @@
 //       and runs after, in its own topic's session;
 //   C4  a send to several agents: one row per recipient under one send, each with its own state; the "whole team"
 //       mark is kept;
-//   C5  a topic's recipients are persisted; a new topic starts with none;
+//   C5  a topic's recipients are saved with each owner send (the last set, or the team mark); a new topic starts
+//       with none;
 //   C6  a late answer is linked: a consult's reply carries reply_to and the topic of its request (inheritance:
 //       request → reply → question → interrupted run → system report);
 //   C7  global inbox (open questions + unreviewed interruptions) and a persistent read mark per topic;
@@ -198,22 +199,32 @@ async function main() {
 	const [ld, qd] = [await waitMsg(long.id), await waitMsg(queued.id)];
 	check("C3 the queued message ran after, in slot 1, in T2's session", qd.state === "done" && ms(qd.started_at) >= ms(ld.finished_at) && qd.slot === 1 && sessionCount(qd.result_text) === sessionCount(seq[3].result_text) + 1, `${ld.finished_at} → ${qd.started_at} count ${sessionCount(qd.result_text)}`);
 
-	// C4/C5. A send to three agents in T1: one row per recipient, independent states, "whole team" kept, the
-	// topic's recipients persisted; T3 (new) starts with none.
+	// C4. A send to three agents ("whole team") in a new topic T3: one row per recipient under one send, each with
+	// its own state, the team mark kept on the rows and as the topic's recipients.
+	const t3 = await newTopic(pid, "Tema tres");
+	check("C5 a new topic starts with no recipients", t3.status === 201 && (t3.body?.recipients ?? []).length === 0, short(JSON.stringify(t3.body), 120));
+	const T3 = t3.body?.id;
 	const cid4 = randomUUID();
 	const rows4 = [];
-	for (const [to, text] of [[A, "esperá 8"], [B, "hola equipo"], [C, "hola equipo"]]) rows4.push(await post(to, text, pid, T1, { clientId: cid4, team: true }));
+	for (const [to, text] of [[A, "esperá 8"], [B, "hola equipo"], [C, "hola equipo"]]) rows4.push(await post(to, text, pid, T3, { clientId: cid4, team: true }));
 	const b4 = await waitMsg(rows4[1].id);
 	const a4 = await get(rows4[0].id);
 	check("C4 three rows under one send", new Set(rows4.map((m) => m.id)).size === 3, rows4.map((m) => m.id).join(","));
 	check("C4 @B answered while @A still runs: states independent", b4.state === "done" && a4.state === "running", `${b4.state}/${a4.state}`);
-	check("C4 the 'whole team' mark is kept on the send", rows4.every((m) => (m.team ?? m.to_team ?? m.team_send) === true || (m.team ?? m.to_team ?? m.team_send) === 1), short(JSON.stringify(rows4[0]), 160)); // CONTRACT
+	const teamOf = (m) => m.team ?? m.to_team ?? m.team_send; // CONTRACT: the row's field
+	check("C4 the 'whole team' mark is kept on every row", rows4.every((m) => teamOf(m) === true || teamOf(m) === 1), short(JSON.stringify(rows4[0]), 160));
 	await waitMsg(rows4[0].id);
-	const t1Now = await topic(T1);
-	const recips = (t1Now?.recipients ?? []).slice().sort().join(",");
-	check("C5 T1 keeps its recipients", recips === [A, B, C].sort().join(","), short(JSON.stringify(t1Now), 160)); // CONTRACT
-	const t3 = await newTopic(pid, "Tema tres");
-	check("C5 a new topic starts with no recipients", t3.status === 201 && (t3.body?.recipients ?? []).length === 0, short(JSON.stringify(t3.body), 120));
+	check("C5 T3 remembers the whole team", JSON.stringify(await topic(T3)).match(/team/i) !== null, short(JSON.stringify(await topic(T3)), 160)); // CONTRACT
+
+	// C5. A topic's recipients are saved with each send of the owner (the last set): {A,B} in T1, {C} in T2 ⇒
+	// reading T1 gives {A,B} and T2 gives {C}; there is no client PATCH for them.
+	const cid5 = randomUUID();
+	const sent5 = [await post(A, "para los dos", pid, T1, { clientId: cid5 }), await post(B, "para los dos", pid, T1, { clientId: cid5 })];
+	const sent5c = await post(C, "solo para c", pid, T2);
+	await Promise.all([...sent5, sent5c].map((m) => waitMsg(m.id)));
+	const recipsOf = async (cid) => ((await topic(cid))?.recipients ?? []).slice().sort().join(","); // CONTRACT: the topic's field
+	check("C5 T1 keeps {A,B}", (await recipsOf(T1)) === [A, B].sort().join(","), short(JSON.stringify(await topic(T1)), 160));
+	check("C5 T2 keeps {C}", (await recipsOf(T2)) === C, short(JSON.stringify(await topic(T2)), 160));
 
 	// C6. A late answer: @A consults @B from T2; the request and its reply carry T2, the reply has reply_to.
 	const cons = await waitMsg((await post(A, `consultá a @${B}: dato`, pid, T2)).id);
@@ -273,8 +284,17 @@ async function main() {
 	// escapes are not. CONTRACT: `?work=<id>` on /fs/list, /fs/preview and /git/status.
 	await api("PATCH", `/api/acp/agents/${A}`, { maxConcurrency: 2 });
 	await sh(sids[A], `cd ${WS} && git init -q -b main && printf '.st/\\n' > .gitignore && echo hola > README.md && git add -A && git -c user.name=t -c user.email=t@t commit -qm base`);
-	const w = await api("POST", "/api/acp/works", { agent: A, id: WORK });
-	if (check("C9 a work for @A", w.status === 201, `${w.status} ${short(JSON.stringify(w.body))}`)) {
+	// The work is created by @B from T1 (`st work new`): its origin topic is T1 (agent_works.conversation_id).
+	const wn = await waitMsg((await post(B, `st: work new @${A} ${WORK}`, pid, T1)).id);
+	const wrow = ((await api("GET", "/api/acp/works")).body ?? []).find?.((x) => x.id === WORK);
+	check("C9 a work for @A, created from T1", /→ exit 0/.test(wn.result_text ?? "") && wrow?.state === "active", short(wn.result_text, 120));
+	check("C6 the work remembers its origin topic (T1)", (wrow?.conversationId ?? wrow?.conversation_id) === T1, short(JSON.stringify(wrow), 160)); // CONTRACT
+	// A `--work` message sent from a topic carries both: the topic of the run that sent it and the work.
+	const wd = await waitMsg((await post(B, `st: send @${A} --work ${WORK} "hola trabajo"`, pid, T1)).id);
+	const wreq = await waitFor(async () => (await topicRows(T1)).find((m) => m.kind === "request" && m.from_id === B && m.to_id === A && m.context === WORK) ?? null, 30_000);
+	const wdone = wreq ? await waitMsg(wreq.id) : null;
+	check("C6 a --work message keeps its topic and runs in the work", !!wdone && topicOf(wdone) === T1 && wdone.context === WORK && cwdOf(wdone.result_text) === `${WS}/.st/ctx/${WORK}`, `${short(wd.result_text, 60)} | ${topicOf(wdone)} ${wdone?.context} ${cwdOf(wdone?.result_text)}`);
+	if (wrow?.state === "active") {
 		const sid = sids[A];
 		await sh(sid, `cd ${WS}/.st/ctx/${WORK} && echo SECRET=1 > .env && ln -s ../../acp acp-link && ln -s ${WS} main-link && ln -s /etc etc-link`);
 		const fs = (path, work = WORK) => api("GET", `/api/sessions/${sid}/fs/list?work=${encodeURIComponent(work)}&path=${encodeURIComponent(path)}`);
@@ -284,8 +304,19 @@ async function main() {
 			const r = await fs(path);
 			check(`C9 ${what} under the work's root is refused`, r.status === 400 || r.status === 403 || r.status === 404, `${r.status} ${short(JSON.stringify(r.body), 80)}`);
 		}
-		const pv = await api("GET", `/api/sessions/${sid}/fs/preview?work=${WORK}&path=.env`);
-		check("C9 .env in the worktree is not previewed", pv.status === 403, String(pv.status));
+		// Every entry takes `work` (Files list/preview/raw/download, Git status/diff/log) and refuses the same things.
+		for (const [route, q] of [["fs/preview", "path=.env"], ["fs/raw", "path=.env"], ["files", "path=.env"], ["fs/preview", "path=acp-link"], ["fs/raw", "path=main-link"], ["files", "path=etc-link"], ["files", "path=.."]]) {
+			const r = await api("GET", `/api/sessions/${sid}/${route}?work=${WORK}&${q}`);
+			check(`C9 ${route} ${q} under the work's root is refused`, r.status === 400 || r.status === 403 || r.status === 404, `${r.status}`);
+		}
+		const ok = await api("GET", `/api/sessions/${sid}/fs/preview?work=${WORK}&path=README.md`);
+		check("C9 a plain file of the worktree is previewed", ok.status === 200, String(ok.status));
+		const glog = await api("GET", `/api/sessions/${sid}/git/log?work=${WORK}`);
+		check("C9 Git log at the work's root", glog.status === 200, String(glog.status));
+		const gdir = await api("GET", `/api/sessions/${sid}/git/status?work=${WORK}&dir=..`);
+		check("C9 with `work`, the client's `dir` is refused or ignored (never the main checkout)", gdir.status >= 400 || JSON.stringify(gdir.body).includes(`work/${WORK}`), `${gdir.status} ${short(JSON.stringify(gdir.body), 100)}`);
+		const gdiff = await api("GET", `/api/sessions/${sid}/git/diff?work=${WORK}&area=untracked&path=.env`);
+		check("C9 Git diff of .env in the worktree is refused", gdiff.status === 403 || gdiff.status === 400, String(gdiff.status));
 		for (const [what, work] of [["an unknown work", `${PREFIX}-nope`], ["`.st` as a work id", ".st"], ["a traversal as work id", "../acp"]]) {
 			const r = await fs("", work);
 			check(`C9 ${what} is refused`, r.status >= 400, `${r.status}`);
