@@ -126,7 +126,12 @@ it, into the recipient's default context. An agent's **reply** comes back to the
 from (`from_context`, taken from the sender's credential).
 
 A slot ≥ 2 opens (new or resumed) a context's session when it claims a message of it and closes it
-when it claims one of another context. `session/close` (and a resume) stops what that session left
+when it claims one of another context. Since it keeps it open in between, the claim has **affinity**: a context's
+message goes to the slot that last started one of that context while that slot's latest message is
+still of it and the slot is within the cap — never to a second slot that would open the same session
+again (two adapters on one transcript, and a stale copy for the next message). Any slot takes a
+context that never ran, one whose slot moved on to another context, or one whose slot is past a
+lowered cap. `session/close` (and a resume) stops what that session left
 running, so a slot whose session still has an open task (a process declared `ST-PERSISTENT`) keeps
 that context and takes only its messages until the task ends.
 
