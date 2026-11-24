@@ -61,7 +61,7 @@ test.describe("new agent form", () => {
 		app,
 		page,
 	}) => {
-		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/chat`);
 		await openFromProjectChat(page);
 		await expect(page.locator("#new-session-modal-title")).toHaveText(
 			"Nuevo agente en Educación HZ",
@@ -86,7 +86,7 @@ test.describe("new agent form", () => {
 	});
 
 	test("a session name written by hand stops following the agent's", async ({ app, page }) => {
-		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/chat`);
 		await openFromProjectChat(page);
 		const agent = page.locator("#new-session-acp-agent");
 		const session = page.locator("#new-session-input");
@@ -101,7 +101,7 @@ test.describe("new agent form", () => {
 		app,
 		page,
 	}) => {
-		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/chat`);
 		await openFromProjectChat(page);
 		const agent = page.locator("#new-session-acp-agent");
 		await agent.fill("Dev_1");
@@ -131,7 +131,7 @@ test.describe("new agent form", () => {
 		app,
 		page,
 	}) => {
-		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/chat`);
 		await openFromProjectChat(page);
 		await expect(page.locator("#new-session-modal-title")).toHaveText(/Nuevo agente/);
 		await page.keyboard.press("Escape");
@@ -169,7 +169,7 @@ test.describe("new agent form", () => {
 		app,
 		page,
 	}) => {
-		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/chat`);
 		await openFromProjectChat(page);
 		// Agent mode in Spanish: the session's label and the progress toast.
 		await expect(page.locator("#new-session-input-label")).toHaveText("Nombre de la sesión");
@@ -192,7 +192,7 @@ test.describe("new agent form", () => {
 		app,
 		page,
 	}) => {
-		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/chat`);
 		const group = page.locator(".acp-agents-group");
 		for (const close of ["Escape", "cancel", "x"] as const) {
 			await openFromProjectChat(page);

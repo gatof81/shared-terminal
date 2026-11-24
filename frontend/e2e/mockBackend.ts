@@ -97,6 +97,16 @@ export interface MockAcpAgent {
 	authRequired?: boolean;
 	loginMethods?: Array<{ id: string; name: string; description: string }>;
 	waitingInput?: boolean;
+	/** v27: what it runs / has queued / waits for, with each message's topic (never slots). */
+	runningIn?: Array<{ id: number; conversationId: string | null; work: string | null }>;
+	queue?: Array<{ id: number; conversationId: string | null; work: string | null }>;
+	waitingFor?: Array<{
+		id: number;
+		agent: string;
+		conversationId: string | null;
+		work: string | null;
+	}>;
+	question?: { id: number; messageId: number | null; conversationId: string | null } | null;
 	modelApplied?: { requested: string; current: string | null; error: string | null } | null;
 	effort?: string | null;
 	effortApplied?: {
@@ -126,7 +136,30 @@ export interface MockAcpMessage {
 	project_id: string | null;
 	depth: number;
 	client_id: string | null;
+	/** v27: the topic (null: the Archive). */
+	conversation_id: string | null;
+	team?: number | null;
+	reviewed_at?: string | null;
+	recovery_of?: number | null;
 }
+
+/** A topic of a project (v27, docs/ACP_AGENTS.md §4b). */
+export interface MockConversation {
+	id: string;
+	projectId: string;
+	title: string;
+	createdAt: string;
+	archivedAt: string | null;
+	readAt: string | null;
+	recipients: { agents: string[] } | { team: true } | null;
+}
+
+/** The topics `enableConversations()` seeds in "Educación HZ". */
+export const CONV_IDS = {
+	ci: "c0000000-0000-4000-8000-0000000000c1",
+	ui: "c0000000-0000-4000-8000-0000000000c2",
+	backend: "c0000000-0000-4000-8000-0000000000c3",
+};
 
 export interface MockProject {
 	projectId: string;
@@ -294,6 +327,13 @@ export class MockBackend {
 	acpActivity: Record<string, Array<Record<string, unknown>>> = {};
 	acpSockets: WebSocketRoute[] = [];
 	private acpSeq = 0;
+	/** v27 topics (none until `enableConversations()`). */
+	acpConversations: MockConversation[] = [];
+	/** Every `POST /acp/conversations/:id/read` body's `at`, by topic, in order. */
+	readMarks: Record<string, string[]> = {};
+	acpWorks: Array<Record<string, unknown>> = [];
+	private convCreations = new Map<string, string>();
+	private convSeq = 10;
 
 	constructor() {
 		this.enableAcp();
@@ -372,6 +412,7 @@ export class MockBackend {
 			project_id: null,
 			depth: 0,
 			client_id: null,
+			conversation_id: null,
 			...m,
 		};
 		this.acpMessages.push(row);
@@ -395,6 +436,183 @@ export class MockBackend {
 		Object.assign(m, patch);
 		this.pushAcp({ type: "message", message: m });
 		return m;
+	}
+
+	/**
+	 * Three topics in "Educación HZ" (3B): «Optimización de CI», where @dev is
+	 * working now; «Rediseño de UI/UX», with an answer of @arq the person has
+	 * not seen (1 unread); «Mejoras del backend», empty. @dev also has a
+	 * message queued in «Rediseño de UI/UX» (busy in another topic).
+	 */
+	enableConversations(): void {
+		const conv = (id: string, title: string, readAt: string | null): MockConversation => ({
+			id,
+			projectId: PROJECT_IDS.hz,
+			title,
+			createdAt: iso(400),
+			archivedAt: null,
+			readAt,
+			recipients: null,
+		});
+		this.acpConversations = [
+			conv(CONV_IDS.ci, "Optimización de CI", iso(2000)),
+			conv(CONV_IDS.ui, "Rediseño de UI/UX", iso(600)),
+			conv(CONV_IDS.backend, "Mejoras del backend", null),
+		];
+		const ci = this.addAcpMessage({
+			to_id: "dev",
+			body: "@dev el job de e2e tarda 14 minutos: bajalo sin perder cobertura.",
+			state: "done",
+			result_text: "Medí 5 corridas: 6 min son instalación de navegadores. Propongo caché.",
+			project_id: PROJECT_IDS.hz,
+			conversation_id: CONV_IDS.ci,
+			finished_at: iso(500),
+		});
+		const run = this.addAcpMessage({
+			to_id: "dev",
+			body: "@dev implementalo en un trabajo aparte.",
+			state: "running",
+			project_id: PROJECT_IDS.hz,
+			conversation_id: CONV_IDS.ci,
+			started_at: iso(700),
+		});
+		this.addAcpMessage({
+			to_id: "arq",
+			body: "@arq ¿qué falta del prototipo?",
+			state: "done",
+			result_text: "Faltan los estados del equipo y el divisor de no leídos.",
+			project_id: PROJECT_IDS.hz,
+			conversation_id: CONV_IDS.ui,
+			finished_at: iso(900),
+		});
+		const queued = this.addAcpMessage({
+			to_id: "dev",
+			body: "@dev cuando puedas, revisá los tokens.",
+			state: "pending",
+			project_id: PROJECT_IDS.hz,
+			conversation_id: CONV_IDS.ui,
+		});
+		const dev = this.acpAgents.find((a) => a.name === "dev")!;
+		dev.running = [run.id];
+		dev.runningIn = [{ id: run.id, conversationId: CONV_IDS.ci, work: null }];
+		dev.pending = 1;
+		dev.queue = [{ id: queued.id, conversationId: CONV_IDS.ui, work: null }];
+		void ci;
+	}
+
+	private convView(c: MockConversation) {
+		const rows = this.acpMessages.filter((m) => m.conversation_id === c.id);
+		const times = [c.createdAt, ...rows.flatMap((m) => [m.created_at, m.finished_at ?? ""])];
+		const after = (t: string | null) =>
+			c.readAt === null || (t !== null && Date.parse(t) > Date.parse(c.readAt));
+		const unread =
+			rows.filter((m) => m.from_id !== "owner" && after(m.created_at)).length +
+			rows.filter(
+				(m) => m.from_id === "owner" && m.state === "done" && m.result_text && after(m.finished_at),
+			).length;
+		return {
+			...c,
+			lastActivityAt: times.filter(Boolean).sort().at(-1)!,
+			unread,
+			needsAction: false,
+		};
+	}
+
+	/** Push a topic's view live (as the backend does on create / rename / archive / read / post). */
+	pushConversation(id: string): void {
+		const c = this.acpConversations.find((x) => x.id === id);
+		if (c) this.pushAcp({ type: "conversation", conversation: this.convView(c) });
+	}
+
+	private async handleConversations(
+		method: string,
+		path: string,
+		req: ReturnType<Route["request"]>,
+		json: (status: number, body: unknown) => Promise<void>,
+		page: (msgs: MockAcpMessage[]) => MockAcpMessage[],
+	): Promise<boolean> {
+		const list = /^\/acp\/projects\/([^/]+)\/conversations$/.exec(path);
+		if (list && method === "GET") {
+			const pid = decodeURIComponent(list[1]!);
+			const archived = new URL(req.url()).searchParams.get("archived") === "1";
+			await json(
+				200,
+				this.acpConversations
+					.filter((c) => c.projectId === pid && Boolean(c.archivedAt) === archived)
+					.map((c) => this.convView(c))
+					.sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt)),
+			);
+			return true;
+		}
+		if (path === "/acp/conversations" && method === "POST") {
+			const b = JSON.parse(req.postData() ?? "{}") as {
+				projectId?: string;
+				title?: string;
+				clientRequestId?: string;
+			};
+			const title = (b.title ?? "").trim();
+			if (!title || [...title].length > 120) {
+				await json(400, { error: "invalid-title" });
+				return true;
+			}
+			const prior = this.convCreations.get(String(b.clientRequestId));
+			if (prior) {
+				const c = this.acpConversations.find((x) => x.id === prior)!;
+				await json(200, { ...this.convView(c), replayed: true });
+				return true;
+			}
+			const c: MockConversation = {
+				id: `c0000000-0000-4000-8000-0000000000${String(++this.convSeq).padStart(2, "0")}`,
+				projectId: String(b.projectId),
+				title,
+				createdAt: iso(1750 + this.convSeq),
+				archivedAt: null,
+				readAt: null,
+				recipients: null,
+			};
+			this.acpConversations.push(c);
+			this.convCreations.set(String(b.clientRequestId), c.id);
+			this.pushConversation(c.id);
+			await json(201, { ...this.convView(c), replayed: false });
+			return true;
+		}
+		const one = /^\/acp\/conversations\/([^/]+)(?:\/(archive|read|feed))?$/.exec(path);
+		if (!one) return false;
+		const c = this.acpConversations.find((x) => x.id === decodeURIComponent(one[1]!));
+		if (!c) {
+			await json(404, { error: "conversation-not-found" });
+			return true;
+		}
+		if (one[2] === undefined && method === "PATCH") {
+			const title = String(
+				(JSON.parse(req.postData() ?? "{}") as { title?: string }).title ?? "",
+			).trim();
+			if (!title || [...title].length > 120) {
+				await json(400, { error: "invalid-title" });
+				return true;
+			}
+			c.title = title;
+		} else if (one[2] === "archive" && method === "POST") {
+			c.archivedAt ??= iso(1795);
+		} else if (one[2] === "read" && method === "POST") {
+			const at = String((JSON.parse(req.postData() ?? "{}") as { at?: string }).at ?? "");
+			this.readMarks[c.id] = [...(this.readMarks[c.id] ?? []), at];
+			if (c.readAt === null || Date.parse(at) > Date.parse(c.readAt)) c.readAt = at;
+		} else if (one[2] === "feed" && method === "GET") {
+			await json(200, {
+				conversation: this.convView(c),
+				agents: this.acpAgents.filter((a) => a.projectId === c.projectId),
+				maxMessageBytes: 262144,
+				messages: page(this.acpMessages.filter((m) => m.conversation_id === c.id)),
+				questions: this.acpQuestions,
+				activity: this.acpActivity,
+				activitySeq: 0,
+			});
+			return true;
+		} else return false;
+		this.pushConversation(c.id);
+		await json(200, this.convView(c));
+		return true;
 	}
 
 	/** Turn projects on: one project and a few more sessions of alice's. */
@@ -527,6 +745,22 @@ export class MockBackend {
 			await json(200, { default: "claude-acp-0.108.0", available: ["claude-acp-0.108.0"] });
 			return true;
 		}
+		if (await this.handleConversations(method, path, req, json, page)) return true;
+		if (path === "/acp/inbox" && method === "GET") {
+			const questions = this.acpQuestions.filter((q) => q.state === "open");
+			const interrupted = this.acpMessages.filter((m) => m.state === "uncertain" && !m.reviewed_at);
+			await json(200, {
+				count: questions.length + interrupted.length,
+				action: { questions, interrupted },
+				results: [],
+				reports: [],
+			});
+			return true;
+		}
+		if (path === "/acp/works" && method === "GET") {
+			await json(200, this.acpWorks);
+			return true;
+		}
 		const feed = /^\/acp\/agents\/([^/]+)\/feed$/.exec(path);
 		if (feed && method === "GET") {
 			const a = this.acpAgents.find((x) => x.name === decodeURIComponent(feed[1]!));
@@ -569,17 +803,52 @@ export class MockBackend {
 		}
 		if (path === "/acp/messages" && method === "POST") {
 			const b = JSON.parse(req.postData() ?? "{}") as {
-				to: string;
+				to: string | string[];
 				body: string;
 				projectId?: string;
 				clientId?: string;
+				conversationId?: string;
 			};
-			if (!this.acpAgents.some((a) => a.name === b.to)) {
+			if (b.conversationId) {
+				const c = this.acpConversations.find((x) => x.id === b.conversationId);
+				if (!c) {
+					await json(404, { error: "conversation-not-found" });
+					return true;
+				}
+				if (c.archivedAt) {
+					await json(409, { error: "conversation-archived" });
+					return true;
+				}
+				const names = (Array.isArray(b.to) ? b.to : [b.to]).map((n) => n.replace(/^@/, ""));
+				const bad = names.find(
+					(n) => this.acpAgents.find((a) => a.name === n)?.projectId !== c.projectId,
+				);
+				if (bad) {
+					await json(400, { error: "not-in-project", agent: bad });
+					return true;
+				}
+				const rows = names.map((n) =>
+					this.addAcpMessage({
+						to_id: n,
+						body: b.body,
+						project_id: c.projectId,
+						conversation_id: c.id,
+						client_id: b.clientId ?? null,
+						created_at: iso(1780 + this.acpSeq),
+					}),
+				);
+				c.recipients = { agents: names };
+				for (const row of rows) this.pushAcp({ type: "message", message: row });
+				this.pushConversation(c.id);
+				await json(201, Array.isArray(b.to) ? { messages: rows, replayed: false } : rows[0]);
+				return true;
+			}
+			if (typeof b.to !== "string" || !this.acpAgents.some((a) => a.name === b.to)) {
 				await json(404, { error: "agent-not-found" });
 				return true;
 			}
 			const row = this.addAcpMessage({
-				to_id: b.to,
+				to_id: b.to as string,
 				body: b.body,
 				project_id: b.projectId ?? null,
 				client_id: b.clientId ?? null,

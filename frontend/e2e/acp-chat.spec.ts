@@ -85,14 +85,15 @@ test.describe("ACP chat", () => {
 		await app.login("alice", chatOf(PROJECT_SESSION_IDS.scratch));
 		const answer = page.locator("#acp-chat .acp-msg-result", { hasText: "Mirá" });
 		const internal = answer.getByRole("link", { name: "el proyecto" });
-		await expect(internal).toHaveAttribute("href", `#/projects/${PROJECT_IDS.hz}/chat`);
+		await expect(internal).toHaveAttribute("href", `#/projects/${PROJECT_IDS.hz}`);
 		await expect(internal).not.toHaveAttribute("target", /.+/);
 		const external = answer.getByRole("link", { name: "afuera" });
 		await expect(external).toHaveAttribute("target", "_blank");
 		await expect(external).toHaveAttribute("rel", "noopener noreferrer nofollow");
 		const pages = page.context().pages().length;
 		await internal.click();
-		await expect(page.locator("#pv-title")).toHaveText("Educación HZ");
+		// The project's own page: its rail.
+		await expect(page.locator(".rail-project-name")).toHaveText("Educación HZ");
 		expect(page.url()).toContain(`#/projects/${PROJECT_IDS.hz}`);
 		expect(page.context().pages()).toHaveLength(pages);
 	});
@@ -142,7 +143,7 @@ test.describe("ACP chat", () => {
 		await link.scrollIntoViewIfNeeded();
 		const before = await placeOf(page, thread, "Respuesta 15:");
 		await link.click();
-		await expect(page.locator("#pv-title")).toHaveText("Educación HZ");
+		await expect(page.locator(".rail-project-name")).toHaveText("Educación HZ");
 		await page.goBack();
 		await expect(link).toBeInViewport();
 		expect(Math.abs((await placeOf(page, thread, "Respuesta 15:")) - before)).toBeLessThanOrEqual(
@@ -177,7 +178,7 @@ test.describe("ACP chat", () => {
 		backend,
 	}) => {
 		longThread(backend, "arq", chatOf(PROJECT_SESSION_IDS.scratch), PROJECT_IDS.hz);
-		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/chat`);
 		const thread = "#project-view .acp-chat-thread";
 		const link = page.locator(thread).getByRole("link", { name: "el destino" });
 		await link.scrollIntoViewIfNeeded();
@@ -203,7 +204,7 @@ test.describe("ACP chat", () => {
 		const link = page.locator("#acp-chat .acp-chat-thread").getByRole("link", { name: "ir" });
 		await expect(link).toBeInViewport();
 		await link.click();
-		await expect(page.locator("#pv-title")).toHaveText("Educación HZ");
+		await expect(page.locator(".rail-project-name")).toHaveText("Educación HZ");
 		await page.goBack();
 		await expect(link).toBeInViewport();
 		expect(
@@ -244,7 +245,7 @@ test.describe("ACP chat", () => {
 		};
 		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
 		const solo = await column("#acp-chat");
-		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/chat`);
 		const project = await column(".acp-project");
 		const colPx = 56 * 16;
 		for (const c of [solo, project]) {
@@ -304,7 +305,7 @@ test.describe("ACP chat", () => {
 		app,
 		backend,
 	}) => {
-		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/chat`);
 		const input = page.locator("#project-view .acp-chat-input");
 		await expect(page.locator(".acp-agents-group")).toHaveAccessibleName(
 			/^Agentes del proyecto: 2\./,
@@ -552,7 +553,7 @@ test.describe("ACP chat headers", () => {
 				project_id: PROJECT_IDS.hz,
 			});
 		await page.setViewportSize({ width: 390, height: 844 });
-		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/chat`);
 		const thread = page.locator("#project-view .acp-chat-thread");
 		await expect(thread).toContainText("Respuesta 27.");
 		const gap = () =>

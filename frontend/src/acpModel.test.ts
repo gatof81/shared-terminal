@@ -7,7 +7,9 @@ import {
 	authFromActivity,
 	effortLabel,
 	effortState,
+	eventTime,
 	groupThread,
+	isUnread,
 	mapThroughEdits,
 	modelLabel,
 	modelState,
@@ -17,6 +19,7 @@ import {
 	recipientsOf,
 	setRecipient,
 	sidebarAgentStatus,
+	teamState,
 	upsert,
 	workTag,
 } from "./acpModel.js";
@@ -443,5 +446,70 @@ describe("workTag", () => {
 		expect(workTag({ context: "e2-work-tag" })).toBe("trabajo e2-work-tag");
 		expect(workTag({ context: null })).toBeNull();
 		expect(workTag({})).toBeNull();
+	});
+});
+
+describe("teamState (the seven words)", () => {
+	const ctx = {
+		here: "c1",
+		titleOf: (id: string) => (id === "c2" ? "Optimización de CI" : null),
+		interrupted: false,
+	};
+	it("is available with nothing to do", () => {
+		expect(teamState({}, ctx).label).toBe("disponible");
+	});
+	it("works here, or is busy in another topic by its title", () => {
+		expect(teamState({ runningIn: [{ id: 1, conversationId: "c1", work: null }] }, ctx).label).toBe(
+			"trabajando aquí",
+		);
+		expect(
+			teamState(
+				{
+					runningIn: [{ id: 1, conversationId: "c2", work: null }],
+					queue: [
+						{ id: 2, conversationId: "c1", work: null },
+						{ id: 3, conversationId: "c1", work: null },
+					],
+				},
+				ctx,
+			).label,
+		).toBe("ocupado en «Optimización de CI» · 2 en cola");
+		expect(teamState({ runningIn: [{ id: 1, conversationId: null, work: null }] }, ctx).label).toBe(
+			"ocupado",
+		);
+	});
+	it("puts what the person must act on first", () => {
+		const busy = { runningIn: [{ id: 1, conversationId: "c1", work: null }] };
+		expect(teamState({ ...busy, waitingInput: true }, ctx).label).toBe("espera tu decisión");
+		expect(teamState(busy, { ...ctx, interrupted: true }).label).toBe("ejecución interrumpida");
+	});
+	it("waits for another agent, or only has a queue", () => {
+		expect(
+			teamState({ waitingFor: [{ id: 4, agent: "qa", conversationId: "c1", work: null }] }, ctx)
+				.label,
+		).toBe("esperando a @qa");
+		expect(teamState({ queue: [{ id: 2, conversationId: "c1", work: null }] }, ctx).label).toBe(
+			"1 en cola",
+		);
+	});
+});
+
+describe("read state", () => {
+	it("an answer to the person counts from when it finished", () => {
+		const m = msg(1, {
+			state: "done",
+			result_text: "ok",
+			created_at: "2026-11-24T10:00:00.000Z",
+			finished_at: "2026-11-24T12:00:00.000Z",
+		});
+		expect(eventTime(m)).toBe("2026-11-24T12:00:00.000Z");
+		expect(isUnread(m, "2026-11-24T11:00:00.000Z")).toBe(true);
+		expect(isUnread(m, "2026-11-24T12:00:00.000Z")).toBe(false);
+	});
+	it("the person's own pending message is never news; an agent's row is", () => {
+		expect(isUnread(msg(1), null)).toBe(false);
+		expect(isUnread(msg(2, { from_id: "qa", created_at: "2026-11-24T10:00:00.000Z" }), null)).toBe(
+			true,
+		);
 	});
 });

@@ -125,7 +125,7 @@ test.describe("ACP conversation", () => {
 		page,
 		app,
 	}, info) => {
-		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/chat`);
 		const thread = page.locator(".acp-project .acp-chat-thread");
 		const post = thread.locator("article.acp-msg", { hasText: "¿cómo encaramos el login?" });
 		await expect(post.locator(".acp-sub")).toHaveCount(2);

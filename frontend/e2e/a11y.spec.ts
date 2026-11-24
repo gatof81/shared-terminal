@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import type { Page } from "@playwright/test";
 import { expect, test } from "./fixtures.js";
-import { PROJECT_IDS, PROJECT_SESSION_IDS, SESSION_IDS } from "./mockBackend.js";
+import { CONV_IDS, PROJECT_IDS, PROJECT_SESSION_IDS, SESSION_IDS } from "./mockBackend.js";
 
 /**
  * Accessibility sweep (UX audit A1–A4): axe-core over the main views, in
@@ -58,9 +58,19 @@ test.describe("accessibility — axe on the main views", () => {
 		}
 	});
 
+	test("the project's rail and a topic with news", async ({ app, backend, page }) => {
+		backend.enableConversations();
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		await expect(page.locator(".rail-body .rail-agent")).toHaveCount(2);
+		await expectClean(page, "project rail");
+		await page.goto(`/#/projects/${PROJECT_IDS.hz}/c/${CONV_IDS.ui}`);
+		await expect(page.locator("#project-view .acp-divider")).toBeVisible();
+		await expectClean(page, "topic");
+	});
+
 	test("sidebar tree and a project page", async ({ app, backend, page }) => {
 		backend.enableProjects();
-		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/chat`);
 		await expect(page.locator("#pv-title")).toBeVisible();
 		await expectClean(page, "project page");
 		await app.openSidebar();
@@ -70,7 +80,7 @@ test.describe("accessibility — axe on the main views", () => {
 
 	test("the new-agent dialog with its field errors", async ({ app, backend, page }) => {
 		backend.enableAcp();
-		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/chat`);
 		// The button is in the "Agentes" panel's foot, opened from the agents' group.
 		await page.locator(".acp-agents-group").click();
 		await page.getByRole("button", { name: "+ Nueva sesión con agente" }).click();
@@ -123,7 +133,7 @@ test.describe("accessibility — axe on the main views", () => {
 		await app.openAgentSettings();
 		await expect(page.locator("#acp-chat .acp-model-select")).toBeVisible();
 		await expectClean(page, "ACP chat, settings open");
-		await page.goto(`/#/projects/${PROJECT_IDS.hz}`);
+		await page.goto(`/#/projects/${PROJECT_IDS.hz}/chat`);
 		await page.locator(".acp-agents-group").click();
 		await expect(page.locator("#acp-agents")).toBeVisible();
 		await expectClean(page, "Project Chat, agents panel open");
@@ -254,7 +264,7 @@ test.describe("accessibility — axe on the main views", () => {
 			note: "Error del adaptador.",
 		});
 		backend.addAcpMessage({ to_id: "solo", body: "En cola" });
-		await app.login("alice", `#/projects/${hz}`);
+		await app.login("alice", `#/projects/${hz}/chat`);
 		await expect(page.locator("#project-view .acp-question-open")).toBeVisible();
 		await expectClean(page, "Project Chat thread");
 		await page.goto(`/#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);

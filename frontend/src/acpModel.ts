@@ -541,3 +541,65 @@ export function messagePlace(
 	if (hasEarlier && oldest !== null && id < oldest) return "earlier";
 	return "elsewhere";
 }
+
+// ── Project rail (3B F1) ────────────────────────────────────────────────────
+
+/**
+ * An agent's state in the seven words fixed for 3B (PROPUESTA §4, #757):
+ * «disponible» · «trabajando aquí» · «ocupado en «X»» · «N en cola» ·
+ * «esperando a @x» · «espera tu decisión» · «ejecución interrumpida»
+ * (busy and a queue combine: «ocupado en «X» · N en cola»). Never slots.
+ *
+ * What the person must act on comes first (a question, an interruption not
+ * reviewed); then what the agent is doing; then what it waits for.
+ * `here`: the topic on screen («trabajando aquí»); `titleOf`: a topic's
+ * title in this project (another project's, or the Archive's, is unknown:
+ * plain «ocupado»).
+ */
+export interface TeamState {
+	label: string;
+	tone: "ok" | "busy" | "warn" | "err" | "idle";
+}
+
+export function teamState(
+	a: Pick<
+		AcpAgentInfo,
+		"runningIn" | "running" | "queue" | "pending" | "waitingFor" | "question" | "waitingInput"
+	>,
+	ctx: { here: string | null; titleOf: (id: string) => string | null; interrupted: boolean },
+): TeamState {
+	if (a.question || a.waitingInput) return { label: "espera tu decisión", tone: "warn" };
+	if (ctx.interrupted) return { label: "ejecución interrumpida", tone: "err" };
+	const queued = a.queue?.length ?? a.pending ?? 0;
+	const inQueue = queued ? ` · ${queued} en cola` : "";
+	const running = a.runningIn ?? (a.running ?? []).map((id) => ({ id, conversationId: null }));
+	if (running.length) {
+		if (ctx.here !== null && running.some((r) => r.conversationId === ctx.here))
+			return { label: `trabajando aquí${inQueue}`, tone: "busy" };
+		const titled = running
+			.map((r) => (r.conversationId ? ctx.titleOf(r.conversationId) : null))
+			.find((t): t is string => t !== null);
+		return { label: `${titled ? `ocupado en «${titled}»` : "ocupado"}${inQueue}`, tone: "busy" };
+	}
+	const waiting = a.waitingFor?.[0];
+	if (waiting) return { label: `esperando a @${waiting.agent}`, tone: "idle" };
+	if (queued) return { label: `${queued} en cola`, tone: "busy" };
+	return { label: "disponible", tone: "ok" };
+}
+
+/**
+ * A row's event time for the read mark (§4b Read state): when a person's
+ * message got its result, the time it finished; anything else, when it was
+ * written.
+ */
+export function eventTime(m: AcpMessage): string {
+	return m.from_id === "owner" && m.state === "done" && m.result_text && m.finished_at
+		? m.finished_at
+		: m.created_at;
+}
+
+/** A row is news for a reader whose mark is `readAt` (null: never read). */
+export function isUnread(m: AcpMessage, readAt: string | null): boolean {
+	if (m.from_id === "owner" && !(m.state === "done" && m.result_text)) return false;
+	return readAt === null || Date.parse(eventTime(m)) > Date.parse(readAt);
+}

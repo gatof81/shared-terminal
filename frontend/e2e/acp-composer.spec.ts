@@ -10,7 +10,7 @@ import { PROJECT_IDS, PROJECT_SESSION_IDS } from "./mockBackend.js";
  * someone. What is sent is still the text (recipientsOf): acp-recipients.spec.ts.
  */
 
-const PROJECT = `#/projects/${PROJECT_IDS.hz}`;
+const PROJECT = `#/projects/${PROJECT_IDS.hz}/chat`;
 const P = "#project-view";
 
 const box = async (l: Locator) => (await l.boundingBox())!;

@@ -160,11 +160,21 @@ describe("reads", () => {
 describe("project routes", () => {
 	const PID = "6b1f2c3d-0000-4000-8000-000000000001";
 
-	it("parses the project page and round-trips it", () => {
-		expect(parseProjectRoute(`#/projects/${PID}`)).toEqual({ projectId: PID });
-		expect(parseProjectRoute(`#/projects/${PID}/chat`)).toEqual({ projectId: PID });
-		expect(projectRouteHash({ projectId: PID })).toBe(`#/projects/${PID}/chat`);
-		for (const r of [{ projectId: PID }, { projectId: "p 1" }])
+	it("parses the project's pages and round-trips them", () => {
+		const CID = "0c0c0c0c-0000-4000-8000-000000000009";
+		expect(parseProjectRoute(`#/projects/${PID}`)).toEqual({ projectId: PID, page: "home" });
+		expect(parseProjectRoute(`#/projects/${PID}/chat`)).toEqual({ projectId: PID, page: "chat" });
+		expect(parseProjectRoute(`#/projects/${PID}/c/${CID}`)).toEqual({
+			projectId: PID,
+			page: "conversation",
+			conversationId: CID,
+		});
+		expect(projectRouteHash({ projectId: PID })).toBe(`#/projects/${PID}`);
+		for (const r of [
+			{ projectId: PID, page: "home" as const },
+			{ projectId: "p 1", page: "chat" as const },
+			{ projectId: PID, page: "conversation" as const, conversationId: "c 1" },
+		])
 			expect(parseProjectRoute(projectRouteHash(r))).toEqual(r);
 	});
 
@@ -176,6 +186,8 @@ describe("project routes", () => {
 			"#/projects/%zz",
 			`#/projects/${PID}/team`,
 			`#/projects/${PID}/agents`,
+			`#/projects/${PID}/c/`,
+			`#/projects/${PID}/c/x/y`,
 			`#/sessions/${SID}`,
 		])
 			expect(parseProjectRoute(h), h).toBeNull();
@@ -209,15 +221,15 @@ describe("project routes", () => {
 		onAddressWrite(() => writes.push(window.location.hash));
 		navigateProject({ projectId: PID });
 		shown = true;
-		expect(window.location.hash).toBe(`#/projects/${PID}/chat`);
+		expect(window.location.hash).toBe(`#/projects/${PID}`);
 		expect(depth()).toBe(1);
 		navigate({ sessionId: SID, view: "terminal", detail: "tab-2" }, { replace: true });
-		expect(window.location.hash).toBe(`#/projects/${PID}/chat`);
+		expect(window.location.hash).toBe(`#/projects/${PID}`);
 		expect(currentRoute()).toEqual({ sessionId: SID, view: "terminal", detail: "tab-2" });
 		// A view the person chose (push) leaves the page.
 		navigate({ sessionId: SID, view: "files", detail: null });
 		expect(window.location.hash).toBe(`#/sessions/${SID}/files`);
-		expect(writes).toEqual([`#/projects/${PID}/chat`, `#/sessions/${SID}/files`]);
+		expect(writes).toEqual([`#/projects/${PID}`, `#/sessions/${SID}/files`]);
 	});
 
 	it("leaving a page pushes the session underneath (Back returns to the page)", () => {

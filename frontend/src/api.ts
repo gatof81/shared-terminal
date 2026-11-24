@@ -1849,6 +1849,14 @@ export interface AcpMessage {
 	client_id?: string | null;
 	/** Execution context: null = the agent's default one; else the work (`st work`) it runs in. */
 	context?: string | null;
+	/** The topic (v27): null = the Archive (direct, or the old Project Chat). */
+	conversation_id?: string | null;
+	/** Sent to the whole team ("Todo el equipo"): 1 on each row of that post. */
+	team?: number | null;
+	/** An `uncertain` run the person marked reviewed ("Dar por revisada"). */
+	reviewed_at?: string | null;
+	/** A runner's recovery report: the interrupted message it reports on. */
+	recovery_of?: number | null;
 }
 
 export interface AcpAgentInfo {
@@ -1885,8 +1893,23 @@ export interface AcpAgentInfo {
 	authRequired?: boolean;
 	/** An open question of this agent waits for the person. */
 	waitingInput?: boolean;
+	/** v27: what it runs, in which topic (never slots). */
+	runningIn?: AcpMessageRef[];
+	/** v27: its queue, in the order it takes it. */
+	queue?: AcpMessageRef[];
+	/** v27: its requests to other agents not answered yet. */
+	waitingFor?: Array<AcpMessageRef & { agent: string }>;
+	/** v27: its open question to the person, if any. */
+	question?: { id: number; messageId: number | null; conversationId: string | null } | null;
 	/** Login methods its adapter advertises (terminal-auth), for "Conectar cuenta". */
 	loginMethods?: Array<{ id: string; name: string; description: string }>;
+}
+
+/** A message an agent runs or has queued, with its topic and work (v27). */
+export interface AcpMessageRef {
+	id: number;
+	conversationId: string | null;
+	work: string | null;
 }
 
 export type AcpQuestionState = "open" | "answered" | "delivered" | "withdrawn" | "orphaned";
@@ -1926,6 +1949,45 @@ export interface AcpFeed {
 	/** Retained live activity per agent name. */
 	activity: Record<string, AcpActivity[]>;
 	activitySeq: number;
+	/** A topic's feed (v27): the topic itself, with its read mark. */
+	conversation?: AcpConversation;
+}
+
+/** A topic of a project (docs/ACP_AGENTS.md §4b). */
+export interface AcpConversation {
+	id: string;
+	projectId: string;
+	title: string;
+	createdAt: string;
+	lastActivityAt: string;
+	archivedAt: string | null;
+	readAt: string | null;
+	recipients: { agents: string[] } | { team: true } | null;
+	unread?: number;
+	needsAction?: boolean;
+}
+
+/** GET /api/acp/inbox: the global attention (§4b Inbox). */
+export interface AcpInbox {
+	count: number;
+	action: {
+		questions: Array<AcpQuestion & { conversation_id: string | null; project_id: string | null }>;
+		interrupted: AcpMessage[];
+	};
+	results: AcpMessage[];
+	reports: AcpMessage[];
+}
+
+/** A work (`st work`) as GET /api/acp/works shows it. */
+export interface AcpWork {
+	id: string;
+	agent: string;
+	projectId: string | null;
+	conversationId: string | null;
+	branch: string;
+	state: string;
+	createdAt: string;
+	closedAt: string | null;
 }
 
 async function acpJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -1967,17 +2029,51 @@ export const acpProjectFeed = async (projectId: string, before?: number | null) 
 export const acpSend = (
 	to: string,
 	body: string,
-	opts: { projectId?: string | null; clientId?: string } = {},
+	opts: { projectId?: string | null; clientId?: string; conversationId?: string } = {},
 ) =>
 	acpJson<AcpMessage>("/messages", {
 		method: "POST",
 		body: JSON.stringify({
 			to,
 			body,
-			...(opts.projectId ? { projectId: opts.projectId } : {}),
+			...(opts.conversationId ? { conversationId: opts.conversationId } : {}),
+			...(opts.projectId && !opts.conversationId ? { projectId: opts.projectId } : {}),
 			...(opts.clientId ? { clientId: opts.clientId } : {}),
 		}),
 	});
+export const acpConversationFeed = async (id: string, before?: number | null) =>
+	feedIn(await acpJson<AcpFeed>(`/conversations/${encodeURIComponent(id)}/feed${beforeQ(before)}`));
+export const acpConversations = (projectId: string, archived = false) =>
+	acpJson<AcpConversation[]>(
+		`/projects/${encodeURIComponent(projectId)}/conversations${archived ? "?archived=1" : ""}`,
+	);
+/** Idempotent by `clientRequestId`: a retry after an unknown outcome is the same topic. */
+export const acpCreateConversation = (projectId: string, title: string, clientRequestId: string) =>
+	acpJson<AcpConversation>("/conversations", {
+		method: "POST",
+		body: JSON.stringify({ projectId, title, clientRequestId }),
+	});
+export const acpRenameConversation = (id: string, title: string) =>
+	acpJson<AcpConversation>(`/conversations/${encodeURIComponent(id)}`, {
+		method: "PATCH",
+		body: JSON.stringify({ title }),
+	});
+export const acpArchiveConversation = (id: string) =>
+	acpJson<AcpConversation>(`/conversations/${encodeURIComponent(id)}/archive`, { method: "POST" });
+/** The read mark: the newest event time the reader saw (the server keeps the max). */
+export const acpReadConversation = (id: string, at: string) =>
+	acpJson<AcpConversation>(`/conversations/${encodeURIComponent(id)}/read`, {
+		method: "POST",
+		body: JSON.stringify({ at }),
+	});
+/** A post in a topic: one row per recipient under one client id. */
+export const acpPost = (conversationId: string, to: string[], body: string, clientId: string) =>
+	acpJson<{ messages: AcpMessage[]; replayed?: boolean }>("/messages", {
+		method: "POST",
+		body: JSON.stringify({ conversationId, to, body, clientId }),
+	});
+export const acpInbox = () => acpJson<AcpInbox>("/inbox");
+export const acpWorks = () => acpJson<AcpWork[]>("/works");
 export const acpSetProject = (name: string, projectId: string | null) =>
 	acpJson<AcpAgentInfo>(`/agents/${encodeURIComponent(name)}`, {
 		method: "PATCH",

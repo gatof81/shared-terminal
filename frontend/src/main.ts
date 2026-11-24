@@ -883,6 +883,13 @@ sidebarToggleBtn.addEventListener("click", () => {
 });
 
 sidebarBackdrop.addEventListener("click", () => setSidebarOpen(false));
+// The project rail's foot (projectRail.ts): "Sesiones" on a phone opens the
+// drawer over the project's screen; "Ajustes" is the account's menu.
+window.addEventListener("st:open-sidebar", () => setSidebarOpen(true));
+window.addEventListener("st:open-user-menu", (e) => {
+	const opener = (e as CustomEvent<{ opener?: HTMLElement }>).detail?.opener ?? userMenuBtn;
+	openUserMenu(opener);
+});
 
 // Escape closes the mobile drawer, matching the WAI-ARIA modal-dialog
 // expectation. Desktop ignores this — the sidebar is always part of the

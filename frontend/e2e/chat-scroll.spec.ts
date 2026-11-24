@@ -87,7 +87,7 @@ test.describe("chat scroll: ACP chats", () => {
 			to_id: "solo",
 			body: "¿Dónde sigue?",
 			state: "done",
-			result_text: `En [el proyecto](#/projects/${PROJECT_IDS.hz}).`,
+			result_text: `En [el proyecto](#/projects/${PROJECT_IDS.hz}/chat).`,
 		});
 		const agent = page.locator(AGENT);
 		await app.login("alice", chatOf(PROJECT_SESSION_IDS.scratch));
@@ -104,9 +104,11 @@ test.describe("chat scroll: ACP chats", () => {
 		await expect(agent).toContainText("Respuesta 30.");
 		await expect.poll(() => gap(agent), "the first agent again, from the sidebar").toBeLessThan(4);
 
-		// Project Chat from its heading in the sidebar.
+		// The previous Project Chat: the project from its heading in the sidebar,
+		// then the rail's Archive.
 		await app.openSidebar();
 		await page.locator(`.sgroup[data-group="${PROJECT_IDS.hz}"] a.sgroup-title`).click();
+		await page.locator(".rail-archive-row").click();
 		const project = page.locator(PROJECT);
 		await expect(project).toContainText("Tema 30 resuelto.");
 		await expect.poll(() => gap(project), "Project Chat").toBeLessThan(4);
@@ -313,7 +315,7 @@ test.describe("chat scroll: a link followed in the same instant as a scroll", ()
 						: `Tema ${i} resuelto.\n\nCon otra línea.`,
 				project_id: PROJECT_IDS.hz,
 			});
-		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/chat`);
 		const t = page.locator(PROJECT);
 		await expect(t).toContainText("Tema 30 resuelto.");
 		// Scrolled to the link's row and the link followed in ONE task: no

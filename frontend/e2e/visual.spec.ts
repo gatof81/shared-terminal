@@ -1,6 +1,7 @@
 import { fileURLToPath } from "node:url";
 import type { Page } from "@playwright/test";
 import { expect, test } from "./fixtures.js";
+import { CONV_IDS, PROJECT_IDS } from "./mockBackend.js";
 
 /**
  * Screenshot baselines of the main screens, per project (desktop / mobile).
@@ -68,6 +69,29 @@ test.describe("visual", () => {
 		await app.switchView("terminal");
 		await expect(page.locator("#terminal-state")).toContainText("stopped");
 		await shot(page, "terminal-stopped");
+	});
+
+	test("project rail", async ({ app, backend, page }) => {
+		backend.enableConversations();
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		await expect(page.locator(".rail-body .rail-agent")).toHaveCount(2);
+		await expect(page.locator(".rail-body .rail-unread")).toHaveText("1");
+		await shot(page, "project-rail");
+	});
+
+	test("topic with unread", async ({ app, backend, page }) => {
+		backend.enableConversations();
+		backend.addAcpMessage({
+			from_id: "dev",
+			to_id: "arq",
+			body: "¿Los tokens nuevos ya están en `tokens.css`?",
+			project_id: PROJECT_IDS.hz,
+			conversation_id: CONV_IDS.ui,
+		});
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/c/${CONV_IDS.ui}`);
+		await expect(page.locator("#project-view .acp-divider")).toBeVisible();
+		await expect(page.locator("#ps-topic-title")).toHaveText("Rediseño de UI/UX");
+		await shot(page, "project-topic");
 	});
 
 	test("new session dialog", async ({ app, page }) => {

@@ -4,7 +4,7 @@
 import { expect, test } from "./fixtures.js";
 import { PROJECT_IDS, PROJECT_SESSION_IDS } from "./mockBackend.js";
 
-const project = `#/projects/${PROJECT_IDS.hz}`;
+const project = `#/projects/${PROJECT_IDS.hz}/chat`;
 
 test.describe("Project Chat: recipients menu", () => {
 	test.beforeEach(({ backend }) => backend.enableAcp());
