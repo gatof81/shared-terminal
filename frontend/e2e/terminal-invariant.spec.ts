@@ -1,4 +1,5 @@
 import { expect, test } from "./fixtures.js";
+import { PROJECT_IDS } from "./mockBackend.js";
 
 /**
  * The terminal invariant (docs/design/ui-unificada.md §5.1): switching
@@ -47,6 +48,54 @@ test.describe("terminal invariant", () => {
 		backend.pushTerminalOutput(sock.sessionId, "\r\nstill here\r\n");
 		await app.switchView("terminal");
 		await expect(page.locator(".tab-pane.active")).toContainText("still here");
+	});
+
+	test("rail ⇄ topic ⇄ terminal: the project's pages go over the terminal without touching it", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.enableConversations();
+		await app.login("alice");
+		await app.openSession("my-project");
+		await app.expectTerminalReady();
+		await page.waitForTimeout(400);
+		const sockets = backend.terminalSockets.length;
+		const sock = backend.terminalSockets[0]!;
+		const framesBefore = sock.sent.length;
+		const rowsBefore = await page.locator(".tab-pane.active .xterm-rows > div").count();
+		const topicRow = (title: string) => page.locator(".rail-body .rail-conv", { hasText: title });
+
+		// The project from its heading in the sidebar: its rail.
+		await app.openSidebar();
+		await page.locator(`.sgroup[data-group="${PROJECT_IDS.hz}"] a.sgroup-title`).click();
+		await expect(page.locator(".rail-body")).toBeVisible();
+		// Topic, another topic, back to the rail.
+		await topicRow("Optimización de CI").click();
+		await expect(page.locator("#ps-topic-title")).toHaveText("Optimización de CI");
+		if (app.mobile) await page.locator(".ps-back").click();
+		await topicRow("Rediseño de UI/UX").click();
+		await expect(page.locator("#ps-topic-title")).toHaveText("Rediseño de UI/UX");
+		await page.goBack();
+		await expect(page.locator(".rail-body")).toBeVisible();
+		// The sessions from the rail's foot: the terminal again; Back to the rail.
+		await page.locator(".rail-foot").getByRole("button", { name: "Sesiones" }).click();
+		if (app.mobile) {
+			await expect(page.locator("main")).toHaveClass(/sidebar-open/);
+			await app.sessionRow("my-project").locator(".session-select").click();
+		}
+		await expect(page.locator("#project-view")).toBeHidden();
+		await page.goBack();
+		await expect(page.locator(".rail-body")).toBeVisible();
+		await page.goForward();
+		await expect(page.locator("#project-view")).toBeHidden();
+		await page.waitForTimeout(400);
+
+		expect(backend.terminalSockets.length, "no new terminal socket").toBe(sockets);
+		expect(sock.closed, "the attach stayed open").toBe(false);
+		expect(sock.sent.length - framesBefore, "no frame of any kind (no resize)").toBe(0);
+		expect(await page.locator(".tab-pane.active .xterm-rows > div").count()).toBe(rowsBefore);
+		expect(app.errors).toEqual([]);
 	});
 
 	test("typing reaches the session and the echo renders", async ({ app, backend, page }) => {

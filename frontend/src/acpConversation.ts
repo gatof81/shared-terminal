@@ -1,0 +1,255 @@
+// acpConversation.ts — a topic of a project (`#/projects/<pid>/c/<cid>`,
+// 3B F1): its header and its thread. The thread is the shared one
+// (acpThread.ts, source "conversation"): the topic's feed, posts with
+// `conversationId`, live rows over /ws/acp, the divider «Nuevos desde tu
+// última visita», «↓ N nuevos», the reading anchor kept across visits and
+// the read mark of what the reader saw.
+//
+// One element for every topic (the thread resets itself when the topic
+// changes): leaving a topic only stops following it, so coming back finds
+// the same DOM and the reader's place.
+
+import { AcpThread, type ThreadState } from "./acpThread.js";
+import { type AcpConversation, acpArchiveConversation, acpRenameConversation } from "./api.js";
+import { openActionMenu } from "./components/actionMenu.js";
+import { confirmDialog, promptDialog } from "./components/dialog.js";
+import { showToast } from "./components/toast.js";
+import { projectName } from "./projectDirectory.js";
+import {
+	agentState,
+	onRailChange,
+	patchConversation,
+	railAgents,
+	railConversation,
+} from "./projectRail.js";
+import { depth, navigateProject, projectRouteHash } from "./router.js";
+import { setTitlePage } from "./tabTitle.js";
+import { button, el, syncChildren } from "./ui.js";
+
+const TITLE_MAX = 120;
+
+const root = el("div", "ps-topic");
+root.setAttribute("role", "region");
+root.setAttribute("aria-labelledby", "ps-topic-title");
+const thread = new AcpThread();
+const noteEl = el("p", "pv-status");
+noteEl.hidden = true;
+
+export const topicHeader = el("div", "pv-header ps-topic-head");
+const back = el("a", "btn btn-icon ps-back", "‹");
+back.setAttribute("aria-label", "Volver al proyecto");
+back.title = "Volver al proyecto";
+const titleBox = el("div", "ps-topic-titles");
+const titleEl = el("h2", "pv-title ps-topic-title");
+titleEl.id = "ps-topic-title";
+titleEl.tabIndex = -1;
+const subEl = el("p", "ps-topic-sub");
+titleBox.append(titleEl, subEl);
+const menuBtn = button(
+	"⋯",
+	"btn btn-icon pv-menu-btn",
+	() => openMenu(),
+	"Acciones de la conversación",
+);
+menuBtn.setAttribute("aria-haspopup", "menu");
+topicHeader.append(back, titleBox, menuBtn);
+root.append(noteEl, thread.root);
+
+let pid: string | null = null;
+let cid: string | null = null;
+let state: ThreadState | null = null;
+/** Whether the person reached this topic from the project's rail (‹ is then Back). */
+let fromRail = false;
+
+thread.onState = (s) => {
+	state = s;
+	paint();
+};
+onRailChange(() => paint());
+
+back.addEventListener("click", (e) => {
+	if (!pid || e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+	e.preventDefault();
+	upToProject(pid);
+});
+
+/**
+ * Up the stack project → topic: Back when the topic was opened from the
+ * rail (what the browser's Back and the gesture do too), otherwise the
+ * project in the topic's place — never a second entry of the project.
+ */
+function upToProject(projectId: string): void {
+	if (fromRail && depth() > 0) history.back();
+	else navigateProject({ projectId }, { replace: true });
+}
+
+/** The topic's page element, following topic `conversationId` of project `projectId`. */
+export function topicPage(
+	projectId: string,
+	conversationId: string,
+	opener: "rail" | "other",
+): HTMLElement {
+	if (cid !== conversationId) fromRail = opener === "rail";
+	pid = projectId;
+	cid = conversationId;
+	back.href = projectRouteHash({ projectId });
+	thread.open({ kind: "conversation", conversationId, projectId });
+	state = thread.state;
+	paint();
+	return root;
+}
+
+/** Off screen: stop following (DOM and state kept for a quick return). */
+export function suspendTopic(): void {
+	thread.close();
+}
+
+export function resetTopic(): void {
+	thread.close();
+	pid = null;
+	cid = null;
+	state = null;
+}
+
+/** The topic as last known: the thread's feed, else the rail's list. */
+function topic(): AcpConversation | null {
+	if (!cid) return null;
+	const fromFeed = state?.conversation?.id === cid ? state.conversation : null;
+	return fromFeed ?? railConversation(cid);
+}
+
+function paint(): void {
+	if (!pid || !cid) return;
+	const c = topic();
+	const missing = state?.feed === "not-found";
+	const title = c?.title ?? (missing ? "Conversación no encontrada" : "Conversación");
+	if (titleEl.textContent !== title) titleEl.textContent = title;
+	if (root.isConnected) setTitlePage(title);
+	titleEl.title = title;
+	// "Proyecto · @a trabajando": who works here now, in the fixed words.
+	const here = railAgents()
+		.filter((a) => a.projectId === pid)
+		.filter((a) => agentState(a).label.startsWith("trabajando aquí"))
+		.map((a) => `@${a.name} trabajando`);
+	const sub = [projectName(pid) ?? "", ...here].filter(Boolean).join(" · ");
+	if (subEl.textContent !== sub) subEl.textContent = sub;
+	const isArchived = Boolean(c?.archivedAt);
+	menuBtn.hidden = !c || isArchived || missing;
+	// An archived topic is read here, without a message box; a missing one says so.
+	thread.setComposer(missing || isArchived ? "off" : c ? "on" : "disabled");
+	const note = missing
+		? "Esta conversación no existe o ya no está en este proyecto."
+		: isArchived
+			? "Conversación archivada · solo lectura"
+			: state?.feed === "error"
+				? "No se pudo cargar la conversación."
+				: "";
+	noteEl.hidden = note === "";
+	noteEl.classList.toggle("pv-status-error", missing || state?.feed === "error");
+	if (noteEl.textContent !== note) {
+		const parts: Array<string | HTMLElement> = [note];
+		if (state?.feed === "error")
+			parts.push(
+				" ",
+				button("Reintentar", "pv-btn", () => thread.retry()),
+			);
+		noteEl.replaceChildren(...parts);
+	}
+	thread.root.hidden = missing;
+	syncChildren(root, headerInPage ? [topicHeader, noteEl, thread.root] : [noteEl, thread.root]);
+}
+
+/**
+ * Where the header row goes: on top of the topic (wide), or out of it — on
+ * a phone projectsView puts it in the app's header, in the session bar's place.
+ */
+let headerInPage = true;
+export function placeTopicHeader(inPage: boolean): void {
+	headerInPage = inPage;
+	if (!inPage && topicHeader.parentElement === root) topicHeader.remove();
+	paint();
+}
+
+function openMenu(): void {
+	const c = topic();
+	if (!c) return;
+	openActionMenu({
+		title: c.title,
+		opener: menuBtn,
+		items: [
+			{ id: "rename", label: "Renombrar" },
+			{
+				id: "archive",
+				label: "Archivar",
+				kind: "danger",
+				hint: "Sale de la lista y no admite mensajes nuevos; su historial sigue legible.",
+			},
+		],
+		onPick: (id) => {
+			if (id === "rename") void renameTopic(c);
+			else void archiveTopic(c);
+		},
+	});
+}
+
+function titleProblem(v: string): string | null {
+	const t = v.trim();
+	return t === ""
+		? "Poné un título"
+		: [...t].length > TITLE_MAX
+			? `Hasta ${TITLE_MAX} caracteres`
+			: null;
+}
+
+async function renameTopic(c: AcpConversation): Promise<void> {
+	let done: AcpConversation | null = null;
+	await promptDialog({
+		title: "Renombrar conversación",
+		label: "Título",
+		initialValue: c.title,
+		confirmLabel: "Renombrar",
+		validate: titleProblem,
+		onConfirm: async (v) => {
+			try {
+				done = await acpRenameConversation(c.id, v.trim());
+				return null;
+			} catch (err) {
+				return refusal(err, "No se pudo renombrar");
+			}
+		},
+	});
+	if (done) {
+		patchConversation(done);
+		showToast("Conversación renombrada");
+	}
+}
+
+async function archiveTopic(c: AcpConversation): Promise<void> {
+	const ok = await confirmDialog({
+		title: `Archivar «${c.title}»`,
+		message:
+			"Sale de la lista de conversaciones y no admite mensajes nuevos. Su historial sigue legible desde «Ver archivadas».",
+		confirmLabel: "Archivar",
+		danger: true,
+	}).catch(() => false);
+	if (!ok) return;
+	try {
+		const row = await acpArchiveConversation(c.id);
+		patchConversation(row);
+		showToast("Conversación archivada");
+		// The project, in the topic's place: an archived topic is not where one writes.
+		if (cid === c.id && pid) upToProject(pid);
+	} catch (err) {
+		showToast(refusal(err, "No se pudo archivar"), true);
+	}
+}
+
+/** Fixed words for a refused write (never the server's code alone). */
+export function refusal(err: unknown, what: string): string {
+	const e = err as { status?: number; code?: string };
+	if (e.status === undefined) return "No se pudo conectar. Volvé a intentar.";
+	if (e.code === "invalid-title")
+		return `Título inválido: 1–${TITLE_MAX} caracteres, sin caracteres de control.`;
+	if (e.status === 404) return "La conversación ya no existe.";
+	return `${what} (${e.code ?? e.status}).`;
+}

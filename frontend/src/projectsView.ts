@@ -1,8 +1,13 @@
 /**
  * projectsView.ts — Projects: the sidebar's Projects section (its "+"), the
- * project page (`#/projects/<pid>`: ACP Project Chat, acpProjectChat.ts) and
- * the new-project dialog. A project only groups ACP agents and gives them a
- * shared conversation; each agent keeps its own session.
+ * project's pages and the new-project dialog. A project groups ACP agents
+ * and gives them topics; each agent keeps its own session.
+ *
+ *   #/projects/<pid>          the project: its rail (projectRail.ts) — in the
+ *                             sidebar on a wide screen, the whole screen on a phone
+ *   #/projects/<pid>/c/<cid>  a topic (acpConversation.ts), the rail beside it
+ *   #/projects/<pid>/chat     the previous Project Chat (acpProjectChat.ts),
+ *                             reached from the rail's Archive until F5
  *
  * The page is shown OVER the session workbench, never instead of it: the
  * terminal area's other children only turn `visibility: hidden` (layout
@@ -10,6 +15,14 @@
  * stays open (the terminal invariant, viewSwitch.ts).
  */
 
+import {
+	placeTopicHeader,
+	refusal,
+	resetTopic,
+	suspendTopic,
+	topicHeader,
+	topicPage,
+} from "./acpConversation.js";
 import {
 	acpProjectPage,
 	onProjectFeed,
@@ -25,6 +38,7 @@ import { resetAcpAgents } from "./acpRegistry.js";
 import { stopAcpStatusFeed } from "./acpStatusFeed.js";
 import type { FeedStatus } from "./acpThread.js";
 import {
+	acpCreateConversation,
 	archiveProject,
 	createProject,
 	fetchProjects,
@@ -45,10 +59,24 @@ import {
 	setProjects,
 } from "./projectDirectory.js";
 import {
+	configureRail,
+	hideRail,
+	onRailChange,
+	patchConversation,
+	railBody,
+	railHead,
+	repaintRail,
+	resetRail,
+	showRail,
+} from "./projectRail.js";
+import {
 	disableProjectRoutes,
 	enableProjectRoutes,
+	fromHistory,
 	navigateProject,
 	onAddressWrite,
+	type ProjectPage,
+	type ProjectRoute,
 	projectRouteHash,
 	pushSessionAddress,
 	readProjectRoute,
@@ -68,6 +96,8 @@ const PROJECT_NAME_MAX = 80;
 
 let active = false; // signed in + app shown
 let shown: string | null = null; // the project id on screen
+let shownPage: ProjectPage | null = null; // which of its pages
+let shownTopic: string | null = null;
 let gen = 0; // bumped by every reset (logout): a load started before applies nothing
 let loadError = false;
 let canCreate = true;
@@ -99,7 +129,7 @@ const MODE: Record<PageState, ProjectPageMode> = {
 
 function evaluate(): void {
 	const pid = shown;
-	if (!pid) return;
+	if (!pid || shownPage !== "chat") return;
 	let next: PageState;
 	if (feedStatus === "loading") next = "loading";
 	else if (feedStatus === "not-found") next = "missing";
@@ -164,6 +194,8 @@ async function loadProjects(): Promise<void> {
 	} else if (a?.code !== "stale") loadError = true;
 	renderSection();
 	if (shown) evaluate();
+	paintSpace();
+	repaintRail();
 }
 
 // ── Sidebar section ─────────────────────────────────────────────────────────
@@ -211,21 +243,51 @@ function sync(): void {
 		hidePage();
 		return;
 	}
-	// The address is the page's canonical one (…/chat), also when it was
-	// entered by the bare form: written in place, not a history entry; the
-	// write comes back here (onAddressWrite).
+	// The address in its canonical form (an encoding written differently):
+	// in place, not a history entry; the write comes back here (onAddressWrite).
 	if (window.location.hash !== projectRouteHash(r)) {
 		navigateProject(r, { replace: true });
 		return;
 	}
-	const changed = shown !== r.projectId;
-	shown = r.projectId;
+	const page = r.page ?? "home";
+	const prevPid = shown;
+	const prevPage = shownPage;
+	// Leaving one kind of page for the other: the one left stops following.
+	if (prevPage === "chat" && page !== "chat") {
+		suspendAcpProject();
+		headerFor = null;
+	}
+	if (prevPage !== null && prevPage !== "chat" && page === "chat") leaveSpace();
+	if (page === "chat") syncChat(r.projectId, prevPid !== r.projectId || prevPage !== "chat");
+	else syncSpace(r, prevPid, prevPage);
+	renderSection();
+}
+
+/** The previous Project Chat (its own page until F5). */
+function syncChat(pid: string, changed: boolean): void {
+	shown = pid;
+	shownPage = "chat";
+	shownTopic = null;
 	if (changed) {
 		pageState = "loading";
 		absentConfirmed = null;
 		confirming = null;
 		confirmFailed = false;
 	}
+	if (!pageEl) return;
+	showPageEl();
+	renderPage();
+	if (changed) {
+		const f = projectFeed(pid);
+		feedStatus = f.feed;
+		feedName = f.name;
+		evaluate();
+		pageEl.querySelector<HTMLElement>(".pv-title")?.focus({ preventScroll: true });
+		if (!projectsLoaded()) void loadProjects();
+	}
+}
+
+function showPageEl(): void {
 	if (!pageEl) return;
 	document.body.classList.add("project-page-on");
 	pageEl.hidden = false;
@@ -237,24 +299,167 @@ function sync(): void {
 		!pageEl.contains(focused)
 	)
 		focused.blur();
-	renderPage();
-	if (changed) {
-		const f = projectFeed(r.projectId);
-		feedStatus = f.feed;
-		feedName = f.name;
-		evaluate();
+}
+
+// ── The project's space: rail + topic ───────────────────────────────────────
+//
+// One page element (`.ps-page`): a slot for the rail's body (a phone's
+// project screen) and the main area (a topic, or on a wide screen with no
+// topic, a line saying what to do). Where the rail goes follows the width
+// (placeSpace): wide, head and body in the sidebar (#project-rail, the
+// sidebar's other children hidden); on a phone, the head in the app's header
+// and the body in the page — the header keeps its height either way, and
+// the terminal under the page keeps its box (no resize).
+
+const spaceEl = el("div", "ps-page");
+const railSlot = el("div", "ps-rail-slot");
+const mainSlot = el("div", "ps-main");
+spaceEl.append(railSlot, mainSlot);
+const railEl = el("div", "project-rail");
+railEl.id = "project-rail";
+const homeEl = el("div", "ps-home");
+const homeTitle = el("h2", "ps-home-title", "Elegí una conversación");
+homeTitle.tabIndex = -1;
+const homeNote = el("p", "ps-home-note");
+const homeNew = button("Nueva conversación", "btn primary sm", () => {
+	if (shown) void newConversationFlow(shown);
+});
+homeEl.append(homeTitle, homeNote, homeNew);
+const phoneMq = typeof window !== "undefined" ? window.matchMedia?.("(max-width: 768px)") : null;
+phoneMq?.addEventListener?.("change", () => placeSpace());
+
+function syncSpace(r: ProjectRoute, prevPid: string | null, prevPage: ProjectPage | null): void {
+	const page = r.page === "conversation" ? "conversation" : "home";
+	const topic = page === "conversation" ? (r.conversationId ?? null) : null;
+	const topicChanged = topic !== shownTopic || prevPid !== r.projectId;
+	shown = r.projectId;
+	shownPage = page;
+	shownTopic = topic;
+	if (!pageEl) return;
+	showPageEl();
+	document.body.classList.add("project-space-on");
+	document.body.classList.toggle("ps-on-topic", topic !== null);
+	showRail(r.projectId, topic);
+	if (topic) {
+		// From the rail (a phone's project screen, or the sidebar) by a tap,
+		// not Back / Forward: ‹ is then the browser's Back.
+		const opener =
+			prevPid === r.projectId && prevPage === "home" && !fromHistory() ? "rail" : "other";
+		mainSlot.replaceChildren(topicPage(r.projectId, topic, opener));
+	} else {
+		suspendTopic();
+		mainSlot.replaceChildren(homeEl);
 	}
-	renderSection();
-	if (changed) {
-		pageEl.querySelector<HTMLElement>(".pv-title")?.focus({ preventScroll: true });
+	if (pageEl.firstChild !== spaceEl || pageEl.childNodes.length !== 1)
+		pageEl.replaceChildren(spaceEl);
+	placeSpace();
+	paintSpace();
+	if (topicChanged || prevPage !== page) {
+		// The page's heading, for a screen reader (a phone's project screen has
+		// none of its own: the rail's head is the app's header there).
+		const target = topic ? topicHeader.querySelector<HTMLElement>(".pv-title") : homeTitle;
+		if (target?.offsetParent) target.focus({ preventScroll: true });
 		if (!projectsLoaded()) void loadProjects();
 	}
 }
 
+/** What the space says about the project itself, and the tab's title. */
+function paintSpace(): void {
+	if (!shown || shownPage === null || shownPage === "chat") return;
+	const name = projectName(shown);
+	const gone = projectsLoaded() && name === null;
+	homeTitle.textContent = gone ? "Proyecto no encontrado" : "Elegí una conversación";
+	homeNote.textContent = gone
+		? "No existe o fue archivado. El historial de un proyecto archivado se lee en su Project Chat anterior."
+		: "Elegí un tema del panel, o empezá uno nuevo: cada tema es una conversación con el equipo del proyecto.";
+	homeNew.hidden = gone;
+	// Nothing of a rail for a project that is not there: the sidebar keeps its
+	// sessions, and a phone shows this line instead of an empty project screen.
+	document.body.classList.toggle("ps-gone", gone);
+	// A topic's title is its own page's (acpConversation.paint).
+	if (!shownTopic) setTitlePage(name ?? "Proyecto");
+}
+
+function placeSpace(): void {
+	const slot = document.getElementById("header-project");
+	const sidebar = document.getElementById("sidebar");
+	if (!shown || shownPage === null || shownPage === "chat") return;
+	if (phoneMq?.matches) {
+		railEl.remove();
+		railSlot.replaceChildren(railBody);
+		if (slot) {
+			slot.replaceChildren(shownTopic ? topicHeader : railHead);
+			slot.hidden = false;
+		}
+		placeTopicHeader(false);
+	} else {
+		railSlot.replaceChildren();
+		if (railEl.firstChild !== railHead) railEl.replaceChildren(railHead, railBody);
+		if (sidebar && railEl.parentElement !== sidebar) sidebar.prepend(railEl);
+		if (slot) {
+			slot.hidden = true;
+			slot.replaceChildren();
+		}
+		placeTopicHeader(true);
+	}
+}
+
+/** Leaving the space (another kind of page, or no page): rail and topic stop following. */
+function leaveSpace(): void {
+	hideRail();
+	suspendTopic();
+	railEl.remove();
+	railSlot.replaceChildren();
+	topicHeader.remove();
+	document.body.classList.remove("project-space-on", "ps-on-topic", "ps-gone");
+	const slot = document.getElementById("header-project");
+	if (slot && (slot.contains(railHead) || slot.contains(topicHeader))) {
+		slot.hidden = true;
+		slot.replaceChildren();
+	}
+	shownTopic = null;
+}
+
+/** "+" of Conversaciones (and the space's own button): a new topic, then into it. */
+async function newConversationFlow(pid: string): Promise<void> {
+	// One id per dialog: a retry after an unknown outcome is the same topic.
+	const clientRequestId = crypto.randomUUID();
+	let created: { id: string } | null = null;
+	await promptDialog({
+		title: "Nueva conversación",
+		label: "Título",
+		confirmLabel: "Crear",
+		validate: (v) =>
+			v.trim() === ""
+				? "Poné un título"
+				: [...v.trim()].length > 120
+					? "Hasta 120 caracteres"
+					: null,
+		onConfirm: async (v) => {
+			try {
+				const c = await acpCreateConversation(pid, v.trim(), clientRequestId);
+				patchConversation(c);
+				created = c;
+				return null;
+			} catch (err) {
+				const e = err as { code?: string };
+				return e.code === "outcome-unknown"
+					? "No se pudo confirmar. Volvé a intentar: no se duplica."
+					: refusal(err, "No se pudo crear");
+			}
+		},
+	});
+	const c = created as { id: string } | null;
+	if (c && shown === pid)
+		navigateProject({ projectId: pid, page: "conversation", conversationId: c.id });
+}
+
 function hidePage(): void {
 	if (shown === null && pageEl?.hidden !== false) return;
+	if (shownPage === "chat") suspendAcpProject();
+	else if (shownPage !== null) leaveSpace();
 	shown = null;
-	suspendAcpProject();
+	shownPage = null;
 	document.body.classList.remove("project-page-on");
 	if (pageEl) {
 		pageEl.hidden = true;
@@ -347,6 +552,10 @@ function statusNote(st: PageState): HTMLElement | null {
 }
 
 function renderPage(): void {
+	if (shownPage !== "chat") {
+		paintSpace();
+		return;
+	}
 	if (!pageEl || !shown) return;
 	// The live list's name first (a rename lands there); the feed's for an archived one.
 	const name = projectName(shown) ?? (pageState === "missing" ? null : feedName);
@@ -422,6 +631,8 @@ async function renameFlow(pid: string, current: string): Promise<void> {
 		renderSessionList();
 	renderSection();
 	if (shown === pid) evaluate();
+	paintSpace();
+	repaintRail();
 	showToast("Proyecto renombrado");
 }
 
@@ -466,6 +677,26 @@ function wire(): void {
 	window.addEventListener("st:projects-changed", () => void loadProjects());
 	onProjectFeed(onFeed);
 	onAddressWrite(() => sync());
+	onRailChange(() => paintSpace());
+	configureRail({
+		newProject: () => void openCreateProjectDialog(),
+		renameProject: (pid) => void renameFlow(pid, projectName(pid) ?? ""),
+		archiveProject: (pid) => void archiveFlow(pid, projectName(pid) ?? "este proyecto"),
+		newConversation: (pid) => void newConversationFlow(pid),
+		newAgent: (pid, opener) =>
+			window.dispatchEvent(
+				new CustomEvent("st:new-acp-session", { detail: { projectId: pid, opener } }),
+			),
+		// Sessions: on a phone the drawer (the page stays under it); wider,
+		// the page gives way to the session underneath (Back returns).
+		sessions: (opener) => {
+			if (phoneMq?.matches)
+				window.dispatchEvent(new CustomEvent("st:open-sidebar", { detail: { opener } }));
+			else leaveForSession();
+		},
+		settings: (opener) =>
+			window.dispatchEvent(new CustomEvent("st:open-user-menu", { detail: { opener } })),
+	});
 	newProjectBtn?.addEventListener("click", () => void openCreateProjectDialog());
 	// A session row or the session bar used while the page is up: the page
 	// gives way to the session (and Back returns to it).
@@ -509,6 +740,8 @@ export function resetProjects(): void {
 	disableProjectRoutes();
 	clearProjects();
 	resetAcpProject();
+	resetRail();
+	resetTopic();
 	loadError = false;
 	canCreate = true;
 	headerFor = null;

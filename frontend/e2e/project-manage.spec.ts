@@ -31,7 +31,7 @@ test.describe("project management", () => {
 		app,
 		backend,
 	}, info) => {
-		await app.login("alice", `#/projects/${HZ}`);
+		await app.login("alice", `#/projects/${HZ}/chat`);
 		const title = page.locator("#pv-title");
 		await expect(title).toHaveText("Educación HZ");
 		await expect(page.locator(".acp-project .acp-chat-input")).toBeEnabled();
@@ -63,7 +63,7 @@ test.describe("project management", () => {
 		page,
 		app,
 	}, info) => {
-		await app.login("alice", `#/projects/${HZ}`);
+		await app.login("alice", `#/projects/${HZ}/chat`);
 		await openMenuItem(page, "Archivar");
 		const body = page.locator(".dialog-card .dialog-body");
 		await expect(body).toContainText("no se puede deshacer desde la app");
@@ -81,7 +81,7 @@ test.describe("project management", () => {
 	}, info) => {
 		backend.projects[0]!.archivedAt = "2026-11-19T00:00:00Z";
 		for (const a of backend.acpAgents) if (a.projectId === HZ) a.projectId = null;
-		await app.login("alice", `#/projects/${HZ}`);
+		await app.login("alice", `#/projects/${HZ}/chat`);
 		await expect(page.locator("#pv-title")).toHaveText("Educación HZ");
 		await expect(page.locator(".pv-status-archived")).toHaveText(
 			"Proyecto archivado · solo lectura",
@@ -97,7 +97,8 @@ test.describe("project management", () => {
 	});
 
 	test("a project that does not exist is 'not found'", async ({ page, app }) => {
-		await app.login("alice", "#/projects/6b1f2c3d-0000-4000-8000-000000000999");
+		// Its own page (the rail's is in project-rail.spec).
+		await app.login("alice", "#/projects/6b1f2c3d-0000-4000-8000-000000000999/chat");
 		await expect(page.locator(".pv-status-error")).toHaveText("Proyecto no encontrado.");
 		await expect(page.locator(".pv-status-archived")).toHaveCount(0);
 		await expect(page.locator(".acp-project .acp-chat-input")).toBeHidden();
@@ -108,7 +109,7 @@ test.describe("project management", () => {
 		app,
 		backend,
 	}) => {
-		await app.login("alice", `#/projects/${HZ}`);
+		await app.login("alice", `#/projects/${HZ}/chat`);
 		const said = page.locator(".acp-project .acp-msg", { hasText: "Con OAuth y PKCE." });
 		await expect(said).toBeVisible();
 		await expect(page.locator(".acp-project .acp-chat-input")).toBeEnabled();
@@ -137,7 +138,7 @@ test.describe("project management", () => {
 		backend,
 	}) => {
 		backend.projectFeedFailure = 500;
-		await app.login("alice", `#/projects/${HZ}`);
+		await app.login("alice", `#/projects/${HZ}/chat`);
 		const status = page.locator(".pv-status-error");
 		await expect(status).toContainText("No se pudo cargar el proyecto.");
 		await expect(page.locator(".pv-status-archived")).toHaveCount(0);

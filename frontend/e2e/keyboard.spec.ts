@@ -149,7 +149,7 @@ test.describe("soft keyboard (simulated visual viewport)", () => {
 			hash: `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`,
 			root: "#acp-chat",
 		},
-		{ name: "Project Chat", hash: `#/projects/${PROJECT_IDS.hz}`, root: "#project-view" },
+		{ name: "Project Chat", hash: `#/projects/${PROJECT_IDS.hz}/chat`, root: "#project-view" },
 	])
 		test(`${chat.name}: with 150 px visible the layout fits its box — the thread gives way, the message box is whole`, async ({
 			app,

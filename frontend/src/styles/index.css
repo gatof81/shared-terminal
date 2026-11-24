@@ -27,3 +27,5 @@
 @import "./projects.css";
 /* Experimental ACP agent chat: classes used only by acpChat.ts. */
 @import "./acp-chat.css";
+/* The project rail and topics (3B): after the chat it reuses. */
+@import "./rail.css";

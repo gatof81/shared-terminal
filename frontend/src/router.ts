@@ -25,9 +25,10 @@
  * `#session=<id>` (the service worker's one-shot notification jump) is a
  * different shape and is not this module's: it parses to null here.
  *
- * The project page (`#/projects/<pid>/chat`, its Project Chat) is a SECOND
- * route shape, parsed apart so the session route above keeps its exact
- * meaning. A project page is shown OVER the
+ * The project pages (`#/projects/<pid>`: the rail, `…/c/<cid>`: a topic,
+ * `…/chat`: the previous Project Chat) are a SECOND route shape, parsed
+ * apart so the session route above keeps its exact meaning. A project page
+ * is shown OVER the
  * session underneath, which stays open, attached and un-resized — so while
  * one is in the address, `current` keeps naming that session and the
  * session listeners are not told anything (projectsView.ts owns the page).
@@ -104,24 +105,43 @@ export function readRoute(): Route | null {
 
 // ── Project routes (P3a) ────────────────────────────────────────────────────
 
+/**
+ * A project's pages (3B):
+ *   #/projects/<pid>               the project: its rail (on a phone, the
+ *                                  whole screen; wider, the rail and no topic)
+ *   #/projects/<pid>/c/<cid>       a topic (conversation) of the project
+ *   #/projects/<pid>/chat          the previous Project Chat (read from the
+ *                                  rail's Archive until F5 retires it)
+ */
+export type ProjectPage = "home" | "chat" | "conversation";
+
 export interface ProjectRoute {
 	projectId: string;
+	/** Absent: "home". */
+	page?: ProjectPage;
+	/** The topic, for `page: "conversation"`. */
+	conversationId?: string;
 }
 
-/**
- * `#/projects/<pid>/chat`: the project page (its Project Chat). The bare
- * `#/projects/<pid>` is the same page.
- */
 export function parseProjectRoute(hash: string): ProjectRoute | null {
-	const m = /^#\/projects\/([^/?#]+)(?:\/chat)?$/.exec(hash);
+	const m = /^#\/projects\/([^/?#]+)(?:\/(chat|c\/([^/?#]+)))?$/.exec(hash);
 	if (!m) return null;
 	const projectId = decode(m[1]!);
 	if (projectId === null || projectId === "") return null;
-	return { projectId };
+	if (m[2] === undefined) return { projectId, page: "home" };
+	if (m[2] === "chat") return { projectId, page: "chat" };
+	const conversationId = decode(m[3]!);
+	if (conversationId === null || conversationId === "") return null;
+	return { projectId, page: "conversation", conversationId };
 }
 
 export function projectRouteHash(route: ProjectRoute): string {
-	return `#/projects/${encodeURIComponent(route.projectId)}/chat`;
+	const base = `#/projects/${encodeURIComponent(route.projectId)}`;
+	const page = route.page ?? "home";
+	if (page === "chat") return `${base}/chat`;
+	if (page === "conversation" && route.conversationId)
+		return `${base}/c/${encodeURIComponent(route.conversationId)}`;
+	return base;
 }
 
 /**

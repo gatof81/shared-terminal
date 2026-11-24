@@ -305,16 +305,12 @@ test.describe("Project Chat (U-2)", () => {
 		await expect(target).not.toHaveClass(/acp-msg-flash/);
 	});
 
-	test("navigation: the address is the project's (…/chat); Abrir su chat is a history entry; archiving stays on the page, read-only", async ({
+	test("navigation: the address is the previous Project Chat's (…/chat); Abrir su chat is a history entry; archiving stays on the page, read-only", async ({
 		app,
 		page,
 	}) => {
-		const length = await page.evaluate(() => history.length);
-		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/chat`);
 		await expect(page.locator("#pv-title")).toBeVisible();
-		// Entered by the bare form: the address becomes the canonical …/chat, in place (N3).
-		await expect(page).toHaveURL(new RegExp(`#/projects/${PROJECT_IDS.hz}/chat$`));
-		expect(await page.evaluate(() => history.length)).toBeLessThanOrEqual(length + 1);
 		const panel = await openPanel(page);
 		await panel.getByRole("link", { name: "Abrir su chat (@dev)" }).click();
 		await expect(page).toHaveURL(new RegExp(`#/sessions/${PROJECT_SESSION_IDS.developer2}/chat$`));
