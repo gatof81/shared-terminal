@@ -6,7 +6,7 @@
 //   C2  ACP continuity per (agent, topic) while alternating: the slot 1 resumes each topic's own session (count),
 //       always in the main checkout, never two runs at once there;
 //   C3  an agent busy in another topic ⇒ the message waits `pending` (the agent's status says busy in which topic)
-//       and runs after, in its own topic's session;
+//       and runs after, in its own topic's session; a process left running in a topic holds slot 1 there (heldBy);
 //   C4  a send to several agents: one row per recipient under one send, each with its own state; the "whole team"
 //       mark is kept;
 //   C5  a topic's recipients are saved with each owner send (the last set, or the team mark); a new topic starts
@@ -199,6 +199,21 @@ async function main() {
 	check("C3 @A's status: running in T1, queued in T2", status?.runningIn?.some((r) => r.id === long.id && r.conversationId === T1) && status?.queue?.some((q) => q.id === queued.id && q.conversationId === T2), short(JSON.stringify({ runningIn: status?.runningIn, queue: status?.queue }), 200));
 	const [ld, qd] = [await waitMsg(long.id), await waitMsg(queued.id)];
 	check("C3 the queued message ran after, in slot 1, in T2's session", qd.state === "done" && ms(qd.started_at) >= ms(ld.finished_at) && qd.slot === 1 && sessionCount(qd.result_text) === sessionCount(seq[3].result_text) + 1, `${ld.finished_at} → ${qd.started_at} count ${sessionCount(qd.result_text)}`);
+
+	// C3b. A process left running in T1 holds slot 1 there (heldBy, #761): the test agent's `persistente N:` declares
+	// ST-PERSISTENT on a task that stays open N s. While it lives, /agents says "held in T1", a message to @A in T2
+	// waits pending, and once the task ends the slot is released and T2's message runs.
+	const hold = await waitMsg((await post(A, `persistente 25: consultá a @${B}: tarde`, pid, T1)).id);
+	const t2wait = await post(A, "mientras retiene", pid, T2);
+	const heldNow = await waitFor(async () => {
+		const a = (await agents()).find((x) => x.name === A);
+		return (a?.heldBy ?? []).some((h) => h.conversationId === T1) ? a : null;
+	}, 20_000);
+	check("C3b a live process in T1: @A is held there (heldBy)", hold.state === "done" && !!heldNow, short(JSON.stringify(heldNow?.heldBy), 120));
+	check("C3b …and the T2 message waits pending meanwhile", (await get(t2wait.id)).state === "pending", (await get(t2wait.id)).state);
+	const t2ran = await waitMsg(t2wait.id, ["done", "uncertain", "failed"], 120_000);
+	const heldAfter = (await agents()).find((x) => x.name === A)?.heldBy ?? [];
+	check("C3b after the process ended: the T2 message ran in T2 and the hold is gone", t2ran.state === "done" && topicOf(t2ran) === T2 && !heldAfter.some((h) => h.conversationId === T1), `${t2ran.state} ${short(JSON.stringify(heldAfter), 80)}`);
 
 	// C4. A send to three agents ("whole team") in a new topic T3: one row per recipient under one send, each with
 	// its own state, the team mark kept on the rows and as the topic's recipients.
