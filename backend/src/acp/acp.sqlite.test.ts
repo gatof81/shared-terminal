@@ -1101,7 +1101,9 @@ describe("ACP slots: contexts, caps and attribution (v24)", () => {
 		// A slot holding context b's session open takes only b: m3 (context a) is not for it.
 		await settle(m4.id);
 		expect((await claim(3, "b")).status).toBe(204);
-		expect((await claim(3)).body.id).toBe(m3.id);
+		// …nor any other: context a stays with slot 2, which may still hold its session.
+		expect((await claim(3)).status).toBe(204);
+		expect((await claim(2)).body.id).toBe(m3.id);
 		await settle(m3.id);
 		await settle(m1.id);
 		await call(owner, "PATCH", "/agents/multi", { maxConcurrency: 2 });
@@ -1673,5 +1675,65 @@ describe("ACP works: close, clean, the slot's session (v26)", () => {
 		expect((await act(owner, id, "clean")).status).toBe(409);
 		fx.clean = ["absent"];
 		expect((await act(owner, id, "clean")).body.state).toBe("cleaned");
+	});
+});
+
+// A context's ACP session stays open in the slot that last ran it: its next
+// message goes to that slot, never to a second one that would open it again.
+describe("ACP slots: context affinity", () => {
+	const SIDA = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+	const claim = (slot: number) => call(as("afin"), "POST", "/runner/claim", { slot });
+	const done = (id: number) =>
+		call(as("afin"), "POST", `/runner/messages/${id}/result`, { state: "done", text: "." });
+	const to = (work: string) =>
+		call(owner, "POST", "/messages", { to: "afin", body: work, work }).then((r) => r.body);
+
+	beforeAll(async () => {
+		db.prepare(
+			"INSERT INTO sessions (session_id, user_id, name, container_name, status) VALUES (?, ?, 'afin', ?, 'running')",
+		).run(SIDA, OWNER, `st-${SIDA.slice(0, 12)}`);
+		const a = await acp.create(SIDA, OWNER, "afin", { projectId: "p-1" });
+		tokens.afin = acp.tokenFor(a.agent_id);
+		await acp.setMaxConcurrency(OWNER, "afin", 3);
+		for (const [k, id] of ["af-c", "af-d", "af-e", "af-f"].entries())
+			db.prepare(
+				"INSERT INTO agent_works (owner_user_id, id, agent_id, project_id, branch, port_base, state, created_by) VALUES (?, ?, ?, 'p-1', ?, ?, 'active', 'owner')",
+			).run(OWNER, id, a.agent_id, `work/${id}`, 20000 + 100 * k);
+	});
+
+	it("a context that never ran goes to any slot; once run, it stays with that slot while it is free", async () => {
+		const c1 = await to("af-c");
+		expect((await claim(2)).body.id).toBe(c1.id);
+		await done(c1.id);
+		const c2 = await to("af-c");
+		expect((await claim(3)).status).toBe(204);
+		expect((await claim(2)).body.id).toBe(c2.id);
+		await done(c2.id);
+	});
+
+	it("a slot that moved on to another context released it: another slot may take it", async () => {
+		const d1 = await to("af-d");
+		expect((await claim(2)).body.id).toBe(d1.id); // slot 2: c, then d
+		await done(d1.id);
+		const c3 = await to("af-c");
+		expect((await claim(3)).body.id).toBe(c3.id);
+		await done(c3.id);
+		// The context it skips does not block the next one: slot 3 holds c, a new e is anyone's.
+		const c4 = await to("af-c");
+		const e1 = await to("af-e");
+		expect((await claim(2)).body.id).toBe(e1.id);
+		expect((await claim(3)).body.id).toBe(c4.id);
+		await done(e1.id);
+		await done(c4.id);
+	});
+
+	it("a slot past a lowered cap claims nothing more: its context goes to another slot", async () => {
+		const f1 = await to("af-f");
+		expect((await claim(3)).body.id).toBe(f1.id);
+		await done(f1.id);
+		await acp.setMaxConcurrency(OWNER, "afin", 2);
+		const f2 = await to("af-f");
+		expect((await claim(2)).body.id).toBe(f2.id);
+		await done(f2.id);
 	});
 });

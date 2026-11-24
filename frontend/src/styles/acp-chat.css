@@ -113,7 +113,8 @@
 /* Secondary text is a muted COLOUR, never a lowered opacity: opacity took
    the time and the "hecho" state below 4.5:1 on the bubbles (axe, #380);
    --c-muted keeps them quieter than the text and readable. */
-.acp-msg-time {
+.acp-msg-time,
+.acp-msg-work {
 	color: var(--c-muted);
 }
 .acp-details > summary {

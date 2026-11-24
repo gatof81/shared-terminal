@@ -284,6 +284,9 @@ const RUN_GUARD = `NOT EXISTS (SELECT 1 FROM agent_messages y WHERE y.owner_user
 	AND (SELECT COUNT(*) FROM agent_messages y WHERE y.owner_user_id = ?1 AND y.to_id = ?2 AND y.state = 'running')
 		< (SELECT max_concurrency FROM acp_agents WHERE owner_user_id = ?1 AND name = ?2)
 	AND (SELECT COUNT(*) FROM agent_messages y WHERE y.state = 'running') < ?5`;
+// The slot that last started a message of the claim's candidate `m`'s context.
+const LAST_SLOT = `(SELECT x.slot FROM agent_messages x WHERE x.owner_user_id = ?1 AND x.to_id = ?2
+	AND x.context = m.context AND x.slot IS NOT NULL ORDER BY x.started_at DESC, x.id DESC LIMIT 1)`;
 const ACTIVITY_MAX = 500;
 /** Agent → agent hops allowed below one person's message (ACP_MAX_DEPTH). */
 export const DEFAULT_MAX_DEPTH = 6;
@@ -805,6 +808,16 @@ export class AcpAgents {
 	 *   so the default ACP session is only ever open in slot 1, as before slots;
 	 * - `onlyContext`: a slot holding a context it cannot close (processes the
 	 *   agent left running there) takes only that context's messages;
+	 * - AFFINITY (named contexts): a context's message goes to the slot L that
+	 *   last started one of that context while L may still hold its ACP session
+	 *   — L's latest message is of that context and L ≤ max_concurrency. A slot
+	 *   keeps a context's session open after the message (it closes it only on
+	 *   taking another context), so without this a second slot would open the
+	 *   same session again: two adapters on one transcript, and L's copy, stale,
+	 *   used for the next message L takes. L is free when it is not running C
+	 *   (C runs one at a time) or will be; a restarted L holds nothing and still
+	 *   takes it. Any other slot takes C when C never ran, L moved on to another
+	 *   context, or L is past the cap (it claims nothing more);
 	 * - the agent's running count < max_concurrency and the backend's < maxRunning.
 	 */
 	async claim(
@@ -819,6 +832,10 @@ export class AcpAgents {
 				AND (CASE WHEN ?3 = 1 THEN m.context IS NULL ELSE m.context IS NOT NULL END)
 				AND (?4 IS NULL OR m.context = ?4)
 				AND NOT EXISTS (SELECT 1 FROM agent_messages x WHERE x.owner_user_id = ?1 AND x.to_id = ?2 AND x.state = 'running' AND x.context IS m.context)
+				AND (m.context IS NULL OR ${LAST_SLOT} IS NULL OR ${LAST_SLOT} = ?3
+					OR ${LAST_SLOT} > (SELECT max_concurrency FROM acp_agents WHERE owner_user_id = ?1 AND name = ?2)
+					OR (SELECT y.context FROM agent_messages y WHERE y.owner_user_id = ?1 AND y.to_id = ?2 AND y.slot = ${LAST_SLOT}
+						ORDER BY y.started_at DESC, y.id DESC LIMIT 1) IS NOT m.context)
 				ORDER BY m.id LIMIT 1)
 			 AND ${RUN_GUARD}
 			 RETURNING *`,
