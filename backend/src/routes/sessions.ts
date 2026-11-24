@@ -58,6 +58,7 @@ import {
 	TERMINAL_DIM_MAX,
 	TeardownFailedError,
 } from "./shared.js";
+import { resolveWorkParam } from "./workRoot.js";
 
 // POST /sessions input caps. Bound user-controlled fields at the
 // request boundary so D1 rows and future name-rendering UI don't
@@ -1582,7 +1583,9 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 				// without learning anything about that workspace's
 				// contents (not even file-exists timing).
 				await assertOwnedByOr404(sessions, req.params.id, userId);
-				await streamWorkspaceFile(req.params.id, rel, res);
+				// `work=<id>`: download from that work's worktree (routes/workRoot.ts).
+				const work = await resolveWorkParam(req.query.work, req.params.id, userId);
+				await streamWorkspaceFile(req.params.id, rel, res, work?.id);
 			} catch (err) {
 				handleSessionError(err, res);
 			}
@@ -1606,8 +1609,13 @@ const MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024;
  * Error shape: writes the 4xx/413 response itself; throws only on
  * unexpected filesystem errors (caller maps those via handleSessionError).
  */
-async function streamWorkspaceFile(sessionId: string, rel: string, res: Response): Promise<void> {
-	const opened = await openWorkspaceFile(sessionId, rel, { maxBytes: MAX_DOWNLOAD_BYTES });
+async function streamWorkspaceFile(
+	sessionId: string,
+	rel: string,
+	res: Response,
+	work: string | undefined,
+): Promise<void> {
+	const opened = await openWorkspaceFile(sessionId, rel, { maxBytes: MAX_DOWNLOAD_BYTES, work });
 	if (!opened.ok) {
 		res.status(opened.status).json({ error: opened.error });
 		return;
