@@ -18,6 +18,7 @@ import {
 	setRecipient,
 	sidebarAgentStatus,
 	upsert,
+	workTag,
 } from "./acpModel.js";
 import type { AcpActivity, AcpMessage } from "./api.js";
 
@@ -434,5 +435,13 @@ describe("recipients from the menu: the leading mentions of the text", () => {
 		// Empty field: the caret goes after the inserted mention.
 		const e0 = setRecipient("", names, "arq", true);
 		expect(mapThroughEdits(0, e0)).toBe("@arq ".length);
+	});
+});
+
+describe("workTag", () => {
+	it("tags a work's message and leaves the default context alone", () => {
+		expect(workTag({ context: "e2-work-tag" })).toBe("trabajo e2-work-tag");
+		expect(workTag({ context: null })).toBeNull();
+		expect(workTag({})).toBeNull();
 	});
 });

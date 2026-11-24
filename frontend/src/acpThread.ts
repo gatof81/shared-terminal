@@ -29,6 +29,7 @@ import {
 	type ThreadItem,
 	upsert,
 	who,
+	workTag,
 } from "./acpModel.js";
 import { acpReadTicket, setAcpAgents } from "./acpRegistry.js";
 import {
@@ -953,6 +954,7 @@ export class AcpThread {
 				m.to_id,
 				m.reply_to,
 				m.project_id ?? null,
+				m.context ?? null,
 				m.body,
 				m.result_text,
 				m.note,
@@ -1055,7 +1057,11 @@ export class AcpThread {
 		const name = agentId(m.to_id);
 		const meta = el("span", "acp-msg-time", `#${m.id}`);
 		meta.title = `Mensaje #${m.id}${m.finished_at ? ` · terminó ${time(m.finished_at)}` : ""}`;
-		head.append(name, this.badge(m), meta);
+		head.append(name, this.badge(m));
+		// Two works of one agent run at once: the tag tells their messages apart.
+		const work = workTag(m);
+		if (work) head.append(el("span", "acp-msg-work", work));
+		head.append(meta);
 		sub.append(head, ...this.outcome(m));
 		return sub;
 	}
