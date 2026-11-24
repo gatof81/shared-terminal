@@ -3,6 +3,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    # The backend serves every session's terminal and API: under CPU contention
+    # it gets 4x the default weight (1024) the session containers keep, so a
+    # busy session never starves it (applied live in #741, OPS-RESULT 1).
+    cpu_shares: 4096
     ports:
       - "${PORT:-3001}:3001"
     volumes:
