@@ -369,7 +369,7 @@ async function main() {
 	const ovDone = await Promise.all(ov.map((m) => waitMsg(m.id)));
 	check(
 		"both done; s1 ran in its own worktree and slot",
-		ovDone.every((m) => m.state === "done") && ovDone[1].slot === 2 && (ovDone[1].result_text ?? "").includes(`cwd /home/developer/workspace/.st/ctx/${S1})`),
+		ovDone.every((m) => m.state === "done") && ovDone[1].slot === 2 && (ovDone[1].result_text ?? "").includes(`cwd /home/developer/workspace/.st/ctx/${S1} · trabajo ${S1}`),
 		short(ovDone[1].result_text),
 	);
 	const same = [await send(DEV, "esperá 2", pid, S2), await send(DEV, "esperá 2", pid, S2)];
@@ -414,7 +414,7 @@ async function main() {
 	check("--work into a closed work: 409 work-not-active", into.status === 409 && into.body?.error === "work-not-active", JSON.stringify(into.body));
 	const held = await api("POST", `/api/acp/works/${S1}/clean`);
 	check("cleaning s1 with its server alive: cleanup-pending, the process named", held.status === 409 && held.body?.error === "cleanup-pending" && held.body.reasons.some((r) => r.startsWith("proceso")), JSON.stringify(held.body));
-	await execIn(sids[DEV], ["sh", "-c", "pkill -f 'st-test-server$'; true"]);
+	await execIn(sids[DEV], ["sh", "-c", "pkill -f 'st-work-server$'; true"]);
 	const released = await waitFor("s1's session released", async () => (await execOut(sids[DEV], `grep -h 'released the session of work ${S1}' /tmp/st-acp-runner-*.log`)).code === 0, 90_000);
 	check("…with the server gone, the slot released s1's ACP session", !!released);
 	const cleaned = await api("POST", `/api/acp/works/${S1}/clean`);

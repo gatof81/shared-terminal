@@ -24,10 +24,20 @@
 //   st: <args>               → runs `st <args>` (st work new|list|close|clean,
 //                              st send --work, st port check …) as a tool call
 //                              and answers with its exit code and output
-//   servidor [puerto]        → starts an HTTP server on that port (default
-//                              ST_PORT_BASE) in the session's cwd and
-//                              environment, declared ST-PERSISTENT; it lives
-//                              until it is killed or the session closes
+//   servidor [n]             → starts an HTTP server on ST_PORT_BASE + n (n = 0
+//                              by default) in the session's cwd and environment
+//                              (argv ends in st-work-server, it answers its
+//                              ST_WORK), declared ST-PERSISTENT; it lives until
+//                              it is killed or the session closes
+//   trabajo nuevo @x <id>    → st work new @x <id>
+//   delegá <id> a @x: <t>    → st send @x --work <id> "<t>"
+//   puerto <p>               → st port check <p>
+//   cerrá|limpiá trabajo @x <id> → st work close|clean <id>
+//   ocupá <p>                → tries to listen on p: EADDRINUSE / bound (freed)
+//   commit <archivo>: <t>    → writes it, git add + commit + push origin HEAD
+// The st ones answer with the output and `exit <code>`. Every answer ends with
+// the session's context: prompts, model, effort, cwd, `trabajo <ST_WORK|->` and,
+// when the header says so, `desde el trabajo <id>`.
 //   preguntá: <q> | a | b    → asks the person (ACP elicitation/create, the form
 //                              claude-agent-acp makes of AskUserQuestion) and
 //                              continues with the answer
@@ -41,7 +51,8 @@
 // adapter's) and cwd — what its `st` runs with; `session/close` unloads it
 // and stops its background tasks. Effort levels per model are test-only (opus: five, sonnet or
 // no model: three, haiku: none — the option is absent, like the real adapter).
-import { execFile, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
+import { createServer } from "node:net";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
@@ -177,7 +188,16 @@ async function prompt(sessionId, text) {
 		await sleep(150);
 		update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: t.slice(half) } });
 	};
-	const ctx = `(sesión ACP: ${s.prompts} mensajes · modelo ${modelOf(s) ?? "default"} · effort ${s.effort ?? "default"} · cwd ${loaded.get(sessionId)?.cwd ?? "?"})`;
+	const fromWork = /desde el trabajo «([^»]+)»/.exec(header)?.[1];
+	const ctx = `(sesión ACP: ${s.prompts} mensajes · modelo ${modelOf(s) ?? "default"} · effort ${s.effort ?? "default"} · cwd ${loaded.get(sessionId)?.cwd ?? "?"} · trabajo ${loaded.get(sessionId)?.env?.ST_WORK ?? "-"}${fromWork ? ` · desde el trabajo ${fromWork}` : ""})`;
+	/** `st <args>` as a tool call; the answer carries its output and exit code. */
+	const stTool = async (args) => {
+		const id = `t${++tool}`;
+		update(sessionId, { sessionUpdate: "tool_call", toolCallId: id, title: `st ${args.join(" ")}`, kind: "execute", status: "in_progress" });
+		const r = await stRun(sessionId, args);
+		update(sessionId, { sessionUpdate: "tool_call_update", toolCallId: id, status: r.code === 0 ? "completed" : "failed" });
+		await say(`st ${args.join(" ")} → exit ${r.code}: ${r.out} ${ctx}`);
+	};
 	let m;
 	if (/^\[st-recovery\]/.test(header) || /^\[st-recovery\]/.test(body) || header.includes("de @system")) {
 		await say(`Reporte de @${ME}: no repetí nada; el mensaje interrumpido quedó sin rehacer. ${ctx}`);
@@ -195,16 +215,46 @@ async function prompt(sessionId, text) {
 			await say(`${got} ${ctx}`);
 		}
 	} else if ((m = /^st:\s*(.+)$/im.exec(body))) {
-		const id = `t${++tool}`;
-		update(sessionId, { sessionUpdate: "tool_call", toolCallId: id, title: `st ${m[1]}`, kind: "execute", status: "in_progress" });
-		const r = await stRun(sessionId, argv(m[1]));
-		update(sessionId, { sessionUpdate: "tool_call_update", toolCallId: id, status: r.code === 0 ? "completed" : "failed" });
-		await say(`st ${m[1]} → exit ${r.code}: ${r.out} ${ctx}`);
+		await stTool(argv(m[1]));
+	} else if ((m = /^trabajo nuevo (@[a-z][a-z0-9-]*) ([a-z0-9][a-z0-9-]*)\s*$/im.exec(body))) {
+		await stTool(["work", "new", m[1], m[2]]);
+	} else if ((m = /^deleg[aá] ([a-z0-9][a-z0-9-]*) a (@[a-z][a-z0-9-]*):\s*([\s\S]+)$/im.exec(body))) {
+		await stTool(["send", m[2], "--work", m[1], m[3].trim()]);
+	} else if ((m = /^puerto (\d+)\s*$/im.exec(body))) {
+		await stTool(["port", "check", m[1]]);
+	} else if ((m = /^(cerr[aá]|limpi[aá]) trabajo @[a-z][a-z0-9-]* ([a-z0-9][a-z0-9-]*)\s*$/im.exec(body))) {
+		await stTool(["work", /^cerr/i.test(m[1]) ? "close" : "clean", m[2]]);
+	} else if ((m = /^ocup[aá] (\d+)\s*$/im.exec(body))) {
+		const res = await new Promise((resolve) => {
+			const srv = createServer();
+			srv.once("error", (err) => resolve(err.code ?? err.message));
+			srv.listen(Number(m[1]), () => srv.close(() => resolve("bound")));
+		});
+		await say(`ocupá ${m[1]}: ${res} ${ctx}`);
+	} else if ((m = /^commit ([^:\n]+):\s*([\s\S]+)$/im.exec(body))) {
+		const l = loaded.get(sessionId);
+		const opts = { cwd: l?.cwd, env: { ...process.env, ...l?.env, GIT_TERMINAL_PROMPT: "0" }, encoding: "utf8" };
+		const git = (...a) => execFileSync("git", ["-c", "user.name=st-test-agent", "-c", "user.email=st-test-agent@invalid", ...a], opts).trim();
+		let answer;
+		try {
+			writeFileSync(`${l?.cwd}/${m[1].trim()}`, `${m[2].trim()}\n`);
+			git("add", "--", m[1].trim());
+			git("commit", "-q", "-m", m[2].trim().split("\n")[0]);
+			const branch = git("symbolic-ref", "--short", "HEAD");
+			const sha = git("rev-parse", "HEAD");
+			const push = await new Promise((resolve) =>
+				execFile("git", ["push", "-q", "origin", "HEAD"], opts, (err, _o, e) => resolve(err ? `${err.code ?? 1} ${e.trim()}` : "0")),
+			);
+			answer = `commit en la rama ${branch}, sha ${sha}, push exit ${push}`;
+		} catch (err) {
+			answer = `commit falló: ${String(err.stderr ?? err.message).trim()}`;
+		}
+		await say(`${answer} ${ctx}`);
 	} else if ((m = /^servidor(?: (\d+))?\s*$/im.exec(body))) {
 		const l = loaded.get(sessionId);
-		const port = Number(m[1] ?? l?.env?.ST_PORT_BASE);
+		const port = Number(l?.env?.ST_PORT_BASE) + Number(m[1] ?? 0);
 		const taskId = `srv-${randomUUID().slice(0, 8)}`;
-		const srv = spawn(process.execPath, ["-e", "require('http').createServer((q, r) => r.end('ok')).listen(Number(process.argv[1]))", String(port), "st-test-server"], {
+		const srv = spawn(process.execPath, ["-e", "require('http').createServer((q, r) => r.end(`trabajo ${process.env.ST_WORK ?? '-'}`)).listen(Number(process.argv[1]))", String(port), "st-work-server"], {
 			cwd: l?.cwd,
 			env: { ...process.env, ...l?.env },
 			stdio: "ignore",
@@ -216,7 +266,7 @@ async function prompt(sessionId, text) {
 			update(sessionId, { sessionUpdate: "async_task_state_update", asyncTaskId: taskId, state: "completed" });
 		});
 		await sleep(500);
-		await say(`Servidor en el puerto ${port} (pid ${srv.pid}). ${ctx}\nST-PERSISTENT: ${taskId} servidor en ${port}`);
+		await say(`Servidor en el puerto ${port} (pid ${srv.pid}). puerto ${port} ${ctx}\nST-PERSISTENT: ${taskId} servidor en ${port}`);
 	} else if ((m = /rondas (\d+):\s*consult[aá] a @([a-z][a-z0-9-]*):\s*([\s\S]+)$/i.exec(body))) {
 		const [, n, to, text] = m;
 		s.rounds = { to, text: text.trim(), left: Math.max(Number(n) - 1, 0) };
