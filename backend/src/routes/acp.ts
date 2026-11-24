@@ -313,8 +313,11 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 				return void res
 					.status(400)
 					.json({ error: "projectId, model, effort or maxConcurrency is required" });
-			const slots = Number(body.maxConcurrency);
-			if (hasSlots && !(Number.isInteger(slots) && slots >= 1 && slots <= MAX_SLOTS))
+			const slots = body.maxConcurrency;
+			if (
+				hasSlots &&
+				!(typeof slots === "number" && Number.isInteger(slots) && slots >= 1 && slots <= MAX_SLOTS)
+			)
 				return void res
 					.status(400)
 					.json({ error: `maxConcurrency must be an integer 1..${MAX_SLOTS}` });
@@ -334,7 +337,7 @@ export function buildAcpRouter(acp: AcpAgents): Router {
 				: null;
 			if (hasModel) row = await acp.setModel(owner, req.params.name, model as string);
 			if (hasEffort) row = await acp.setEffort(owner, req.params.name, effort ?? null);
-			if (hasSlots) row = await acp.setMaxConcurrency(owner, req.params.name, slots);
+			if (hasSlots) row = await acp.setMaxConcurrency(owner, req.params.name, slots as number);
 			if (!row) return void res.status(404).json({ error: "not-found" });
 			res.json(agentView(row, await acp.loads(owner)));
 		}),

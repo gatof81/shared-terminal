@@ -945,6 +945,7 @@ describe("ACP slots: contexts, caps and attribution (v24)", () => {
 		expect((await sendTo("a")).body.error).toBe("context-needs-slots");
 		expect((await sendTo("Mal_Nombre")).body.error).toBe("bad-context");
 		expect((await call(owner, "PATCH", "/agents/multi", { maxConcurrency: 9 })).status).toBe(400);
+		expect((await call(owner, "PATCH", "/agents/multi", { maxConcurrency: "2" })).status).toBe(400);
 		const p = await call(owner, "PATCH", "/agents/multi", { maxConcurrency: 2 });
 		expect(p.body.maxConcurrency).toBe(2);
 		// Only the person places a message in a context.
