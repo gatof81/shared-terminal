@@ -143,6 +143,7 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 		runningIn: loads.get(a.name)?.runningIn ?? [],
 		queue: loads.get(a.name)?.queue ?? [],
 		waitingFor: loads.get(a.name)?.waitingFor ?? [],
+		heldBy: acp.heldOf(a.agent_id),
 		name: a.name,
 		sessionId: a.session_id,
 		runtime: a.runtime,
@@ -913,6 +914,16 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 				(typeof keepConv !== "string" || !/^[0-9a-f-]{36}$/.test(keepConv))
 			)
 				return void res.status(400).json({ error: "bad-conversation" });
+			// The restriction IS the report of a slot held by a live process.
+			acp.setHeld(
+				agent,
+				slot,
+				keepConv !== undefined
+					? { conversationId: keepConv as string | null, work: null, since: "" }
+					: typeof only === "string"
+						? { conversationId: null, work: only, since: "" }
+						: null,
+			);
 			const msg = await acp.claim(
 				agent,
 				slot,

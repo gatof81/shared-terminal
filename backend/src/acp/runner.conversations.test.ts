@@ -268,10 +268,18 @@ describe("runner slot 1: one ACP session per conversation (B2)", () => {
 		const next = await post("rc", "tras el proceso", B);
 		await new Promise((ok) => setTimeout(ok, 2_500));
 		expect(msg(next.id).state).toBe("pending"); // A's session holds a live task
+		// …and /agents says so: held in A by a process («proceso en curso»).
+		const held = (await call("GET", "/agents")).body.find(
+			(x: { name: string }) => x.name === "rc",
+		).heldBy;
+		expect(held).toMatchObject([{ conversationId: A, work: null }]);
 		const d = await settled(next.id);
 		expect(
 			Date.parse(d.started_at as string) - Date.parse(pers.finished_at as string),
 		).toBeGreaterThanOrEqual(4_000);
+		expect(
+			(await call("GET", "/agents")).body.find((x: { name: string }) => x.name === "rc").heldBy,
+		).toEqual([]);
 		// The process outlived its message: its st send was refused, nothing reached @rd.
 		expect(
 			db.prepare("SELECT COUNT(*) AS n FROM agent_messages WHERE body = 'tarde'").get(),
