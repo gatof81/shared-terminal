@@ -73,7 +73,12 @@ test.describe("visual", () => {
 
 	test("project rail", async ({ app, backend, page }) => {
 		backend.enableConversations();
-		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		// Wide, the rail beside a topic («Optimización de CI», so «Rediseño»
+		// keeps its unread: entering bare would open the most recent and read it).
+		await app.login(
+			"alice",
+			`#/projects/${PROJECT_IDS.hz}${app.mobile ? "" : `/c/${CONV_IDS.ci}`}`,
+		);
 		await expect(page.locator(".rail-body .rail-agent")).toHaveCount(2);
 		await expect(page.locator(".rail-body .rail-unread")).toHaveText("1");
 		await shot(page, "project-rail");
