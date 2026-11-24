@@ -176,6 +176,8 @@ test.describe("visual", () => {
 		// What was on screen is marked read: the open topic's count goes (wide,
 		// where the rail shows), at a time the read mark's answer decides.
 		await expect(page.locator(".rail-conv[aria-current] .rail-unread")).toHaveCount(0);
+		// …and its answer leaves «Resultados sin ver»: no attention row is left.
+		await expect(page.locator(".rail-attention")).toBeHidden();
 		await shot(page, "project-topic");
 	});
 

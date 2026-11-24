@@ -32,7 +32,10 @@ export function startInbox(): void {
 	if (unsubscribe) return;
 	unsubscribe = subscribeAcp((ev) => {
 		if (ev.type === "open") refreshInbox(0);
-		else if (ev.type === "message" || ev.type === "question") refreshInbox();
+		// A read mark arrives as a `conversation` frame: an answer just seen
+		// leaves «Resultados sin ver» (and the rail's count) without waiting for a row.
+		else if (ev.type === "message" || ev.type === "question" || ev.type === "conversation")
+			refreshInbox();
 	});
 	poll = setInterval(() => {
 		if (!document.hidden && !acpLiveUp()) refreshInbox(0);
