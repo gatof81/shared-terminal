@@ -13,7 +13,7 @@
 // debounced; while the socket is down, a slow poll.
 
 import { acpLiveUp, subscribeAcp } from "./acpLive.js";
-import { agentHue, teamState } from "./acpModel.js";
+import { agentHue, type TeamState, teamState } from "./acpModel.js";
 import { acpReadTicket, setAcpAgents } from "./acpRegistry.js";
 import {
 	type AcpAgentInfo,
@@ -100,7 +100,7 @@ function interrupted(agent: string): boolean {
 }
 
 /** An agent's state in the fixed words, as of now, with `here` the topic on screen. */
-export function agentState(a: AcpAgentInfo): { label: string; tone: string } {
+export function agentState(a: AcpAgentInfo): TeamState {
 	return teamState(a, { here, titleOf: topicTitle, interrupted: interrupted(a.name) });
 }
 
@@ -602,7 +602,7 @@ function convStatus(c: AcpConversation): { label: string; tone: string } | null 
 	return null;
 }
 
-function agentRow(a: AcpAgentInfo, st: { label: string; tone: string }): HTMLElement {
+function agentRow(a: AcpAgentInfo, st: TeamState): HTMLElement {
 	const li = el("li");
 	// F1: the agent's session (its Terminal, Files, Git); its menu of tools is F4.
 	const link = el("a", "rail-row rail-agent");
@@ -623,12 +623,14 @@ function agentRow(a: AcpAgentInfo, st: { label: string; tone: string }): HTMLEle
  * The state's line: when it names a topic, only the topic's title gives way
  * (an ellipsis inside «…»); what follows it — «· 1 en cola» — always shows.
  */
-function stateLine(st: { label: string; tone: string }): HTMLElement {
+function stateLine(st: { label: string; tone: string; short?: string }): HTMLElement {
 	const sub = el("span", `rail-row-sub rail-state tone-${st.tone}`);
+	// The whole state where the rail says less (a held slot: «ocupado»).
 	sub.title = st.label;
-	const m = /^(.*?«)(.+)(»)(.*)$/.exec(st.label);
+	const words = st.short ?? st.label;
+	const m = /^(.*?«)(.+)(»)(.*)$/.exec(words);
 	if (!m) {
-		sub.textContent = st.label;
+		sub.textContent = words;
 		return sub;
 	}
 	sub.append(
