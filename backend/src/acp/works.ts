@@ -120,16 +120,19 @@ cd ${ws} || exit 3
 [ -e "$dir" ] || { echo absent; exit 0; }
 bad=0
 r() { echo "reason=$*"; bad=1; }
+# A zombie has no cwd and runs nothing.
+zombie() { [ "$(sed -n 's/.*) \(.\).*/\1/p' "$1/stat" 2>/dev/null)" = Z ]; }
+# Unreadable: a doubt — unless, a moment later, it has ended (it was exiting).
+unreadable() { sleep 0.2; [ -d "$1" ] && ! zombie "$1" && r "proceso $(basename "$1") ilegible"; }
 for p in /proc/[0-9]*; do
 	pid=$(basename "$p")
 	[ "$pid" = "$$" ] && continue
-	# A zombie has no cwd and runs nothing; one that ended meanwhile is gone.
-	[ "$(sed -n 's/.*) \(.\).*/\1/p' "$p/stat" 2>/dev/null)" = Z ] && continue
+	zombie "$p" && continue
 	cwd=$(readlink "$p/cwd" 2>/dev/null)
-	if [ -z "$cwd" ]; then [ -d "$p" ] && r "proceso $pid ilegible"; continue; fi
+	if [ -z "$cwd" ]; then unreadable "$p"; continue; fi
 	cmd=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null | cut -c1-60)
 	case "$cwd" in "$dir" | "$dir"/*) r "proceso $pid ($cmd) con cwd en el trabajo"; continue ;; esac
-	if ! e=$(tr '\0' '\n' < "$p/environ" 2>/dev/null); then [ -d "$p" ] && r "proceso $pid ilegible"; continue; fi
+	if ! e=$(tr '\0' '\n' < "$p/environ" 2>/dev/null); then unreadable "$p"; continue; fi
 	printf '%s\n' "$e" | grep -qxF "ST_WORK=$id" && r "proceso $pid ($cmd) del trabajo (ST_WORK)"
 done
 st=$(git -C "$dir" status --porcelain 2>/dev/null) || r "git status falló"
