@@ -236,6 +236,17 @@ export interface AgentLoad {
 	waitingFor: Array<MessageRef & { agent: string }>;
 }
 
+/** A slot kept in a conversation (or work) by a process left running there: «proceso en curso». */
+export interface HeldBy {
+	conversationId: string | null;
+	work: string | null;
+	/** When the slot was first seen held there. */
+	since: string;
+}
+const HELD_TTL_MS = 60_000;
+const sameHeld = (a: HeldBy, b: HeldBy) =>
+	a.conversationId === b.conversationId && a.work === b.work;
+
 /** An open question to the person: the agent stands still until it is answered. */
 export interface OpenQuestion {
 	id: number;
@@ -536,6 +547,37 @@ export class AcpAgents {
 			at: new Date().toISOString(),
 		});
 		this.publish(agent.owner_user_id, { type: "agents" });
+	}
+
+	/**
+	 * Where a slot is held by a process the agent left running (memory only):
+	 * a slot whose session has an open task cannot switch sessions, and says so
+	 * with every claim (`conversation` / `context`, the claim's own
+	 * restriction). A claim without it clears it. While the slot runs a message
+	 * it does not claim, so an entry older than HELD_TTL_MS is not shown.
+	 */
+	private readonly held = new Map<string, Map<number, HeldBy & { atMs: number }>>();
+
+	setHeld(agent: AgentRow, slot: number, h: HeldBy | null): void {
+		const bySlot = this.held.get(agent.agent_id) ?? new Map();
+		const prev = bySlot.get(slot);
+		if (h)
+			bySlot.set(slot, {
+				...h,
+				since: prev && sameHeld(prev, h) ? prev.since : new Date().toISOString(),
+				atMs: Date.now(),
+			});
+		else bySlot.delete(slot);
+		this.held.set(agent.agent_id, bySlot);
+		if (!prev !== !h || (prev && h && !sameHeld(prev, h)))
+			this.publish(agent.owner_user_id, { type: "agents" });
+	}
+
+	heldOf(agentId: string): HeldBy[] {
+		const now = Date.now();
+		return [...(this.held.get(agentId)?.values() ?? [])]
+			.filter((h) => now - h.atMs <= HELD_TTL_MS)
+			.map(({ conversationId, work, since }) => ({ conversationId, work, since }));
 	}
 
 	modelAppliedOf(agentId: string): ModelApplied | null {
@@ -1099,6 +1141,7 @@ export class AcpAgents {
 		this.loginMethods.delete(agent.agent_id);
 		this.modelApplied.delete(agent.agent_id);
 		this.effortApplied.delete(agent.agent_id);
+		this.held.delete(agent.agent_id);
 		this.publish(agent.owner_user_id, { type: "agents" });
 	}
 
