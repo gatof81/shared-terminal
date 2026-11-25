@@ -375,6 +375,49 @@ test.describe("Pendientes and the review of an interruption", () => {
 		expect(app.errors).toEqual([]);
 	});
 
+	test("a review opened from Pendientes that leads elsewhere closes Pendientes too", async ({
+		app,
+		page,
+	}) => {
+		await app.login("alice", topic(CONV_IDS.ci));
+		const panel = page.locator(".acp-inbox-card");
+		const review = page.locator(".acp-review-card");
+		const reviewOf = async (text: string) => {
+			await page.locator("#inbox-btn").click();
+			await panel
+				.locator(".acp-ib-item.is-interrupted", { hasText: text })
+				.getByRole("button", { name: "Revisar interrupción" })
+				.click();
+			await expect(review).toBeVisible();
+		};
+
+		// «Escribirle un mensaje nuevo»: its topic, the field focused, no panel over it.
+		await reviewOf("informe de tiempos");
+		await review.getByRole("button", { name: "Escribirle un mensaje nuevo" }).click();
+		await expect(review).toBeHidden();
+		await expect(panel).toBeHidden();
+		await expect(page.locator("#ps-topic-title")).toHaveText("Mejoras del backend");
+		await expect(chips(page).locator(".acp-chip-name")).toHaveText(["@dev"]);
+		await expect(field(page)).toBeFocused();
+		await expect(page.locator("#app-view")).not.toHaveAttribute("inert");
+
+		// «Ver cambios en Git»: the agent's Herramientas, focus on its view.
+		await reviewOf("variante sin shards");
+		await review.getByRole("button", { name: "Ver cambios en Git" }).click();
+		await expect(review).toBeHidden();
+		await expect(panel).toBeHidden();
+		await app.expectView("git");
+		await expect(page.locator(".tools-agent")).toHaveValue("arq");
+		await expect(page.locator("#view-git-btn")).toBeFocused();
+		await expect(page.locator("#app-view")).not.toHaveAttribute("inert");
+		// Back leaves Herramientas for the topic; Pendientes does not come back.
+		await page.goBack();
+		await expect(page.locator(".tools-bar")).toBeHidden();
+		await expect(page.locator("#ps-topic-title")).toHaveText("Mejoras del backend");
+		await expect(panel).toBeHidden();
+		expect(app.errors).toEqual([]);
+	});
+
 	test("a question is answered from Pendientes", async ({ app, backend, page }) => {
 		const asking = backend.addAcpMessage({
 			to_id: "arq",
