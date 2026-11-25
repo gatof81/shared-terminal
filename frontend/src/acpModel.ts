@@ -1,5 +1,5 @@
-// acpModel.ts — pure helpers of the ACP chats (individual and Project Chat):
-// mentions, grouping a post sent to several agents, activity rows, agent
+// acpModel.ts — pure helpers of a project's topics and its Archive:
+// mentions, a topic's timeline, per-recipient states, activity rows, agent
 // status words. No DOM, no network: unit-tested in acpModel.test.ts.
 
 import type { AcpActivity, AcpAgentInfo, AcpMessage } from "./api.js";
@@ -63,176 +63,30 @@ export function effortLabel(level: string | null | undefined): string {
 		.join(" ");
 }
 
-export const STATE_LABEL: Record<string, string> = {
-	pending: "en cola",
-	running: "trabajando",
-	done: "hecho",
-	failed: "falló",
-	uncertain: "incierto",
-};
-
-const MENTION_RE = /(^|[^A-Za-z0-9_@.-])@([a-z][a-z0-9-]{1,31})(?![a-z0-9-])/g;
-
-/** Agents named with `@name` in `text`, in order of first appearance, only among `names`. */
-export function parseMentions(text: string, names: readonly string[]): string[] {
-	const known = new Set(names);
-	const out: string[] = [];
-	for (const m of text.matchAll(MENTION_RE)) {
-		const n = m[2]!;
-		if (known.has(n) && !out.includes(n)) out.push(n);
-	}
-	return out;
-}
-
 /**
- * Who a Project Chat post goes to. The agents named at the START of the
- * message (`@a @b, haced X`) are its recipients; a mention inside the text is
- * part of the instruction ("@arq consultá a @dev: …" goes to @arq only).
- * Every leading mention must be an agent of the project: one that is not
- * (a typo, an agent of another project) refuses the whole post — never a
- * partial send, and never a fallback to a name found later in the text
- * ("@devv revisá con @qa" must not reach @qa). Without leading mentions: the
- * one agent mentioned anywhere, or the only agent of the project; otherwise
- * the person is asked to start with one.
+ * The agents named at the START of a topic's text (`@a @b, haced X`), added
+ * to its chips; a mention inside the text is part of the instruction
+ * ("@arq consultá a @dev: …" adds @arq only). Every leading mention must be
+ * an agent of the project: one that is not (a typo, an agent of another
+ * project) refuses the whole post — never a partial send, and never a
+ * fallback to a name found later in the text ("@devv revisá con @qa" must
+ * not reach @qa). No leading mention: nobody.
  */
 export function recipientsOf(
 	text: string,
 	names: readonly string[],
 ): { to: string[]; error: string | null } {
+	const lead = /^\s*((?:@[A-Za-z0-9_-]+[\s,;:.!?]*)+)/.exec(text);
+	if (!lead) return { to: [], error: null };
 	const known = new Set(names);
 	const valid = names.map((n) => `@${n}`).join(", ");
-	const lead = /^\s*((?:@[A-Za-z0-9_-]+[\s,;:.!?]*)+)/.exec(text);
-	if (lead) {
-		const to = [...new Set([...lead[1]!.matchAll(/@([A-Za-z0-9_-]+)/g)].map((m) => m[1]!))];
-		const unknown = to.filter((n) => !known.has(n));
-		if (unknown.length === 0) return { to, error: null };
-		return {
-			to: [],
-			error: `${unknown.map((n) => `@${n}`).join(", ")} no ${unknown.length === 1 ? "es un agente" : "son agentes"} de este proyecto${names.length ? ` (agentes: ${valid})` : ""}. No se envió nada.`,
-		};
-	}
-	const any = parseMentions(text, names);
-	if (any.length === 1) return { to: any, error: null };
-	if (names.length === 1 && any.length === 0) return { to: [names[0]!], error: null };
-	if (names.length === 0)
-		return { to: [], error: "Este proyecto no tiene agentes todavía: agregá uno." };
+	const to = [...new Set([...lead[1]!.matchAll(/@([A-Za-z0-9_-]+)/g)].map((m) => m[1]!))];
+	const unknown = to.filter((n) => !known.has(n));
+	if (unknown.length === 0) return { to, error: null };
 	return {
 		to: [],
-		error: `Empezá el mensaje con el agente al que va dirigido: ${valid}`,
+		error: `${unknown.map((n) => `@${n}`).join(", ")} no ${unknown.length === 1 ? "es un agente" : "son agentes"} de este proyecto${names.length ? ` (agentes: ${valid})` : ""}. No se envió nada.`,
 	};
-}
-
-// ── Recipients picked from a menu (Project Chat's "+") ─────────────────────
-//
-// The recipients ARE the leading mentions of the text (recipientsOf): the
-// menu only edits that leading group, so what is sent is exactly what the
-// person could have typed, and drafts, the unsent message and retries carry
-// the recipients with the text. Every edit is a list of splices, so the
-// field's caret and selection can be carried across them (mapThroughEdits).
-
-/** Replace `text[start, end)` with `insert`. */
-export interface TextEdit {
-	start: number;
-	end: number;
-	insert: string;
-}
-
-const LEAD_RE = /^\s*((?:@[A-Za-z0-9_-]+[\s,;:.!?]*)+)/;
-const LEAD_TOKEN_RE = /@([A-Za-z0-9_-]+)([\s,;:.!?]*)/g;
-
-/** The leading mentions: each `@name` with where it and its separators end. */
-function leadTokens(
-	text: string,
-): Array<{ name: string; start: number; end: number; sepEnd: number }> {
-	const m = LEAD_RE.exec(text);
-	if (!m) return [];
-	const from = m[0].length - m[1]!.length;
-	const out = [];
-	for (const t of m[1]!.matchAll(LEAD_TOKEN_RE)) {
-		const start = from + t.index!;
-		const end = start + 1 + t[1]!.length;
-		out.push({ name: t[1]!, start, end, sepEnd: end + t[2]!.length });
-	}
-	return out;
-}
-
-export function applyEdits(text: string, edits: readonly TextEdit[]): string {
-	let out = text;
-	for (const e of edits) out = out.slice(0, e.start) + e.insert + out.slice(e.end);
-	return out;
-}
-
-/** Where a caret at `pos` is after the edits (inside a removed span: at its end). */
-export function mapThroughEdits(pos: number, edits: readonly TextEdit[]): number {
-	let p = pos;
-	for (const e of edits) {
-		if (p >= e.end) p += e.insert.length - (e.end - e.start);
-		else if (p > e.start) p = e.start + e.insert.length;
-	}
-	return p;
-}
-
-/**
- * The menu's row for agent `name`: checked iff it is a recipient of the
- * text as it is (recipientsOf — never another source); `implicit` when it
- * is one only because the text mentions it once inside (no leading group),
- * which unchecking cannot change without editing the message's body.
- */
-export function recipientRow(
-	text: string,
-	names: readonly string[],
-	name: string,
-): { checked: boolean; implicit: boolean } {
-	const checked = recipientsOf(text, names).to.includes(name);
-	return { checked, implicit: checked && leadTokens(text).length === 0 };
-}
-
-/**
- * The edits that make `name` a recipient (`on`) or not, touching only the
- * leading group. On: added after the last leading mention (`@a, @b: x` →
- * `@a, @b @c: x`); without a leading group, the recipients the text already
- * has (an implicit one) are written out with it, so checking someone never
- * takes the message from whoever was getting it. A leading mention that is
- * not an agent stays (its error too). Off: every leading `@name` goes, with
- * its separator (the last one keeps the group's closing separator); an
- * implicit recipient cannot be unchecked: no edit.
- */
-export function setRecipient(
-	text: string,
-	names: readonly string[],
-	name: string,
-	on: boolean,
-): TextEdit[] {
-	const lead = leadTokens(text);
-	if (on) {
-		if (lead.some((t) => t.name === name)) return [];
-		if (lead.length > 0) {
-			const last = lead[lead.length - 1]!;
-			return [{ start: last.end, end: last.end, insert: ` @${name}` }];
-		}
-		const now = recipientsOf(text, names).to.filter((n) => n !== name);
-		const at = text.length - text.trimStart().length;
-		const group = [...now, name].map((n) => `@${n}`).join(" ");
-		return [{ start: at, end: at, insert: `${group} ` }];
-	}
-	const edits: TextEdit[] = [];
-	// Right to left: each splice leaves the earlier offsets valid.
-	for (let i = lead.length - 1; i >= 0; i--) {
-		const t = lead[i]!;
-		if (t.name !== name) continue;
-		const isLast = i === lead.length - 1 || lead.slice(i + 1).every((x) => x.name === name);
-		const prev = lead[i - 1];
-		if (isLast && prev && prev.name !== name)
-			// `@a, @b: x` without @b → `@a: x` (the group's closing separator kept).
-			edits.push({ start: prev.end, end: t.end, insert: "" });
-		else edits.push({ start: t.start, end: t.sepEnd, insert: "" });
-	}
-	return edits;
-}
-
-/** The work a message runs in, as its chat tag; null for the agent's default context. */
-export function workTag(m: Pick<AcpMessage, "context">): string | null {
-	return m.context ? `trabajo ${m.context}` : null;
 }
 
 /** Insert or replace by id, keeping id order. */
@@ -301,15 +155,6 @@ export function activityRows(events: readonly AcpActivity[], max = 12): Activity
 	}
 	return [...rows.values()].slice(-max);
 }
-
-export const ACTIVITY_STATE: Record<string, string> = {
-	pending: "…",
-	in_progress: "en curso",
-	running: "en curso",
-	completed: "ok",
-	failed: "falló",
-	stopped: "detenida",
-};
 
 export interface AgentStatus {
 	label: string;
@@ -410,10 +255,6 @@ export function authFromActivity(events: readonly AcpActivity[], initial: boolea
 		if (e.kind === "turn" && e.phase === "answered") v = false;
 	}
 	return v;
-}
-
-export function who(id: string): string {
-	return id === "owner" ? "Vos" : id === "system" ? "Shared Terminal" : `@${id}`;
 }
 
 // ── Questions (ACP form elicitation) ─────────────────────────────────────
@@ -517,7 +358,7 @@ export function answerText(form: QuestionForm, answerJson: string | null): strin
 
 /**
  * A stable hue per agent name, so each agent keeps its colour wherever it
- * shows (its chats, the Project Chat header, the sidebar): `--acp-hue`.
+ * shows (its topics, the rail, the sidebar): `--acp-hue`.
  */
 export function agentHue(name: string): number {
 	let h = 0;

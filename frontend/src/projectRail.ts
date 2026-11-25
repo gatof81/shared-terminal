@@ -60,6 +60,8 @@ export function configureRail(a: RailActions): void {
 let pid: string | null = null;
 /** The topic on screen («trabajando aquí»; its row is the current one). */
 let here: string | null = null;
+/** The Archive is on screen (its row is the current one). */
+let inArchive = false;
 let gen = 0;
 let convs: AcpConversation[] = [];
 let convsRead: "loading" | "ok" | "error" = "loading";
@@ -216,10 +218,11 @@ function sectionHead(title: string, add?: string, onAdd?: () => void): HTMLEleme
 
 // ── Lifecycle ───────────────────────────────────────────────────────────────
 
-/** Shows the rail of project `projectId`, with topic `topic` on screen (or none). */
-export function showRail(projectId: string, topic: string | null): void {
+/** Shows the rail of project `projectId`, with topic `topic` (or the Archive) on screen. */
+export function showRail(projectId: string, topic: string | null, archive = false): void {
 	const changed = projectId !== pid;
 	here = topic;
+	inArchive = archive;
 	if (changed) {
 		gen++;
 		pid = projectId;
@@ -259,6 +262,7 @@ export function resetRail(): void {
 	gen++;
 	pid = null;
 	here = null;
+	inArchive = false;
 	convs = [];
 	convsRead = "loading";
 	archived = null;
@@ -507,18 +511,24 @@ function paint(): void {
 	closedToggle.textContent = showClosed ? "Ocultar cerrados" : `Ver cerrados (${closed.length})`;
 	closedToggle.setAttribute("aria-expanded", String(showClosed));
 
-	// Archivo · solo lectura: the previous Project Chat (its content moves here in F5).
+	// Archivo · solo lectura: what was written before topics (acpArchive.ts).
 	syncChildren(archiveList, [
-		row(`arch:${p}`, p, () => {
+		row(`arch:${p}`, [p, inArchive], () => {
 			const li = el("li");
 			const a = el("a", "rail-row rail-archive-row");
-			a.href = projectRouteHash({ projectId: p, page: "chat" });
+			a.href = projectRouteHash({ projectId: p, page: "archive" });
+			if (inArchive) a.setAttribute("aria-current", "page");
 			const text = el("span", "rail-row-text");
 			text.append(
-				el("span", "rail-row-title", "Project Chat anterior"),
-				el("span", "rail-row-sub", "Lo escrito antes de los temas"),
+				el("span", "rail-row-title", "Archivo"),
+				el("span", "rail-row-sub", "Project Chat y chats individuales anteriores"),
 			);
 			a.append(text);
+			a.addEventListener("click", (e) => {
+				if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+				e.preventDefault();
+				navigateProject({ projectId: p, page: "archive" });
+			});
 			li.append(a);
 			return li;
 		}),

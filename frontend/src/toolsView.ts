@@ -29,6 +29,7 @@
  * workspace: with it the workspace select reads «Sesión completa», disabled.
  */
 
+import { openAgentSettings } from "./acpSettings.js";
 import type { AcpAgentInfo, AcpWork } from "./api.js";
 import { openActionMenu } from "./components/actionMenu.js";
 import { gitBranch, onGitStatus, requestGitStatus } from "./gitView.js";
@@ -179,9 +180,11 @@ export function openAgentMenu(name: string, opener: HTMLElement): void {
 				label: `⎇ ${w.id}`,
 				hint: `trabajo · ${workWords(w)}`,
 			})),
+			{ id: "settings", label: "Ajustes del agente", hint: "modelo · effort · cuenta" },
 		],
 		onPick: (id) => {
-			if (id.startsWith("w:")) openTools({ agent: name, work: id.slice(2), tool: "git" });
+			if (id === "settings") openAgentSettings(name, opener);
+			else if (id.startsWith("w:")) openTools({ agent: name, work: id.slice(2), tool: "git" });
 			else openTools({ agent: name, work: null, tool: id as ToolName });
 		},
 	});

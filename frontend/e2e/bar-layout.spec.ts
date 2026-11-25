@@ -51,7 +51,6 @@ test.describe("the bar layout", () => {
 		const name = await box("#terminal-session-name");
 		expect(name.width, "the session name keeps room to read").toBeGreaterThanOrEqual(72);
 		await expect(page.locator("#terminal-session-name")).toHaveText("my-project");
-		await expect(page.locator("#view-chat-btn"), "a traditional session has no Chat").toBeHidden();
 		for (const v of ["terminal", "files", "git"] as const) {
 			const b = await box(`#view-${v}-btn`);
 			expect(b.width, `${v} tab is a touch target`).toBeGreaterThanOrEqual(34);
@@ -238,6 +237,5 @@ test.describe("the bar layout", () => {
 		await app.switchView("terminal");
 		await expect(page.locator("#terminal-state")).toContainText("stopped");
 		await app.switchView("git");
-		await expect(page.locator("#view-chat-btn")).toBeHidden();
 	});
 });

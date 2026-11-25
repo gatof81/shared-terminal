@@ -10,7 +10,12 @@
 // the same DOM and the reader's place.
 
 import { AcpThread, type ThreadState } from "./acpThread.js";
-import { type AcpConversation, acpArchiveConversation, acpRenameConversation } from "./api.js";
+import {
+	type AcpConversation,
+	acpArchiveConversation,
+	acpCreateConversation,
+	acpRenameConversation,
+} from "./api.js";
 import { openActionMenu } from "./components/actionMenu.js";
 import { confirmDialog, promptDialog } from "./components/dialog.js";
 import { showToast } from "./components/toast.js";
@@ -283,6 +288,41 @@ function titleProblem(v: string): string | null {
 		: [...t].length > TITLE_MAX
 			? `Hasta ${TITLE_MAX} caracteres`
 			: null;
+}
+
+/**
+ * «Nueva conversación» (and «Continuar en una conversación nueva», the
+ * Archive's): the title, then the topic — shown in the rail at once. Null
+ * when cancelled. One id per dialog: a retry after an unknown outcome is
+ * the same topic.
+ */
+export async function newTopicDialog(
+	projectId: string,
+	opts: { title?: string; initial?: string } = {},
+): Promise<AcpConversation | null> {
+	const clientRequestId = crypto.randomUUID();
+	let created: AcpConversation | null = null;
+	await promptDialog({
+		title: opts.title ?? "Nueva conversación",
+		label: "Título",
+		initialValue: opts.initial ? [...opts.initial].slice(0, TITLE_MAX).join("") : undefined,
+		confirmLabel: "Crear",
+		validate: titleProblem,
+		onConfirm: async (v) => {
+			try {
+				const c = await acpCreateConversation(projectId, v.trim(), clientRequestId);
+				patchConversation(c);
+				created = c;
+				return null;
+			} catch (err) {
+				const e = err as { code?: string };
+				return e.code === "outcome-unknown"
+					? "No se pudo confirmar. Volvé a intentar: no se duplica."
+					: refusal(err, "No se pudo crear");
+			}
+		},
+	});
+	return created;
 }
 
 async function renameTopic(c: AcpConversation): Promise<void> {

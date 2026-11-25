@@ -1,27 +1,6 @@
-/* ── Chat view (an ACP agent's, acpChat.ts) ─────────────────────────
-   Same overlay shape as Files/Git (#files-view), plus what the ACP chats
-   (acpThread.ts) share: the "go to the end" button (chatScroll.ts) and
-   the Markdown of an agent's text (chatMarkdown.ts). */
-#chat-view {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  top: 0;
-  z-index: var(--z-overlay);
-  display: flex;
-  flex-direction: column;
-  background: var(--c-bg);
-  min-height: 0;
-  color: var(--c-text);
-}
-#chat-view[hidden] {
-  display: none;
-}
-#chat-view :focus-visible {
-  outline: 2px solid var(--c-accent);
-  outline-offset: 1px;
-}
+/* ── What the ACP threads share (acpThread.ts) ───────────────────────
+   The "go to the end" button (chatScroll.ts) and the Markdown of an
+   agent's text (chatMarkdown.ts). */
 .chat-float {
   position: absolute;
   left: 50%;

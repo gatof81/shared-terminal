@@ -258,11 +258,6 @@ body.project-page-on #actions-btn {
 #project-view[hidden] {
   display: none;
 }
-.pv-page {
-  max-width: 60rem;
-  margin: 0 auto;
-  padding: var(--s-4) var(--s-5) var(--s-6);
-}
 .pv-header {
   display: flex;
   align-items: center;
@@ -304,11 +299,6 @@ body.project-page-on #actions-btn {
 }
 .pv-status-error {
   color: var(--c-err);
-}
-.pv-tools {
-  display: flex;
-  align-items: center;
-  gap: var(--s-2);
 }
 .pv-btn {
   display: inline-flex;
@@ -387,9 +377,6 @@ body.project-page-on #actions-btn {
   }
   .pv-btn {
     min-height: 2.75rem;
-  }
-  .pv-page {
-    padding: var(--s-3) var(--s-4) var(--s-6);
   }
 }
 

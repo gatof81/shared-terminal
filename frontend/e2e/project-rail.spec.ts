@@ -100,7 +100,7 @@ test.describe("project rail and topics", () => {
 		await expect(rail(page).locator(".rail-work")).toHaveCount(2);
 		await expect(rail(page).locator(".rail-archive-row")).toHaveAttribute(
 			"href",
-			`#/projects/${HZ}/chat`,
+			`#/projects/${HZ}/archive`,
 		);
 		// Pendientes: wired to the inbox (an interruption to review counts).
 		backend.addAcpMessage({

@@ -13,7 +13,6 @@ export const APP_TITLE = "Shared Terminal";
 const VIEW_LABEL: ReadonlyMap<string, string> = new Map([
 	["files", "Files"],
 	["git", "Git"],
-	["chat", "Chat"],
 ]);
 
 export interface TitleParts {

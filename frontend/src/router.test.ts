@@ -43,7 +43,6 @@ describe("parseRoute / routeHash", () => {
 				`#/sessions/${SID}/git/unstaged:src/auth.ts`,
 				{ sessionId: SID, view: "git", detail: "unstaged:src/auth.ts" },
 			],
-			[`#/sessions/${SID}/chat/conv-1`, { sessionId: SID, view: "chat", detail: "conv-1" }],
 			[`#/sessions/${SID}/terminal/tab-1`, { sessionId: SID, view: "terminal", detail: "tab-1" }],
 		];
 		for (const [hash, route] of cases) {
@@ -183,7 +182,15 @@ describe("project routes", () => {
 	it("parses the project's pages and round-trips them", () => {
 		const CID = "0c0c0c0c-0000-4000-8000-000000000009";
 		expect(parseProjectRoute(`#/projects/${PID}`)).toEqual({ projectId: PID, page: "home" });
-		expect(parseProjectRoute(`#/projects/${PID}/chat`)).toEqual({ projectId: PID, page: "chat" });
+		expect(parseProjectRoute(`#/projects/${PID}/archive`)).toEqual({
+			projectId: PID,
+			page: "archive",
+		});
+		expect(parseProjectRoute(`#/projects/${PID}/archive/@dev`)).toEqual({
+			projectId: PID,
+			page: "archive",
+			archive: "@dev",
+		});
 		expect(parseProjectRoute(`#/projects/${PID}/c/${CID}`)).toEqual({
 			projectId: PID,
 			page: "conversation",
@@ -192,10 +199,16 @@ describe("project routes", () => {
 		expect(projectRouteHash({ projectId: PID })).toBe(`#/projects/${PID}`);
 		for (const r of [
 			{ projectId: PID, page: "home" as const },
-			{ projectId: "p 1", page: "chat" as const },
+			{ projectId: "p 1", page: "archive" as const },
+			{ projectId: PID, page: "archive" as const, archive: "project" },
+			{ projectId: PID, page: "archive" as const, archive: "@qa-2" },
 			{ projectId: PID, page: "conversation" as const, conversationId: "c 1" },
 		])
 			expect(parseProjectRoute(projectRouteHash(r))).toEqual(r);
+		// The key as it reads: `@`, never `%40`.
+		expect(projectRouteHash({ projectId: PID, page: "archive", archive: "@dev" })).toBe(
+			`#/projects/${PID}/archive/@dev`,
+		);
 	});
 
 	it("parses Herramientas (with and without its topic) and round-trips it", () => {
@@ -241,18 +254,19 @@ describe("project routes", () => {
 			`#/projects/${PID}/agents`,
 			`#/projects/${PID}/c/`,
 			`#/projects/${PID}/c/x/y`,
+			`#/projects/${PID}/chat`,
+			`#/projects/${PID}/archive/dev`,
+			`#/projects/${PID}/archive/@Dev`,
+			`#/projects/${PID}/archive/project/x`,
 			`#/sessions/${SID}`,
 		])
 			expect(parseProjectRoute(h), h).toBeNull();
 	});
 
 	it("never changes how a session route parses, and a project hash is no session route", () => {
-		expect(parseRoute(`#/projects/${PID}/chat`)).toBeNull();
-		expect(parseRoute(`#/sessions/${SID}/chat/c1`)).toEqual({
-			sessionId: SID,
-			view: "chat",
-			detail: "c1",
-		});
+		expect(parseRoute(`#/projects/${PID}/archive`)).toBeNull();
+		// The session's Chat view is gone: such an address is no route.
+		expect(parseRoute(`#/sessions/${SID}/chat`)).toBeNull();
 	});
 
 	it("project routes off: a pasted project hash is delivered to the session listeners as before", () => {
@@ -288,10 +302,10 @@ describe("project routes", () => {
 	it("leaving a page pushes the session underneath (Back returns to the page)", () => {
 		const shown = true;
 		enableProjectRoutes(() => shown);
-		navigate({ sessionId: SID, view: "chat", detail: null }, { replace: true });
+		navigate({ sessionId: SID, view: "files", detail: null }, { replace: true });
 		navigateProject({ projectId: PID });
 		pushSessionAddress();
-		expect(window.location.hash).toBe(`#/sessions/${SID}/chat`);
+		expect(window.location.hash).toBe(`#/sessions/${SID}/files`);
 		expect(depth()).toBe(2);
 	});
 

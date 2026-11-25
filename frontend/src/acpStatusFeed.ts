@@ -1,5 +1,5 @@
 // acpStatusFeed.ts — keeps the agents registry (acpRegistry.ts) current
-// without any chat open, for the sidebar. Each read of /api/acp/agents is
+// without any topic open, for the sidebar. Each read of /api/acp/agents is
 // three D1 queries, so the budget is:
 //
 // - The period: the registry is read when it is 30 s old — counting ANY read
@@ -52,7 +52,7 @@ let lastAttempt = 0;
 
 /**
  * The one read of the agents list (shared by overlapping callers: the
- * landing of a selected session, the first session-list load, this feed): it
+ * project page, the first session-list load, this feed): it
  * writes the registry. While the list has never been read, a failure is
  * retried in the background (5 s, doubling, up to 60 s).
  */

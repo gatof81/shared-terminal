@@ -8,7 +8,8 @@
 //   - «Resultados sin ver»: agents' answers to the person not seen yet —
 //     informative, not counted.
 //
-// «Ver en el tema» opens the topic with the message highlighted. It is a
+// «Ver en el tema» opens the topic with the message highlighted («Ver en el
+// Archivo»: the Archive's chat, for what was written before topics). It is a
 // dialog (components/dialog.ts): over everything, `inert` underneath, so the
 // terminal under it keeps its box — opening or closing it sends no resize.
 
@@ -21,12 +22,18 @@ import { createDialog, type Dialog } from "./components/dialog.js";
 import { projectName } from "./projectDirectory.js";
 import { el, syncChildren } from "./ui.js";
 
+type GoTarget = {
+	id: number;
+	conversationId: string | null;
+	projectId: string | null;
+	agent: string;
+};
+
 export interface InboxHooks {
-	/** «Ver en el tema»: the topic (or, for the Archive, the agent's chat) at message `id`. */
-	goTo: (
-		target: { id: number; conversationId: string | null; projectId: string | null; agent: string },
-		opts: { result: boolean },
-	) => void;
+	/** «Ver en el tema»: the topic (or the Archive's chat) at message `id`. */
+	goTo: (target: GoTarget, opts: { result: boolean }) => void;
+	/** Whether `goTo` has somewhere to go (an agent's Archive needs its project). */
+	canGo?: (target: GoTarget) => boolean;
 	/** A topic's title the page already knows (the shown project's). */
 	titleOf: (conversationId: string) => string | null;
 }
@@ -213,20 +220,23 @@ function goButton(
 	m: { id: number; conversation_id?: string | null; project_id?: string | null },
 	agent: string,
 	result: boolean,
-): HTMLElement {
-	const b = el("button", "btn sm ghost acp-ib-go", "Ver en el tema");
+): HTMLElement | null {
+	const target: GoTarget = {
+		id: m.id,
+		conversationId: m.conversation_id ?? null,
+		projectId: m.project_id ?? null,
+		agent,
+	};
+	if (hooks.canGo && !hooks.canGo(target)) return null;
+	const b = el(
+		"button",
+		"btn sm ghost acp-ib-go",
+		target.conversationId ? "Ver en el tema" : "Ver en el Archivo",
+	);
 	b.type = "button";
 	b.addEventListener("click", () => {
 		dialog?.close();
-		hooks.goTo(
-			{
-				id: m.id,
-				conversationId: m.conversation_id ?? null,
-				projectId: m.project_id ?? null,
-				agent,
-			},
-			{ result },
-		);
+		hooks.goTo(target, { result });
 	});
 	return b;
 }
@@ -251,14 +261,15 @@ function questionItem(
 			cards.set(q.id, card);
 		}
 		const acts = el("div", "acp-ib-acts");
-		if (q.message_id !== null)
-			acts.append(
-				goButton(
-					{ id: q.message_id, conversation_id: q.conversation_id, project_id: q.project_id },
-					q.agent,
-					false,
-				),
-			);
+		const go =
+			q.message_id === null
+				? null
+				: goButton(
+						{ id: q.message_id, conversation_id: q.conversation_id, project_id: q.project_id },
+						q.agent,
+						false,
+					);
+		if (go) acts.append(go);
 		main.append(card.el, acts);
 		return item;
 	});
@@ -285,7 +296,8 @@ function interruptedItem(m: AcpMessage): HTMLElement {
 				where: m.conversation_id ? whereOf(null, m.conversation_id) : null,
 			}),
 		);
-		acts.append(review, goButton(m, m.to_id, false));
+		const go = goButton(m, m.to_id, false);
+		acts.append(review, ...(go ? [go] : []));
 		main.append(acts);
 		return item;
 	});
@@ -297,7 +309,8 @@ function resultItem(m: AcpMessage): HTMLElement {
 		const { item, main } = itemShell("is-result", m.to_id, where);
 		main.append(el("p", "acp-ib-what", `@${m.to_id}: ${clip(m.result_text ?? "", 220)}`));
 		const acts = el("div", "acp-ib-acts");
-		acts.append(goButton(m, m.to_id, true));
+		const go = goButton(m, m.to_id, true);
+		if (go) acts.append(go);
 		main.append(acts);
 		return item;
 	});

@@ -10,7 +10,7 @@
  */
 
 import { agentHue, sidebarAgentStatus } from "./acpModel.js";
-import { acpAgentsLoaded, acpAgentsReadAt, acpEntry, isAcpAgentSession } from "./acpRegistry.js";
+import { acpAgentsLoaded, acpAgentsReadAt, acpEntry } from "./acpRegistry.js";
 import { readAcpAgents, startAcpStatusFeed } from "./acpStatusFeed.js";
 import { openObserversModalFor } from "./admin.js";
 import {
@@ -298,11 +298,10 @@ function tabRowItem(): MenuItem[] {
 		: [{ id: "tabs-hide", label: "Hide tabs", hint }];
 }
 
-/** The ⋯ menu of the ACTIVE session (the session bar). */
 /**
  * What the bar's ⋯ shows first for the open session, before its actions —
- * acpChat.ts: "Ajustes del agente" for an agent's session (UX iter3 E: its
- * own header row goes; the bar is its header). `onPick` true = handled.
+ * acpSettings.ts: "Ajustes del agente" for an agent's session (UX iter3 E:
+ * the bar is its header). `onPick` true = handled.
  */
 type SessionMenuExtras = (s: SessionInfo) => { items: MenuItem[]; onPick: (id: string) => boolean };
 let sessionMenuExtras: SessionMenuExtras | null = null;
@@ -435,8 +434,8 @@ export async function refreshSessions() {
 		if (gen !== listGen || !isLoggedIn()) return;
 		const firstLoad = !listLoaded;
 		listLoaded = true;
-		// Who is an agent decides where a selected session lands: read it now,
-		// so it is known before the first click (no wait in the normal case).
+		// Who is an agent decides how the tree files a row (by its project):
+		// read it with the first list.
 		if (firstLoad && !acpAgentsLoaded()) void readAcpAgents();
 		setServerReachable(true);
 		setSessions(list);
@@ -1107,43 +1106,6 @@ sessionList.addEventListener("keydown", (e) => {
 // screen the way it already won the address.
 let wantedTabId: string | null = null;
 
-// How long a selection may wait for the agents list. It is read when the
-// session list first loads (refreshSessions), so normally it is in before
-// the first click and nothing waits; this only covers a click in the first
-// instants after load. A read is one request with three D1 queries in
-// parallel — about one D1 round trip — so 500 ms covers it with margin,
-// while a slow or failing list costs at most half a second, once.
-const LANDING_AGENTS_WAIT_MS = 500;
-/**
- * A selection already waited for the list in this page load and it was not
- * there (late or failed): later selections never wait — they take "not an
- * agent" at once while the read goes on (acpStatusFeed retries a failed
- * one), and use it once it lands.
- */
-let agentsWaitSpent = false;
-
-/**
- * Resolve the landing view (UI unification §9, decision 1; viewPolicy.ts)
- * for a session being selected. Synchronous when everything it depends on
- * is known; otherwise the read that decides it — is it an agent's session —
- * runs now, in parallel with the tab listing, and the landing waits for it
- * (bounded).
- */
-function decideLanding(sessionId: string, running: boolean): View | Promise<View> {
-	// Known, or the one wait of this page load was spent: decided without the list.
-	if (isAcpAgentSession(sessionId) !== null || agentsWaitSpent)
-		return landingFor(sessionId, running);
-	// The one shared read of the agents list (acpStatusFeed.ts), bounded.
-	return Promise.race([readAcpAgents(), sleep(LANDING_AGENTS_WAIT_MS)]).then(() => {
-		if (!acpAgentsLoaded()) agentsWaitSpent = true;
-		return landingFor(sessionId, running);
-	});
-}
-
-function sleep(ms: number): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 export async function openSession(
 	sessionId: string,
 	opts: { tabId?: string | null; view?: View | null } = {},
@@ -1160,10 +1122,10 @@ export async function openSession(
 	const meta = sessions.find((x) => x.sessionId === sessionId);
 	const running = meta?.status === "running";
 	// The landing view (viewPolicy.ts) — unless the route names one (the
-	// router applies it right after). While it is being
-	// decided the view sync must not land a fallback of its own, and a
+	// router applies it right after). Until it lands (after the tab
+	// listing) the view sync must not land a fallback of its own, and a
 	// view the person picks meanwhile wins over it.
-	const landing = opts.view ? null : decideLanding(sessionId, running);
+	const landing = opts.view ? null : landingFor(sessionId, running);
 	const choiceAt = choiceGeneration();
 	// The pending landing belongs to THIS session (viewSwitch keys it by
 	// id): an overlapping open of another session neither ends it early
@@ -1180,7 +1142,7 @@ async function openSessionBody(
 	sessionId: string,
 	meta: SessionInfo | undefined,
 	running: boolean,
-	landing: View | Promise<View> | null,
+	landing: View | null,
 	choiceAt: number,
 ): Promise<void> {
 	// updateToolbar → syncSessionViews re-keys every view to this session
@@ -1188,27 +1150,24 @@ async function openSessionBody(
 	// written, in place — selecting a session is not a history entry.
 	updateToolbar();
 	reflectRoute({ push: false });
-	// A landing that needs the agents list waits for it (bounded); the
-	// tab listing below runs meanwhile, so a running session loses nothing.
-	const land = async (): Promise<boolean> => {
+	const land = (): boolean => {
 		if (landing === null) return true;
-		const v = landing instanceof Promise ? await landing : landing;
 		endLanding(sessionId);
 		if (activeSessionId !== sessionId) return false;
 		// The person chose a view while this was deciding: theirs stands.
 		if (choiceGeneration() !== choiceAt) return true;
-		landView(v, { forced: !running });
+		landView(landing, { forced: !running });
 		return true;
 	};
 
 	// Not running → no tmux to list tabs from or attach to, but the
-	// workspace is on the host: open straight into the Files view (or
-	// an agent's Chat). refreshSessions re-opens it
+	// workspace is on the host: open straight into the Files view.
+	// refreshSessions re-opens it
 	// properly once the session is started.
 	if (meta && !running) {
 		filesOnlySessionId = sessionId;
 		if (landing === null) showFilesOnly();
-		else await land();
+		else land();
 		return;
 	}
 	filesOnlySessionId = null;
@@ -1218,7 +1177,7 @@ async function openSessionBody(
 	try {
 		const tabs = await listTabs(sessionId);
 		if (activeSessionId !== sessionId) return;
-		if (!(await land())) return;
+		if (!land()) return;
 		// Sort by creation order so +-added tabs stay on the right
 		// (listTabs returns alphabetical from tmux list-sessions).
 		setCurrentTabs(tabs.sort((a, b) => a.createdAt - b.createdAt));
@@ -1486,7 +1445,7 @@ function paintBarIdentity(): void {
 		const a = document.createElement("a");
 		a.href = projectRouteHash({ projectId: project.projectId });
 		a.textContent = `${project.name} ↗`;
-		a.title = `Abrir Project Chat: ${project.name}`;
+		a.title = `Abrir el proyecto: ${project.name}`;
 		a.addEventListener("click", (e) => {
 			if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
 			e.preventDefault();

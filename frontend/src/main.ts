@@ -30,7 +30,7 @@ import {
 } from "./api.js";
 // Overlay views register themselves with viewSwitch on load; nothing
 // else imports them by name, so the side-effect imports keep them in.
-import "./acpChat.js";
+import "./acpSettings.js";
 import "./filesView.js";
 import "./gitView.js";
 import { type MenuItem, openActionMenu } from "./components/actionMenu.js";

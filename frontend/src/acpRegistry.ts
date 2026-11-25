@@ -2,10 +2,10 @@
 // session: who is an agent, in which project, and its state (running,
 // queue, login, a question waiting, runner liveness). The one store every
 // view reads agents from (the sidebar's rows and group headings); every
-// read of the list writes it (the ACP chats, the project page, the session
-// form, and acpStatusFeed.ts, which keeps it current on a budget). A leaf
-// module (no imports), so the sidebar (sessionCore.ts) can use it without
-// importing the chat modules.
+// read of the list writes it (a topic's thread, the project's rail, the
+// agent's settings, the session form, and acpStatusFeed.ts, which keeps it
+// current on a budget). A leaf module (no imports), so the sidebar
+// (sessionCore.ts) can use it without importing the ACP modules.
 //
 // Announced changes: `st:acp-agents` when who is an agent or their project
 // changed (the sidebar regroups), `st:acp-status` when only a state changed

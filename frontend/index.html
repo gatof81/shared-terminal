@@ -196,10 +196,6 @@
                 </svg>
                 <span class="view-label">Git</span>
               </button>
-              <button id="view-chat-btn" type="button" aria-pressed="false" title="Chat with the agent" hidden>
-                <svg class="view-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H8l-4 4z" /></svg>
-                <span class="view-label">Chat</span>
-              </button>
             </div>
             <!-- The session's actions (start / stop / ports / observers /
                  terminate / delete) as one menu in the bar. -->
@@ -340,8 +336,6 @@
               <div id="git-diff"></div>
             </div>
           </div>
-          <!-- Chat of an ACP agent's session (acpChat.ts). -->
-          <div id="chat-view" hidden></div>
           <!-- Project / agent page (P3a, projectsView.ts): shown OVER the
                session — its siblings only turn visibility:hidden, so the
                terminal keeps its box and its socket. -->

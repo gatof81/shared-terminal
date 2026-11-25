@@ -6,8 +6,10 @@
  *   #/projects/<pid>          the project: its rail (projectRail.ts) — in the
  *                             sidebar on a wide screen, the whole screen on a phone
  *   #/projects/<pid>/c/<cid>  a topic (acpConversation.ts), the rail beside it
- *   #/projects/<pid>/chat     the previous Project Chat (acpProjectChat.ts),
- *                             reached from the rail's Archive until F5
+ *   #/projects/<pid>/archive[/<k>]  the Archive (acpArchive.ts): its list, or
+ *                             one of its read-only chats, the rail beside it
+ *   #/projects/<pid>[/c/<cid>]/tools/…  Herramientas (toolsView.ts), over the
+ *                             topic it was opened from
  *
  * The page is shown OVER the session workbench, never instead of it: the
  * terminal area's other children only turn `visibility: hidden` (layout
@@ -16,9 +18,18 @@
  */
 
 import {
+	archiveHeader,
+	archivePage,
+	onArchiveWork,
+	placeArchiveHeader,
+	resetArchive,
+	revealInArchive,
+	suspendArchive,
+} from "./acpArchive.js";
+import {
+	newTopicDialog,
 	onTopicWork,
 	placeTopicHeader,
-	refusal,
 	resetTopic,
 	revealInTopic,
 	suspendTopic,
@@ -34,23 +45,10 @@ import {
 	resetInboxPanel,
 } from "./acpInbox.js";
 import { resetInbox, startInbox } from "./acpInboxStore.js";
-import {
-	acpProjectPage,
-	onProjectFeed,
-	type ProjectPageMode,
-	projectFeed,
-	refreshAcpAgents,
-	resetAcpProject,
-	retryProjectFeed,
-	setProjectPageMode,
-	suspendAcpProject,
-} from "./acpProjectChat.js";
-import { acpSessionOf, resetAcpAgents } from "./acpRegistry.js";
+import { acpEntryByName, resetAcpAgents } from "./acpRegistry.js";
 import { configureReview } from "./acpReview.js";
-import { stopAcpStatusFeed } from "./acpStatusFeed.js";
-import type { FeedStatus } from "./acpThread.js";
+import { readAcpAgents, stopAcpStatusFeed } from "./acpStatusFeed.js";
 import {
-	acpCreateConversation,
 	archiveProject,
 	createProject,
 	fetchProjects,
@@ -58,7 +56,6 @@ import {
 	type ProjectSummary,
 	renameProject,
 } from "./api.js";
-import { openActionMenu } from "./components/actionMenu.js";
 import { confirmDialog, promptDialog } from "./components/dialog.js";
 import { showToast } from "./components/toast.js";
 import {
@@ -74,7 +71,6 @@ import {
 	configureRail,
 	hideRail,
 	onRailChange,
-	patchConversation,
 	railBody,
 	railConversations,
 	railHead,
@@ -94,7 +90,6 @@ import {
 	projectRouteHash,
 	pushSessionAddress,
 	readProjectRoute,
-	routeHash,
 } from "./router.js";
 import { renderSessionList, sessionListLoaded } from "./sessionCore.js";
 import { setTitlePage } from "./tabTitle.js";
@@ -121,90 +116,12 @@ let active = false; // signed in + app shown
 let shown: string | null = null; // the project id on screen
 let shownPage: ProjectPage | null = null; // which of its pages
 let shownTopic: string | null = null;
+/** The Archive's chat on screen (`page: "archive"`; null: its list). */
+let shownArchive: string | null = null;
 let gen = 0; // bumped by every reset (logout): a load started before applies nothing
 let loadError = false;
 let canCreate = true;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
-
-// ── The shown project's state ───────────────────────────────────────────────
-// Active, archived, not found or failed — decided from the project's feed AND
-// the project list, never from "not in the list" alone: the feed carries no
-// `archived` flag (an archived project's feed still answers 200, and this
-// frontend-only change does not touch the backend), so ARCHIVED is concluded
-// only from a feed that answered plus a list that was fetched successfully,
-// in this auth generation, AFTER the absence was noticed, and still lacks it.
-// Until then — and on any error — the page stays locked (fail-closed).
-type PageState = "loading" | "active" | "archived" | "missing" | "error";
-let pageState: PageState = "loading";
-let feedStatus: FeedStatus = "loading";
-let feedName: string | null = null;
-let absentConfirmed: string | null = null; // the pid a post-absence list confirmed absent
-let confirming: string | null = null;
-let confirmFailed = false;
-
-const MODE: Record<PageState, ProjectPageMode> = {
-	loading: "loading",
-	active: "active",
-	archived: "archived",
-	missing: "unavailable",
-	error: "unavailable",
-};
-
-function evaluate(): void {
-	const pid = shown;
-	if (!pid || shownPage !== "chat") return;
-	let next: PageState;
-	if (feedStatus === "loading") next = "loading";
-	else if (feedStatus === "not-found") next = "missing";
-	else if (feedStatus === "error" || feedStatus === "stale") next = "error";
-	else if (projectName(pid) !== null) next = "active";
-	else if (absentConfirmed === pid) next = "archived";
-	else if (confirmFailed) next = "error";
-	else {
-		next = "loading";
-		void confirmAbsence(pid);
-	}
-	pageState = next;
-	// The history stays readable (box locked) when it was read once and only a
-	// re-read or the list check failed; only a project never read is hidden.
-	const readable = feedStatus === "ok" || feedStatus === "stale";
-	setProjectPageMode(
-		next === "error" && readable ? (absentConfirmed === pid ? "archived" : "loading") : MODE[next],
-	);
-	renderPage();
-}
-
-/** The feed answered but the list lacks the project: ask for the list once more before concluding. */
-async function confirmAbsence(pid: string): Promise<void> {
-	if (confirming === pid) return;
-	confirming = pid;
-	const myGen = gen;
-	const a = await fetchProjects().catch(() => null);
-	if (confirming === pid) confirming = null;
-	if (myGen !== gen || !active || shown !== pid || (a && !a.ok && a.code === "stale")) return;
-	if (a?.ok) {
-		loadError = false;
-		canCreate = a.body.can.createProject.allowed;
-		if (setProjects(a.body.projects) && sessionListLoaded()) renderSessionList();
-		if (!a.body.projects.some((p) => p.projectId === pid)) absentConfirmed = pid;
-	} else confirmFailed = true;
-	renderSection();
-	evaluate();
-}
-
-function onFeed(pid: string, feed: FeedStatus, name: string | null): void {
-	if (pid !== shown) return;
-	if (feed === feedStatus && name === feedName) return;
-	feedStatus = feed;
-	feedName = name;
-	evaluate();
-}
-
-function retryPage(): void {
-	confirmFailed = false;
-	if (feedStatus !== "ok") retryProjectFeed();
-	evaluate();
-}
 
 async function loadProjects(): Promise<void> {
 	const myGen = gen;
@@ -216,7 +133,6 @@ async function loadProjects(): Promise<void> {
 		if (setProjects(a.body.projects) && sessionListLoaded()) renderSessionList();
 	} else if (a?.code !== "stale") loadError = true;
 	renderSection();
-	if (shown) evaluate();
 	paintSpace();
 	repaintRail();
 }
@@ -249,7 +165,7 @@ function renderSection(): void {
 			el(
 				"p",
 				"project-list-note",
-				"Sin proyectos. Un proyecto agrupa agentes ACP y les da un Project Chat.",
+				"Sin proyectos. Un proyecto agrupa agentes ACP y les da conversaciones.",
 			),
 		);
 	if (currentProject() !== shown) {
@@ -272,42 +188,8 @@ function sync(): void {
 		navigateProject(r, { replace: true });
 		return;
 	}
-	const page = r.page ?? "home";
-	const prevPid = shown;
-	const prevPage = shownPage;
-	// Leaving one kind of page for the other: the one left stops following.
-	if (prevPage === "chat" && page !== "chat") {
-		suspendAcpProject();
-		headerFor = null;
-	}
-	if (prevPage !== null && prevPage !== "chat" && page === "chat") leaveSpace();
-	if (page === "chat") syncChat(r.projectId, prevPid !== r.projectId || prevPage !== "chat");
-	else syncSpace(r, prevPid, prevPage);
+	syncSpace(r, shown, shownPage);
 	renderSection();
-}
-
-/** The previous Project Chat (its own page until F5). */
-function syncChat(pid: string, changed: boolean): void {
-	shown = pid;
-	shownPage = "chat";
-	shownTopic = null;
-	if (changed) {
-		pageState = "loading";
-		absentConfirmed = null;
-		confirming = null;
-		confirmFailed = false;
-	}
-	if (!pageEl) return;
-	showPageEl();
-	renderPage();
-	if (changed) {
-		const f = projectFeed(pid);
-		feedStatus = f.feed;
-		feedName = f.name;
-		evaluate();
-		pageEl.querySelector<HTMLElement>(".pv-title")?.focus({ preventScroll: true });
-		if (!projectsLoaded()) void loadProjects();
-	}
 }
 
 /**
@@ -364,13 +246,16 @@ const phoneMq = typeof window !== "undefined" ? window.matchMedia?.("(max-width:
 phoneMq?.addEventListener?.("change", () => placeSpace());
 
 function syncSpace(r: ProjectRoute, prevPid: string | null, prevPage: ProjectPage | null): void {
-	const page = r.page === "conversation" || r.page === "tools" ? r.page : "home";
+	const page = r.page ?? "home";
 	// Herramientas keeps the topic it was opened from mounted under it.
-	const topic = page !== "home" ? (r.conversationId ?? null) : null;
-	const topicChanged = topic !== shownTopic || prevPid !== r.projectId;
+	const topic = page === "conversation" || page === "tools" ? (r.conversationId ?? null) : null;
+	const archive = page === "archive" ? (r.archive ?? null) : null;
+	const topicChanged = topic !== shownTopic || archive !== shownArchive || prevPid !== r.projectId;
+	const prevArchive = shownArchive;
 	shown = r.projectId;
 	shownPage = page;
 	shownTopic = topic;
+	shownArchive = archive;
 	if (!pageEl) return;
 	if (page === "tools") liftPageEl();
 	else {
@@ -378,15 +263,25 @@ function syncSpace(r: ProjectRoute, prevPid: string | null, prevPage: ProjectPag
 		showPageEl();
 	}
 	document.body.classList.add("project-space-on");
-	document.body.classList.toggle("ps-on-topic", topic !== null);
-	showRail(r.projectId, topic);
+	// A phone's stack: the project's screen (the rail) → a topic / the Archive.
+	document.body.classList.toggle("ps-on-topic", topic !== null || page === "archive");
+	showRail(r.projectId, topic, page === "archive");
 	if (topic) rememberTopic(r.projectId, topic);
+	if (page !== "archive") suspendArchive();
 	if (topic) {
 		// From the rail (a phone's project screen, or the sidebar) by a tap,
 		// not Back / Forward: ‹ is then the browser's Back.
 		const opener =
 			prevPid === r.projectId && prevPage === "home" && !fromHistory() ? "rail" : "other";
 		place(mainSlot, topicPage(r.projectId, topic, opener));
+	} else if (page === "archive") {
+		suspendTopic();
+		// A chat picked from the Archive's list by a tap: its ‹ is Back.
+		const opener =
+			prevPid === r.projectId && prevPage === "archive" && prevArchive === null && !fromHistory()
+				? "list"
+				: "other";
+		place(mainSlot, archivePage(r.projectId, archive, opener));
 	} else {
 		suspendTopic();
 		place(mainSlot, homeEl);
@@ -406,7 +301,11 @@ function syncSpace(r: ProjectRoute, prevPid: string | null, prevPage: ProjectPag
 	if (topicChanged || prevPage !== page) {
 		// The page's heading, for a screen reader (a phone's project screen has
 		// none of its own: the rail's head is the app's header there).
-		const target = topic ? topicHeader.querySelector<HTMLElement>(".pv-title") : homeTitle;
+		const target = topic
+			? topicHeader.querySelector<HTMLElement>(".pv-title")
+			: page === "archive"
+				? archiveHeader.querySelector<HTMLElement>(".pv-title")
+				: homeTitle;
 		if (target?.offsetParent) target.focus({ preventScroll: true });
 		if (!projectsLoaded()) void loadProjects();
 	}
@@ -461,7 +360,7 @@ function openTopicIfWide(): void {
 
 /** What the space says about the project itself, and the tab's title. */
 function paintSpace(): void {
-	if (!shown || shownPage === null || shownPage === "chat") return;
+	if (!shown || shownPage === null) return;
 	const name = projectName(shown);
 	const gone = projectsLoaded() && name === null;
 	const list = railConversations();
@@ -471,7 +370,7 @@ function paintSpace(): void {
 			? "Sin conversaciones todavía"
 			: "";
 	homeNote.textContent = gone
-		? "No existe o fue archivado. El historial de un proyecto archivado se lee en su Project Chat anterior."
+		? "No existe o fue archivado."
 		: list?.length === 0
 			? "Cada tema es una conversación con el equipo del proyecto."
 			: "";
@@ -479,24 +378,28 @@ function paintSpace(): void {
 	// Nothing of a rail for a project that is not there: the sidebar keeps its
 	// sessions, and a phone shows this line instead of an empty project screen.
 	document.body.classList.toggle("ps-gone", gone);
-	// A topic's title is its own page's (acpConversation.paint).
-	if (!shownTopic) setTitlePage(name ?? "Proyecto");
+	// A topic's or the Archive's title is its own page's.
+	if (!shownTopic && shownPage !== "archive") setTitlePage(name ?? "Proyecto");
 }
 
 function placeSpace(): void {
 	const slot = document.getElementById("header-project");
 	const sidebar = document.getElementById("sidebar");
-	if (!shown || shownPage === null || shownPage === "chat") return;
+	if (!shown || shownPage === null) return;
 	if (phoneMq?.matches) {
 		railEl.remove();
 		railSlot.replaceChildren(railBody);
 		if (slot) {
 			// Herramientas: the header's row is the session bar's (its tools bar).
 			if (shownPage === "tools") slot.replaceChildren();
-			else slot.replaceChildren(shownTopic ? topicHeader : railHead);
+			else
+				slot.replaceChildren(
+					shownPage === "archive" ? archiveHeader : shownTopic ? topicHeader : railHead,
+				);
 			slot.hidden = shownPage === "tools";
 		}
 		placeTopicHeader(false);
+		placeArchiveHeader(false);
 	} else {
 		railSlot.replaceChildren();
 		if (railEl.firstChild !== railHead) railEl.replaceChildren(railHead, railBody);
@@ -506,6 +409,7 @@ function placeSpace(): void {
 			slot.replaceChildren();
 		}
 		placeTopicHeader(true);
+		placeArchiveHeader(true);
 	}
 }
 
@@ -514,48 +418,27 @@ function leaveSpace(): void {
 	leaveTools();
 	hideRail();
 	suspendTopic();
+	suspendArchive();
 	railEl.remove();
 	railSlot.replaceChildren();
 	topicHeader.remove();
+	archiveHeader.remove();
 	document.body.classList.remove("project-space-on", "ps-on-topic", "ps-gone");
 	const slot = document.getElementById("header-project");
-	if (slot && (slot.contains(railHead) || slot.contains(topicHeader))) {
+	if (
+		slot &&
+		(slot.contains(railHead) || slot.contains(topicHeader) || slot.contains(archiveHeader))
+	) {
 		slot.hidden = true;
 		slot.replaceChildren();
 	}
 	shownTopic = null;
+	shownArchive = null;
 }
 
 /** "+" of Conversaciones (and the space's own button): a new topic, then into it. */
 async function newConversationFlow(pid: string): Promise<void> {
-	// One id per dialog: a retry after an unknown outcome is the same topic.
-	const clientRequestId = crypto.randomUUID();
-	let created: { id: string } | null = null;
-	await promptDialog({
-		title: "Nueva conversación",
-		label: "Título",
-		confirmLabel: "Crear",
-		validate: (v) =>
-			v.trim() === ""
-				? "Poné un título"
-				: [...v.trim()].length > 120
-					? "Hasta 120 caracteres"
-					: null,
-		onConfirm: async (v) => {
-			try {
-				const c = await acpCreateConversation(pid, v.trim(), clientRequestId);
-				patchConversation(c);
-				created = c;
-				return null;
-			} catch (err) {
-				const e = err as { code?: string };
-				return e.code === "outcome-unknown"
-					? "No se pudo confirmar. Volvé a intentar: no se duplica."
-					: refusal(err, "No se pudo crear");
-			}
-		},
-	});
-	const c = created as { id: string } | null;
+	const c = await newTopicDialog(pid);
 	if (c && shown === pid)
 		navigateProject({ projectId: pid, page: "conversation", conversationId: c.id });
 }
@@ -563,8 +446,7 @@ async function newConversationFlow(pid: string): Promise<void> {
 function hidePage(): void {
 	leaveTools();
 	if (shown === null && pageEl?.hidden !== false) return;
-	if (shownPage === "chat") suspendAcpProject();
-	else if (shownPage !== null) leaveSpace();
+	if (shownPage !== null) leaveSpace();
 	shown = null;
 	shownPage = null;
 	document.body.classList.remove("project-page-on");
@@ -588,95 +470,11 @@ function leaveForSession(): void {
 	sync();
 }
 
-let headerFor: { key: string; el: HTMLElement } | null = null;
-function header(pid: string, name: string | null, st: PageState): HTMLElement {
-	const key = JSON.stringify([pid, name, st]);
-	if (headerFor?.key === key) return headerFor.el;
-	const h = el("div", "pv-header");
-	const title = el("h2", "pv-title", name ?? "Proyecto");
-	title.id = "pv-title";
-	title.tabIndex = -1;
-	const tools = el("div", "pv-tools");
-	// Writes only on a project confirmed live (fail-closed: see evaluate).
-	// One row: the title, the agents' group (acpProjectChat) and a ⋯ menu
-	// (the app's action menu: Escape, focus back to the button, arrows). No
-	// ×: the way out is the sidebar (☰ on a phone) or Back (U-2 N1/N2).
-	if (st === "active") {
-		const menu = button(
-			"⋯",
-			"btn btn-icon pv-menu-btn",
-			() =>
-				openActionMenu({
-					title: name ?? "Proyecto",
-					opener: menu,
-					items: [
-						{ id: "rename", label: "Renombrar" },
-						{
-							id: "archive",
-							label: "Archivar",
-							kind: "danger",
-							hint: "No se puede deshacer desde la app; el historial sigue legible.",
-						},
-					],
-					onPick: (id) => {
-						if (id === "rename") void renameFlow(pid, name ?? "");
-						else if (id === "archive") void archiveFlow(pid, name ?? "este proyecto");
-					},
-				}),
-			"Acciones del proyecto",
-		);
-		menu.setAttribute("aria-haspopup", "menu");
-		tools.append(menu);
-	}
-	h.append(title, tools);
-	headerFor = { key, el: h };
-	return h;
-}
-
-let noteCache: { key: string; el: HTMLElement | null } | null = null;
-/** The state line, kept across re-renders while the state is the same. */
-function noteFor(st: PageState): HTMLElement | null {
-	const key = `${st}:${feedStatus}`;
-	if (noteCache?.key !== key) noteCache = { key, el: statusNote(st) };
-	return noteCache.el;
-}
-
-function statusNote(st: PageState): HTMLElement | null {
-	if (st === "archived")
-		return el("p", "pv-status pv-status-archived", "Proyecto archivado · solo lectura");
-	if (st === "missing") return el("p", "pv-status pv-status-error", "Proyecto no encontrado.");
-	if (st !== "error") return null;
-	const p = el("p", "pv-status pv-status-error");
-	p.setAttribute("role", "alert");
-	p.append(
-		feedStatus === "ok"
-			? "No se pudo confirmar el estado del proyecto. "
-			: feedStatus === "stale"
-				? "No se pudo actualizar el proyecto. "
-				: "No se pudo cargar el proyecto. ",
-		button("Reintentar", "pv-btn", retryPage),
-	);
-	return p;
-}
-
-function renderPage(): void {
-	if (shownPage !== "chat") {
-		paintSpace();
-		return;
-	}
-	if (!pageEl || !shown) return;
-	// The live list's name first (a rename lands there); the feed's for an archived one.
-	const name = projectName(shown) ?? (pageState === "missing" ? null : feedName);
-	setTitlePage(name ?? "Proyecto");
-	const page = acpProjectPage(shown, header(shown, name, pageState), noteFor(pageState));
-	if (pageEl.childNodes.length !== 1 || pageEl.firstChild !== page) pageEl.replaceChildren(page);
-}
-
 async function archiveFlow(pid: string, name: string): Promise<void> {
 	const ok = await confirmDialog({
 		title: `Archivar ${name}`,
 		message:
-			"Deja de aparecer en la lista y no se puede deshacer desde la app. Sus agentes quedan sin proyecto; sus sesiones y su contexto no cambian. El historial sigue legible en el chat de cada agente y en la URL de este proyecto (solo lectura).",
+			"Deja de aparecer en la lista y no se puede deshacer desde la app. Sus agentes quedan sin proyecto; sus sesiones y su contexto no cambian.",
 		confirmLabel: "Archivar",
 	}).catch(() => false);
 	if (!ok) return;
@@ -685,10 +483,8 @@ async function archiveFlow(pid: string, name: string): Promise<void> {
 		showToast(`No se pudo archivar (${r.code})`, true);
 		return;
 	}
-	await refreshAcpAgents();
-	// The page stays, archived and read-only, at the same address (U-2 N4).
+	await readAcpAgents();
 	await loadProjects();
-	if (shown === pid) evaluate();
 }
 
 // ── Rename ──────────────────────────────────────────────────────────────────
@@ -738,7 +534,6 @@ async function renameFlow(pid: string, current: string): Promise<void> {
 	)
 		renderSessionList();
 	renderSection();
-	if (shown === pid) evaluate();
 	paintSpace();
 	repaintRail();
 	showToast("Proyecto renombrado");
@@ -783,7 +578,6 @@ function wire(): void {
 	window.addEventListener("popstate", () => sync());
 	window.addEventListener("hashchange", () => sync());
 	window.addEventListener("st:projects-changed", () => void loadProjects());
-	onProjectFeed(onFeed);
 	onAddressWrite(() => sync());
 	onRailChange(() => {
 		paintSpace();
@@ -811,19 +605,21 @@ function wire(): void {
 		openWork: (w) => openTools({ agent: w.agent, work: w.id, tool: "git" }),
 		openInbox: (opener) => openInbox(opener),
 	});
-	// Pendientes and «Revisar interrupción» lead into a topic, or — for the
-	// Archive (no topic) — into the agent's own chat.
-	const agentChat = (agent: string) => {
-		const sid = acpSessionOf(agent);
-		if (sid) window.location.hash = routeHash({ sessionId: sid, view: "chat", detail: null });
-	};
+	// Pendientes and «Revisar interrupción» lead into a topic, or into the
+	// Archive's chat the message belongs to: the previous Project Chat, or the
+	// direct messages of an agent — listed in its project's Archive.
 	configureInbox({
 		titleOf: topicTitle,
 		goTo: (t, opts) => {
 			if (t.conversationId && t.projectId)
 				revealInTopic(t.projectId, t.conversationId, t.id, opts.result);
-			else agentChat(t.agent);
+			else {
+				const where = archiveOf(t.projectId, t.agent);
+				if (where) revealInArchive(where.projectId, where.key, t.id, opts.result);
+				else noProjectToast(t.agent);
+			}
 		},
+		canGo: (t) => Boolean(t.conversationId || archiveOf(t.projectId, t.agent)),
 	});
 	// A review's way out leaves Pendientes too when it was opened from there:
 	// left open, the panel stays modal over the view it led to (everything
@@ -833,7 +629,12 @@ function wire(): void {
 		writeNew: (m) => {
 			closeInbox();
 			if (m.conversation_id && m.project_id) writeInTopic(m.project_id, m.conversation_id, m.to_id);
-			else agentChat(m.to_id);
+			else {
+				// Out of a topic: a new one, in the project it belongs to.
+				const pid = archiveOf(m.project_id ?? null, m.to_id)?.projectId;
+				if (pid) void newTopicWith(pid, m.to_id);
+				else noProjectToast(m.to_id);
+			}
 		},
 		tools: (agent, tool) => {
 			closeInbox();
@@ -849,7 +650,9 @@ function wire(): void {
 			return true;
 		},
 	});
-	onTopicWork((agent, work) => openTools({ agent, work, tool: "git" }));
+	const work = (agent: string, w: string) => openTools({ agent, work: w, tool: "git" });
+	onTopicWork(work);
+	onArchiveWork(work);
 	mountInboxButton();
 	newProjectBtn?.addEventListener("click", () => void openCreateProjectDialog());
 	// A session row or the session bar used while the page is up: the page
@@ -870,6 +673,33 @@ function wire(): void {
 	}
 }
 
+/**
+ * The Archive chat a message out of any topic is read in: the previous
+ * Project Chat of its project, or the direct messages of `agent` in the
+ * Archive of the project the agent is in now (none: no Archive shows them).
+ */
+function archiveOf(
+	projectId: string | null,
+	agent: string,
+): { projectId: string; key: string } | null {
+	if (projectId) return { projectId, key: "project" };
+	const p = acpEntryByName(agent)?.projectId;
+	return p ? { projectId: p, key: `@${agent}` } : null;
+}
+
+function noProjectToast(agent: string): void {
+	showToast(
+		`@${agent} no está en ningún proyecto: asignale uno desde «Ajustes del agente» (⋯ de su sesión).`,
+		true,
+	);
+}
+
+/** «Escribirle un mensaje nuevo» from the Archive: a new topic of `pid`, `agent` its recipient. */
+async function newTopicWith(pid: string, agent: string): Promise<void> {
+	const c = await newTopicDialog(pid);
+	if (c) writeInTopic(pid, c.id, agent);
+}
+
 /** The app is shown for a signed-in account. */
 export function startProjects(): void {
 	wire();
@@ -877,7 +707,7 @@ export function startProjects(): void {
 	enableProjectRoutes(() => shown !== null && readProjectRoute() !== null);
 	renderSection();
 	void loadProjects();
-	void refreshAcpAgents();
+	void readAcpAgents();
 	startInbox();
 	sync();
 	if (pollTimer) clearInterval(pollTimer);
@@ -896,21 +726,14 @@ export function resetProjects(): void {
 	pollTimer = null;
 	disableProjectRoutes();
 	clearProjects();
-	resetAcpProject();
 	resetRail();
 	resetTopic();
+	resetArchive();
 	resetTools();
 	resetInboxPanel();
 	resetInbox();
 	loadError = false;
 	canCreate = true;
-	headerFor = null;
-	pageState = "loading";
-	feedStatus = "loading";
-	feedName = null;
-	absentConfirmed = null;
-	confirming = null;
-	confirmFailed = false;
 	hidePage();
 	renderSection();
 }
