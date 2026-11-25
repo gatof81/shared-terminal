@@ -307,6 +307,7 @@ export async function newTopicDialog(
 		label: "Título",
 		initialValue: opts.initial ? [...opts.initial].slice(0, TITLE_MAX).join("") : undefined,
 		confirmLabel: "Crear",
+		cancelLabel: "Cancelar",
 		validate: titleProblem,
 		onConfirm: async (v) => {
 			try {
@@ -332,6 +333,7 @@ async function renameTopic(c: AcpConversation): Promise<void> {
 		label: "Título",
 		initialValue: c.title,
 		confirmLabel: "Renombrar",
+		cancelLabel: "Cancelar",
 		validate: titleProblem,
 		onConfirm: async (v) => {
 			try {
@@ -350,6 +352,7 @@ async function renameTopic(c: AcpConversation): Promise<void> {
 
 async function archiveTopic(c: AcpConversation): Promise<void> {
 	const ok = await confirmDialog({
+		cancelLabel: "Cancelar",
 		title: `Archivar «${c.title}»`,
 		message:
 			"Sale de la lista de conversaciones y no admite mensajes nuevos. Su historial sigue legible desde «Conversaciones archivadas», en el panel del proyecto.",

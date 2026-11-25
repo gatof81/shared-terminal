@@ -3,8 +3,9 @@
 // (acpArchive.ts): what was written before topics, read where it is — the
 // previous Project Chat (`project_id` = the project, no conversation) or an
 // agent's previous direct messages (no project, no conversation). Same
-// timeline either way; an Archive chat has no composer and no action that
-// writes (an interruption or a question there is resolved in Pendientes).
+// timeline either way; an Archive chat has no composer and adds nothing to
+// its thread (an interruption is reviewed with the same dialog as in a
+// topic; an open question is answered in Pendientes).
 //
 // Data: one page over REST, then live rows and activity from /ws/acp
 // (acpLive.ts), applied by id; a (re)connect reloads the page; while the
@@ -158,6 +159,14 @@ export class AcpThread {
 	 * reader, whatever `atBottom` still says.
 	 */
 	private pinnedTop = 0;
+	/**
+	 * What a reader further up is reading (its row and that row's offset) and
+	 * the scrollTop it was seen at. The thread keeps that row in place by
+	 * itself when rows change height (`keepHeld`): the browser's scroll
+	 * anchoring is off on it (`overflow-anchor: none`) — Safari has none at
+	 * all, so one way for every engine.
+	 */
+	private held: { place: ReadingPlace; top: number } | null = null;
 
 	private source: ThreadSource | null = null;
 	/**
@@ -292,6 +301,8 @@ export class AcpThread {
 	 * plugged in here the chip only says which work a message runs in.
 	 */
 	onOpenWork: ((agent: string, work: string) => void) | null = null;
+	/** Pendientes (acpInbox.ts), from an Archive chat's open question («Responder en Pendientes»). */
+	onOpenInbox: (opener: HTMLElement) => void = () => {};
 
 	constructor() {
 		// One line at rest; CSS (field-sizing) grows it with the text up to a cap.
@@ -381,13 +392,19 @@ export class AcpThread {
 				// "Ir al final" scrolling smoothly: its own steps are not the reader moving up.
 				if (this.endBtn.jumping) {
 					this.atBottom = true;
-					if (away < END_SLACK) this.renderPill();
+					// Arrived: what the end shows is seen. The arrival can be the
+					// jump's last scroll event (WebKit sends none after it).
+					if (away < END_SLACK) {
+						this.renderPill();
+						this.noteSeenSoon();
+					}
 					return;
 				}
-				// A reader at the end can only leave it upwards. A scroll that did
-				// not go above where the end was pinned is the browser's scroll
-				// anchoring (rows grew around its anchor and it moved scrollTop to
-				// hold it), not the reader: the end stays pinned.
+				// A reader at the end can only leave it upwards. A scroll event
+				// that did not go above where the end was pinned is not theirs:
+				// it is the late event of the thread's own pin, dispatched after
+				// rows grew below and before the ResizeObserver's report. The end
+				// stays pinned.
 				if (this.atBottom && away >= END_SLACK && t.scrollTop >= this.pinnedTop) {
 					t.scrollTop = t.scrollHeight;
 					this.pinnedTop = t.scrollTop;
@@ -430,7 +447,7 @@ export class AcpThread {
 				} else if (this.atBottom) {
 					t.scrollTop = t.scrollHeight;
 					this.pinnedTop = t.scrollTop;
-				}
+				} else this.keepHeld();
 				this.renderPill();
 			});
 			this.resizeObs.observe(this.threadEl);
@@ -545,6 +562,7 @@ export class AcpThread {
 		this.putRow({ anchor, offset: Math.round(t.clientHeight * 0.25) - lead });
 		this.box = t.clientHeight;
 		this.atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < END_SLACK;
+		this.held = null;
 		this.noteAnchor();
 		this.renderPill();
 		const ids = row.dataset.ids ?? "";
@@ -600,6 +618,7 @@ export class AcpThread {
 			this.feed = "loading";
 			this.readOnce = false;
 			this.atBottom = true;
+			this.held = null;
 			// Where it was being read (else its news or its end), once its feed is in.
 			this.placePending = true;
 			this.shownMax = 0;
@@ -927,7 +946,12 @@ export class AcpThread {
 		// A reader further up keeps the row they are looking at where it is,
 		// whatever changes above or below it (an earlier page, an answer, a
 		// question card): by that row, never by scrollTop or the distance to the end.
-		const keep = atBottom || this.toBottom ? null : this.rowInView();
+		// The row held since the reader last scrolled, not the one in view now:
+		// rows can have changed height since (a font that arrived) with the
+		// ResizeObserver's report still pending — this frame's render runs
+		// first, and the geometry it reads is already shifted.
+		const held = this.held && Math.abs(t.scrollTop - this.held.top) < 1 ? this.held : null;
+		const keep = atBottom || this.toBottom ? null : (held?.place ?? this.rowInView());
 		const nodes: HTMLElement[] = [];
 		if (this.hasEarlier) {
 			this.moreBtn.disabled = false;
@@ -974,19 +998,25 @@ export class AcpThread {
 			nodes.push(cached.el);
 		}
 		for (const key of [...this.items.keys()]) if (!used.has(key)) this.items.delete(key);
-		// Questions whose message is not on this page (an older page, or none).
-		const shown = new Set(this.messages.map((m) => m.id));
+		// A question shows inside its message. One with no message at all is
+		// shown at the end; one whose message is not on this page is not: an
+		// agent's feed carries every open question of the agent, its topics'
+		// included, and here it would have no context (Pendientes has it).
 		for (const q of this.questions.values())
-			if ((q.message_id === null || !shown.has(q.message_id)) && q.state === "open")
-				nodes.push(this.questionEl(q));
+			if (q.message_id === null && q.state === "open") nodes.push(this.questionEl(q));
 		syncChildren(t, nodes);
 		this.observeRows(nodes);
 		if (keepFocus?.isConnected) keepFocus.focus({ preventScroll: true });
 		const end = atBottom || this.toBottom;
+		const placed = !end && keep !== null && this.putRow(keep);
 		if (end) {
 			t.scrollTop = t.scrollHeight;
 			this.pinnedTop = t.scrollTop;
-		} else if (!keep || !this.putRow(keep)) t.scrollTop = prevTop;
+		} else if (!placed) t.scrollTop = prevTop;
+		// The held row is still the reader's (it was put back): only where
+		// scrollTop now is changes. Anything else is taken afresh.
+		if (placed && held && keep === held.place) held.top = t.scrollTop;
+		else this.holdPlace(!end);
 		this.toBottom = false;
 		// News below a reader who is further up: a new row (an id above what
 		// was shown — an earlier page has lower ids), or a row already shown
@@ -1104,6 +1134,7 @@ export class AcpThread {
 						if (m && isUnread(m, this.dividerAt ?? null)) this.newIds.add(m.id);
 					}
 		}
+		this.held = null;
 		this.noteAnchor();
 		this.renderPill();
 		return true;
@@ -1134,10 +1165,55 @@ export class AcpThread {
 		const key = sourceKey(this.source);
 		if (this.atBottom) {
 			readingPlaces.delete(key);
+			this.holdPlace(false);
 			return;
 		}
 		const place = this.rowInView();
 		if (place) readingPlaces.set(key, place);
+		// Not taken afresh when scrollTop has not moved: a scroll event can be
+		// the late one of the thread's own placement, dispatched after rows
+		// changed height — the geometry then is the shifted one.
+		this.holdPlace(true, false);
+	}
+
+	/**
+	 * The row held is the first one that STARTS in view, not the reading
+	 * anchor (the first one partly in view): a row cut at the top that grows
+	 * inside would push everything under it — the text being read, the
+	 * «Nuevos» divider — while its own top stayed put.
+	 */
+	private holdPlace(on: boolean, fresh = true): void {
+		const t = this.threadEl;
+		if (on && !fresh && this.held && Math.abs(t.scrollTop - this.held.top) < 1) return;
+		this.held = null;
+		if (!on || t.clientHeight === 0) return;
+		const hit = firstRowInView(t, (c) => c.dataset.anchor !== undefined);
+		if (!hit) return;
+		let row: Element | null = hit.row;
+		if (hit.offset < 0)
+			for (let n = row.nextElementSibling; n; n = n.nextElementSibling)
+				if ((n as HTMLElement).dataset.anchor !== undefined) {
+					row = n;
+					break;
+				}
+		const offset = row.getBoundingClientRect().top - t.getBoundingClientRect().top;
+		this.held = {
+			place: { anchor: (row as HTMLElement).dataset.anchor!, offset },
+			top: t.scrollTop,
+		};
+	}
+
+	/**
+	 * Rows changed height around a reader further up (a font, a re-wrap, a
+	 * card): their row goes back to where it was on screen. Not when
+	 * scrollTop moved since the place was taken — that is the reader's own
+	 * scroll whose event has not come yet, and it is theirs.
+	 */
+	private keepHeld(): void {
+		const t = this.threadEl;
+		const h = this.held;
+		if (!h || Math.abs(t.scrollTop - h.top) >= 1) return;
+		if (this.putRow(h.place)) h.top = t.scrollTop;
 	}
 
 	/** The first row at least partly in view, and its top edge's offset from the thread's. */
@@ -1202,12 +1278,14 @@ export class AcpThread {
 		}
 		this.box = t.clientHeight;
 		this.atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < END_SLACK;
+		this.holdPlace(!this.atBottom);
 		this.renderPill();
 	}
 
 	private scrollToEnd(): void {
 		const t = this.threadEl;
 		this.atBottom = true;
+		this.held = null;
 		t.scrollTop = t.scrollHeight;
 		this.pinnedTop = t.scrollTop;
 		// The box it was placed in, now: the scroll handler takes a scroll in a
@@ -1344,9 +1422,8 @@ export class AcpThread {
 				if (report && !report.result_text)
 					state.append(" · ", el("span", "acp-rs-muted", "informe pedido"));
 			}
-			// The Archive writes nothing: its interruptions are reviewed in Pendientes.
-			if (st.kind === "interrupted" && this.readOnly) state.append(" · revisala en Pendientes");
-			else if (st.kind === "interrupted") {
+			// The same review in a topic and in the Archive: it writes nothing to the thread.
+			if (st.kind === "interrupted") {
 				const review = el("button", "btn sm acp-review-btn", "Revisar interrupción");
 				review.type = "button";
 				review.addEventListener("click", () => this.onReview(m));
@@ -1520,6 +1597,7 @@ export class AcpThread {
 		const card = questionCard(q, {
 			stillHere: () => gen === this.gen,
 			readOnly: this.readOnly,
+			onOpenInbox: (opener) => this.onOpenInbox(opener),
 			onAnswered: (row) => {
 				this.noteLive({ q: row });
 				this.questions.set(row.id, row);

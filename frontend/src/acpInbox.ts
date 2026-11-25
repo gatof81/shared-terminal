@@ -16,6 +16,7 @@
 import { inboxNow, onInbox, refreshInbox } from "./acpInboxStore.js";
 import { agentHue } from "./acpModel.js";
 import { questionCard } from "./acpQuestionCard.js";
+import { acpEntryByName } from "./acpRegistry.js";
 import { openReview } from "./acpReview.js";
 import { type AcpMessage, type AcpQuestion, acpConversations } from "./api.js";
 import { createDialog, type Dialog } from "./components/dialog.js";
@@ -141,15 +142,25 @@ function build(): void {
 	});
 }
 
-/** «Proyecto › Tema» (or «Archivo»): where an item belongs. */
-function whereOf(projectId: string | null, conversationId: string | null): string {
+/**
+ * «Proyecto › Tema», or for what has no topic «Proyecto › Archivo › <chat>»:
+ * the previous Project Chat, or `agent`'s direct messages — in the Archive
+ * of the project the agent is in now (none: «Archivo › @x · chat individual»).
+ */
+function whereOf(projectId: string | null, conversationId: string | null, agent: string): string {
+	if (!conversationId) {
+		const chat = projectId ? "Project Chat anterior" : `@${agent} · chat individual`;
+		const pid = projectId ?? acpEntryByName(agent)?.projectId ?? null;
+		const name = pid ? projectName(pid) : null;
+		return name ? `${name} › Archivo › ${chat}` : `Archivo › ${chat}`;
+	}
 	const p = projectId ? projectName(projectId) : null;
 	let t: string | null = null;
 	if (conversationId) {
 		t = hooks.titleOf(conversationId) ?? titles.get(conversationId) ?? null;
 		if (t === null && projectId && !titlesRead.has(projectId)) void readTitles(projectId);
 	}
-	const topic = conversationId ? (t ?? "Conversación") : "Archivo";
+	const topic = t ?? "Conversación";
 	return p ? `${p} › ${topic}` : topic;
 }
 
@@ -244,7 +255,7 @@ function goButton(
 function questionItem(
 	q: AcpQuestion & { conversation_id: string | null; project_id: string | null },
 ): HTMLElement {
-	const where = whereOf(q.project_id, q.conversation_id);
+	const where = whereOf(q.project_id, q.conversation_id, q.agent);
 	return keep(`q:${q.id}`, [q.state, where], () => {
 		const { item, main } = itemShell("is-question", q.agent, where);
 		const g = openGen;
@@ -276,7 +287,7 @@ function questionItem(
 }
 
 function interruptedItem(m: AcpMessage): HTMLElement {
-	const where = whereOf(m.project_id ?? null, m.conversation_id ?? null);
+	const where = whereOf(m.project_id ?? null, m.conversation_id ?? null, m.to_id);
 	return keep(`u:${m.id}`, [m.reviewed_at ?? null, m.note, where], () => {
 		const { item, main } = itemShell("is-interrupted", m.to_id, where);
 		main.append(
@@ -293,7 +304,7 @@ function interruptedItem(m: AcpMessage): HTMLElement {
 		review.type = "button";
 		review.addEventListener("click", () =>
 			openReview(m, {
-				where: m.conversation_id ? whereOf(null, m.conversation_id) : null,
+				where: m.conversation_id ? whereOf(null, m.conversation_id, m.to_id) : null,
 			}),
 		);
 		const go = goButton(m, m.to_id, false);
@@ -304,7 +315,7 @@ function interruptedItem(m: AcpMessage): HTMLElement {
 }
 
 function resultItem(m: AcpMessage): HTMLElement {
-	const where = whereOf(m.project_id ?? null, m.conversation_id ?? null);
+	const where = whereOf(m.project_id ?? null, m.conversation_id ?? null, m.to_id);
 	return keep(`r:${m.id}`, [m.result_text, where], () => {
 		const { item, main } = itemShell("is-result", m.to_id, where);
 		main.append(el("p", "acp-ib-what", `@${m.to_id}: ${clip(m.result_text ?? "", 220)}`));

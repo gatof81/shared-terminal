@@ -67,13 +67,15 @@ test.describe("agent settings", () => {
 		const select = page.locator(`${DIALOG} .acp-effort-select`);
 		const state = page.locator(`${DIALOG} .acp-effort-state`);
 		expect(await select.locator("option").allTextContents()).toEqual([
-			"Default",
+			"Por defecto",
 			"Low",
 			"Extra High",
 		]);
 		await expect(state).toHaveText("Aplicado.");
 		await select.selectOption("extra_high");
-		await page.locator(`${DIALOG} .acp-chat-effort button`, { hasText: "Cambiar effort" }).click();
+		await page
+			.locator(`${DIALOG} .acp-chat-effort button`, { hasText: "Cambiar esfuerzo" })
+			.click();
 		await expect(state).toContainText("Se aplica cuando @arq esté libre");
 		expect(backend.acpAgents.find((a) => a.name === "arq")?.effort).toBe("extra_high");
 	});
@@ -127,16 +129,26 @@ test.describe("agent settings", () => {
 	}) => {
 		await app.login("alice", SOLO);
 		await expect(page.locator("#session-menu-btn")).toHaveAccessibleName(
-			"Session actions (sin proyecto: asignale uno para conversar)",
+			"Session actions (Sin proyecto · Asignale uno para conversar)",
 		);
 		await app.openAgentSettings();
 		const dialog = page.locator(DIALOG);
-		await expect(dialog).toContainText("Sin proyecto no tiene conversaciones");
+		await expect(dialog).toContainText(
+			"Sin proyecto no tiene conversaciones ni Archivo. Asignale un proyecto para hablarle en sus temas; sus mensajes anteriores pasan al Archivo de ese proyecto.",
+		);
 		await dialog.locator(".acp-project-select").selectOption(PROJECT_IDS.hz);
 		await dialog.getByRole("button", { name: "Guardar" }).click();
 		await expect
 			.poll(() => backend.acpAgents.find((a) => a.name === "solo")?.projectId)
 			.toBe(PROJECT_IDS.hz);
+		await expect(dialog).not.toContainText("Sin proyecto no tiene conversaciones");
+		// And back to «Sin proyecto» with the same select.
+		await dialog.locator(".acp-project-select").selectOption("");
+		await dialog.getByRole("button", { name: "Guardar" }).click();
+		await expect.poll(() => backend.acpAgents.find((a) => a.name === "solo")?.projectId).toBeNull();
+		await expect(dialog).toContainText("Sin proyecto no tiene conversaciones ni Archivo");
+		await dialog.locator(".acp-project-select").selectOption(PROJECT_IDS.hz);
+		await dialog.getByRole("button", { name: "Guardar" }).click();
 		await expect(dialog).not.toContainText("Sin proyecto no tiene conversaciones");
 		await app.escape();
 		await expect(page.locator("#session-menu-btn")).toHaveAccessibleName("Session actions");

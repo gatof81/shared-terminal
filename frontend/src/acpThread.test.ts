@@ -417,7 +417,7 @@ describe("consistency", () => {
 describe("an Archive chat", () => {
 	const archive = (agent: string | null) => ({ kind: "archive" as const, projectId: "p1", agent });
 
-	it("writes nothing: no message box, its interruption is reviewed in Pendientes", async () => {
+	it("has no message box; its interruption is reviewed with the same dialog as in a topic", async () => {
 		api.acpProjectFeed.mockResolvedValue(
 			feed({
 				project: { id: "p1", name: "P" },
@@ -432,13 +432,41 @@ describe("an Archive chat", () => {
 		await flush();
 		expect(t.root.querySelector("form")!.classList.contains("acp-composer-off")).toBe(true);
 		const buttons = [...t.root.querySelectorAll("button")].map((b) => b.textContent);
-		expect(buttons).not.toContain("Revisar interrupción");
-		expect(t.root.textContent).toContain("revisala en Pendientes");
+		expect(buttons).toContain("Revisar interrupción");
 		t.input.value = "algo";
 		submit(t);
 		await flush();
 		expect(api.acpPost).not.toHaveBeenCalled();
 		expect(api.acpSend).not.toHaveBeenCalled();
+	});
+
+	it("an agent's open question asked in a topic is not shown in its Archive chat", async () => {
+		api.acpFeed.mockResolvedValue(
+			feed({
+				agent: agent("solo", "p1"),
+				messages: [msg(1, { to_id: "solo", state: "done", result_text: "ok" })],
+				questions: [
+					{
+						id: 3,
+						agent: "solo",
+						message_id: 99,
+						request: JSON.stringify({ message: "¿Sigo?" }),
+						state: "open",
+						answer: null,
+						created_at: "2026-11-18T10:00:00Z",
+						answered_at: null,
+						delivered_at: null,
+						note: null,
+					},
+				] as AcpFeed["questions"],
+			}),
+		);
+		const t = mount();
+		t.open(archive("solo"));
+		await flush();
+		await flush();
+		expect(t.root.querySelectorAll(".acp-post")).toHaveLength(1);
+		expect(t.root.querySelector(".acp-question")).toBeNull();
 	});
 
 	it("an agent's chat is its direct part only; «Cargar anteriores» goes past a page without any", async () => {

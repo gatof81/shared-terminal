@@ -8,7 +8,7 @@
 
 import type { Page } from "@playwright/test";
 import { expect, test } from "./fixtures.js";
-import { PROJECT_IDS } from "./mockBackend.js";
+import { CONV_IDS, PROJECT_IDS, PROJECT_SESSION_IDS } from "./mockBackend.js";
 
 const HZ = PROJECT_IDS.hz;
 const LIST = `#/projects/${HZ}/archive`;
@@ -31,7 +31,7 @@ test.describe("the Archive", () => {
 		await expect(page.locator("#ps-archive-title")).toHaveText("Archivo · solo lectura");
 		// @dev has nothing outside topics: no entry. @solo is in no project.
 		await expect(rows(page)).toHaveText([
-			/Project Chat anterior.*solo lectura/,
+			/Project Chat anterior.*hasta 31\/10\/2026 · solo lectura/,
 			/@arq · chat individual.*solo lectura/,
 		]);
 		if (!app.mobile)
@@ -41,7 +41,7 @@ test.describe("the Archive", () => {
 			);
 	});
 
-	test("a chat is read only: the topic's thread, no message box, nothing that writes", async ({
+	test("a chat is read only: the topic's thread, no message box; an interruption reviewed as in a topic", async ({
 		app,
 		backend,
 		page,
@@ -62,11 +62,13 @@ test.describe("the Archive", () => {
 		await expect(thread.locator(".acp-post")).toHaveCount(3);
 		await expect(thread).not.toContainText("revisá el diseño");
 		await expect(thread.locator(".acp-result")).toContainText("OAuth con PKCE");
-		// No box, no chips, no review: the strip says so, with «Continuar…».
+		// No box, no chips: the strip says so, with «Continuar…».
 		await expect(page.locator(`${PAGE} .acp-chat-input`)).toBeHidden();
 		await expect(page.locator(`${PAGE} .acp-to-row`)).toBeHidden();
-		await expect(thread.getByRole("button", { name: "Revisar interrupción" })).toHaveCount(0);
-		await expect(thread).toContainText("revisala en Pendientes");
+		// The same «Revisar interrupción» as in a topic, the same dialog.
+		await thread.getByRole("button", { name: "Revisar interrupción" }).click();
+		await expect(page.locator(".acp-review-card")).toBeVisible();
+		await app.escape();
 		const strip = page.locator(`${PAGE} .ps-readonly`);
 		await expect(strip).toContainText("Archivo · solo lectura");
 		await expect(strip.getByRole("button")).toHaveText("Continuar en una conversación nueva");
@@ -98,6 +100,86 @@ test.describe("the Archive", () => {
 		await expect(page.locator("#ps-archive-title")).toHaveText("Project Chat anterior");
 	});
 
+	test("continuing an agent's chat: «Para:» comes with that agent; the box is empty", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		// An open question of that chat stays there (and in Pendientes): not in the new topic.
+		const asking = backend.addAcpMessage({
+			to_id: "arq",
+			body: "Elegí el proveedor",
+			state: "running",
+		});
+		backend.acpQuestions = [
+			{
+				id: 7,
+				agent: "arq",
+				message_id: asking.id,
+				request: JSON.stringify({
+					message: "¿Qué proveedor?",
+					requestedSchema: { type: "object", properties: {} },
+				}),
+				state: "open",
+				answer: null,
+				created_at: "2026-10-31T10:29:30Z",
+				answered_at: null,
+				delivered_at: null,
+				note: null,
+			},
+		];
+		await app.login("alice", `${LIST}/@arq`);
+		await page.getByRole("button", { name: "Continuar en una conversación nueva" }).click();
+		await expect(page.locator(".dialog-card .modal-field input")).toHaveValue(
+			"Continuación de @arq · chat individual",
+		);
+		await expect(page.locator(".dialog-card .dialog-cancel")).toHaveText("Cancelar");
+		await page.locator(".dialog-card .modal-primary-action").click();
+		await expect(page.locator("#ps-topic-title")).toHaveText(
+			"Continuación de @arq · chat individual",
+		);
+		const chips = page.locator("#project-view .ps-topic .acp-to-chips .acp-chip");
+		await expect(chips).toHaveCount(1);
+		await expect(chips).toContainText("@arq");
+		await expect(page.locator("#project-view .ps-topic .acp-chat-input")).toHaveValue("");
+		await expect(page.locator("#project-view .ps-topic .acp-question")).toHaveCount(0);
+	});
+
+	test("an open question in the Archive: «Responder en Pendientes» opens Pendientes", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		const asking = backend.addAcpMessage({
+			to_id: "arq",
+			body: "Elegí el proveedor",
+			state: "running",
+		});
+		backend.acpQuestions = [
+			{
+				id: 7,
+				agent: "arq",
+				message_id: asking.id,
+				request: JSON.stringify({
+					message: "¿Qué proveedor?",
+					requestedSchema: { type: "object", properties: {} },
+				}),
+				state: "open",
+				answer: null,
+				created_at: "2026-10-31T10:29:30Z",
+				answered_at: null,
+				delivered_at: null,
+				note: null,
+			},
+		];
+		await app.login("alice", `${LIST}/@arq`);
+		const card = page.locator(`${PAGE} .acp-question-open`);
+		await expect(card).toContainText("espera tu respuesta · Responder en Pendientes");
+		await expect(card.locator("form")).toHaveCount(0);
+		await card.getByRole("button", { name: "Responder en Pendientes" }).click();
+		await expect(page.locator(".acp-inbox-card")).toBeVisible();
+	});
+
 	test("an interruption in the Archive is in Pendientes: reviewed there, seen in its chat", async ({
 		app,
 		backend,
@@ -114,7 +196,9 @@ test.describe("the Archive", () => {
 		await expect(page.locator("#inbox-btn .inbox-count")).toHaveText("1");
 		await page.locator("#inbox-btn").click();
 		const item = page.locator(".acp-inbox-card .acp-ib-item.is-interrupted");
-		await expect(item.locator(".acp-ib-where")).toHaveText("Archivo");
+		await expect(item.locator(".acp-ib-where")).toHaveText(
+			"Educación HZ › Archivo › @arq · chat individual",
+		);
 		// «Ver en el Archivo»: the agent's chat, the message highlighted.
 		await item.getByRole("button", { name: "Ver en el Archivo" }).click();
 		await expect(page).toHaveURL(new RegExp(`${LIST}/@arq$`));
@@ -146,6 +230,23 @@ test.describe("the Archive", () => {
 		await expect(item).toContainText("Ordená el README");
 		await expect(item.getByRole("button", { name: "Revisar interrupción" })).toBeVisible();
 		await expect(item.getByRole("button", { name: /^Ver en/ })).toHaveCount(0);
+	});
+
+	test("a phone: leaving a topic or the Archive for a session hides the header's project slot", async ({
+		app,
+		page,
+	}) => {
+		test.skip(!app.mobile, "a phone");
+		for (const hash of [`${LIST}/@arq`, `#/projects/${HZ}/c/${CONV_IDS.ci}`]) {
+			await app.login("alice", hash);
+			await expect(page.locator("#header-project")).toBeVisible();
+			await page.goto(`/#/sessions/${PROJECT_SESSION_IDS.architect}/terminal`);
+			await expect(page.locator("#header-project")).toBeHidden();
+			// The session bar's ⋯ is reachable (nothing covers it).
+			await page.locator("#session-menu-btn").click();
+			await expect(page.getByRole("menuitem", { name: /^Ajustes del agente/ })).toBeVisible();
+			await app.escape();
+		}
 	});
 
 	test("a phone's stack: project → Archivo → chat, one ‹ in the header at each step", async ({

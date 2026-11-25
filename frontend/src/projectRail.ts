@@ -519,10 +519,7 @@ function paint(): void {
 			a.href = projectRouteHash({ projectId: p, page: "archive" });
 			if (inArchive) a.setAttribute("aria-current", "page");
 			const text = el("span", "rail-row-text");
-			text.append(
-				el("span", "rail-row-title", "Archivo"),
-				el("span", "rail-row-sub", "Project Chat y chats individuales anteriores"),
-			);
+			text.append(el("span", "rail-row-title", "Project Chat y chats individuales"));
 			a.append(text);
 			a.addEventListener("click", (e) => {
 				if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;

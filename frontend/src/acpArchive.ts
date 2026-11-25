@@ -12,10 +12,12 @@
 //                                      «Archivo · solo lectura» and
 //                                      «Continuar en una conversación nueva»
 //
-// An interruption or a question that lives here is resolved in Pendientes
-// (acpInbox.ts reads every scope); this thread only says so.
+// Nothing is added to an archived thread: an interruption is reviewed with
+// the same dialog as in a topic (acpReview.ts), an open question is answered
+// in Pendientes (acpInbox.ts reads every scope; the card links there).
 
-import { newTopicDialog } from "./acpConversation.js";
+import { newTopicDialog, writeInTopic } from "./acpConversation.js";
+import { openInbox } from "./acpInbox.js";
 import { AcpThread, type ThreadState } from "./acpThread.js";
 import { type AcpMessage, acpFeed, acpProjectFeed } from "./api.js";
 import { projectName } from "./projectDirectory.js";
@@ -70,6 +72,7 @@ const listNote = el("p", "ps-home-note ps-archive-note");
 
 const thread = new AcpThread();
 thread.setComposer("off");
+thread.onOpenInbox = (opener) => openInbox(opener);
 const strip = el("div", "ps-readonly");
 strip.append(
 	el("span", "ps-readonly-text", "Archivo · solo lectura"),
@@ -257,7 +260,7 @@ function day(iso: string): string {
 	const d = new Date(iso);
 	return Number.isNaN(d.getTime())
 		? ""
-		: d.toLocaleDateString(undefined, { day: "2-digit", month: "2-digit", year: "numeric" });
+		: d.toLocaleDateString("es-AR", { day: "2-digit", month: "2-digit", year: "numeric" });
 }
 
 // ── Painting ────────────────────────────────────────────────────────────────
@@ -284,7 +287,7 @@ function paint(): void {
 					? "Cargando…"
 					: shown.length === 0
 						? "El Archivo de este proyecto está vacío: todo lo escrito está en sus conversaciones."
-						: "Lo escrito antes de los temas, donde estaba. Se lee; no se escribe.",
+						: "Lo escrito antes de los temas. Se lee; no se escribe.",
 		);
 		if (listError) listNote.append(button("Reintentar", "pv-btn", () => void loadList(p)));
 		parts.push(listNote, listEl);
@@ -331,8 +334,10 @@ function setText(node: HTMLElement, text: string): void {
 
 /**
  * A new topic of the project, its title proposed from the archive and
- * editable, opened with an empty message box. Nothing is copied: no
- * message, no recipient, no link back.
+ * editable, opened with an empty message box. No message is copied; an
+ * agent's chat continues with that agent in «Para:» (the continuation is
+ * explicit), the previous Project Chat with nobody. No link back: a topic
+ * has no origin the backend keeps.
  */
 async function continueHere(): Promise<void> {
 	const p = pid;
@@ -342,7 +347,10 @@ async function continueHere(): Promise<void> {
 		title: "Continuar en una conversación nueva",
 		initial: `Continuación de ${archiveTitle(k)}`,
 	});
-	if (c && pid === p) navigateProject({ projectId: p, page: "conversation", conversationId: c.id });
+	if (!c || pid !== p) return;
+	// An agent's chat continues with that agent in «Para:»; the Project Chat, with nobody.
+	if (k.startsWith("@")) writeInTopic(p, c.id, k.slice(1));
+	else navigateProject({ projectId: p, page: "conversation", conversationId: c.id });
 }
 
 // ── Going to a message from elsewhere (Pendientes) ──────────────────────────
