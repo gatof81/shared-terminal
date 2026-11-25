@@ -158,6 +158,14 @@ export class AcpThread {
 	 * reader, whatever `atBottom` still says.
 	 */
 	private pinnedTop = 0;
+	/**
+	 * What a reader further up is reading (its row and that row's offset) and
+	 * the scrollTop it was seen at. The thread keeps that row in place by
+	 * itself when rows change height (`keepHeld`): the browser's scroll
+	 * anchoring is off on it (`overflow-anchor: none`) — Safari has none at
+	 * all, so one way for every engine.
+	 */
+	private held: { place: ReadingPlace; top: number } | null = null;
 
 	private source: ThreadSource | null = null;
 	/**
@@ -384,15 +392,6 @@ export class AcpThread {
 					if (away < END_SLACK) this.renderPill();
 					return;
 				}
-				// A reader at the end can only leave it upwards. A scroll that did
-				// not go above where the end was pinned is the browser's scroll
-				// anchoring (rows grew around its anchor and it moved scrollTop to
-				// hold it), not the reader: the end stays pinned.
-				if (this.atBottom && away >= END_SLACK && t.scrollTop >= this.pinnedTop) {
-					t.scrollTop = t.scrollHeight;
-					this.pinnedTop = t.scrollTop;
-					return;
-				}
 				this.atBottom = away < END_SLACK;
 				if (this.atBottom) {
 					// The reader's own place at the end: what the rules above and
@@ -430,7 +429,7 @@ export class AcpThread {
 				} else if (this.atBottom) {
 					t.scrollTop = t.scrollHeight;
 					this.pinnedTop = t.scrollTop;
-				}
+				} else this.keepHeld();
 				this.renderPill();
 			});
 			this.resizeObs.observe(this.threadEl);
@@ -987,6 +986,7 @@ export class AcpThread {
 			t.scrollTop = t.scrollHeight;
 			this.pinnedTop = t.scrollTop;
 		} else if (!keep || !this.putRow(keep)) t.scrollTop = prevTop;
+		this.holdPlace(!end);
 		this.toBottom = false;
 		// News below a reader who is further up: a new row (an id above what
 		// was shown — an earlier page has lower ids), or a row already shown
@@ -1134,10 +1134,51 @@ export class AcpThread {
 		const key = sourceKey(this.source);
 		if (this.atBottom) {
 			readingPlaces.delete(key);
+			this.holdPlace(false);
 			return;
 		}
 		const place = this.rowInView();
 		if (place) readingPlaces.set(key, place);
+		this.holdPlace(true);
+	}
+
+	/**
+	 * The row held is the first one that STARTS in view, not the reading
+	 * anchor (the first one partly in view): a row cut at the top that grows
+	 * inside would push everything under it — the text being read, the
+	 * «Nuevos» divider — while its own top stayed put.
+	 */
+	private holdPlace(on: boolean): void {
+		const t = this.threadEl;
+		this.held = null;
+		if (!on || t.clientHeight === 0) return;
+		const hit = firstRowInView(t, (c) => c.dataset.anchor !== undefined);
+		if (!hit) return;
+		let row: Element | null = hit.row;
+		if (hit.offset < 0)
+			for (let n = row.nextElementSibling; n; n = n.nextElementSibling)
+				if ((n as HTMLElement).dataset.anchor !== undefined) {
+					row = n;
+					break;
+				}
+		const offset = Math.round(row.getBoundingClientRect().top - t.getBoundingClientRect().top);
+		this.held = {
+			place: { anchor: (row as HTMLElement).dataset.anchor!, offset },
+			top: t.scrollTop,
+		};
+	}
+
+	/**
+	 * Rows changed height around a reader further up (a font, a re-wrap, a
+	 * card): their row goes back to where it was on screen. Not when
+	 * scrollTop moved since the place was taken — that is the reader's own
+	 * scroll whose event has not come yet, and it is theirs.
+	 */
+	private keepHeld(): void {
+		const t = this.threadEl;
+		const h = this.held;
+		if (!h || Math.abs(t.scrollTop - h.top) >= 1) return;
+		if (this.putRow(h.place)) h.top = t.scrollTop;
 	}
 
 	/** The first row at least partly in view, and its top edge's offset from the thread's. */

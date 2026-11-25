@@ -562,7 +562,7 @@ test.describe("a topic whose rows grow after they were placed", () => {
 	const gap = (page: Page) =>
 		page.locator(THREAD).evaluate((t) => Math.round(t.scrollHeight - t.scrollTop - t.clientHeight));
 
-	async function open(app: App, backend: MockBackend, page: Page): Promise<void> {
+	async function open(app: App, backend: MockBackend, page: Page, readAt = at(200)): Promise<void> {
 		backend.enableConversations();
 		for (let i = 0; i < 12; i++)
 			backend.addAcpMessage({
@@ -575,8 +575,8 @@ test.describe("a topic whose rows grow after they were placed", () => {
 				created_at: at(i * 10),
 				finished_at: at(i * 10 + 5),
 			});
-		// All read: the topic opens at its end, not at «Nuevos desde tu última visita».
-		backend.acpConversations.find((c) => c.id === CONV_IDS.backend)!.readAt = at(200);
+		// All read by default: the topic opens at its end, not at «Nuevos desde tu última visita».
+		backend.acpConversations.find((c) => c.id === CONV_IDS.backend)!.readAt = readAt;
 		await app.login("alice", topic(CONV_IDS.backend));
 		await expect(page.locator(THREAD)).toContainText("Revisado el punto 11.");
 		await expect.poll(() => backend.requests.filter((r) => r.path === FEED).length).toBe(2);
@@ -602,6 +602,9 @@ test.describe("a topic whose rows grow after they were placed", () => {
 	test("a reader further up is not moved", async ({ app, backend, page }) => {
 		await open(app, backend, page);
 		const thread = page.locator(THREAD);
+		// The thread holds the row itself, as in Safari (no scroll anchoring
+		// there): Chromium's anchoring must not be what makes this pass.
+		expect(await thread.evaluate((t) => getComputedStyle(t).overflowAnchor)).toBe("none");
 		const rowTop = () =>
 			thread.evaluate((t) => {
 				const row = [...t.children].find((c) => c.textContent?.includes("punto 3:"))!;
@@ -619,6 +622,26 @@ test.describe("a topic whose rows grow after they were placed", () => {
 		await grow(page);
 		expect(Math.abs((await rowTop()) - top)).toBeLessThanOrEqual(1);
 		expect(await gap(page)).toBeGreaterThan(60);
+		expect(app.errors).toEqual([]);
+	});
+
+	test("a topic opened at its news keeps «Nuevos desde tu última visita» in place", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		// Read up to «punto 5»: it opens at the divider, above «punto 6».
+		await open(app, backend, page, at(55));
+		const divider = page.locator(`${THREAD} .acp-divider`);
+		await expect(divider).toBeInViewport();
+		const top = () =>
+			divider.evaluate((d) =>
+				Math.round(d.getBoundingClientRect().top - d.parentElement!.getBoundingClientRect().top),
+			);
+		const before = await top();
+		await grow(page);
+		await expect(divider).toBeInViewport();
+		expect(Math.abs((await top()) - before)).toBeLessThanOrEqual(1);
 		expect(app.errors).toEqual([]);
 	});
 });

@@ -114,6 +114,10 @@
 	flex: 1;
 	min-height: 0;
 	overflow-y: auto;
+	/* The thread keeps the reader's row in place itself (acpThread.ts,
+	   keepHeld): Safari has no scroll anchoring, and Chromium's on top of
+	   it would correct twice. */
+	overflow-anchor: none;
 	padding: 12px 14px;
 	display: flex;
 	flex-direction: column;
