@@ -249,3 +249,12 @@ button.rail-row:focus-visible {
     display: none;
   }
 }
+/* Herramientas' own main action (a gone work's «Ver workspace principal»): the accent, not the green. */
+.files-btn.primary.is-accent {
+  background: var(--c-accent-strong);
+  border-color: var(--c-accent-strong);
+}
+.files-btn.primary.is-accent:hover:not(:disabled) {
+  background: var(--c-accent);
+  border-color: var(--c-accent);
+}

@@ -28,11 +28,11 @@ export function questionCard(q: AcpQuestion, opts: QuestionCardOptions): HTMLEle
 	if (form.message) card.append(el("p", "acp-question-text", form.message));
 	if (q.state === "open") {
 		if (opts.readOnly) {
-			const line = el("div", "acp-question-state", "Esperando tu respuesta · respondela en ");
-			const go = el("button", "acp-link", "Pendientes");
+			const line = el("div", "acp-question-state", "espera tu respuesta · ");
+			const go = el("button", "acp-link", "Responder en Pendientes");
 			go.type = "button";
 			go.addEventListener("click", () => opts.onOpenInbox?.(go));
-			line.append(go, ".");
+			line.append(go);
 			card.append(line);
 		} else card.append(answerForm(q, form, opts));
 		return card;

@@ -3,8 +3,9 @@
 // (acpArchive.ts): what was written before topics, read where it is — the
 // previous Project Chat (`project_id` = the project, no conversation) or an
 // agent's previous direct messages (no project, no conversation). Same
-// timeline either way; an Archive chat has no composer and no action that
-// writes (an interruption or a question there is resolved in Pendientes).
+// timeline either way; an Archive chat has no composer and adds nothing to
+// its thread (an interruption is reviewed with the same dialog as in a
+// topic; an open question is answered in Pendientes).
 //
 // Data: one page over REST, then live rows and activity from /ws/acp
 // (acpLive.ts), applied by id; a (re)connect reloads the page; while the
@@ -292,7 +293,7 @@ export class AcpThread {
 	 * plugged in here the chip only says which work a message runs in.
 	 */
 	onOpenWork: ((agent: string, work: string) => void) | null = null;
-	/** Pendientes (acpInbox.ts), from an Archive chat's «revisala / respondela en Pendientes». */
+	/** Pendientes (acpInbox.ts), from an Archive chat's open question («Responder en Pendientes»). */
 	onOpenInbox: (opener: HTMLElement) => void = () => {};
 
 	constructor() {
@@ -1346,10 +1347,8 @@ export class AcpThread {
 				if (report && !report.result_text)
 					state.append(" · ", el("span", "acp-rs-muted", "informe pedido"));
 			}
-			// The Archive writes nothing: its interruptions are reviewed in Pendientes.
-			if (st.kind === "interrupted" && this.readOnly)
-				state.append(" · revisala en ", this.inboxLink());
-			else if (st.kind === "interrupted") {
+			// The same review in a topic and in the Archive: it writes nothing to the thread.
+			if (st.kind === "interrupted") {
 				const review = el("button", "btn sm acp-review-btn", "Revisar interrupción");
 				review.type = "button";
 				review.addEventListener("click", () => this.onReview(m));
@@ -1479,14 +1478,6 @@ export class AcpThread {
 			chip.addEventListener("click", () => open(m.to_id, work));
 		}
 		return chip;
-	}
-
-	/** «Pendientes» as a link: where the Archive's interruptions and questions are resolved. */
-	private inboxLink(): HTMLElement {
-		const b = el("button", "acp-link", "Pendientes");
-		b.type = "button";
-		b.addEventListener("click", () => this.onOpenInbox(b));
-		return b;
 	}
 
 	/** «ver» / «✓ @a»: the answer's own item, in view and highlighted. */

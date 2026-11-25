@@ -297,6 +297,8 @@ export interface ConfirmOptions {
 	 * to type.
 	 */
 	requireText?: { expected: string; label?: string };
+	/** The confirm button in the accent blue (the project's surfaces, 3B) instead of the green. */
+	accent?: boolean;
 }
 
 export interface PromptOptions {
@@ -307,6 +309,8 @@ export interface PromptOptions {
 	initialValue?: string;
 	confirmLabel?: string;
 	cancelLabel?: string;
+	/** The confirm button in the accent blue (the project's surfaces, 3B) instead of the green. */
+	accent?: boolean;
 	/** Returns an error message to show inline, or null when the value is acceptable. */
 	validate?: (value: string) => string | null;
 	/**
@@ -420,6 +424,7 @@ export function confirmDialog(opts: ConfirmOptions): Promise<boolean> {
 			opts.cancelLabel ?? "Cancel",
 			danger,
 		);
+		if (opts.accent && !danger) b.confirmBtn.classList.add("is-accent");
 		let input: HTMLInputElement | null = null;
 		if (opts.requireText) {
 			const { expected, label } = opts.requireText;
@@ -468,6 +473,7 @@ export function promptDialog(opts: PromptOptions): Promise<string | null> {
 			opts.cancelLabel ?? "Cancel",
 			false,
 		);
+		if (opts.accent) b.confirmBtn.classList.add("is-accent");
 		const field = el("label", "modal-field");
 		if (opts.label) field.appendChild(el("span", undefined, opts.label));
 		const input = el("input");

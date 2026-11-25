@@ -12,10 +12,11 @@
 //                                      «Archivo · solo lectura» and
 //                                      «Continuar en una conversación nueva»
 //
-// An interruption or a question that lives here is resolved in Pendientes
-// (acpInbox.ts reads every scope); this thread only says so.
+// Nothing is added to an archived thread: an interruption is reviewed with
+// the same dialog as in a topic (acpReview.ts), an open question is answered
+// in Pendientes (acpInbox.ts reads every scope; the card links there).
 
-import { newTopicDialog } from "./acpConversation.js";
+import { newTopicDialog, writeInTopic } from "./acpConversation.js";
 import { openInbox } from "./acpInbox.js";
 import { AcpThread, type ThreadState } from "./acpThread.js";
 import { type AcpMessage, acpFeed, acpProjectFeed } from "./api.js";
@@ -333,8 +334,10 @@ function setText(node: HTMLElement, text: string): void {
 
 /**
  * A new topic of the project, its title proposed from the archive and
- * editable, opened with an empty message box. Nothing is copied: no
- * message, no recipient, no link back.
+ * editable, opened with an empty message box. No message is copied; an
+ * agent's chat continues with that agent in «Para:» (the continuation is
+ * explicit), the previous Project Chat with nobody. No link back: a topic
+ * has no origin the backend keeps.
  */
 async function continueHere(): Promise<void> {
 	const p = pid;
@@ -344,7 +347,10 @@ async function continueHere(): Promise<void> {
 		title: "Continuar en una conversación nueva",
 		initial: `Continuación de ${archiveTitle(k)}`,
 	});
-	if (c && pid === p) navigateProject({ projectId: p, page: "conversation", conversationId: c.id });
+	if (!c || pid !== p) return;
+	// An agent's chat continues with that agent in «Para:»; the Project Chat, with nobody.
+	if (k.startsWith("@")) writeInTopic(p, c.id, k.slice(1));
+	else navigateProject({ projectId: p, page: "conversation", conversationId: c.id });
 }
 
 // ── Going to a message from elsewhere (Pendientes) ──────────────────────────

@@ -417,7 +417,7 @@ describe("consistency", () => {
 describe("an Archive chat", () => {
 	const archive = (agent: string | null) => ({ kind: "archive" as const, projectId: "p1", agent });
 
-	it("writes nothing: no message box, its interruption is reviewed in Pendientes", async () => {
+	it("has no message box; its interruption is reviewed with the same dialog as in a topic", async () => {
 		api.acpProjectFeed.mockResolvedValue(
 			feed({
 				project: { id: "p1", name: "P" },
@@ -432,8 +432,7 @@ describe("an Archive chat", () => {
 		await flush();
 		expect(t.root.querySelector("form")!.classList.contains("acp-composer-off")).toBe(true);
 		const buttons = [...t.root.querySelectorAll("button")].map((b) => b.textContent);
-		expect(buttons).not.toContain("Revisar interrupción");
-		expect(t.root.textContent).toContain("revisala en Pendientes");
+		expect(buttons).toContain("Revisar interrupción");
 		t.input.value = "algo";
 		submit(t);
 		await flush();

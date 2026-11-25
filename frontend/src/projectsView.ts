@@ -424,11 +424,11 @@ function leaveSpace(): void {
 	topicHeader.remove();
 	archiveHeader.remove();
 	document.body.classList.remove("project-space-on", "ps-on-topic", "ps-gone");
+	// The header's project slot is only this space's: emptied AND hidden — an
+	// empty slot left shown covers the session bar's ⋯ on a phone. (Checking
+	// what it holds came too late: the headers above were already removed.)
 	const slot = document.getElementById("header-project");
-	if (
-		slot &&
-		(slot.contains(railHead) || slot.contains(topicHeader) || slot.contains(archiveHeader))
-	) {
+	if (slot) {
 		slot.hidden = true;
 		slot.replaceChildren();
 	}
@@ -472,10 +472,12 @@ function leaveForSession(): void {
 
 async function archiveFlow(pid: string, name: string): Promise<void> {
 	const ok = await confirmDialog({
+		accent: true,
 		title: `Archivar ${name}`,
 		message:
 			"Deja de aparecer en la lista y no se puede deshacer desde la app. Sus agentes quedan sin proyecto; sus sesiones y su contexto no cambian.",
 		confirmLabel: "Archivar",
+		cancelLabel: "Cancelar",
 	}).catch(() => false);
 	if (!ok) return;
 	const r = await archiveProject(pid);
@@ -501,6 +503,8 @@ async function renameFlow(pid: string, current: string): Promise<void> {
 	const myGen = gen;
 	let renamed: ProjectSummary | null = null;
 	await promptDialog({
+		accent: true,
+		cancelLabel: "Cancelar",
 		title: "Renombrar proyecto",
 		label: "Nombre",
 		initialValue: current,
@@ -546,6 +550,8 @@ async function openCreateProjectDialog(): Promise<void> {
 	const clientRequestId = crypto.randomUUID();
 	let created: string | null = null;
 	const name = await promptDialog({
+		accent: true,
+		cancelLabel: "Cancelar",
 		title: "Nuevo proyecto",
 		label: "Nombre",
 		confirmLabel: "Crear",
