@@ -1161,7 +1161,7 @@ export class AcpThread {
 					row = n;
 					break;
 				}
-		const offset = Math.round(row.getBoundingClientRect().top - t.getBoundingClientRect().top);
+		const offset = row.getBoundingClientRect().top - t.getBoundingClientRect().top;
 		this.held = {
 			place: { anchor: (row as HTMLElement).dataset.anchor!, offset },
 			top: t.scrollTop,

@@ -604,7 +604,8 @@ test.describe("a topic whose rows grow after they were placed", () => {
 		const thread = page.locator(THREAD);
 		// The thread holds the row itself, as in Safari (no scroll anchoring
 		// there): Chromium's anchoring must not be what makes this pass.
-		expect(await thread.evaluate((t) => getComputedStyle(t).overflowAnchor)).toBe("none");
+		if (await page.evaluate(() => CSS.supports("overflow-anchor", "none")))
+			expect(await thread.evaluate((t) => getComputedStyle(t).overflowAnchor)).toBe("none");
 		const rowTop = () =>
 			thread.evaluate((t) => {
 				const row = [...t.children].find((c) => c.textContent?.includes("punto 3:"))!;
