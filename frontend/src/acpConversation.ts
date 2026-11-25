@@ -303,7 +303,6 @@ export async function newTopicDialog(
 	const clientRequestId = crypto.randomUUID();
 	let created: AcpConversation | null = null;
 	await promptDialog({
-		accent: true,
 		title: opts.title ?? "Nueva conversación",
 		label: "Título",
 		initialValue: opts.initial ? [...opts.initial].slice(0, TITLE_MAX).join("") : undefined,
@@ -330,7 +329,6 @@ export async function newTopicDialog(
 async function renameTopic(c: AcpConversation): Promise<void> {
 	let done: AcpConversation | null = null;
 	await promptDialog({
-		accent: true,
 		title: "Renombrar conversación",
 		label: "Título",
 		initialValue: c.title,
@@ -354,7 +352,6 @@ async function renameTopic(c: AcpConversation): Promise<void> {
 
 async function archiveTopic(c: AcpConversation): Promise<void> {
 	const ok = await confirmDialog({
-		accent: true,
 		cancelLabel: "Cancelar",
 		title: `Archivar «${c.title}»`,
 		message:

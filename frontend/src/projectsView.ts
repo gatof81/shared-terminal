@@ -472,7 +472,6 @@ function leaveForSession(): void {
 
 async function archiveFlow(pid: string, name: string): Promise<void> {
 	const ok = await confirmDialog({
-		accent: true,
 		title: `Archivar ${name}`,
 		message:
 			"Deja de aparecer en la lista y no se puede deshacer desde la app. Sus agentes quedan sin proyecto; sus sesiones y su contexto no cambian.",
@@ -503,7 +502,6 @@ async function renameFlow(pid: string, current: string): Promise<void> {
 	const myGen = gen;
 	let renamed: ProjectSummary | null = null;
 	await promptDialog({
-		accent: true,
 		cancelLabel: "Cancelar",
 		title: "Renombrar proyecto",
 		label: "Nombre",
@@ -550,7 +548,6 @@ async function openCreateProjectDialog(): Promise<void> {
 	const clientRequestId = crypto.randomUUID();
 	let created: string | null = null;
 	const name = await promptDialog({
-		accent: true,
 		cancelLabel: "Cancelar",
 		title: "Nuevo proyecto",
 		label: "Nombre",

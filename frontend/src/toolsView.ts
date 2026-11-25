@@ -123,7 +123,7 @@ const termNote = el("span", "tools-term-note");
 const goneBox = stateBox(
 	"info",
 	"Este trabajo ya no está disponible.",
-	button("Ver workspace principal", "files-btn primary is-accent", () => {
+	button("Ver workspace principal", "files-btn primary", () => {
 		if (target) openTools({ agent: target.agent, work: null, tool: target.tool });
 	}),
 );

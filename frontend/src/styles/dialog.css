@@ -104,12 +104,3 @@
     min-height: 2.75rem;
   }
 }
-/* The project's surfaces (3B): their dialogs' main action in the accent blue. */
-.modal-primary-action.is-accent {
-  background: var(--c-accent-strong);
-  border-color: var(--c-accent-strong);
-}
-.modal-primary-action.is-accent:hover:not(:disabled) {
-  background: var(--c-accent);
-  border-color: var(--c-accent);
-}
