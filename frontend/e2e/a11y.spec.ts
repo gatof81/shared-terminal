@@ -63,7 +63,13 @@ test.describe("accessibility — axe on the main views", () => {
 		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
 		await expect(page.locator(".rail-body .rail-agent")).toHaveCount(2);
 		await expectClean(page, "project rail");
-		await page.goto(`/#/projects/${PROJECT_IDS.hz}/c/${CONV_IDS.ui}`);
+		// In the same document, as the app navigates: WebKit's page.goto to a
+		// URL that only changes the hash reloads the page, and by then the
+		// topic the wide rail opened has its one news marked as seen — the
+		// divider is (rightly) gone.
+		await page.evaluate((h) => {
+			location.hash = h;
+		}, `#/projects/${PROJECT_IDS.hz}/c/${CONV_IDS.ui}`);
 		await expect(page.locator("#project-view .acp-divider")).toBeVisible();
 		await expectClean(page, "topic");
 	});

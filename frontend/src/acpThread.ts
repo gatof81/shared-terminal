@@ -392,6 +392,16 @@ export class AcpThread {
 					if (away < END_SLACK) this.renderPill();
 					return;
 				}
+				// A reader at the end can only leave it upwards. A scroll event
+				// that did not go above where the end was pinned is not theirs:
+				// it is the late event of the thread's own pin, dispatched after
+				// rows grew below and before the ResizeObserver's report. The end
+				// stays pinned.
+				if (this.atBottom && away >= END_SLACK && t.scrollTop >= this.pinnedTop) {
+					t.scrollTop = t.scrollHeight;
+					this.pinnedTop = t.scrollTop;
+					return;
+				}
 				this.atBottom = away < END_SLACK;
 				if (this.atBottom) {
 					// The reader's own place at the end: what the rules above and
@@ -544,6 +554,7 @@ export class AcpThread {
 		this.putRow({ anchor, offset: Math.round(t.clientHeight * 0.25) - lead });
 		this.box = t.clientHeight;
 		this.atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < END_SLACK;
+		this.held = null;
 		this.noteAnchor();
 		this.renderPill();
 		const ids = row.dataset.ids ?? "";
@@ -599,6 +610,7 @@ export class AcpThread {
 			this.feed = "loading";
 			this.readOnce = false;
 			this.atBottom = true;
+			this.held = null;
 			// Where it was being read (else its news or its end), once its feed is in.
 			this.placePending = true;
 			this.shownMax = 0;
@@ -1113,6 +1125,7 @@ export class AcpThread {
 						if (m && isUnread(m, this.dividerAt ?? null)) this.newIds.add(m.id);
 					}
 		}
+		this.held = null;
 		this.noteAnchor();
 		this.renderPill();
 		return true;
@@ -1148,7 +1161,10 @@ export class AcpThread {
 		}
 		const place = this.rowInView();
 		if (place) readingPlaces.set(key, place);
-		this.holdPlace(true);
+		// Not taken afresh when scrollTop has not moved: a scroll event can be
+		// the late one of the thread's own placement, dispatched after rows
+		// changed height — the geometry then is the shifted one.
+		this.holdPlace(true, false);
 	}
 
 	/**
@@ -1157,8 +1173,9 @@ export class AcpThread {
 	 * inside would push everything under it — the text being read, the
 	 * «Nuevos» divider — while its own top stayed put.
 	 */
-	private holdPlace(on: boolean): void {
+	private holdPlace(on: boolean, fresh = true): void {
 		const t = this.threadEl;
+		if (on && !fresh && this.held && Math.abs(t.scrollTop - this.held.top) < 1) return;
 		this.held = null;
 		if (!on || t.clientHeight === 0) return;
 		const hit = firstRowInView(t, (c) => c.dataset.anchor !== undefined);
@@ -1252,12 +1269,14 @@ export class AcpThread {
 		}
 		this.box = t.clientHeight;
 		this.atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < END_SLACK;
+		this.holdPlace(!this.atBottom);
 		this.renderPill();
 	}
 
 	private scrollToEnd(): void {
 		const t = this.threadEl;
 		this.atBottom = true;
+		this.held = null;
 		t.scrollTop = t.scrollHeight;
 		this.pinnedTop = t.scrollTop;
 		// The box it was placed in, now: the scroll handler takes a scroll in a
