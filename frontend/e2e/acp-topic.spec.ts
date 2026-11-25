@@ -73,6 +73,7 @@ test.describe("a topic's recipients and their states", () => {
 		// Before sending: who will queue it, and why (the agents' real state).
 		await expect(notes(page)).toHaveText(
 			"Le queda en cola a @dev (ocupado en «Optimización de CI»).",
+			{ useInnerText: true },
 		);
 		await shot(page, "1-before", info.project.name);
 		await field(page).fill("revisá el contraste de los chips");

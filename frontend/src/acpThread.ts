@@ -1847,21 +1847,43 @@ export class AcpThread {
 		this.chipBox.replaceChildren(...nodes);
 		// Under the field: who it reaches, and who will queue it (dato real: /agents).
 		// At most two lines (one each; CSS cuts the end — a topic's title — on a phone).
-		const lines: string[] = [];
+		// With a phone's keyboard up (`html[data-kb=open]`, acp-topic.css) only a
+		// short queue line shows — names, no topic — and the reach line goes: both
+		// variants are in the DOM and CSS picks one, so the keyboard opening or
+		// closing renders nothing (the thread's box change alone moves nothing).
+		const lines: HTMLElement[] = [];
 		const to = c.team ? names : c.agents;
 		if (c.team && names.length)
-			lines.push(`Llega a ${names.map((n) => `@${n}`).join(", ")}, a cada uno por separado.`);
+			lines.push(
+				el(
+					"div",
+					"acp-to-note acp-to-reach",
+					`Llega a ${names.map((n) => `@${n}`).join(", ")}, a cada uno por separado.`,
+				),
+			);
 		const queued = to.flatMap((n) => {
 			const busy = busyElsewhere(this.agents.get(n), this.topicId(), this.titleOf);
-			return busy ? [`@${n} (${busy})`] : [];
+			return busy ? [{ n: `@${n}`, full: `@${n} (${busy})` }] : [];
 		});
-		if (queued.length)
+		if (queued.length) {
+			const lead = queued.length > 1 ? "Les" : "Le";
+			const full = queued.map((q) => q.full);
 			lines.push(
-				`${queued.length > 1 ? "Les" : "Le"} queda en cola a ${
-					queued.length > 1 ? `${queued.slice(0, -1).join(", ")} y ${queued.at(-1)}` : queued[0]
-				}.`,
+				el(
+					"div",
+					"acp-to-note acp-to-queue",
+					`${lead} queda en cola a ${
+						full.length > 1 ? `${full.slice(0, -1).join(", ")} y ${full.at(-1)}` : full[0]
+					}.`,
+				),
+				el(
+					"div",
+					"acp-to-note acp-to-queue-short",
+					`${lead} queda en cola a ${queueShort(queued.map((q) => q.n))}.`,
+				),
 			);
-		this.toNotes.replaceChildren(...lines.map((l) => el("div", "acp-to-note", l)));
+		}
+		this.toNotes.replaceChildren(...lines);
 		this.toNotes.hidden = lines.length === 0;
 	}
 
@@ -2295,6 +2317,13 @@ interface ReadingPlace {
 }
 
 /** "3 mensajes nuevos": the count of the end button and its announcement. */
+/** «@dev», «@dev y @qa», «@dev, @qa y 1 más»: the keyboard-up queue line's names. */
+function queueShort(names: readonly string[]): string {
+	if (names.length === 1) return names[0]!;
+	if (names.length === 2) return `${names[0]} y ${names[1]}`;
+	return `${names[0]}, ${names[1]} y ${names.length - 2} más`;
+}
+
 function newText(n: number): string {
 	return `${n} ${n === 1 ? "mensaje nuevo" : "mensajes nuevos"}`;
 }

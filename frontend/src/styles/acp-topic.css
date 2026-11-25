@@ -107,6 +107,21 @@
 .acp-to-notes[hidden] {
 	display: none;
 }
+/* A phone's keyboard up (main.ts): the band is short — the reach line goes,
+   the queue line is the short one (names only, one line); closed, both full.
+   Nothing queued with the keyboard up: no notes box at all. */
+.acp-to-queue-short,
+html[data-kb="open"] .acp-to-reach,
+html[data-kb="open"] .acp-to-queue,
+html[data-kb="open"] .acp-to-notes:not(:has(.acp-to-queue-short)) {
+	display: none;
+}
+html[data-kb="open"] .acp-to-queue-short {
+	display: block;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
 @media (max-width: 768px) {
 	.acp-to-row {
 		min-height: 44px;
