@@ -539,7 +539,7 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 					: typeof req.query.agent === "string"
 						? req.query.agent
 						: null;
-			res.json(await acp.messages(ownerOf(c), { agent, before: beforeOf(req) }));
+			res.json(await acp.messages(ownerOf(c), { agent }, beforeOf(req)));
 		}),
 	);
 
@@ -640,7 +640,7 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 			const agent = await acp.byName(owner, req.params.name);
 			if (!agent) return void res.status(404).json({ error: "not-found" });
 			const [messages, loads, waiting] = await Promise.all([
-				acp.messages(owner, { agent: agent.name, archive: true, before: beforeOf(req) }),
+				acp.messages(owner, { agentArchive: agent.name }, beforeOf(req)),
 				acp.loads(owner),
 				acp.waitingAgents(owner),
 			]);
@@ -673,7 +673,7 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 			const [all, loads, messages, waiting] = await Promise.all([
 				acp.list(owner),
 				acp.loads(owner),
-				acp.messages(owner, { projectId: pid, archive: true, before: beforeOf(req) }),
+				acp.messages(owner, { projectArchive: pid }, beforeOf(req)),
 				acp.waitingAgents(owner),
 			]);
 			const agents = all.filter((a) => a.project_id === pid);
@@ -794,7 +794,7 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 			const [all, loads, messages, waiting, summary] = await Promise.all([
 				acp.list(owner),
 				acp.loads(owner),
-				acp.messages(owner, { conversationId: conv.id, before: beforeOf(req) }),
+				acp.messages(owner, { conversation: conv.id }, beforeOf(req)),
 				acp.waitingAgents(owner),
 				conversations.summary(owner, conv.id),
 			]);

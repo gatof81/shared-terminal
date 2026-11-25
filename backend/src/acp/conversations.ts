@@ -35,15 +35,24 @@ const NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 /** Rows of each inbox section at most (the counter is the length of the first). */
 const INBOX_MAX = 200;
 
-/** The SQL of "unseen" for a message row `m` of conversation `c` (see the header). */
-const UNSEEN = `((m.from_id != 'owner' AND m.created_at > COALESCE(c.read_at, ''))
-	OR (m.from_id = 'owner' AND m.state = 'done' AND m.result_text IS NOT NULL AND m.finished_at > COALESCE(c.read_at, '')))`;
+/**
+ * "Unseen" for a message row `m` of conversation `c` (see the header) is two
+ * disjoint cases (by `from_id`), each written with its time range first so it
+ * reads by the v28 indexes from `read_at` on — a topic already read reads ≈ 0
+ * rows, not its whole history (D1 bills rows read; these run on every change).
+ */
+const UNSEEN_OTHERS = `m.created_at > COALESCE(c.read_at, '') AND m.from_id != 'owner'`;
+const UNSEEN_RESULT = `m.finished_at > COALESCE(c.read_at, '') AND m.from_id = 'owner' AND m.state = 'done' AND m.result_text IS NOT NULL`;
+const UNREAD = `(SELECT COUNT(*) FROM agent_messages m WHERE m.owner_user_id = c.owner_user_id AND m.conversation_id = c.id AND ${UNSEEN_OTHERS})
+	+ (SELECT COUNT(*) FROM agent_messages m WHERE m.owner_user_id = c.owner_user_id AND m.conversation_id = c.id AND ${UNSEEN_RESULT})`;
+// CROSS JOIN fixes SQLite's join order: from the few open questions (v28
+// index) to their message, never from every message of the topic to its questions.
 const NEEDS_ACTION = `(EXISTS (SELECT 1 FROM agent_messages m WHERE m.owner_user_id = c.owner_user_id AND m.conversation_id = c.id
 		AND m.state = 'uncertain' AND m.reviewed_at IS NULL)
-	OR EXISTS (SELECT 1 FROM agent_questions q JOIN agent_messages m ON m.id = q.message_id AND m.owner_user_id = q.owner_user_id
+	OR EXISTS (SELECT 1 FROM agent_questions q CROSS JOIN agent_messages m ON m.id = q.message_id AND m.owner_user_id = q.owner_user_id
 		WHERE q.owner_user_id = c.owner_user_id AND q.state = 'open' AND m.conversation_id = c.id))`;
 const SUMMARY = `c.*,
-	(SELECT COUNT(*) FROM agent_messages m WHERE m.owner_user_id = c.owner_user_id AND m.conversation_id = c.id AND ${UNSEEN}) AS unread,
+	${UNREAD} AS unread,
 	${NEEDS_ACTION} AS needs_action`;
 
 export class ConversationError extends Error {
@@ -278,8 +287,13 @@ export class AcpConversations {
 				[ownerUserId, INBOX_MAX],
 			),
 			d1Query<MessageRow>(
-				`SELECT m.* FROM agent_messages m JOIN conversations c ON c.id = m.conversation_id AND c.owner_user_id = m.owner_user_id
-				 WHERE m.owner_user_id = ? AND m.from_id = 'owner' AND c.archived_at IS NULL AND ${UNSEEN}
+				// From the live conversations, each by its result-time range (the
+				// other case of "unseen" cannot be a message of the person's).
+				// CROSS JOIN is SQLite's way to fix that order: never all the
+				// owner's messages first.
+				`SELECT m.* FROM conversations c CROSS JOIN agent_messages m
+				 WHERE c.owner_user_id = ? AND c.archived_at IS NULL
+				 AND m.owner_user_id = c.owner_user_id AND m.conversation_id = c.id AND ${UNSEEN_RESULT}
 				 ORDER BY m.finished_at, m.id LIMIT ?`,
 				[ownerUserId, INBOX_MAX],
 			),

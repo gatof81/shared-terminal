@@ -70,6 +70,56 @@ describe("d1 call counter (#241b)", () => {
 	});
 });
 
+describe("d1 rows read (meta.rows_read)", () => {
+	const answer = (rowsRead: number) =>
+		new Response(
+			JSON.stringify({
+				result: [
+					{
+						results: [],
+						success: true,
+						meta: { changes: 0, duration: 0, last_row_id: 0, rows_read: rowsRead },
+					},
+				],
+				success: true,
+				errors: [],
+			}),
+		);
+
+	it("sums D1's rows_read and ranks statements by it, keyed by normalised text, never params", async () => {
+		const { __resetD1CallsForTests, d1Query, getD1RowsRead } = await import("./db.js");
+		__resetD1CallsForTests();
+		const reads = [5, 7, 100];
+		(globalThis as { fetch: unknown }).fetch = vi.fn(async () => answer(reads.shift() ?? 0));
+		await d1Query("SELECT * FROM a WHERE x = ?", ["secret-1"]);
+		await d1Query("SELECT *\n\t FROM a   WHERE x = ?", ["secret-2"]);
+		await d1Query("SELECT * FROM b", []);
+		const r = getD1RowsRead();
+		expect(r.rowsReadSinceBoot).toBe(112);
+		expect(r.topStatements.map((t) => [t.queries, t.rowsRead])).toEqual([
+			[1, 100],
+			[2, 12],
+		]);
+		expect(r.topStatements[1].statement).toMatch(/^SELECT \* FROM a WHERE x = \? #[0-9a-f]{8}$/);
+		expect(JSON.stringify(r)).not.toContain("secret");
+	});
+
+	it("statements sharing their first 80 characters stay apart; past 200 keys, one (other) bucket", async () => {
+		const { __resetD1CallsForTests, d1Query, getD1RowsRead } = await import("./db.js");
+		__resetD1CallsForTests();
+		(globalThis as { fetch: unknown }).fetch = vi.fn(async () => answer(1));
+		const head = `SELECT ${"c".repeat(90)}`;
+		await d1Query(`${head} FROM one`);
+		await d1Query(`${head} FROM two`);
+		expect(getD1RowsRead().topStatements).toHaveLength(2);
+		for (let i = 0; i < 250; i++) await d1Query(`SELECT ${i}`);
+		const all = getD1RowsRead(1000);
+		expect(all.topStatements).toHaveLength(201);
+		expect(all.topStatements[0]).toEqual({ statement: "(other)", queries: 52, rowsRead: 52 });
+		expect(all.rowsReadSinceBoot).toBe(252);
+	});
+});
+
 // #304: a `success: true` response with an empty `result` array must throw
 // a sourced error at d1Query, not return undefined and surface later as
 // `Cannot read properties of undefined (reading 'results')` in a caller.

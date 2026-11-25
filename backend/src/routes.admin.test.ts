@@ -67,6 +67,10 @@ const dbStubs = vi.hoisted(() => ({
 	// test pins JSON shape, not specific counter values; per-call
 	// counter behaviour is exercised in `db.test.ts`.
 	getD1CallsSinceBoot: vi.fn(() => 0),
+	getD1RowsRead: vi.fn(() => ({
+		rowsReadSinceBoot: 1234,
+		topStatements: [{ statement: "SELECT 1 #abcdef01", queries: 2, rowsRead: 1234 }],
+	})),
 	__resetD1CallsForTests: vi.fn(),
 }));
 vi.mock("./db.js", () => dbStubs);
@@ -203,7 +207,11 @@ describe("GET /api/admin/stats (#241a)", () => {
 				responses4xxSinceBoot: number;
 				responses5xxSinceBoot: number;
 			};
-			d1: { callsSinceBoot: number };
+			d1: {
+				callsSinceBoot: number;
+				rowsReadSinceBoot: number;
+				topStatements: Array<{ statement: string; queries: number; rowsRead: number }>;
+			};
 			resources: {
 				runningCount: number;
 				statsAvailable: number;
@@ -257,7 +265,11 @@ describe("GET /api/admin/stats (#241a)", () => {
 			responses4xxSinceBoot: 0,
 			responses5xxSinceBoot: 0,
 		});
-		expect(body.d1).toEqual({ callsSinceBoot: 0 });
+		expect(body.d1).toEqual({
+			callsSinceBoot: 0,
+			rowsReadSinceBoot: 1234,
+			topStatements: [{ statement: "SELECT 1 #abcdef01", queries: 2, rowsRead: 1234 }],
+		});
 		// #270: resources block is always present. Empty list of running
 		// sessions → all totals zero, but the `limits` block still
 		// surfaces the per-session min/max/default the form needs.

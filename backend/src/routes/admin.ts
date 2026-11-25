@@ -2,7 +2,7 @@ import type { Request, Response, Router } from "express";
 import { requireAdmin } from "../auth.js";
 import { invalidateStatsCache } from "../containerStats.js";
 import { parseD1Utc } from "../d1Time.js";
-import { getD1CallsSinceBoot } from "../db.js";
+import { getD1CallsSinceBoot, getD1RowsRead } from "../db.js";
 import type { DockerManager } from "../dockerManager.js";
 import { DEFAULT_MEMORY_BYTES, DEFAULT_NANO_CPUS } from "../dockerManager.js";
 import { logger } from "../logger.js";
@@ -95,7 +95,7 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 				idleSweeper: idleSweeperStats,
 				reconcile: reconcileStats,
 				dispatcher: getDispatcherStats(),
-				d1: { callsSinceBoot: getD1CallsSinceBoot() },
+				d1: { callsSinceBoot: getD1CallsSinceBoot(), ...getD1RowsRead() },
 				resources: resourceSnapshot,
 			});
 		} catch (err) {
