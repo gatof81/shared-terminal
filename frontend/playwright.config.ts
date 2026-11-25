@@ -61,29 +61,54 @@ export default defineConfig({
 		// container anyway, and the screenshots mask the terminal.
 		launchOptions: { args: ["--disable-gpu", "--disable-webgl", "--disable-webgl2"] },
 	},
-	projects: [
-		{
-			name: "desktop",
-			use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 800 } },
-		},
-		{
-			name: "mobile",
-			// A 390-px phone with touch: the app's mobile breakpoint (≤ 768 px)
-			// and `pointer: coarse` (the key bar) both engage.
-			// `@any-viewport`: timing, network and cookie logic with nothing on
-			// screen that depends on the width (the read budget, the landing's
-			// waits, the auth transitions). One run on desktop proves it; the
-			// phone repeated it for ~45 s of worker time per CI run.
-			grepInvert: /@any-viewport/,
-			use: {
-				...devices["Desktop Chrome"],
-				viewport: { width: 390, height: 844 },
-				deviceScaleFactor: 1,
-				isMobile: true,
-				hasTouch: true,
-			},
-		},
-	],
+	// QA one-off (NOT for merge): this branch runs the suite on WebKit — Safari's
+	// engine on a desktop and an iPhone 13 profile (iOS UA, touch). Baselines are
+	// Chromium's, so the visual spec is left out.
+	projects: true // this branch only: always WebKit (the token cannot edit ci.yml)
+		? [
+				{
+					name: "webkit-desktop",
+					testIgnore: /visual\.spec\.ts/,
+					use: {
+						...devices["Desktop Safari"],
+						viewport: { width: 1280, height: 800 },
+						launchOptions: {},
+					},
+				},
+				{
+					name: "webkit-mobile",
+					grepInvert: /@any-viewport/,
+					testIgnore: /visual\.spec\.ts/,
+					use: {
+						...devices["iPhone 13"],
+						viewport: { width: 390, height: 844 },
+						launchOptions: {},
+					},
+				},
+			]
+		: [
+				{
+					name: "desktop",
+					use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 800 } },
+				},
+				{
+					name: "mobile",
+					// A 390-px phone with touch: the app's mobile breakpoint (≤ 768 px)
+					// and `pointer: coarse` (the key bar) both engage.
+					// `@any-viewport`: timing, network and cookie logic with nothing on
+					// screen that depends on the width (the read budget, the landing's
+					// waits, the auth transitions). One run on desktop proves it; the
+					// phone repeated it for ~45 s of worker time per CI run.
+					grepInvert: /@any-viewport/,
+					use: {
+						...devices["Desktop Chrome"],
+						viewport: { width: 390, height: 844 },
+						deviceScaleFactor: 1,
+						isMobile: true,
+						hasTouch: true,
+					},
+				},
+			],
 	webServer: {
 		// CI serves the production build (`E2E_SERVER=preview`): the shipped
 		// bundle, and one script per page load instead of ~100 modules the
