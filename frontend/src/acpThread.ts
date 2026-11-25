@@ -1315,8 +1315,7 @@ export class AcpThread {
 					state.append(" · ", el("span", "acp-rs-muted", "informe pedido"));
 			}
 			// The Archive writes nothing: its interruptions are reviewed in Pendientes.
-			if (st.kind === "interrupted" && this.readOnly)
-				state.append(" · revisala en Pendientes");
+			if (st.kind === "interrupted" && this.readOnly) state.append(" · revisala en Pendientes");
 			else if (st.kind === "interrupted") {
 				const review = el("button", "btn sm acp-review-btn", "Revisar interrupción");
 				review.type = "button";
