@@ -23,15 +23,19 @@
 .acp-set-row {
 	display: grid;
 	grid-template-columns: 6.5rem minmax(0, 1fr);
-	align-items: center;
+	/* Top: a setting with a note under its select keeps its label by the select. */
+	align-items: start;
 	column-gap: 12px;
 	min-height: 2.5rem;
 	margin-top: 6px;
 }
 .acp-set-label {
 	color: var(--c-text-2);
+	/* The select's height (2rem; 44 px to the touch): the label sits on its line. */
+	line-height: 2rem;
 }
 .acp-set-ctl {
+	min-height: 2rem;
 	display: flex;
 	flex-wrap: wrap;
 	align-items: center;
@@ -554,6 +558,12 @@ pre.acp-msg-body {
 	.acp-settings .acp-project-select,
 	.acp-settings .acp-model-select,
 	.acp-settings .acp-effort-select {
+		min-height: 44px;
+	}
+	.acp-set-label {
+		line-height: 44px;
+	}
+	.acp-set-ctl {
 		min-height: 44px;
 	}
 	.acp-chat-composer {

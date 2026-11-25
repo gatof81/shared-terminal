@@ -977,11 +977,12 @@ export class AcpThread {
 			nodes.push(cached.el);
 		}
 		for (const key of [...this.items.keys()]) if (!used.has(key)) this.items.delete(key);
-		// Questions whose message is not on this page (an older page, or none).
-		const shown = new Set(this.messages.map((m) => m.id));
+		// A question shows inside its message. One with no message at all is
+		// shown at the end; one whose message is not on this page is not: an
+		// agent's feed carries every open question of the agent, its topics'
+		// included, and here it would have no context (Pendientes has it).
 		for (const q of this.questions.values())
-			if ((q.message_id === null || !shown.has(q.message_id)) && q.state === "open")
-				nodes.push(this.questionEl(q));
+			if (q.message_id === null && q.state === "open") nodes.push(this.questionEl(q));
 		syncChildren(t, nodes);
 		this.observeRows(nodes);
 		if (keepFocus?.isConnected) keepFocus.focus({ preventScroll: true });

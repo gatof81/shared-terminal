@@ -102,8 +102,32 @@ test.describe("the Archive", () => {
 
 	test("continuing an agent's chat: «Para:» comes with that agent; the box is empty", async ({
 		app,
+		backend,
 		page,
 	}) => {
+		// An open question of that chat stays there (and in Pendientes): not in the new topic.
+		const asking = backend.addAcpMessage({
+			to_id: "arq",
+			body: "Elegí el proveedor",
+			state: "running",
+		});
+		backend.acpQuestions = [
+			{
+				id: 7,
+				agent: "arq",
+				message_id: asking.id,
+				request: JSON.stringify({
+					message: "¿Qué proveedor?",
+					requestedSchema: { type: "object", properties: {} },
+				}),
+				state: "open",
+				answer: null,
+				created_at: "2026-10-31T10:29:30Z",
+				answered_at: null,
+				delivered_at: null,
+				note: null,
+			},
+		];
 		await app.login("alice", `${LIST}/@arq`);
 		await page.getByRole("button", { name: "Continuar en una conversación nueva" }).click();
 		await expect(page.locator(".dialog-card .modal-field input")).toHaveValue(
@@ -118,6 +142,7 @@ test.describe("the Archive", () => {
 		await expect(chips).toHaveCount(1);
 		await expect(chips).toContainText("@arq");
 		await expect(page.locator("#project-view .ps-topic .acp-chat-input")).toHaveValue("");
+		await expect(page.locator("#project-view .ps-topic .acp-question")).toHaveCount(0);
 	});
 
 	test("an open question in the Archive: «Responder en Pendientes» opens Pendientes", async ({
