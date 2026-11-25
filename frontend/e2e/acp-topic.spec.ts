@@ -649,3 +649,84 @@ test.describe("a topic whose rows grow after they were placed", () => {
 		expect(app.errors).toEqual([]);
 	});
 });
+
+// #787: a question shows only inside its message's row. One whose message is
+// on an older page is not at the end of the thread — it is in Pendientes,
+// counted, and answerable there; «Cargar anteriores» shows it in place.
+test.describe("an open question whose message is on an older page", () => {
+	test("not at the end of the thread; counted and answered in Pendientes; in place after «Cargar anteriores»", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.enableConversations();
+		const asking = backend.addAcpMessage({
+			to_id: "arq",
+			body: "@arq elegí el proveedor de login",
+			project_id: HZ,
+			conversation_id: CONV_IDS.backend,
+			state: "running",
+			created_at: at(1),
+		});
+		for (let i = 0; i < 105; i++)
+			backend.addAcpMessage({
+				to_id: "dev",
+				body: `@dev punto ${i}`,
+				state: "done",
+				result_text: `Revisado el punto ${i}.`,
+				project_id: HZ,
+				conversation_id: CONV_IDS.backend,
+				created_at: at(10 + i),
+				finished_at: at(11 + i),
+			});
+		backend.acpConversations.find((c) => c.id === CONV_IDS.backend)!.readAt = at(1799);
+		backend.acpQuestions = [
+			{
+				id: 41,
+				agent: "arq",
+				message_id: asking.id,
+				request: JSON.stringify({
+					message: "¿Qué proveedor usamos?",
+					requestedSchema: {
+						type: "object",
+						properties: { p: { type: "string", title: "Proveedor", enum: ["GitHub", "Google"] } },
+					},
+				}),
+				state: "open",
+				answer: null,
+				created_at: at(5),
+				answered_at: null,
+				delivered_at: null,
+				note: null,
+			},
+		];
+		await app.login("alice", topic(CONV_IDS.backend));
+		const thread = page.locator(THREAD);
+		await expect(thread).toContainText("Revisado el punto 104.");
+		// Its message is not on this page: no card at the end of the thread.
+		await expect(thread.locator(".acp-question")).toHaveCount(0);
+		// …but Pendientes counts it and lists it.
+		const inbox = page.locator("#inbox-btn");
+		await expect(inbox).toHaveAttribute("aria-label", /Pendientes: \d+ te esper/);
+		const count = Number(/(\d+)/.exec((await inbox.getAttribute("aria-label")) ?? "")?.[1]);
+		await inbox.click();
+		const item = page.locator(".acp-inbox-card .acp-ib-item.is-question", {
+			hasText: "¿Qué proveedor usamos?",
+		});
+		await expect(item.locator(".acp-ib-where")).toHaveText("Educación HZ › Mejoras del backend");
+		await page.keyboard.press("Escape");
+		// «Cargar anteriores»: the card shows in place, inside its message.
+		await thread.getByRole("button", { name: "Cargar anteriores" }).click();
+		await expect(thread.locator(".acp-question-open")).toContainText("¿Qué proveedor usamos?");
+		// Answered from Pendientes: the count goes down by one, no card left open.
+		await inbox.click();
+		await item.getByLabel("GitHub").check();
+		await item.getByRole("button", { name: "Responder" }).click();
+		await expect(inbox).toHaveAttribute(
+			"aria-label",
+			count - 1 === 0 ? /Pendientes/ : new RegExp(`Pendientes: ${count - 1} te esper`),
+		);
+		await expect(page.locator(".acp-inbox-card .acp-ib-item.is-question")).toHaveCount(0);
+		expect(app.errors).toEqual([]);
+	});
+});
