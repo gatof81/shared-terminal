@@ -371,7 +371,7 @@ export class AcpThread {
 				// reader at the end is pinned there, not reclassified as "above".
 				if (t.clientHeight !== this.box) {
 					this.box = t.clientHeight;
-					if (this.atBottom) {
+					if (this.atBottom && !this.readerLeftEnd()) {
 						t.scrollTop = t.scrollHeight;
 						this.pinnedTop = t.scrollTop;
 						return;
@@ -394,8 +394,12 @@ export class AcpThread {
 					return;
 				}
 				this.atBottom = away < END_SLACK;
-				if (this.atBottom) this.clearNew();
-				else this.renderPill();
+				if (this.atBottom) {
+					// The reader's own place at the end: what the rules above and
+					// `readerLeftEnd` compare with is never older than this scroll.
+					this.pinnedTop = t.scrollTop;
+					this.clearNew();
+				} else this.renderPill();
 				// At once, not on the next frame: a link followed right after the
 				// scroll hides the thread before that frame, and Back would find no
 				// place to return to (a one-row binary search: cheap per event).
@@ -419,7 +423,11 @@ export class AcpThread {
 				// Shown again: the box was rebuilt, its scroll offset is not to be
 				// trusted: the reading place goes back (none: the end).
 				if (wasHidden && !this.placePending) this.restorePlace();
-				else if (this.atBottom) {
+				else if (this.atBottom && this.readerLeftEnd() && !this.endBtn.jumping) {
+					// The reader scrolled up before its event came: theirs, not re-pinned.
+					this.atBottom = false;
+					this.noteAnchor();
+				} else if (this.atBottom) {
 					t.scrollTop = t.scrollHeight;
 					this.pinnedTop = t.scrollTop;
 				}
@@ -560,7 +568,9 @@ export class AcpThread {
 	open(source: ThreadSource): void {
 		const same = sameChat(this.source, source);
 		if (!same) {
-			// The topic being left: what was in view counts before anything resets.
+			// The topic being left: its place and what was in view count before
+			// anything resets.
+			this.notePlaceAtLeave();
 			this.flushSeen();
 			this.gen++;
 			this.closePicker(false);
@@ -634,14 +644,7 @@ export class AcpThread {
 
 	/** Stops following (the DOM and state stay for a quick return). */
 	close(): void {
-		// The place being read, from the geometry as it is now (the last scroll
-		// event may not have been dispatched yet), while the thread still shows:
-		// what Back returns to.
-		const t = this.threadEl;
-		if (t.clientHeight > 0 && !this.placePending && !this.endBtn.jumping) {
-			this.atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < END_SLACK;
-			this.noteAnchor();
-		}
+		this.notePlaceAtLeave();
 		this.closePicker(false);
 		this.flushSeen();
 		this.unsubscribe?.();
@@ -649,6 +652,20 @@ export class AcpThread {
 		this.stopPoll();
 		if (this.statusTimer) clearInterval(this.statusTimer);
 		this.statusTimer = null;
+	}
+
+	/**
+	 * The place being read, from the geometry as it is now (the last scroll
+	 * event may not have been dispatched yet), while the thread still shows
+	 * it: what Back returns to. Every way out takes it — a close, and a switch
+	 * to another topic in the same thread (a link from one topic to another).
+	 */
+	private notePlaceAtLeave(): void {
+		const t = this.threadEl;
+		if (t.clientHeight > 0 && !this.placePending && !this.endBtn.jumping) {
+			this.atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < END_SLACK;
+			this.noteAnchor();
+		}
 	}
 
 	private saveDraft(src: ThreadSource, text: string): void {
@@ -902,9 +919,7 @@ export class AcpThread {
 			this.atBottom &&
 			// "Ir al final" scrolling smoothly is on its way down, not the reader up.
 			!this.endBtn.jumping &&
-			t.clientHeight > 0 &&
-			t.clientHeight === this.box &&
-			t.scrollTop < this.pinnedTop - END_SLACK
+			this.readerLeftEnd()
 		)
 			this.atBottom = false;
 		const atBottom = this.atBottom;
@@ -1160,6 +1175,21 @@ export class AcpThread {
 				obs.observe(n);
 				this.observedRows.add(n);
 			}
+	}
+
+	/**
+	 * The thread was pinned to its end and is now well above it by the
+	 * reader's own scroll, whose event has not come yet (it comes with the
+	 * next frame; a render, a ResizeObserver or a box change can run first).
+	 * The layout never does that: a box or content that shrinks clamps
+	 * scrollTop to the new end (nothing below it), one that grows leaves
+	 * scrollTop where it was or — scroll anchoring — moves it down.
+	 */
+	private readerLeftEnd(): boolean {
+		const t = this.threadEl;
+		if (t.clientHeight === 0) return false;
+		const away = t.scrollHeight - t.scrollTop - t.clientHeight;
+		return away > 1 && t.scrollTop < this.pinnedTop - END_SLACK;
 	}
 
 	/** Back to this chat's anchor; with none (or its row no longer shown), the end. */

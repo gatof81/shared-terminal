@@ -214,10 +214,6 @@ test.describe("2 · a link in an answer", () => {
 		backend,
 		page,
 	}) => {
-		// FINDING (3b-port): topic → topic, the place is not taken from the
-		// geometry when no scroll event preceded the link (the same thread object
-		// changes source; a link to a session keeps it). Remove when fixed.
-		test.fail(true, "Back leaves the thread at its end");
 		fill(backend, 30, withLink);
 		const t = await open(app, page, CONV_IDS.backend, "Respuesta 30.");
 		// Scrolled to the link's row and the link followed in ONE task: no
@@ -484,11 +480,6 @@ test.describe("6 · scroll", () => {
 		backend,
 		page,
 	}) => {
-		// FINDING (3b-port): on the wide layout the thread is usually back at its
-		// end (scrollTop 6395) before the reader's scroll is even dispatched — a
-		// race (it passed once under a loaded run), so skipped rather than
-		// expected to fail; the phone keeps the scroll. Enable when fixed.
-		test.fixme(!app.mobile, "desktop: the reader's first scroll is pulled to the end");
 		fill(backend, 30);
 		// Scrolls to the top in the same task the rows land in — before the
 		// thread's ResizeObserver has had a frame to look at its box.
