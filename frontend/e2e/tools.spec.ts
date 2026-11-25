@@ -212,6 +212,28 @@ test.describe("Herramientas", () => {
 		expect(app.errors).toEqual([]);
 	});
 
+	test("a work's subfolder that answers 404 is that folder's error, not the work's", async ({
+		app,
+		page,
+	}) => {
+		await app.login("alice", toolsAt(CONV_IDS.ci, "dev", "ci-cache", "files"));
+		await expect(page.locator("#files-tree")).toContainText(".github");
+		// Deleted since its parent was listed.
+		await page.route(/\/fs\/list\?.*path=\.github/, (route) =>
+			route.fulfill({
+				status: 404,
+				contentType: "application/json",
+				body: '{"error":"Not found"}',
+			}),
+		);
+		await page.locator("#files-tree .files-row", { hasText: ".github" }).click();
+		await expect(page.locator("#files-tree .files-tree-note.error")).toContainText("Not found");
+		await expect(page.locator("#files-tree")).toContainText("README.md");
+		await expect(page.locator(".tools-gone-state")).toHaveCount(0);
+		await expect(strip(page)).not.toContainText("ya no está disponible");
+		expect(app.errors).toEqual([]);
+	});
+
 	test("a deep link is the same Herramientas: on a phone only ‹, the agent named whole", async ({
 		app,
 		page,

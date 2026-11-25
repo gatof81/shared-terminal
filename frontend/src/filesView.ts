@@ -191,7 +191,9 @@ async function loadDir(path: string): Promise<void> {
 		const status = err instanceof WorkspaceFsError ? err.status : 0;
 		// The work is gone (cleaned) or not this session's: Herramientas shows
 		// it as one state over the whole view, never a retry by another path.
-		if (stateWork !== null && (status === 404 || status === 403))
+		// Only its root says so: a subfolder's 404 (deleted since the parent
+		// was listed) or 403 (restricted) is that folder's error.
+		if (path === "" && stateWork !== null && (status === 404 || status === 403))
 			reportWorkGone(sessionId, stateWork);
 		dirs.set(path, {
 			listing: null,
