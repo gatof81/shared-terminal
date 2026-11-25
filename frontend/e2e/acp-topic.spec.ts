@@ -730,3 +730,79 @@ test.describe("an open question whose message is on an older page", () => {
 		expect(app.errors).toEqual([]);
 	});
 });
+
+// A question whose message is on an earlier page is not shown at the end of
+// the thread (#787: an agent's feed carries its other topics' questions too).
+// It is never out of sight: Pendientes and its count, the agent's state, and
+// its own message once that page is loaded.
+test.describe("an open question on an earlier page", () => {
+	test("is in Pendientes with the count, the agent says it waits, and shows in its message when loaded", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.enableConversations();
+		const cid = CONV_IDS.backend;
+		const asking = backend.addAcpMessage({
+			to_id: "arq",
+			body: "@arq elegí el proveedor",
+			state: "running",
+			project_id: PROJECT_IDS.hz,
+			conversation_id: cid,
+		});
+		// A full page after it: the asking message is on the earlier one.
+		for (let i = 0; i < 100; i++)
+			backend.addAcpMessage({
+				to_id: "dev",
+				body: `@dev punto ${i}`,
+				state: "done",
+				result_text: `ok ${i}`,
+				project_id: PROJECT_IDS.hz,
+				conversation_id: cid,
+			});
+		backend.acpQuestions = [
+			{
+				id: 7,
+				agent: "arq",
+				message_id: asking.id,
+				request: JSON.stringify({
+					message: "¿Qué proveedor?",
+					requestedSchema: { type: "object", properties: {} },
+				}),
+				state: "open",
+				answer: null,
+				created_at: "2026-10-31T10:29:30Z",
+				answered_at: null,
+				delivered_at: null,
+				note: null,
+			},
+		];
+		const arq = backend.acpAgents.find((a) => a.name === "arq")!;
+		arq.running = [asking.id];
+		arq.runningIn = [{ id: asking.id, conversationId: cid, work: null }];
+		arq.waitingInput = true;
+		arq.question = { id: 7, messageId: asking.id, conversationId: cid };
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/c/${cid}`);
+		const thread = page.locator("#project-view .ps-topic .acp-chat-thread");
+		await expect(thread.locator(".acp-more")).toBeVisible();
+		// Not at the end of the thread…
+		await expect(thread.locator(".acp-question")).toHaveCount(0);
+		// …but in Pendientes, counted, with its card…
+		await expect(page.locator("#inbox-btn .inbox-count")).toHaveText("1");
+		// …and the agent says it waits (the rail's team on a wide screen; the topic's row too).
+		if (!app.mobile)
+			await expect(page.locator(".rail-body .rail-agent", { hasText: "@arq" })).toContainText(
+				"espera tu decisión",
+			);
+		await page.locator("#inbox-btn").click();
+		await expect(page.locator(".acp-inbox-card .acp-question-open")).toContainText(
+			"¿Qué proveedor?",
+		);
+		await app.escape();
+		// Its message's page loaded: the card is in it, the message says it waits.
+		await thread.locator(".acp-more").click();
+		const post = thread.locator(`[data-ids~="${asking.id}"]`);
+		await expect(post.locator(".acp-question-open")).toContainText("¿Qué proveedor?");
+		await expect(post).toContainText("espera tu decisión");
+	});
+});
