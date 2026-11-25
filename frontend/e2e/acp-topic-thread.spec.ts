@@ -6,7 +6,7 @@
 
 import type { Locator, Page } from "@playwright/test";
 import { type App, expect, test } from "./fixtures.js";
-import { CONV_IDS, type MockBackend, PROJECT_IDS } from "./mockBackend.js";
+import { CONV_IDS, type MockBackend, PROJECT_IDS, PROJECT_SESSION_IDS } from "./mockBackend.js";
 
 const HZ = PROJECT_IDS.hz;
 const topic = (id: string) => `#/projects/${HZ}/c/${id}`;
@@ -705,26 +705,46 @@ test.describe("a phone's visible band with the keyboard up", () => {
 	const keyboard = (page: Page, h: number) =>
 		page.evaluate((h) => (window as unknown as { __kb: (h: number) => void }).__kb(h), h);
 
+	/** @qa and @ux in the project, busy in «Optimización de CI» like @dev. */
+	function busyTeam(backend: MockBackend): void {
+		const dev = backend.acpAgents.find((a) => a.name === "dev")!;
+		for (const [name, sid] of [
+			["qa", PROJECT_SESSION_IDS.designer],
+			["ux", PROJECT_SESSION_IDS.developer2],
+		] as const)
+			backend.acpAgents.push({ ...dev, name, sessionId: sid });
+	}
+	const visibleNotes = (page: Page) => page.locator(`${ROOT} .acp-to-notes .acp-to-note:visible`);
+
 	test("360 × 390 with the box's notes and a long draft: the thread keeps room, and the row being read", async ({
 		app,
 		backend,
 		page,
 	}, info) => {
 		fill(backend, 30);
-		// @dev is busy in another topic: the box carries its note.
-		backend.acpConversations.find((c) => c.id === CONV_IDS.backend)!.recipients = {
-			agents: ["dev"],
-		};
+		busyTeam(backend);
+		// The whole team: the box carries both notes (who it reaches, who queues it).
+		backend.acpConversations.find((c) => c.id === CONV_IDS.backend)!.recipients = { team: true };
 		await page.setViewportSize({ width: 390, height: 844 });
 		const t = await open(app, page, CONV_IDS.backend, "Respuesta 30.");
-		await expect(page.locator(`${ROOT} .acp-to-notes`)).toContainText("Le queda en cola a @dev");
+		await expect(visibleNotes(page)).toHaveText([
+			"Llega a @arq, @dev, @qa, @ux, a cada uno por separado.",
+			/^Les queda en cola a @dev \(ocupado en «Optimización de CI»\), @qa .+ y @ux .+\.$/,
+		]);
 		await readAt(page, t, "pregunta 20");
 		const top = await rowTop(t, "pregunta 20");
+		const resizes = () =>
+			backend.terminalSockets.flatMap((s) => s.sent).filter((f) => f.type === "resize").length;
+		const r0 = resizes();
 
 		const input = field(page);
 		await input.focus();
 		await keyboard(page, 360);
 		await expect(page.locator("html")).toHaveAttribute("data-kb", "open");
+		// Keyboard up: only the short queue line, on one line, no topic.
+		await expect(visibleNotes(page)).toHaveText(["Les queda en cola a @dev, @qa y 1 más."]);
+		const line = visibleNotes(page).first();
+		expect(await line.evaluate((e) => getComputedStyle(e).whiteSpace)).toBe("nowrap");
 		await stays(t, "pregunta 20", top, "the keyboard opened");
 		await input.fill(
 			Array.from({ length: 12 }, (_, i) => `línea ${i} del borrador largo`).join("\n"),
@@ -744,8 +764,48 @@ test.describe("a phone's visible band with the keyboard up", () => {
 
 		await keyboard(page, 844);
 		await expect(page.locator("html")).not.toHaveAttribute("data-kb", "open");
+		// Closed: both notes in full again.
+		await expect(visibleNotes(page)).toHaveCount(2);
+		await expect(visibleNotes(page).first()).toHaveText(
+			"Llega a @arq, @dev, @qa, @ux, a cada uno por separado.",
+		);
 		await input.fill("");
 		await stays(t, "pregunta 20", top, "the keyboard closed");
+		expect(resizes() - r0, "no resize reached a terminal").toBe(0);
+		expect(app.errors).toEqual([]);
+	});
+
+	test("keyboard up: the queue line names one, two, or two and how many more; none queued, no line", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		busyTeam(backend);
+		backend.acpConversations.find((c) => c.id === CONV_IDS.backend)!.recipients = {
+			agents: ["arq"],
+		};
+		await page.setViewportSize({ width: 390, height: 844 });
+		await app.login("alice", topic(CONV_IDS.backend));
+		const input = field(page);
+		await expect(input).toBeEnabled();
+		await input.focus();
+		await keyboard(page, 360);
+		await expect(page.locator("html")).toHaveAttribute("data-kb", "open");
+		// «Para:» stays; @arq is free: no line.
+		await expect(page.locator(`${ROOT} .acp-to-chips .acp-chip-name`)).toHaveText(["@arq"]);
+		await expect(page.locator(`${ROOT} .acp-to-notes`)).toBeHidden();
+		const add = async (name: string) => {
+			await page.locator(`${ROOT} .acp-pick-btn`).click();
+			await page.getByRole("menuitemcheckbox", { name: new RegExp(`@${name}`) }).click();
+			await page.keyboard.press("Escape");
+		};
+		await add("dev");
+		await expect(visibleNotes(page)).toHaveText(["Le queda en cola a @dev."]);
+		await add("qa");
+		await expect(visibleNotes(page)).toHaveText(["Les queda en cola a @dev y @qa."]);
+		await add("ux");
+		await expect(visibleNotes(page)).toHaveText(["Les queda en cola a @dev, @qa y 1 más."]);
+		await expect(page.locator(`${ROOT} .acp-to-row`)).toBeVisible();
 		expect(app.errors).toEqual([]);
 	});
 });
