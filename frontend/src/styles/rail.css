@@ -67,6 +67,9 @@ body.ps-gone #project-rail {
   flex-direction: column;
   flex: 1;
   min-height: 0;
+  /* A flex item of the phone's project screen: without it a long topic
+     title widens the whole rail past the viewport instead of ellipsing. */
+  min-width: 0;
 }
 .rail-scroll {
   flex: 1;

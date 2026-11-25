@@ -317,6 +317,26 @@ test.describe("project rail and topics", () => {
 		expect(app.errors).toEqual([]);
 	});
 
+	test("a long topic title is cut in its row and in Equipo; the queue and the rail stay in the screen", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		const long = "Optimización del pipeline de CI: caché de navegadores y paralelismo de e2e";
+		backend.acpConversations.find((c) => c.id === CONV_IDS.ci)!.title = long;
+		await app.login("alice", app.mobile ? RAIL : topic(CONV_IDS.ui));
+		const dev = rail(page).locator(".rail-agent", { hasText: "@dev" }).locator(".rail-state");
+		await expect(dev).toContainText("1 en cola");
+		const width = page.viewportSize()!.width;
+		for (const box of [
+			await rail(page).boundingBox(),
+			await convRow(page, long).boundingBox(),
+			await dev.locator(".rail-state-fixed").last().boundingBox(),
+		])
+			expect(box!.x + box!.width).toBeLessThanOrEqual(width);
+		expect(app.errors).toEqual([]);
+	});
+
 	test("wide: a project without topics says so, with its one action", async ({
 		app,
 		backend,
