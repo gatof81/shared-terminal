@@ -228,6 +228,22 @@ export const test = base.extend<{ backend: MockBackend; app: App }>({
 		const backend = new MockBackend();
 		await backend.install(page);
 		await installFonts(page);
+		// WebKit run only (this branch): no WebGL, like Chromium's --disable-webgl, so
+		// xterm uses its DOM renderer and the specs can read the terminal's rows.
+		await page.addInitScript(() => {
+			const get = HTMLCanvasElement.prototype.getContext;
+			// biome-ignore lint/suspicious/noExplicitAny: test shim
+			HTMLCanvasElement.prototype.getContext = function (
+				this: HTMLCanvasElement,
+				type: string,
+				...rest: any[]
+			) {
+				if (type === "webgl" || type === "webgl2" || type === "experimental-webgl") return null;
+				// biome-ignore lint/suspicious/noExplicitAny: test shim
+				return (get as any).call(this, type, ...rest);
+				// biome-ignore lint/suspicious/noExplicitAny: test shim
+			} as any;
+		});
 		await page.clock.setFixedTime(FIXED_NOW);
 		await use(backend);
 	},
