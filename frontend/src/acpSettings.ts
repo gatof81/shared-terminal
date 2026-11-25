@@ -5,7 +5,7 @@
 // person — a model or effort pending or refused, a login missing, no
 // project — is flagged on the session's ⋯ itself.
 //
-//   - runtime; model and effort (stored at once, applied by its runner while
+//   - runtime; model and effort — «Esfuerzo» — (stored at once, applied by its runner while
 //     idle); its project — the only way in for an agent without one: a
 //     conversation always belongs to a project;
 //   - «Conectar cuenta»: the adapter's own login methods, each in a new
@@ -96,11 +96,11 @@ function flagWhy(a: AcpAgentInfo): string | null {
 	const ms = modelState(a);
 	const es = effortState(a);
 	if (ms === "failed") return "el modelo no se aplicó";
-	if (es === "failed") return "el effort no se aplicó";
+	if (es === "failed") return "el esfuerzo no se aplicó";
 	if (a.authRequired) return "falta conectar una cuenta";
-	if (!a.projectId) return "sin proyecto: asignale uno para conversar";
+	if (!a.projectId) return "Sin proyecto · Asignale uno para conversar";
 	if (ms === "pending") return "cambio de modelo pendiente";
-	if (es === "pending") return "cambio de effort pendiente";
+	if (es === "pending") return "cambio de esfuerzo pendiente";
 	return null;
 }
 
@@ -191,7 +191,9 @@ function render(): void {
 	// The focus survives a re-render: it goes back to the same control.
 	const focused = document.activeElement as HTMLElement | null;
 	const which = focused && body.contains(focused) ? focused.dataset.ctl : undefined;
-	const parts: HTMLElement[] = [el("div", "acp-chat-meta", `Runtime: ${a.runtime}`)];
+	const parts: HTMLElement[] = [
+		settingRow("acp-chat-runtime", "Runtime", el("span", "acp-chat-meta", a.runtime)),
+	];
 	parts.push(modelRow(a), effortRow(a), projectRow(a));
 	if (a.authRequired) parts.push(loginBox(a));
 	body.replaceChildren(...parts);
@@ -288,7 +290,6 @@ function savedSelect(
  * it started with): context, history and queue stay.
  */
 function modelRow(a: AcpAgentInfo): HTMLElement {
-	const row = el("div", "acp-chat-project acp-chat-model");
 	const options: Array<[string, string]> = ACP_MODELS.map((m) => [m.id, m.label]);
 	if (a.model && !ACP_MODELS.some((m) => m.id === a.model)) options.push([a.model, a.model]);
 	if (!a.model) options.push(["", "Por defecto"]);
@@ -312,8 +313,7 @@ function modelRow(a: AcpAgentInfo): HTMLElement {
 					: "";
 	const status = el("span", `acp-model-state acp-model-${ms}`, note);
 	status.setAttribute("role", "status");
-	row.append(el("span", undefined, "Modelo:"), select, button, status);
-	return row;
+	return settingRow("acp-chat-model", "Modelo", select, button, status);
 }
 
 /**
@@ -322,7 +322,6 @@ function modelRow(a: AcpAgentInfo): HTMLElement {
  * use: nothing here knows which levels exist.
  */
 function effortRow(a: AcpAgentInfo): HTMLElement {
-	const row = el("div", "acp-chat-project acp-chat-effort");
 	const stored = a.effort ?? "default";
 	const levels = a.effortApplied?.levels ?? [];
 	const values = levels.length > 0 ? [...levels] : ["default"];
@@ -330,17 +329,17 @@ function effortRow(a: AcpAgentInfo): HTMLElement {
 	if (!values.includes(stored)) values.push(stored);
 	const { select, button } = savedSelect(
 		"effort",
-		"Effort del agente",
-		values.map((v) => [v, effortLabel(v)]),
+		"Esfuerzo del agente",
+		values.map((v) => [v, v === "default" ? "Por defecto" : effortLabel(v)]),
 		stored,
-		"Cambiar effort",
+		"Cambiar esfuerzo",
 		(v) => acpSetEffort(a.name, v === "default" ? null : v),
-		"el effort",
+		"el esfuerzo",
 	);
 	const es = effortState(a);
 	const note =
 		es === "pending"
-			? `Se aplica cuando @${a.name} esté libre (el mensaje en curso termina con el effort anterior).`
+			? `Se aplica cuando @${a.name} esté libre (el mensaje en curso termina con el esfuerzo anterior).`
 			: es === "failed"
 				? `El adaptador rechazó ${effortLabel(a.effort)}: ${a.effortApplied?.error ?? ""}`
 				: es === "applied"
@@ -348,23 +347,22 @@ function effortRow(a: AcpAgentInfo): HTMLElement {
 					: "";
 	const status = el("span", `acp-effort-state acp-effort-${es}`, note);
 	status.setAttribute("role", "status");
-	row.append(el("span", undefined, "Effort:"), select, button, status);
+	const parts: HTMLElement[] = [select, button, status];
 	if (levels.length === 0)
-		row.append(
+		parts.push(
 			el(
 				"span",
 				"acp-effort-note",
 				a.effortApplied
-					? "El modelo actual no ofrece effort"
+					? "El modelo actual no ofrece niveles de esfuerzo"
 					: "Los niveles se conocen cuando el agente atienda su próximo mensaje",
 			),
 		);
-	return row;
+	return settingRow("acp-chat-effort", "Esfuerzo", ...parts);
 }
 
 /** Its project: where its conversations happen (without one it has none). */
 function projectRow(a: AcpAgentInfo): HTMLElement {
-	const row = el("div", "acp-chat-project");
 	const options: Array<[string, string]> = [["", "Sin proyecto"]];
 	for (const p of projects()) options.push([p.projectId, p.name]);
 	if (a.projectId && !projects().some((p) => p.projectId === a.projectId))
@@ -378,14 +376,23 @@ function projectRow(a: AcpAgentInfo): HTMLElement {
 		(v) => acpSetProject(a.name, v || null),
 		"el proyecto",
 	);
-	row.append(el("span", undefined, "Proyecto:"), select, button);
+	const parts: HTMLElement[] = [select, button];
 	if (!a.projectId)
-		row.append(
+		parts.push(
 			el(
 				"span",
-				"acp-effort-note",
-				"Sin proyecto no tiene conversaciones: se habla con un agente en los temas de su proyecto.",
+				"acp-effort-note acp-project-note",
+				"Sin proyecto no tiene conversaciones ni Archivo. Asignale un proyecto para hablarle en sus temas; sus mensajes anteriores pasan al Archivo de ese proyecto.",
 			),
 		);
+	return settingRow("acp-chat-project", "Proyecto", ...parts);
+}
+
+/** One setting: its label in the first column, its controls and notes in the second. */
+function settingRow(cls: string, label: string, ...controls: HTMLElement[]): HTMLElement {
+	const row = el("div", `acp-set-row ${cls}`);
+	const ctl = el("div", "acp-set-ctl");
+	ctl.append(...controls);
+	row.append(el("span", "acp-set-label", label), ctl);
 	return row;
 }

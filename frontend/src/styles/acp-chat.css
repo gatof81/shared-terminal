@@ -19,6 +19,28 @@
 	padding: 8px 16px 16px;
 	font-size: 0.9rem;
 }
+/* Two even columns: the labels, then each setting's controls and notes. */
+.acp-set-row {
+	display: grid;
+	grid-template-columns: 6.5rem minmax(0, 1fr);
+	align-items: center;
+	column-gap: 12px;
+	min-height: 2.5rem;
+	margin-top: 6px;
+}
+.acp-set-label {
+	color: var(--c-text-2);
+}
+.acp-set-ctl {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px 10px;
+	min-width: 0;
+}
+.acp-set-ctl .acp-effort-note {
+	flex-basis: 100%;
+}
 .acp-settings .acp-chat-notice {
 	margin-top: 10px;
 	border: 1px solid rgba(var(--c-warn-rgb), 0.5);
@@ -28,14 +50,6 @@
 	font-size: 0.78rem;
 	margin-top: 2px;
 	overflow-wrap: anywhere;
-}
-.acp-chat-project {
-	display: flex;
-	flex-wrap: wrap;
-	align-items: center;
-	gap: 6px 10px;
-	margin-top: 6px;
-	font-size: 0.85rem;
 }
 .acp-project-select,
 .acp-model-select,
