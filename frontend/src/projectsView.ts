@@ -26,7 +26,13 @@ import {
 	topicPage,
 	writeInTopic,
 } from "./acpConversation.js";
-import { configureInbox, mountInboxButton, openInbox, resetInboxPanel } from "./acpInbox.js";
+import {
+	closeInbox,
+	configureInbox,
+	mountInboxButton,
+	openInbox,
+	resetInboxPanel,
+} from "./acpInbox.js";
 import { resetInbox, startInbox } from "./acpInboxStore.js";
 import {
 	acpProjectPage,
@@ -819,12 +825,29 @@ function wire(): void {
 			else agentChat(t.agent);
 		},
 	});
+	// A review's way out leaves Pendientes too when it was opened from there:
+	// left open, the panel stays modal over the view it led to (everything
+	// underneath `inert`; the whole screen on a phone). The panel's own
+	// «Ver en el tema» closes it the same way.
 	configureReview({
 		writeNew: (m) => {
+			closeInbox();
 			if (m.conversation_id && m.project_id) writeInTopic(m.project_id, m.conversation_id, m.to_id);
 			else agentChat(m.to_id);
 		},
-		tools: (agent, tool) => openTools({ agent, work: null, tool }),
+		tools: (agent, tool) => {
+			closeInbox();
+			if (!openTools({ agent, work: null, tool })) return false;
+			// Closing handed the focus back to the header's Pendientes button:
+			// it goes to the view the person asked for — its tab — unless that
+			// view took it already (the terminal does on a desktop).
+			requestAnimationFrame(() => {
+				const a = document.activeElement;
+				if (!a || a === document.body || a.id === "inbox-btn")
+					document.getElementById(`view-${tool}-btn`)?.focus();
+			});
+			return true;
+		},
 	});
 	onTopicWork((agent, work) => openTools({ agent, work, tool: "git" }));
 	mountInboxButton();
