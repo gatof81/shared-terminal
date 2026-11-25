@@ -1905,7 +1905,7 @@ describe("ACP conversations (v27)", () => {
 		expect(conv.recipients).toEqual({ team: true });
 	});
 
-	it("an agent's consult inherits the conversation; the reply and the unfinished notice stay in it; outside the project it is direct", async () => {
+	it("an agent's consult inherits the conversation; the reply stays in it; outside the project it is refused", async () => {
 		const m = (await call(as("ana"), "POST", "/runner/claim")).body;
 		expect(m).toMatchObject({
 			conversation_id: c1,
@@ -1913,8 +1913,15 @@ describe("ACP conversations (v27)", () => {
 		});
 		const consult = await call(as("ana"), "POST", "/messages", { to: "caro", body: "¿cache?" });
 		expect(consult.body).toMatchObject({ conversation_id: c1, project_id: PC, depth: 1 });
+		// A recipient of another project: refused, nothing written (never a direct message).
+		const count = () =>
+			(db.prepare("SELECT COUNT(*) AS n FROM agent_messages").get() as { n: number }).n;
+		const before = count();
 		const outside = await call(as("ana"), "POST", "/messages", { to: "fuera", body: "privado" });
-		expect(outside.body).toMatchObject({ conversation_id: null, project_id: null });
+		expect(outside.status).toBe(409);
+		expect(outside.body).toMatchObject({ error: "recipient-other-project", agent: "fuera" });
+		expect(outside.body.message).toContain("@fuera no es de este proyecto");
+		expect(count()).toBe(before);
 		// An agent picks no conversation, team or list.
 		expect(
 			(await call(as("ana"), "POST", "/messages", { to: "caro", body: "x", conversationId: c2 }))
@@ -1936,18 +1943,7 @@ describe("ACP conversations (v27)", () => {
 			.prepare("SELECT * FROM agent_messages WHERE reply_to = ? AND kind = 'reply'")
 			.get(cc.id) as Record<string, unknown>;
 		expect(reply).toMatchObject({ conversation_id: c1, project_id: PC, to_id: "ana" });
-		// fuera's run of the private consult is interrupted: the notice is direct, like the consult.
-		const f = (await call(as("fuera"), "POST", "/runner/claim")).body;
-		await call(as("fuera"), "POST", `/runner/messages/${f.id}/result`, {
-			state: "uncertain",
-			note: "corte",
-		});
-		const notice = db
-			.prepare("SELECT * FROM agent_messages WHERE reply_to = ? AND note = 'unfinished:uncertain'")
-			.get(f.id) as Record<string, unknown>;
-		expect(notice).toMatchObject({ conversation_id: null, to_id: "ana" });
-		// Drain ana's queue (c2's team row, caro's reply, the notice) for the next tests.
-		await work("ana");
+		// Drain ana's queue (c2's team row, caro's reply) for the next tests.
 		await work("ana");
 		await work("ana");
 	});
@@ -2222,6 +2218,53 @@ describe("ACP conversations (v27)", () => {
 			work: "conv-work",
 		});
 		expect(both.body).toMatchObject({ conversation_id: c1, context: "conv-work" });
+	});
+
+	it("a run with no conversation keeps the old rule: a recipient of another project gets it direct", async () => {
+		const sent = await call(owner, "POST", "/messages", {
+			to: "ana",
+			body: "archivo",
+			projectId: PC,
+		});
+		expect(sent.body).toMatchObject({ conversation_id: null, project_id: PC });
+		const m = (await call(as("ana"), "POST", "/runner/claim")).body;
+		expect(m.id).toBe(sent.body.id);
+		const inside = await call(as("ana"), "POST", "/messages", { to: "caro", body: "x" });
+		expect(inside.body).toMatchObject({ conversation_id: null, project_id: PC });
+		const outside = await call(as("ana"), "POST", "/messages", { to: "fuera", body: "privado" });
+		expect(outside.status).toBe(201);
+		expect(outside.body).toMatchObject({ conversation_id: null, project_id: null });
+		await call(as("ana"), "POST", `/runner/messages/${m.id}/result`, { state: "done", text: "." });
+	});
+
+	it("a consult inside the project whose run is interrupted: the unfinished notice stays in the conversation", async () => {
+		const sent = await call(owner, "POST", "/messages", {
+			to: "ana",
+			body: "revisá con beto",
+			conversationId: c1,
+		});
+		const m = (await call(as("ana"), "POST", "/runner/claim")).body;
+		expect(m.id).toBe(sent.body.id);
+		const consult = await call(as("ana"), "POST", "/messages", { to: "beto", body: "¿estado?" });
+		expect(consult.body).toMatchObject({ conversation_id: c1, project_id: PC });
+		// beto may have older messages queued: run them first.
+		let b = (await call(as("beto"), "POST", "/runner/claim")).body;
+		while (b.id !== consult.body.id) {
+			await call(as("beto"), "POST", `/runner/messages/${b.id}/result`, {
+				state: "done",
+				text: ".",
+			});
+			b = (await call(as("beto"), "POST", "/runner/claim")).body;
+		}
+		await call(as("beto"), "POST", `/runner/messages/${b.id}/result`, {
+			state: "uncertain",
+			note: "corte",
+		});
+		const notice = db
+			.prepare("SELECT * FROM agent_messages WHERE reply_to = ? AND note = 'unfinished:uncertain'")
+			.get(consult.body.id) as Record<string, unknown>;
+		expect(notice).toMatchObject({ conversation_id: c1, project_id: PC, to_id: "ana" });
+		await call(as("ana"), "POST", `/runner/messages/${m.id}/result`, { state: "done", text: "." });
 	});
 });
 

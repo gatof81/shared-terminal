@@ -297,9 +297,13 @@ post stores the conversation's `recipients`.
 
 ### Inheritance (nothing to choose for an agent)
 
-- An agent's `st send` takes the **conversation and scope** of the message it is running when the
-  recipient is in that project; otherwise it is direct, with no conversation. An agent sending
-  `conversationId`, a list or `team` gets `400 conversation-inherited`.
+- An agent's `st send` takes the **conversation and scope** of the message it is running; a request
+  from a topic never leaves its project: a recipient outside the conversation's project (or in none) is
+  `409 recipient-other-project` («@x no es de este proyecto: no se envió nada») and no row is written.
+  Only a run with no conversation (the Archive's paths, agents without a project) keeps the old rule:
+  scope when the recipient is in that project, direct otherwise. A `work` outside the sender's project
+  is still `403 work-other-project`. An agent sending `conversationId`, a list or `team` gets
+  `400 conversation-inherited`.
 - The reply to a request (trigger) and the notice of an unfinished request (`unfinished:failed|uncertain`)
   copy the request's conversation.
 - A question to the person belongs to the conversation of the message it was asked from
@@ -461,6 +465,15 @@ session.
   runner that is alive but stuck is not detected.
 - **Adapter gone.** If the adapter exits mid-message, the message becomes `uncertain` and the runner
   exits; the loop restarts it and the adapter with it.
+- **Session gone from the adapter.** If the Claude process behind an idle session dies, claude-agent-acp
+  evicts the session and answers the next `session/prompt` with `-32002` (`sessionNotFound`, before the
+  turn is queued): nothing ran, so the message goes back to `pending` and the next claim reopens the
+  session (`session/resume`). Once per message: refused the same way right after the reopen, it is
+  `uncertain` with the note. Any error after the turn started stays `uncertain`.
+- **Tasks belong to their session.** Leaving a session (close, switch, loss) drops its open tasks. A
+  `turn` task the adapter opens with no message running (e.g. after the message settled) blocks no
+  message and does not hold the session. A task that spawns while a claim is in flight and holds the
+  session sends the claimed message of another session back to `pending`.
 - **Continuity.** The runner's state is in the workspace (`~/workspace/.st/acp`: ACP session id, one
   event log per message), so it survives runner, container and backend restarts and a container
   re-creation; the runner resumes the same ACP session (same context) and settles an interrupted

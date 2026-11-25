@@ -41,7 +41,16 @@
 //   preguntá: <q> | a | b    → asks the person (ACP elicitation/create, the form
 //                              claude-agent-acp makes of AskUserQuestion) and
 //                              continues with the answer
+//   morí                     → answers, then drops the session from memory
+//                              (like claude-agent-acp when the Claude process
+//                              dies while idle): its next prompt gets -32002
+//                              until it is resumed
+//   turno huérfano           → answers, and 4 s later (the message settled)
+//                              opens a `turn` task of its own that never ends
+//                              while the session is loaded
 //   anything else            → an echo of the first line
+// With `<state>/test-agent/lose-sessions` present, every prompt drops its
+// session and is refused with -32002 (a session that dies again on reopen).
 // A reply from another agent ("Respuesta de @x a tu mensaje #n: …") is
 // acknowledged. Every answer carries how many prompts this ACP session has
 // seen and the session's model and effort — the session (count, model, effort)
@@ -322,6 +331,19 @@ async function prompt(sessionId, text) {
 		update(sessionId, { sessionUpdate: "async_task_spawned", asyncTaskId: taskId, taskType: "shell", name: `trabajo de ${m[1]} s` });
 		setTimeout(() => update(sessionId, { sessionUpdate: "async_task_state_update", asyncTaskId: taskId, state: "completed" }), Number(m[1]) * 1000);
 		await say(`Dejé un trabajo en segundo plano (${taskId}, ${m[1]} s). ${ctx}`);
+	} else if (/^mor[ií]\s*$/im.test(body)) {
+		await say(`Me muero en reposo. ${ctx}`);
+		setTimeout(() => {
+			unload(sessionId);
+			loaded.delete(sessionId);
+			console.error(`[test-agent] session ${sessionId}: Claude Agent process died (simulated)`);
+		}, 300);
+	} else if (/^turno hu[ée]rfano\s*$/im.test(body)) {
+		await say(`Después voy a abrir un turno propio. ${ctx}`);
+		later(sessionId, 4_000, () => {
+			const taskId = `turn-${randomUUID().slice(0, 8)}`;
+			update(sessionId, { sessionUpdate: "async_task_spawned", asyncTaskId: taskId, taskType: "turn", name: "autonomous-turn" });
+		});
 	} else {
 		await say(`Recibido por @${ME}: ${body.split("\n")[0].slice(0, 200)} ${ctx}`);
 	}
@@ -398,10 +420,14 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
 		}
 		else if (method === "session/prompt" && existsSync(`${DIR}/require-auth`) && !existsSync(CREDS))
 			throw Object.assign(new Error("Authentication required"), { code: -32000 });
-		else if (method === "session/prompt") result = await prompt(params.sessionId, params.prompt.map((b) => b.text ?? "").join("\n"));
+		else if (method === "session/prompt" && (!loaded.has(params.sessionId) || existsSync(`${DIR}/lose-sessions`))) {
+			// Like claude-agent-acp's startTurn for a session not in its map.
+			loaded.delete(params.sessionId);
+			throw Object.assign(new Error("Resource not found"), { code: -32002, data: { sessionId: params.sessionId } });
+		} else if (method === "session/prompt") result = await prompt(params.sessionId, params.prompt.map((b) => b.text ?? "").join("\n"));
 		else throw Object.assign(new Error(`unsupported ${method}`), { code: -32601 });
 		out({ id, result });
 	} catch (err) {
-		out({ id, error: { code: err.code ?? -32603, message: err.message } });
+		out({ id, error: { code: err.code ?? -32603, message: err.message, ...(err.data ? { data: err.data } : {}) } });
 	}
 });
