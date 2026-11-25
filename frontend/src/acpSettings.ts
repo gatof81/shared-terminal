@@ -233,14 +233,17 @@ function loginBox(a: AcpAgentInfo): HTMLElement {
 		});
 		actions.append(b);
 	}
-	box.append(
-		actions,
-		el(
-			"div",
-			"acp-chat-meta",
-			"También podés ejecutar `claude auth login` (o `claude` y /login) en la Terminal de su sesión.",
-		),
+	const hint = el("div", "acp-chat-meta");
+	hint.append(
+		"También podés ejecutar ",
+		el("code", undefined, "claude auth login"),
+		" (o ",
+		el("code", undefined, "claude"),
+		" y ",
+		el("code", undefined, "/login"),
+		") en la Terminal de su sesión.",
 	);
+	box.append(actions, hint);
 	return box;
 }
 
