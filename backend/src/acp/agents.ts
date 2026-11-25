@@ -831,7 +831,7 @@ export class AcpAgents {
 	 * filter (`?2 IS NULL OR col = ?2`) cannot use an index, so the old single
 	 * statement read every message of the owner. The first three go by
 	 * `idx_agent_messages_conversation` (owner, conversation_id — NULL for the
-	 * Archive —, id): a page reads about `limit` rows of its own source.
+	 * Archive —, id), pinned: a page reads about `limit` rows of its own source.
 	 */
 	async messages(
 		ownerUserId: string,
@@ -845,6 +845,13 @@ export class AcpAgents {
 	): Promise<MessageRow[]> {
 		let where: string;
 		let params: unknown[];
+		// The conversation and Archive pages pin their index in the text, not in
+		// the statistics: without `sqlite_stat1` (D1 as deployed) the planner
+		// took idx_agent_messages_project for the project Archive and walked
+		// every topic message of the project, newest first, to reach the
+		// Archive (the oldest). v27 always creates the index; were it missing,
+		// the read fails instead of degrading silently.
+		let from = "agent_messages INDEXED BY idx_agent_messages_conversation";
 		if ("conversation" in source) {
 			where = "conversation_id = ?";
 			params = [source.conversation];
@@ -855,14 +862,16 @@ export class AcpAgents {
 			where = "conversation_id IS NULL AND (to_id = ? OR from_id = ?)";
 			params = [source.agentArchive, source.agentArchive];
 		} else if (source.agent !== null) {
+			from = "agent_messages";
 			where = "(to_id = ? OR from_id = ?)";
 			params = [source.agent, source.agent];
 		} else {
+			from = "agent_messages";
 			where = "1";
 			params = [];
 		}
 		const r = await d1Query<MessageRow>(
-			`SELECT * FROM (SELECT * FROM agent_messages WHERE owner_user_id = ? AND ${where} AND id < ?
+			`SELECT * FROM (SELECT * FROM ${from} WHERE owner_user_id = ? AND ${where} AND id < ?
 			 ORDER BY id DESC LIMIT ?) ORDER BY id`,
 			[ownerUserId, ...params, before ?? Number.MAX_SAFE_INTEGER, limit],
 		);

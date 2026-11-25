@@ -2328,7 +2328,6 @@ describe("D1 reads: the hot reads go by index, never through the owner's whole h
 		// The Archive: project posts and direct messages outside any conversation.
 		for (let k = 0; k < 300; k++, i++)
 			msg.run(OWNER, "owner", "solo", "done", k % 2 ? PD : null, null, t(i), t(i + 1), "r", null);
-		db.exec("ANALYZE");
 	});
 
 	type Plan = { sql: string; plan: string[] };
@@ -2377,33 +2376,6 @@ describe("D1 reads: the hot reads go by index, never through the owner's whole h
 		expect(db.prepare("SELECT 1 FROM schema_migrations WHERE version = 28").get()).toBeTruthy();
 	});
 
-	it("a conversation's feed reads its messages by idx_agent_messages_conversation, with and without ?before=", async () => {
-		for (const q of ["", "?before=500"]) {
-			const plans = await plansOf(async () => {
-				const r = await call(owner, "GET", `/conversations/${convs[3]}/feed${q}`);
-				expect(r.status).toBe(200);
-				expect(r.body.messages.length).toBeGreaterThan(0);
-			});
-			const page = plans.find((p) => /^SELECT \* FROM \(SELECT \* FROM agent_messages/.test(p.sql));
-			expect(page?.plan.join("\n")).toMatch(
-				/SEARCH agent_messages USING INDEX idx_agent_messages_conversation \(owner_user_id=\? AND conversation_id=\? AND id<\?\)/,
-			);
-			expectBounded(plans);
-		}
-	});
-
-	it("the Archive feeds read only what belongs to no conversation", async () => {
-		for (const path of [`/projects/${PD}/feed`, "/agents/solo/feed"]) {
-			const plans = await plansOf(async () => {
-				expect((await call(owner, "GET", path)).status).toBe(200);
-			});
-			const page = plans.find((p) => /^SELECT \* FROM \(SELECT \* FROM agent_messages/.test(p.sql));
-			expect(page?.plan.join("\n")).toMatch(
-				/idx_agent_messages_conversation \(owner_user_id=\? AND conversation_id=\? AND id<\?\)/,
-			);
-		}
-	});
-
 	it("GET /messages (st): everything to or from the calling agent, any scope", async () => {
 		const r = await call(as("solo"), "GET", "/messages");
 		expect(r.body.length).toBeGreaterThan(0);
@@ -2412,13 +2384,59 @@ describe("D1 reads: the hot reads go by index, never through the owner's whole h
 		expect(older.body.every((m: MessageRowT) => m.id < r.body[0].id)).toBe(true);
 	});
 
-	it("the topic list, the inbox and /agents read no owner-wide range of messages or questions", async () => {
-		for (const path of [`/projects/${PD}/conversations`, "/inbox", "/agents"]) {
-			const plans = await plansOf(async () => {
-				expect((await call(owner, "GET", path)).status).toBe(200);
-			});
-			expectBounded(plans);
-		}
+	// The same plans with no statistics (D1 as deployed: nobody runs ANALYZE)
+	// and with them (were D1 to run PRAGMA optimize): neither may change them.
+	describe.each([
+		["without statistics", false],
+		["after ANALYZE", true],
+	])("%s", (_label, analyze) => {
+		beforeAll(() => {
+			if (analyze) db.exec("ANALYZE");
+			else
+				expect(
+					db.prepare("SELECT name FROM sqlite_master WHERE name = 'sqlite_stat1'").get(),
+				).toBeUndefined();
+		});
+
+		it("a conversation's feed reads its messages by idx_agent_messages_conversation, with and without ?before=", async () => {
+			for (const q of ["", "?before=500"]) {
+				const plans = await plansOf(async () => {
+					const r = await call(owner, "GET", `/conversations/${convs[3]}/feed${q}`);
+					expect(r.status).toBe(200);
+					expect(r.body.messages.length).toBeGreaterThan(0);
+				});
+				const page = plans.find((p) =>
+					/^SELECT \* FROM \(SELECT \* FROM agent_messages/.test(p.sql),
+				);
+				expect(page?.plan.join("\n")).toMatch(
+					/SEARCH agent_messages USING INDEX idx_agent_messages_conversation \(owner_user_id=\? AND conversation_id=\? AND id<\?\)/,
+				);
+				expectBounded(plans);
+			}
+		});
+
+		it("the Archive feeds read only what belongs to no conversation", async () => {
+			for (const path of [`/projects/${PD}/feed`, "/agents/solo/feed"]) {
+				const plans = await plansOf(async () => {
+					expect((await call(owner, "GET", path)).status).toBe(200);
+				});
+				const page = plans.find((p) =>
+					/^SELECT \* FROM \(SELECT \* FROM agent_messages/.test(p.sql),
+				);
+				expect(page?.plan.join("\n")).toMatch(
+					/idx_agent_messages_conversation \(owner_user_id=\? AND conversation_id=\? AND id<\?\)/,
+				);
+			}
+		});
+
+		it("the topic list, the inbox and /agents read no owner-wide range of messages or questions", async () => {
+			for (const path of [`/projects/${PD}/conversations`, "/inbox", "/agents"]) {
+				const plans = await plansOf(async () => {
+					expect((await call(owner, "GET", path)).status).toBe(200);
+				});
+				expectBounded(plans);
+			}
+		});
 	});
 });
 
