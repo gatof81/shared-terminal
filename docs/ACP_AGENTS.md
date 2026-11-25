@@ -465,6 +465,15 @@ session.
   runner that is alive but stuck is not detected.
 - **Adapter gone.** If the adapter exits mid-message, the message becomes `uncertain` and the runner
   exits; the loop restarts it and the adapter with it.
+- **Session gone from the adapter.** If the Claude process behind an idle session dies, claude-agent-acp
+  evicts the session and answers the next `session/prompt` with `-32002` (`sessionNotFound`, before the
+  turn is queued): nothing ran, so the message goes back to `pending` and the next claim reopens the
+  session (`session/resume`). Once per message: refused the same way right after the reopen, it is
+  `uncertain` with the note. Any error after the turn started stays `uncertain`.
+- **Tasks belong to their session.** Leaving a session (close, switch, loss) drops its open tasks. A
+  `turn` task the adapter opens with no message running (e.g. after the message settled) blocks no
+  message and does not hold the session. A task that spawns while a claim is in flight and holds the
+  session sends the claimed message of another session back to `pending`.
 - **Continuity.** The runner's state is in the workspace (`~/workspace/.st/acp`: ACP session id, one
   event log per message), so it survives runner, container and backend restarts and a container
   re-creation; the runner resumes the same ACP session (same context) and settles an interrupted

@@ -72,6 +72,12 @@ const STARTUP_WINDOW_MS = 3_000; // what the resume itself triggers arrives with
 const BG_CHECK_MS = Number(env.BG_CHECK_MS ?? 10 * 60_000); // ask once about tasks still open after this
 const TERMINAL = new Set(["completed", "failed", "stopped"]);
 const AUTH_REQUIRED = -32000; // ACP RequestError.authRequired()
+// ACP RequestError.sessionNotFound(): "Resource not found", data {sessionId}.
+// claude-agent-acp 0.108.0 answers it to a session/prompt only from startTurn,
+// BEFORE the prompt is queued — the session is not in its map, typically
+// because the Claude process behind it died while idle ("Claude Agent process
+// died", which evicts the session). The turn never ran.
+const SESSION_NOT_FOUND = -32002;
 const AUTH_RETRY_MS = 60_000; // without new credentials, the adapter is restarted anyway after this
 const API_TIMEOUT_MS = 30_000;
 const OPEN_ASK_MS = Number(env.OPEN_ASK_MS ?? 30_000); // how often a slot asks whether its open work is still active
@@ -179,19 +185,35 @@ setInterval(() => {
 	void api("POST", "/runner/activity", { events });
 }, 1_000).unref();
 
-// ── Session state: every async task, whatever message it belongs to ──────
-// `live`: open tasks (id → {taskType, name}); `persistent`: ids the agent
-// declared as processes left running on purpose — they never block.
+// ── Session state: every async task of the open session ───────────────────────────
+// `live`: open tasks (id → {taskType, name, msg}: the message running when it
+// spawned, null for none); `persistent`: ids the agent declared as processes
+// left running on purpose — they never block. Tasks belong to the session
+// that opened them: both sets are emptied whenever the slot leaves a session
+// (`forgetSession`), since closing or losing it ends what it had running.
 const live = new Map();
 const persistent = new Set();
 let lastActivity = Date.now();
 let current = null;
 
+// A turn Claude opened by itself with no message running (e.g. a task
+// notification after the message settled) is nobody's work: it neither blocks
+// a message nor holds the session, and it is dropped with the session. Every
+// other task still holds the session (closing it would kill a process).
+const orphanTurn = (t) => t.taskType === "turn" && t.msg === null;
+const holding = () => [...live.values()].some((t) => !orphanTurn(t));
+function forgetSession() {
+	const dropped = [...live].filter(([, t]) => orphanTurn(t)).map(([id]) => id);
+	if (dropped.length) log(`dropped task(s) with no message of the session left: ${dropped.join(" ")}`);
+	live.clear();
+	persistent.clear();
+}
+
 function record(entry) {
 	if (current) appendFileSync(current.file, `${JSON.stringify({ t: Date.now(), ...entry })}\n`);
 }
 
-const blockingTasks = () => [...live].filter(([id]) => !persistent.has(id));
+const blockingTasks = () => [...live].filter(([id, t]) => !persistent.has(id) && !orphanTurn(t));
 const agentIdle = () => blockingTasks().length === 0 && Date.now() - lastActivity > IDLE_SETTLE_MS;
 
 function onUpdate(u) {
@@ -200,7 +222,7 @@ function onUpdate(u) {
 	const kind = u.sessionUpdate;
 	if (kind === "config_option_update") keepConfigOptions(u);
 	if (kind === "async_task_spawned") {
-		live.set(u.asyncTaskId, { taskType: u.taskType, name: u.name });
+		live.set(u.asyncTaskId, { taskType: u.taskType, name: u.name, msg: current?.msg.id ?? null });
 		emit({ kind: "task", taskId: u.asyncTaskId, taskType: u.taskType, name: u.name, state: "running" });
 		log(`task ${u.asyncTaskId} (${u.taskType}) spawned${current ? "" : " — no current message"}`);
 	} else if (kind === "async_task_state_update") {
@@ -407,6 +429,7 @@ async function openSession(ctx = null, conv = null, token = null, work = null) {
 		log(`closed the session ${open.key}`);
 		open = null;
 	}
+	forgetSession();
 	const systemPrompt = { mode: "append", content: [{ type: "text", text: PROTOCOL }] };
 	const cwd = cwdOf(ctx);
 	// A named context is a work: its worktree is made by the backend before its
@@ -549,6 +572,9 @@ async function applyEffort(sessionId, requested) {
 	}
 }
 
+// Messages already put back once because the adapter had lost their session.
+const lostSession = new Set();
+
 // ── One message ───────────────────────────────────────────────────────────
 function run(sessionId, msg) {
 	return new Promise((resolve) => {
@@ -562,15 +588,17 @@ function run(sessionId, msg) {
 			segments: [""],
 			allText: "",
 			checked: false,
-			async release(note) {
+			async release(note, auth = true) {
 				if (current?.msg !== msg) return;
 				clearTimeout(current.timer);
 				clearTimeout(current.bgTimer);
 				record({ released: note });
-				emit({ kind: "auth", state: "required" });
 				current = null;
-				authWaitUntil = Date.now() + AUTH_RETRY_MS;
-				authCredentials = credentialsMtime();
+				if (auth) {
+					emit({ kind: "auth", state: "required" });
+					authWaitUntil = Date.now() + AUTH_RETRY_MS;
+					authCredentials = credentialsMtime();
+				}
 				await api("POST", `/runner/messages/${msg.id}/release`, { note });
 				log(`message #${msg.id}: back to pending (${note})`);
 				resolve();
@@ -620,6 +648,25 @@ function run(sessionId, msg) {
 				// the runner waits for a login (the session's ~/.claude, shared with
 				// the terminal's `claude`) before claiming again.
 				if (err.data?.code === AUTH_REQUIRED) return current.release("agent not authenticated: log in with `claude` in this session's terminal");
+				// The adapter no longer has the session: refused before the turn was
+				// queued, so nothing ran. Forget it (the next claim reopens it with
+				// session/resume) and put the message back. Once per message: refused
+				// again right after a reopen, it is `uncertain` with the note.
+				// An error once the turn ran («process exited unexpectedly», -32603)
+				// is not this code and stays `uncertain` below.
+				if (err.data?.code === SESSION_NOT_FOUND && open?.sessionId === sessionId) {
+					log(`message #${msg.id}: the adapter lost session ${sessionId} (${open.key}); reopening it`);
+					open = null;
+					forgetSession();
+					if (!lostSession.has(msg.id)) {
+						lostSession.add(msg.id);
+						return current.release("la sesión ACP ya no estaba en el adaptador (proceso de Claude muerto): no se ejecutó; se reabre", false);
+					}
+					return current.settle({
+						state: "uncertain",
+						note: `la sesión ACP tampoco estaba tras reabrirla: ${err.message}`,
+					});
+				}
 				current.settle({ state: "uncertain", note: `prompt error: ${err.message}` });
 			});
 	});
@@ -759,7 +806,7 @@ async function main() {
 			continue;
 		}
 		// A new runner was installed (backend upgrade): hand over while idle.
-		if (!current && live.size === 0 && selfMtime() !== startedMtime) {
+		if (!current && !holding() && selfMtime() !== startedMtime) {
 			log("runner updated on disk: restarting into the new version");
 			process.exit(0);
 		}
@@ -770,7 +817,7 @@ async function main() {
 		// A session that still has an open task (a process the agent left
 		// running) cannot be closed: the slot takes only the messages of its work
 		// (slot ≥ 2) or of its conversation (slot 1).
-		const keep = open && live.size ? open : null;
+		const keep = open && holding() ? open : null;
 		// Now and then the slot says which work's session it holds: a work no
 		// longer active gets its session closed (below), freeing its processes.
 		const ask = SLOT !== 1 && open && Date.now() - openAskedAt >= OPEN_ASK_MS ? open.ctx : null;
@@ -783,12 +830,21 @@ async function main() {
 		});
 		// Only idle with no open task: a process the agent left running there
 		// wins and the session stays (closing it would kill the process).
-		if (r.status !== 200 && r.release && r.release === open?.ctx && live.size === 0 && !current) {
+		if (r.status !== 200 && r.release && r.release === open?.ctx && !holding() && !current) {
 			await request("session/close", { sessionId: open.sessionId }).catch((err) => log(`close ${open.sessionId}: ${err.message}`));
 			log(`released the session of work ${open.ctx} (no longer active)`);
 			open = null;
+			forgetSession();
 		}
 		const want = r.status === 200 ? sessionOf(r.body) : null;
+		// A task that spawned while the claim was in flight holds this session:
+		// the message of another one goes back to pending (it never left), and
+		// the next claim keeps to this session.
+		if (want && open && keyOf(want.ctx, want.conv) !== open.key && holding()) {
+			await api("POST", `/runner/messages/${r.body.id}/release`, { note: "el slot quedó retenido por una tarea abierta: vuelve a la cola" });
+			log(`message #${r.body.id}: back to pending (a task spawned during the claim holds ${open.key})`);
+			continue;
+		}
 		if (want && keyOf(want.ctx, want.conv) !== open?.key) {
 			try {
 				await openSession(want.ctx, want.conv, r.body.contextToken, r.body.work);

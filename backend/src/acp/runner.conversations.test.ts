@@ -9,11 +9,14 @@
  * start, never closes a session with an open task (the next conversation
  * waits), a message to an agent busy in another topic waits `pending` and
  * runs after, and after a restart the interrupted message is reported on in
- * its own conversation's session.
+ * its own conversation's session. And two defects of the runner (#757): a
+ * prompt refused because the adapter lost the session (-32002) goes back to
+ * pending and runs after a reopen; a `turn` task the adapter opens with no
+ * message running holds nothing and is dropped when the slot changes session.
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import type http from "node:http";
 import { createRequire } from "node:module";
 import type { AddressInfo } from "node:net";
@@ -336,4 +339,46 @@ describe("runner slot 1: one ACP session per conversation (B2)", () => {
 		const b = await settled((await post("rc", "sigo", B)).id);
 		expect(count(b)).toBeGreaterThan(3);
 	}, 90_000);
+});
+
+describe("runner: what the adapter does on its own (#757)", () => {
+	it("a prompt refused because the adapter lost the session goes back to pending and runs after a reopen", async () => {
+		const died = await settled((await post("rc", "morí", A)).id);
+		expect(died.state).toBe("done");
+		await new Promise((ok) => setTimeout(ok, 500)); // the session is gone from the adapter
+		const next = await settled((await post("rc", "después de morir", A)).id);
+		expect(next.state).toBe("done");
+		expect(next.attempts).toBe(2); // refused once (nothing ran), then run in the resumed session
+		expect(count(next)).toBe(count(died) + 1);
+		expect(logs.get("rc")).toContain(`message #${next.id}: back to pending`);
+	}, 60_000);
+
+	it("refused again right after the reopen, the message is uncertain with the note", async () => {
+		const flag = path.join(stateOf("rc"), "test-agent", "lose-sessions");
+		mkdirSync(path.dirname(flag), { recursive: true });
+		writeFileSync(flag, "");
+		try {
+			const m = await settled((await post("rc", "nunca corre", B)).id);
+			expect(m.state).toBe("uncertain");
+			expect(m.note).toContain("tampoco estaba tras reabrirla");
+			expect(m.attempts).toBe(2);
+		} finally {
+			rmSync(flag);
+		}
+		expect((await settled((await post("rc", "vuelve", B)).id)).state).toBe("done");
+	}, 60_000);
+
+	it("a turn the adapter opens with no message running holds nothing: the next message, of another conversation, closes done", async () => {
+		const first = await settled((await post("rc", "turno huérfano", A)).id);
+		expect(first.state).toBe("done");
+		await until("orphan turn", () =>
+			/task turn-\S+ \(turn\) spawned — no current message/.test(logs.get("rc") ?? ""),
+		);
+		const next = await settled((await post("rc", "otro tema", B)).id, 15_000);
+		expect(next.state).toBe("done");
+		expect(logs.get("rc")).toMatch(/dropped task\(s\) with no message of the session left: turn-/);
+		expect(
+			(await call("GET", "/agents")).body.find((x: { name: string }) => x.name === "rc").heldBy,
+		).toEqual([]);
+	}, 60_000);
 });
