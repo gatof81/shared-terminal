@@ -1,0 +1,241 @@
+/* ── Herramientas (3B F4, toolsView.ts) ──
+   The agent's session workbench with the project page lifted off it. The
+   page stays mounted under it — visibility, not display: the topic keeps
+   its layout and its scroll for «‹ Tema» and Back. Nothing here may change
+   the terminal's box: the bar takes the session name's place in the session
+   bar at the height of the view tabs beside it, the strip lives inside the
+   Files / Git overlay, and with Terminal the note sits in the tab row. */
+body.tools-on #project-view {
+  visibility: hidden;
+}
+body.tools-on #terminal-session-name,
+body.tools-on #terminal-status-badge,
+body.tools-on #terminal-session-sub,
+body.tools-on #view-chat-btn {
+  display: none !important;
+}
+
+.tools-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  /* Gives way first: the view tabs and ⋯ keep their size. */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+#terminal-toolbar > .tools-bar {
+  flex-shrink: 1;
+}
+body.tools-on #view-switch {
+  margin-left: auto;
+}
+.tools-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 1 auto;
+  min-width: 2.5rem;
+  max-width: 16rem;
+  height: 26px;
+  padding: 0 6px;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-s);
+  color: var(--c-text-2);
+  font: inherit;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+.tools-back:hover {
+  color: var(--c-text);
+  background: var(--c-surface-2);
+}
+.tools-back-caret {
+  font-size: 1rem;
+  line-height: 1;
+}
+.tools-back-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tools-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 26px;
+  padding: 0 0 0 8px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-s);
+  background: var(--c-bg);
+}
+.tools-field-label {
+  flex: none;
+  font-size: 0.64rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--c-muted);
+}
+.tools-select {
+  min-width: 0;
+  max-width: 14rem;
+  height: 24px;
+  padding: 0 4px;
+  background: transparent;
+  border: 0;
+  color: var(--c-text);
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.tools-select:disabled {
+  color: var(--c-muted);
+  cursor: default;
+}
+.tools-select option {
+  background: var(--c-surface);
+  color: var(--c-text);
+}
+.tools-field:focus-within {
+  outline: 2px solid var(--c-accent);
+  outline-offset: -1px;
+}
+.tools-select:focus {
+  outline: none;
+}
+.tools-field.is-session {
+  opacity: 0.75;
+}
+
+/* The strip: what is being looked at, always (inside the Files / Git overlay). */
+.tools-strip {
+  flex-shrink: 0;
+  padding: 6px 12px;
+  background: var(--c-surface);
+  border-bottom: 1px solid var(--c-border);
+  font-size: 0.8rem;
+  color: var(--c-muted);
+}
+.tools-strip-text {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 14px;
+}
+.tools-strip-kind {
+  color: var(--c-text);
+  font-weight: 600;
+}
+.tools-strip-fact b {
+  font-weight: 400;
+  color: var(--c-text);
+}
+.tools-mono {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+}
+.tools-strip-here {
+  color: var(--c-accent);
+}
+.tools-strip-warn {
+  color: var(--c-warn);
+}
+.tools-strip-topic {
+  color: var(--c-accent);
+  text-decoration: none;
+}
+.tools-strip-topic:hover {
+  text-decoration: underline;
+}
+
+/* With Terminal: the session's note, in the tab row (never a row of its own). */
+.tools-term-note {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.72rem;
+  color: var(--c-muted);
+}
+
+/* The rail's Equipo and Trabajos rows are buttons (a menu, Herramientas). */
+button.rail-row {
+  width: 100%;
+  background: transparent;
+  border: 0;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+button.rail-row:hover {
+  background: var(--c-surface-2);
+}
+button.rail-row:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: -2px;
+}
+
+/* A topic: an agent's face opens its menu; a work's chip, that workspace. */
+.ps-topic .acp-agent-id[data-agent] {
+  cursor: pointer;
+}
+@media (max-width: 768px) {
+  /* The header's row: ☰ · ‹ · Agente · the view tabs · ⋯ — every control 44
+     px tall at most, so the header keeps the height the page's row had. */
+  header .tools-bar {
+    flex: 1 1 auto;
+    gap: 2px;
+  }
+  header .tools-back {
+    flex: none;
+    width: 36px;
+    min-width: 36px;
+    height: 44px;
+    justify-content: center;
+    padding: 0;
+  }
+  header .tools-back-label {
+    display: none;
+  }
+  header .tools-back-caret {
+    font-size: 1.3rem;
+  }
+  header .tools-field {
+    flex: 1 1 auto;
+    height: 40px;
+    padding: 0 0 0 6px;
+  }
+  header .tools-field-label {
+    display: none;
+  }
+  header .tools-select {
+    flex: 1;
+    width: 100%;
+    max-width: none;
+    height: 38px;
+    font-size: 0.9rem;
+  }
+  /* The workspace: a select across the strip's first line. */
+  .tools-strip .tools-field {
+    display: flex;
+    height: 44px;
+    margin-bottom: 6px;
+  }
+  .tools-strip .tools-select {
+    flex: 1;
+    max-width: none;
+    height: 42px;
+    font-size: 0.95rem;
+  }
+  /* Terminal: «Sesión completa» takes the place of history search and font
+     size in the tab row (both stay in the session's own view). */
+  body.tools-on #terminal-search-btn,
+  body.tools-on #font-size-btn {
+    display: none;
+  }
+}

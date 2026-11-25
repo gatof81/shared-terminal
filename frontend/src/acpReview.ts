@@ -37,10 +37,10 @@ export interface ReviewHooks {
 	/** «Escribirle un mensaje nuevo»: a message to `m.to_id` in `m`'s topic. */
 	writeNew: (m: AcpMessage) => void;
 	/**
-	 * The agent's Git / Terminal (Herramientas, 3B F4). Until it is plugged
-	 * in, the agent's session opens in that view.
+	 * The agent's Git / Terminal in Herramientas (3B F4); false when it could
+	 * not open there (no project page up): the agent's session opens in that view.
 	 */
-	tools?: (agent: string, tool: "git" | "terminal") => void;
+	tools?: (agent: string, tool: "git" | "terminal") => boolean;
 }
 
 let hooks: ReviewHooks = { writeNew: () => {} };
@@ -128,8 +128,7 @@ export function openReview(m: AcpMessage, ctx: ReviewContext = {}): void {
 		b.type = "button";
 		b.addEventListener("click", () => {
 			dialog.close();
-			if (hooks.tools) hooks.tools(m.to_id, tool);
-			else {
+			if (!hooks.tools?.(m.to_id, tool)) {
 				const sid = acpSessionOf(m.to_id);
 				if (sid) window.location.hash = routeHash({ sessionId: sid, view: tool, detail: null });
 			}

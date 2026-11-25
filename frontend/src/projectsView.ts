@@ -16,6 +16,7 @@
  */
 
 import {
+	onTopicWork,
 	placeTopicHeader,
 	refusal,
 	resetTopic,
@@ -91,6 +92,14 @@ import {
 } from "./router.js";
 import { renderSessionList, sessionListLoaded } from "./sessionCore.js";
 import { setTitlePage } from "./tabTitle.js";
+import {
+	hideTools,
+	leaveTools,
+	openAgentMenu,
+	openTools,
+	resetTools,
+	showTools,
+} from "./toolsView.js";
 import { button, el } from "./ui.js";
 
 const section = document.getElementById("project-section");
@@ -295,10 +304,22 @@ function syncChat(pid: string, changed: boolean): void {
 	}
 }
 
+/**
+ * Herramientas: the session's workbench comes out from under the page, which
+ * stays mounted — invisible (`visibility`, layout and scroll kept) and inert.
+ */
+function liftPageEl(): void {
+	if (!pageEl) return;
+	document.body.classList.remove("project-page-on");
+	pageEl.hidden = false;
+	pageEl.inert = true;
+}
+
 function showPageEl(): void {
 	if (!pageEl) return;
 	document.body.classList.add("project-page-on");
 	pageEl.hidden = false;
+	pageEl.inert = false;
 	// Keystrokes must not keep going to a terminal the page now covers.
 	const focused = document.activeElement;
 	if (
@@ -337,14 +358,19 @@ const phoneMq = typeof window !== "undefined" ? window.matchMedia?.("(max-width:
 phoneMq?.addEventListener?.("change", () => placeSpace());
 
 function syncSpace(r: ProjectRoute, prevPid: string | null, prevPage: ProjectPage | null): void {
-	const page = r.page === "conversation" ? "conversation" : "home";
-	const topic = page === "conversation" ? (r.conversationId ?? null) : null;
+	const page = r.page === "conversation" || r.page === "tools" ? r.page : "home";
+	// Herramientas keeps the topic it was opened from mounted under it.
+	const topic = page !== "home" ? (r.conversationId ?? null) : null;
 	const topicChanged = topic !== shownTopic || prevPid !== r.projectId;
 	shown = r.projectId;
 	shownPage = page;
 	shownTopic = topic;
 	if (!pageEl) return;
-	showPageEl();
+	if (page === "tools") liftPageEl();
+	else {
+		hideTools({ fromHistory: fromHistory() });
+		showPageEl();
+	}
 	document.body.classList.add("project-space-on");
 	document.body.classList.toggle("ps-on-topic", topic !== null);
 	showRail(r.projectId, topic);
@@ -354,15 +380,22 @@ function syncSpace(r: ProjectRoute, prevPid: string | null, prevPage: ProjectPag
 		// not Back / Forward: ‹ is then the browser's Back.
 		const opener =
 			prevPid === r.projectId && prevPage === "home" && !fromHistory() ? "rail" : "other";
-		mainSlot.replaceChildren(topicPage(r.projectId, topic, opener));
+		place(mainSlot, topicPage(r.projectId, topic, opener));
 	} else {
 		suspendTopic();
-		mainSlot.replaceChildren(homeEl);
+		place(mainSlot, homeEl);
 	}
 	if (pageEl.firstChild !== spaceEl || pageEl.childNodes.length !== 1)
 		pageEl.replaceChildren(spaceEl);
 	placeSpace();
 	paintSpace();
+	if (page === "tools") {
+		// The topic under Herramientas only waits (its place is kept by the DOM).
+		suspendTopic();
+		showTools(r);
+		if (!projectsLoaded()) void loadProjects();
+		return;
+	}
 	openTopicIfWide();
 	if (topicChanged || prevPage !== page) {
 		// The page's heading, for a screen reader (a phone's project screen has
@@ -371,6 +404,15 @@ function syncSpace(r: ProjectRoute, prevPid: string | null, prevPage: ProjectPag
 		if (target?.offsetParent) target.focus({ preventScroll: true });
 		if (!projectsLoaded()) void loadProjects();
 	}
+}
+
+/**
+ * `node` as `slot`'s only child — left where it is when it already is: taking
+ * the thread out of the document and back loses its scroll (Herramientas ⇄
+ * its topic must find the reader where they were).
+ */
+function place(slot: HTMLElement, node: HTMLElement): void {
+	if (slot.firstChild !== node || slot.childNodes.length !== 1) slot.replaceChildren(node);
 }
 
 // ── The topic a wide screen opens ──────────────────────────────────────────
@@ -443,8 +485,10 @@ function placeSpace(): void {
 		railEl.remove();
 		railSlot.replaceChildren(railBody);
 		if (slot) {
-			slot.replaceChildren(shownTopic ? topicHeader : railHead);
-			slot.hidden = false;
+			// Herramientas: the header's row is the session bar's (its tools bar).
+			if (shownPage === "tools") slot.replaceChildren();
+			else slot.replaceChildren(shownTopic ? topicHeader : railHead);
+			slot.hidden = shownPage === "tools";
 		}
 		placeTopicHeader(false);
 	} else {
@@ -461,6 +505,7 @@ function placeSpace(): void {
 
 /** Leaving the space (another kind of page, or no page): rail and topic stop following. */
 function leaveSpace(): void {
+	leaveTools();
 	hideRail();
 	suspendTopic();
 	railEl.remove();
@@ -510,6 +555,7 @@ async function newConversationFlow(pid: string): Promise<void> {
 }
 
 function hidePage(): void {
+	leaveTools();
 	if (shown === null && pageEl?.hidden !== false) return;
 	if (shownPage === "chat") suspendAcpProject();
 	else if (shownPage !== null) leaveSpace();
@@ -518,6 +564,7 @@ function hidePage(): void {
 	document.body.classList.remove("project-page-on");
 	if (pageEl) {
 		pageEl.hidden = true;
+		pageEl.inert = false;
 		pageEl.replaceChildren();
 	}
 	setTitlePage(null);
@@ -754,6 +801,8 @@ function wire(): void {
 		},
 		settings: (opener) =>
 			window.dispatchEvent(new CustomEvent("st:open-user-menu", { detail: { opener } })),
+		agentMenu: (name, opener) => openAgentMenu(name, opener),
+		openWork: (w) => openTools({ agent: w.agent, work: w.id, tool: "git" }),
 		openInbox: (opener) => openInbox(opener),
 	});
 	// Pendientes and «Revisar interrupción» lead into a topic, or — for the
@@ -775,7 +824,9 @@ function wire(): void {
 			if (m.conversation_id && m.project_id) writeInTopic(m.project_id, m.conversation_id, m.to_id);
 			else agentChat(m.to_id);
 		},
+		tools: (agent, tool) => openTools({ agent, work: null, tool }),
 	});
+	onTopicWork((agent, work) => openTools({ agent, work, tool: "git" }));
 	mountInboxButton();
 	newProjectBtn?.addEventListener("click", () => void openCreateProjectDialog());
 	// A session row or the session bar used while the page is up: the page
@@ -785,6 +836,8 @@ function wire(): void {
 			"click",
 			(e) => {
 				if (shown === null) return;
+				// Herramientas IS the session bar's page: its controls stay in it.
+				if (id === "terminal-toolbar" && shownPage === "tools") return;
 				const t = e.target;
 				if (t instanceof Element && t.closest(".session-actions")) return;
 				leaveForSession();
@@ -823,6 +876,7 @@ export function resetProjects(): void {
 	resetAcpProject();
 	resetRail();
 	resetTopic();
+	resetTools();
 	resetInboxPanel();
 	resetInbox();
 	loadError = false;

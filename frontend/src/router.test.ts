@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+	appRouteHash,
 	clear,
 	currentRoute,
 	depth,
 	enableProjectRoutes,
 	fromHistory,
+	mapSessionAddress,
 	navigate,
 	navigateProject,
 	onAddressWrite,
@@ -157,6 +159,24 @@ describe("reads", () => {
 	});
 });
 
+describe("Herramientas over the session (mapSessionAddress)", () => {
+	beforeEach(() => {
+		resetForTests();
+		history.replaceState(null, "", "/");
+	});
+
+	it("writes the tools' session as the tools address, and others as before", () => {
+		const tools = "#/projects/p/tools/dev/~/files/README.md";
+		mapSessionAddress((r) => (r.sessionId === SID ? tools : null));
+		navigate({ sessionId: SID, view: "files", detail: "README.md" });
+		expect(window.location.hash).toBe(tools);
+		expect(currentRoute()).toEqual({ sessionId: SID, view: "files", detail: "README.md" });
+		navigate({ sessionId: "other", view: null, detail: null });
+		expect(window.location.hash).toBe("#/sessions/other");
+		mapSessionAddress(null);
+	});
+});
+
 describe("project routes", () => {
 	const PID = "6b1f2c3d-0000-4000-8000-000000000001";
 
@@ -176,6 +196,39 @@ describe("project routes", () => {
 			{ projectId: PID, page: "conversation" as const, conversationId: "c 1" },
 		])
 			expect(parseProjectRoute(projectRouteHash(r))).toEqual(r);
+	});
+
+	it("parses Herramientas (with and without its topic) and round-trips it", () => {
+		const CID = "0c0c0c0c-0000-4000-8000-000000000009";
+		expect(parseProjectRoute(`#/projects/${PID}/c/${CID}/tools/dev/~/files/src/a%20b.ts`)).toEqual({
+			projectId: PID,
+			page: "tools",
+			conversationId: CID,
+			tools: { agent: "dev", work: null, tool: "files", detail: "src/a b.ts" },
+		});
+		expect(parseProjectRoute(`#/projects/${PID}/tools/dev/ci-cache/git`)).toEqual({
+			projectId: PID,
+			page: "tools",
+			tools: { agent: "dev", work: "ci-cache", tool: "git", detail: null },
+		});
+		for (const r of [
+			{
+				projectId: PID,
+				page: "tools" as const,
+				conversationId: CID,
+				tools: { agent: "arq", work: null, tool: "terminal" as const, detail: "tab-1" },
+			},
+			{
+				projectId: PID,
+				page: "tools" as const,
+				tools: { agent: "dev", work: "w-1", tool: "git" as const, detail: "unstaged:a/b c.ts" },
+			},
+		])
+			expect(parseProjectRoute(projectRouteHash(r))).toEqual(r);
+		// Not a tool; a link with a "." / ".." step in its path is no address.
+		expect(parseProjectRoute(`#/projects/${PID}/tools/dev/~/chat`)).toBeNull();
+		expect(appRouteHash(`#/projects/${PID}/tools/dev/~/files/../x`)).toBeNull();
+		expect(appRouteHash(`#/projects/${PID}/tools/dev/~/git/unstaged:../x`)).toBeNull();
 	});
 
 	it("rejects other shapes", () => {

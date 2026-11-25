@@ -32,6 +32,7 @@ import { highlightCode, languageForFile } from "./highlight.js";
 import { activeSessionId, isMobile, sessions } from "./main.js";
 import { renderMarkdown } from "./markdown.js";
 import { saveBlob } from "./saveBlob.js";
+import { currentWork, inTools, onWorkChange } from "./toolsContext.js";
 import { button, el, stateBox } from "./ui.js";
 import {
 	getView,
@@ -61,6 +62,8 @@ const previewEl = document.getElementById("files-preview")!;
 
 /** Session the cached explorer state below belongs to. */
 let stateSessionId: string | null = null;
+/** …and its workspace: null = the principal one, else a work (toolsContext.ts). */
+let stateWork: string | null = null;
 // Bumped on every session switch; async results carrying an older value
 // are dropped so a slow listing for session A never renders into B.
 let generation = 0;
@@ -129,6 +132,7 @@ onViewChange((next) => {
  * and logout), after viewSwitch has settled which view is up.
  */
 onSessionSync(syncFilesView);
+onWorkChange(syncFilesView);
 
 // Route detail = the selected path (#/sessions/<id>/files/<path>).
 registerRouteDetail("files", {
@@ -142,7 +146,7 @@ function syncFilesView(): void {
 		resetState(null);
 		return;
 	}
-	if (s.sessionId !== stateSessionId) {
+	if (s.sessionId !== stateSessionId || currentWork() !== stateWork) {
 		resetState(s.sessionId);
 		if (isFilesViewActive()) {
 			void loadDir("");
@@ -160,6 +164,7 @@ function resetState(sessionId: string | null): void {
 	previewAbort?.abort();
 	previewAbort = null;
 	stateSessionId = sessionId;
+	stateWork = sessionId === null ? null : currentWork();
 	dirs.clear();
 	expanded.clear();
 	expanded.add("");
@@ -178,7 +183,7 @@ async function loadDir(path: string): Promise<void> {
 	dirs.set(path, { listing: prev?.listing ?? null, loading: true, error: null });
 	renderTree();
 	try {
-		const listing = await listWorkspaceDir(sessionId, path);
+		const listing = await listWorkspaceDir(sessionId, path, stateWork);
 		if (gen !== generation) return;
 		dirs.set(path, { listing, loading: false, error: null });
 	} catch (err) {
@@ -222,7 +227,7 @@ async function openPreview(path: string): Promise<void> {
 	renderPreview();
 	let data: WorkspacePreview;
 	try {
-		data = await previewWorkspaceFile(sessionId, path, signal);
+		data = await previewWorkspaceFile(sessionId, path, signal, stateWork);
 	} catch (err) {
 		if (stale()) return;
 		const httpStatus = err instanceof WorkspaceFsError ? err.status : 0;
@@ -235,7 +240,7 @@ async function openPreview(path: string): Promise<void> {
 	renderPreview();
 	if (data.kind === "image") {
 		try {
-			const blob = await fetchWorkspaceImage(sessionId, path, data.mime, signal);
+			const blob = await fetchWorkspaceImage(sessionId, path, data.mime, signal, stateWork);
 			if (stale()) return;
 			setPreview({
 				status: "loaded",
@@ -346,7 +351,7 @@ async function downloadSelected(path: string): Promise<void> {
 	if (sessionId === null) return;
 	try {
 		showToast(`Downloading ${baseName(path)}…`);
-		const { blob, filename } = await downloadSessionFile(sessionId, path);
+		const { blob, filename } = await downloadSessionFile(sessionId, path, stateWork);
 		saveBlob(blob, filename);
 	} catch (err) {
 		showToast(`Download failed: ${(err as Error).message}`, true);
@@ -414,6 +419,16 @@ function renderTree(): void {
 	const root = dirs.get("");
 	if (!root || (root.loading && !root.listing)) {
 		treeEl.appendChild(stateBox("loading", "Loading files…"));
+		return;
+	}
+	if (
+		root.error &&
+		stateWork !== null &&
+		(root.error.status === 404 || root.error.status === 403)
+	) {
+		// The work is gone (cleaned) or not this session's: a state, never a
+		// retry with another path — the client has no other way into it.
+		treeEl.appendChild(stateBox("info", "Este trabajo ya no está disponible."));
 		return;
 	}
 	if (root.error) {
@@ -550,7 +565,12 @@ treeEl.addEventListener("keydown", (e) => {
 function previewHeader(name: string, meta: string, actions: HTMLElement[]): HTMLElement {
 	const header = el("div", "files-preview-header");
 	header.appendChild(
-		button("‹ Files", "files-btn files-mobile-only", routeBack, "Back to file list"),
+		button(
+			inTools() ? "‹ Archivos" : "‹ Files",
+			"files-btn files-mobile-only",
+			routeBack,
+			inTools() ? "Volver a la lista de archivos" : "Back to file list",
+		),
 	);
 	const title = el("div", "files-preview-title");
 	title.appendChild(el("span", "files-preview-name", name));

@@ -208,6 +208,27 @@ test.describe("visual", () => {
 		await shot(page, "project-topic");
 	});
 
+	test("tools: a work's Git", async ({ app, backend, page }) => {
+		backend.enableConversations();
+		backend.enableWorks();
+		await app.login(
+			"alice",
+			`#/projects/${PROJECT_IDS.hz}/c/${CONV_IDS.ci}/tools/dev/ci-cache/git`,
+		);
+		await expect(page.locator("#git-list")).toContainText("ci.yml");
+		await expect(page.locator("#tools-strip")).toContainText("tema «Optimización de CI»");
+		await shot(page, "tools-git-work");
+	});
+
+	test("tools: Terminal, the whole session", async ({ app, backend, page }) => {
+		backend.enableConversations();
+		backend.enableWorks();
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/c/${CONV_IDS.ci}/tools/dev/~/terminal`);
+		await app.expectTerminalReady();
+		await expect(page.locator(".tools-term-note")).toContainText("Sesión completa");
+		await shot(page, "tools-terminal");
+	});
+
 	test("topic: recipients and their states", async ({ app, backend, page }) => {
 		topicStates(backend);
 		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/c/${CONV_IDS.backend}`);

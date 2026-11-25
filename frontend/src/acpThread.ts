@@ -2575,6 +2575,8 @@ export { agentHue };
 
 function agentId(name: string): HTMLElement {
 	const id = el("span", "acp-msg-who acp-agent-id");
+	// The hook of an agent's menu in a topic (acpConversation.ts).
+	id.dataset.agent = name;
 	id.append(el("span", "acp-avatar", name.slice(0, 1).toUpperCase()), `@${name}`);
 	id.style.setProperty("--acp-hue", String(agentHue(name)));
 	return id;
