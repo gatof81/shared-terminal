@@ -61,41 +61,6 @@ body.ps-gone #project-rail {
   color: var(--c-muted);
   font-size: 0.75rem;
 }
-.rail-inbox {
-  position: relative;
-  display: grid;
-  place-items: center;
-  flex: none;
-  width: 40px;
-  height: 40px;
-  color: var(--c-text-2);
-}
-.rail-inbox svg {
-  width: 20px;
-  height: 20px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.7;
-  stroke-linejoin: round;
-}
-.rail-inbox-count {
-  position: absolute;
-  top: 2px;
-  right: 0;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  border-radius: 999px;
-  background: var(--c-warn);
-  color: #1b1300;
-  font-size: 11px;
-  font-weight: 700;
-  line-height: 18px;
-  text-align: center;
-}
-.rail-inbox-count[hidden] {
-  display: none;
-}
 
 .rail-body {
   display: flex;
@@ -552,10 +517,6 @@ a.rail-row:focus-visible,
   }
   #header-project .rail-project {
     min-height: 44px;
-  }
-  #header-project .rail-inbox {
-    width: 44px;
-    height: 44px;
   }
   .ps-topic {
     padding: 0;

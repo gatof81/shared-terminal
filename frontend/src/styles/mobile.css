@@ -165,7 +165,7 @@
     height: 44px;
   }
   /* A project page: its header row takes the session bar's place in the
-     header (acpProjectChat.placeHeader) — ☰ · title · agents · ⋯ · account.
+     header (projectsView.placeSpace) — ☰ · title · agents · ⋯ · account.
      The bar goes (its tabs and ⋯ act on the session underneath); every
      control is 44 px tall, so the header keeps its height: the terminal
      under the page is not resized on entering or leaving it. */
