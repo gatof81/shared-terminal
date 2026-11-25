@@ -261,6 +261,35 @@ function seedWorkFs(id: string): FsDir {
 	return root;
 }
 
+/** The work «ci-cache»'s change: the «+12 −3» its status lists. */
+const WORK_PATCH = `diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 3bda155..9c41e2d 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -1,9 +1,18 @@
+ name: ci
+ jobs:
+   e2e:
+-    runs-on: ubuntu-latest
+-    steps:
+-      - run: npm ci
++    runs-on: ubuntu-24.04
++    steps:
++      - uses: actions/checkout@v4
++      - uses: actions/cache@v4
++        with:
++          path: |
++            ~/.npm
++            ~/.cache/ms-playwright
++          key: e2e-\${{ hashFiles('frontend/package-lock.json') }}
++          restore-keys: e2e-
++      - run: npm ci --prefer-offline
++      - run: npx playwright install chromium
+       - run: npm run build
+       - run: npm run test:e2e
+   lint:
+`;
+
 const GIT_PATCH = `diff --git a/src/auth.ts b/src/auth.ts
 index 1111111..2222222 100644
 --- a/src/auth.ts
@@ -1425,7 +1454,13 @@ export class MockBackend {
 					return json(200, {
 						path: p,
 						area: url.searchParams.get("area") ?? "unstaged",
-						patch: p === "src/auth.ts" ? GIT_PATCH : "",
+						patch: workRow
+							? p === ".github/workflows/ci.yml"
+								? WORK_PATCH
+								: ""
+							: p === "src/auth.ts"
+								? GIT_PATCH
+								: "",
 						truncated: false,
 						binary: false,
 					});

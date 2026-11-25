@@ -86,12 +86,16 @@ test.describe("Herramientas", () => {
 		await expect(page).toHaveURL(
 			new RegExp(`${escapeRe(toolsAt(CONV_IDS.ci, "dev", "~", "terminal"))}(/tab-1)?$`),
 		);
-		await expect(page.locator("#tab-tools .tools-term-note")).toContainText("Sesión completa");
-		if (!app.mobile) {
-			// Wide, the workspace select stays in the bar, disabled; a phone's is
-			// the strip's first line, which Terminal does not have.
+		const note = page.locator("#tab-tools .tools-term-note");
+		if (app.mobile) {
+			// A phone's workspace select is the strip's first line, which
+			// Terminal does not have: the note says it.
+			await expect(note).toHaveText("Sesión completa");
+		} else {
+			// Wide, the select stays in the bar, disabled, and says it once.
 			await expect(page.locator(".tools-ws")).toBeDisabled();
 			await expect(page.locator(".tools-ws option:checked")).toHaveText("Sesión completa");
+			await expect(note).toHaveText("se abre en ~/workspace");
 		}
 		await expect(strip(page)).toHaveCount(0);
 		await app.expectTerminalReady();
@@ -129,6 +133,10 @@ test.describe("Herramientas", () => {
 			topic(CONV_IDS.ci),
 		);
 		await expect(page.locator("#git-list")).toContainText("ci.yml");
+		// Its change, as a diff.
+		await page.locator("#git-list .git-row", { hasText: "ci.yml" }).click();
+		await expect(page.locator("#git-diff")).toContainText("actions/cache@v4");
+		await expect(page.locator("#git-diff")).not.toContainText("No differences");
 
 		await page.click("#view-files-btn");
 		await expect(page).toHaveURL(urlEnds(toolsAt(CONV_IDS.ci, "dev", "ci-cache", "files")));
@@ -166,17 +174,90 @@ test.describe("Herramientas", () => {
 
 	test("a cleaned work is a state: no retry, no other path", async ({ app, backend, page }) => {
 		await app.login("alice", toolsAt(null, "dev", "old-try", "files"));
-		await expect(page.locator("#files-tree")).toContainText("Este trabajo ya no está disponible");
+		// One state over the whole view: no tree, no preview, no ↻.
+		const gone = (view: string) => page.locator(`#${view}-view .tools-gone-state`);
+		await expect(gone("files")).toContainText("Este trabajo ya no está disponible.");
+		await expect(
+			gone("files").getByRole("button", { name: "Ver workspace principal" }),
+		).toBeVisible();
+		for (const id of ["#files-header", "#files-tree", "#files-preview", "#files-refresh-btn"])
+			await expect(page.locator(id)).toBeHidden();
 		await expect(strip(page)).toContainText("Trabajo old-try");
 		await expect(strip(page)).toContainText("ya no está disponible");
+		await expect(strip(page)).toContainText("puertos —");
+		// The header as in all of Herramientas: on a phone only ‹ (no ☰), and
+		// the agent's name whole.
+		await expect(page.locator(".tools-back")).toBeVisible();
+		await expect(page.locator(".tools-agent")).toHaveValue("dev");
+		if (app.mobile) await expect(page.locator("#sidebar-toggle")).toBeHidden();
+		const agentBox = await page.locator(".tools-agent").boundingBox();
+		expect(agentBox?.width ?? 0).toBeGreaterThan(56);
 		await page.click("#view-git-btn");
-		await expect(page.locator("#git-list")).toContainText("Este trabajo ya no está disponible");
+		await expect(gone("git")).toContainText("Este trabajo ya no está disponible.");
+		for (const id of ["#git-header", "#git-list", "#git-diff"])
+			await expect(page.locator(id)).toBeHidden();
 		await page.waitForTimeout(300);
 		expect(backend.workReads).toEqual([
 			"/fs/list?work=old-try",
 			"/git/status?work=old-try",
 			"/git/log?work=old-try",
 		]);
+		// «Ver workspace principal»: the same agent and tool, no work.
+		await gone("git").getByRole("button", { name: "Ver workspace principal" }).click();
+		await expect(page).toHaveURL(urlEnds(toolsAt(null, "dev", "~", "git")));
+		await expect(gone("git")).toHaveCount(0);
+		await expect(page.locator("#git-list")).toContainText("auth.ts");
+		await expect(strip(page)).toContainText("Workspace principal");
+		expect(backend.workReads).toHaveLength(3);
+		expect(app.errors).toEqual([]);
+	});
+
+	test("a deep link is the same Herramientas: on a phone only ‹, the agent named whole", async ({
+		app,
+		page,
+	}) => {
+		await app.login("alice", toolsAt(CONV_IDS.ci, "dev", "ci-cache", "git"));
+		await expect(strip(page)).toContainText("Trabajo ci-cache");
+		await expect(page.locator(".tools-back")).toBeVisible();
+		if (app.mobile) await expect(page.locator("#sidebar-toggle")).toBeHidden();
+		const agentBox = await page.locator(".tools-agent").boundingBox();
+		expect(agentBox?.width ?? 0).toBeGreaterThan(56);
+		// The tool tabs: icons only on a phone, each named (aria-label and title).
+		for (const name of ["Terminal", "Files", "Git"]) {
+			const tab = page.locator("#view-switch").getByRole("button", { name, exact: true });
+			await expect(tab).toBeVisible();
+			await expect(tab).toHaveAttribute("title", name);
+		}
+		expect(app.errors).toEqual([]);
+	});
+
+	test("a work is asked of its agent's session only, never of the one on screen", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		const urls = apiUrls(page);
+		const dev = backend.acpAgents.find((a) => a.name === "dev")?.sessionId;
+		await app.login("alice", topic(CONV_IDS.ui));
+		// Another agent's session under the page: @arq's Files.
+		await page.locator(".ps-topic-head .pv-menu-btn").click();
+		await page.getByRole("menuitem", { name: /^Herramientas de @arq/ }).click();
+		await app.expectView("files");
+		await expect(page.locator("#files-tree")).toContainText("README.md");
+		// Then a work of @dev's, straight from the address.
+		await page.evaluate(
+			(h) => {
+				location.hash = h;
+			},
+			toolsAt(CONV_IDS.ui, "dev", "ci-cache", "files"),
+		);
+		await expect(strip(page)).toContainText("Trabajo ci-cache");
+		await expect(page.locator("#files-tree")).toContainText(".github");
+		await page.waitForTimeout(300);
+		const workUrls = urls.filter((u) => u.includes("work="));
+		expect(workUrls.length).toBeGreaterThan(0);
+		for (const u of workUrls) expect(u).toContain(`/sessions/${dev}/`);
+		await expect(page.locator(".tools-gone-state")).toHaveCount(0);
 		expect(app.errors).toEqual([]);
 	});
 
