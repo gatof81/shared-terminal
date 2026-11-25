@@ -593,9 +593,10 @@ test.describe("a topic whose rows grow after they were placed", () => {
 
 	test("a reader at the end stays at the end", async ({ app, backend, page }) => {
 		await open(app, backend, page);
-		expect(await gap(page)).toBeLessThan(2);
+		await expect.poll(() => gap(page)).toBeLessThan(2);
 		await grow(page);
-		expect(await gap(page)).toBeLessThan(2);
+		// Polled: WebKit reports the rows' new size a few frames late.
+		await expect.poll(() => gap(page)).toBeLessThan(2);
 		expect(app.errors).toEqual([]);
 	});
 
@@ -618,10 +619,12 @@ test.describe("a topic whose rows grow after they were placed", () => {
 			},
 			await rowTop(),
 		);
-		await frames(page);
+		// The thread took the scroll as the reader's (its event can come a few
+		// frames late in WebKit): the end button shows.
+		await expect(page.locator("#project-view .ps-topic .chat-end")).toBeVisible();
 		const top = await rowTop();
 		await grow(page);
-		expect(Math.abs((await rowTop()) - top)).toBeLessThanOrEqual(1);
+		await expect.poll(async () => Math.abs((await rowTop()) - top)).toBeLessThanOrEqual(1);
 		expect(await gap(page)).toBeGreaterThan(60);
 		expect(app.errors).toEqual([]);
 	});
@@ -641,8 +644,8 @@ test.describe("a topic whose rows grow after they were placed", () => {
 			);
 		const before = await top();
 		await grow(page);
+		await expect.poll(async () => Math.abs((await top()) - before)).toBeLessThanOrEqual(1);
 		await expect(divider).toBeInViewport();
-		expect(Math.abs((await top()) - before)).toBeLessThanOrEqual(1);
 		expect(app.errors).toEqual([]);
 	});
 });
