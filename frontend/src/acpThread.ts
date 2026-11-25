@@ -389,7 +389,12 @@ export class AcpThread {
 				// "Ir al final" scrolling smoothly: its own steps are not the reader moving up.
 				if (this.endBtn.jumping) {
 					this.atBottom = true;
-					if (away < END_SLACK) this.renderPill();
+					// Arrived: what the end shows is seen. The arrival can be the
+					// jump's last scroll event (WebKit sends none after it).
+					if (away < END_SLACK) {
+						this.renderPill();
+						this.noteSeenSoon();
+					}
 					return;
 				}
 				// A reader at the end can only leave it upwards. A scroll event
