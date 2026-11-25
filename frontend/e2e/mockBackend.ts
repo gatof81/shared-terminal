@@ -138,6 +138,8 @@ export interface MockAcpMessage {
 	client_id: string | null;
 	/** v27: the topic (null: the Archive). */
 	conversation_id: string | null;
+	/** The work it runs in (`st send --work`), if any. */
+	context?: string | null;
 	team?: number | null;
 	reviewed_at?: string | null;
 	recovery_of?: number | null;
@@ -238,6 +240,26 @@ function seedFs(): FsDir {
 	};
 }
 
+/** A work's worktree: the workspace's files plus what the work changed. */
+function seedWorkFs(id: string): FsDir {
+	const root = seedFs();
+	root.entries[".github"] = {
+		type: "dir",
+		entries: {
+			workflows: {
+				type: "dir",
+				entries: {
+					"ci.yml": {
+						type: "file",
+						content: `# ${id}\nname: ci\njobs:\n  e2e:\n    steps:\n      - uses: actions/cache@v4\n`,
+					},
+				},
+			},
+		},
+	};
+	return root;
+}
+
 const GIT_PATCH = `diff --git a/src/auth.ts b/src/auth.ts
 index 1111111..2222222 100644
 --- a/src/auth.ts
@@ -332,6 +354,8 @@ export class MockBackend {
 	/** Every `POST /acp/conversations/:id/read` body's `at`, by topic, in order. */
 	readMarks: Record<string, string[]> = {};
 	acpWorks: Array<Record<string, unknown>> = [];
+	/** Every Files / Git request that named a work (`<rest>?work=<id>`), in order. */
+	workReads: string[] = [];
 	private convCreations = new Map<string, string>();
 	private convSeq = 10;
 
@@ -498,6 +522,45 @@ export class MockBackend {
 		dev.pending = 1;
 		dev.queue = [{ id: queued.id, conversationId: CONV_IDS.ui, work: null }];
 		void ci;
+	}
+
+	/**
+	 * Works (3B F4): @dev's «ci-cache», active, from «Optimización de CI» (it
+	 * works there now), and «old-try», cleaned (its worktree is gone: Files and
+	 * Git answer 404 for it).
+	 */
+	enableWorks(): void {
+		const work = (id: string, state: string, extra: Record<string, unknown> = {}) => ({
+			id,
+			agent: "dev",
+			projectId: PROJECT_IDS.hz,
+			conversationId: null,
+			branch: `work/${id}`,
+			dir: `/home/developer/workspace/.st/ctx/${id}`,
+			baseSha: "3bda155e0c1d2a4b",
+			portBase: 20000,
+			state,
+			note: null,
+			createdBy: "dev",
+			createdAt: iso(700),
+			closedAt: null,
+			cleanedAt: null,
+			...extra,
+		});
+		this.acpWorks = [
+			work("ci-cache", "active", { conversationId: CONV_IDS.ci }),
+			work("old-try", "cleaned", {
+				portBase: 20100,
+				closedAt: iso(300),
+				cleanedAt: iso(350),
+			}),
+		];
+		const dev = this.acpAgents.find((a) => a.name === "dev")!;
+		dev.runningIn = (dev.runningIn ?? []).map((r) =>
+			r.conversationId === CONV_IDS.ci ? { ...r, work: "ci-cache" } : r,
+		);
+		for (const m of this.acpMessages)
+			if (m.conversation_id === CONV_IDS.ci && m.state === "running") m.context = "ci-cache";
 	}
 
 	private convView(c: MockConversation) {
@@ -1157,11 +1220,28 @@ export class MockBackend {
 			if (rest === "/bootstrap-log") return json(200, { log: null });
 			if (!own) return json(404, { error: "Session not found" });
 
+			// ── a work (`work=<id>`, 3B F4): its worktree is the root, and only
+			// for a work of THIS session's agent that is not cleaned — else the
+			// same 404 as a missing session (the real backend's workRoot.ts).
+			const workId = url.searchParams.get("work");
+			let workRoot: FsDir | null = null;
+			let workRow: Record<string, unknown> | null = null;
+			if (workId !== null && (rest.startsWith("/fs/") || rest.startsWith("/git/"))) {
+				const agent = this.acpAgents.find((a) => a.sessionId === id);
+				workRow =
+					this.acpWorks.find(
+						(w) => w.id === workId && w.agent === agent?.name && w.state !== "cleaned",
+					) ?? null;
+				this.workReads.push(`${rest}?work=${workId}`);
+				if (!workRow) return json(404, { error: "Session not found" });
+				workRoot = seedWorkFs(workId);
+			}
+
 			// ── files ──
 			const fs = /^\/fs\/(list|preview|raw)$/.exec(rest);
 			if (fs) {
 				const rel = url.searchParams.get("path") ?? "";
-				const node = this.resolve(rel);
+				const node = this.resolve(rel, workRoot ?? undefined);
 				if (!node) return json(404, { error: "Not found" });
 				if (node.restricted) return json(403, { error: "Restricted path" });
 				if (fs[1] === "list") {
@@ -1196,6 +1276,33 @@ export class MockBackend {
 			if (rest.startsWith("/git/")) {
 				if (s.status !== "running") {
 					return json(409, { error: "Session is not running", code: "session-not-running" });
+				}
+				if (rest === "/git/status" && workRow) {
+					return json(200, {
+						repo: true,
+						root: "",
+						truncated: false,
+						branch: workRow.branch,
+						detached: false,
+						head: "9c41e2d000",
+						upstream: null,
+						ahead: null,
+						behind: null,
+						changes: [
+							{
+								area: "unstaged",
+								status: "M",
+								xy: " M",
+								path: ".github/workflows/ci.yml",
+								oldPath: null,
+								additions: 12,
+								deletions: 3,
+								binary: false,
+								restricted: false,
+							},
+						],
+						work: workRow,
+					});
 				}
 				if (rest === "/git/status") {
 					return json(200, {
@@ -1353,8 +1460,8 @@ export class MockBackend {
 		};
 	}
 
-	private resolve(rel: string): FsNode | null {
-		let node: FsNode = this.fs;
+	private resolve(rel: string, root: FsDir = this.fs): FsNode | null {
+		let node: FsNode = root;
 		for (const part of rel.split("/").filter(Boolean)) {
 			if (node.type !== "dir") return null;
 			const next: FsNode | undefined = node.entries[part];

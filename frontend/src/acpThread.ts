@@ -1221,8 +1221,15 @@ export class AcpThread {
 		meta.title = `Mensaje #${m.id}${m.finished_at ? ` · terminó ${time(m.finished_at)}` : ""}`;
 		head.append(name, this.badge(m));
 		// Two works of one agent run at once: the tag tells their messages apart.
+		// In a topic it opens that workspace in Herramientas (acpConversation.ts).
 		const work = workTag(m);
-		if (work) head.append(el("span", "acp-msg-work", work));
+		if (work && m.context) {
+			const chip = el("button", "acp-msg-work", work);
+			chip.type = "button";
+			chip.dataset.agent = m.to_id;
+			chip.dataset.work = m.context;
+			head.append(chip);
+		}
 		head.append(meta);
 		sub.append(head, ...this.outcome(m));
 		return sub;
@@ -1957,6 +1964,8 @@ export { agentHue };
 
 function agentId(name: string): HTMLElement {
 	const id = el("span", "acp-msg-who acp-agent-id");
+	// The hook of an agent's menu in a topic (acpConversation.ts).
+	id.dataset.agent = name;
 	id.append(el("span", "acp-avatar", name.slice(0, 1).toUpperCase()), `@${name}`);
 	id.style.setProperty("--acp-hue", String(agentHue(name)));
 	return id;

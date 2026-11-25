@@ -232,7 +232,7 @@ export function setRecipient(
 
 /** The work a message runs in, as its chat tag; null for the agent's default context. */
 export function workTag(m: Pick<AcpMessage, "context">): string | null {
-	return m.context ? `trabajo ${m.context}` : null;
+	return m.context ? `⎇ ${m.context}` : null;
 }
 
 /** Insert or replace by id, keeping id order. */

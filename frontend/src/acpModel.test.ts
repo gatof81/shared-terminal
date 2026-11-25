@@ -443,7 +443,7 @@ describe("recipients from the menu: the leading mentions of the text", () => {
 
 describe("workTag", () => {
 	it("tags a work's message and leaves the default context alone", () => {
-		expect(workTag({ context: "e2-work-tag" })).toBe("trabajo e2-work-tag");
+		expect(workTag({ context: "e2-work-tag" })).toBe("⎇ e2-work-tag");
 		expect(workTag({ context: null })).toBeNull();
 		expect(workTag({})).toBeNull();
 	});

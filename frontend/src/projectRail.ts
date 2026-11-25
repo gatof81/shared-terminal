@@ -27,7 +27,7 @@ import {
 } from "./api.js";
 import { openActionMenu } from "./components/actionMenu.js";
 import { projectName, projects } from "./projectDirectory.js";
-import { navigateProject, projectRouteHash, routeHash } from "./router.js";
+import { navigateProject, projectRouteHash } from "./router.js";
 import { el, syncChildren } from "./ui.js";
 
 const POLL_MS = 15_000;
@@ -42,6 +42,10 @@ export interface RailActions {
 	newAgent: (pid: string, opener: HTMLElement) => void;
 	sessions: (opener: HTMLElement) => void;
 	settings: (opener: HTMLElement) => void;
+	/** An agent's menu: Files · Git · Terminal · its works (toolsView.ts). */
+	agentMenu: (name: string, opener: HTMLElement) => void;
+	/** A work's row: Herramientas on that work. */
+	openWork: (work: AcpWork) => void;
 }
 
 let actions: RailActions | null = null;
@@ -77,6 +81,11 @@ export function onRailChange(fn: () => void): void {
 
 export function railAgents(): readonly AcpAgentInfo[] {
 	return agents;
+}
+
+/** Every work of the owner's agents, as last read (Herramientas' workspaces). */
+export function railWorks(): readonly AcpWork[] {
+	return works;
 }
 
 /** A topic of the shown project as its list says (live or archived), if known. */
@@ -599,11 +608,13 @@ function convStatus(c: AcpConversation): { label: string; tone: string } | null 
 
 function agentRow(a: AcpAgentInfo, st: { label: string; tone: string }): HTMLElement {
 	const li = el("li");
-	// F1: the agent's session (its Terminal, Files, Git); its menu of tools is F4.
-	const link = el("a", "rail-row rail-agent");
-	link.href = routeHash({ sessionId: a.sessionId, view: null, detail: null });
+	// Its menu: Files · Git · Terminal of its session, and its works (F4).
+	const link = el("button", "rail-row rail-agent");
+	link.type = "button";
+	link.setAttribute("aria-haspopup", "menu");
+	link.addEventListener("click", () => actions?.agentMenu(a.name, link));
 	link.style.setProperty("--acp-hue", String(agentHue(a.name)));
-	link.title = `Abrir la sesión de @${a.name}`;
+	link.title = `Herramientas de @${a.name}`;
 	const face = el("span", "acp-avatar rail-face", a.name.slice(0, 1).toUpperCase());
 	face.setAttribute("aria-hidden", "true");
 	face.append(el("span", `rail-dot tone-${st.tone}`));
@@ -618,14 +629,20 @@ function agentRow(a: AcpAgentInfo, st: { label: string; tone: string }): HTMLEle
 }
 
 function workRow(w: AcpWork, words: string): HTMLElement {
-	const li = el("li", "rail-row rail-work");
-	li.dataset.work = w.id;
+	const li = el("li");
+	// Its workspace in Herramientas (its Git first: what the work changed).
+	const b = el("button", "rail-row rail-work");
+	b.type = "button";
+	b.dataset.work = w.id;
+	b.title = `Abrir el trabajo ${w.id} en Herramientas`;
+	b.addEventListener("click", () => actions?.openWork(w));
 	const text = el("span", "rail-row-text");
 	text.append(
 		el("span", "rail-row-title rail-mono", w.id),
 		el("span", `rail-row-sub${words === "en curso" ? " tone-busy" : ""}`, `@${w.agent} · ${words}`),
 	);
-	li.append(text);
+	b.append(text);
+	li.append(b);
 	return li;
 }
 

@@ -1563,8 +1563,11 @@ export async function uploadSessionFiles(
 export async function downloadSessionFile(
 	sessionId: string,
 	relPath: string,
+	work: string | null = null,
 ): Promise<{ blob: Blob; filename: string }> {
-	const res = await apiFetch(`/sessions/${sessionId}/files?path=${encodeURIComponent(relPath)}`);
+	const res = await apiFetch(
+		`/sessions/${sessionId}/files?path=${encodeURIComponent(relPath)}${workQuery(work)}`,
+	);
 	if (!res.ok) {
 		const body = await res.json().catch(() => ({}));
 		throw new Error(body.error ?? `Download failed (${res.status})`);
@@ -1614,14 +1617,24 @@ export class WorkspaceFsError extends Error {
 	}
 }
 
+/**
+ * `&work=<id>` (3B F4): the request reads that work's worktree. Only the id
+ * travels — never a path under `.st/`; the backend proves the work is this
+ * session's and builds the root itself (routes/workRoot.ts).
+ */
+function workQuery(work: string | null): string {
+	return work === null ? "" : `&work=${encodeURIComponent(work)}`;
+}
+
 async function workspaceFsFetch(
 	sessionId: string,
 	endpoint: string,
 	relPath: string,
 	signal?: AbortSignal,
+	work: string | null = null,
 ): Promise<Response> {
 	const res = await apiFetch(
-		`/sessions/${encodeURIComponent(sessionId)}/fs/${endpoint}?path=${encodeURIComponent(relPath)}`,
+		`/sessions/${encodeURIComponent(sessionId)}/fs/${endpoint}?path=${encodeURIComponent(relPath)}${workQuery(work)}`,
 		{ signal },
 	);
 	if (!res.ok) {
@@ -1634,16 +1647,18 @@ async function workspaceFsFetch(
 export async function listWorkspaceDir(
 	sessionId: string,
 	relPath: string,
+	work: string | null = null,
 ): Promise<WorkspaceListing> {
-	return (await workspaceFsFetch(sessionId, "list", relPath)).json();
+	return (await workspaceFsFetch(sessionId, "list", relPath, undefined, work)).json();
 }
 
 export async function previewWorkspaceFile(
 	sessionId: string,
 	relPath: string,
 	signal?: AbortSignal,
+	work: string | null = null,
 ): Promise<WorkspacePreview> {
-	return (await workspaceFsFetch(sessionId, "preview", relPath, signal)).json();
+	return (await workspaceFsFetch(sessionId, "preview", relPath, signal, work)).json();
 }
 
 /** Image bytes for an inline preview. The Blob is re-typed with the mime
@@ -1653,8 +1668,9 @@ export async function fetchWorkspaceImage(
 	relPath: string,
 	mime: string,
 	signal?: AbortSignal,
+	work: string | null = null,
 ): Promise<Blob> {
-	const res = await workspaceFsFetch(sessionId, "raw", relPath, signal);
+	const res = await workspaceFsFetch(sessionId, "raw", relPath, signal, work);
 	return new Blob([await res.arrayBuffer()], { type: mime });
 }
 
@@ -1743,22 +1759,31 @@ async function gitFetch(
 	return res;
 }
 
+/** `dir` and `work` are exclusive on the backend: with a work, its worktree is the root. */
+function gitWhere(dir: string, work: string | null): Record<string, string> {
+	return work !== null ? { work } : dir ? { dir } : {};
+}
+
 export async function fetchGitStatus(
 	sessionId: string,
 	dir: string,
 	signal?: AbortSignal,
+	work: string | null = null,
 ): Promise<GitStatus> {
-	return (await gitFetch(sessionId, "status", dir ? { dir } : {}, signal)).json();
+	return (await gitFetch(sessionId, "status", gitWhere(dir, work), signal)).json();
 }
 
 export async function fetchGitDiff(
 	sessionId: string,
-	req: { path: string; area: GitArea; oldPath: string | null; dir: string },
+	req: { path: string; area: GitArea; oldPath: string | null; dir: string; work?: string | null },
 	signal?: AbortSignal,
 ): Promise<GitDiff> {
-	const params: Record<string, string> = { path: req.path, area: req.area };
+	const params: Record<string, string> = {
+		path: req.path,
+		area: req.area,
+		...gitWhere(req.dir, req.work ?? null),
+	};
 	if (req.oldPath !== null) params.oldPath = req.oldPath;
-	if (req.dir) params.dir = req.dir;
 	return (await gitFetch(sessionId, "diff", params, signal)).json();
 }
 
@@ -1766,8 +1791,9 @@ export async function fetchGitLog(
 	sessionId: string,
 	dir: string,
 	signal?: AbortSignal,
+	work: string | null = null,
 ): Promise<GitCommit[]> {
-	const body = await (await gitFetch(sessionId, "log", dir ? { dir } : {}, signal)).json();
+	const body = await (await gitFetch(sessionId, "log", gitWhere(dir, work), signal)).json();
 	return body.commits;
 }
 
@@ -1985,6 +2011,11 @@ export interface AcpWork {
 	projectId: string | null;
 	conversationId: string | null;
 	branch: string;
+	/** In the container: `/home/developer/workspace/.st/ctx/<id>`. */
+	dir?: string;
+	baseSha?: string | null;
+	/** Its ports: portBase … portBase+99. */
+	portBase?: number | null;
 	state: string;
 	createdAt: string;
 	closedAt: string | null;

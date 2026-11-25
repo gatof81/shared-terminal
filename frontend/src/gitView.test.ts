@@ -275,8 +275,8 @@ describe("view switching", () => {
 		expect(api.fetchGitStatus).not.toHaveBeenCalled();
 		$("view-git-btn").click();
 		await flush();
-		expect(api.fetchGitStatus).toHaveBeenCalledWith("s1", "");
-		expect(api.fetchGitLog).toHaveBeenCalledWith("s1", "");
+		expect(api.fetchGitStatus).toHaveBeenCalledWith("s1", "", undefined, null);
+		expect(api.fetchGitLog).toHaveBeenCalledWith("s1", "", undefined, null);
 	});
 
 	it("keeps a user-chosen Git view on a stopped session instead of forcing Files", async () => {
@@ -343,7 +343,7 @@ describe("status states", () => {
 		api.fetchGitStatus.mockResolvedValueOnce({ ...CLEAN, root: "app" });
 		buttonNamed($("git-list"), "app")?.click();
 		await flush();
-		expect(api.fetchGitStatus).toHaveBeenLastCalledWith("s1", "app");
+		expect(api.fetchGitStatus).toHaveBeenLastCalledWith("s1", "app", undefined, null);
 		expect($("git-summary").textContent).toContain("app");
 		expect($("git-list").textContent).toContain("Working tree clean");
 	});
@@ -407,6 +407,7 @@ describe("diff", () => {
 			area: "unstaged",
 			oldPath: null,
 			dir: "",
+			work: null,
 		});
 		expect(rowFor("unstaged:src/app.ts")?.classList.contains("selected")).toBe(true);
 		const rows = [...document.querySelectorAll<HTMLElement>(".git-diff-row")];
@@ -445,6 +446,7 @@ describe("diff", () => {
 			area: "staged",
 			oldPath: "docs/a.md",
 			dir: "app",
+			work: null,
 		});
 	});
 
@@ -462,12 +464,13 @@ describe("diff", () => {
 		api.fetchGitStatus.mockResolvedValueOnce({ ...DIRTY, root: "app" });
 		vs.applyRouteView("git", gv.gitDetail("app", "staged", "docs/b.md"));
 		await flush();
-		expect(api.fetchGitStatus).toHaveBeenLastCalledWith("s1", "app");
+		expect(api.fetchGitStatus).toHaveBeenLastCalledWith("s1", "app", undefined, null);
 		expect(api.fetchGitDiff).toHaveBeenLastCalledWith("s1", {
 			path: "docs/b.md",
 			area: "staged",
 			oldPath: "docs/a.md",
 			dir: "app",
+			work: null,
 		});
 	});
 
@@ -615,6 +618,7 @@ describe("diff", () => {
 			area: "unstaged",
 			oldPath: null,
 			dir: "",
+			work: null,
 		});
 		expect(rowFor("unstaged:src/app.ts")?.classList.contains("selected")).toBe(true);
 	});
@@ -663,8 +667,8 @@ describe("diff", () => {
 			binary: false,
 		});
 		await flush();
-		expect(api.fetchGitStatus).toHaveBeenLastCalledWith("s2", "");
-		expect(api.fetchGitLog).toHaveBeenLastCalledWith("s2", "");
+		expect(api.fetchGitStatus).toHaveBeenLastCalledWith("s2", "", undefined, null);
+		expect(api.fetchGitLog).toHaveBeenLastCalledWith("s2", "", undefined, null);
 		expect($("git-list").textContent).toContain("Working tree clean");
 		expect($("git-list").textContent).toContain("feat: thing");
 		// The old diff's result was dropped, not rendered into s2.
@@ -819,7 +823,7 @@ describe("sessions", () => {
 		api.fetchGitStatus.mockResolvedValue(CLEAN);
 		selectSession("s2");
 		await flush();
-		expect(api.fetchGitStatus).toHaveBeenLastCalledWith("s2", "");
+		expect(api.fetchGitStatus).toHaveBeenLastCalledWith("s2", "", undefined, null);
 		expect($("git-list").textContent).toContain("Working tree clean");
 		expect($("git-diff").textContent).toContain("Select a changed file");
 		expect(rowFor("unstaged:src/app.ts")).toBeUndefined();
@@ -848,7 +852,7 @@ describe("sessions", () => {
 		expect($("git-view").hidden).toBe(true);
 		expect(vs.getView()).toBe("terminal");
 		await openGit("s3");
-		expect(api.fetchGitStatus).toHaveBeenLastCalledWith("s3", "");
+		expect(api.fetchGitStatus).toHaveBeenLastCalledWith("s3", "", undefined, null);
 	});
 });
 

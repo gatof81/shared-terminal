@@ -24,6 +24,7 @@ import {
 } from "./projectRail.js";
 import { depth, navigateProject, projectRouteHash } from "./router.js";
 import { setTitlePage } from "./tabTitle.js";
+import { openAgentMenu, openTools } from "./toolsView.js";
 import { button, el, syncChildren } from "./ui.js";
 
 const TITLE_MAX = 120;
@@ -60,6 +61,20 @@ let cid: string | null = null;
 let state: ThreadState | null = null;
 /** Whether the person reached this topic from the project's rail (‹ is then Back). */
 let fromRail = false;
+
+// An agent's avatar or name in the thread opens its menu (Files · Git ·
+// Terminal · its works); a work's chip `⎇ <id>` opens that workspace.
+thread.root.addEventListener("click", (e) => {
+	const t = e.target;
+	if (!(t instanceof Element)) return;
+	const chip = t.closest<HTMLElement>(".acp-msg-work[data-work]");
+	if (chip?.dataset.agent && chip.dataset.work) {
+		openTools({ agent: chip.dataset.agent, work: chip.dataset.work, tool: "git" });
+		return;
+	}
+	const who = t.closest<HTMLElement>(".acp-agent-id[data-agent]");
+	if (who?.dataset.agent) openAgentMenu(who.dataset.agent, who);
+});
 
 thread.onState = (s) => {
 	state = s;
@@ -177,6 +192,12 @@ function openMenu(): void {
 		title: c.title,
 		opener: menuBtn,
 		items: [
+			// Herramientas: the agents of the project, the ones working here first.
+			...teamForTools().map((name) => ({
+				id: `t:${name}`,
+				label: `Herramientas de @${name}`,
+				hint: "Files · Git · Terminal",
+			})),
 			{ id: "rename", label: "Renombrar" },
 			{
 				id: "archive",
@@ -186,10 +207,19 @@ function openMenu(): void {
 			},
 		],
 		onPick: (id) => {
-			if (id === "rename") void renameTopic(c);
+			if (id.startsWith("t:")) openTools({ agent: id.slice(2), work: null, tool: "files" });
+			else if (id === "rename") void renameTopic(c);
 			else void archiveTopic(c);
 		},
 	});
+}
+
+/** The project's agents, the ones working in this topic first. */
+function teamForTools(): string[] {
+	const team = railAgents().filter((a) => a.projectId === pid);
+	const here = (a: (typeof team)[number]) =>
+		a.runningIn?.some((r) => r.conversationId === cid) === true;
+	return [...team.filter(here), ...team.filter((a) => !here(a))].map((a) => a.name);
 }
 
 function titleProblem(v: string): string | null {

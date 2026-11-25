@@ -1,5 +1,5 @@
 import { expect, test } from "./fixtures.js";
-import { PROJECT_IDS } from "./mockBackend.js";
+import { CONV_IDS, PROJECT_IDS, PROJECT_SESSION_IDS } from "./mockBackend.js";
 
 /**
  * The terminal invariant (docs/design/ui-unificada.md §5.1): switching
@@ -95,6 +95,82 @@ test.describe("terminal invariant", () => {
 		expect(sock.closed, "the attach stayed open").toBe(false);
 		expect(sock.sent.length - framesBefore, "no frame of any kind (no resize)").toBe(0);
 		expect(await page.locator(".tab-pane.active .xterm-rows > div").count()).toBe(rowsBefore);
+		expect(app.errors).toEqual([]);
+	});
+
+	test("topic ⇄ Herramientas ⇄ menus: no resize, no new socket; another agent is another attach", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.enableConversations();
+		backend.enableWorks();
+		const topicHash = `#/projects/${PROJECT_IDS.hz}/c/${CONV_IDS.ci}`;
+		await app.login("alice", topicHash);
+		await expect(page.locator("#ps-topic-title")).toHaveText("Optimización de CI");
+		const menu = page.locator('[role="menu"].action-menu');
+		const agentMenu = async () => {
+			await page.locator('#project-view .acp-agent-id[data-agent="dev"]').first().click();
+			await expect(menu).toBeVisible();
+		};
+		// Herramientas of @dev, Terminal: its session attaches — once.
+		await agentMenu();
+		await menu.getByRole("menuitem", { name: /^Terminal de la sesión/ }).click();
+		await app.expectTerminalReady();
+		await page.waitForTimeout(400);
+		const sockets = backend.terminalSockets.length;
+		const sock = backend.terminalSockets.find(
+			(s) => s.sessionId === PROJECT_SESSION_IDS.developer2 && !s.closed,
+		)!;
+		expect(sock).toBeTruthy();
+		const framesBefore = sock.sent.length;
+		const rowsBefore = await page.locator(".tab-pane.active .xterm-rows > div").count();
+
+		// «‹ Tema» and Forward; Back and Forward.
+		await page.locator(".tools-back").click();
+		await expect(page.locator("#ps-topic-title")).toBeVisible();
+		await page.goForward();
+		await expect(page.locator(".tools-bar")).toBeVisible();
+		await page.goBack();
+		await expect(page.locator("#ps-topic-title")).toBeVisible();
+		// The agent's menu over the topic, dismissed; then its Files, Git, Terminal.
+		await agentMenu();
+		await app.escape();
+		await expect(menu).toBeHidden();
+		await agentMenu();
+		await menu.getByRole("menuitem", { name: /^Files · principal/ }).click();
+		await app.expectView("files");
+		await page.click("#view-git-btn");
+		await app.expectView("git");
+		await page.locator(".tools-ws").selectOption("ci-cache");
+		await expect(page.locator("#git-list")).toContainText("ci.yml");
+		await page.click("#view-terminal-btn");
+		await app.expectView("terminal");
+		// The session's ⋯ over the tools.
+		await page.click("#session-menu-btn");
+		await expect(menu).toBeVisible();
+		await app.escape();
+		await page.locator(".tools-back").click();
+		await expect(page.locator("#ps-topic-title")).toBeVisible();
+		await page.goForward();
+		await expect(page.locator(".tools-bar")).toBeVisible();
+		await page.waitForTimeout(400);
+
+		expect(backend.terminalSockets.length, "no new terminal socket").toBe(sockets);
+		expect(sock.closed, "the attach stayed open").toBe(false);
+		expect(sock.sent.length - framesBefore, "no frame of any kind (no resize)").toBe(0);
+		expect(await page.locator(".tab-pane.active .xterm-rows > div").count()).toBe(rowsBefore);
+
+		// Another AGENT: its session attaches — a new socket, never a resize of this one.
+		await page.locator(".tools-agent").selectOption("arq");
+		await expect
+			.poll(() =>
+				backend.terminalSockets.some(
+					(s) => s.sessionId === PROJECT_SESSION_IDS.architect && !s.closed,
+				),
+			)
+			.toBe(true);
+		expect(sock.sent.filter((f) => f.type === "resize").length).toBe(0);
 		expect(app.errors).toEqual([]);
 	});
 
