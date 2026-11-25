@@ -99,6 +99,14 @@ async function waitFor(what, fn, ms = 120_000) {
 }
 const agents = async () => (await api("GET", "/api/acp/agents")).body;
 const agentFeed = async (n) => (await api("GET", `/api/acp/agents/${n}/feed`)).body;
+// `running` is the claim, not the prompt: between the two the runner may still open the
+// message's ACP session (a switch of topic or work) and apply model/effort. A stop in that
+// window is a message never sent to the agent, which recovery rightly puts back to
+// pending (a second, complete attempt). A step that interrupts a TURN waits for the
+// runner's own `turn`/`start` activity event of that message instead: the runner records
+// the prompt in the message's log (what recovery reads) synchronously before emitting it.
+const waitTurnStarted = (n, id, ms = 30_000) =>
+	waitFor(`turn of #${id}`, async () => (await agentFeed(n)).activity?.[n]?.some((e) => e.kind === "turn" && e.phase === "start" && e.messageId === id), ms);
 const projectFeed = async (pid) => (await api("GET", `/api/acp/projects/${pid}/feed`)).body;
 const convFeed = async (id = CONV) => (await api("GET", `/api/acp/conversations/${id}/feed`)).body;
 // Everything to or from an agent, any conversation (the Archive feed shows none of them).
@@ -205,7 +213,7 @@ async function main() {
 	const before = await msgsOf(ARQ);
 	const countBefore = countOf(before.messages.filter((m) => m.to_id === ARQ && m.conversation_id === CONV && m.result_text).at(-1)?.result_text);
 	const work = await send(ARQ, "esperá 60", pid);
-	await waitMsg(work.id, ["running"], 30_000);
+	await waitTurnStarted(ARQ, work.id);
 	const p1 = await send(ARQ, "pendiente 1 tras el reinicio", pid);
 	const p2 = await send(ARQ, "pendiente 2 tras el reinicio", pid);
 	const stop = await api("POST", `/api/sessions/${sids[ARQ]}/stop`);
@@ -489,7 +497,7 @@ async function main() {
 	const ap = await waitMsg(afterPers.id);
 	check("…and runs once the task ended", ap.state === "done" && Date.parse(ap.started_at) - Date.parse(persA.finished_at) >= 6_000, `${(Date.parse(ap.started_at) - Date.parse(persA.finished_at)) / 1000}s`);
 	const longA = await inA("esperá 60");
-	await waitMsg(longA.id, ["running"], 30_000);
+	await waitTurnStarted(ARQ, longA.id);
 	await api("POST", `/api/sessions/${sids[ARQ]}/stop`);
 	await api("POST", `/api/sessions/${sids[ARQ]}/start`);
 	const uA = await waitMsg(longA.id, ["uncertain", "failed", "done"], 120_000);
