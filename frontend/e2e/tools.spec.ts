@@ -113,7 +113,7 @@ test.describe("Herramientas", () => {
 	}) => {
 		const urls = apiUrls(page);
 		await app.login("alice", topic(CONV_IDS.ci));
-		await page.locator(`${THREAD} .acp-msg-work[data-work="ci-cache"]`).click();
+		await page.locator(`${THREAD} .acp-work-chip`, { hasText: "⎇ ci-cache" }).first().click();
 		await expect(page).toHaveURL(urlEnds(toolsAt(CONV_IDS.ci, "dev", "ci-cache", "git")));
 		await app.expectView("git");
 		await expect(page.locator(".tools-ws")).toHaveValue("ci-cache");
@@ -151,11 +151,15 @@ test.describe("Herramientas", () => {
 		await expect(strip(page)).toContainText("Workspace principal");
 		expect(backend.workReads.length).toBe(before);
 
-		// Its row in the rail (from the project: Herramientas without a topic).
+		// Its row in the rail. A phone's project screen has no topic: «‹» names
+		// the project; wide, the project opened a topic, which «‹» names.
 		await page.goto(`/${RAIL}`);
 		await page.locator(".rail-body .rail-work", { hasText: "ci-cache" }).click();
-		await expect(page).toHaveURL(urlEnds(toolsAt(null, "dev", "ci-cache", "git")));
-		await expect(page.locator(".tools-back-label")).toHaveText("Educación HZ");
+		await expect(page).toHaveURL(new RegExp(`#/projects/${HZ}(/c/[^/]+)?/tools/dev/ci-cache/git$`));
+		if (app.mobile) {
+			await expect(page).toHaveURL(urlEnds(toolsAt(null, "dev", "ci-cache", "git")));
+			await expect(page.locator(".tools-back-label")).toHaveText("Educación HZ");
+		}
 		await expect(strip(page)).toContainText("Trabajo ci-cache");
 		expect(app.errors).toEqual([]);
 	});
@@ -217,9 +221,13 @@ test.describe("Herramientas", () => {
 		await expect(page).toHaveURL(urlEnds(topic(CONV_IDS.ui)));
 		await expect(thread).toBeVisible();
 		expect(await thread.evaluate((t) => t.scrollTop)).toBe(top);
-		await page.goBack();
-		await expect(page).toHaveURL(urlEnds(RAIL));
-		await expect(page.locator(".rail-body")).toBeVisible();
+		// The phone's stack: the project's screen next. (Wide, entering the
+		// project opened a topic in its place, so there is no rail-only entry.)
+		if (app.mobile) {
+			await page.goBack();
+			await expect(page).toHaveURL(urlEnds(RAIL));
+			await expect(page.locator(".rail-body")).toBeVisible();
+		}
 		expect(app.errors).toEqual([]);
 	});
 
@@ -227,12 +235,15 @@ test.describe("Herramientas", () => {
 		await app.login("alice", RAIL);
 		await page.locator(".rail-body .rail-agent", { hasText: "@arq" }).click();
 		await page.getByRole("menuitem", { name: /^Git · principal/ }).click();
-		await expect(page).toHaveURL(urlEnds(toolsAt(null, "arq", "~", "git")));
+		// (Wide, the project opened its last topic: Herramientas comes from it.)
+		const fromTopic = (agent: string) =>
+			new RegExp(`#/projects/${HZ}(/c/[^/]+)?/tools/${agent}/~/git$`);
+		await expect(page).toHaveURL(fromTopic("arq"));
 		await app.expectView("git");
 		await expect(strip(page)).toContainText("rama main");
 		// Another agent from the selector: its session, its principal workspace.
 		await page.locator(".tools-agent").selectOption("dev");
-		await expect(page).toHaveURL(urlEnds(toolsAt(null, "dev", "~", "git")));
+		await expect(page).toHaveURL(fromTopic("dev"));
 		await expect(page.locator("#terminal-toolbar")).toHaveAttribute(
 			"data-session-name",
 			"hz-dev-2",

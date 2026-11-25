@@ -1,6 +1,6 @@
 // projectRail.ts — the project's rail (3B F1, PROPUESTA §2): the project
-// selector ▾ and Pendientes (its count; the inbox itself is F3), the
-// attention row, the topics (Conversaciones: create, unread per topic),
+// selector ▾, the attention row (a way into Pendientes, acpInbox.ts — whose
+// icon with its count is the app header's, on every screen), the topics (Conversaciones: create, unread per topic),
 // the team with each agent's state in the seven fixed words (Equipo), the
 // works (Trabajos: active ones; closed ones on demand), the Archive's entry
 // and a foot with the sessions and the settings.
@@ -12,16 +12,15 @@
 // kept current by /ws/acp (acpLive.ts: one socket for the tab), re-read
 // debounced; while the socket is down, a slow poll.
 
+import { inboxNow, onInbox } from "./acpInboxStore.js";
 import { acpLiveUp, subscribeAcp } from "./acpLive.js";
-import { agentHue, teamState } from "./acpModel.js";
+import { agentHue, type TeamState, teamState } from "./acpModel.js";
 import { acpReadTicket, setAcpAgents } from "./acpRegistry.js";
 import {
 	type AcpAgentInfo,
 	type AcpConversation,
-	type AcpInbox,
 	type AcpWork,
 	acpConversations,
-	acpInbox,
 	acpListAgents,
 	acpWorks,
 } from "./api.js";
@@ -46,6 +45,8 @@ export interface RailActions {
 	agentMenu: (name: string, opener: HTMLElement) => void;
 	/** A work's row: Herramientas on that work. */
 	openWork: (work: AcpWork) => void;
+	/** Pendientes (acpInbox.ts), from the attention row. */
+	openInbox: (opener: HTMLElement) => void;
 }
 
 let actions: RailActions | null = null;
@@ -68,7 +69,6 @@ let agents: AcpAgentInfo[] = [];
 let agentsRead = false;
 let works: AcpWork[] = [];
 let showClosed = false;
-let inbox: AcpInbox | null = null;
 let unsubscribe: (() => void) | null = null;
 let poll: ReturnType<typeof setInterval> | null = null;
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -88,6 +88,11 @@ export function railWorks(): readonly AcpWork[] {
 	return works;
 }
 
+/** The shown project's live topics, most recently active first; null until read. */
+export function railConversations(): readonly AcpConversation[] | null {
+	return convsRead === "ok" ? convs : null;
+}
+
 /** A topic of the shown project as its list says (live or archived), if known. */
 export function railConversation(id: string): AcpConversation | null {
 	return convs.find((c) => c.id === id) ?? archived?.find((c) => c.id === id) ?? null;
@@ -100,11 +105,14 @@ export function topicTitle(id: string): string | null {
 
 /** Whether `agent` has an interrupted run the person has not reviewed (Pendientes). */
 function interrupted(agent: string): boolean {
-	return inbox?.action.interrupted.some((m) => m.to_id === agent) ?? false;
+	return inboxNow()?.action.interrupted.some((m) => m.to_id === agent) ?? false;
 }
+onInbox(() => {
+	if (pid) render();
+});
 
 /** An agent's state in the fixed words, as of now, with `here` the topic on screen. */
-export function agentState(a: AcpAgentInfo): { label: string; tone: string } {
+export function agentState(a: AcpAgentInfo): TeamState {
 	return teamState(a, { here, titleOf: topicTitle, interrupted: interrupted(a.name) });
 }
 
@@ -123,22 +131,20 @@ caret.setAttribute("aria-hidden", "true");
 selector.append(selectorName, caret);
 selector.addEventListener("click", () => openSelector());
 
-// Pendientes: its icon and count. The inbox panel arrives in F3; until then
-// it says the count and nothing more (not a control that does nothing).
-const inboxEl = el("span", "rail-inbox");
-inboxEl.setAttribute("role", "img");
-inboxEl.append(inboxIcon(), el("span", "rail-inbox-count"));
-railHead.append(selector, inboxEl);
+railHead.append(selector);
 
-const attention = el("p", "rail-attention");
+// «N te esperan · N resultados nuevos»: a way into Pendientes.
+const attention = el("button", "rail-attention");
+attention.type = "button";
 attention.hidden = true;
+attention.addEventListener("click", () => actions?.openInbox(attention));
 
 const convHead = sectionHead("Conversaciones", "Nueva conversación", () => {
 	if (pid) actions?.newConversation(pid);
 });
 const convList = el("ul", "rail-list rail-convs");
 const convNote = el("p", "rail-note");
-const archivedToggle = el("button", "rail-more", "Ver archivadas");
+const archivedToggle = el("button", "rail-more", "Conversaciones archivadas");
 archivedToggle.type = "button";
 archivedToggle.addEventListener("click", () => {
 	showArchived = !showArchived;
@@ -208,17 +214,6 @@ function sectionHead(title: string, add?: string, onAdd?: () => void): HTMLEleme
 	return head;
 }
 
-function inboxIcon(): SVGElement {
-	const ns = "http://www.w3.org/2000/svg";
-	const svg = document.createElementNS(ns, "svg");
-	svg.setAttribute("viewBox", "0 0 24 24");
-	svg.setAttribute("aria-hidden", "true");
-	const p = document.createElementNS(ns, "path");
-	p.setAttribute("d", "M3 13l3-8h12l3 8v6H3zM3 13h5l1 3h6l1-3h5");
-	svg.append(p);
-	return svg;
-}
-
 // ── Lifecycle ───────────────────────────────────────────────────────────────
 
 /** Shows the rail of project `projectId`, with topic `topic` on screen (or none). */
@@ -270,7 +265,6 @@ export function resetRail(): void {
 	agents = [];
 	agentsRead = false;
 	works = [];
-	inbox = null;
 	for (const t of timers.values()) clearTimeout(t);
 	timers.clear();
 	railHead.remove();
@@ -306,10 +300,9 @@ function reloadAll(): void {
 	if (showArchived) void loadArchived(pid, gen);
 	soon("agents", 0);
 	soon("works", 0);
-	soon("inbox", 0);
 }
 
-function soon(what: "convs" | "agents" | "works" | "inbox", delay = LIVE_DEBOUNCE_MS): void {
+function soon(what: "convs" | "agents" | "works", delay = LIVE_DEBOUNCE_MS): void {
 	if (timers.has(what) || !pid) return;
 	const p = pid;
 	const g = gen;
@@ -319,8 +312,7 @@ function soon(what: "convs" | "agents" | "works" | "inbox", delay = LIVE_DEBOUNC
 			timers.delete(what);
 			if (what === "convs") void loadConvs(p, g);
 			else if (what === "agents") void loadAgents(g);
-			else if (what === "works") void loadWorks(g);
-			else void loadInbox(g);
+			else void loadWorks(g);
 		}, delay),
 	);
 }
@@ -373,16 +365,6 @@ async function loadWorks(g: number): Promise<void> {
 	if (g === gen) render();
 }
 
-async function loadInbox(g: number): Promise<void> {
-	try {
-		const box = await acpInbox();
-		if (g === gen) inbox = box;
-	} catch {
-		/* keep */
-	}
-	if (g === gen) render();
-}
-
 function onLive(ev: Parameters<Parameters<typeof subscribeAcp>[0]>[0]): void {
 	switch (ev.type) {
 		case "open":
@@ -396,13 +378,11 @@ function onLive(ev: Parameters<Parameters<typeof subscribeAcp>[0]>[0]): void {
 			// (a result, an interruption) — whatever project it is in: the inbox is global.
 			if (m.project_id === pid || convs.some((c) => c.id === m.conversation_id)) soon("convs");
 			soon("agents");
-			soon("inbox");
 			if (m.context) soon("works");
 			return;
 		}
 		case "question":
 			soon("agents", 0);
-			soon("inbox", 0);
 			soon("convs");
 			return;
 		case "agents":
@@ -464,19 +444,16 @@ function paint(): void {
 	selector.title = `${name} · cambiar de proyecto`;
 	selector.setAttribute("aria-label", `Proyecto: ${name}. Cambiar de proyecto`);
 
+	const inbox = inboxNow();
 	const count = inbox?.count ?? 0;
 	const results = inbox?.results.length ?? 0;
-	const countEl = inboxEl.querySelector<HTMLElement>(".rail-inbox-count")!;
-	countEl.textContent = count > 99 ? "99+" : count > 0 ? String(count) : "";
-	countEl.hidden = count === 0;
-	inboxEl.setAttribute("aria-label", count ? `Pendientes: ${count}` : "Pendientes: nada pendiente");
-	inboxEl.title = count ? `Pendientes: ${count}` : "Nada pendiente";
 	// «N te esperan · N resultados nuevos» (fixed words); only with something to say.
 	const said: string[] = [];
 	if (count) said.push(`${count} ${count === 1 ? "te espera" : "te esperan"}`);
 	if (results) said.push(`${results} ${results === 1 ? "resultado nuevo" : "resultados nuevos"}`);
 	attention.textContent = said.join(" · ");
 	attention.hidden = said.length === 0;
+	attention.title = "Abrir Pendientes";
 
 	// Conversaciones (and, on demand, the archived ones under them)
 	const convRows = convs.map((c) => convRow(p, c, false));
@@ -497,7 +474,7 @@ function paint(): void {
 			: convsRead === "error"
 				? "No se pudieron cargar las conversaciones; reintentando."
 				: "Sin conversaciones todavía. Creá una con +.";
-	archivedToggle.textContent = showArchived ? "Ocultar archivadas" : "Ver archivadas";
+	archivedToggle.textContent = showArchived ? "Ocultar archivadas" : "Conversaciones archivadas";
 	archivedToggle.setAttribute("aria-expanded", String(showArchived));
 
 	// Equipo
@@ -597,7 +574,7 @@ function convRow(p: string, c: AcpConversation, isArchived: boolean): HTMLElemen
 function convStatus(c: AcpConversation): { label: string; tone: string } | null {
 	if (agents.some((a) => a.question?.conversationId === c.id))
 		return { label: "espera tu decisión", tone: "warn" };
-	if (inbox?.action.interrupted.some((m) => m.conversation_id === c.id))
+	if (inboxNow()?.action.interrupted.some((m) => m.conversation_id === c.id))
 		return { label: "ejecución interrumpida", tone: "err" };
 	const working = agents
 		.filter((a) => a.runningIn?.some((r) => r.conversationId === c.id))
@@ -606,7 +583,7 @@ function convStatus(c: AcpConversation): { label: string; tone: string } | null 
 	return null;
 }
 
-function agentRow(a: AcpAgentInfo, st: { label: string; tone: string }): HTMLElement {
+function agentRow(a: AcpAgentInfo, st: TeamState): HTMLElement {
 	const li = el("li");
 	// Its menu: Files · Git · Terminal of its session, and its works (F4).
 	const link = el("button", "rail-row rail-agent");
@@ -619,13 +596,32 @@ function agentRow(a: AcpAgentInfo, st: { label: string; tone: string }): HTMLEle
 	face.setAttribute("aria-hidden", "true");
 	face.append(el("span", `rail-dot tone-${st.tone}`));
 	const text = el("span", "rail-row-text");
-	text.append(
-		el("span", "rail-row-title", `@${a.name}`),
-		el("span", `rail-row-sub tone-${st.tone}`, st.label),
-	);
+	text.append(el("span", "rail-row-title", `@${a.name}`), stateLine(st));
 	link.append(face, text);
 	li.append(link);
 	return li;
+}
+
+/**
+ * The state's line: when it names a topic, only the topic's title gives way
+ * (an ellipsis inside «…»); what follows it — «· 1 en cola» — always shows.
+ */
+function stateLine(st: { label: string; tone: string; short?: string }): HTMLElement {
+	const sub = el("span", `rail-row-sub rail-state tone-${st.tone}`);
+	// The whole state where the rail says less (a held slot: «ocupado»).
+	sub.title = st.label;
+	const words = st.short ?? st.label;
+	const m = /^(.*?«)(.+)(»)(.*)$/.exec(words);
+	if (!m) {
+		sub.textContent = words;
+		return sub;
+	}
+	sub.append(
+		el("span", "rail-state-fixed", m[1]!),
+		el("span", "rail-state-topic", m[2]!),
+		el("span", "rail-state-fixed", `${m[3]}${m[4]}`),
+	);
+	return sub;
 }
 
 function workRow(w: AcpWork, words: string): HTMLElement {

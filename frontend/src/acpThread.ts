@@ -16,26 +16,35 @@ import {
 	activityRows,
 	agentHue,
 	agentStatus,
-	answerText,
 	applyEdits,
 	authFromActivity,
+	busyElsewhere,
+	type Chips,
+	chipsOf,
 	eventTime,
 	groupThread,
+	isTeamPost,
 	isUnread,
+	itemMessages,
 	mapThroughEdits,
+	mentionQuery,
 	messagePlace,
-	parseMentions,
-	questionForm,
 	recipientRow,
+	recipientState,
 	recipientsOf,
 	STATE_LABEL,
 	setRecipient,
 	type ThreadItem,
+	type TopicItem,
+	teamState,
+	topicTimeline,
 	upsert,
 	who,
 	workTag,
 } from "./acpModel.js";
+import { questionCard } from "./acpQuestionCard.js";
 import { acpReadTicket, setAcpAgents } from "./acpRegistry.js";
+import { openReview } from "./acpReview.js";
 import {
 	type AcpActivity,
 	type AcpAgentInfo,
@@ -43,14 +52,12 @@ import {
 	type AcpFeed,
 	type AcpMessage,
 	type AcpQuestion,
-	acpAnswer,
 	acpConversationFeed,
 	acpFeed,
 	acpListAgents,
 	acpPost,
 	acpProjectFeed,
 	acpReadConversation,
-	acpRequeue,
 	acpSend,
 	uploadSessionFiles,
 } from "./api.js";
@@ -262,6 +269,38 @@ export class AcpThread {
 	/** Called after every change of agents / auth / project / error (headers use it). */
 	onState: (s: ThreadState) => void = () => {};
 
+	// ── A topic's recipients (3B F2) ────────────────────────────────────
+	/**
+	 * A topic's recipients as edited here and not sent yet, by conversation
+	 * id. Without an entry the composer shows the topic's own (the server's
+	 * `recipients`: what its last post went to — the same on every device);
+	 * a new topic has none and starts empty.
+	 */
+	private readonly chips = new Map<string, Chips>();
+	/** «Para:» — the chips and "+" (a topic's composer only). */
+	private readonly toRow = el("div", "acp-to-row");
+	private readonly chipBox = el("div", "acp-to-chips");
+	/** Under the field: «Llega a …, a cada uno por separado.» and who will queue it. */
+	private readonly toNotes = el("div", "acp-to-notes");
+	/** The `@` menu over the field: the team and its agents, filtered by what is typed. */
+	private readonly mentionList = el("div", "acp-mention-menu");
+	private mention: { start: number; query: string; active: number } | null = null;
+	/** A topic's title by id, for «ocupado en «X»» (the rail knows the project's). */
+	titleOf: (id: string) => string | null = () => null;
+	/** «Revisar interrupción» on an interrupted message (acpReview.ts). */
+	onReview: (m: AcpMessage) => void = (m) =>
+		openReview(m, {
+			where: this.conversation?.title ?? null,
+			activity: this.lastActivity(m.id),
+			report: this.messages.find((x) => x.recovery_of === m.id) ?? null,
+			onChanged: (row) => this.applyRow(row),
+		});
+	/**
+	 * Where `⎇ <work>` leads (Herramientas, 3B F4). Until something is
+	 * plugged in here the chip only says which work a message runs in.
+	 */
+	onOpenWork: ((agent: string, work: string) => void) | null = null;
+
 	constructor() {
 		// One line at rest; CSS (field-sizing) grows it with the text up to a cap.
 		this.input.rows = 1;
@@ -287,7 +326,7 @@ export class AcpThread {
 		});
 		this.toLine.hidden = true;
 		// The menu opens upward from the surface (positioned on it, out of the grid).
-		this.surface.append(this.pickBtn, this.input, this.sendBtn, this.pickMenu);
+		this.surface.append(this.pickBtn, this.input, this.sendBtn, this.pickMenu, this.mentionList);
 		// Errors sit by the field, not at the top of the thread: a refused send
 		// must be seen where the person is looking, however long the thread.
 		// Under the surface, with "Recuperar el texto" next to the words.
@@ -297,17 +336,26 @@ export class AcpThread {
 		errorLine.append(this.errorEl, this.recoverBtn);
 		this.sendStatus.setAttribute("role", "status");
 		this.sendStatus.setAttribute("aria-live", "polite");
-		this.composer.append(this.toLine, this.surface, errorLine, this.sendStatus);
+		this.buildToRow();
+		this.composer.append(
+			this.toLine,
+			this.toRow,
+			this.surface,
+			this.toNotes,
+			errorLine,
+			this.sendStatus,
+		);
 		// A tap on Enviar, a mention or "↓ N nuevos" must not take the focus from the field:
 		// on a phone that blur closes the keyboard, the layout grows back (the
 		// bottom bar returns) and the button moves away under the finger before
 		// the tap lands. Keyboard activation does not go through these events.
-		for (const b of [this.sendBtn, this.pickBtn, this.pickMenu, this.endBtn.el])
+		for (const b of [this.sendBtn, this.pickBtn, this.pickMenu, this.mentionList, this.endBtn.el])
 			for (const type of ["pointerdown", "mousedown"] as const)
 				b.addEventListener(type, (e) => {
 					if (document.activeElement === this.input) e.preventDefault();
 				});
 		this.input.addEventListener("input", () => {
+			this.syncMention();
 			this.renderHint();
 			this.syncSendBtn();
 			// What is written by hand shows in the menu as it is typed.
@@ -388,6 +436,7 @@ export class AcpThread {
 			void this.send();
 		});
 		this.input.addEventListener("keydown", (e) => {
+			if (this.mentionKey(e)) return;
 			if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
 				e.preventDefault();
 				void this.send();
@@ -442,13 +491,20 @@ export class AcpThread {
 	 * unbounded history. "shown": in view; "earlier": still further back
 	 * after those pages; "missing": not in this chat, or the load stopped.
 	 */
-	async revealMessage(id: number): Promise<"shown" | "earlier" | "missing"> {
+	async revealMessage(
+		id: number,
+		opts: { result?: boolean } = {},
+	): Promise<"shown" | "earlier" | "missing"> {
 		const gen = this.gen;
 		try {
 			for (let pages = 0; ; pages++) {
 				if (gen !== this.gen) return "missing";
 				this.render();
-				const row = this.threadEl.querySelector<HTMLElement>(`[data-ids~="${id}"]`);
+				// A result has a row of its own in a topic; else the message's row.
+				const row =
+					(opts.result
+						? this.threadEl.querySelector<HTMLElement>(`:scope > [data-result="${id}"]`)
+						: null) ?? this.threadEl.querySelector<HTMLElement>(`[data-ids~="${id}"]`);
 				if (row) {
 					this.goToRow(row);
 					return "shown";
@@ -463,13 +519,13 @@ export class AcpThread {
 		}
 	}
 
-	private goToRow(row: HTMLElement): void {
+	private goToRow(row: HTMLElement, inner?: HTMLElement): void {
 		const t = this.threadEl;
 		const anchor = row.dataset.anchor;
 		if (!anchor) return;
 		// "esperando tu respuesta": the destination is the open question's card.
-		const card = row.querySelector<HTMLElement>(".acp-question-open");
-		const target = card ?? row;
+		const card = inner ? null : row.querySelector<HTMLElement>(".acp-question-open");
+		const target = inner ?? card ?? row;
 		const lead = target.getBoundingClientRect().top - row.getBoundingClientRect().top;
 		this.putRow({ anchor, offset: Math.round(t.clientHeight * 0.25) - lead });
 		this.box = t.clientHeight;
@@ -547,6 +603,20 @@ export class AcpThread {
 			}, STATUS_MS);
 		if (same) return;
 		void this.reload();
+	}
+
+	/** A message row as a write just answered it (a review, a requeue): shown at once. */
+	applyRow(row: AcpMessage): void {
+		if (!this.relevant(row)) return;
+		this.noteLive({ row });
+		this.messages = upsert(this.messages, row);
+		this.changed();
+	}
+
+	/** The latest activity this page saw for message `id` (tool and detail), if any. */
+	lastActivity(id: number): string | null {
+		const last = activityRows(this.activity.get(id) ?? []).at(-1);
+		return last ? `${last.label || "herramienta"}${last.detail ? ` ${last.detail}` : ""}` : null;
 	}
 
 	/** An agent's row as a write just answered it (e.g. its project changed here). */
@@ -875,22 +945,50 @@ export class AcpThread {
 		// «Nuevos desde tu última visita»: before the first item with news
 		// since the mark this topic had when it was opened.
 		let dividerPlaced = this.dividerAt === undefined;
-		for (const item of groupThread(this.messages)) {
-			const first = item.kind === "post" ? item.messages[0]! : item.message;
-			const key = `${item.kind}:${first.id}`;
-			const sig = this.itemSig(item);
+		const topic = this.source?.kind === "conversation";
+		const rows: Array<{
+			key: string;
+			ms: AcpMessage[];
+			sig: () => string;
+			build: () => HTMLElement;
+			news: boolean;
+			result: number | null;
+		}> = topic
+			? topicTimeline(this.messages).map((it) => ({
+					key: it.key,
+					ms: itemMessages(it),
+					sig: () => this.topicSig(it),
+					build: () => this.topicItemEl(it),
+					// The person's post is never news by itself: its answers are, where they land.
+					news: it.kind !== "post" && isUnread(it.message, this.dividerAt ?? null),
+					result: it.kind === "result" ? it.message.id : null,
+				}))
+			: groupThread(this.messages).map((it) => {
+					const ms = it.kind === "post" ? it.messages : [it.message];
+					return {
+						key: `${it.kind}:${ms[0]!.id}`,
+						ms,
+						sig: () => this.itemSig(it),
+						build: () => this.itemEl(it),
+						news: ms.some((m) => isUnread(m, this.dividerAt ?? null)),
+						result: null,
+					};
+				});
+		for (const row of rows) {
+			const { key, ms } = row;
+			const sig = row.sig();
 			let cached = this.items.get(key);
 			if (cached?.sig !== sig) {
-				cached = { sig, el: this.itemEl(item) };
+				cached = { sig, el: row.build() };
 				this.items.set(key, cached);
 			}
 			used.add(key);
 			// The reading anchor's handle (noteAnchor / restorePlace), and the
 			// messages the row shows (revealMessage finds a message's row by them).
 			cached.el.dataset.anchor = key;
-			const ms = item.kind === "post" ? item.messages : [item.message];
 			cached.el.dataset.ids = ms.map((m) => m.id).join(" ");
-			if (!dividerPlaced && ms.some((m) => isUnread(m, this.dividerAt ?? null))) {
+			if (row.result !== null) cached.el.dataset.result = String(row.result);
+			if (!dividerPlaced && row.news) {
 				dividerPlaced = true;
 				nodes.push(this.divider);
 			}
@@ -964,8 +1062,10 @@ export class AcpThread {
 			for (const id of (row.dataset.ids ?? "").split(" ")) {
 				const m = byId.get(Number(id));
 				if (!m || !isUnread(m, null)) continue;
-				// A person's message is news by its answer: that bubble must be in view.
+				// A person's message is news by its answer: that bubble must be in
+				// view (in a topic, the answer is an item of its own).
 				if (m.from_id === "owner") {
+					if (row.dataset.result === undefined && row.dataset.anchor?.startsWith("post:")) continue;
 					const sub = row.querySelector<HTMLElement>(`[data-mid="${m.id}"]`);
 					if (sub && sub.getBoundingClientRect().top >= bottom) continue;
 				}
@@ -1134,6 +1234,281 @@ export class AcpThread {
 		]);
 	}
 
+	// ── A topic's items (3B F2) ─────────────────────────────────────────
+
+	/** Recipient `m.to_id`'s row under a message, from the backend's facts only. */
+	private rowState(m: AcpMessage) {
+		return recipientState(m, {
+			agent: this.agents.get(m.to_id),
+			titleOf: this.titleOf,
+			asking: this.openQuestionOf(m.id),
+			login: this.auth.get(m.to_id) === true,
+			activity: this.lastActivity(m.id),
+		});
+	}
+
+	private topicSig(it: TopicItem): string {
+		return JSON.stringify([
+			it.kind,
+			itemMessages(it).map((m) => [
+				m.id,
+				m.state,
+				m.from_id,
+				m.to_id,
+				m.body,
+				m.result_text,
+				m.note,
+				m.reviewed_at ?? null,
+				m.context ?? null,
+				m.team ?? null,
+				m.created_at,
+				m.finished_at,
+				m.recovery_of ?? null,
+				this.rowState(m).label,
+				this.messages.find((x) => x.recovery_of === m.id)?.result_text ? "r" : "",
+				[...this.questions.values()]
+					.filter((q) => q.message_id === m.id)
+					.map((q) => `${q.id}:${q.state}`),
+			]),
+			it.kind === "reply" ? (it.consult?.id ?? null) : null,
+			this.onOpenWork !== null,
+		]);
+	}
+
+	private topicItemEl(it: TopicItem): HTMLElement {
+		switch (it.kind) {
+			case "post":
+				return this.postEl(it.messages);
+			case "consult":
+				return this.consultEl(it.message);
+			case "system":
+				return this.noteEl(it.message);
+			case "reply":
+				return this.replyEl(it.message, it.consult);
+			case "result":
+				return this.resultEl(it.message);
+		}
+	}
+
+	/** The person's message: «Vos → …», what was said, one state row per recipient. */
+	private postEl(ms: AcpMessage[]): HTMLElement {
+		const first = ms[0]!;
+		const art = el("article", "acp-msg acp-turn acp-mine acp-post");
+		art.dataset.state = first.state;
+		const said = el("div", "acp-bubble acp-out");
+		const head = el("div", "acp-msg-head");
+		const who = el("span", "acp-msg-who");
+		const names = ms.map((m) => `@${m.to_id}`).join(", ");
+		who.append("Vos ");
+		if (isTeamPost(ms)) {
+			const team = el("span", "acp-team-to", `→ Todo el equipo (${ms.length})`);
+			team.title = names;
+			team.setAttribute("aria-label", `→ Todo el equipo: ${names}`);
+			who.append(team);
+		} else who.append(`→ ${names}`);
+		head.append(who);
+		for (const m of ms) {
+			const w = this.workChip(m);
+			if (w) head.append(w);
+		}
+		head.append(el("span", "acp-msg-time", time(first.created_at)));
+		said.append(head, el("pre", "acp-msg-body", first.body), this.statusEl(ms));
+		art.append(said);
+		for (const m of ms)
+			for (const q of this.questions.values())
+				if (q.message_id === m.id) art.append(this.questionEl(q));
+		return art;
+	}
+
+	/**
+	 * One row per recipient — trabajando · en cola (why) · respondió · interrumpida;
+	 * no aggregate progress. Everyone answered: «✓ @a ✓ @b», each to its answer.
+	 */
+	private statusEl(ms: AcpMessage[]): HTMLElement {
+		const states = ms.map((m) => ({ m, st: this.rowState(m) }));
+		if (states.every(({ st }) => st.kind === "done")) {
+			const line = el("div", "acp-rs-all");
+			line.setAttribute("aria-label", "Respondieron todos");
+			for (const { m } of states) {
+				const mark = el(m.result_text ? "button" : "span", "acp-rs-check", `✓ @${m.to_id}`);
+				if (mark instanceof HTMLButtonElement) {
+					mark.type = "button";
+					mark.title = `Ir a la respuesta de @${m.to_id}`;
+					mark.addEventListener("click", () => this.goToResult(m.id));
+				}
+				line.append(mark);
+			}
+			return line;
+		}
+		const ul = el("ul", "acp-rs-list");
+		ul.setAttribute("aria-label", "Estado por destinatario");
+		for (const { m, st } of states) {
+			const li = el("li", `acp-rs acp-rs-${st.kind}`);
+			li.dataset.agent = m.to_id;
+			li.style.setProperty("--acp-hue", String(agentHue(m.to_id)));
+			const state = el("span", "acp-rs-state");
+			state.append(el("span", "acp-rs-dot"), el("span", "acp-rs-label", st.label));
+			li.append(avatarOf(m.to_id), el("span", "acp-rs-name", `@${m.to_id}`), state);
+			if (st.kind === "done" && m.result_text) {
+				const ver = el("button", "acp-link", "ver");
+				ver.type = "button";
+				ver.setAttribute("aria-label", `Ver la respuesta de @${m.to_id}`);
+				ver.addEventListener("click", () => this.goToResult(m.id));
+				state.append(" · ", ver);
+			}
+			if (st.kind === "interrupted" || st.kind === "reviewed") {
+				const report = this.messages.find((x) => x.recovery_of === m.id);
+				if (report && !report.result_text)
+					state.append(" · ", el("span", "acp-rs-muted", "informe pedido"));
+			}
+			if (st.kind === "interrupted") {
+				const review = el("button", "btn sm acp-review-btn", "Revisar interrupción");
+				review.type = "button";
+				review.addEventListener("click", () => this.onReview(m));
+				state.append(" · ", review);
+			}
+			if (st.kind === "failed" && m.note) li.append(el("span", "acp-rs-note", m.note));
+			ul.append(li);
+		}
+		return ul;
+	}
+
+	/** «@a consulta a @b», its answer nested in it (`reply_to`). */
+	private consultEl(m: AcpMessage): HTMLElement {
+		const art = el("article", "acp-msg acp-consult acp-topic-consult");
+		art.dataset.state = m.state;
+		const said = el("div", "acp-bubble acp-in");
+		agentVoice(said, m.from_id);
+		const head = el("div", "acp-msg-head");
+		head.append(agentId(m.from_id), el("span", "acp-msg-to", `consulta a @${m.to_id}`));
+		const w = this.workChip(m);
+		if (w) head.append(w);
+		head.append(el("span", "acp-msg-time", time(m.created_at)));
+		said.append(head, agentText(m.body));
+		if (m.result_text) {
+			const nested = el("div", "acp-nested acp-voice");
+			nested.style.setProperty("--acp-hue", String(agentHue(m.to_id)));
+			nested.dataset.answer = String(m.id);
+			const h = el("div", "acp-msg-head");
+			h.append(
+				el("span", "acp-nested-mark", "↳"),
+				agentId(m.to_id),
+				el("span", "acp-msg-to", "respondió"),
+				el("span", "acp-msg-time", time(m.finished_at ?? m.created_at)),
+			);
+			nested.append(h, agentText(m.result_text));
+			said.append(nested);
+		} else said.append(this.statusEl([m]));
+		art.append(said);
+		for (const q of this.questions.values())
+			if (q.message_id === m.id) art.append(this.questionEl(q));
+		return art;
+	}
+
+	/** A Shared Terminal note to an agent (its recovery report request, a check): one quiet line. */
+	private noteEl(m: AcpMessage): HTMLElement {
+		const art = el("article", "acp-msg acp-system acp-topic-note");
+		art.dataset.state = m.state;
+		const line = el("div", "acp-note-line");
+		line.append(
+			el(
+				"span",
+				undefined,
+				m.recovery_of
+					? `Shared Terminal pidió a @${m.to_id} un informe de solo lectura de la ejecución interrumpida #${m.recovery_of}`
+					: `Shared Terminal → @${m.to_id}`,
+			),
+			el("span", "acp-msg-time", time(m.created_at)),
+		);
+		art.append(line, this.collapsible(`b${m.id}`, "Ver el texto", agentText(m.body)));
+		if (!(m.state === "done" && m.result_text)) art.append(this.statusEl([m]));
+		return art;
+	}
+
+	/**
+	 * A consult's answer delivered to the agent that asked. Its consult in
+	 * the thread: only «↳ @x respondió la consulta de @y (hh:mm) · Ir a la
+	 * respuesta», never the text again. Without it (an earlier page): the
+	 * only place to read it.
+	 */
+	private replyEl(m: AcpMessage, consult: AcpMessage | null): HTMLElement {
+		const art = el("article", "acp-msg acp-reply");
+		art.dataset.state = m.state;
+		if (consult) {
+			const line = el("div", "acp-late");
+			const go = el("button", "acp-link", "Ir a la respuesta");
+			go.type = "button";
+			go.addEventListener("click", () => this.goToAnswer(consult.id));
+			line.append(
+				`↳ @${m.from_id} respondió la consulta de @${m.to_id} (${time(consult.created_at)}) · `,
+				go,
+			);
+			art.append(line);
+			return art;
+		}
+		const said = el("div", "acp-bubble acp-in");
+		agentVoice(said, m.from_id);
+		const head = el("div", "acp-msg-head");
+		head.append(
+			agentId(m.from_id),
+			el("span", "acp-msg-to", `→ @${m.to_id} · respuesta a #${m.reply_to}`),
+			el("span", "acp-msg-time", time(m.created_at)),
+		);
+		said.append(head, agentText(m.body));
+		art.append(said);
+		return art;
+	}
+
+	/** What an agent answered, where it landed in time. */
+	private resultEl(m: AcpMessage): HTMLElement {
+		const art = el("article", "acp-msg acp-result");
+		art.dataset.state = m.state;
+		const said = el("div", "acp-bubble acp-in");
+		agentVoice(said, m.to_id);
+		said.dataset.mid = String(m.id);
+		const head = el("div", "acp-msg-head");
+		head.append(agentId(m.to_id));
+		if (m.recovery_of) head.append(el("span", "acp-tag", "informe de interrupción"));
+		const w = this.workChip(m);
+		if (w) head.append(w);
+		head.append(el("span", "acp-msg-time", time(m.finished_at ?? m.created_at)));
+		const res = el("div", "acp-msg-result");
+		res.append(markdownBlock(m.result_text ?? ""));
+		said.append(head, res);
+		art.append(said);
+		return art;
+	}
+
+	/** `⎇ <work>`: the work a message runs in (its Herramientas: onOpenWork, 3B F4). */
+	private workChip(m: AcpMessage): HTMLElement | null {
+		const work = m.context;
+		if (!work) return null;
+		const open = this.onOpenWork;
+		const chip = el(open ? "button" : "span", "acp-work-chip", `⎇ ${work}`);
+		chip.title = `Trabajo ${work} de @${m.to_id}`;
+		if (open && chip instanceof HTMLButtonElement) {
+			chip.type = "button";
+			chip.addEventListener("click", () => open(m.to_id, work));
+		}
+		return chip;
+	}
+
+	/** «ver» / «✓ @a»: the answer's own item, in view and highlighted. */
+	private goToResult(id: number): void {
+		const row = this.threadEl.querySelector<HTMLElement>(`:scope > [data-result="${id}"]`);
+		if (row) this.goToRow(row);
+		else void this.revealMessage(id, { result: true });
+	}
+
+	/** «Ir a la respuesta»: the consult's nested answer, in view and highlighted. */
+	private goToAnswer(consultId: number): void {
+		const row = this.threadEl.querySelector<HTMLElement>(
+			`:scope > [data-anchor="consult:${consultId}"]`,
+		);
+		const inner = row?.querySelector<HTMLElement>(`[data-answer="${consultId}"]`) ?? undefined;
+		if (row) this.goToRow(row, inner);
+	}
+
 	private openQuestionOf(id: number): boolean {
 		for (const q of this.questions.values())
 			if (q.message_id === id && q.state === "open") return true;
@@ -1221,15 +1596,8 @@ export class AcpThread {
 		meta.title = `Mensaje #${m.id}${m.finished_at ? ` · terminó ${time(m.finished_at)}` : ""}`;
 		head.append(name, this.badge(m));
 		// Two works of one agent run at once: the tag tells their messages apart.
-		// In a topic it opens that workspace in Herramientas (acpConversation.ts).
 		const work = workTag(m);
-		if (work && m.context) {
-			const chip = el("button", "acp-msg-work", work);
-			chip.type = "button";
-			chip.dataset.agent = m.to_id;
-			chip.dataset.work = m.context;
-			head.append(chip);
-		}
+		if (work) head.append(el("span", "acp-msg-work", work));
 		head.append(meta);
 		sub.append(head, ...this.outcome(m));
 		return sub;
@@ -1308,7 +1676,7 @@ export class AcpThread {
 					el(
 						"div",
 						"acp-typing",
-						m.state === "pending" ? "En cola: lo toma cuando termine lo anterior." : "Trabajando…",
+						m.state === "pending" ? "En cola — lo toma en cuanto se libere." : "Trabajando…",
 					),
 				);
 		}
@@ -1320,38 +1688,23 @@ export class AcpThread {
 		if (m.note && (m.state === "uncertain" || m.state === "failed"))
 			out.push(el("div", "acp-msg-note", m.note));
 		if (m.state === "uncertain") {
-			const again = el("button", "btn sm", "Volver a encolar");
-			again.type = "button";
-			again.title =
-				"La ejecución se interrumpió y no se repite sola: puede haber tenido efectos. Reencolar es decisión tuya.";
-			again.addEventListener("click", () => {
-				again.disabled = true;
-				// The answer may land after the person moved to another chat: it
-				// belongs to the chat it was asked from, never to the one on screen then.
-				const gen = this.gen;
-				void acpRequeue(m.id)
-					.then((row) => {
-						if (gen !== this.gen || !this.relevant(row)) return;
-						this.noteLive({ row });
-						this.messages = upsert(this.messages, row);
-						this.changed();
-					})
-					.catch((err) => {
-						if (gen !== this.gen) return;
-						again.disabled = false;
-						this.error = (err as Error).message;
-						this.errorIsFeed = false;
-						this.changed();
-					});
-			});
-			out.push(
-				el(
-					"div",
-					"acp-msg-note",
-					"Incierto: la ejecución se interrumpió. No se repite automáticamente.",
-				),
-				again,
-			);
+			// Never a one-tap retry (PROPUESTA §11.1): the review says what is
+			// known, and requeueing there needs an explicit acknowledgement.
+			if (m.reviewed_at)
+				out.push(el("div", "acp-msg-note", "Interrumpida · revisada, no reencolada."));
+			else {
+				const review = el("button", "btn sm acp-review-btn", "Revisar interrupción");
+				review.type = "button";
+				review.addEventListener("click", () => this.onReview(m));
+				out.push(
+					el(
+						"div",
+						"acp-msg-note",
+						"Incierto: la ejecución se interrumpió. No se repite automáticamente.",
+					),
+					review,
+				);
+			}
 		}
 		return out;
 	}
@@ -1359,131 +1712,24 @@ export class AcpThread {
 	private questionEl(q: AcpQuestion): HTMLElement {
 		const cached = this.cards.get(q.id);
 		if (cached && cached.state === q.state) return cached.el;
-		const form = questionForm(q.request);
-		const card = el("section", `acp-question acp-question-${q.state}`);
-		card.setAttribute("aria-label", `Pregunta de @${q.agent}`);
-		card.append(el("div", "acp-question-head", `@${q.agent} pregunta`));
-		if (form.message) card.append(el("p", "acp-question-text", form.message));
-		if (q.state === "open") card.append(this.questionForm(q, form));
-		else {
-			const said = answerText(form, q.answer);
-			const line =
-				q.state === "answered"
-					? `Tu respuesta: ${said} · entregándola al agente…`
-					: q.state === "delivered"
-						? `Tu respuesta: ${said}`
-						: q.state === "withdrawn"
-							? "El agente retiró la pregunta (ya no la necesita)."
-							: `Sin entregar: ${q.note ?? "el agente se reinició"}.${said ? ` Tu respuesta (${said}) no se usó.` : ""}`;
-			card.append(el("div", "acp-question-state", line));
-			if (q.state === "orphaned") {
-				// Continue safely: the person decides whether the agent gets the decision
-				// again, as an ordinary message in its queue.
-				const again = el("button", "btn sm", "Enviar la decisión como mensaje");
-				again.type = "button";
-				again.addEventListener("click", () => {
-					const prefix = this.source?.kind !== "agent" ? `@${q.agent} ` : "";
-					this.input.value = `${prefix}Sobre tu pregunta «${form.message}»: ${said && !said.startsWith("(") ? said : ""}`;
-					this.input.focus();
-				});
-				card.append(again);
-			}
-		}
+		const gen = this.gen;
+		const card = questionCard(q, {
+			stillHere: () => gen === this.gen,
+			onAnswered: (row) => {
+				this.noteLive({ q: row });
+				this.questions.set(row.id, row);
+				this.changed();
+			},
+			onResend: (text) => {
+				if (this.source?.kind === "conversation") this.addChip(q.agent);
+				const prefix = this.source?.kind === "project" ? `@${q.agent} ` : "";
+				this.input.value = `${prefix}${text}`;
+				this.input.focus();
+				this.changed();
+			},
+		});
 		this.cards.set(q.id, { state: q.state, el: card });
 		return card;
-	}
-
-	private questionForm(q: AcpQuestion, form: ReturnType<typeof questionForm>): HTMLElement {
-		const f = el("form", "acp-question-form");
-		const read: Array<() => [string, unknown] | null> = [];
-		form.fields.forEach((field, i) => {
-			const box = el("fieldset", "acp-question-field");
-			if (field.label) box.append(el("legend", undefined, field.label));
-			const name = `q${q.id}-${i}`;
-			if (field.kind === "single" || field.kind === "multi") {
-				const inputs: HTMLInputElement[] = [];
-				for (const o of field.options) {
-					const lab = el("label", "acp-option");
-					const inp = el("input");
-					inp.type = field.kind === "single" ? "radio" : "checkbox";
-					inp.name = name;
-					inp.value = o.value;
-					inputs.push(inp);
-					lab.append(inp, el("span", undefined, o.label));
-					if (o.description) lab.append(el("small", undefined, ` — ${o.description}`));
-					box.append(lab);
-				}
-				read.push(() => {
-					const picked = inputs.filter((x) => x.checked).map((x) => x.value);
-					if (field.kind === "multi") return picked.length ? [field.key, picked] : null;
-					return picked[0] !== undefined ? [field.key, picked[0]] : null;
-				});
-			} else if (field.kind === "boolean") {
-				const lab = el("label", "acp-option");
-				const inp = el("input");
-				inp.type = "checkbox";
-				lab.append(inp, el("span", undefined, "Sí"));
-				box.append(lab);
-				read.push(() => [field.key, inp.checked]);
-			} else {
-				const inp = el("textarea", "acp-question-input");
-				inp.rows = 2;
-				inp.setAttribute("aria-label", field.label || form.message || "Respuesta");
-				box.append(inp);
-				read.push(() => {
-					const v = inp.value.trim();
-					if (!v) return null;
-					return [field.key, field.kind === "number" ? Number(v) : v];
-				});
-			}
-			if (field.custom) {
-				const other = el("input", "acp-question-other");
-				other.type = "text";
-				other.placeholder = "Otra respuesta o nota (opcional)";
-				other.setAttribute("aria-label", "Otra respuesta");
-				box.append(other);
-				const key = field.custom;
-				read.push(() => (other.value.trim() ? [key, other.value.trim()] : null));
-			}
-			f.append(box);
-		});
-		const actions = el("div", "acp-question-actions");
-		const send = el("button", "btn sm acp-question-send", "Responder");
-		send.type = "submit";
-		const skip = el("button", "btn sm", "Omitir");
-		skip.type = "button";
-		const status = el("span", "acp-chat-hint");
-		actions.append(send, skip, status);
-		f.append(actions);
-		const submit = (body: { action: "accept" | "decline"; content?: Record<string, unknown> }) => {
-			send.disabled = skip.disabled = true;
-			status.textContent = "Enviando…";
-			const gen = this.gen;
-			void acpAnswer(q.id, body)
-				.then((row) => {
-					if (gen !== this.gen) return;
-					this.noteLive({ q: row });
-					this.questions.set(row.id, row);
-					this.changed();
-				})
-				.catch((err: Error & { status?: number }) => {
-					// 409: someone (another tab) answered first, or the agent restarted.
-					status.textContent =
-						err.status === 409
-							? "Ya no está abierta; se actualiza sola."
-							: `No se envió: ${err.message}`;
-					send.disabled = skip.disabled = err.status === 409;
-				});
-		};
-		f.addEventListener("submit", (e) => {
-			e.preventDefault();
-			const content = Object.fromEntries(
-				read.map((g) => g()).filter((x): x is [string, unknown] => x !== null),
-			);
-			submit({ action: "accept", content });
-		});
-		skip.addEventListener("click", () => submit({ action: "decline" }));
-		return f;
 	}
 
 	/** This chat's unsent text goes back into the field, if the field is empty. */
@@ -1505,10 +1751,21 @@ export class AcpThread {
 		this.input.disabled = !writable;
 		this.syncSendBtn();
 		this.composer.classList.toggle("acp-composer-off", this.composerMode === "off");
-		const picks = writable && this.source?.kind !== "agent" && this.agents.size > 1;
+		const topic = this.source?.kind === "conversation";
+		// A topic's "+" sits in «Para:», next to its chips; elsewhere it is the surface's first cell.
+		if (topic && this.pickBtn.parentElement !== this.toRow) this.toRow.append(this.pickBtn);
+		if (!topic && this.pickBtn.parentElement !== this.surface) this.surface.prepend(this.pickBtn);
+		this.toRow.hidden = !topic || this.composerMode === "off";
+		if (topic) this.renderChips();
+		else this.toNotes.hidden = true;
+		if (!topic || !writable) this.closeMention();
+		const picks = writable && this.source?.kind !== "agent" && this.agents.size > (topic ? 0 : 1);
 		this.pickBtn.hidden = !picks;
+		const pickName = topic ? "Agregar destinatario" : "Elegir destinatarios";
+		this.pickBtn.title = pickName;
+		this.pickBtn.setAttribute("aria-label", pickName);
 		// The surface's states (acp-chat.css): no "+" column, a refused send, locked.
-		this.surface.classList.toggle("no-plus", !picks);
+		this.surface.classList.toggle("no-plus", !picks || topic);
 		this.surface.classList.toggle("is-error", Boolean(u?.error));
 		this.surface.classList.toggle("is-disabled", !writable);
 		if (!picks) this.closePicker(false);
@@ -1629,6 +1886,14 @@ export class AcpThread {
 	}
 
 	private renderPicker(): void {
+		if (this.source?.kind === "conversation") {
+			const focused = (document.activeElement as HTMLElement | null)?.dataset?.agent;
+			const rows = this.topicPickRows();
+			this.pickList.replaceChildren(...rows);
+			this.pickNote.hidden = true;
+			if (focused) rows.find((r) => r.dataset.agent === focused)?.focus();
+			return;
+		}
 		const names = [...this.agents.keys()];
 		const text = this.input.value;
 		const focused = (document.activeElement as HTMLElement | null)?.dataset?.agent;
@@ -1726,7 +1991,8 @@ export class AcpThread {
 		const queued = this.messages.filter((m) => m.state === "pending").length;
 		const running = this.messages.filter((m) => m.state === "running").length;
 		const line: Array<string | HTMLElement> = [];
-		if (this.source && this.source.kind !== "agent" && this.composerMode === "on") {
+		const topic = this.source?.kind === "conversation";
+		if (this.source?.kind === "project" && this.composerMode === "on") {
 			const to = this.recipients(this.input.value).to;
 			if (to.length) {
 				line.push("Para ");
@@ -1738,8 +2004,9 @@ export class AcpThread {
 		}
 		const parts: string[] = [];
 		if (this.sending) parts.push(this.sending > 1 ? `Enviando (${this.sending})…` : "Enviando…");
-		if (running) parts.push(`${running} en curso`);
-		if (queued) parts.push(`${queued} en espera`);
+		// A topic says it per recipient, under each message.
+		if (running && !topic) parts.push(`${running} trabajando`);
+		if (queued && !topic) parts.push(`${queued} en cola`);
 		// UTF-8 takes at most 3 bytes per UTF-16 unit: below that bound nothing
 		// can be near the limit, and typing does not encode the text each key.
 		const text = this.input.value;
@@ -1761,15 +2028,339 @@ export class AcpThread {
 	 * leading mentions, or the one agent mentioned in the text — never "the
 	 * project's only agent" — and with nobody, «Elegí a quién con + o @».
 	 */
-	private recipients(text: string): { to: string[]; error: string | null } {
+	private recipients(text: string): { to: string[]; team: boolean; error: string | null } {
 		const names = [...this.agents.keys()];
-		const r = recipientsOf(text, names);
-		if (this.source?.kind !== "conversation") return r;
-		const named = /^\s*@[A-Za-z0-9_-]/.test(text) || parseMentions(text, names).length > 0;
-		if (!named) return { to: [], error: "Elegí a quién con + o @" };
-		return r.error !== null && !/^\s*@/.test(text)
-			? { to: [], error: "Elegí a quién con + o @" }
-			: r;
+		if (this.source?.kind !== "conversation") return { ...recipientsOf(text, names), team: false };
+		// A topic: the chips, plus the agents named at the start of the text
+		// (typed without the menu) — never one named inside the instruction.
+		const c = this.currentChips();
+		if (c.team) return { to: names, team: true, error: null };
+		const lead = /^\s*@[A-Za-z0-9_-]/.test(text) ? recipientsOf(text, names) : null;
+		if (lead?.error) return { to: [], team: false, error: lead.error };
+		const to = [...new Set([...c.agents, ...(lead?.to ?? [])])];
+		return to.length
+			? { to, team: false, error: null }
+			: { to: [], team: false, error: "Elegí a quién con + o @" };
+	}
+
+	// ── A topic's recipients: chips, "+", the `@` menu (3B F2) ───────────
+	//
+	// In a topic the recipients are explicit (PROPUESTA §3, §11.2): the
+	// chips of «Para:», added with "+" or `@`, never guessed from the text
+	// alone. «Todo el equipo» is a chip of its own, resolved by the server
+	// when the message is sent (who joins later does not get it).
+
+	private topicId(): string | null {
+		return this.source?.kind === "conversation" ? this.source.conversationId : null;
+	}
+
+	/** The topic's chips now: edited here, else the topic's own. */
+	private currentChips(): Chips {
+		const cid = this.topicId();
+		if (!cid) return { team: false, agents: [] };
+		return this.chips.get(cid) ?? chipsOf(this.conversation?.recipients);
+	}
+
+	private setChips(c: Chips): void {
+		const cid = this.topicId();
+		if (!cid) return;
+		this.chips.set(cid, { team: c.team, agents: [...new Set(c.agents)] });
+		this.renderComposer();
+		if (this.pickOpen) this.renderPicker();
+	}
+
+	private addChip(name: string): void {
+		const c = this.currentChips();
+		if (name === "*") this.setChips({ team: true, agents: [] });
+		else if (!c.team && !c.agents.includes(name))
+			this.setChips({ team: false, agents: [...c.agents, name] });
+	}
+
+	/**
+	 * «Escribirle un mensaje nuevo» (a reviewed interruption): topic `cid`
+	 * opens with `agent` as its only recipient.
+	 */
+	presetRecipients(cid: string, agents: string[]): void {
+		this.chips.set(cid, { team: false, agents: [...agents] });
+		if (this.topicId() === cid) this.renderComposer();
+	}
+
+	private teamNames(): string[] {
+		return [...this.agents.keys()];
+	}
+
+	private buildToRow(): void {
+		this.toRow.hidden = true;
+		const label = el("span", "acp-to-label", "Para");
+		label.setAttribute("aria-hidden", "true");
+		this.toRow.append(label, this.chipBox);
+		this.toNotes.hidden = true;
+		this.toNotes.setAttribute("aria-live", "polite");
+		this.mentionList.hidden = true;
+		this.mentionList.id = `acp-mention-${++pickerSeq}`;
+		this.mentionList.setAttribute("role", "listbox");
+		this.mentionList.setAttribute("aria-label", "Mencionar");
+		this.input.addEventListener("click", () => this.syncMention());
+		this.input.addEventListener("blur", () => this.closeMention());
+	}
+
+	/** The chips, the "+" next to them and the notes under the field. */
+	private renderChips(): void {
+		const c = this.currentChips();
+		const names = this.teamNames();
+		const nodes: HTMLElement[] = [];
+		if (c.team) {
+			const chip = el("span", "acp-chip acp-chip-team");
+			chip.setAttribute("role", "listitem");
+			chip.title = "Los agentes del proyecto al enviar; quien se sume después no lo recibe";
+			const stack = el("span", "acp-chip-stack");
+			for (const n of names.slice(0, 4)) stack.append(avatarOf(n));
+			chip.append(stack, el("span", "acp-chip-name", `Todo el equipo · ${names.length}`));
+			chip.append(
+				this.chipX("Quitar a todo el equipo", () => this.setChips({ team: false, agents: [] })),
+			);
+			nodes.push(chip);
+		} else
+			for (const n of c.agents) {
+				const chip = el("span", "acp-chip");
+				chip.setAttribute("role", "listitem");
+				chip.style.setProperty("--acp-hue", String(agentHue(n)));
+				const busy = busyElsewhere(this.agents.get(n), this.topicId(), this.titleOf);
+				chip.append(avatarOf(n), el("span", "acp-chip-name", `@${n}`));
+				if (busy) {
+					const b = el("span", "acp-chip-busy", busy.startsWith("ocupado") ? "ocupado" : "espera");
+					b.title = busy;
+					chip.append(b);
+				}
+				chip.append(
+					this.chipX(`Quitar a @${n}`, () =>
+						this.setChips({ team: false, agents: c.agents.filter((x) => x !== n) }),
+					),
+				);
+				nodes.push(chip);
+			}
+		// A list only when there are chips: the empty line is not an item.
+		if (nodes.length) {
+			this.chipBox.setAttribute("role", "list");
+			this.chipBox.setAttribute("aria-label", "Destinatarios");
+		} else {
+			this.chipBox.removeAttribute("role");
+			this.chipBox.removeAttribute("aria-label");
+			nodes.push(el("span", "acp-to-empty", "Elegí a quién con + o @"));
+		}
+		this.chipBox.replaceChildren(...nodes);
+		// Under the field: who it reaches, and who will queue it (dato real: /agents).
+		// At most two lines (one each; CSS cuts the end — a topic's title — on a phone).
+		const lines: string[] = [];
+		const to = c.team ? names : c.agents;
+		if (c.team && names.length)
+			lines.push(`Llega a ${names.map((n) => `@${n}`).join(", ")}, a cada uno por separado.`);
+		const queued = to.flatMap((n) => {
+			const busy = busyElsewhere(this.agents.get(n), this.topicId(), this.titleOf);
+			return busy ? [`@${n} (${busy})`] : [];
+		});
+		if (queued.length)
+			lines.push(
+				`${queued.length > 1 ? "Les" : "Le"} queda en cola a ${
+					queued.length > 1 ? `${queued.slice(0, -1).join(", ")} y ${queued.at(-1)}` : queued[0]
+				}.`,
+			);
+		this.toNotes.replaceChildren(...lines.map((l) => el("div", "acp-to-note", l)));
+		this.toNotes.hidden = lines.length === 0;
+	}
+
+	private chipX(label: string, onClick: () => void): HTMLElement {
+		const x = el("button", "acp-chip-x", "×");
+		x.type = "button";
+		x.setAttribute("aria-label", label);
+		x.title = label;
+		// Removing a chip while typing keeps the keyboard up (no blur).
+		x.addEventListener("pointerdown", (e) => {
+			if (document.activeElement === this.input) e.preventDefault();
+		});
+		x.addEventListener("click", onClick);
+		return x;
+	}
+
+	/** The `@` menu follows the caret: open while an `@query` is being typed. */
+	private syncMention(): void {
+		if (this.source?.kind !== "conversation" || this.composerMode !== "on") {
+			this.closeMention();
+			return;
+		}
+		const q = mentionQuery(this.input.value, this.input.selectionStart ?? 0);
+		if (!q) {
+			this.closeMention();
+			return;
+		}
+		const sameQuery = this.mention?.query === q.query;
+		this.mention = { start: q.start, query: q.query, active: sameQuery ? this.mention!.active : 0 };
+		this.renderMention();
+	}
+
+	private mentionOptions(): Array<{ key: string; label: string; sub: string }> {
+		const q = this.mention?.query.toLowerCase() ?? "";
+		const names = this.teamNames();
+		const here = this.topicId();
+		const out: Array<{ key: string; label: string; sub: string }> = [];
+		if (
+			names.length > 1 &&
+			("todo el equipo".includes(q) || "equipo".startsWith(q) || "todos".startsWith(q))
+		)
+			out.push({ key: "*", label: "Todo el equipo", sub: `${names.length} agentes` });
+		for (const n of names)
+			if (n.toLowerCase().includes(q)) {
+				const a = this.agents.get(n)!;
+				const st = teamState(a, { here, titleOf: this.titleOf, interrupted: false });
+				out.push({ key: n, label: `@${n}`, sub: st.label });
+			}
+		return out;
+	}
+
+	private renderMention(): void {
+		const opts = this.mentionOptions();
+		if (!this.mention || opts.length === 0) {
+			this.closeMention();
+			return;
+		}
+		const active = Math.min(this.mention.active, opts.length - 1);
+		this.mention.active = active;
+		const rows = opts.map((o, i) => {
+			const r = el("div", "acp-mention-row");
+			r.id = `${this.mentionList.id}-${i}`;
+			r.setAttribute("role", "option");
+			r.setAttribute("aria-selected", String(i === active));
+			r.dataset.pick = o.key;
+			const face = o.key === "*" ? el("span", "acp-avatar acp-avatar-team", "∗") : avatarOf(o.key);
+			if (o.key !== "*") r.style.setProperty("--acp-hue", String(agentHue(o.key)));
+			const text = el("span", "acp-mention-text");
+			text.append(el("span", "acp-mention-name", o.label), el("span", "acp-mention-sub", o.sub));
+			r.append(face, text);
+			r.addEventListener("pointerdown", (e) => e.preventDefault());
+			r.addEventListener("click", () => this.pickMention(o.key));
+			return r;
+		});
+		this.mentionList.replaceChildren(...rows);
+		this.mentionList.hidden = false;
+		this.closePicker(false);
+		this.input.setAttribute("aria-controls", this.mentionList.id);
+		this.input.setAttribute("aria-expanded", "true");
+		this.input.setAttribute("aria-activedescendant", rows[active]!.id);
+	}
+
+	private closeMention(): void {
+		if (!this.mention && this.mentionList.hidden) return;
+		this.mention = null;
+		this.mentionList.hidden = true;
+		this.mentionList.replaceChildren();
+		this.input.removeAttribute("aria-activedescendant");
+		this.input.removeAttribute("aria-expanded");
+	}
+
+	/** The `@query` typed leaves the text and becomes a chip. */
+	private pickMention(key: string): void {
+		const m = this.mention;
+		if (!m) return;
+		const i = this.input;
+		const end = m.start + 1 + m.query.length;
+		const rest = i.value.slice(end).replace(/^ /, "");
+		i.value = i.value.slice(0, m.start) + rest;
+		i.setSelectionRange(m.start, m.start);
+		this.closeMention();
+		this.addChip(key);
+		this.renderHint();
+		this.syncSendBtn();
+	}
+
+	/** The `@` menu's keys while it is open; true when the key was its. */
+	private mentionKey(e: KeyboardEvent): boolean {
+		if (!this.mention || this.mentionList.hidden) return false;
+		const n = this.mentionList.childElementCount;
+		if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+			e.preventDefault();
+			this.mention.active = (this.mention.active + (e.key === "ArrowDown" ? 1 : n - 1)) % n;
+			this.renderMention();
+			return true;
+		}
+		if (e.key === "Enter" || e.key === "Tab") {
+			e.preventDefault();
+			const row = this.mentionList.children[this.mention.active] as HTMLElement | undefined;
+			if (row?.dataset.pick) this.pickMention(row.dataset.pick);
+			return true;
+		}
+		if (e.key === "Escape") {
+			e.preventDefault();
+			e.stopPropagation();
+			this.closeMention();
+			return true;
+		}
+		return false;
+	}
+
+	/** "+" in a topic: Todo el equipo and each agent, checked as the chips say. */
+	private topicPickRows(): HTMLElement[] {
+		const c = this.currentChips();
+		const names = this.teamNames();
+		const here = this.topicId();
+		const row = (
+			key: string,
+			checked: boolean,
+			face: HTMLElement,
+			name: string,
+			sub: string,
+			locked = false,
+		) => {
+			const b = el("button", `acp-pick-row${checked ? " checked" : ""}`);
+			b.type = "button";
+			b.tabIndex = -1;
+			b.dataset.agent = key;
+			b.setAttribute("role", "menuitemcheckbox");
+			b.setAttribute("aria-checked", String(checked));
+			const mark = el("span", "acp-pick-mark", checked ? "✓" : "");
+			mark.setAttribute("aria-hidden", "true");
+			const info = el("span", "acp-pick-info");
+			info.append(face, el("span", "acp-pick-name", name), el("span", "acp-pick-state", sub));
+			if (locked) b.setAttribute("aria-disabled", "true");
+			b.append(mark, info);
+			b.addEventListener("click", () => {
+				if (locked) return;
+				if (key === "*") this.setChips({ team: !c.team, agents: [] });
+				else if (checked) this.setChips({ team: false, agents: c.agents.filter((x) => x !== key) });
+				else this.addChip(key);
+			});
+			return b;
+		};
+		const out: HTMLElement[] = [];
+		if (names.length > 1)
+			out.push(
+				row(
+					"*",
+					c.team,
+					el("span", "acp-avatar acp-avatar-team", "∗"),
+					`Todo el equipo · ${names.length}`,
+					"a cada uno por separado",
+				),
+			);
+		for (const n of names) {
+			const st = teamState(this.agents.get(n)!, {
+				here,
+				titleOf: this.titleOf,
+				interrupted: false,
+			});
+			const face = avatarOf(n);
+			face.style.setProperty("--acp-hue", String(agentHue(n)));
+			out.push(
+				row(
+					n,
+					c.team || c.agents.includes(n),
+					face,
+					`@${n}`,
+					c.team ? "en Todo el equipo" : st.label,
+					c.team,
+				),
+			);
+		}
+		return out;
 	}
 
 	// ── Sending ─────────────────────────────────────────────────────────
@@ -1780,6 +2371,16 @@ export class AcpThread {
 		// Checked before the reservation below: a locked box keeps its draft.
 		if (this.composerMode !== "on" || !src || text.trim() === "") return;
 		this.notice = "";
+		// A topic without recipients sends nothing — and keeps the text where it is.
+		if (src.kind === "conversation" && this.agents.size > 0) {
+			const r = this.recipients(text);
+			if (r.error) {
+				this.notice = r.error;
+				this.renderComposer();
+				if (!this.pickBtn.hidden) flash(this.toRow, false);
+				return;
+			}
+		}
 		// Reserve this send BEFORE any await: the text leaves the field and gets
 		// its client id now, so a second click (or Ctrl+Enter) on the same draft
 		// finds an empty field and sends nothing. A new message typed meanwhile is
@@ -1814,7 +2415,8 @@ export class AcpThread {
 			this.changed();
 			return;
 		}
-		const to = src.kind === "agent" ? { to: [src.name], error: null } : this.recipients(text);
+		const to =
+			src.kind === "agent" ? { to: [src.name], team: false, error: null } : this.recipients(text);
 		if (to.error) {
 			giveBack(to.error);
 			this.changed();
@@ -1833,7 +2435,16 @@ export class AcpThread {
 			const asPost = src.kind === "conversation" && !tooBig;
 			if (asPost) {
 				try {
-					const r = await acpPost(src.conversationId, to.to, text, clientId);
+					const r = await acpPost(src.conversationId, to.team ? "team" : to.to, text, clientId);
+					// What the topic keeps now (the server stored the same): the
+					// chips go back to being the topic's own.
+					if (this.topicId() === src.conversationId && this.conversation) {
+						this.conversation = {
+							...this.conversation,
+							recipients: to.team ? { team: true } : { agents: to.to },
+						};
+						this.chips.delete(src.conversationId);
+					}
 					if (sameChat(this.source, src))
 						for (const row of r.messages)
 							if (this.relevant(row)) {
@@ -1951,7 +2562,7 @@ function time(iso: string): string {
 	const d = new Date(iso);
 	return Number.isNaN(d.getTime())
 		? ""
-		: d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+		: d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
 }
 
 /** An agent's avatar + @name, in its colour (also the Project Chat header's). */
@@ -1969,6 +2580,14 @@ function agentId(name: string): HTMLElement {
 	id.append(el("span", "acp-avatar", name.slice(0, 1).toUpperCase()), `@${name}`);
 	id.style.setProperty("--acp-hue", String(agentHue(name)));
 	return id;
+}
+
+/** An agent's round initial in its colour (decorative: its @name is next to it). */
+function avatarOf(name: string): HTMLElement {
+	const a = el("span", "acp-avatar", name.slice(0, 1).toUpperCase());
+	a.style.setProperty("--acp-hue", String(agentHue(name)));
+	a.setAttribute("aria-hidden", "true");
+	return a;
 }
 
 /** Marks a bubble as said by that agent (its colour accent, see .acp-voice). */

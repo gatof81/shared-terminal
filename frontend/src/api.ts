@@ -1925,6 +1925,11 @@ export interface AcpAgentInfo {
 	queue?: AcpMessageRef[];
 	/** v27: its requests to other agents not answered yet. */
 	waitingFor?: Array<AcpMessageRef & { agent: string }>;
+	/**
+	 * A slot kept in a topic (or a work) by a process the agent left running
+	 * there (#761): it cannot take another topic until that process ends.
+	 */
+	heldBy?: Array<{ conversationId: string | null; work: string | null; since: string }>;
 	/** v27: its open question to the person, if any. */
 	question?: { id: number; messageId: number | null; conversationId: string | null } | null;
 	/** Login methods its adapter advertises (terminal-auth), for "Conectar cuenta". */
@@ -2097,11 +2102,24 @@ export const acpReadConversation = (id: string, at: string) =>
 		method: "POST",
 		body: JSON.stringify({ at }),
 	});
-/** A post in a topic: one row per recipient under one client id. */
-export const acpPost = (conversationId: string, to: string[], body: string, clientId: string) =>
+/**
+ * A post in a topic: one row per recipient under one client id. `team`:
+ * the project's agents as of now («Todo el equipo»), resolved by the server.
+ */
+export const acpPost = (
+	conversationId: string,
+	to: string[] | "team",
+	body: string,
+	clientId: string,
+) =>
 	acpJson<{ messages: AcpMessage[]; replayed?: boolean }>("/messages", {
 		method: "POST",
-		body: JSON.stringify({ conversationId, to, body, clientId }),
+		body: JSON.stringify({
+			conversationId,
+			...(to === "team" ? { team: true } : { to }),
+			body,
+			clientId,
+		}),
 	});
 export const acpInbox = () => acpJson<AcpInbox>("/inbox");
 export const acpWorks = () => acpJson<AcpWork[]>("/works");
@@ -2140,3 +2158,6 @@ export function openAcpSocket(): WebSocket {
 }
 export const acpRequeue = (id: number) =>
 	acpJson<AcpMessage>(`/messages/${id}/requeue`, { method: "POST" });
+/** «Dar por revisada, sin reencolar»: the interrupted message leaves Pendientes; nothing is sent. */
+export const acpReview = (id: number) =>
+	acpJson<AcpMessage>(`/messages/${id}/review`, { method: "POST" });

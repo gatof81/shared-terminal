@@ -28,6 +28,8 @@ const api = vi.hoisted(() => ({
 	acpProjectFeed: vi.fn(),
 	acpSend: vi.fn(),
 	acpRequeue: vi.fn(),
+	acpReview: vi.fn(),
+	acpInbox: vi.fn(() => new Promise(() => {})),
 	acpAnswer: vi.fn(),
 	acpListAgents: vi.fn(),
 	uploadSessionFiles: vi.fn(),
@@ -331,7 +333,7 @@ describe("consistency", () => {
 		expect(t.root.querySelector(".acp-badge")?.textContent).toBe("hecho");
 	});
 
-	it("a requeue answered after switching chats changes nothing in the chat on screen", async () => {
+	it("a requeue (from the review, after acknowledging) answered after switching chats changes nothing on screen", async () => {
 		api.acpFeed.mockResolvedValueOnce(
 			feed({ agent: agent("dev"), messages: [msg(3, { state: "uncertain" })] }),
 		);
@@ -341,10 +343,19 @@ describe("consistency", () => {
 		t.open({ kind: "agent", name: "dev" });
 		await flush();
 		await flush();
-		const again = [...t.root.querySelectorAll("button")].find(
-			(b) => b.textContent === "Volver a encolar",
-		)!;
+		// Never a one-tap retry: the review's requeue is locked until acknowledged.
+		[...t.root.querySelectorAll("button")]
+			.find((b) => b.textContent === "Revisar interrupción")!
+			.click();
+		const dialog = document.querySelector(".acp-review")!;
+		const again = dialog.querySelector<HTMLButtonElement>(".acp-review-requeue-btn")!;
+		expect(again.disabled).toBe(true);
+		const ack = dialog.querySelector<HTMLInputElement>(".acp-review-ack input")!;
+		ack.checked = true;
+		ack.dispatchEvent(new Event("change"));
+		expect(again.disabled).toBe(false);
 		again.click();
+		expect(api.acpRequeue).toHaveBeenCalledWith(3);
 		api.acpFeed.mockResolvedValueOnce(feed({ agent: agent("qa"), messages: [] }));
 		t.open({ kind: "agent", name: "qa" });
 		await flush();

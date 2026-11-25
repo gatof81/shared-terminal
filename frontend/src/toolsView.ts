@@ -128,9 +128,9 @@ function field(label: string, control: HTMLElement, cls: string): HTMLElement {
  * Open Herramientas on `t` from the project page on screen (a new history
  * entry: Back returns). Anywhere else — no project page up — it does nothing.
  */
-export function openTools(t: { agent: string; work: string | null; tool: ToolName }): void {
+export function openTools(t: { agent: string; work: string | null; tool: ToolName }): boolean {
 	const r = readProjectRoute();
-	if (!r) return;
+	if (!r) return false;
 	const from =
 		r.page === "tools"
 			? (r.conversationId ?? null)
@@ -144,6 +144,7 @@ export function openTools(t: { agent: string; work: string | null; tool: ToolNam
 		tools: { agent: t.agent, work: t.work, tool: t.tool, detail: null },
 	});
 	if (r.page !== "tools") entryDepth = depth();
+	return true;
 }
 
 /**

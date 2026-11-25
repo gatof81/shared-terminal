@@ -184,21 +184,6 @@ button.rail-row:focus-visible {
 .ps-topic .acp-agent-id[data-agent] {
   cursor: pointer;
 }
-.acp-msg-work {
-  padding: 0 6px;
-  background: transparent;
-  border: 1px solid var(--c-border);
-  border-radius: 999px;
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  line-height: 1.5;
-  cursor: pointer;
-}
-.acp-msg-work:hover {
-  color: var(--c-text);
-  border-color: var(--c-accent);
-}
-
 @media (max-width: 768px) {
   /* The header's row: ☰ · ‹ · Agente · the view tabs · ⋯ — every control 44
      px tall at most, so the header keeps the height the page's row had. */

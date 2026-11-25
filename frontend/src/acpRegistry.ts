@@ -116,6 +116,12 @@ export function acpEntryByName(name: string): AcpSessionEntry | null {
 	return null;
 }
 
+/** The session agent `name` runs in, if the list has it. */
+export function acpSessionOf(name: string): string | null {
+	for (const [sid, e] of bySession) if (e.name === name) return sid;
+	return null;
+}
+
 /** Something happened that only a new read can show: its mark. */
 export function markAcpStale(): number {
 	return ++staleSeq;

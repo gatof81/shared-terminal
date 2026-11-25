@@ -50,7 +50,7 @@ test.describe("terminal invariant", () => {
 		await expect(page.locator(".tab-pane.active")).toContainText("still here");
 	});
 
-	test("rail ⇄ topic ⇄ terminal: the project's pages go over the terminal without touching it", async ({
+	test("rail ⇄ topic ⇄ Pendientes ⇄ menus ⇄ terminal: nothing touches the terminal", async ({
 		app,
 		backend,
 		page,
@@ -76,6 +76,16 @@ test.describe("terminal invariant", () => {
 		if (app.mobile) await page.locator(".ps-back").click();
 		await topicRow("Rediseño de UI/UX").click();
 		await expect(page.locator("#ps-topic-title")).toHaveText("Rediseño de UI/UX");
+		// Pendientes and the topic's menu over the topic.
+		const inbox = page.locator(".acp-inbox-card");
+		await page.locator("#inbox-btn").click();
+		await expect(inbox).toBeVisible();
+		await page.keyboard.press("Escape");
+		await expect(inbox).toBeHidden();
+		await page.locator(".ps-topic-head .pv-menu-btn").click();
+		await expect(page.locator('[role="menu"].action-menu')).toBeVisible();
+		await page.keyboard.press("Escape");
+		await expect(page.locator('[role="menu"].action-menu')).toBeHidden();
 		await page.goBack();
 		await expect(page.locator(".rail-body")).toBeVisible();
 		// The sessions from the rail's foot: the terminal again; Back to the rail.
@@ -89,6 +99,13 @@ test.describe("terminal invariant", () => {
 		await expect(page.locator(".rail-body")).toBeVisible();
 		await page.goForward();
 		await expect(page.locator("#project-view")).toBeHidden();
+		// Pendientes and the account's menu with the terminal on screen.
+		await page.locator("#inbox-btn").click();
+		await expect(inbox).toBeVisible();
+		await inbox.getByRole("button", { name: "Cerrar Pendientes" }).click();
+		await expect(inbox).toBeHidden();
+		await app.openUserMenu();
+		await page.keyboard.press("Escape");
 		await page.waitForTimeout(400);
 
 		expect(backend.terminalSockets.length, "no new terminal socket").toBe(sockets);

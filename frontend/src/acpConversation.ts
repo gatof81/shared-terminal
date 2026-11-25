@@ -21,6 +21,7 @@ import {
 	patchConversation,
 	railAgents,
 	railConversation,
+	topicTitle,
 } from "./projectRail.js";
 import { depth, navigateProject, projectRouteHash } from "./router.js";
 import { setTitlePage } from "./tabTitle.js";
@@ -63,22 +64,19 @@ let state: ThreadState | null = null;
 let fromRail = false;
 
 // An agent's avatar or name in the thread opens its menu (Files · Git ·
-// Terminal · its works); a work's chip `⎇ <id>` opens that workspace.
+// Terminal · its works). A work's chip `⎇ <id>`: onTopicWork (projectsView).
 thread.root.addEventListener("click", (e) => {
 	const t = e.target;
 	if (!(t instanceof Element)) return;
-	const chip = t.closest<HTMLElement>(".acp-msg-work[data-work]");
-	if (chip?.dataset.agent && chip.dataset.work) {
-		openTools({ agent: chip.dataset.agent, work: chip.dataset.work, tool: "git" });
-		return;
-	}
 	const who = t.closest<HTMLElement>(".acp-agent-id[data-agent]");
 	if (who?.dataset.agent) openAgentMenu(who.dataset.agent, who);
 });
 
+thread.titleOf = topicTitle;
 thread.onState = (s) => {
 	state = s;
 	paint();
+	revealPending();
 };
 onRailChange(() => paint());
 
@@ -111,7 +109,63 @@ export function topicPage(
 	thread.open({ kind: "conversation", conversationId, projectId });
 	state = thread.state;
 	paint();
+	queueMicrotask(revealPending);
 	return root;
+}
+
+// ── Going to a message from elsewhere (Pendientes, a review) ────────────────
+
+/** A message to show once its topic's feed is read («Ver en el tema»). */
+let pendingReveal: { cid: string; id: number; result: boolean } | null = null;
+
+/**
+ * Opens topic `conversationId` of project `projectId` at message `id`
+ * (its answer's own item when `result`), highlighted.
+ */
+export function revealInTopic(
+	projectId: string,
+	conversationId: string,
+	id: number,
+	result: boolean,
+): void {
+	pendingReveal = { cid: conversationId, id, result };
+	if (cid === conversationId && root.isConnected) revealPending();
+	else navigateProject({ projectId, page: "conversation", conversationId });
+}
+
+function revealPending(): void {
+	const p = pendingReveal;
+	if (!p || p.cid !== cid || !root.isConnected) return;
+	if (state?.feed === "loading") return;
+	pendingReveal = null;
+	if (state?.feed === "not-found") return;
+	// After the frame that lays the feed out (the thread renders on the next one).
+	requestAnimationFrame(() => {
+		void thread.revealMessage(p.id, { result: p.result }).then((found) => {
+			if (found === "earlier")
+				thread.showNotice(
+					`El mensaje #${p.id} está más atrás en el historial: «Cargar anteriores» sigue buscando.`,
+				);
+			else if (found === "missing")
+				thread.showNotice(`No se encontró el mensaje #${p.id} en este tema.`);
+		});
+	});
+}
+
+/**
+ * Where a message's `⎇ <work>` chip leads: Herramientas on that work (3B
+ * F4 plugs it in; until then the chip only names the work).
+ */
+export function onTopicWork(open: ((agent: string, work: string) => void) | null): void {
+	thread.onOpenWork = open;
+}
+
+/** «Escribirle un mensaje nuevo»: topic `conversationId`, with `agent` as its recipient. */
+export function writeInTopic(projectId: string, conversationId: string, agent: string): void {
+	thread.presetRecipients(conversationId, [agent]);
+	if (cid !== conversationId || !root.isConnected)
+		navigateProject({ projectId, page: "conversation", conversationId });
+	requestAnimationFrame(() => thread.input.focus());
 }
 
 /** Off screen: stop following (DOM and state kept for a quick return). */
@@ -258,7 +312,7 @@ async function archiveTopic(c: AcpConversation): Promise<void> {
 	const ok = await confirmDialog({
 		title: `Archivar «${c.title}»`,
 		message:
-			"Sale de la lista de conversaciones y no admite mensajes nuevos. Su historial sigue legible desde «Ver archivadas».",
+			"Sale de la lista de conversaciones y no admite mensajes nuevos. Su historial sigue legible desde «Conversaciones archivadas», en el panel del proyecto.",
 		confirmLabel: "Archivar",
 		danger: true,
 	}).catch(() => false);
