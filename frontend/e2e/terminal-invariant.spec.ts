@@ -191,6 +191,84 @@ test.describe("terminal invariant", () => {
 		expect(app.errors).toEqual([]);
 	});
 
+	test("Herramientas ⇄ Pendientes (criterion 7): no resize, no new socket; a review's tools are another attach", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.enableConversations();
+		backend.enableWorks();
+		// An interruption of @arq waiting in Pendientes.
+		backend.addAcpMessage({
+			to_id: "arq",
+			body: "@arq medí también la variante sin shards.",
+			project_id: PROJECT_IDS.hz,
+			conversation_id: CONV_IDS.ci,
+			state: "uncertain",
+			note: "se reinició el runner de @arq",
+		});
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/c/${CONV_IDS.ci}`);
+		await expect(page.locator("#ps-topic-title")).toHaveText("Optimización de CI");
+		const menu = page.locator('[role="menu"].action-menu');
+		await page.locator('#project-view .acp-agent-id[data-agent="dev"]').first().click();
+		await menu.getByRole("menuitem", { name: /^Terminal de la sesión/ }).click();
+		await app.expectTerminalReady();
+		await page.waitForTimeout(400);
+		const sockets = backend.terminalSockets.length;
+		const sock = backend.terminalSockets.find(
+			(s) => s.sessionId === PROJECT_SESSION_IDS.developer2 && !s.closed,
+		)!;
+		expect(sock).toBeTruthy();
+		const framesBefore = sock.sent.length;
+		const rowsBefore = await page.locator(".tab-pane.active .xterm-rows > div").count();
+
+		// Pendientes over each of the tools' views, opened from the header and dismissed.
+		const inbox = page.locator("#inbox-btn");
+		const panel = page.locator(".acp-inbox-card");
+		for (const view of ["terminal", "files", "git"] as const) {
+			if (view !== "terminal") await page.click(`#view-${view}-btn`);
+			await app.expectView(view);
+			await expect(page.locator(".tools-bar")).toBeVisible();
+			await inbox.click();
+			await expect(panel).toBeVisible();
+			await app.escape();
+			await expect(panel).toBeHidden();
+		}
+		await page.click("#view-terminal-btn");
+		await app.expectView("terminal");
+		await page.waitForTimeout(400);
+		expect(backend.terminalSockets.length, "no new terminal socket").toBe(sockets);
+		expect(sock.closed, "the attach stayed open").toBe(false);
+		expect(sock.sent.length - framesBefore, "no frame of any kind (no resize)").toBe(0);
+		expect(await page.locator(".tab-pane.active .xterm-rows > div").count()).toBe(rowsBefore);
+
+		// From Pendientes, an interruption of @arq: «Ver cambios en Git» opens
+		// @arq's Herramientas — its session attaches; @dev's gets no resize.
+		await inbox.click();
+		await panel
+			.locator(".acp-ib-item.is-interrupted", { hasText: "variante sin shards" })
+			.getByRole("button", { name: "Revisar interrupción" })
+			.click();
+		const review = page.locator(".acp-review-card");
+		await expect(review).toBeVisible();
+		await review.getByRole("button", { name: "Ver cambios en Git" }).click();
+		await expect(review).toBeHidden();
+		await app.expectView("git");
+		await expect(page.locator(".tools-agent")).toHaveValue("arq");
+		await page.click("#view-terminal-btn");
+		await expect
+			.poll(() =>
+				backend.terminalSockets.some(
+					(s) => s.sessionId === PROJECT_SESSION_IDS.architect && !s.closed,
+				),
+			)
+			.toBe(true);
+		expect(sock.sent.filter((f) => f.type === "resize").length, "no resize to @dev's session").toBe(
+			0,
+		);
+		expect(app.errors).toEqual([]);
+	});
+
 	test("typing reaches the session and the echo renders", async ({ app, backend, page }) => {
 		await app.login("alice");
 		await app.openSession("my-project");
