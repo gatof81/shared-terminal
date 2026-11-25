@@ -724,7 +724,10 @@ export class MockBackend {
 				agents: this.acpAgents.filter((a) => a.projectId === c.projectId),
 				maxMessageBytes: 262144,
 				messages: page(this.acpMessages.filter((m) => m.conversation_id === c.id)),
-				questions: this.acpQuestions,
+				// Like the backend: only the questions asked on this topic's messages.
+				questions: this.acpQuestions.filter((q) =>
+					this.acpMessages.some((m) => m.id === q.message_id && m.conversation_id === c.id),
+				),
 				activity: this.acpActivity,
 				activitySeq: 0,
 			});
