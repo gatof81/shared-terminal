@@ -27,9 +27,6 @@ body.tools-on #view-chat-btn {
 #terminal-toolbar > .tools-bar {
   flex-shrink: 1;
 }
-body.tools-on #view-switch {
-  margin-left: auto;
-}
 .tools-back {
   display: inline-flex;
   align-items: center;
@@ -153,6 +150,15 @@ body.tools-on #view-switch {
   text-decoration: underline;
 }
 
+/* A work that is gone: one state over the whole view (no header, no panes). */
+#files-view.tools-gone > :not(.tools-strip, .tools-gone-state),
+#git-view.tools-gone > :not(.tools-strip, .tools-gone-state) {
+  display: none;
+}
+.tools-gone-state {
+  flex: 1;
+}
+
 /* With Terminal: the session's note, in the tab row (never a row of its own). */
 .tools-term-note {
   min-width: 0;
@@ -190,6 +196,11 @@ button.rail-row:focus-visible {
   header .tools-bar {
     flex: 1 1 auto;
     gap: 2px;
+  }
+  /* Herramientas, however it was reached (a deep link too): ‹ is the only
+     way out of the header — no ☰ beside it (F1: a topic or Herramientas). */
+  body.tools-on header #sidebar-toggle {
+    display: none;
   }
   header .tools-back {
     flex: none;

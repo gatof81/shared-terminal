@@ -220,12 +220,33 @@ test.describe("visual", () => {
 		await shot(page, "tools-git-work");
 	});
 
+	test("tools: a work's diff", async ({ app, backend, page }) => {
+		backend.enableConversations();
+		backend.enableWorks();
+		await app.login(
+			"alice",
+			`#/projects/${PROJECT_IDS.hz}/c/${CONV_IDS.ci}/tools/dev/ci-cache/git`,
+		);
+		await page.locator("#git-list .git-row", { hasText: "ci.yml" }).click();
+		await expect(page.locator("#git-diff")).toContainText("actions/cache@v4");
+		await shot(page, "tools-git-work-diff");
+	});
+
+	test("tools: a work that is gone (a deep link)", async ({ app, backend, page }) => {
+		backend.enableConversations();
+		backend.enableWorks();
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/tools/dev/old-try/files`);
+		await expect(page.locator(".tools-gone-state")).toContainText("Ver workspace principal");
+		await expect(page.locator("#tools-strip")).toContainText("puertos —");
+		await shot(page, "tools-work-gone");
+	});
+
 	test("tools: Terminal, the whole session", async ({ app, backend, page }) => {
 		backend.enableConversations();
 		backend.enableWorks();
 		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/c/${CONV_IDS.ci}/tools/dev/~/terminal`);
 		await app.expectTerminalReady();
-		await expect(page.locator(".tools-term-note")).toContainText("Sesión completa");
+		await expect(page.locator(".tools-term-note")).toBeVisible();
 		await shot(page, "tools-terminal");
 	});
 

@@ -32,7 +32,7 @@
 import type { AcpAgentInfo, AcpWork } from "./api.js";
 import { openActionMenu } from "./components/actionMenu.js";
 import { gitBranch, onGitStatus, requestGitStatus } from "./gitView.js";
-import { activeSessionId, isMobile, sessions } from "./main.js";
+import { isMobile, sessions } from "./main.js";
 import { projectName } from "./projectDirectory.js";
 import { agentState, onRailChange, railAgents, railWorks, topicTitle } from "./projectRail.js";
 import {
@@ -48,8 +48,8 @@ import {
 	type ToolsTarget,
 } from "./router.js";
 import { applyRoute } from "./sessionCore.js";
-import { setInTools, setWork } from "./toolsContext.js";
-import { el } from "./ui.js";
+import { isWorkGone, onWorkGone, setInTools, setWork } from "./toolsContext.js";
+import { button, el, stateBox } from "./ui.js";
 import { getView, onSessionSync, onViewChange } from "./viewSwitch.js";
 
 const toolbar = document.getElementById("terminal-toolbar");
@@ -115,6 +115,18 @@ stripText.setAttribute("aria-live", "polite");
 strip.append(stripText);
 
 const termNote = el("span", "tools-term-note");
+
+// A work the backend no longer serves (404/403): one state over the whole
+// Files / Git view — no tree, no preview, no ↻ — with the way to the
+// principal workspace. Never a retry: the client has no other way into it.
+const goneBox = stateBox(
+	"info",
+	"Este trabajo ya no está disponible.",
+	button("Ver workspace principal", "files-btn primary", () => {
+		if (target) openTools({ agent: target.agent, work: null, tool: target.tool });
+	}),
+);
+goneBox.classList.add("tools-gone-state");
 
 function field(label: string, control: HTMLElement, cls: string): HTMLElement {
 	const f = el("label", `tools-field ${cls}`);
@@ -209,6 +221,8 @@ export function hideTools(opts: { fromHistory: boolean }): void {
 	applied = null;
 	strip.remove();
 	termNote.remove();
+	goneBox.remove();
+	for (const o of Object.values(overlays)) o?.classList.remove("tools-gone");
 	bar.remove();
 }
 
@@ -219,7 +233,7 @@ export function leaveTools(): void {
 	cid = null;
 	target = null;
 	sessionId = null;
-	setWork(null);
+	setWork(null, null);
 }
 
 function apply(): void {
@@ -227,7 +241,9 @@ function apply(): void {
 	if (!t || !on) return;
 	const agent = railAgents().find((a) => a.name === t.agent) ?? null;
 	sessionId = agent?.sessionId ?? null;
-	setWork(t.work, { silent: sessionId !== activeSessionId });
+	// Bound to the agent's session: until that session is the one on screen,
+	// the one there keeps reading its own principal workspace.
+	setWork(sessionId, t.work);
 	const hash = currentHash();
 	// Not known yet (the agents or the sessions still loading): applied when they land.
 	if (sessionId !== null && sessions.some((s) => s.sessionId === sessionId) && applied !== hash) {
@@ -341,9 +357,8 @@ function paint(): void {
 	wsField.classList.toggle("is-session", t.tool === "terminal");
 
 	paintStrip(t);
-	termNote.textContent = isMobile()
-		? "Sesión completa"
-		: `Sesión completa · se abre en ${WORKSPACE}`;
+	// Wide, the disabled workspace select already says «Sesión completa».
+	termNote.textContent = isMobile() ? "Sesión completa" : `se abre en ${WORKSPACE}`;
 	termNote.title =
 		"La terminal es de la sesión (tmux en su contenedor), compartida por todos sus workspaces";
 }
@@ -372,7 +387,9 @@ function paintStrip(t: ToolsTarget): void {
 		parts.push(fact("rama", w?.branch ?? `work/${t.work}`));
 		parts.push(fact("dir", `${WORKSPACE}/.st/ctx/${t.work}`));
 		if (w?.baseSha) parts.push(fact("base", w.baseSha.slice(0, 7)));
-		if (typeof w?.portBase === "number")
+		// A cleaned work's ports are free again (another work may hold them).
+		if (!w || w.state === "cleaned") parts.push(fact("puertos", "—"));
+		else if (typeof w.portBase === "number")
 			parts.push(fact("puertos", `${w.portBase}–${w.portBase + 99}`));
 		if (!w || w.state === "cleaned") parts.push(warn("ya no está disponible"));
 		else if (w.state !== "active" && w.state !== "creating") parts.push(warn("cerrado"));
@@ -449,6 +466,11 @@ function place(): void {
 	if (overlay) {
 		if (overlay.firstChild !== strip) overlay.prepend(strip);
 	} else strip.remove();
+	const gone = overlay !== null && overlay !== undefined && isWorkGone(sessionId);
+	for (const o of Object.values(overlays)) o?.classList.toggle("tools-gone", gone && o === overlay);
+	if (gone && overlay) {
+		if (goneBox.parentElement !== overlay) overlay.append(goneBox);
+	} else goneBox.remove();
 	if (view === "terminal" && tabTools) {
 		if (tabTools.firstChild !== termNote) tabTools.prepend(termNote);
 	} else termNote.remove();
@@ -471,6 +493,7 @@ onSessionSync(() => {
 	else paint();
 });
 onGitStatus(() => paint());
+onWorkGone(() => paint());
 if (typeof window !== "undefined")
 	window.matchMedia?.("(max-width: 768px)")?.addEventListener?.("change", () => paint());
 

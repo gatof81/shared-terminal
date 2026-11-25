@@ -378,7 +378,7 @@ export function syncSessionViews(): void {
 	// rather than a disabled button whose only explanation is a tooltip.
 	buttons.terminal.disabled = false;
 	renderSwitch();
-	buttons.terminal.title = canTerminal ? "Show terminal" : "Terminal (session not running)";
+	buttons.terminal.title = canTerminal ? "Terminal" : "Terminal (session not running)";
 	// Listeners first: they re-key their state to the active session, so
 	// a forced switch below (which fires onViewChange → load) loads for
 	// the NEW session rather than racing a stale one.

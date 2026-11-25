@@ -32,7 +32,7 @@ import { highlightCode, languageForFile } from "./highlight.js";
 import { activeSessionId, isMobile, sessions } from "./main.js";
 import { renderMarkdown } from "./markdown.js";
 import { saveBlob } from "./saveBlob.js";
-import { currentWork, inTools, onWorkChange } from "./toolsContext.js";
+import { inTools, onWorkChange, reportWorkGone, workFor } from "./toolsContext.js";
 import { button, el, stateBox } from "./ui.js";
 import {
 	getView,
@@ -146,7 +146,7 @@ function syncFilesView(): void {
 		resetState(null);
 		return;
 	}
-	if (s.sessionId !== stateSessionId || currentWork() !== stateWork) {
+	if (s.sessionId !== stateSessionId || workFor(s.sessionId) !== stateWork) {
 		resetState(s.sessionId);
 		if (isFilesViewActive()) {
 			void loadDir("");
@@ -164,7 +164,7 @@ function resetState(sessionId: string | null): void {
 	previewAbort?.abort();
 	previewAbort = null;
 	stateSessionId = sessionId;
-	stateWork = sessionId === null ? null : currentWork();
+	stateWork = workFor(sessionId);
 	dirs.clear();
 	expanded.clear();
 	expanded.add("");
@@ -189,6 +189,10 @@ async function loadDir(path: string): Promise<void> {
 	} catch (err) {
 		if (gen !== generation) return;
 		const status = err instanceof WorkspaceFsError ? err.status : 0;
+		// The work is gone (cleaned) or not this session's: Herramientas shows
+		// it as one state over the whole view, never a retry by another path.
+		if (stateWork !== null && (status === 404 || status === 403))
+			reportWorkGone(sessionId, stateWork);
 		dirs.set(path, {
 			listing: null,
 			loading: false,

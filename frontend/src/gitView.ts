@@ -34,7 +34,7 @@ import { appendDiffRows } from "./diffTable.js";
 import { relativeDate } from "./format.js";
 import { activeSessionId, isMobile, sessions } from "./main.js";
 import { runSessionAction } from "./sessionCore.js";
-import { currentWork, onWorkChange } from "./toolsContext.js";
+import { onWorkChange, reportWorkGone, workFor } from "./toolsContext.js";
 import { button, el, stateBox } from "./ui.js";
 import {
 	getView,
@@ -207,7 +207,7 @@ function syncGitView(): void {
 		resetState(null);
 		return;
 	}
-	if (s.sessionId !== stateSessionId || currentWork() !== stateWork) {
+	if (s.sessionId !== stateSessionId || workFor(s.sessionId) !== stateWork) {
 		resetState(s.sessionId);
 		if (isGitViewActive()) {
 			void load();
@@ -236,7 +236,7 @@ function resetState(sessionId: string | null): void {
 	generation++;
 	pendingDetail = null;
 	stateSessionId = sessionId;
-	stateWork = sessionId === null ? null : currentWork();
+	stateWork = workFor(sessionId);
 	dir = "";
 	status = { status: "idle" };
 	log = { status: "idle" };
@@ -313,10 +313,14 @@ async function load(): Promise<void> {
 			},
 			(err: unknown) => {
 				if (stale()) return;
+				const httpStatus = err instanceof GitApiError ? err.status : 0;
+				// The work is gone: one state over the whole view (toolsView.ts).
+				if (work !== null && (httpStatus === 404 || httpStatus === 403))
+					reportWorkGone(sessionId, work);
 				status = {
 					status: "error",
 					message: (err as Error).message,
-					httpStatus: err instanceof GitApiError ? err.status : 0,
+					httpStatus,
 					code: err instanceof GitApiError ? err.code : null,
 				};
 				notifyStatus();
