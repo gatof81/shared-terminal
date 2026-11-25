@@ -926,7 +926,12 @@ export class AcpThread {
 		// A reader further up keeps the row they are looking at where it is,
 		// whatever changes above or below it (an earlier page, an answer, a
 		// question card): by that row, never by scrollTop or the distance to the end.
-		const keep = atBottom || this.toBottom ? null : this.rowInView();
+		// The row held since the reader last scrolled, not the one in view now:
+		// rows can have changed height since (a font that arrived) with the
+		// ResizeObserver's report still pending — this frame's render runs
+		// first, and the geometry it reads is already shifted.
+		const held = this.held && Math.abs(t.scrollTop - this.held.top) < 1 ? this.held : null;
+		const keep = atBottom || this.toBottom ? null : (held?.place ?? this.rowInView());
 		const nodes: HTMLElement[] = [];
 		if (this.hasEarlier) {
 			this.moreBtn.disabled = false;
@@ -982,11 +987,15 @@ export class AcpThread {
 		this.observeRows(nodes);
 		if (keepFocus?.isConnected) keepFocus.focus({ preventScroll: true });
 		const end = atBottom || this.toBottom;
+		const placed = !end && keep !== null && this.putRow(keep);
 		if (end) {
 			t.scrollTop = t.scrollHeight;
 			this.pinnedTop = t.scrollTop;
-		} else if (!keep || !this.putRow(keep)) t.scrollTop = prevTop;
-		this.holdPlace(!end);
+		} else if (!placed) t.scrollTop = prevTop;
+		// The held row is still the reader's (it was put back): only where
+		// scrollTop now is changes. Anything else is taken afresh.
+		if (placed && held && keep === held.place) held.top = t.scrollTop;
+		else this.holdPlace(!end);
 		this.toBottom = false;
 		// News below a reader who is further up: a new row (an id above what
 		// was shown — an earlier page has lower ids), or a row already shown
