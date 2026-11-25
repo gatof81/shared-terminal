@@ -121,13 +121,16 @@ const container = {
 	},
 };
 const realFetch = globalThis.fetch;
+/** While set, every single-statement SELECT sent to D1 (its SQL and params). */
+let captured: Array<{ sql: string; params: unknown[] }> | null = null;
+
+const bindOf = (params: unknown[]) =>
+	params.map((p) => (typeof p === "boolean" ? Number(p) : p)) as Array<string | number | null>;
 
 function run(sql: string, params: unknown[]) {
 	try {
 		const st = db.prepare(sql);
-		const bind = params.map((p) => (typeof p === "boolean" ? Number(p) : p)) as Array<
-			string | number | null
-		>;
+		const bind = bindOf(params);
 		if (/^\s*(SELECT|PRAGMA|WITH)\b/i.test(sql) || /\bRETURNING\b/i.test(sql))
 			return {
 				success: true,
@@ -182,6 +185,8 @@ beforeAll(async () => {
 					),
 				);
 			}
+			if (captured && /^\s*SELECT\b/i.test(body.sql))
+				captured.push({ sql: body.sql, params: body.params ?? [] });
 			const answer = run(body.sql, body.params ?? []);
 			return new Response(JSON.stringify(answer));
 		}),
@@ -2265,6 +2270,173 @@ describe("ACP conversations (v27)", () => {
 			.get(consult.body.id) as Record<string, unknown>;
 		expect(notice).toMatchObject({ conversation_id: c1, project_id: PC, to_id: "ana" });
 		await call(as("ana"), "POST", `/runner/messages/${m.id}/result`, { state: "done", text: "." });
+	});
+});
+
+describe("D1 reads: the hot reads go by index, never through the owner's whole history (v28)", () => {
+	// Enough rows that the plan is not the one of a near-empty table, and
+	// ANALYZE so the planner has the statistics D1 would have.
+	const PD = "p-d1";
+	const convs: string[] = [];
+	const cid = (n: number) => `d1000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+
+	beforeAll(() => {
+		db.prepare(
+			"INSERT INTO projects (project_id, owner_user_id, name, client_request_id, request_hash) VALUES (?, ?, 'D1', 'c-d1', 'h')",
+		).run(PD, OWNER);
+		const conv = db.prepare(
+			"INSERT INTO conversations (id, owner_user_id, project_id, title, client_request_id, request_hash, read_at) VALUES (?, ?, ?, ?, ?, 'h', ?)",
+		);
+		const msg = db.prepare(
+			`INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, body, state, project_id, conversation_id,
+				created_at, finished_at, result_text, reviewed_at)
+			 VALUES (?, ?, ?, 'request', 'x', ?, ?, ?, ?, ?, ?, ?)`,
+		);
+		const q = db.prepare(
+			"INSERT INTO agent_questions (owner_user_id, agent, message_id, request, state) VALUES (?, 'ana', ?, '{}', ?)",
+		);
+		const t = (i: number) => new Date(Date.UTC(2026, 0, 1) + i * 1000).toISOString();
+		const QSTATES = ["delivered", "orphaned", "withdrawn", "delivered", "answered", "delivered"];
+		let i = 0;
+		for (let n = 1; n <= 30; n++) {
+			const id = cid(n);
+			convs.push(id);
+			// Most topics read up to their end; a few never read.
+			conv.run(id, OWNER, PD, `T${n}`, `cr-d1-${n}`, n % 10 === 0 ? null : t(1_000_000));
+			for (let k = 0; k < 40; k++, i++) {
+				const mine = k % 2 === 0;
+				const state = k === 7 ? "uncertain" : "done";
+				const r = msg.run(
+					OWNER,
+					mine ? "owner" : "ana",
+					mine ? "ana" : "beto",
+					state,
+					PD,
+					id,
+					t(i),
+					t(i + 1),
+					mine ? "r" : null,
+					state === "uncertain" ? t(i + 2) : null,
+				);
+				// Questions as they accumulate: almost all closed, in every closed state.
+				if (k % 8 === 1) q.run(OWNER, Number(r.lastInsertRowid), QSTATES[(n + k) % QSTATES.length]);
+			}
+		}
+		const anyMsg = (db.prepare("SELECT MAX(id) AS id FROM agent_messages").get() as { id: number })
+			.id;
+		q.run(OWNER, anyMsg, "open");
+		// The Archive: project posts and direct messages outside any conversation.
+		for (let k = 0; k < 300; k++, i++)
+			msg.run(OWNER, "owner", "solo", "done", k % 2 ? PD : null, null, t(i), t(i + 1), "r", null);
+	});
+
+	type Plan = { sql: string; plan: string[] };
+	async function plansOf(fn: () => Promise<unknown>): Promise<Plan[]> {
+		const got: Array<{ sql: string; params: unknown[] }> = [];
+		captured = got;
+		try {
+			await fn();
+		} finally {
+			captured = null;
+		}
+		const plans = got.map((s) => ({
+			sql: s.sql.replace(/\s+/g, " ").trim(),
+			plan: (
+				db.prepare(`EXPLAIN QUERY PLAN ${s.sql}`).all(...bindOf(s.params)) as Array<{
+					detail: string;
+				}>
+			).map((r) => r.detail),
+		}));
+		// D1_PLAN_DUMP=1 prints every plan (what the PR shows before/after).
+		if (process.env.D1_PLAN_DUMP)
+			for (const p of plans) console.log(`${p.sql}\n  ${p.plan.join("\n  ")}\n`);
+		return plans;
+	}
+	// A whole-table read of the messages or questions, one bounded only by the
+	// owner — what grows with every message the owner ever sent — or a whole
+	// topic's history (owner + conversation and nothing else). The partial
+	// index of unreviewed runs is bounded by its own predicate; a scan of the
+	// conversations (`c`) is bounded by the topics, not by the messages.
+	const OWNER_ONLY =
+		/^SEARCH \w+ USING (?:COVERING )?INDEX idx_agent_(?:messages|questions)_(?!unreviewed)\w+ \(owner_user_id=\?\)$/;
+	const WHOLE_TOPIC =
+		/USING (?:COVERING )?INDEX idx_agent_messages_(?!unreviewed)\w+ \(owner_user_id=\? AND conversation_id=\?\)$/;
+	const SCAN = /^SCAN (?!json_each\b|\(subquery-|c$)/;
+	function expectBounded(plans: Plan[]) {
+		expect(plans.length).toBeGreaterThan(0);
+		const bad = plans.flatMap((p) =>
+			p.plan
+				.filter((l) => OWNER_ONLY.test(l) || WHOLE_TOPIC.test(l) || SCAN.test(l))
+				.map((l) => `${l}  ←  ${p.sql}`),
+		);
+		expect(bad).toEqual([]);
+	}
+
+	it("v28 is recorded", () => {
+		expect(db.prepare("SELECT 1 FROM schema_migrations WHERE version = 28").get()).toBeTruthy();
+	});
+
+	it("GET /messages (st): everything to or from the calling agent, any scope", async () => {
+		const r = await call(as("solo"), "GET", "/messages");
+		expect(r.body.length).toBeGreaterThan(0);
+		expect(r.body.every((m: MessageRowT) => m.to_id === "solo" || m.from_id === "solo")).toBe(true);
+		const older = await call(as("solo"), "GET", `/messages?before=${r.body[0].id}`);
+		expect(older.body.every((m: MessageRowT) => m.id < r.body[0].id)).toBe(true);
+	});
+
+	// The same plans with no statistics (D1 as deployed: nobody runs ANALYZE)
+	// and with them (were D1 to run PRAGMA optimize): neither may change them.
+	describe.each([
+		["without statistics", false],
+		["after ANALYZE", true],
+	])("%s", (_label, analyze) => {
+		beforeAll(() => {
+			if (analyze) db.exec("ANALYZE");
+			else
+				expect(
+					db.prepare("SELECT name FROM sqlite_master WHERE name = 'sqlite_stat1'").get(),
+				).toBeUndefined();
+		});
+
+		it("a conversation's feed reads its messages by idx_agent_messages_conversation, with and without ?before=", async () => {
+			for (const q of ["", "?before=500"]) {
+				const plans = await plansOf(async () => {
+					const r = await call(owner, "GET", `/conversations/${convs[3]}/feed${q}`);
+					expect(r.status).toBe(200);
+					expect(r.body.messages.length).toBeGreaterThan(0);
+				});
+				const page = plans.find((p) =>
+					/^SELECT \* FROM \(SELECT \* FROM agent_messages/.test(p.sql),
+				);
+				expect(page?.plan.join("\n")).toMatch(
+					/SEARCH agent_messages USING INDEX idx_agent_messages_conversation \(owner_user_id=\? AND conversation_id=\? AND id<\?\)/,
+				);
+				expectBounded(plans);
+			}
+		});
+
+		it("the Archive feeds read only what belongs to no conversation", async () => {
+			for (const path of [`/projects/${PD}/feed`, "/agents/solo/feed"]) {
+				const plans = await plansOf(async () => {
+					expect((await call(owner, "GET", path)).status).toBe(200);
+				});
+				const page = plans.find((p) =>
+					/^SELECT \* FROM \(SELECT \* FROM agent_messages/.test(p.sql),
+				);
+				expect(page?.plan.join("\n")).toMatch(
+					/idx_agent_messages_conversation \(owner_user_id=\? AND conversation_id=\? AND id<\?\)/,
+				);
+			}
+		});
+
+		it("the topic list, the inbox and /agents read no owner-wide range of messages or questions", async () => {
+			for (const path of [`/projects/${PD}/conversations`, "/inbox", "/agents"]) {
+				const plans = await plansOf(async () => {
+					expect((await call(owner, "GET", path)).status).toBe(200);
+				});
+				expectBounded(plans);
+			}
+		});
 	});
 });
 

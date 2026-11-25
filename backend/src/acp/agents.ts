@@ -817,40 +817,63 @@ export class AcpAgents {
 
 	/**
 	 * A page of messages, newest `limit` before `before` (exclusive), oldest
-	 * first. `agent`: everything to or from that agent, any scope (its
-	 * individual chat — the owner's view of the agent's whole inbox).
-	 * `projectId`: only what was posted in that project. `conversationId`: only
-	 * that conversation. `archive`: only what belongs to no conversation (the
-	 * Archive the old individual chat and Project Chat now show).
+	 * first, of one of four sources:
+	 * - `conversation`: that conversation;
+	 * - `projectArchive`: what was posted in the project in no conversation
+	 *   (the old Project Chat, now the Archive);
+	 * - `agentArchive`: everything to or from the agent in no conversation, any
+	 *   scope (the old individual chat, now the Archive);
+	 * - `agent`: everything to or from the agent, any scope or conversation
+	 *   (`GET /messages`, what `st` reads); `null` = all of the owner's.
+	 *
+	 * One statement per source, every column compared directly and `id < ?`
+	 * always (no `before` = no bound): D1 bills rows READ, and an optional
+	 * filter (`?2 IS NULL OR col = ?2`) cannot use an index, so the old single
+	 * statement read every message of the owner. The first three go by
+	 * `idx_agent_messages_conversation` (owner, conversation_id — NULL for the
+	 * Archive —, id), pinned: a page reads about `limit` rows of its own source.
 	 */
 	async messages(
 		ownerUserId: string,
-		filter: {
-			agent?: string | null;
-			projectId?: string | null;
-			conversationId?: string | null;
-			archive?: boolean;
-			before?: number | null;
-		},
+		source:
+			| { conversation: string }
+			| { projectArchive: string }
+			| { agentArchive: string }
+			| { agent: string | null },
+		before: number | null,
 		limit = 100,
 	): Promise<MessageRow[]> {
+		let where: string;
+		let params: unknown[];
+		// The conversation and Archive pages pin their index in the text, not in
+		// the statistics: without `sqlite_stat1` (D1 as deployed) the planner
+		// took idx_agent_messages_project for the project Archive and walked
+		// every topic message of the project, newest first, to reach the
+		// Archive (the oldest). v27 always creates the index; were it missing,
+		// the read fails instead of degrading silently.
+		let from = "agent_messages INDEXED BY idx_agent_messages_conversation";
+		if ("conversation" in source) {
+			where = "conversation_id = ?";
+			params = [source.conversation];
+		} else if ("projectArchive" in source) {
+			where = "conversation_id IS NULL AND project_id = ?";
+			params = [source.projectArchive];
+		} else if ("agentArchive" in source) {
+			where = "conversation_id IS NULL AND (to_id = ? OR from_id = ?)";
+			params = [source.agentArchive, source.agentArchive];
+		} else if (source.agent !== null) {
+			from = "agent_messages";
+			where = "(to_id = ? OR from_id = ?)";
+			params = [source.agent, source.agent];
+		} else {
+			from = "agent_messages";
+			where = "1";
+			params = [];
+		}
 		const r = await d1Query<MessageRow>(
-			`SELECT * FROM (SELECT * FROM agent_messages WHERE owner_user_id = ?1
-				AND (?2 IS NULL OR to_id = ?2 OR from_id = ?2)
-				AND (?3 IS NULL OR project_id = ?3)
-				AND (?4 IS NULL OR id < ?4)
-				AND (?6 IS NULL OR conversation_id = ?6)
-				AND (?7 = 0 OR conversation_id IS NULL)
-			 ORDER BY id DESC LIMIT ?5) ORDER BY id`,
-			[
-				ownerUserId,
-				filter.agent ?? null,
-				filter.projectId ?? null,
-				filter.before ?? null,
-				limit,
-				filter.conversationId ?? null,
-				filter.archive ? 1 : 0,
-			],
+			`SELECT * FROM (SELECT * FROM ${from} WHERE owner_user_id = ? AND ${where} AND id < ?
+			 ORDER BY id DESC LIMIT ?) ORDER BY id`,
+			[ownerUserId, ...params, before ?? Number.MAX_SAFE_INTEGER, limit],
 		);
 		return r.results;
 	}
@@ -1223,9 +1246,12 @@ export class AcpAgents {
 		agents: string[],
 	): Promise<QuestionRow[]> {
 		if (!messageIds.length && !agents.length) return [];
+		// UNION, not OR: each half goes by its own index (message / agent+state);
+		// with OR the planner read every question of the owner.
 		const r = await d1Query<QuestionRow>(
-			`SELECT * FROM agent_questions WHERE owner_user_id = ?1
-			 AND (message_id IN (SELECT value FROM json_each(?2)) OR (state = 'open' AND agent IN (SELECT value FROM json_each(?3))))
+			`SELECT * FROM agent_questions WHERE owner_user_id = ?1 AND message_id IN (SELECT value FROM json_each(?2))
+			 UNION
+			 SELECT * FROM agent_questions WHERE owner_user_id = ?1 AND state = 'open' AND agent IN (SELECT value FROM json_each(?3))
 			 ORDER BY id`,
 			[ownerUserId, JSON.stringify(messageIds), JSON.stringify(agents)],
 		);

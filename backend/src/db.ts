@@ -10,6 +10,7 @@
  *   D1_DATABASE_ID
  */
 
+import { createHash } from "node:crypto";
 import { logger } from "./logger.js";
 
 const ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID ?? "";
@@ -23,7 +24,7 @@ const D1_API_BASE = (process.env.D1_API_BASE ?? "https://api.cloudflare.com").re
 interface D1QueryResult<T = Record<string, unknown>> {
 	results: T[];
 	success: boolean;
-	meta: { changes: number; duration: number; last_row_id: number };
+	meta: { changes: number; duration: number; last_row_id: number; rows_read?: number };
 }
 
 interface D1ApiResponse<T = Record<string, unknown>> {
@@ -61,6 +62,48 @@ export function getD1CallsSinceBoot(): number {
  *  other. Production code never calls this. */
 export function __resetD1CallsForTests(): void {
 	d1CallsSinceBoot = 0;
+	rowsReadSinceBoot = 0;
+	readsByStatement.clear();
+}
+
+// Rows read, as D1 reports them in each answer's `meta.rows_read` — the unit
+// Cloudflare's daily read limit counts, not the number of calls. The total and
+// a per-statement breakdown, process-local like the call counter, are what
+// tell which query spends the quota. Statements are keyed by their normalised
+// text (never params: those can carry secrets): an ~80-char readable prefix
+// plus a short hash of the whole text, since many statements share a prefix
+// (`SELECT c.*, (SELECT COUNT(*) …` is both a topic and the topic list). The
+// map is bounded: past READS_MAX_KEYS a new statement lands in one "(other)"
+// bucket, so a caller building SQL dynamically cannot grow it without limit.
+let rowsReadSinceBoot = 0;
+const READS_MAX_KEYS = 200;
+const READS_OTHER = "(other)";
+const readsByStatement = new Map<string, { queries: number; rowsRead: number }>();
+
+function recordRowsRead(sql: string, rowsRead: unknown): void {
+	if (typeof rowsRead !== "number" || !Number.isFinite(rowsRead) || rowsRead < 0) return;
+	rowsReadSinceBoot += rowsRead;
+	const norm = sql.replace(/\s+/g, " ").trim();
+	let key = `${norm.slice(0, 80)} #${createHash("sha1").update(norm).digest("hex").slice(0, 8)}`;
+	if (!readsByStatement.has(key) && readsByStatement.size >= READS_MAX_KEYS) key = READS_OTHER;
+	const e = readsByStatement.get(key) ?? { queries: 0, rowsRead: 0 };
+	e.queries++;
+	e.rowsRead += rowsRead;
+	readsByStatement.set(key, e);
+}
+
+/** Rows read since boot and the `top` statements by rows read, for the admin stats endpoint. */
+export function getD1RowsRead(top = 10): {
+	rowsReadSinceBoot: number;
+	topStatements: Array<{ statement: string; queries: number; rowsRead: number }>;
+} {
+	return {
+		rowsReadSinceBoot,
+		topStatements: [...readsByStatement]
+			.map(([statement, e]) => ({ statement, ...e }))
+			.sort((a, b) => b.rowsRead - a.rowsRead)
+			.slice(0, top),
+	};
 }
 
 // Hard ceiling on every D1 round-trip (#343). Without a signal, a
@@ -153,6 +196,7 @@ export async function d1Query<T = Record<string, unknown>>(
 	if (first === undefined) {
 		throw new Error(`D1 returned no result set for: ${sql}`);
 	}
+	recordRowsRead(sql, first.meta?.rows_read);
 	return first;
 }
 
@@ -921,6 +965,33 @@ export const MIGRATIONS: readonly Migration[] = [
 			await d1Batch([...ACP_CONVERSATIONS_DDL]);
 		},
 	},
+	{
+		version: 28,
+		description:
+			"ACP read indexes — unread, needs-action and open questions without the owner's history",
+		apply: () => d1Batch([...ACP_READ_INDEXES_DDL]),
+	},
+];
+
+/**
+ * v28. Indexes only (D1 bills rows READ, and the hot reads walked whole
+ * histories). Each serves a read that runs on every change of a message:
+ *
+ * - `(owner, conversation, created_at)` / `(owner, conversation, finished_at)`:
+ *   a topic's unread count (conversations.ts `UNREAD`) is two counts, each a
+ *   range after `read_at` — a topic already read reads ≈ 0 rows instead of
+ *   all of its messages. The second one also drives the inbox's results.
+ * - the partial `uncertain` index: `needsAction`'s first EXISTS and the
+ *   inbox's interrupted runs read only runs nobody reviewed yet.
+ * - `agent_questions(owner, state)`: the open questions (`/agents`, inbox,
+ *   `needsAction`) without every question the owner ever got.
+ */
+export const ACP_READ_INDEXES_DDL: readonly string[] = [
+	"CREATE INDEX IF NOT EXISTS idx_agent_messages_conv_created ON agent_messages(owner_user_id, conversation_id, created_at)",
+	"CREATE INDEX IF NOT EXISTS idx_agent_messages_conv_finished ON agent_messages(owner_user_id, conversation_id, finished_at)",
+	`CREATE INDEX IF NOT EXISTS idx_agent_messages_unreviewed ON agent_messages(owner_user_id, conversation_id)
+		WHERE state = 'uncertain' AND reviewed_at IS NULL`,
+	"CREATE INDEX IF NOT EXISTS idx_agent_questions_state ON agent_questions(owner_user_id, state)",
 ];
 
 /**
