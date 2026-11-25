@@ -7,7 +7,7 @@
 // that keeps the reader's place.
 
 import type { Page } from "@playwright/test";
-import { expect, test } from "./fixtures.js";
+import { type App, expect, test } from "./fixtures.js";
 import { CONV_IDS, type MockBackend, PROJECT_IDS, PROJECT_SESSION_IDS } from "./mockBackend.js";
 
 const HZ = PROJECT_IDS.hz;
@@ -496,6 +496,85 @@ test.describe("a long topic", () => {
 				return p.anchor === before.anchor && Math.abs(p.offset - before.offset) <= 1;
 			})
 			.toBe(true);
+		expect(app.errors).toEqual([]);
+	});
+});
+
+// A row can grow after the render that placed it, with no scroll and no box
+// change: in CI the person's posts (monospace) re-wrapped when their font
+// arrived after the topic's second load (the one `/ws/acp` triggers on
+// connect), and the phone was left ~30 px short of the end for good. A font
+// swap's size depends on the fallback each machine has, so the re-wrap is
+// made here by a style that lands once both loads are on screen: the posts
+// grow, nothing renders, nothing scrolls. "At the end" is measured to the
+// pixel: END_SLACK (60) would call those 30 px the end too.
+test.describe("a topic whose rows grow after they were placed", () => {
+	const FEED = `/acp/conversations/${CONV_IDS.backend}/feed`;
+
+	const frames = (page: Page) =>
+		page.evaluate(
+			() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(null)))),
+		);
+	const gap = (page: Page) =>
+		page.locator(THREAD).evaluate((t) => Math.round(t.scrollHeight - t.scrollTop - t.clientHeight));
+
+	async function open(app: App, backend: MockBackend, page: Page): Promise<void> {
+		backend.enableConversations();
+		for (let i = 0; i < 12; i++)
+			backend.addAcpMessage({
+				to_id: "dev",
+				body: `@dev punto ${i}: revisá el esquema de sesiones y la clave por tema.`,
+				state: "done",
+				result_text: `Revisado el punto ${i}.`,
+				project_id: HZ,
+				conversation_id: CONV_IDS.backend,
+				created_at: at(i * 10),
+				finished_at: at(i * 10 + 5),
+			});
+		// All read: the topic opens at its end, not at «Nuevos desde tu última visita».
+		backend.acpConversations.find((c) => c.id === CONV_IDS.backend)!.readAt = at(200);
+		await app.login("alice", topic(CONV_IDS.backend));
+		await expect(page.locator(THREAD)).toContainText("Revisado el punto 11.");
+		await expect.poll(() => backend.requests.filter((r) => r.path === FEED).length).toBe(2);
+		await frames(page);
+	}
+
+	async function grow(page: Page): Promise<void> {
+		const thread = page.locator(THREAD);
+		const before = await thread.evaluate((t) => t.scrollHeight);
+		await page.addStyleTag({ content: "pre.acp-msg-body { padding-bottom: 24px; }" });
+		await frames(page);
+		expect(await thread.evaluate((t) => t.scrollHeight)).toBeGreaterThan(before + 100);
+	}
+
+	test("a reader at the end stays at the end", async ({ app, backend, page }) => {
+		await open(app, backend, page);
+		expect(await gap(page)).toBeLessThan(2);
+		await grow(page);
+		expect(await gap(page)).toBeLessThan(2);
+		expect(app.errors).toEqual([]);
+	});
+
+	test("a reader further up is not moved", async ({ app, backend, page }) => {
+		await open(app, backend, page);
+		const thread = page.locator(THREAD);
+		const rowTop = () =>
+			thread.evaluate((t) => {
+				const row = [...t.children].find((c) => c.textContent?.includes("punto 3:"))!;
+				return Math.round(row.getBoundingClientRect().top - t.getBoundingClientRect().top);
+			});
+		// Reads «punto 3» near the top, by their own scroll.
+		await thread.evaluate(
+			(t, dy) => {
+				t.scrollTop += dy - 20;
+			},
+			await rowTop(),
+		);
+		await frames(page);
+		const top = await rowTop();
+		await grow(page);
+		expect(Math.abs((await rowTop()) - top)).toBeLessThanOrEqual(1);
+		expect(await gap(page)).toBeGreaterThan(60);
 		expect(app.errors).toEqual([]);
 	});
 });

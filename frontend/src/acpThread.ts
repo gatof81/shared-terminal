@@ -237,6 +237,9 @@ export class AcpThread {
 	 * and closed nothing but cost a full rebuild on every activity batch.
 	 */
 	private readonly items = new Map<string, { sig: string; el: HTMLElement }>();
+	/** Watches the thread's box and every row in it (see the constructor). */
+	private resizeObs: ResizeObserver | null = null;
+	private readonly observedRows = new Set<Element>();
 	private readonly errorEl = el("div", "acp-chat-error");
 	private readonly emptyEl = el("div", "acp-chat-empty");
 	private readonly moreBtn = el("button", "btn sm acp-more", "Cargar anteriores");
@@ -381,6 +384,15 @@ export class AcpThread {
 					if (away < END_SLACK) this.renderPill();
 					return;
 				}
+				// A reader at the end can only leave it upwards. A scroll that did
+				// not go above where the end was pinned is the browser's scroll
+				// anchoring (rows grew around its anchor and it moved scrollTop to
+				// hold it), not the reader: the end stays pinned.
+				if (this.atBottom && away >= END_SLACK && t.scrollTop >= this.pinnedTop) {
+					t.scrollTop = t.scrollHeight;
+					this.pinnedTop = t.scrollTop;
+					return;
+				}
 				this.atBottom = away < END_SLACK;
 				if (this.atBottom) this.clearNew();
 				else this.renderPill();
@@ -394,9 +406,12 @@ export class AcpThread {
 		);
 		// The thread's box changes without a scroll event too: a reader at the
 		// end stays at the end; one reading further up keeps scrollTop, i.e.
-		// the same text in view.
-		if (typeof ResizeObserver !== "undefined")
-			new ResizeObserver(() => {
+		// the same text in view. Its rows are watched as well: a row can grow
+		// after the render that placed it (a font that finishes loading
+		// re-wraps its text) with no scroll and no box change, and a reader
+		// pinned to the end was left that many pixels short of it, for good.
+		if (typeof ResizeObserver !== "undefined") {
+			this.resizeObs = new ResizeObserver(() => {
 				const t = this.threadEl;
 				const wasHidden = this.box === 0;
 				this.box = t.clientHeight;
@@ -409,7 +424,9 @@ export class AcpThread {
 					this.pinnedTop = t.scrollTop;
 				}
 				this.renderPill();
-			}).observe(this.threadEl);
+			});
+			this.resizeObs.observe(this.threadEl);
+		}
 		this.moreBtn.type = "button";
 		this.moreBtn.addEventListener("click", () => {
 			this.moreBtn.disabled = true;
@@ -948,6 +965,7 @@ export class AcpThread {
 			if ((q.message_id === null || !shown.has(q.message_id)) && q.state === "open")
 				nodes.push(this.questionEl(q));
 		syncChildren(t, nodes);
+		this.observeRows(nodes);
 		if (keepFocus?.isConnected) keepFocus.focus({ preventScroll: true });
 		const end = atBottom || this.toBottom;
 		if (end) {
@@ -1122,6 +1140,26 @@ export class AcpThread {
 		if (!row) return false;
 		t.scrollTop += row.getBoundingClientRect().top - t.getBoundingClientRect().top - place.offset;
 		return true;
+	}
+
+	/**
+	 * Only the rows not watched yet: observe() on a watched element starts it
+	 * over, and its first report would come again on every render.
+	 */
+	private observeRows(nodes: readonly Element[]): void {
+		const obs = this.resizeObs;
+		if (!obs) return;
+		const now = new Set(nodes);
+		for (const n of this.observedRows)
+			if (!now.has(n)) {
+				obs.unobserve(n);
+				this.observedRows.delete(n);
+			}
+		for (const n of nodes)
+			if (!this.observedRows.has(n)) {
+				obs.observe(n);
+				this.observedRows.add(n);
+			}
 	}
 
 	/** Back to this chat's anchor; with none (or its row no longer shown), the end. */
