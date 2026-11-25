@@ -1,5 +1,5 @@
-// chatScroll.ts — what the chats share about scrolling: the ACP agent chat
-// and Project Chat (acpThread.ts).
+// chatScroll.ts — what the threads share about scrolling: a topic and an
+// Archive chat (acpThread.ts).
 // Each thread keeps its own "is the reader at the end", its own count of what
 // is new below and its own reading anchor (a row key); this
 // module has the rule for "at the end", the search for the row being read,
@@ -28,6 +28,8 @@ export interface ChatEndButtonOptions {
 	scroller: () => HTMLElement | null;
 	/** The accessible name, in the view's language: `count` 0 is plain "go to the end". */
 	name: (count: number) => string;
+	/** What the pill shows next to its arrow for `count` > 0 (default: the number). */
+	count?: (count: string) => string;
 	/** Called once the jump starts: the thread clears its count and marks the reader at the end. */
 	onJumped: () => void;
 	/**
@@ -124,7 +126,8 @@ export class ChatEndButton {
 		this.el.hidden = !this.shown;
 		this.el.style.bottom = "";
 		if (this.shown) this.clear();
-		const words = this.count > 99 ? "99+" : this.count > 0 ? String(this.count) : "";
+		const n = this.count > 99 ? "99+" : this.count > 0 ? String(this.count) : "";
+		const words = n && this.opts.count ? this.opts.count(n) : n;
 		// The arrow alone: a 36-px circle (chat.css).
 		this.el.classList.toggle("solo", words === "");
 		if (this.countEl.textContent !== words) this.countEl.textContent = words;

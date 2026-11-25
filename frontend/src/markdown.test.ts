@@ -176,12 +176,13 @@ describe("links in an agent's answer (appRoute: router.appRouteHash)", () => {
 	const kind = (href: string) => classifyHref(href, appRouteHash);
 	it("the app's own addresses navigate in place, in their canonical form", () => {
 		expect(kind("#/sessions/abc")).toEqual({ kind: "app", href: "#/sessions/abc" });
-		expect(kind("#/sessions/abc/chat")).toEqual({ kind: "app", href: "#/sessions/abc/chat" });
+		expect(kind("#/sessions/abc/git")).toEqual({ kind: "app", href: "#/sessions/abc/git" });
 		expect(kind("#/sessions/abc/files/src/a%20b.ts")).toEqual({
 			kind: "app",
 			href: "#/sessions/abc/files/src/a%20b.ts",
 		});
-		expect(kind("#/projects/p-1")).toEqual({ kind: "app", href: "#/projects/p-1/chat" });
+		expect(kind("#/projects/p-1")).toEqual({ kind: "app", href: "#/projects/p-1" });
+		expect(kind("#/projects/p-1/c/c%201")).toEqual({ kind: "app", href: "#/projects/p-1/c/c%201" });
 		// Markup in an id cannot come back out: the href is re-encoded.
 		expect(kind('#/sessions/a"><img>')).toEqual({
 			kind: "app",
@@ -325,12 +326,12 @@ describe("links in an agent's answer (appRoute: router.appRouteHash)", () => {
 		expect(kind("#/sessions/abc/files/\ud800x")).toEqual({ kind: "blocked" });
 	});
 	it("renders an app link as a same-tab link; without the option it is an anchor", () => {
-		const [a] = renderInline("[ver](#/sessions/abc/chat)", {
+		const [a] = renderInline("[ver](#/sessions/abc/git)", {
 			appRoute: appRouteHash,
 		}) as HTMLAnchorElement[];
-		expect(a!.getAttribute("href")).toBe("#/sessions/abc/chat");
+		expect(a!.getAttribute("href")).toBe("#/sessions/abc/git");
 		expect(a!.target).toBe("");
-		const [plain] = renderInline("[ver](#/sessions/abc/chat)") as HTMLAnchorElement[];
+		const [plain] = renderInline("[ver](#/sessions/abc/git)") as HTMLAnchorElement[];
 		expect(plain!.getAttribute("href")).toBe("#");
 		const [ext] = renderInline("[x](https://example.com)", {
 			appRoute: appRouteHash,

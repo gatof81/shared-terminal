@@ -1,0 +1,737 @@
+/* ── A topic's composer and thread (3B F2) and Pendientes (F3) ──
+   acpThread.ts (topic source), acpInbox.ts, acpReview.ts. */
+
+/* «Para:» — the chips, then "+". On a phone the chips scroll sideways in
+   one row; every target is 44 px tall there. */
+.acp-to-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-height: 36px;
+	padding: 0 2px;
+}
+.acp-to-row[hidden] {
+	display: none;
+}
+.acp-to-label {
+	flex: none;
+	font-size: 12px;
+	color: var(--c-muted);
+}
+.acp-to-chips {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+	overflow-x: auto;
+	scrollbar-width: none;
+}
+.acp-to-empty {
+	font-size: 12.5px;
+	color: var(--c-muted);
+	white-space: nowrap;
+}
+.acp-chip {
+	display: inline-flex;
+	flex: none;
+	align-items: center;
+	gap: 5px;
+	height: 30px;
+	padding: 0 2px 0 4px;
+	border: 1px solid var(--c-border);
+	border-radius: 999px;
+	background: var(--c-surface-2);
+	font-size: 12.5px;
+	white-space: nowrap;
+}
+.acp-chip .acp-avatar,
+.acp-rs .acp-avatar,
+.acp-chip-stack .acp-avatar {
+	width: 20px;
+	height: 20px;
+	font-size: 10.5px;
+}
+.acp-chip-name {
+	font-weight: 600;
+}
+.acp-chip-busy {
+	font-size: 11px;
+	color: var(--c-muted);
+}
+.acp-chip-busy::before {
+	content: "· ";
+}
+.acp-chip-stack {
+	display: inline-flex;
+}
+.acp-chip-stack .acp-avatar + .acp-avatar {
+	margin-left: -6px;
+	box-shadow: 0 0 0 2px var(--c-surface-2);
+}
+.acp-chip-team {
+	border-color: rgba(var(--c-accent-rgb), 0.5);
+}
+.acp-chip-x {
+	display: grid;
+	place-items: center;
+	width: 26px;
+	height: 26px;
+	padding: 0;
+	border: 0;
+	border-radius: 50%;
+	background: transparent;
+	color: var(--c-muted);
+	font-size: 15px;
+	cursor: pointer;
+}
+.acp-chip-x:hover,
+.acp-chip-x:focus-visible {
+	background: rgba(255, 255, 255, 0.08);
+	color: var(--c-text);
+}
+.acp-to-row .acp-pick-btn {
+	flex: none;
+}
+.acp-avatar-team {
+	background: var(--c-surface-2);
+	border: 1px solid var(--c-border);
+	color: var(--c-text-2);
+}
+/* Under the field: who it reaches and who will queue it. */
+.acp-to-notes {
+	padding: 0 4px;
+	font-size: 12px;
+	line-height: 1.45;
+	color: var(--c-muted);
+}
+.acp-to-notes[hidden] {
+	display: none;
+}
+/* A phone's keyboard up (main.ts): the band is short — the reach line goes,
+   the queue line is the short one (names only, one line); closed, both full.
+   Nothing queued with the keyboard up: no notes box at all. */
+.acp-to-queue-short,
+html[data-kb="open"] .acp-to-reach,
+html[data-kb="open"] .acp-to-queue,
+html[data-kb="open"] .acp-to-notes:not(:has(.acp-to-queue-short)) {
+	display: none;
+}
+html[data-kb="open"] .acp-to-queue-short {
+	display: block;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+@media (max-width: 768px) {
+	.acp-to-row {
+		min-height: 44px;
+	}
+	.acp-chip-x {
+		width: 32px;
+		height: 32px;
+	}
+	.acp-chip {
+		height: 36px;
+	}
+}
+
+/* The `@` menu: over the field, upward, the caret keeps the focus. */
+.acp-mention-menu {
+	position: absolute;
+	left: 0;
+	bottom: calc(100% + 6px);
+	z-index: 30;
+	width: min(22rem, 100%);
+	max-height: calc(var(--app-vh, 100dvh) * 0.45 - 4rem);
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	box-sizing: border-box;
+	padding: 4px;
+	background: var(--c-surface);
+	border: 1px solid var(--c-border);
+	border-radius: 8px;
+	box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+}
+.acp-mention-menu[hidden] {
+	display: none;
+}
+.acp-mention-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	min-height: 44px;
+	padding: 4px 8px;
+	border-radius: 6px;
+	cursor: pointer;
+}
+.acp-mention-row[aria-selected="true"],
+.acp-mention-row:hover {
+	background: var(--c-surface-2);
+}
+.acp-mention-text {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+}
+.acp-mention-name {
+	font-size: 0.86rem;
+	font-weight: 600;
+}
+.acp-mention-sub {
+	font-size: 0.74rem;
+	color: var(--c-muted);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.acp-pick-name {
+	font-weight: 600;
+}
+
+/* «→ Todo el equipo (N)»: the names on hover (title). */
+.acp-team-to {
+	text-decoration: underline dotted;
+	text-underline-offset: 3px;
+}
+.acp-work-chip {
+	display: inline-flex;
+	align-items: center;
+	padding: 1px 8px;
+	border: 1px solid var(--c-border);
+	border-radius: 999px;
+	background: transparent;
+	color: var(--c-text-2);
+	font: inherit;
+	font-family: var(--font-mono);
+	font-size: 11.5px;
+}
+button.acp-work-chip {
+	cursor: pointer;
+}
+button.acp-work-chip:hover {
+	border-color: var(--c-accent);
+	color: var(--c-accent);
+}
+
+/* One row per recipient, inside the person's message. */
+.acp-rs-list {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	margin: 8px 0 0;
+	padding: 0;
+	list-style: none;
+	text-align: left;
+}
+/* Avatar · name · state on one line; a state that does not fit goes on
+   under ITSELF (its own column), never under the avatar. */
+.acp-rs {
+	display: grid;
+	grid-template-columns: 20px auto minmax(0, 1fr);
+	/* Name and state on the same first line, whatever a button in the state measures. */
+	align-items: baseline;
+	column-gap: 7px;
+	row-gap: 2px;
+	font-size: 0.8rem;
+	line-height: 20px;
+	color: var(--c-text-2);
+}
+.acp-rs-name {
+	font-weight: 600;
+	color: hsl(var(--acp-hue, 210) 55% 66%);
+}
+.acp-rs-state {
+	min-width: 0;
+	color: var(--c-muted);
+	overflow-wrap: anywhere;
+}
+.acp-rs-dot {
+	display: inline-block;
+	margin-right: 5px;
+	vertical-align: 1px;
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	border: 1.5px solid var(--c-muted);
+}
+.acp-rs-running .acp-rs-dot {
+	background: var(--c-accent);
+	border-color: var(--c-accent);
+}
+.acp-rs-running .acp-rs-label {
+	color: var(--c-accent);
+}
+.acp-rs-done .acp-rs-dot {
+	background: var(--c-ok);
+	border-color: var(--c-ok);
+}
+.acp-rs-waiting .acp-rs-dot,
+.acp-rs-login .acp-rs-dot {
+	background: var(--c-warn);
+	border-color: var(--c-warn);
+}
+.acp-rs-waiting .acp-rs-label,
+.acp-rs-login .acp-rs-label {
+	color: var(--c-warn);
+}
+.acp-rs-interrupted .acp-rs-dot,
+.acp-rs-failed .acp-rs-dot {
+	background: var(--c-err);
+	border-color: var(--c-err);
+}
+.acp-rs-interrupted .acp-rs-label,
+.acp-rs-failed .acp-rs-label {
+	color: var(--c-err-soft);
+}
+.acp-rs-note {
+	grid-column: 3;
+	font-size: 0.76rem;
+	color: var(--c-muted);
+}
+.acp-link {
+	padding: 0;
+	border: 0;
+	background: transparent;
+	color: var(--c-accent);
+	font: inherit;
+	cursor: pointer;
+}
+.acp-link:hover {
+	text-decoration: underline;
+}
+.acp-rs .acp-review-btn {
+	min-height: 28px;
+}
+/* Everyone answered: «✓ @a ✓ @b», each to its answer. */
+.acp-rs-all {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	margin-top: 8px;
+}
+.acp-rs-check {
+	padding: 2px 8px;
+	border: 1px solid rgba(var(--c-ok-rgb), 0.35);
+	border-radius: 999px;
+	background: rgba(var(--c-ok-rgb), 0.08);
+	color: var(--c-ok);
+	font: inherit;
+	font-size: 0.78rem;
+}
+button.acp-rs-check {
+	cursor: pointer;
+}
+button.acp-rs-check:hover {
+	border-color: var(--c-ok);
+}
+@media (max-width: 768px) {
+	.acp-rs-check {
+		min-height: 32px;
+	}
+	/* A bigger target that does not move the row: padding taken back by margin. */
+	.acp-rs .acp-link {
+		padding: 8px 6px;
+		margin: -8px -6px;
+	}
+}
+
+/* A consult: its answer nested in it. */
+.acp-nested {
+	margin-top: 8px;
+	padding: 8px 10px;
+	border-radius: var(--radius-s);
+	background: rgba(255, 255, 255, 0.03);
+}
+.acp-nested-mark {
+	color: var(--c-muted);
+}
+/* A late answer's reference at the end: no text of its own. */
+.acp-late {
+	padding: 2px 10px;
+	font-size: 0.8rem;
+	color: var(--c-muted);
+	text-align: center;
+}
+.acp-topic-note .acp-note-line {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: center;
+	gap: 4px 8px;
+	font-size: 0.8rem;
+	color: var(--c-muted);
+}
+.acp-topic-note > .acp-details {
+	text-align: center;
+	font-size: 0.8rem;
+}
+.acp-topic-note > .acp-rs-list {
+	align-items: center;
+}
+.acp-tag {
+	padding: 0 6px;
+	border-radius: 999px;
+	background: rgba(var(--c-warn-rgb), 0.12);
+	color: var(--c-warn);
+	font-size: 0.72rem;
+}
+
+/* ── The header's Pendientes icon (every screen) ── */
+#inbox-btn {
+	position: relative;
+	display: inline-grid;
+	place-items: center;
+	flex-shrink: 0;
+	/* As tall as the header's other controls (the account's 32 px): a taller
+	   one would grow the header on every screen and take rows off the terminal. */
+	width: 32px;
+	height: 32px;
+	padding: 0;
+	border: 0;
+	border-radius: 8px;
+	background: transparent;
+	color: var(--c-text-2);
+	cursor: pointer;
+}
+.header-right + #inbox-btn,
+#inbox-btn {
+	margin-left: 4px;
+}
+#inbox-btn:hover {
+	background: rgba(255, 255, 255, 0.06);
+}
+#inbox-btn:focus-visible {
+	outline: 2px solid var(--c-accent);
+	outline-offset: 1px;
+}
+.inbox-count {
+	position: absolute;
+	top: 1px;
+	right: -2px;
+	min-width: 17px;
+	height: 17px;
+	padding: 0 4px;
+	box-sizing: border-box;
+	border-radius: 999px;
+	background: var(--c-warn);
+	color: #1b1300;
+	font-size: 10.5px;
+	font-weight: 700;
+	line-height: 17px;
+	text-align: center;
+}
+.inbox-count[hidden] {
+	display: none;
+}
+@media (max-width: 768px) {
+	#inbox-btn {
+		width: 40px;
+		height: 44px;
+		margin-left: 0;
+	}
+}
+/* 360 px and less, a session's bar takes the header's whole width (its tabs
+   never go under 40 px): the icon stays on the project's screens only. */
+@media (max-width: 360px) {
+	body:not(.project-page-on) #inbox-btn {
+		display: none;
+	}
+}
+/* The rail's attention row is a way into Pendientes. */
+button.rail-attention {
+	width: 100%;
+	font: inherit;
+	font-size: 0.86rem;
+	text-align: left;
+	cursor: pointer;
+}
+button.rail-attention:hover {
+	background: rgba(var(--c-warn-rgb), 0.14);
+}
+@media (max-width: 768px) {
+	button.rail-attention {
+		min-height: 44px;
+	}
+}
+
+/* ── Pendientes: a panel over the app (wide), the whole screen (phone) ── */
+.modal.acp-inbox {
+	align-items: flex-start;
+	justify-content: flex-start;
+}
+.acp-inbox-card {
+	margin: 56px 0 0 8px;
+	width: 400px;
+	max-height: calc(var(--app-vh, 100dvh) - 72px);
+	padding: 0;
+}
+.acp-inbox-head {
+	margin: 0;
+	padding: 12px 12px 10px 16px;
+	border-bottom: 1px solid var(--c-border);
+}
+.acp-inbox-titles {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+}
+.acp-inbox-scope {
+	font-size: 0.78rem;
+	color: var(--c-muted);
+}
+.acp-inbox-body {
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	padding: 4px 14px 16px;
+}
+.acp-inbox-sec {
+	margin: 14px 0 6px;
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	color: var(--c-muted);
+}
+.acp-inbox-none {
+	margin: 4px 0;
+	font-size: 0.86rem;
+	color: var(--c-muted);
+}
+.acp-ib-item {
+	display: flex;
+	gap: 10px;
+	padding: 8px 0;
+	border-bottom: 1px solid var(--c-border-soft);
+}
+.acp-ib-item > .acp-avatar {
+	flex: none;
+	margin-top: 2px;
+}
+.acp-ib-main {
+	flex: 1;
+	min-width: 0;
+}
+.acp-ib-where {
+	font-size: 0.76rem;
+	color: var(--c-muted);
+}
+.acp-ib-item.is-interrupted .acp-ib-where::before,
+.acp-ib-item.is-question .acp-ib-where::before {
+	content: "";
+	display: inline-block;
+	width: 7px;
+	height: 7px;
+	margin-right: 6px;
+	border-radius: 50%;
+	background: var(--c-warn);
+	vertical-align: 1px;
+}
+.acp-ib-item.is-interrupted .acp-ib-where::before {
+	background: var(--c-err);
+}
+.acp-ib-what {
+	margin: 3px 0 0;
+	font-size: 0.88rem;
+	overflow-wrap: anywhere;
+}
+.acp-ib-acts {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	margin-top: 6px;
+}
+.acp-ib-main .acp-question {
+	margin-top: 4px;
+}
+@media (max-width: 768px) {
+	.modal.acp-inbox .modal-backdrop {
+		display: none;
+	}
+	.acp-inbox-card {
+		margin: 0;
+		width: 100vw;
+		max-width: none;
+		height: var(--app-vh, 100dvh);
+		max-height: none;
+		border: 0;
+		border-radius: 0;
+	}
+	.acp-inbox-head .modal-close {
+		min-width: 44px;
+		min-height: 44px;
+	}
+	.acp-ib-acts .btn {
+		min-height: 44px;
+	}
+}
+
+/* ── «Revisar interrupción» ── */
+.acp-review-card {
+	width: 520px;
+}
+.acp-review-scroll {
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	min-height: 0;
+}
+.acp-review-sub {
+	margin: 0 0 8px;
+	font-size: 0.8rem;
+	color: var(--c-muted);
+}
+.acp-review-quote {
+	margin: 0 0 10px;
+	padding: 4px 10px;
+	border-left: 3px solid var(--c-border);
+	font-size: 0.9rem;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	max-height: 8.5em;
+	overflow-y: auto;
+}
+.acp-review-facts {
+	display: grid;
+	grid-template-columns: auto minmax(0, 1fr);
+	gap: 4px 12px;
+	margin: 0 0 10px;
+	font-size: 0.84rem;
+}
+.acp-review-facts dt {
+	color: var(--c-muted);
+}
+.acp-review-facts dd {
+	margin: 0;
+	overflow-wrap: anywhere;
+}
+.acp-review-warn {
+	margin: 0 0 10px;
+	padding: 8px 10px;
+	border-radius: var(--radius-s);
+	background: rgba(var(--c-err-rgb), 0.12);
+	color: var(--c-err-soft);
+	font-size: 0.84rem;
+}
+.acp-review-report {
+	margin: 0 0 10px;
+	padding: 8px 10px;
+	border-radius: var(--radius-s);
+	background: var(--c-surface-2);
+	font-size: 0.86rem;
+}
+.acp-review-report-head {
+	margin-bottom: 4px;
+	color: var(--c-muted);
+}
+.acp-review-report-head b {
+	color: var(--c-text);
+}
+.acp-review-muted {
+	margin: 4px 0;
+	font-size: 0.82rem;
+	color: var(--c-muted);
+}
+.acp-review-tools,
+.acp-review-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin: 0 0 10px;
+}
+.acp-review-actions {
+	flex-direction: column;
+	align-items: flex-start;
+}
+.acp-review-status {
+	margin: 0 0 8px;
+	font-size: 0.82rem;
+	color: var(--c-muted);
+}
+.acp-review-status:empty {
+	display: none;
+}
+.acp-review-requeue {
+	padding-top: 8px;
+	border-top: 1px solid var(--c-border);
+	font-size: 0.86rem;
+}
+.acp-review-requeue summary {
+	cursor: pointer;
+	color: var(--c-text-2);
+}
+.acp-review-ack {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	margin: 6px 0 8px;
+}
+@media (max-width: 768px) {
+	.acp-review-actions .btn,
+	.acp-review-tools .btn,
+	.acp-review-requeue summary,
+	.acp-review-ack {
+		min-height: 44px;
+	}
+	.acp-review-ack {
+		align-items: center;
+	}
+}
+
+/* A phone: the person's message with state rows takes the whole width, so
+   each row keeps name and state together. */
+@media (max-width: 768px) {
+	.acp-post:has(.acp-rs-list) > .acp-out {
+		align-self: stretch;
+		max-width: none;
+	}
+	.acp-to-note {
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+}
+
+/* Pendientes from the header's icon (wide): under the icon, on the right. */
+.modal.acp-inbox.from-header {
+	justify-content: flex-end;
+}
+.modal.acp-inbox.from-header .acp-inbox-card {
+	margin: 56px 8px 0 0;
+}
+
+/* The review's main action: the accent, like the app's other main actions. */
+.btn.acp-review-done {
+	background: var(--c-accent-strong);
+	border-color: var(--c-accent-strong);
+	color: #fff;
+}
+.btn.acp-review-done:hover:not(:disabled) {
+	background: var(--c-accent);
+	border-color: var(--c-accent);
+}
+/* A phone (≤ 760 px): the review takes the screen; «Cerrar» stays in view. */
+.acp-review-card {
+	display: flex;
+	flex-direction: column;
+}
+.acp-review-scroll {
+	flex: 1 1 auto;
+}
+@media (max-width: 760px) {
+	.modal.acp-review .modal-backdrop {
+		display: none;
+	}
+	.acp-review-card {
+		width: 100vw;
+		max-width: none;
+		height: var(--app-vh, 100dvh);
+		max-height: none;
+		border: 0;
+		border-radius: 0;
+	}
+	.acp-review-card > .modal-actions {
+		flex: none;
+	}
+}
+.acp-rs-muted {
+	color: var(--c-muted);
+	opacity: 0.8;
+}

@@ -91,13 +91,21 @@
             <line x1="3" y1="18" x2="21" y2="18"></line>
           </svg>
         </button>
-        <!-- On a phone, a project page's header row (title · agents · ⋯) takes
-             the session bar's place here (acpProjectChat.placeHeader). -->
+        <!-- On a phone, a project page's header row (the rail's, a topic's or
+             the Archive's) takes the session bar's place here (projectsView.placeSpace). -->
         <div id="header-project" hidden></div>
         <h1 id="app-title">⬛ Shared Terminal</h1>
         <div class="header-right">
           <span id="user-display"></span>
         </div>
+        <!-- Pendientes (acpInbox.ts): every project's questions and interrupted
+             runs, on every screen; the count is what requires the person. -->
+        <button id="inbox-btn" type="button" aria-label="Pendientes">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" aria-hidden="true">
+            <path d="M3 13l3-8h12l3 8v6H3zM3 13h5l1 3h6l1-3h5"></path>
+          </svg>
+          <span class="inbox-count" hidden></span>
+        </button>
         <!-- The user menu (templates, invites, groups, admin, notifications,
              logout; main.ts). Under 400 px the drawer's footer holds them. -->
         <button
@@ -173,24 +181,20 @@
             <!-- Each view button carries an icon (alone on narrow screens,
                  the label on the active one) and a label. -->
             <div id="view-switch" role="group" aria-label="Session view" hidden>
-              <button id="view-terminal-btn" type="button" aria-pressed="true" title="Terminal">
+              <button id="view-terminal-btn" type="button" aria-pressed="true" title="Terminal" aria-label="Terminal">
                 <svg class="view-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6l6 6-6 6M12 18h8" /></svg>
                 <span class="view-label">Terminal</span>
               </button>
-              <button id="view-files-btn" type="button" aria-pressed="false" title="Browse workspace files">
+              <button id="view-files-btn" type="button" aria-pressed="false" title="Files" aria-label="Files">
                 <svg class="view-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h6l2 2h10v11H3z" /></svg>
                 <span class="view-label">Files</span>
               </button>
-              <button id="view-git-btn" type="button" aria-pressed="false" title="Git changes">
+              <button id="view-git-btn" type="button" aria-pressed="false" title="Git" aria-label="Git">
                 <svg class="view-icon" viewBox="0 0 24 24" aria-hidden="true">
                   <circle cx="6" cy="5" r="2.5" /><circle cx="6" cy="19" r="2.5" /><circle cx="18" cy="9" r="2.5" />
                   <path d="M6 7.5v9M18 11.5c0 3-3 4-6 4H9" />
                 </svg>
                 <span class="view-label">Git</span>
-              </button>
-              <button id="view-chat-btn" type="button" aria-pressed="false" title="Chat with the agent" hidden>
-                <svg class="view-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H8l-4 4z" /></svg>
-                <span class="view-label">Chat</span>
               </button>
             </div>
             <!-- The session's actions (start / stop / ports / observers /
@@ -332,8 +336,6 @@
               <div id="git-diff"></div>
             </div>
           </div>
-          <!-- Chat of an ACP agent's session (acpChat.ts). -->
-          <div id="chat-view" hidden></div>
           <!-- Project / agent page (P3a, projectsView.ts): shown OVER the
                session — its siblings only turn visibility:hidden, so the
                terminal keeps its box and its socket. -->

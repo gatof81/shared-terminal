@@ -4,7 +4,7 @@ import { PROJECT_SESSION_IDS } from "./mockBackend.js";
 /**
  * The base controls (UX iter3 §5, base.css): `.btn` and its sizes, the
  * focus ring, and the one state chip — applied so far to the session bar's
- * state and to the ACP chats' buttons.
+ * state and to the ACP buttons.
  */
 test.describe("base controls", () => {
 	test("a .btn with `hidden` is hidden (the model's save button until another model is picked)", async ({
@@ -13,11 +13,11 @@ test.describe("base controls", () => {
 		page,
 	}) => {
 		backend.enableAcp();
-		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
+		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}`);
 		await app.openAgentSettings();
-		const select = page.locator("#acp-chat .acp-model-select");
+		const select = page.locator(".acp-settings-dialog .acp-model-select");
 		await expect(select).toBeVisible();
-		const save = page.locator("#acp-chat .btn", { hasText: "Cambiar modelo" });
+		const save = page.locator(".acp-settings-dialog .btn", { hasText: "Cambiar modelo" });
 		await expect(save).toHaveCount(1);
 		await expect(save).toBeHidden();
 		await select.selectOption({ index: 1 });
@@ -53,11 +53,14 @@ test.describe("base controls", () => {
 		page,
 	}, info) => {
 		backend.enableAcp();
-		backend.acpAgents.find((a) => a.name === "solo")!.authRequired = true;
-		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
-		// "Abrir Terminal" of the login notice: a .btn.sm in every shell and width.
-		const settings = page.locator("#acp-chat .acp-login-actions .btn", {
-			hasText: "Abrir Terminal",
+		const solo = backend.acpAgents.find((a) => a.name === "solo")!;
+		solo.authRequired = true;
+		solo.loginMethods = [{ id: "claude-ai", name: "Claude.ai", description: "" }];
+		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}`);
+		await app.openAgentSettings();
+		// «Conectar cuenta» of the agent's settings: a .btn.sm in every shell and width.
+		const settings = page.locator(".acp-settings-dialog .acp-login-actions .btn", {
+			hasText: "Conectar cuenta",
 		});
 		await expect(settings).toHaveClass(/\bbtn sm\b/);
 		const h = Math.round((await settings.boundingBox())!.height);
@@ -67,7 +70,7 @@ test.describe("base controls", () => {
 		await page.keyboard.press("Shift+Tab");
 		await page.keyboard.press("Tab");
 		await expect(settings).toBeFocused();
-		// 2 px of accent, 2 px off the edge — inside #chat-view too.
+		// 2 px of accent, 2 px off the edge.
 		const ring = await settings.evaluate((e) => {
 			const c = getComputedStyle(e);
 			const probe = document.createElement("i");

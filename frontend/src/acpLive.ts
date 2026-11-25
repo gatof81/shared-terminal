@@ -4,7 +4,7 @@
 // over REST: the socket carries only what happens AFTER it opened, and
 // nothing is replayed. While it is down, listeners fall back to a slow poll.
 
-import type { AcpActivity, AcpMessage, AcpQuestion } from "./api.js";
+import type { AcpActivity, AcpConversation, AcpMessage, AcpQuestion } from "./api.js";
 import { openAcpSocket } from "./api.js";
 
 export type AcpLiveEvent =
@@ -13,7 +13,8 @@ export type AcpLiveEvent =
 	| { type: "message"; message: AcpMessage }
 	| { type: "question"; question: AcpQuestion }
 	| { type: "activity"; agent: string; events: AcpActivity[] }
-	| { type: "agents" };
+	| { type: "agents" }
+	| { type: "conversation"; conversation: AcpConversation };
 
 type Listener = (ev: AcpLiveEvent) => void;
 
@@ -63,7 +64,8 @@ function connect(): void {
 			ev.type === "message" ||
 			ev.type === "question" ||
 			ev.type === "activity" ||
-			ev.type === "agents"
+			ev.type === "agents" ||
+			ev.type === "conversation"
 		)
 			emit(ev as AcpLiveEvent);
 	};

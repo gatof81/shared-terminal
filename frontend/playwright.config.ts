@@ -6,7 +6,8 @@ import { defineConfig, devices } from "@playwright/test";
 // mock backend in e2e/mockBackend.ts (page.route / page.routeWebSocket):
 // no real backend, no Docker, no network. Flows that need tmux or Docker
 // stay in the Session Image workflow's smokes.
-const PORT = 5174;
+// E2E_PORT: a run that must not take 5174 (another worktree, a parallel job).
+const PORT = Number(process.env.E2E_PORT ?? 5174);
 
 export default defineConfig({
 	testDir: "./e2e",

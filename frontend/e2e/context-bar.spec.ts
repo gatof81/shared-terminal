@@ -5,27 +5,20 @@ import { PROJECT_IDS, PROJECT_SESSION_IDS } from "./mockBackend.js";
  * The session bar as the context bar (UX iter3 §2 and E): one identity zone
  * — the session's name and state, or for an ACP agent's session "@agent",
  * its state and "sesión X · proyecto ↗" — the view tabs and the ⋯ last.
- * Its height is part of the terminal's box: the same in the four views and
+ * Its height is part of the terminal's box: the same in the three views and
  * for both kinds of session (terminal-invariant.spec.ts counts the resizes).
  */
 test.describe("context bar", () => {
 	test.beforeEach(({ backend }) => backend.enableAcp());
 
-	test("the bar is as tall in Terminal, Files, Git and Chat, for a traditional session and an agent's", async ({
+	test("the bar is as tall in Terminal, Files and Git, for a traditional session and an agent's", async ({
 		app,
 	}) => {
 		await app.login("alice");
 		const heights: number[] = [];
 		for (const name of ["my-project", "hz-architect"]) {
 			await app.openSession(name);
-			// Only an agent's session has a Chat.
-			const views = [
-				"terminal",
-				"files",
-				"git",
-				...(name === "my-project" ? [] : ["chat"]),
-			] as const;
-			for (const view of views as ReadonlyArray<"terminal" | "files" | "git" | "chat">) {
+			for (const view of ["terminal", "files", "git"] as const) {
 				await app.switchView(view);
 				await app.expectView(view);
 				heights.push(
@@ -38,19 +31,19 @@ test.describe("context bar", () => {
 		expect(new Set(heights).size, `heights: ${heights.join(", ")}`).toBe(1);
 	});
 
-	test("an agent's session: '@agent', its state, 'sesión X · proyecto ↗'; the chat has no header row of its own", async ({
+	test("an agent's session: '@agent', its state, 'sesión X · proyecto ↗'", async ({
 		app,
 		page,
 	}, info) => {
 		test.skip(info.project.use.isMobile === true, "wide screens (the subtitle is ≥ 1100 px)");
-		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.architect}/chat`);
+		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.architect}`);
 		await expect(page.locator("#terminal-session-name")).toHaveText("@arq");
 		await expect(page.locator("#terminal-status-badge")).toHaveClass(/\bchip\b/);
 		await expect(page.locator("#terminal-status-badge")).toHaveAttribute("title", /^Agente: /);
 		await expect(page.locator("#terminal-session-sub")).toHaveText(
 			"sesión hz-architect · Educación HZ ↗",
 		);
-		// The subtitle's project opens Project Chat.
+		// The subtitle's project opens the project.
 		await page.locator("#terminal-session-sub a").click();
 		await expect(page).toHaveURL(new RegExp(`#/projects/${PROJECT_IDS.hz}`));
 	});
@@ -64,7 +57,7 @@ test.describe("context bar", () => {
 		backend.sessions.find((s) => s.sessionId === PROJECT_SESSION_IDS.architect)!.name =
 			"hz-architect-with-a-session-name-far-too-long-for-the-bar";
 		await page.setViewportSize({ width: 1180, height: 800 });
-		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.architect}/chat`);
+		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.architect}`);
 		const sub = page.locator("#terminal-session-sub");
 		await expect(sub).toContainText("Educación HZ ↗");
 		const box = (await sub.boundingBox())!;
@@ -94,15 +87,16 @@ test.describe("context bar", () => {
 		const first = page.getByRole("menuitem").nth(info.project.use.isMobile ? 1 : 0);
 		await expect(first).toContainText("Ajustes del agente");
 		await first.click();
-		// From another view too: the agent's Chat, with the panel open and the focus in it.
-		await app.expectView("chat");
-		await expect(page.locator("#acp-chat .acp-settings")).toBeVisible();
-		await expect(page.locator("#acp-chat .acp-model-state")).toContainText("no disponible");
+		// Its dialog, over the view (the terminal underneath stays), the focus in it.
+		const dialog = page.locator(".acp-settings-dialog [role=dialog]");
+		await expect(dialog).toBeVisible();
+		await expect(dialog.locator(".acp-model-state")).toContainText("no disponible");
 		expect(
 			await page.evaluate(() =>
-				document.getElementById("acp-settings")!.contains(document.activeElement),
+				document.querySelector(".acp-settings-dialog")!.contains(document.activeElement),
 			),
 		).toBe(true);
+		await app.escape();
 		// A traditional session's ⋯ has no such entry, and no flag.
 		await app.openSession("my-project");
 		if (await more.isVisible()) {
@@ -137,7 +131,7 @@ test.describe("context bar on a phone", () => {
 			test.skip(!info.project.use.isMobile, "a phone");
 			backend.enableAcp();
 			await page.setViewportSize({ width, height: 700 });
-			await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
+			await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}`);
 			await expect(page.locator("#terminal-session-name")).toHaveText("@solo");
 			for (const b of await page.locator("header #view-switch button").all()) {
 				const r = (await b.boundingBox())!;

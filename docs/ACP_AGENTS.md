@@ -225,7 +225,7 @@ A message's `project_id` is its **scope**:
 
 | | Individual Chat | Project Chat |
 | --- | --- | --- |
-| Where | the agent's session, Chat view | the project page, `#/projects/<pid>/chat` |
+| Where | the agent's session, Chat view | `#/projects/<pid>/chat` (the rail's Archive entry; a project's topics live at `#/projects/<pid>/c/<cid>`) |
 | Shows | everything to or from that agent, any scope | only what was posted in that project |
 | Scope of a person's message | direct (`projectId` absent) | the project (`projectId`, the agent must be in it) |
 | Recipients | the agent | the `@mentions` at the start of the message, all of which must be agents of the project (one unknown name refuses the whole post); without them, the one agent mentioned or the project's only agent. The API receives one `POST` per recipient, each checked to be in the project |

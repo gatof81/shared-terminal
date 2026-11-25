@@ -1,5 +1,5 @@
 /**
- * viewSwitch.ts — the per-session view selector: Terminal ⇄ Files ⇄ Git ⇄ Chat.
+ * viewSwitch.ts — the per-session view selector: Terminal ⇄ Files ⇄ Git.
  *
  * Owns the one piece of state the overlays share (which view is up) and
  * the mechanics that must be identical for every overlay:
@@ -20,11 +20,10 @@
  * the toolbar): its height varies — it wraps on narrow screens and is
  * hidden entirely on mobile while the chrome drawer is collapsed.
  *
- * Each overlay module (filesView.ts, gitView.ts, acpChat.ts) registers listeners
+ * Each overlay module (filesView.ts, gitView.ts) registers listeners
  * here; this module imports neither, so it can't form a cycle with them.
  */
 
-import { isAcpAgentSession } from "./acpRegistry.js";
 import {
 	activeSessionId,
 	currentTerminals,
@@ -37,7 +36,7 @@ import { navigate } from "./router.js";
 import { setGeometryFrozen } from "./terminalGeometry.js";
 import { chooseLanding, readViewPref, writeViewPref } from "./viewPolicy.js";
 
-export type View = "terminal" | "files" | "git" | "chat";
+export type View = "terminal" | "files" | "git";
 
 // ── Route ───────────────────────────────────────────────────────────────────
 //
@@ -122,11 +121,6 @@ export function reflectRoute(opts: { push: boolean }): void {
 /** Show the view and detail a route names, for the ACTIVE session. */
 export function applyRouteView(next: View | null, detail: string | null): void {
 	pendingRoute = null;
-	// A Chat address for a traditional session (an old link): its landing.
-	if (next === "chat" && activeSessionId !== null && isAcpAgentSession(activeSessionId) === false) {
-		next = landingFor(activeSessionId, terminalAvailable());
-		detail = null;
-	}
 	applying = true;
 	try {
 		if (next !== null) setView(next);
@@ -148,8 +142,7 @@ export function applyRouteView(next: View | null, detail: string | null): void {
 }
 
 /**
- * The in-app "back" of a view's detail pane (‹ Files, ‹ Changes, ‹ in
- * Chat): back to the list, with the address updated IN PLACE — the
+ * The in-app "back" of a view's detail pane (‹ Files, ‹ Changes): back to the list, with the address updated IN PLACE — the
  * browser's Back keeps walking the real history (the previous thing the
  * person opened), the mobile back gesture included.
  */
@@ -175,12 +168,10 @@ const buttons: Record<View, HTMLButtonElement> = {
 	terminal: document.getElementById("view-terminal-btn") as HTMLButtonElement,
 	files: document.getElementById("view-files-btn") as HTMLButtonElement,
 	git: document.getElementById("view-git-btn") as HTMLButtonElement,
-	chat: document.getElementById("view-chat-btn") as HTMLButtonElement,
 };
 const overlays: Record<Exclude<View, "terminal">, HTMLElement> = {
 	files: document.getElementById("files-view")!,
 	git: document.getElementById("git-view")!,
-	chat: document.getElementById("chat-view")!,
 };
 const terminalArea = document.getElementById("terminal-area");
 
@@ -262,7 +253,7 @@ export function setView(next: View, opts: { forced?: boolean; landing?: boolean 
 	const prev = view;
 	view = next;
 	// The covered terminal keeps its geometry until it is shown again
-	// (terminalGeometry.ts): the soft keyboard of the Chat composer must
+	// (terminalGeometry.ts): a soft keyboard opened over an overlay must
 	// not resize tmux for every viewer. Thawing runs one deferred fit.
 	setGeometryFrozen(next !== "terminal");
 	// A detail still pending for the view being left is void.
@@ -299,7 +290,7 @@ export function setView(next: View, opts: { forced?: boolean; landing?: boolean 
 	updateTerminalControls();
 	for (const l of viewListeners) l(next, prev);
 	// A view the person chose is a history entry; a landing (a stopped
-	// session opening in Files, Chat by policy) only updates the address in place.
+	// session opening in Files) only updates the address in place.
 	reflectRoute({ push: chosen });
 }
 
@@ -308,7 +299,6 @@ export function landingFor(sessionId: string, running: boolean): View {
 	return chooseLanding({
 		pref: readViewPref(sessionId),
 		running,
-		isAgent: isAcpAgentSession(sessionId),
 	});
 }
 
@@ -333,25 +323,6 @@ function renderSwitch(): void {
 	}
 }
 
-/**
- * Only an ACP agent's session has a Chat (acpChat.ts); a traditional one
- * is worked from its Terminal. Re-read when the agents list lands
- * (`st:acp-agents`): a session selected before it is not known yet.
- */
-function renderChatTab(): boolean {
-	const has = activeSessionId !== null && isAcpAgentSession(activeSessionId) === true;
-	buttons.chat.hidden = !has;
-	return has;
-}
-if (typeof window !== "undefined")
-	window.addEventListener("st:acp-agents", () => {
-		// On Chat (a route applied before the list) of a session that is not an agent's: its landing.
-		if (!renderChatTab() && view === "chat" && activeSessionId !== null) {
-			const live = terminalAvailable();
-			landView(landingFor(activeSessionId, live), { forced: !live });
-		}
-	});
-
 function terminalAvailable(): boolean {
 	const s = sessions.find((x) => x.sessionId === activeSessionId);
 	return s?.status === "running" || currentTerminals.size > 0;
@@ -370,7 +341,6 @@ export function syncSessionViews(): void {
 		return;
 	}
 	viewSwitch.hidden = false;
-	const hasChat = renderChatTab();
 	const canTerminal = terminalAvailable();
 	// The Terminal view is always selectable: with no live terminal it
 	// shows the session's state and the action that applies (Start,
@@ -378,18 +348,15 @@ export function syncSessionViews(): void {
 	// rather than a disabled button whose only explanation is a tooltip.
 	buttons.terminal.disabled = false;
 	renderSwitch();
-	buttons.terminal.title = canTerminal ? "Show terminal" : "Terminal (session not running)";
+	buttons.terminal.title = canTerminal ? "Terminal" : "Terminal (session not running)";
 	// Listeners first: they re-key their state to the active session, so
 	// a forced switch below (which fires onViewChange → load) loads for
 	// the NEW session rather than racing a stale one.
 	for (const l of syncListeners) l();
 	if (landingOwner !== null && landingOwner === activeSessionId) return;
-	if (view === "chat" && !hasChat)
-		landView(landingFor(s.sessionId, canTerminal), { forced: !canTerminal });
-	else if (!canTerminal) {
-		// No terminal to show: land on what the policy says (Files, or
-		// an agent's Chat). A user already on Files, Git or Chat stays
-		// where they are.
+	if (!canTerminal) {
+		// No terminal to show: land on what the policy says (Files). A
+		// user already on Files or Git stays where they are.
 		if (view === "terminal") landView(landingFor(s.sessionId, false), { forced: true });
 	} else if (forced) {
 		// The terminal is back (Start): leave the fallback for the landing
@@ -404,7 +371,7 @@ export function showFilesOnly(): void {
 }
 
 buttons.terminal.addEventListener("click", () => setView("terminal"));
-for (const name of ["files", "git", "chat"] as const) {
+for (const name of ["files", "git"] as const) {
 	buttons[name].addEventListener("click", () => {
 		setView(name);
 	});

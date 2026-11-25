@@ -67,7 +67,7 @@ test.describe("sidebar tree", () => {
 	test("the selected row: accent background, a 3-px bar, aria-current; rows are 32 px with a mouse", async ({
 		app,
 	}, info) => {
-		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
+		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}`);
 		await app.openSidebar();
 		const row = app.sessionRow("scratch");
 		await expect(row).toHaveClass(/\bactive\b/);

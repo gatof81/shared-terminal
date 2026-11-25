@@ -16,7 +16,7 @@ import { MockBackend, type USERS } from "./mockBackend.js";
 /** The seed data is stamped around 2026-10-31T10:00Z; the page's clock sits 30 min later. */
 export const FIXED_NOW = "2026-10-31T10:30:00Z";
 
-export type View = "terminal" | "files" | "git" | "chat";
+export type View = "terminal" | "files" | "git";
 
 const FONTS_DIR = fileURLToPath(new URL("./fonts/", import.meta.url));
 const FONT_CSS = `
@@ -162,8 +162,8 @@ export class App {
 	}
 
 	/**
-	 * An ACP agent's settings panel, from the bar's ⋯ ("Ajustes del agente",
-	 * UX iter3 E). Returns the ⋯ (Escape gives the focus back to it).
+	 * An ACP agent's settings dialog, from the bar's ⋯ ("Ajustes del agente",
+	 * acpSettings.ts). Returns the ⋯ (Escape gives the focus back to it).
 	 */
 	async openAgentSettings(): Promise<Locator> {
 		const more = this.page.locator("#session-menu-btn");
@@ -185,7 +185,7 @@ export class App {
 	}
 
 	async currentView(): Promise<View> {
-		for (const v of ["files", "git", "chat"] as const) {
+		for (const v of ["files", "git"] as const) {
 			if (await this.page.locator(`#${v}-view`).isVisible()) return v;
 		}
 		return "terminal";
@@ -200,7 +200,7 @@ export class App {
 	}
 
 	async expectView(view: View): Promise<void> {
-		for (const v of ["files", "git", "chat"] as const) {
+		for (const v of ["files", "git"] as const) {
 			const overlay = this.page.locator(`#${v}-view`);
 			if (v === view) await expect(overlay).toBeVisible();
 			else await expect(overlay).toBeHidden();

@@ -4,7 +4,7 @@
  * viewSwitch.ts and the views can all use it without a cycle.
  *
  *   #/sessions/<id>                       the session (short form, #419)
- *   #/sessions/<id>/<view>                view ∈ terminal | files | git | chat
+ *   #/sessions/<id>/<view>                view ∈ terminal | files | git
  *   #/sessions/<id>/<view>/<detail>       what the view shows:
  *                                         files → a path, git → <area>:<path>,
  *                                         terminal → a tab id
@@ -25,16 +25,17 @@
  * `#session=<id>` (the service worker's one-shot notification jump) is a
  * different shape and is not this module's: it parses to null here.
  *
- * The project page (`#/projects/<pid>/chat`, its Project Chat) is a SECOND
- * route shape, parsed apart so the session route above keeps its exact
- * meaning. A project page is shown OVER the
+ * The project pages (`#/projects/<pid>`: the rail, `…/c/<cid>`: a topic,
+ * `…/archive`: the Archive) are a SECOND route shape, parsed
+ * apart so the session route above keeps its exact meaning. A project page
+ * is shown OVER the
  * session underneath, which stays open, attached and un-resized — so while
  * one is in the address, `current` keeps naming that session and the
  * session listeners are not told anything (projectsView.ts owns the page).
  */
 
-export type RouteView = "terminal" | "files" | "git" | "chat";
-const ROUTE_VIEWS: readonly RouteView[] = ["terminal", "files", "git", "chat"];
+export type RouteView = "terminal" | "files" | "git";
+const ROUTE_VIEWS: readonly RouteView[] = ["terminal", "files", "git"];
 
 export interface Route {
 	sessionId: string;
@@ -81,13 +82,19 @@ export function routeHash(route: Route): string {
 	if (route.view === null) return h;
 	h += `/${route.view}`;
 	if (route.detail === null || route.detail === "") return h;
-	h += `/${route.detail
-		.split("/")
-		// ":" stays readable (git's "<area>:<path>" detail); it is not a
-		// delimiter in a fragment and the parser decodes segments anyway.
-		.map((seg) => encodeURIComponent(seg).replace(/%3A/gi, ":"))
-		.join("/")}`;
+	h += `/${encodeDetail(route.detail)}`;
 	return h;
+}
+
+function encodeDetail(detail: string): string {
+	return (
+		detail
+			.split("/")
+			// ":" stays readable (git's "<area>:<path>" detail); it is not a
+			// delimiter in a fragment and the parser decodes segments anyway.
+			.map((seg) => encodeURIComponent(seg).replace(/%3A/gi, ":"))
+			.join("/")
+	);
 }
 
 export function sameRoute(a: Route | null, b: Route | null): boolean {
@@ -104,24 +111,116 @@ export function readRoute(): Route | null {
 
 // ── Project routes (P3a) ────────────────────────────────────────────────────
 
-export interface ProjectRoute {
-	projectId: string;
+/**
+ * A project's pages (3B):
+ *   #/projects/<pid>               the project: its rail (on a phone, the
+ *                                  whole screen; wider, the rail and no topic)
+ *   #/projects/<pid>/c/<cid>       a topic (conversation) of the project
+ *   #/projects/<pid>/archive[/<k>] the Archive (3B F5): its list, or one of its
+ *                                  read-only chats — <k> = `project` (the
+ *                                  previous Project Chat) or `@<agent>` (an
+ *                                  agent's previous direct messages)
+ *   #/projects/<pid>[/c/<cid>]/tools/<agent>/<ws>/<tool>[/<detail>]
+ *                                  Herramientas (3B F4): an agent's Files, Git
+ *                                  or Terminal, over the topic it was opened
+ *                                  from (if any). <ws>: `~` = the principal
+ *                                  workspace, else a work id (a work id never
+ *                                  is `~`). <detail> as a session route's.
+ */
+export type ProjectPage = "home" | "conversation" | "tools" | "archive";
+
+export type ToolName = "terminal" | "files" | "git";
+const TOOLS: readonly ToolName[] = ["terminal", "files", "git"];
+/** The principal workspace in a tools address. */
+export const PRINCIPAL = "~";
+
+export interface ToolsTarget {
+	agent: string;
+	/** null: the principal workspace. */
+	work: string | null;
+	tool: ToolName;
+	/** As a session route's detail (a path, `<area>:<path>`, a tab id). */
+	detail: string | null;
 }
 
-/**
- * `#/projects/<pid>/chat`: the project page (its Project Chat). The bare
- * `#/projects/<pid>` is the same page.
- */
+export interface ProjectRoute {
+	projectId: string;
+	/** Absent: "home". */
+	page?: ProjectPage;
+	/** The topic, for `page: "conversation"` (and the one tools were opened from). */
+	conversationId?: string;
+	/** For `page: "tools"`. */
+	tools?: ToolsTarget;
+	/** For `page: "archive"`: which of its chats (`project` or `@<agent>`); absent = the list. */
+	archive?: string;
+}
+
 export function parseProjectRoute(hash: string): ProjectRoute | null {
-	const m = /^#\/projects\/([^/?#]+)(?:\/chat)?$/.exec(hash);
+	const t =
+		/^#\/projects\/([^/?#]+)(?:\/c\/([^/?#]+))?\/tools\/([^/?#]+)\/([^/?#]+)\/([^/?#]+)(?:\/(.+))?$/.exec(
+			hash,
+		);
+	if (t) {
+		const projectId = decode(t[1]!);
+		const conversationId = t[2] === undefined ? undefined : decode(t[2]);
+		const agent = decode(t[3]!);
+		const ws = decode(t[4]!);
+		const tool = t[5]!;
+		if (!projectId || conversationId === null || conversationId === "" || !agent || !ws)
+			return null;
+		if (!(TOOLS as readonly string[]).includes(tool)) return null;
+		let detail: string | null = null;
+		if (t[6] !== undefined) {
+			const parts = t[6].split("/").map(decode);
+			if (parts.some((p) => p === null)) return null;
+			detail = (parts as string[]).join("/") || null;
+		}
+		return {
+			projectId,
+			page: "tools",
+			...(conversationId ? { conversationId } : {}),
+			tools: { agent, work: ws === PRINCIPAL ? null : ws, tool: tool as ToolName, detail },
+		};
+	}
+	const m = /^#\/projects\/([^/?#]+)(?:\/(archive(?:\/([^/?#]+))?|c\/([^/?#]+)))?$/.exec(hash);
 	if (!m) return null;
 	const projectId = decode(m[1]!);
 	if (projectId === null || projectId === "") return null;
-	return { projectId };
+	if (m[2] === undefined) return { projectId, page: "home" };
+	if (m[2].startsWith("archive")) {
+		if (m[3] === undefined) return { projectId, page: "archive" };
+		const archive = decode(m[3]);
+		return archive && isArchiveKey(archive) ? { projectId, page: "archive", archive } : null;
+	}
+	const conversationId = decode(m[4]!);
+	if (conversationId === null || conversationId === "") return null;
+	return { projectId, page: "conversation", conversationId };
+}
+
+/** An Archive chat's key: the previous Project Chat, or an agent's direct messages. */
+export function isArchiveKey(s: string): boolean {
+	return s === "project" || /^@[a-z][a-z0-9-]{1,31}$/.test(s);
 }
 
 export function projectRouteHash(route: ProjectRoute): string {
-	return `#/projects/${encodeURIComponent(route.projectId)}/chat`;
+	const base = `#/projects/${encodeURIComponent(route.projectId)}`;
+	const page = route.page ?? "home";
+	// A key is `project` or `@<agent name>` (isArchiveKey): written as it reads.
+	if (page === "archive")
+		return route.archive && isArchiveKey(route.archive)
+			? `${base}/archive/${route.archive}`
+			: `${base}/archive`;
+	if (page === "tools" && route.tools) {
+		const t = route.tools;
+		const from = route.conversationId ? `/c/${encodeURIComponent(route.conversationId)}` : "";
+		const h = `${base}${from}/tools/${encodeURIComponent(t.agent)}/${
+			t.work === null ? PRINCIPAL : encodeURIComponent(t.work)
+		}/${t.tool}`;
+		return t.detail ? `${h}/${encodeDetail(t.detail)}` : h;
+	}
+	if (page === "conversation" && route.conversationId)
+		return `${base}/c/${encodeURIComponent(route.conversationId)}`;
+	return base;
 }
 
 /**
@@ -141,6 +240,9 @@ export function appRouteHash(hash: string): string | null {
 		if (path?.split("/").some((seg) => seg === "." || seg === "..")) return null;
 		if (r) return routeHash(r);
 		const p = parseProjectRoute(hash);
+		const toolPath =
+			p?.tools?.tool === "git" ? p.tools.detail?.replace(/^[^:/]*:/, "") : p?.tools?.detail;
+		if (toolPath?.split("/").some((seg) => seg === "." || seg === "..")) return null;
 		return p ? projectRouteHash(p) : null;
 	} catch {
 		// encodeURIComponent throws on a lone surrogate (possible in text that
@@ -190,6 +292,16 @@ function bare(): string {
  * route). A write of the route already shown is a no-op.
  */
 export function navigate(route: Route | null, opts: { replace?: boolean } = {}): void {
+	// Herramientas up: the session's views ARE that page — a view, file, diff
+	// or tab of its session is written as the tools address, never as a
+	// session one (which would take the page down).
+	const mapped = route !== null && sessionAddress ? sessionAddress(route) : null;
+	if (mapped !== null) {
+		current = route;
+		if (window.location.hash === mapped) return;
+		write(mapped, opts.replace === true);
+		return;
+	}
 	const hash = route === null ? "" : routeHash(route);
 	const already = window.location.hash === hash || (route === null && !readRoute());
 	current = route;
@@ -201,14 +313,35 @@ export function navigate(route: Route | null, opts: { replace?: boolean } = {}):
 	// page lands on the session as it is now. A push is a choice the
 	// person made (a view) and leaves the page.
 	if (opts.replace && projectPageShown()) return;
+	write(hash, opts.replace === true);
+}
+
+function write(hash: string, replace: boolean): void {
 	const url = bare() + hash;
-	if (opts.replace) {
+	if (replace) {
 		history.replaceState({ st: { n: depth() } }, "", url);
 	} else {
 		historyNav = false;
 		history.pushState({ st: { n: depth() + 1 } }, "", url);
 	}
 	for (const l of writeListeners) l();
+}
+
+// ── Herramientas over the session ────────────────────────────────────────────
+
+let sessionAddress: ((route: Route) => string | null) | null = null;
+
+/**
+ * toolsView.ts, while Herramientas is up: the address to write for a session
+ * route (null: not the tools' session — written as before). Null to stop.
+ */
+export function mapSessionAddress(fn: ((route: Route) => string | null) | null): void {
+	sessionAddress = fn;
+}
+
+/** toolsView.ts: the session route a tools address applied is what is shown now. */
+export function setCurrentRoute(route: Route | null): void {
+	current = route;
 }
 
 // ── Project pages over the session ──────────────────────────────────────────
@@ -342,5 +475,6 @@ export function resetForTests(): void {
 	historyNav = false;
 	listeners.length = 0;
 	writeListeners.length = 0;
+	sessionAddress = null;
 	disableProjectRoutes();
 }

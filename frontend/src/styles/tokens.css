@@ -2,8 +2,7 @@
    The one place a colour, a layer or a radius is named. Every other
    stylesheet in styles/ refers to these; the literal values are the
    palette the app always had (GitHub-dark), so promoting them changed
-   nothing on screen. The Chat view carried the first `--c-*` set on
-   `#chat-view`; it now lives here for the whole app.
+   nothing on screen.
 
    `--c-*-rgb` triplets exist so translucent variants can be written as
    `rgba(var(--c-accent-rgb), 0.15)` — a future theme only has to change

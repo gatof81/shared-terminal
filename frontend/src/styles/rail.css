@@ -1,0 +1,581 @@
+/* ── The project's rail and topics (projectRail.ts, acpConversation.ts) ──
+   Wide: the rail takes the sidebar's place (#project-rail, the sidebar's
+   other children hidden) while a project's page is up; the sidebar keeps
+   its width, so nothing beside it moves. Phone (≤ 768 px): the rail's head
+   in the app's header, its body as the project's screen, and a topic in
+   the next screen of the stack (projectsView.placeSpace). */
+
+/* Wide: only the rail in the sidebar while the project's space is up. */
+@media (min-width: 769px) {
+  body.project-space-on:not(.ps-gone) #sidebar > :not(#project-rail) {
+    display: none;
+  }
+}
+body.ps-gone #project-rail {
+  display: none;
+}
+#project-rail {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.rail-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 48px;
+  padding: 4px 8px 4px 6px;
+  border-bottom: 1px solid var(--c-border);
+}
+.rail-project {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  min-height: 40px;
+  padding: 0 8px;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-s);
+  color: var(--c-text);
+  font: inherit;
+  font-size: 0.95rem;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+.rail-project:hover {
+  background: var(--c-surface-2);
+}
+.rail-project-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rail-project-caret {
+  flex: none;
+  color: var(--c-muted);
+  font-size: 0.75rem;
+}
+
+.rail-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.rail-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 8px 12px;
+}
+/* «N te esperan · N resultados nuevos». */
+.rail-attention {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 6px;
+  padding: 9px 12px;
+  border: 1px solid rgba(var(--c-warn-rgb), 0.55);
+  border-radius: var(--radius-m);
+  background: rgba(var(--c-warn-rgb), 0.08);
+  color: var(--c-text);
+  font-size: 0.86rem;
+}
+.rail-attention::before {
+  content: "";
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--c-warn);
+}
+.rail-attention[hidden] {
+  display: none;
+}
+.rail-section {
+  margin-top: 12px;
+}
+.rail-section-head {
+  display: flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 0 0 6px;
+}
+.rail-section-head h2 {
+  flex: 1;
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--c-muted);
+}
+.rail-add {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-s);
+  color: var(--c-muted);
+  font-size: 1.05rem;
+  cursor: pointer;
+}
+.rail-add:hover {
+  color: var(--c-text);
+  background: var(--c-surface-2);
+}
+.rail-list {
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.rail-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 5px 8px;
+  border-radius: var(--radius-s);
+  color: var(--c-text);
+  text-decoration: none;
+}
+a.rail-row:hover {
+  background: var(--c-surface-2);
+}
+.rail-row[aria-current="page"] {
+  background: var(--c-accent-bg);
+}
+.rail-row[aria-current="page"]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--c-accent);
+}
+a.rail-row:focus-visible,
+.rail-project:focus-visible,
+.rail-add:focus-visible,
+.rail-more:focus-visible,
+.rail-foot-btn:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: -2px;
+}
+.rail-row-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+.rail-row-title,
+.rail-row-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rail-row-title {
+  font-size: 0.88rem;
+}
+.rail-conv.has-unread .rail-row-title {
+  font-weight: 700;
+}
+.rail-conv.is-archived .rail-row-title {
+  color: var(--c-text-2);
+}
+.rail-row-sub {
+  font-size: 0.76rem;
+  color: var(--c-muted);
+}
+.rail-row-sub.tone-busy {
+  color: var(--c-accent);
+}
+.rail-row-sub.tone-warn {
+  color: var(--c-warn);
+}
+.rail-row-sub.tone-err {
+  color: var(--c-err);
+}
+.rail-row-sub.tone-ok {
+  color: var(--c-text-2);
+}
+.rail-mono {
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+}
+.rail-unread {
+  flex: none;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--c-accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 20px;
+  text-align: center;
+}
+.rail-face {
+  position: relative;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+.rail-dot {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--c-surface);
+  border-radius: 50%;
+  background: var(--c-muted);
+}
+.rail-dot.tone-ok {
+  background: var(--c-ok);
+}
+.rail-dot.tone-busy {
+  background: var(--c-accent);
+}
+.rail-dot.tone-warn {
+  background: var(--c-warn);
+}
+.rail-dot.tone-err {
+  background: var(--c-err);
+}
+.rail-note {
+  margin: 2px 0 0;
+  padding: 4px 8px;
+  font-size: 0.78rem;
+  color: var(--c-muted);
+  list-style: none;
+}
+.rail-note[hidden],
+.rail-more[hidden] {
+  display: none;
+}
+.rail-more {
+  display: block;
+  min-height: 32px;
+  margin-top: 2px;
+  padding: 0 8px;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-s);
+  color: var(--c-muted);
+  font: inherit;
+  font-size: 0.8rem;
+  text-align: left;
+  cursor: pointer;
+}
+.rail-more:hover {
+  color: var(--c-text);
+}
+.rail-archive-row .rail-row-title {
+  color: var(--c-text-2);
+}
+.rail-foot {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  padding: 6px 10px;
+  border-top: 1px solid var(--c-border);
+  color: var(--c-muted);
+}
+.rail-foot-btn {
+  min-height: 36px;
+  padding: 0 8px;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-s);
+  color: var(--c-text-2);
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.rail-foot-btn:hover {
+  color: var(--c-text);
+  background: var(--c-surface-2);
+}
+
+/* ── The page: rail slot (phone) + main (a topic, or the wide empty state) ── */
+#project-view:has(> .ps-page) {
+  overflow: hidden;
+}
+.ps-page {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.ps-rail-slot {
+  display: none;
+}
+.ps-main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.ps-home {
+  margin: auto;
+  max-width: 28rem;
+  padding: var(--s-5);
+  text-align: center;
+  color: var(--c-text-2);
+}
+.ps-home-title {
+  margin: 0 0 var(--s-2);
+  font-size: 1.05rem;
+  color: var(--c-text);
+}
+.ps-home-title:focus {
+  outline: none;
+}
+.ps-home-note {
+  margin: 0 0 var(--s-4);
+  font-size: 0.9rem;
+}
+.ps-home .btn[hidden] {
+  display: none;
+}
+
+.ps-topic {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 60rem;
+  margin: 0 auto;
+  padding: var(--s-3) var(--s-5) 0;
+  box-sizing: border-box;
+}
+.ps-topic > .pv-status {
+  margin: 4px 0;
+}
+.ps-topic > .pv-status[hidden] {
+  display: none;
+}
+.ps-topic-head {
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--c-border);
+}
+.ps-topic-titles {
+  flex: 1;
+  min-width: 0;
+}
+.ps-topic-head .pv-title {
+  display: block;
+  font-size: 1.05rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ps-topic-sub {
+  margin: 1px 0 0;
+  font-size: 0.8rem;
+  color: var(--c-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ps-topic-sub:empty {
+  display: none;
+}
+/* ‹: a phone's way back up the stack; wide, the rail is beside the topic. */
+.ps-back {
+  display: none;
+  text-decoration: none;
+}
+.ps-topic-head .pv-menu-btn[hidden] {
+  display: none;
+}
+
+/* ── The Archive (acpArchive.ts) ── */
+.ps-archive-note {
+  margin: var(--s-3) 0 var(--s-2);
+  text-align: left;
+}
+.ps-archive-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ps-archive-list[hidden] {
+  display: none;
+}
+.ps-archive-row .rail-row-title {
+  color: var(--c-text-2);
+}
+/* Where a topic has its message box: the fixed read-only strip (PROPUESTA §7). */
+.ps-readonly {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--c-border);
+  color: var(--c-muted);
+  font-size: 0.85rem;
+}
+.ps-readonly[hidden] {
+  display: none;
+}
+.ps-continue {
+  min-height: 36px;
+}
+@media (max-width: 768px) {
+  .ps-archive > .ps-archive-note,
+  .ps-archive > .ps-archive-list {
+    padding: 0 12px;
+  }
+  .ps-continue {
+    min-height: 44px;
+  }
+}
+
+/* «Nuevos desde tu última visita» */
+.acp-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--c-warn);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+.acp-divider::before,
+.acp-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: rgba(var(--c-warn-rgb), 0.6);
+}
+
+@media (max-width: 768px) {
+  /* The stack: the project's screen (the rail's body) → a topic. */
+  body.project-space-on:not(.ps-on-topic) .ps-rail-slot {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+  }
+  body.project-space-on:not(.ps-on-topic):not(.ps-gone) .ps-main {
+    display: none;
+  }
+  body.ps-gone .ps-rail-slot {
+    display: none !important;
+  }
+  .ps-rail-slot .rail-body {
+    flex: 1;
+  }
+  .ps-rail-slot .rail-scroll {
+    padding: 8px 12px 16px;
+  }
+  /* 44-px targets everywhere on the project's screen. */
+  .rail-row,
+  .rail-more,
+  .rail-foot-btn {
+    min-height: 44px;
+  }
+  .rail-add {
+    width: 44px;
+    height: 44px;
+  }
+  .rail-row-title {
+    font-size: 0.95rem;
+  }
+  .rail-row-sub {
+    font-size: 0.82rem;
+  }
+  /* The head in the app's header: as tall as the session bar it replaces. */
+  #header-project .rail-head {
+    flex: 1;
+    min-width: 0;
+    min-height: 46px;
+    padding: 0;
+    border: 0;
+  }
+  #header-project .rail-project {
+    min-height: 44px;
+  }
+  .ps-topic {
+    padding: 0;
+  }
+  /* A topic: ‹ is the way back up (to the rail); the ☰ beside it would be a
+     second, heavier way out. The header keeps its height (44-px controls). */
+  body.ps-on-topic header #sidebar-toggle {
+    display: none;
+  }
+  .ps-back {
+    display: grid;
+    place-items: center;
+    flex: none;
+    width: 40px;
+    min-height: 44px;
+    font-size: 1.4rem;
+  }
+  #header-project .ps-topic-head {
+    padding: 0;
+    border: 0;
+    gap: 2px;
+  }
+  #header-project .ps-topic-head .pv-title {
+    font-size: 15px;
+  }
+  #header-project .ps-topic-sub {
+    font-size: 11.5px;
+  }
+}
+
+/* An agent's state naming a topic: only the title gives way; the queue stays. */
+.rail-state {
+  display: flex;
+  min-width: 0;
+  white-space: nowrap;
+}
+.rail-state-fixed {
+  flex: none;
+}
+.rail-state-topic {
+  flex: 0 1 auto;
+  min-width: 2ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* The project without topics: its one action, in the accent (not the green of "New session"). */
+.ps-new {
+  min-height: 36px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: var(--radius-s);
+  background: var(--c-accent-strong);
+  color: #fff;
+  font-weight: 600;
+}
+.ps-new:hover {
+  background: var(--c-accent);
+}
+.ps-new:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
