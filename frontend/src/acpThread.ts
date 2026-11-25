@@ -292,6 +292,8 @@ export class AcpThread {
 	 * plugged in here the chip only says which work a message runs in.
 	 */
 	onOpenWork: ((agent: string, work: string) => void) | null = null;
+	/** Pendientes (acpInbox.ts), from an Archive chat's «revisala / respondela en Pendientes». */
+	onOpenInbox: (opener: HTMLElement) => void = () => {};
 
 	constructor() {
 		// One line at rest; CSS (field-sizing) grows it with the text up to a cap.
@@ -1345,7 +1347,8 @@ export class AcpThread {
 					state.append(" · ", el("span", "acp-rs-muted", "informe pedido"));
 			}
 			// The Archive writes nothing: its interruptions are reviewed in Pendientes.
-			if (st.kind === "interrupted" && this.readOnly) state.append(" · revisala en Pendientes");
+			if (st.kind === "interrupted" && this.readOnly)
+				state.append(" · revisala en ", this.inboxLink());
 			else if (st.kind === "interrupted") {
 				const review = el("button", "btn sm acp-review-btn", "Revisar interrupción");
 				review.type = "button";
@@ -1478,6 +1481,14 @@ export class AcpThread {
 		return chip;
 	}
 
+	/** «Pendientes» as a link: where the Archive's interruptions and questions are resolved. */
+	private inboxLink(): HTMLElement {
+		const b = el("button", "acp-link", "Pendientes");
+		b.type = "button";
+		b.addEventListener("click", () => this.onOpenInbox(b));
+		return b;
+	}
+
 	/** «ver» / «✓ @a»: the answer's own item, in view and highlighted. */
 	private goToResult(id: number): void {
 		const row = this.threadEl.querySelector<HTMLElement>(`:scope > [data-result="${id}"]`);
@@ -1520,6 +1531,7 @@ export class AcpThread {
 		const card = questionCard(q, {
 			stillHere: () => gen === this.gen,
 			readOnly: this.readOnly,
+			onOpenInbox: (opener) => this.onOpenInbox(opener),
 			onAnswered: (row) => {
 				this.noteLive({ q: row });
 				this.questions.set(row.id, row);

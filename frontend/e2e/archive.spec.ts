@@ -31,7 +31,7 @@ test.describe("the Archive", () => {
 		await expect(page.locator("#ps-archive-title")).toHaveText("Archivo · solo lectura");
 		// @dev has nothing outside topics: no entry. @solo is in no project.
 		await expect(rows(page)).toHaveText([
-			/Project Chat anterior.*solo lectura/,
+			/Project Chat anterior.*hasta 31\/10\/2026 · solo lectura/,
 			/@arq · chat individual.*solo lectura/,
 		]);
 		if (!app.mobile)
@@ -67,6 +67,10 @@ test.describe("the Archive", () => {
 		await expect(page.locator(`${PAGE} .acp-to-row`)).toBeHidden();
 		await expect(thread.getByRole("button", { name: "Revisar interrupción" })).toHaveCount(0);
 		await expect(thread).toContainText("revisala en Pendientes");
+		// «Pendientes» is a way there (nothing is written from the Archive itself).
+		await thread.getByRole("button", { name: "Pendientes" }).click();
+		await expect(page.locator(".acp-inbox-card")).toBeVisible();
+		await app.escape();
 		const strip = page.locator(`${PAGE} .ps-readonly`);
 		await expect(strip).toContainText("Archivo · solo lectura");
 		await expect(strip.getByRole("button")).toHaveText("Continuar en una conversación nueva");
@@ -114,7 +118,9 @@ test.describe("the Archive", () => {
 		await expect(page.locator("#inbox-btn .inbox-count")).toHaveText("1");
 		await page.locator("#inbox-btn").click();
 		const item = page.locator(".acp-inbox-card .acp-ib-item.is-interrupted");
-		await expect(item.locator(".acp-ib-where")).toHaveText("Archivo");
+		await expect(item.locator(".acp-ib-where")).toHaveText(
+			"Educación HZ › Archivo › @arq · chat individual",
+		);
 		// «Ver en el Archivo»: the agent's chat, the message highlighted.
 		await item.getByRole("button", { name: "Ver en el Archivo" }).click();
 		await expect(page).toHaveURL(new RegExp(`${LIST}/@arq$`));

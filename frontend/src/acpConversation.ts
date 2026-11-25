@@ -307,6 +307,7 @@ export async function newTopicDialog(
 		label: "Título",
 		initialValue: opts.initial ? [...opts.initial].slice(0, TITLE_MAX).join("") : undefined,
 		confirmLabel: "Crear",
+		cancelLabel: "Cancelar",
 		validate: titleProblem,
 		onConfirm: async (v) => {
 			try {
@@ -332,6 +333,7 @@ async function renameTopic(c: AcpConversation): Promise<void> {
 		label: "Título",
 		initialValue: c.title,
 		confirmLabel: "Renombrar",
+		cancelLabel: "Cancelar",
 		validate: titleProblem,
 		onConfirm: async (v) => {
 			try {

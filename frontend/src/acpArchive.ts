@@ -16,6 +16,7 @@
 // (acpInbox.ts reads every scope); this thread only says so.
 
 import { newTopicDialog } from "./acpConversation.js";
+import { openInbox } from "./acpInbox.js";
 import { AcpThread, type ThreadState } from "./acpThread.js";
 import { type AcpMessage, acpFeed, acpProjectFeed } from "./api.js";
 import { projectName } from "./projectDirectory.js";
@@ -70,6 +71,7 @@ const listNote = el("p", "ps-home-note ps-archive-note");
 
 const thread = new AcpThread();
 thread.setComposer("off");
+thread.onOpenInbox = (opener) => openInbox(opener);
 const strip = el("div", "ps-readonly");
 strip.append(
 	el("span", "ps-readonly-text", "Archivo · solo lectura"),
@@ -257,7 +259,7 @@ function day(iso: string): string {
 	const d = new Date(iso);
 	return Number.isNaN(d.getTime())
 		? ""
-		: d.toLocaleDateString(undefined, { day: "2-digit", month: "2-digit", year: "numeric" });
+		: d.toLocaleDateString("es-AR", { day: "2-digit", month: "2-digit", year: "numeric" });
 }
 
 // ── Painting ────────────────────────────────────────────────────────────────
@@ -284,7 +286,7 @@ function paint(): void {
 					? "Cargando…"
 					: shown.length === 0
 						? "El Archivo de este proyecto está vacío: todo lo escrito está en sus conversaciones."
-						: "Lo escrito antes de los temas, donde estaba. Se lee; no se escribe.",
+						: "Lo escrito antes de los temas. Se lee; no se escribe.",
 		);
 		if (listError) listNote.append(button("Reintentar", "pv-btn", () => void loadList(p)));
 		parts.push(listNote, listEl);

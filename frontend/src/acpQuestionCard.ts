@@ -16,6 +16,8 @@ export interface QuestionCardOptions {
 	onResend?: (text: string) => void;
 	/** Where nothing is written (the Archive): an open question is answered in Pendientes. */
 	readOnly?: boolean;
+	/** Opens Pendientes (the read-only card's link). */
+	onOpenInbox?: (opener: HTMLElement) => void;
 }
 
 export function questionCard(q: AcpQuestion, opts: QuestionCardOptions): HTMLElement {
@@ -25,11 +27,14 @@ export function questionCard(q: AcpQuestion, opts: QuestionCardOptions): HTMLEle
 	card.append(el("div", "acp-question-head", `@${q.agent} pregunta`));
 	if (form.message) card.append(el("p", "acp-question-text", form.message));
 	if (q.state === "open") {
-		card.append(
-			opts.readOnly
-				? el("div", "acp-question-state", "Esperando tu respuesta · respondela en Pendientes.")
-				: answerForm(q, form, opts),
-		);
+		if (opts.readOnly) {
+			const line = el("div", "acp-question-state", "Esperando tu respuesta · respondela en ");
+			const go = el("button", "acp-link", "Pendientes");
+			go.type = "button";
+			go.addEventListener("click", () => opts.onOpenInbox?.(go));
+			line.append(go, ".");
+			card.append(line);
+		} else card.append(answerForm(q, form, opts));
 		return card;
 	}
 	const said = answerText(form, q.answer);
