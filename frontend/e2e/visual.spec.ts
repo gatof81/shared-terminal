@@ -118,10 +118,10 @@ function topicStates(backend: MockBackend): void {
 
 async function shot(page: Page, name: string): Promise<void> {
 	// The overlays sit absolutely over the terminal's box, so masking the
-	// terminal would paint over Files / Git / Chat too: mask it only when it
+	// terminal would paint over Files / Git too: mask it only when it
 	// is the view on screen.
 	const terminalShown = !(await page
-		.locator("#files-view, #git-view, #chat-view")
+		.locator("#files-view, #git-view")
 		.filter({ visible: true })
 		.count());
 	const mask = terminalShown ? [page.locator("#terminal-container")] : [];
@@ -278,6 +278,23 @@ test.describe("visual", () => {
 		await review.getByText("Reencolar el mensaje original…").click();
 		await expect(review.getByRole("button", { name: "Reencolar", exact: true })).toBeDisabled();
 		await shot(page, "review");
+	});
+
+	test("the Archive's list", async ({ app, backend, page }) => {
+		backend.enableConversations();
+		backend.enableArchive();
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/archive`);
+		await expect(page.locator(".ps-archive-row")).toHaveCount(2);
+		await shot(page, "archive-list");
+	});
+
+	test("an Archive chat, read-only", async ({ app, backend, page }) => {
+		backend.enableConversations();
+		backend.enableArchive();
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/archive/@arq`);
+		await expect(page.locator("#project-view .acp-result")).toHaveCount(1);
+		await expect(page.locator(".ps-readonly")).toBeVisible();
+		await shot(page, "archive-thread");
 	});
 
 	test("new session dialog", async ({ app, page }) => {

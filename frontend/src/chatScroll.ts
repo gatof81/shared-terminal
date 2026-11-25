@@ -1,5 +1,5 @@
-// chatScroll.ts — what the chats share about scrolling: the ACP agent chat
-// and Project Chat (acpThread.ts).
+// chatScroll.ts — what the threads share about scrolling: a topic and an
+// Archive chat (acpThread.ts).
 // Each thread keeps its own "is the reader at the end", its own count of what
 // is new below and its own reading anchor (a row key); this
 // module has the rule for "at the end", the search for the row being read,

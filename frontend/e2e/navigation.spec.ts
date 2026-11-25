@@ -36,8 +36,6 @@ test.describe("navigation", () => {
 		await expect(page.locator("#git-summary")).toContainText("main");
 		await expect(page.locator("#git-list .git-row")).toHaveCount(2);
 
-		await expect(page.locator("#view-chat-btn")).toBeHidden();
-
 		await app.switchView("terminal");
 		await expect(page.locator("#terminal-session-name")).toHaveText("my-project");
 		await expect(page.locator("#terminal-container .tab-pane.active")).toContainText("Welcome");

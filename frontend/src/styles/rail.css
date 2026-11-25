@@ -445,6 +445,51 @@ a.rail-row:focus-visible,
   display: none;
 }
 
+/* ── The Archive (acpArchive.ts) ── */
+.ps-archive-note {
+  margin: var(--s-3) 0 var(--s-2);
+  text-align: left;
+}
+.ps-archive-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ps-archive-list[hidden] {
+  display: none;
+}
+.ps-archive-row .rail-row-title {
+  color: var(--c-text-2);
+}
+/* Where a topic has its message box: the fixed read-only strip (PROPUESTA §7). */
+.ps-readonly {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--c-border);
+  color: var(--c-muted);
+  font-size: 0.85rem;
+}
+.ps-readonly[hidden] {
+  display: none;
+}
+.ps-continue {
+  min-height: 36px;
+}
+@media (max-width: 768px) {
+  .ps-archive > .ps-archive-note,
+  .ps-archive > .ps-archive-list {
+    padding: 0 12px;
+  }
+  .ps-continue {
+    min-height: 44px;
+  }
+}
+
 /* «Nuevos desde tu última visita» */
 .acp-divider {
   display: flex;

@@ -557,6 +557,31 @@ export class MockBackend {
 	}
 
 	/**
+	 * The Archive (3B F5): what was written before topics. The previous
+	 * Project Chat already has enableAcp's «@arq revisá el diseño»; this adds
+	 * @arq's previous direct messages (no project, no topic). @dev has none:
+	 * its Archive entry is not listed. @solo's are not in any project's.
+	 */
+	enableArchive(): void {
+		this.addAcpMessage({
+			to_id: "arq",
+			body: "¿Tenés un minuto para el login?",
+			state: "done",
+			result_text: "Sí: **OAuth con PKCE**, y el refresh en una cookie httpOnly.",
+			created_at: iso(300),
+			finished_at: iso(320),
+		});
+		this.addAcpMessage({
+			to_id: "arq",
+			body: "Revisá la migración de sesiones",
+			state: "failed",
+			note: "Error del adaptador.",
+			created_at: iso(340),
+			finished_at: iso(350),
+		});
+	}
+
+	/**
 	 * Works (3B F4): @dev's «ci-cache», active, from «Optimización de CI» (it
 	 * works there now), and «old-try», cleaned (its worktree is gone: Files and
 	 * Git answer 404 for it).
@@ -914,7 +939,13 @@ export class MockBackend {
 			await json(200, {
 				agent: a,
 				maxMessageBytes: 262144,
-				messages: page(this.acpMessages.filter((m) => m.to_id === a.name || m.from_id === a.name)),
+				// The Archive's (backend `archive: true`): everything to or from the
+				// agent outside any topic, in any scope.
+				messages: page(
+					this.acpMessages.filter(
+						(m) => !m.conversation_id && (m.to_id === a.name || m.from_id === a.name),
+					),
+				),
 				questions: this.acpQuestions.filter((q) => q.agent === a.name),
 				activity: this.acpActivity,
 				activitySeq: 0,
@@ -937,7 +968,8 @@ export class MockBackend {
 				project: { id: p.projectId, name: p.name },
 				agents: this.acpAgents.filter((a) => a.projectId === pid),
 				maxMessageBytes: 262144,
-				messages: page(this.acpMessages.filter((m) => m.project_id === pid)),
+				// The previous Project Chat: the project's scope, outside any topic.
+				messages: page(this.acpMessages.filter((m) => m.project_id === pid && !m.conversation_id)),
 				questions: this.acpQuestions,
 				activity: this.acpActivity,
 				activitySeq: 0,
@@ -1006,6 +1038,13 @@ export class MockBackend {
 			});
 			this.pushAcp({ type: "message", message: row });
 			await json(201, row);
+			return true;
+		}
+		// «Conectar cuenta»: the login runs in a new terminal tab of the agent's session.
+		const login = /^\/acp\/agents\/([^/]+)\/login$/.exec(path);
+		if (login && method === "POST") {
+			const a = this.acpAgents.find((x) => x.name === decodeURIComponent(login[1]!));
+			await json(a ? 200 : 404, a ? { sessionId: a.sessionId, tabId: "tab-1" } : {});
 			return true;
 		}
 		const agentPatch = /^\/acp\/agents\/([^/]+)$/.exec(path);

@@ -3,7 +3,6 @@ import {
 	activityRows,
 	agentStatus,
 	answerText,
-	applyEdits,
 	authFromActivity,
 	busyElsewhere,
 	chipsOf,
@@ -12,21 +11,16 @@ import {
 	eventTime,
 	groupThread,
 	isUnread,
-	mapThroughEdits,
 	mentionQuery,
 	modelLabel,
 	modelState,
-	parseMentions,
 	questionForm,
-	recipientRow,
 	recipientState,
 	recipientsOf,
-	setRecipient,
 	sidebarAgentStatus,
 	teamState,
 	topicTimeline,
 	upsert,
-	workTag,
 } from "./acpModel.js";
 import type { AcpActivity, AcpMessage } from "./api.js";
 
@@ -48,27 +42,14 @@ const msg = (id: number, over: Partial<AcpMessage> = {}): AcpMessage => ({
 	...over,
 });
 
-describe("mentions", () => {
+describe("leading mentions in a topic's text", () => {
 	const names = ["arquitecto", "dev", "qa-1"];
-	it("finds known agents in order, once, not inside emails or longer names", () => {
-		expect(parseMentions("@dev y @arquitecto, de nuevo @dev", names)).toEqual([
-			"dev",
-			"arquitecto",
-		]);
-		expect(parseMentions("mail a x@dev.com y @devops", names)).toEqual([]);
-		expect(parseMentions("(@qa-1)\n@dev:", names)).toEqual(["qa-1", "dev"]);
-		expect(parseMentions("```\n@dev\n```", names)).toEqual(["dev"]);
-	});
-	it("a post with no mention goes to the only agent, else asks for one", () => {
-		expect(recipientsOf("hola", ["dev"])).toEqual({ to: ["dev"], error: null });
-		expect(recipientsOf("hola", names).error).toContain("@arquitecto");
-		expect(recipientsOf("hola", []).error).toContain("no tiene agentes");
+	it("the agents named at the start, once; one inside the text is part of the instruction", () => {
 		expect(recipientsOf("@qa-1 mirá", names).to).toEqual(["qa-1"]);
-		// Leading mentions are the recipients; one inside the text is part of the instruction.
 		expect(recipientsOf("@arquitecto consultá a @dev: ¿listo?", names).to).toEqual(["arquitecto"]);
 		expect(recipientsOf("@arquitecto @dev, revisen esto", names).to).toEqual(["arquitecto", "dev"]);
-		expect(recipientsOf("Revisá esto @dev", names).to).toEqual(["dev"]);
-		expect(recipientsOf("que @dev hable con @arquitecto", names).error).toContain("Empezá");
+		expect(recipientsOf("@dev @dev hola", names).to).toEqual(["dev"]);
+		expect(recipientsOf("Revisá esto @dev", names)).toEqual({ to: [], error: null });
 	});
 	it("an unknown leading mention refuses the whole post (no partial send, no fallback)", () => {
 		const typo = recipientsOf("@devv revisá con @qa-1", names);
@@ -342,117 +323,6 @@ describe("effort", () => {
 				effortApplied: { ...ap("high"), model: "claude-opus-5-5" },
 			}),
 		).toBe("applied");
-	});
-});
-
-describe("recipients from the menu: the leading mentions of the text", () => {
-	const names = ["arq", "dev", "qa", "dis"];
-	const edit = (text: string, name: string, on: boolean) =>
-		applyEdits(text, setRecipient(text, names, name, on));
-
-	it("checking adds after the leading group, keeping its punctuation and the body", () => {
-		expect(edit("", "arq", true)).toBe("@arq ");
-		expect(edit("hola", "arq", true)).toBe("@arq hola");
-		expect(edit("@arq hola", "dev", true)).toBe("@arq @dev hola");
-		expect(edit("@arq, @dev: mirá esto", "qa", true)).toBe("@arq, @dev @qa: mirá esto");
-		expect(edit("  @arq hola", "dev", true)).toBe("  @arq @dev hola");
-		// Already a leading recipient: nothing.
-		expect(setRecipient("@arq hola", names, "arq", true)).toEqual([]);
-	});
-
-	it("an implicit recipient becomes explicit with the one checked", () => {
-		// "revisá con @qa" goes to @qa (one mention inside): checking @dev keeps @qa.
-		expect(recipientsOf("revisá con @qa", names).to).toEqual(["qa"]);
-		const next = edit("revisá con @qa", "dev", true);
-		expect(next).toBe("@qa @dev revisá con @qa");
-		expect(recipientsOf(next, names).to).toEqual(["qa", "dev"]);
-	});
-
-	it("unchecking removes only that leading mention, the body untouched", () => {
-		expect(edit("@arq @dev hola", "arq", false)).toBe("@dev hola");
-		expect(edit("@arq @dev hola", "dev", false)).toBe("@arq hola");
-		expect(edit("@arq, @dev: hola @dev", "dev", false)).toBe("@arq: hola @dev");
-		expect(edit("@arq @dev @qa hola", "dev", false)).toBe("@arq @qa hola");
-		expect(edit("@arq hola", "arq", false)).toBe("hola");
-		expect(edit("@arq @dev @dev hola", "dev", false)).toBe("@arq hola");
-		// Not a recipient: nothing.
-		expect(setRecipient("@arq hola", names, "qa", false)).toEqual([]);
-	});
-
-	it("an implicit recipient cannot be unchecked (it is in the body): no edit, the row says why", () => {
-		expect(setRecipient("revisá con @qa", names, "qa", false)).toEqual([]);
-		expect(recipientRow("revisá con @qa", names, "qa")).toEqual({ checked: true, implicit: true });
-		expect(recipientRow("@qa revisá", names, "qa")).toEqual({ checked: true, implicit: false });
-	});
-
-	it("an unknown leading mention: nobody checked; checking adds, the unknown stays (its error too)", () => {
-		expect(names.map((n) => recipientRow("@devv revisá", names, n).checked)).toEqual([
-			false,
-			false,
-			false,
-			false,
-		]);
-		const next = edit("@devv revisá", "arq", true);
-		expect(next).toBe("@devv @arq revisá");
-		expect(recipientsOf(next, names).error).toMatch(/@devv no es un agente/);
-		expect(recipientsOf(next, names).to).toEqual([]);
-	});
-
-	it("checked == recipientsOf(text).to, for every text and agent (the menu's only source)", () => {
-		const texts = [
-			"",
-			"hola",
-			"@arq hola",
-			"@arq @dev hola",
-			"@arq, @dev: hola @qa",
-			"revisá con @qa",
-			"@qa y @dev revisen",
-			"@devv revisá",
-			"hola @arq y @dev",
-			"   @dis",
-			"@dis@arq pegados",
-		];
-		for (const text of texts)
-			for (const n of names) {
-				expect(recipientRow(text, names, n).checked, `${text} / ${n}`).toBe(
-					recipientsOf(text, names).to.includes(n),
-				);
-				// …and after any toggle, still the same rule.
-				for (const on of [true, false]) {
-					const after = edit(text, n, on);
-					for (const m of names)
-						expect(recipientRow(after, names, m).checked).toBe(
-							recipientsOf(after, names).to.includes(m),
-						);
-				}
-			}
-	});
-
-	it("checking then unchecking someone restores the text when nothing else changed", () => {
-		for (const text of ["@arq hola", "@arq, @dev: hola", "  @arq hola"])
-			expect(edit(edit(text, "qa", true), "qa", false)).toBe(text);
-	});
-
-	it("the caret and selection keep their place in the text", () => {
-		const text = "@arq hola mundo";
-		const caret = text.indexOf("mundo");
-		const edits = setRecipient(text, names, "dev", true);
-		const next = applyEdits(text, edits);
-		expect(next.slice(mapThroughEdits(caret, edits))).toBe("mundo");
-		const off = setRecipient(next, names, "arq", false);
-		const back = applyEdits(next, off);
-		expect(back.slice(mapThroughEdits(next.indexOf("mundo"), off))).toBe("mundo");
-		// Empty field: the caret goes after the inserted mention.
-		const e0 = setRecipient("", names, "arq", true);
-		expect(mapThroughEdits(0, e0)).toBe("@arq ".length);
-	});
-});
-
-describe("workTag", () => {
-	it("tags a work's message and leaves the default context alone", () => {
-		expect(workTag({ context: "e2-work-tag" })).toBe("trabajo e2-work-tag");
-		expect(workTag({ context: null })).toBeNull();
-		expect(workTag({})).toBeNull();
 	});
 });
 

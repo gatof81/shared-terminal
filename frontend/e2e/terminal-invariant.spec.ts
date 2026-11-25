@@ -115,6 +115,52 @@ test.describe("terminal invariant", () => {
 		expect(app.errors).toEqual([]);
 	});
 
+	test("Archive ⇄ an archived chat ⇄ «Continuar…» ⇄ back: nothing touches the terminal", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.enableConversations();
+		await app.login("alice");
+		await app.openSession("my-project");
+		await app.expectTerminalReady();
+		await page.waitForTimeout(400);
+		const sockets = backend.terminalSockets.length;
+		const sock = backend.terminalSockets[0]!;
+		const framesBefore = sock.sent.length;
+		const rowsBefore = await page.locator(".tab-pane.active .xterm-rows > div").count();
+
+		// The project, its Archive, the previous Project Chat.
+		await app.openSidebar();
+		await page.locator(`.sgroup[data-group="${PROJECT_IDS.hz}"] a.sgroup-title`).click();
+		await page.locator(".rail-body .rail-archive-row").click();
+		await page.locator(".ps-archive-row", { hasText: "Project Chat anterior" }).click();
+		await expect(page.locator("#ps-archive-title")).toHaveText("Project Chat anterior");
+		// «Continuar en una conversación nueva»: a topic, created and opened.
+		await page.getByRole("button", { name: "Continuar en una conversación nueva" }).click();
+		await page.locator(".dialog-card .modal-primary-action").click();
+		await expect(page.locator("#ps-topic-title")).toHaveText(
+			"Continuación de Project Chat anterior",
+		);
+		// Back to the archived chat, to the list, and out to the session.
+		await page.goBack();
+		await expect(page.locator("#ps-archive-title")).toHaveText("Project Chat anterior");
+		await page.goBack();
+		await expect(page.locator("#ps-archive-title")).toHaveText("Archivo · solo lectura");
+		// A phone's stack: the project's screen (the rail, with its foot) is one more Back.
+		if (app.mobile) await page.goBack();
+		await page.locator(".rail-foot").getByRole("button", { name: "Sesiones" }).click();
+		if (app.mobile) await app.sessionRow("my-project").locator(".session-select").click();
+		await expect(page.locator("#project-view")).toBeHidden();
+		await page.waitForTimeout(400);
+
+		expect(backend.terminalSockets.length, "no new terminal socket").toBe(sockets);
+		expect(sock.closed, "the attach stayed open").toBe(false);
+		expect(sock.sent.length - framesBefore, "no frame of any kind (no resize)").toBe(0);
+		expect(await page.locator(".tab-pane.active .xterm-rows > div").count()).toBe(rowsBefore);
+		expect(app.errors).toEqual([]);
+	});
+
 	test("topic ⇄ Herramientas ⇄ menus: no resize, no new socket; another agent is another attach", async ({
 		app,
 		backend,

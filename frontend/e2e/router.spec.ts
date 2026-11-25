@@ -148,17 +148,11 @@ test.describe("router", () => {
 		expect(since[since.length - 1]).toBe("tab-2");
 	});
 
-	test("a stopped session's deep link to the terminal shows its state; to chat lands on Files (no Chat)", async ({
-		app,
-		page,
-	}) => {
+	test("a stopped session's deep link to the terminal shows its state", async ({ app, page }) => {
 		await app.login("alice", `#/sessions/${SESSION_IDS.stopped}/terminal`);
 		await expect(page.locator("#terminal-session-name")).toHaveText("docs");
 		await app.expectView("terminal");
 		await expect(page.locator("#terminal-state")).toContainText("stopped");
-		await page.goto(`/#/sessions/${SESSION_IDS.stopped}/chat`);
-		await app.expectView("files");
-		await expect(page.locator("#view-chat-btn")).toBeHidden();
 	});
 
 	test("an unknown or foreign session: one toast, the address cleared, no request for it", async ({

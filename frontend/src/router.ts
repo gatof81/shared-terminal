@@ -4,7 +4,7 @@
  * viewSwitch.ts and the views can all use it without a cycle.
  *
  *   #/sessions/<id>                       the session (short form, #419)
- *   #/sessions/<id>/<view>                view ∈ terminal | files | git | chat
+ *   #/sessions/<id>/<view>                view ∈ terminal | files | git
  *   #/sessions/<id>/<view>/<detail>       what the view shows:
  *                                         files → a path, git → <area>:<path>,
  *                                         terminal → a tab id
@@ -26,7 +26,7 @@
  * different shape and is not this module's: it parses to null here.
  *
  * The project pages (`#/projects/<pid>`: the rail, `…/c/<cid>`: a topic,
- * `…/chat`: the previous Project Chat) are a SECOND route shape, parsed
+ * `…/archive`: the Archive) are a SECOND route shape, parsed
  * apart so the session route above keeps its exact meaning. A project page
  * is shown OVER the
  * session underneath, which stays open, attached and un-resized — so while
@@ -34,8 +34,8 @@
  * session listeners are not told anything (projectsView.ts owns the page).
  */
 
-export type RouteView = "terminal" | "files" | "git" | "chat";
-const ROUTE_VIEWS: readonly RouteView[] = ["terminal", "files", "git", "chat"];
+export type RouteView = "terminal" | "files" | "git";
+const ROUTE_VIEWS: readonly RouteView[] = ["terminal", "files", "git"];
 
 export interface Route {
 	sessionId: string;
@@ -116,8 +116,10 @@ export function readRoute(): Route | null {
  *   #/projects/<pid>               the project: its rail (on a phone, the
  *                                  whole screen; wider, the rail and no topic)
  *   #/projects/<pid>/c/<cid>       a topic (conversation) of the project
- *   #/projects/<pid>/chat          the previous Project Chat (read from the
- *                                  rail's Archive until F5 retires it)
+ *   #/projects/<pid>/archive[/<k>] the Archive (3B F5): its list, or one of its
+ *                                  read-only chats — <k> = `project` (the
+ *                                  previous Project Chat) or `@<agent>` (an
+ *                                  agent's previous direct messages)
  *   #/projects/<pid>[/c/<cid>]/tools/<agent>/<ws>/<tool>[/<detail>]
  *                                  Herramientas (3B F4): an agent's Files, Git
  *                                  or Terminal, over the topic it was opened
@@ -125,7 +127,7 @@ export function readRoute(): Route | null {
  *                                  workspace, else a work id (a work id never
  *                                  is `~`). <detail> as a session route's.
  */
-export type ProjectPage = "home" | "chat" | "conversation" | "tools";
+export type ProjectPage = "home" | "conversation" | "tools" | "archive";
 
 export type ToolName = "terminal" | "files" | "git";
 const TOOLS: readonly ToolName[] = ["terminal", "files", "git"];
@@ -149,6 +151,8 @@ export interface ProjectRoute {
 	conversationId?: string;
 	/** For `page: "tools"`. */
 	tools?: ToolsTarget;
+	/** For `page: "archive"`: which of its chats (`project` or `@<agent>`); absent = the list. */
+	archive?: string;
 }
 
 export function parseProjectRoute(hash: string): ProjectRoute | null {
@@ -178,21 +182,34 @@ export function parseProjectRoute(hash: string): ProjectRoute | null {
 			tools: { agent, work: ws === PRINCIPAL ? null : ws, tool: tool as ToolName, detail },
 		};
 	}
-	const m = /^#\/projects\/([^/?#]+)(?:\/(chat|c\/([^/?#]+)))?$/.exec(hash);
+	const m = /^#\/projects\/([^/?#]+)(?:\/(archive(?:\/([^/?#]+))?|c\/([^/?#]+)))?$/.exec(hash);
 	if (!m) return null;
 	const projectId = decode(m[1]!);
 	if (projectId === null || projectId === "") return null;
 	if (m[2] === undefined) return { projectId, page: "home" };
-	if (m[2] === "chat") return { projectId, page: "chat" };
-	const conversationId = decode(m[3]!);
+	if (m[2].startsWith("archive")) {
+		if (m[3] === undefined) return { projectId, page: "archive" };
+		const archive = decode(m[3]);
+		return archive && isArchiveKey(archive) ? { projectId, page: "archive", archive } : null;
+	}
+	const conversationId = decode(m[4]!);
 	if (conversationId === null || conversationId === "") return null;
 	return { projectId, page: "conversation", conversationId };
+}
+
+/** An Archive chat's key: the previous Project Chat, or an agent's direct messages. */
+export function isArchiveKey(s: string): boolean {
+	return s === "project" || /^@[a-z][a-z0-9-]{1,31}$/.test(s);
 }
 
 export function projectRouteHash(route: ProjectRoute): string {
 	const base = `#/projects/${encodeURIComponent(route.projectId)}`;
 	const page = route.page ?? "home";
-	if (page === "chat") return `${base}/chat`;
+	// A key is `project` or `@<agent name>` (isArchiveKey): written as it reads.
+	if (page === "archive")
+		return route.archive && isArchiveKey(route.archive)
+			? `${base}/archive/${route.archive}`
+			: `${base}/archive`;
 	if (page === "tools" && route.tools) {
 		const t = route.tools;
 		const from = route.conversationId ? `/c/${encodeURIComponent(route.conversationId)}` : "";

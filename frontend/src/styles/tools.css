@@ -10,8 +10,7 @@ body.tools-on #project-view {
 }
 body.tools-on #terminal-session-name,
 body.tools-on #terminal-status-badge,
-body.tools-on #terminal-session-sub,
-body.tools-on #view-chat-btn {
+body.tools-on #terminal-session-sub {
   display: none !important;
 }
 

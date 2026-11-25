@@ -206,9 +206,6 @@
     min-width: 40px;
     min-height: 44px;
   }
-  .pv-page.acp-project {
-    padding-top: 0;
-  }
   header #terminal-toolbar {
     flex: 1;
     min-width: 0;

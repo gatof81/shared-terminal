@@ -1969,7 +1969,7 @@ export interface AcpActivity {
 	[key: string]: unknown;
 }
 
-/** One page of a chat: the individual chat of an agent or a Project Chat. */
+/** One page of a thread: a topic, or an Archive chat (the previous Project Chat, an agent's direct messages). */
 export interface AcpFeed {
 	agent?: AcpAgentInfo;
 	project?: { id: string; name: string };
@@ -2062,18 +2062,18 @@ export const acpProjectFeed = async (projectId: string, before?: number | null) 
 	feedIn(
 		await acpJson<AcpFeed>(`/projects/${encodeURIComponent(projectId)}/feed${beforeQ(before)}`),
 	);
+/** One message to agent `to` in topic `conversationId` (every message is in a topic). */
 export const acpSend = (
 	to: string,
 	body: string,
-	opts: { projectId?: string | null; clientId?: string; conversationId?: string } = {},
+	opts: { conversationId: string; clientId?: string },
 ) =>
 	acpJson<AcpMessage>("/messages", {
 		method: "POST",
 		body: JSON.stringify({
 			to,
 			body,
-			...(opts.conversationId ? { conversationId: opts.conversationId } : {}),
-			...(opts.projectId && !opts.conversationId ? { projectId: opts.projectId } : {}),
+			conversationId: opts.conversationId,
 			...(opts.clientId ? { clientId: opts.clientId } : {}),
 		}),
 	});

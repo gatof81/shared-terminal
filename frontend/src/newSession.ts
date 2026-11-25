@@ -261,7 +261,7 @@ let acpSyncFields: () => void = () => {};
 let acpAgentLabel: HTMLLabelElement | null = null;
 let acpAgentError: HTMLElement | null = null;
 
-// ── Agent mode ("+ Nueva sesión con agente", from Project Chat) ─────────────
+// ── Agent mode ("+ Nueva sesión con agente", from a project's Equipo) ───────
 // The same dialog, about the agent: titled "Nuevo agente", the agent's name
 // first and required, the session named after the agent unless the person
 // writes another name. Every other open (the sidebar's "+ New session",
@@ -435,7 +435,7 @@ async function acpAgentForCreate(): Promise<
 	};
 }
 
-/** Opens the new-session dialog for an ACP agent, optionally already in a project (from Project Chat). */
+/** Opens the new-session dialog for an ACP agent, optionally already in a project (from its rail). */
 window.addEventListener("st:new-acp-session", (e) => {
 	const detail = (e as CustomEvent<{ projectId?: string; opener?: HTMLElement }>).detail;
 	acpPreselectProject = detail?.projectId ?? null;

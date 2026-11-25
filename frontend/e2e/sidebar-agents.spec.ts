@@ -67,7 +67,7 @@ test.describe("sidebar: agents and their state", () => {
 		);
 	});
 
-	test("a live event moves a row's state without opening its chat; a waiting agent shows on its folded project", async ({
+	test("a live event moves a row's state without opening anything; a waiting agent shows on its folded project", async ({
 		app,
 		backend,
 		page,
@@ -80,7 +80,7 @@ test.describe("sidebar: agents and their state", () => {
 		backend.acpAgents.find((a) => a.name === "arq")!.running = [row.id];
 		backend.pushAcp({ type: "message", message: row });
 		await expect(arq).toHaveText("trabajando");
-		await expect(page.locator("#chat-view")).toBeHidden();
+		await expect(page.locator("#project-view")).toBeHidden();
 
 		// A question opens: "te espera", on the row and on the project's heading.
 		const q = { id: 9, agent: "arq", message_id: row.id, state: "open" };
@@ -210,7 +210,7 @@ test.describe("sidebar: agent state re-reads (clock running)", { tag: "@any-view
 		expect(reads(backend)).toBe(before + 2);
 	});
 
-	test("the budget: idle ≤ 2 reads/min, a burst of events = 1 read, hidden = 0, a chat open ≤ 4", async ({
+	test("the budget: idle ≤ 2 reads/min, a burst of events = 1 read, hidden = 0", async ({
 		app,
 		backend,
 		page,
@@ -259,15 +259,5 @@ test.describe("sidebar: agent state re-reads (clock running)", { tag: "@any-view
 		await expect.poll(() => reads(backend)).toBe(at + 1);
 		await page.waitForTimeout(300);
 		expect(reads(backend), "one read on showing").toBe(at + 1);
-
-		// A chat open: its own status poll, and the feed adds nothing.
-		await page.evaluate(
-			(sid) => (location.hash = `#/sessions/${sid}/chat`),
-			PROJECT_SESSION_IDS.scratch,
-		);
-		await expect(page.locator("#acp-chat")).toBeVisible();
-		await page.clock.runFor(2_000);
-		await page.waitForTimeout(200);
-		expect(await minute(), "a chat open").toBeLessThanOrEqual(4);
 	});
 });

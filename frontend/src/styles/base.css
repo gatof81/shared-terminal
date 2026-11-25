@@ -86,10 +86,7 @@ html[data-kb="open"] body {
 .btn:active:not(:disabled) {
   background: var(--c-border-soft);
 }
-.btn:focus-visible,
-/* The chat view's own ring (chat.css, by id) sets a 1-px offset: the base
-   controls keep theirs there too. */
-#chat-view .btn:focus-visible {
+.btn:focus-visible {
   outline: 2px solid var(--c-accent);
   outline-offset: 2px;
 }

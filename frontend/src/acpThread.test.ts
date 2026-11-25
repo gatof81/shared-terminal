@@ -1,9 +1,10 @@
 /**
  * acpThread.test.ts — the ACP thread's races under jsdom, with the network
  * (api.ts) and the live socket (acpLive.ts) mocked: a send is reserved before
- * any await, drafts belong to their chat, a late page never undoes a newer
- * live row, a late answer lands only in the chat it was asked from, and a
- * re-render keeps the elements that did not change.
+ * any await, drafts belong to their topic, a late page never undoes a newer
+ * live row, a late answer lands only in the topic it was asked from, a
+ * re-render keeps the elements that did not change — and an Archive chat
+ * writes nothing.
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -26,6 +27,9 @@ vi.mock("./main.js", () => ({ showCopySuccessToast: vi.fn(), showToast: vi.fn() 
 const api = vi.hoisted(() => ({
 	acpFeed: vi.fn(),
 	acpProjectFeed: vi.fn(),
+	acpConversationFeed: vi.fn(),
+	acpReadConversation: vi.fn(() => new Promise(() => {})),
+	acpPost: vi.fn(),
 	acpSend: vi.fn(),
 	acpRequeue: vi.fn(),
 	acpReview: vi.fn(),
@@ -92,38 +96,82 @@ function mount() {
 	document.body.replaceChildren(t.root);
 	return t;
 }
+/** A topic of project p1 whose recipients are `to` (its server-kept «Para:»). */
+const conv = (id: string, to: string[] = ["solo"]) => ({
+	id,
+	projectId: "p1",
+	title: id,
+	createdAt: "2026-11-18T10:00:00Z",
+	lastActivityAt: "2026-11-18T10:00:00Z",
+	archivedAt: null,
+	readAt: null,
+	recipients: { agents: to },
+});
+const topic = (id: string) => ({
+	kind: "conversation" as const,
+	conversationId: id,
+	projectId: "p1",
+});
+/** The feed of topic `id`, its agents `names` (in p1). */
+const topicFeed = (id: string, names: string[], over: Partial<AcpFeed> = {}) =>
+	feed({
+		conversation: conv(id, names.slice(0, 1)) as AcpFeed["conversation"],
+		agents: names.map((n) => agent(n, "p1")),
+		...over,
+	});
+/** Each topic answers with its own feed: A = «solo», B = «arq». */
+function twoTopics(over: Partial<AcpFeed> = {}) {
+	api.acpConversationFeed.mockImplementation(async (id: string) =>
+		topicFeed(id, id === "A" ? ["solo"] : ["arq"], over),
+	);
+}
+const inTopic = (m: AcpMessage, cid: string) => ({ ...m, conversation_id: cid, project_id: "p1" });
 const submit = (t: InstanceType<typeof AcpThread>) =>
 	t.root.querySelector("form")!.dispatchEvent(new Event("submit", { cancelable: true }));
 
 describe("sending", () => {
 	it("two quick submits of the same draft send once, even while the page is still loading", async () => {
 		const page = deferred<AcpFeed>();
-		api.acpFeed.mockReturnValueOnce(page.promise);
-		api.acpSend.mockResolvedValue(msg(9, { to_id: "dev" }));
+		api.acpConversationFeed.mockReturnValueOnce(page.promise);
+		api.acpPost.mockResolvedValue({ messages: [inTopic(msg(9, { to_id: "solo" }), "A")] });
 		const t = mount();
-		t.open({ kind: "agent", name: "dev" });
+		t.open(topic("A"));
 		t.input.value = "hacé X";
-		api.acpFeed.mockResolvedValue(feed({ agent: agent("dev") }));
+		api.acpConversationFeed.mockResolvedValue(topicFeed("A", ["solo"]));
 		submit(t);
 		submit(t);
-		page.resolve(feed({ agent: agent("dev") }));
+		page.resolve(topicFeed("A", ["solo"]));
 		await flush();
 		await flush();
-		expect(api.acpSend).toHaveBeenCalledTimes(1);
+		expect(api.acpPost).toHaveBeenCalledTimes(1);
 		// A second, different message while the first one is pending is a new send.
 		t.input.value = "y también Y";
 		submit(t);
 		await flush();
-		expect(api.acpSend).toHaveBeenCalledTimes(2);
-		expect(api.acpSend.mock.calls[0]![2].clientId).not.toBe(api.acpSend.mock.calls[1]![2].clientId);
+		expect(api.acpPost).toHaveBeenCalledTimes(2);
+		expect(api.acpPost.mock.calls[0]![3]).not.toBe(api.acpPost.mock.calls[1]![3]);
+	});
+
+	it("every message goes into its topic: one post, never a send without conversation", async () => {
+		api.acpConversationFeed.mockResolvedValue(topicFeed("A", ["solo"]));
+		api.acpPost.mockResolvedValue({ messages: [] });
+		const t = mount();
+		t.open(topic("A"));
+		await flush();
+		t.input.value = "hola";
+		submit(t);
+		await flush();
+		await flush();
+		expect(api.acpPost).toHaveBeenCalledWith("A", ["solo"], "hola", expect.any(String));
+		expect(api.acpSend).not.toHaveBeenCalled();
 	});
 
 	it("a retry of a long message reuses its id AND the exact body (no second upload)", async () => {
-		api.acpFeed.mockResolvedValue(feed({ agent: agent("dev"), maxMessageBytes: 8 }));
+		api.acpConversationFeed.mockResolvedValue(topicFeed("A", ["solo"], { maxMessageBytes: 8 }));
 		api.uploadSessionFiles.mockResolvedValue({ paths: ["/home/developer/uploads/m.md"] });
 		api.acpSend.mockRejectedValueOnce(new Error("503")).mockResolvedValueOnce(msg(4));
 		const t = mount();
-		t.open({ kind: "agent", name: "dev" });
+		t.open(topic("A"));
 		await flush();
 		t.input.value = "un mensaje largo";
 		submit(t);
@@ -136,104 +184,73 @@ describe("sending", () => {
 		expect(api.uploadSessionFiles).toHaveBeenCalledTimes(1);
 		const [first, second] = api.acpSend.mock.calls;
 		expect(second![1]).toBe(first![1]);
-		expect(second![2].clientId).toBe(first![2].clientId);
+		expect(second![2]).toEqual(first![2]);
+		expect(first![2].conversationId).toBe("A");
 	});
 
 	it("an unknown leading mention sends nothing and keeps the text", async () => {
-		api.acpProjectFeed.mockResolvedValue(
-			feed({ project: { id: "p1", name: "P" }, agents: [agent("dev", "p1"), agent("qa", "p1")] }),
-		);
+		api.acpConversationFeed.mockResolvedValue(topicFeed("A", ["dev", "qa"]));
 		const t = mount();
-		t.open({ kind: "project", projectId: "p1" });
+		t.open(topic("A"));
 		await flush();
 		t.input.value = "@devv revisá con @qa";
 		submit(t);
 		await flush();
 		await flush();
-		expect(api.acpSend).not.toHaveBeenCalled();
+		expect(api.acpPost).not.toHaveBeenCalled();
 		expect(t.input.value).toBe("@devv revisá con @qa");
 		expect(t.root.querySelector(".acp-chat-error")?.textContent).toContain("@devv");
 	});
 });
 
 describe("drafts", () => {
-	it("each chat keeps its own draft; none follows the person into another chat", async () => {
-		api.acpFeed.mockResolvedValue(feed());
-		api.acpProjectFeed.mockResolvedValue(feed({ project: { id: "p1", name: "P" } }));
+	it("each topic keeps its own draft; none follows the person into another topic", async () => {
+		twoTopics();
 		const t = mount();
-		t.open({ kind: "agent", name: "solo" });
-		t.input.value = "para solo";
-		t.open({ kind: "agent", name: "arq" });
+		t.open(topic("A"));
+		t.input.value = "para A";
+		t.open(topic("B"));
 		expect(t.input.value).toBe("");
-		t.open({ kind: "project", projectId: "p1" });
-		expect(t.input.value).toBe("");
-		t.open({ kind: "agent", name: "solo" });
-		expect(t.input.value).toBe("para solo");
+		t.open(topic("A"));
+		expect(t.input.value).toBe("para A");
 	});
 
-	it("a failed send gives the text back to its own chat, not to the one on screen", async () => {
-		api.acpFeed.mockResolvedValue(feed({ agent: agent("solo") }));
+	it("a failed send gives the text back to its own topic, not to the one on screen", async () => {
+		twoTopics();
 		let fail!: (e: Error) => void;
-		api.acpSend.mockReturnValueOnce(
-			new Promise<AcpMessage>((_, rej) => {
+		api.acpPost.mockReturnValueOnce(
+			new Promise((_, rej) => {
 				fail = rej;
 			}),
 		);
 		const t = mount();
-		t.open({ kind: "agent", name: "solo" });
+		t.open(topic("A"));
 		await flush();
 		t.input.value = "importante";
 		submit(t);
 		await flush();
-		t.open({ kind: "agent", name: "arq" });
+		t.open(topic("B"));
 		fail(new Error("503"));
 		await flush();
 		await flush();
 		expect(t.input.value).toBe("");
-		t.open({ kind: "agent", name: "solo" });
+		t.open(topic("A"));
 		expect(t.input.value).toBe("importante");
-	});
-});
-
-describe("leaving and coming back", () => {
-	it("a send that fails after A → B → A returns its text to A's field, with the error", async () => {
-		api.acpFeed.mockResolvedValue(feed({ agent: agent("solo") }));
-		let fail!: (e: Error) => void;
-		api.acpSend.mockReturnValueOnce(
-			new Promise<AcpMessage>((_, rej) => {
-				fail = rej;
-			}),
-		);
-		const t = mount();
-		t.open({ kind: "agent", name: "solo" });
-		await flush();
-		t.input.value = "importante";
-		submit(t);
-		await flush();
-		t.open({ kind: "agent", name: "arq" });
-		t.open({ kind: "agent", name: "solo" });
-		fail(new Error("503"));
-		await flush();
-		await flush();
-		await flush();
-		expect(t.input.value).toBe("importante");
-		// Fixed words: who it did not reach, never the server's answer.
-		expect(t.root.querySelector(".acp-chat-error")?.textContent).toBe("No se envió a @solo.");
 	});
 });
 
 describe("a send that fails while the person is elsewhere", () => {
 	function pendingSend() {
 		let fail!: (e: Error) => void;
-		api.acpSend.mockReturnValueOnce(
-			new Promise<AcpMessage>((_, rej) => {
+		api.acpPost.mockReturnValueOnce(
+			new Promise((_, rej) => {
 				fail = rej;
 			}),
 		);
 		return (e: Error) => fail(e);
 	}
-	async function sendInSolo(t: InstanceType<typeof AcpThread>, text: string) {
-		t.open({ kind: "agent", name: "solo" });
+	async function sendInA(t: InstanceType<typeof AcpThread>, text: string) {
+		t.open(topic("A"));
 		await flush();
 		t.input.value = text;
 		submit(t);
@@ -250,47 +267,48 @@ describe("a send that fails while the person is elsewhere", () => {
 		t.root.querySelector<HTMLButtonElement>(".acp-recover")!;
 
 	it("a refusal the person can act on says why, in fixed words; any other stays plain", async () => {
-		api.acpFeed.mockResolvedValue(feed({ agent: agent("solo") }));
+		twoTopics();
 		let fail = pendingSend();
 		const t = mount();
-		await sendInSolo(t, "importante");
+		await sendInA(t, "importante");
 		fail(Object.assign(new Error("bad"), { status: 400, code: "not-in-project" }));
 		await settle();
 		expect(errorText(t)).toBe("No se envió a @solo (ya no está en este proyecto).");
 		t.input.value = "";
 		fail = pendingSend();
-		await sendInSolo(t, "otro");
+		await sendInA(t, "otro");
 		fail(Object.assign(new Error("internal"), { status: 500, code: "internal" }));
 		await settle();
 		expect(errorText(t)).toBe("No se envió a @solo.");
 	});
 
-	it("A → B: nothing of A shows in B; back in A, the text and the error are there", async () => {
-		api.acpFeed.mockResolvedValue(feed({ agent: agent("solo") }));
+	it("A → B → A: nothing of A shows in B; back in A, the text and the error are there", async () => {
+		twoTopics();
 		const fail = pendingSend();
 		const t = mount();
-		await sendInSolo(t, "importante");
-		t.open({ kind: "agent", name: "arq" });
+		await sendInA(t, "importante");
+		t.open(topic("B"));
 		fail(new Error("503"));
 		await settle();
 		expect(t.input.value).toBe("");
 		expect(errorText(t)).toBe("");
-		t.open({ kind: "agent", name: "solo" });
+		t.open(topic("A"));
 		await settle();
 		expect(t.input.value).toBe("importante");
+		// Fixed words: who it did not reach, never the server's answer.
 		expect(errorText(t)).toBe("No se envió a @solo.");
 	});
 
 	it("over another draft of A the text is offered, never written over it", async () => {
-		api.acpFeed.mockResolvedValue(feed({ agent: agent("solo") }));
+		twoTopics();
 		const fail = pendingSend();
 		const t = mount();
-		await sendInSolo(t, "importante");
+		await sendInA(t, "importante");
 		t.input.value = "otro borrador";
-		t.open({ kind: "agent", name: "arq" });
+		t.open(topic("B"));
 		fail(new Error("503"));
 		await settle();
-		t.open({ kind: "agent", name: "solo" });
+		t.open(topic("A"));
 		await settle();
 		expect(t.input.value).toBe("otro borrador");
 		expect(recoverBtn(t).hidden).toBe(false);
@@ -301,20 +319,20 @@ describe("a send that fails while the person is elsewhere", () => {
 	});
 
 	it("the retry after coming back keeps the client id (an ambiguous failure is not duplicated)", async () => {
-		api.acpFeed.mockResolvedValue(feed({ agent: agent("solo") }));
+		twoTopics();
 		const fail = pendingSend();
 		const t = mount();
-		await sendInSolo(t, "importante");
-		t.open({ kind: "agent", name: "arq" });
+		await sendInA(t, "importante");
+		t.open(topic("B"));
 		fail(new Error("timeout"));
 		await settle();
-		t.open({ kind: "agent", name: "solo" });
+		t.open(topic("A"));
 		await settle();
-		api.acpSend.mockResolvedValueOnce(msg(7, { to_id: "solo" }));
+		api.acpPost.mockResolvedValueOnce({ messages: [] });
 		submit(t);
 		await settle();
-		const [first, retry] = api.acpSend.mock.calls;
-		expect(retry![2].clientId).toBe(first![2].clientId);
+		const [first, retry] = api.acpPost.mock.calls;
+		expect(retry![3]).toBe(first![3]);
 		expect(errorText(t)).toBe("");
 	});
 });
@@ -322,25 +340,34 @@ describe("a send that fails while the person is elsewhere", () => {
 describe("consistency", () => {
 	it("a late page does not undo a newer row that arrived live", async () => {
 		const page = deferred<AcpFeed>();
-		api.acpFeed.mockReturnValueOnce(page.promise);
+		api.acpConversationFeed.mockReturnValueOnce(page.promise);
 		const t = mount();
-		t.open({ kind: "agent", name: "dev" });
-		live.listener!({ type: "message", message: msg(5, { state: "done", result_text: "ok" }) });
+		t.open(topic("A"));
+		live.listener!({
+			type: "message",
+			message: inTopic(msg(5, { to_id: "solo", state: "done", result_text: "ok" }), "A"),
+		});
 		// The page was read before #5 finished.
-		page.resolve(feed({ agent: agent("dev"), messages: [msg(5, { state: "running" })] }));
+		page.resolve(
+			topicFeed("A", ["solo"], {
+				messages: [inTopic(msg(5, { to_id: "solo", state: "running" }), "A")],
+			}),
+		);
 		await flush();
 		await flush();
-		expect(t.root.querySelector(".acp-badge")?.textContent).toBe("hecho");
+		expect(t.root.querySelector(".acp-result .acp-msg-result")?.textContent).toBe("ok");
 	});
 
-	it("a requeue (from the review, after acknowledging) answered after switching chats changes nothing on screen", async () => {
-		api.acpFeed.mockResolvedValueOnce(
-			feed({ agent: agent("dev"), messages: [msg(3, { state: "uncertain" })] }),
+	it("a requeue (from the review, after acknowledging) answered after switching topics changes nothing on screen", async () => {
+		api.acpConversationFeed.mockResolvedValueOnce(
+			topicFeed("A", ["solo"], {
+				messages: [inTopic(msg(3, { to_id: "solo", state: "uncertain" }), "A")],
+			}),
 		);
 		const requeue = deferred<AcpMessage>();
 		api.acpRequeue.mockReturnValueOnce(requeue.promise);
 		const t = mount();
-		t.open({ kind: "agent", name: "dev" });
+		t.open(topic("A"));
 		await flush();
 		await flush();
 		// Never a one-tap retry: the review's requeue is locked until acknowledged.
@@ -356,32 +383,91 @@ describe("consistency", () => {
 		expect(again.disabled).toBe(false);
 		again.click();
 		expect(api.acpRequeue).toHaveBeenCalledWith(3);
-		api.acpFeed.mockResolvedValueOnce(feed({ agent: agent("qa"), messages: [] }));
-		t.open({ kind: "agent", name: "qa" });
+		api.acpConversationFeed.mockResolvedValueOnce(topicFeed("B", ["arq"]));
+		t.open(topic("B"));
 		await flush();
-		requeue.resolve(msg(3, { state: "pending" }));
+		requeue.resolve(inTopic(msg(3, { to_id: "solo", state: "pending" }), "A"));
 		await flush();
 		await flush();
 		expect(t.root.querySelectorAll(".acp-msg")).toHaveLength(0);
 	});
 
 	it("a live event re-renders without replacing the messages that did not change", async () => {
-		api.acpFeed.mockResolvedValueOnce(
-			feed({
-				agent: agent("dev"),
-				messages: [msg(1, { state: "done", result_text: "## Hecho\n\n`x`" })],
+		api.acpConversationFeed.mockResolvedValueOnce(
+			topicFeed("A", ["solo"], {
+				messages: [
+					inTopic(msg(1, { to_id: "solo", state: "done", result_text: "## Hecho\n\n`x`" }), "A"),
+				],
 			}),
 		);
 		const t = mount();
-		t.open({ kind: "agent", name: "dev" });
+		t.open(topic("A"));
 		await flush();
 		await flush();
 		const before = t.root.querySelector(".acp-msg");
-		expect(before?.querySelector(".acp-msg-result h2")?.textContent).toBe("Hecho");
-		live.listener!({ type: "message", message: msg(2) });
+		expect(t.root.querySelector(".acp-msg-result h2")?.textContent).toBe("Hecho");
+		live.listener!({ type: "message", message: inTopic(msg(2, { to_id: "solo" }), "A") });
 		await flush();
 		await flush();
-		expect(t.root.querySelectorAll(".acp-msg")).toHaveLength(2);
+		expect(t.root.querySelectorAll(".acp-post")).toHaveLength(2);
 		expect(t.root.querySelector(".acp-msg")).toBe(before);
+	});
+});
+
+describe("an Archive chat", () => {
+	const archive = (agent: string | null) => ({ kind: "archive" as const, projectId: "p1", agent });
+
+	it("writes nothing: no message box, its interruption is reviewed in Pendientes", async () => {
+		api.acpProjectFeed.mockResolvedValue(
+			feed({
+				project: { id: "p1", name: "P" },
+				agents: [agent("solo", "p1")],
+				messages: [msg(3, { to_id: "solo", state: "uncertain", project_id: "p1" })],
+			}),
+		);
+		const t = mount();
+		t.setComposer("off");
+		t.open(archive(null));
+		await flush();
+		await flush();
+		expect(t.root.querySelector("form")!.classList.contains("acp-composer-off")).toBe(true);
+		const buttons = [...t.root.querySelectorAll("button")].map((b) => b.textContent);
+		expect(buttons).not.toContain("Revisar interrupción");
+		expect(t.root.textContent).toContain("revisala en Pendientes");
+		t.input.value = "algo";
+		submit(t);
+		await flush();
+		expect(api.acpPost).not.toHaveBeenCalled();
+		expect(api.acpSend).not.toHaveBeenCalled();
+	});
+
+	it("an agent's chat is its direct part only; «Cargar anteriores» goes past a page without any", async () => {
+		const page = (from: number, direct: boolean) =>
+			Array.from({ length: 100 }, (_, i) =>
+				msg(from + i, { to_id: "solo", project_id: direct && i === 99 ? null : "p1" }),
+			);
+		api.acpFeed
+			.mockResolvedValueOnce(feed({ agent: agent("solo", "p1"), messages: page(201, true) }))
+			.mockResolvedValueOnce(feed({ agent: agent("solo", "p1"), messages: page(101, false) }))
+			.mockResolvedValueOnce(
+				feed({ agent: agent("solo", "p1"), messages: [msg(50, { to_id: "solo" })] }),
+			);
+		const t = mount();
+		t.open(archive("solo"));
+		await flush();
+		await flush();
+		expect(t.root.querySelectorAll(".acp-post")).toHaveLength(1);
+		const more = () => t.root.querySelector<HTMLButtonElement>(".acp-more")!;
+		more().click();
+		await flush();
+		await flush();
+		expect(api.acpFeed).toHaveBeenLastCalledWith("solo", 201);
+		more().click();
+		await flush();
+		await flush();
+		expect(api.acpFeed).toHaveBeenLastCalledWith("solo", 101);
+		await flush();
+		expect(t.root.querySelectorAll(".acp-post")).toHaveLength(2);
+		expect(t.root.querySelector(".acp-more")).toBeNull();
 	});
 });

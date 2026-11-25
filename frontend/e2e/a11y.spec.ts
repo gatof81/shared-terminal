@@ -70,9 +70,11 @@ test.describe("accessibility — axe on the main views", () => {
 
 	test("sidebar tree and a project page", async ({ app, backend, page }) => {
 		backend.enableProjects();
-		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/chat`);
-		await expect(page.locator("#pv-title")).toBeVisible();
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		await expect(page.locator(".rail-project-name")).toBeVisible();
 		await expectClean(page, "project page");
+		// The tree: the sidebar of a session (a wide project page puts its rail there).
+		await page.goto(`/#/sessions/${SESSION_IDS.running}`);
 		await app.openSidebar();
 		await expect(app.sessionRow("hz-architect")).toBeVisible();
 		await expectClean(page, "sidebar");
@@ -80,10 +82,12 @@ test.describe("accessibility — axe on the main views", () => {
 
 	test("the new-agent dialog with its field errors", async ({ app, backend, page }) => {
 		backend.enableAcp();
-		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/chat`);
-		// The button is in the "Agentes" panel's foot, opened from the agents' group.
-		await page.locator(".acp-agents-group").click();
-		await page.getByRole("button", { name: "+ Nueva sesión con agente" }).click();
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
+		// The rail's Equipo "+".
+		await page
+			.locator(".rail-body")
+			.getByRole("button", { name: "Nueva sesión con agente" })
+			.click();
 		await page.fill("#new-session-acp-agent", "Dev_1");
 		await page.locator("#new-session-input").fill("");
 		await page.click("#new-session-submit");
@@ -116,43 +120,28 @@ test.describe("accessibility — axe on the main views", () => {
 		);
 		await expectClean(page, "sidebar with agents", ["#session-list"]);
 	});
-	test("ACP chats: settings and the manage panel open, a refused model flagged", async ({
-		app,
-		backend,
-		page,
-	}) => {
+	test("the agent's settings dialog, a refused model flagged", async ({ app, backend, page }) => {
 		backend.enableAcp();
 		const solo = backend.acpAgents.find((a) => a.name === "solo")!;
 		solo.projectId = PROJECT_IDS.hz;
 		solo.model = "claude-opus-5-5";
 		solo.modelApplied = { requested: "claude-opus-5-5", current: null, error: "no disponible" };
-		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
-		await expect(page.locator("#acp-chat .acp-chat-thread")).toBeVisible();
-		// The whole page: the threads' text passes too (#380).
-		await expectClean(page, "ACP chat, settings closed");
+		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}`);
 		await app.openAgentSettings();
-		await expect(page.locator("#acp-chat .acp-model-select")).toBeVisible();
-		await expectClean(page, "ACP chat, settings open");
-		await page.goto(`/#/projects/${PROJECT_IDS.hz}/chat`);
-		await page.locator(".acp-agents-group").click();
-		await expect(page.locator("#acp-agents")).toBeVisible();
-		await expectClean(page, "Project Chat, agents panel open");
-		// The recipients menu and the agents' list open.
-		await page.keyboard.press("Escape");
-		await page.getByRole("button", { name: "Elegir destinatarios" }).click();
-		await expect(page.getByRole("menu", { name: "Destinatarios" })).toBeVisible();
-		await expectClean(page, "Project Chat, recipients menu open");
-		await page.keyboard.press("Escape");
+		await expect(page.locator(".acp-settings-dialog .acp-model-select")).toBeVisible();
+		await expectClean(page, "agent settings", [".acp-settings-dialog .modal-card"]);
 	});
 
-	test("ACP threads, every kind of row, on the whole page (no exclusions)", async ({
+	test("the Archive's threads, every kind of row, on the whole page (no exclusions)", async ({
 		app,
 		backend,
 		page,
 	}) => {
 		backend.enableAcp();
 		const hz = PROJECT_IDS.hz;
-		// The project's thread: a post to two agents, a consult and its delivered
+		// @solo's direct messages are listed in the Archive of the project it is in.
+		backend.acpAgents.find((a) => a.name === "solo")!.projectId = hz;
+		// The previous Project Chat: a post to two agents, a consult and its delivered
 		// reply, a reply whose consult is elsewhere, work with activity, a question,
 		// a queued message.
 		backend.addAcpMessage({
@@ -250,7 +239,7 @@ test.describe("accessibility — axe on the main views", () => {
 			},
 		];
 		backend.addAcpMessage({ to_id: "dev", body: "@dev después los tests", project_id: hz });
-		// A direct chat: done, uncertain (with its note and Volver a encolar), failed, queued.
+		// A direct chat: done, uncertain (with its note), failed, queued.
 		backend.addAcpMessage({
 			to_id: "solo",
 			body: "Interrumpido",
@@ -264,11 +253,11 @@ test.describe("accessibility — axe on the main views", () => {
 			note: "Error del adaptador.",
 		});
 		backend.addAcpMessage({ to_id: "solo", body: "En cola" });
-		await app.login("alice", `#/projects/${hz}/chat`);
+		await app.login("alice", `#/projects/${hz}/archive/project`);
 		await expect(page.locator("#project-view .acp-question-open")).toBeVisible();
-		await expectClean(page, "Project Chat thread");
-		await page.goto(`/#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
-		await expect(page.locator("#acp-chat .acp-msg", { hasText: "Interrumpido" })).toBeVisible();
-		await expectClean(page, "individual chat thread");
+		await expectClean(page, "Archive: previous Project Chat");
+		await page.goto(`/#/projects/${hz}/archive/@solo`);
+		await expect(page.locator("#project-view .acp-msg", { hasText: "Interrumpido" })).toBeVisible();
+		await expectClean(page, "Archive: an agent's direct messages");
 	});
 });
