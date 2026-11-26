@@ -576,7 +576,7 @@ describe("interruptions in plain words (§14)", () => {
 		expect(agentNow({ running: [3], pending: 2 }).chip).toBe("Ahora: trabajando en otro");
 		expect(agentNow({ running: [], pending: 2 }).chip).toBe("Ahora: 2 en cola");
 		expect(agentNow({ running: [3], pending: 0, heldBy: [{}] }).chip).toBe(
-			"Dejó un proceso abierto",
+			"Ahora: proceso abierto",
 		);
 	});
 

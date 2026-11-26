@@ -567,7 +567,8 @@ button.rail-attention:hover {
 	opacity: 0.45;
 	cursor: not-allowed;
 }
-.acp-ib-item.is-interrupted .acp-ib-what {
+.acp-ib-item.is-interrupted .acp-ib-what,
+.acp-ib-item.is-gone-group .acp-ib-what {
 	font-weight: 600;
 }
 .acp-ib-quote {
@@ -750,6 +751,20 @@ button.rail-attention:hover {
 }
 .acp-review-tech summary {
 	cursor: pointer;
+}
+/* A touch screen: the summary keeps its 44-px target, overlapping the
+   grid's gaps instead of opening a hole between «Qué pasó» and «Informe». */
+@media (max-width: 768px) {
+	.acp-review-tech summary {
+		box-sizing: border-box;
+		padding: 13px 0;
+	}
+	.acp-review-tech:not([open]) {
+		margin: -8px 0 -14px;
+	}
+	.acp-review-tech[open] {
+		margin-top: -8px;
+	}
 }
 .acp-review-tech code {
 	display: block;

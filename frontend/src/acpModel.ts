@@ -715,7 +715,7 @@ export function agentNow(a: {
 }): { chip: string; sentence: string; tone: "ok" | "busy" | "warn" } {
 	if (a.heldBy?.length)
 		return {
-			chip: "Dejó un proceso abierto",
+			chip: "Ahora: proceso abierto",
 			sentence: "dejó un proceso abierto: no toma otro tema hasta que termine.",
 			tone: "warn",
 		};
