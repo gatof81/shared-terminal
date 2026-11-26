@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Shared Terminal · Prototipo 4 · Tablero de tareas</title>
+<link rel="stylesheet" href="board.css">
+</head>
+<body>
+<header id="top">
+	<button class="icon-btn" aria-label="Menú">☰</button>
+	<span class="brand">Shared Terminal</span>
+	<span class="grow"></span>
+	<button class="icon-btn inbox" aria-label="Pendientes (2)">
+		<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 9.5V13h12V9.5M2 9.5 4 3h8l2 6.5M2 9.5h3.5l1 1.5h3l1-1.5H14"/></svg><b class="badge">2</b>
+	</button>
+	<span class="me" aria-hidden="true">D</span>
+</header>
+<div id="app" data-screen="board">
+	<aside id="rail" aria-label="Proyecto"></aside>
+	<main id="main">
+		<section id="board" aria-labelledby="board-title"></section>
+		<section id="topic" aria-label="Conversación" hidden></section>
+	</main>
+	<aside id="detail" aria-label="Detalle de la tarea" hidden></aside>
+</div>
+<div id="menu" class="menu" role="menu" hidden></div>
+<dialog id="dlg"></dialog>
+<div id="toast" role="status" aria-live="polite"></div>
+
+<!-- Panel del prototipo: escenarios. No es parte de la propuesta. -->
+<details id="proto" open>
+	<summary>Prototipo 4 · escenario</summary>
+	<label><input type="radio" name="sc" value="normal" checked> Con tareas</label>
+	<label><input type="radio" name="sc" value="empty"> Proyecto sin tareas</label>
+	<label><input type="radio" name="sc" value="error"> Error al cargar</label>
+	<label><input type="radio" name="sc" value="stale"> Error al recargar (datos previos)</label>
+	<label><input type="checkbox" id="sc-409"> La próxima acción choca (409)</label>
+	<button id="sc-reset" class="btn sm">Reiniciar datos</button>
+</details>
+<script src="data.js"></script>
+<script src="board.js"></script>
+</body>
+</html>
