@@ -2683,9 +2683,15 @@ describe("ACP tasks (v29)", () => {
 			(await patch(as("coord"), own.id, { version: own.version, status: "done", assignee: "dev2" }))
 				.body.error,
 		).toBe("self-approval");
-		expect((await patch(owner, own.id, { version: own.version, status: "done" })).body.doneBy).toBe(
-			"owner",
-		);
+		// Nor by reassigning it away first and approving it in a later write.
+		const away = await patch(as("coord"), own.id, { version: own.version, assignee: "dev2" });
+		expect(away.status).toBe(200);
+		expect(
+			(await patch(as("coord"), own.id, { version: away.body.version, status: "done" })).body.error,
+		).toBe("self-approval");
+		expect(
+			(await patch(owner, own.id, { version: away.body.version, status: "done" })).body.doneBy,
+		).toBe("owner");
 	});
 
 	it("concurrency: a write decided on an old version is refused with the current row", async () => {

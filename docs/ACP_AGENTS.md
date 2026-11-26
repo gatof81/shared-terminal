@@ -445,8 +445,8 @@ coordinator of an agent's root is that agent; the person may name one, or none.
 - the **coordinator**: create children, title/description, `assignee`/`reviewer`, priority, `dep`
   links, hand the goal over (`coordinator`; to nobody only the person);
 - the **assignee**: `status` among todo/doing/review, `blockedReason` (set / `null`), `work`/`pr`/`external` links;
-- `done`, and reopening a done task: an agent that is **not the assignee** (neither the current one
-  nor the one the same write sets) and is the task's `reviewer` or the coordinator; the assignee
+- `done`, and reopening a done task: an agent that is **not the assignee** (neither the current one,
+  the one the same write sets, nor any it had before — its history says) and is the task's `reviewer` or the coordinator; the assignee
   never (403 `self-approval`). A status grants nothing else (no deploy, no merge).
 
 Every write is `UPDATE … WHERE version = ?`; a write on a child allowed by being its root's coordinator

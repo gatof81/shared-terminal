@@ -256,6 +256,18 @@ export class AcpTasks {
 		return a.name;
 	}
 
+	/** `name` was ever this task's assignee: its history (created / assigned), read by the task. */
+	private async wasAssignee(t: TaskRow, name: string): Promise<boolean> {
+		const r = await d1Query(
+			`SELECT 1 FROM task_events WHERE owner_user_id = ? AND task_id = ?
+			 AND ((kind = 'created' AND json_extract(data, '$.assignee') = ?)
+				OR (json_extract(data, '$.assignee[0]') = ? OR json_extract(data, '$.assignee[1]') = ?))
+			 LIMIT 1`,
+			[t.owner_user_id, t.id, name, name, name],
+		);
+		return r.results.length > 0;
+	}
+
 	/** The root's coordinator (a child has none of its own). */
 	private async coordinatorOf(t: TaskRow): Promise<string | null> {
 		if (t.parent_id === null) return t.coordinator;
@@ -628,9 +640,10 @@ export class AcpTasks {
 			const to = oneOf(b.status, STATUSES, "bad-status");
 			if (to === "done" || t.status === "done") {
 				// Approval (and its undoing): never the assignee — the one the task
-				// had, or the one this same write gives it.
+				// has, the one this same write gives it, or any it had before (a
+				// coordinator could otherwise reassign its own task away and approve it).
 				if (actor.kind === "agent") {
-					if (me === t.assignee || me === newAssignee)
+					if (me === t.assignee || me === newAssignee || (await this.wasAssignee(t, me as string)))
 						throw new TaskError(403, "self-approval", {
 							message:
 								"el responsable de una tarea no la aprueba: la aprueba su reviewer, el coordinador o la persona",
