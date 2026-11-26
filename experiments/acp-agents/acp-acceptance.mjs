@@ -409,6 +409,7 @@ async function main() {
 	check("…and that process's later st send is refused (nothing written)", !(await msgsOf(ARQ)).messages.some((m) => m.body === "tarde desde s1"));
 	const k = [await send(DEV, "esperá 10", pid), await send(DEV, "esperá 10", pid, S1)];
 	await waitFor("both running", async () => (await Promise.all(k.map((m) => get(m.id)))).every((m) => m.state === "running"), 60_000);
+	await waitTurnStarted(DEV, k[1].id);
 	check("slot 2's runner killed", await execIn(sids[DEV], ["sh", "-c", "pkill -KILL -f '^node --no-warnings /opt/st-acp/st/runner.mjs 2$'; true"]));
 	const kDone = await Promise.all(k.map((m) => waitMsg(m.id)));
 	check("slot 1's message finished normally", kDone[0].state === "done", kDone[0].state);
