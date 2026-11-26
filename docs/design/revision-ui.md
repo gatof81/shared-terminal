@@ -270,6 +270,106 @@ Conviven con todo lo de 3B, que ya está en español.
 
 **Para discutir.** Si el owner quiere el Tablero como vista por defecto del proyecto, cambia el aterrizaje de `#/projects/<pid>`.
 
+---
+
+## Agregado del owner (#1614): interrupciones y borrado
+
+La 14 va con «vale la pena» y es la primera de ese grupo por lo que molesta hoy. La 15 es solo el lugar.
+
+### 14. Interrupciones: que se entienda qué pasó y qué hacer (pedido del owner, #1614)
+
+| Hoy: Pendientes (390) | Hoy: la tarjeta, con un agente que ya no existe |
+|---|---|
+| ![](../../assets/ui-review/390-pendientes-interrupciones.png) | ![](../../assets/ui-review/390-review-agente-borrado.png) |
+
+**Qué se ve hoy.** Lo armé con el mock: tres interrupciones de agentes de la aceptación cuyas sesiones ya no existen (`t3f9a-arq`, `t3f9a-dev`, `t81c0-dev`) y una de @dev.
+
+- **En la fila** (`acpInbox.ts`, `interruptedItem`):
+  - Solo dice «Se interrumpió tu mensaje a @t3f9a-arq: «…»» y ofrece «Revisar interrupción».
+  - No dice por qué se cortó.
+  - No dice si hay informe, si el agente siguió ni qué conviene hacer.
+  - Las de agentes que ya no existen son iguales a las demás, una por fila, con el nombre tipo hash repetido.
+- **En la tarjeta** (`acpReview.ts`):
+  - La causa es el texto técnico del runner: «adapter exited (SIGTERM)», «prompt error: …».
+  - El aviso rojo («Puede haber hecho parte del trabajo…») se lee como un fallo.
+  - Con un agente que ya no existe, igual ofrece «Ver cambios en Git», «Abrir Terminal», «Escribirle un mensaje nuevo» y «Reencolar». Ninguna de esas puede funcionar.
+
+**Propuesta.** El boceto estático está en [`interrupciones.html`](../../assets/ui-review/interrupciones.html):
+
+| Teléfono | Ancho |
+|---|---|
+| ![](../../assets/ui-review/390-boceto-interrupciones.png) | ![](../../assets/ui-review/d-boceto-interrupciones.png) |
+
+**Pendientes: dos secciones en lugar de «Requieren tu acción».**
+- **Preguntas** van primero, porque un agente está esperando.
+- **Interrupciones · N** van después.
+  - En la cabecera de la sección va «Dar por revisadas…». Abre una confirmación con el resumen: «4 interrupciones: 1 con informe, 3 de agentes que ya no existen. No se reenvía nada».
+  - Hoy son N llamadas a `POST …/review`, una por mensaje, en serie. No hace falta un endpoint nuevo. Si el owner suele acumular decenas, un endpoint en lote va a «para discutir».
+
+**La fila de una interrupción contesta las cuatro preguntas sin abrir nada:**
+1. **Qué pasó**, en el título y en lenguaje llano: «@dev se reinició mientras trabajaba».
+   - El frontend traduce el `note` conocido:
+     - `adapter exited …` → «se reinició mientras trabajaba»;
+     - `prompt error …` → «tuvo un error mientras trabajaba»;
+     - lo de «sesión ACP» → «no pudo retomar su sesión»;
+     - cualquier otro → «se cortó mientras trabajaba».
+   - El texto original queda en la tarjeta, en «Detalle técnico».
+   - Debajo va el mensaje en una línea gris.
+2. **Si hay informe:** «✓ Dejó informe», «Escribiendo informe…» o «Sin informe». Sale de `inbox.reports` (`recovery_of`), que el inbox ya trae.
+3. **Que ya no corre:** «Ya no está corriendo», siempre. Un mensaje `uncertain` no está en ejecución por definición, y decirlo contesta el «¿hay algo trabado?».
+4. **Si el agente siguió:** «Ahora: disponible», «Ahora: trabajando en otro», «N en cola» o «Dejó un proceso abierto».
+   - El estado sale del registro de agentes (`running`, `pending`); el proceso abierto sale de `heldBy`, que `/api/acp/agents` ya devuelve y el registro todavía no guarda: es un cambio de frontend.
+   - Un informe terminado prueba además que el agente volvió a trabajar después del corte.
+
+Cada dato es un chip de texto de 22 px de alto: borde `--c-border`, `--c-ok` para el informe, `--c-accent` para el estado y `--c-warn` para «Sin informe» y «Dejó un proceso abierto». Ninguno depende solo del color.
+
+**La acción principal de la fila depende del caso:**
+- **Con informe:** «Dar por revisada» directo desde la fila, como botón principal (`--c-accent-strong`), más «Ver informe». No se reenvía nada; es lo que casi siempre corresponde.
+- **Sin informe o con un proceso abierto:** «Revisar» como principal y «Dar por revisada» como botón de texto.
+
+**Agentes que ya no existen.**
+- **Cómo se reconocen.** El registro está cargado (`acpAgentsLoaded()`) y no hay ningún agente con ese nombre (`acpEntryByName(to_id) === null`). No se adivina por la forma del nombre `t<hex>-…`: cuenta igual para cualquier agente borrado.
+- **En Pendientes van en un solo grupo:**
+  - avatar con borde punteado y «?»;
+  - título «N interrupciones de agentes eliminados»;
+  - los nombres en una línea gris;
+  - el botón «Dar por revisadas las N»;
+  - un desplegable «Ver una por una».
+- **Qué gana la persona.** Tres filas con nombre de hash pasan a ser una fila y un toque.
+
+**La tarjeta «Revisar interrupción», reordenada:**
+- **Título:** lo que pasó, el mismo de la fila, en lugar de «Revisar interrupción».
+- **Tres filas de hechos** (`dl`):
+  - **Qué pasó:** «La sesión de @dev se reinició a las 10:25, en medio de este trabajo. Ya no está corriendo: nada se reintenta solo.» Debajo, «Detalle técnico» plegado con el `note` y la última actividad.
+  - **Informe:** el texto, quién lo escribió y a qué hora («después de reiniciarse»); o «está escribiendo su informe»; o «No dejó informe».
+  - **Ahora:** el estado actual del agente, o «@x ya no existe: su sesión fue eliminada».
+- **Recomendado:** un recuadro en `--c-accent-bg` con borde de acento, una frase según el caso y su botón. Reemplaza al aviso rojo, que se leía como un fallo. La advertencia de que puede repetir trabajo pasa a la frase.
+  - **Con informe:** «Si está bien, dala por revisada. Si querés que lo termine, escribile un mensaje nuevo: reencolar puede repetir lo que ya hizo.»
+  - **Sin informe:** «Mirá los cambios en Git antes de decidir.» Git pasa a ser el botón principal.
+  - **Agente eliminado:** «Dala por revisada. No se puede retomar ni reencolar: no hay agente que lo reciba.»
+- **Herramientas:** «Ver cambios en Git» y «Abrir Terminal», solo si el agente existe.
+- **Reencolar:** sigue plegado, con su casilla de reconocimiento, y su título agrega «(no recomendado)». No aparece si el agente no existe.
+
+**Datos.**
+- Todo sale de lo que el frontend ya recibe: la fila `uncertain`, `inbox.reports`, el registro de agentes y `/api/acp/agents`.
+- **A discutir, lado backend:**
+  - que el runner escriba `note` con un código estable (`restart`, `prompt-error`, …) en lugar de texto libre, porque la traducción por prefijo se rompe si cambia el texto;
+  - el endpoint de revisión en lote;
+  - si una interrupción de un agente eliminado debería salir sola de Pendientes al borrar la sesión. Eso último es decisión de datos.
+
+**Tamaño:** mediano, solo frontend: `acpInbox.ts`, `acpReview.ts` y que el registro guarde `heldBy`.
+
+### 15. Dónde iría «Eliminar definitivamente» (solo el lugar; la decisión es de datos y backend)
+
+No lo diseño. Si se decide, la acción va siempre al final de un menú ⋯, en `kind-danger`, con el texto «Eliminar definitivamente…» y un diálogo de confirmación que diga qué se borra y que no se puede deshacer:
+
+- **Trabajos cerrados:** en el rail, «Trabajos» → «Ver cerrados» (`projectRail.ts`, `closedToggle`) → el ⋯ de cada fila cerrada. Si el owner lo quiere en lote, también un «Eliminar los cerrados…» al pie de esa lista.
+- **Conversaciones archivadas:** «Conversaciones archivadas» → el ⋯ de cada tema archivado.
+- **Proyectos archivados:** hoy no tienen lugar en la interfaz. Irían en Ajustes → «Proyectos archivados», una lista con ⋯ → «Eliminar definitivamente…».
+- **Archivo (chats anteriores):** en la lista del Archivo, ⋯ por chat.
+
+
+
 ### Notas de validación (no son propuestas)
 
 - **Gesto Atrás de iOS.** No lo recorrí en esta revisión. Hay que confirmar en iPhone real que el borde izquierdo de Safari hace lo mismo que ‹ en tema → rail → nivel principal, y qué pasa con el swipe con el drawer abierto.
@@ -294,3 +394,5 @@ Conviven con todo lo de 3B, que ya está en español.
 | 11 | Textos en español | mediano | sí |
 | 12 | Largo de línea en escritorio | chico | sí |
 | 13 | Lugar del Tablero | para discutir | sí (la vista es de la Etapa 4) |
+| 14 | Interrupciones legibles, en grupo y en lote | mediano | sí (código de `note` y lote: para discutir) |
+| 15 | Lugar de «Eliminar definitivamente» | para discutir | no (datos y backend) |

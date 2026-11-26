@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Boceto — Interrupciones en Pendientes y «Revisar interrupción»</title>
+<!-- Boceto estático (revision-ui.md §14). Colores y radios = tokens de
+     frontend/src/styles/tokens.css; no es código de la app. -->
+<style>
+:root{--c-bg:#0d1117;--c-surface:#161b22;--c-surface-2:#1c2128;--c-border:#30363d;--c-border-soft:#21262d;--c-text:#e6edf3;--c-text-2:#c9d1d9;--c-muted:#8b949e;--c-accent:#58a6ff;--c-accent-strong:#1f6feb;--c-accent-bg:rgba(88,166,255,.12);--c-ok:#3fb950;--c-warn:#e3b341;--c-err:#f85149;--radius-s:6px;--radius-m:10px}
+*{box-sizing:border-box}
+body{margin:0;background:var(--c-bg);color:var(--c-text);font:15px/1.4 system-ui,sans-serif}
+.wrap{display:flex;gap:24px;padding:16px;flex-wrap:wrap;align-items:flex-start}
+.panel{width:min(100%,400px);background:var(--c-surface);border:1px solid var(--c-border);border-radius:var(--radius-m);overflow:hidden}
+.ph{display:flex;align-items:baseline;gap:8px;padding:14px 16px;border-bottom:1px solid var(--c-border)}
+.ph b{font-size:1.05rem}.ph span{color:var(--c-muted);font-size:.8rem}
+.sec{display:flex;align-items:center;gap:8px;padding:14px 14px 6px;color:var(--c-muted);font-size:.7rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase}
+.sec .n{color:var(--c-text-2)}
+.sec .more{margin-left:auto;font:inherit;text-transform:none;letter-spacing:0;font-size:.8rem;font-weight:500;color:var(--c-accent);background:none;border:0;min-height:32px}
+.item{padding:10px 14px 12px;border-bottom:1px solid var(--c-border-soft)}
+.where{display:flex;align-items:center;gap:6px;font-size:.78rem;color:var(--c-muted);min-height:24px}
+.where a{color:inherit;text-decoration:none}
+.av{display:inline-grid;place-items:center;width:18px;height:18px;border-radius:50%;font-size:.65rem;font-weight:700;color:#fff;background:hsl(var(--h) 45% 32%)}
+.av.gone{background:transparent;border:1.5px dashed var(--c-muted);color:var(--c-muted)}
+.what{margin:4px 0 2px;font-weight:600}
+.quote{margin:0 0 8px;color:var(--c-muted);font-size:.85rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.facts{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+.f{display:inline-flex;align-items:center;gap:5px;height:22px;padding:0 8px;border-radius:999px;border:1px solid var(--c-border);font-size:.74rem;color:var(--c-text-2)}
+.f.ok{border-color:rgba(63,185,80,.45);color:var(--c-ok)}
+.f.busy{border-color:rgba(88,166,255,.45);color:var(--c-accent)}
+.f.warn{border-color:rgba(227,179,65,.5);color:var(--c-warn)}
+.acts{display:flex;gap:8px;flex-wrap:wrap}
+.btn{min-height:36px;padding:0 12px;border-radius:var(--radius-s);border:1px solid var(--c-border);background:var(--c-surface-2);color:var(--c-text);font:inherit;font-size:.85rem;font-weight:600}
+.btn.primary{background:var(--c-accent-strong);border-color:var(--c-accent-strong);color:#fff}
+.btn.text{background:none;border-color:transparent;color:var(--c-accent);font-weight:500}
+.group{padding:10px 14px 12px;border-bottom:1px solid var(--c-border-soft)}
+.group .what{font-weight:600}
+.names{color:var(--c-muted);font-size:.8rem;margin:2px 0 10px}
+details summary{color:var(--c-muted);font-size:.8rem;cursor:pointer;min-height:28px}
+/* card */
+.card{width:min(100%,460px);background:var(--c-surface);border:1px solid var(--c-border);border-radius:var(--radius-m)}
+.ch{display:flex;align-items:flex-start;gap:10px;padding:16px 16px 6px}
+.ch h2{margin:0;font-size:1.05rem;flex:1}
+.x{color:var(--c-muted);font-size:1.2rem}
+.cb{padding:0 16px 16px}
+.sub{color:var(--c-muted);font-size:.8rem;margin:0 0 6px}
+blockquote{margin:0 0 12px;padding:2px 0 2px 10px;border-left:3px solid var(--c-border);color:var(--c-text-2)}
+dl{display:grid;grid-template-columns:88px 1fr;gap:8px 10px;margin:0 0 12px;font-size:.88rem}
+dt{color:var(--c-muted)}dd{margin:0}
+.rep{background:var(--c-surface-2);border-radius:var(--radius-s);padding:8px 10px}
+.reco{border:1px solid rgba(88,166,255,.35);background:var(--c-accent-bg);border-radius:var(--radius-s);padding:10px 12px;margin-bottom:12px}
+.reco b{display:block;font-size:.72rem;letter-spacing:.06em;text-transform:uppercase;color:var(--c-accent);margin-bottom:4px}
+.reco p{margin:0 0 10px;font-size:.88rem}
+.tools{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.muted{color:var(--c-muted);font-size:.8rem}
+.cap{color:var(--c-muted);font-size:.75rem;margin:0 0 6px;width:100%}
+@media (max-width:480px){.wrap{padding:0;gap:0}.panel,.card{width:100%;border-radius:0;border-left:0;border-right:0}.btn{min-height:44px}.where{min-height:44px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<!-- ── Pendientes ─────────────────────────────── -->
+<section class="panel" aria-label="Pendientes (boceto)">
+	<div class="ph"><b>Pendientes</b><span>todos los proyectos</span></div>
+
+	<div class="sec">Preguntas <span class="n">· 1</span></div>
+	<div class="item"><div class="where"><span class="av" style="--h:25">A</span><a href="#">Educación HZ › Mejoras del backend</a></div>
+		<p class="what">@arq pregunta: ¿Qué proveedor usamos para el piloto?</p>
+		<p class="muted" style="margin:0">(la tarjeta de pregunta, propuesta 3)</p></div>
+
+	<div class="sec">Interrupciones <span class="n">· 4</span><button class="more">Dar por revisadas…</button></div>
+
+	<div class="item">
+		<div class="where"><span class="av" style="--h:350">D</span><a href="#">Educación HZ › Mejoras del backend</a> · 10:25</div>
+		<p class="what">@dev se reinició mientras trabajaba</p>
+		<p class="quote">«medí también la variante sin shards.»</p>
+		<div class="facts"><span class="f ok">✓ Dejó informe</span><span class="f">Ya no está corriendo</span><span class="f busy">Ahora: trabajando en otro</span></div>
+		<div class="acts"><button class="btn primary">Dar por revisada</button><button class="btn">Ver informe</button></div>
+	</div>
+
+	<div class="item">
+		<div class="where"><span class="av" style="--h:200">Q</span><a href="#">Educación HZ › Pruebas</a> · 11:02</div>
+		<p class="what">@qa se reinició mientras trabajaba</p>
+		<p class="quote">«corré la suite con 4 shards y anotá los tiempos»</p>
+		<div class="facts"><span class="f warn">Sin informe</span><span class="f">Ya no está corriendo</span><span class="f warn">Dejó un proceso abierto</span></div>
+		<div class="acts"><button class="btn primary">Revisar</button><button class="btn text">Dar por revisada</button></div>
+	</div>
+
+	<div class="group">
+		<div class="where"><span class="av gone">?</span>Agentes que ya no existen</div>
+		<p class="what">3 interrupciones de agentes eliminados</p>
+		<p class="names">@t3f9a-arq, @t3f9a-dev, @t81c0-dev · no se pueden retomar</p>
+		<div class="acts"><button class="btn primary">Dar por revisadas las 3</button></div>
+		<details><summary>Ver una por una</summary></details>
+	</div>
+</section>
+
+<!-- ── Revisar interrupción ───────────────────── -->
+<section class="card" aria-label="Revisar interrupción (boceto)">
+	<div class="ch"><h2>@dev se reinició mientras trabajaba</h2><span class="x">×</span></div>
+	<div class="cb">
+		<p class="sub">Tu mensaje en «Mejoras del backend» · 10:25</p>
+		<blockquote>@dev medí también la variante sin shards.</blockquote>
+		<dl>
+			<dt>Qué pasó</dt><dd>La sesión de @dev se reinició a las 10:25, en medio de este trabajo. <b>Ya no está corriendo</b>: nada se reintenta solo.
+				<details><summary>Detalle técnico</summary><code class="muted">adapter exited (SIGTERM) · última actividad: Bash npm run test:e2e -- --shard=1/1</code></details></dd>
+			<dt>Informe</dt><dd><div class="rep">Llegué a lanzar 1 corrida sin shards; no hice commits ni cambié archivos.</div><span class="muted">Lo escribió @dev a las 10:26, después de reiniciarse.</span></dd>
+			<dt>Ahora</dt><dd>@dev está trabajando en otro mensaje.</dd>
+		</dl>
+		<div class="reco"><b>Recomendado</b>
+			<p>El informe dice qué quedó hecho. Si está bien, dala por revisada. Si querés que lo termine, escribile un mensaje nuevo: reencolar puede repetir lo que ya hizo.</p>
+			<div class="acts"><button class="btn primary">Dar por revisada</button><button class="btn">Escribirle un mensaje nuevo</button></div>
+		</div>
+		<div class="tools"><button class="btn">Ver cambios en Git</button><button class="btn">Abrir Terminal</button></div>
+		<details><summary>Reencolar el mensaje original… (no recomendado)</summary></details>
+	</div>
+</section>
+
+<section class="card" aria-label="Revisar interrupción, agente eliminado (boceto)">
+	<div class="ch"><h2>@t3f9a-arq se reinició mientras trabajaba</h2><span class="x">×</span></div>
+	<div class="cb">
+		<p class="sub">Tu mensaje directo · 10:01</p>
+		<blockquote>@t3f9a-arq acceptance step 3: run st send and report</blockquote>
+		<dl>
+			<dt>Qué pasó</dt><dd>La sesión se reinició en medio de este trabajo. Ya no está corriendo.</dd>
+			<dt>Informe</dt><dd><div class="rep">No llegué a ejecutar nada.</div></dd>
+			<dt>Ahora</dt><dd><b>@t3f9a-arq ya no existe</b>: su sesión fue eliminada.</dd>
+		</dl>
+		<div class="reco"><b>Recomendado</b>
+			<p>Dala por revisada. No se puede retomar ni reencolar: no hay agente que lo reciba.</p>
+			<div class="acts"><button class="btn primary">Dar por revisada</button></div>
+		</div>
+	</div>
+</section>
+
+</div>
+</body>
+</html>
