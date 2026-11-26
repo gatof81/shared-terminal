@@ -257,6 +257,26 @@ async function call(who: Who, method: string, path: string, body?: unknown) {
 }
 const owner: Who = { user: OWNER };
 const as = (agent: string): Who => ({ agent });
+/** The real `st` CLI, as an agent runs it in its container. */
+async function stCli(agent: string, ...args: string[]) {
+	const { execFile } = await import("node:child_process");
+	const bin = new URL("../../../acp-runtime/bin/st", import.meta.url).pathname;
+	return new Promise<{ code: number; out: string; err: string }>((resolve) =>
+		execFile(
+			process.execPath,
+			[bin, ...args],
+			{
+				env: {
+					...process.env,
+					ST_URL: base.replace(/\/api\/acp$/, ""),
+					ST_TOKEN: tokens[agent],
+					ST_AGENT: agent,
+				},
+			},
+			(e, out, err) => resolve({ code: e ? Number(e.code ?? 1) : 0, out, err }),
+		),
+	);
+}
 
 /** Runs one message of `agent` to completion as its runner would. */
 async function work(agent: string, text = "ok") {
@@ -3334,6 +3354,12 @@ describe("ACP tasks: inheritance, budgets, derived state (PR 3)", () => {
 			},
 		]);
 		expect(re.body.previousRunActive).toEqual([{ messageId: m.body.id, agent: "tb" }]);
+		// The CLI prints the derived state too (its constants were once read in their TDZ).
+		const shown = await stCli("ta", "task", "show", String(t.id));
+		expect(shown.err).toBe("");
+		expect(shown.code).toBe(0);
+		expect(shown.out).toMatch(`en curso: @tb (#${m.body.id})`);
+		expect(shown.out).toMatch(`la ejecución anterior sigue activa: @tb (#${m.body.id})`);
 		// A write on the old version: the whole current row and who changed what last.
 		const old = await call(as("ta"), "PATCH", `/tasks/${t.id}`, {
 			version: t.version,
@@ -3375,6 +3401,9 @@ describe("ACP tasks: inheritance, budgets, derived state (PR 3)", () => {
 		// Interrupted: shown until the person reviews it.
 		await settle("tb", m.body.id, "uncertain");
 		expect(kinds(await read())).toEqual(["uncertain"]);
+		const shownU = await stCli("ta", "task", "show", String(t.id));
+		expect(shownU.code).toBe(0);
+		expect(shownU.out).toMatch(`interrumpido sin revisar: @tb (#${m.body.id})`);
 		expect((await read()).contradiction).toBeNull();
 		await call(owner, "POST", `/messages/${m.body.id}/review`);
 		expect(kinds(await read())).toEqual([]);

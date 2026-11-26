@@ -19,7 +19,10 @@
 //   S12 /ws/acp: one `task` frame per write to the owner; nothing to another owner.
 //   S13 board with ~50 and ~500 tasks: page ≤ 200 (150 open + 50 done); D1 cost of one load
 //       (delta of GET /api/admin/stats → d1). Real D1 (rows_read reported): rows ≤
-//       ROWS_PER_TASK × returned + ROWS_SLACK. Shim (no rows_read): same number of statements
+//       ROWS_PER_TASK × returned + ROWS_SLACK (6: real D1 counts a read row per id that
+//       `json_each(?)` yields, so the per-page statements over the page's ids add ~5.3 rows
+//       per task returned, measured in OPS-RESULT 3; what is guarded is that the cost is
+//       linear in the page and has no scan, not a fixed per-task figure). Shim (no rows_read): same number of statements
 //       with 50 and 500. The EXPLAIN QUERY PLAN of the board is pinned by
 //       backend/src/acp/acp.sqlite.test.ts ("D1 reads: the board goes by index (v29)").
 //   S17 the agent-request INSERT in a task (trigger trg_task_request_counted): rows read by
@@ -32,6 +35,7 @@
 //   S14 IDLE_MS at rest with idle agents and /ws/acp open: no statement on tasks/task_links/
 //       task_events, total D1 calls (and rows) under the thresholds printed below.
 //
+// Needs Node ≥ 22 (the global WebSocket of S12; Node 18 has none): it refuses to start otherwise.
 // Run (one pass; Docker on this host for S10, S15):
 //   ACP_GOAL_BUDGET=150 ACP_TASK_BUDGET=3 ./lab-st.sh up                         # lab A :3101
 //   LAB=$HOME/acp-lab2 LAB_NAME=acplab2 PORT=3102 ENV_FILE=$HOME/acp-lab/backend.env \
@@ -45,7 +49,7 @@
 // Variables (defaults in brackets; the run prints them):
 //   ST [http://127.0.0.1:3101]  LAB_LOGIN=1 (registers/logs in labowner; lab only)  PREFIX  KEEP=1
 //   ONLY=S7,S13,…  (sections to run; default all)   D1_VARIANT=rows|calls (default: detected)
-//   SEED_SMALL [50] SEED_BIG [500] SEED_CONCURRENCY [6] ROWS_PER_TASK [3] ROWS_SLACK [50]
+//   SEED_SMALL [50] SEED_BIG [500] SEED_CONCURRENCY [6] ROWS_PER_TASK [6] ROWS_SLACK [50]
 //   S17_SLACK [0] (rows the INSERT may grow from 50 to 500 tasks)  ROUND_MS [30000] (per round, S11)
 //   IDLE_MS [600000] IDLE_MAX_CALLS_PER_MIN [60] IDLE_MAX_ROWS_PER_MIN [3000]
 //   LAB_B_ST [http://127.0.0.1:3102] LAB_A_CONTAINER [acplab-backend] LAB_B_CONTAINER [acplab2-backend]
@@ -58,6 +62,11 @@
 import { execSync } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 
+if (typeof WebSocket !== "function") {
+	console.log(`FAIL refusing to run: Node ${process.version} has no global WebSocket (S12 needs it) — use Node 22 or later`);
+	console.log("1 FAILED");
+	process.exit(1);
+}
 const env = process.env;
 const ST = env.ST ?? "http://127.0.0.1:3101";
 const LAB_B_ST = env.LAB_B_ST ?? "http://127.0.0.1:3102";
@@ -70,7 +79,7 @@ const CFG = {
 	SEED_SMALL: num("SEED_SMALL", 50),
 	SEED_BIG: num("SEED_BIG", 500),
 	SEED_CONCURRENCY: num("SEED_CONCURRENCY", 6),
-	ROWS_PER_TASK: num("ROWS_PER_TASK", 3),
+	ROWS_PER_TASK: num("ROWS_PER_TASK", 6),
 	ROWS_SLACK: num("ROWS_SLACK", 50),
 	S17_SLACK: num("S17_SLACK", 0),
 	ROUND_MS: num("ROUND_MS", 30_000),

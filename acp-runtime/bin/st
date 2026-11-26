@@ -11,6 +11,11 @@ const [cmd, ...args] = process.argv.slice(2);
 const API = `${process.env.ST_URL}/api/acp`;
 const headers = { authorization: `Bearer ${process.env.ST_TOKEN ?? ""}`, "content-type": "application/json" };
 
+// What is really going on (derived by the backend), next to what was declared.
+// Module constants go ABOVE the command dispatch: the hoisted functions below
+// it run during the dispatch, and a `const` they read further down is still in
+// its temporal dead zone (once: `st task show` of a task with activity died).
+const ACTIVITY = { running: "en curso", queued: "en cola", uncertain: "interrumpido sin revisar", waitOwner: "pregunta abierta a la persona", work: "trabajo activo" };
 // The backend's refusals, said in a line: the code's meaning and the details it sent.
 const REASONS = {
 	"unknown-recipient": "no hay un agente con ese nombre",
@@ -162,8 +167,6 @@ function taskLine(t) {
 	return `#${t.id}${t.parentId ? ` (de #${t.parentId})` : ""} [${t.status}${t.blockedReason ? ", bloqueada" : ""}] ${t.priority !== "normal" ? `${t.priority} · ` : ""}${t.title}` +
 	`${t.assignee ? ` · @${t.assignee}` : ""}${t.reviewer ? ` · revisa @${t.reviewer}` : ""}${t.coordinator ? ` · coordina @${t.coordinator}` : ""} · v${t.version}`;
 }
-// What is really going on (derived by the backend), next to what was declared.
-const ACTIVITY = { running: "en curso", queued: "en cola", uncertain: "interrumpido sin revisar", waitOwner: "pregunta abierta a la persona", work: "trabajo activo" };
 function stateLines(t) {
 	if (!t?.activity) return [];
 	const out = t.activity.map(
