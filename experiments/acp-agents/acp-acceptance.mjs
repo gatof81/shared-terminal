@@ -113,6 +113,29 @@ const convFeed = async (id = CONV) => (await api("GET", `/api/acp/conversations/
 const msgsOf = async (n) => ({ messages: (await api("GET", `/api/acp/messages?agent=${n}`)).body });
 // The test agent's count of prompts in its ACP session: the LAST one (a reply quotes the other agent's).
 const countOf = (text) => Number([...(text ?? "").matchAll(/sesión ACP: (\d+)/g)].at(-1)?.[1] ?? 0);
+// This run's leftovers in Pendientes: it interrupts runs on purpose (and a failed step may
+// leave a question open), and the owner would see them forever under agents that no
+// longer exist. Taken from the inbox itself, so a step added later is covered too.
+const mine = (name) => typeof name === "string" && name.startsWith(`${PREFIX}-`);
+async function inboxLeftovers() {
+	const inbox = (await api("GET", "/api/acp/inbox")).body;
+	return {
+		questions: (inbox?.action?.questions ?? []).filter((q) => mine(q.agent)),
+		interrupted: (inbox?.action?.interrupted ?? []).filter((m) => mine(m.from_id) || mine(m.to_id)),
+	};
+}
+async function clearInbox() {
+	const left = await inboxLeftovers();
+	// A question first: cancelling it lets its message finish instead of being interrupted.
+	for (const q of left.questions) await api("POST", `/api/acp/questions/${q.id}/answer`, { action: "cancel" });
+	for (const m of left.interrupted) await api("POST", `/api/acp/messages/${m.id}/review`);
+	const after = await inboxLeftovers();
+	check(
+		"no interrupted run or open question of this test is left in the inbox",
+		after.questions.length === 0 && after.interrupted.length === 0,
+		`reviewed ${left.interrupted.map((m) => `#${m.id}`).join(" ") || "none"}, cancelled ${left.questions.map((q) => `#${q.id}`).join(" ") || "none"}; left ${after.interrupted.length + after.questions.length}`,
+	);
+}
 const newConv = async (pid, title) => {
 	const r = await api("POST", "/api/acp/conversations", { projectId: pid, title, clientRequestId: randomUUID() });
 	if (r.status !== 201) throw new Error(`conversation: ${r.status} ${JSON.stringify(r.body)}`);
@@ -574,6 +597,8 @@ async function main() {
 	check("runner of @dev online after everything", !!(await runnerOnline(DEV)));
 
 	if (process.env.KEEP !== "1") {
+		// Before the sessions go: a question is cancelled while its runner can still hear it.
+		await clearInbox();
 		for (const s of created.sessions) {
 			const d = await api("DELETE", `/api/sessions/${s}?hard=true`);
 			check(`test session ${s.slice(0, 8)} removed`, d.status < 300, String(d.status));
@@ -583,13 +608,22 @@ async function main() {
 			const a = await api("DELETE", `/api/projects/${created.project}`);
 			check("test project archived", a.status < 300, String(a.status));
 		}
-	} else console.log(`kept: project ${pid}, sessions ${created.sessions.join(" ")}`);
+	} else {
+		const left = await inboxLeftovers();
+		console.log(`kept: project ${created.project}, sessions ${created.sessions.join(" ")}; inbox not reviewed (KEEP=1): ${left.interrupted.length} interrupted, ${left.questions.length} open questions of this run`);
+	}
 }
 
 main()
 	.catch((err) => {
 		failures++;
 		console.log(`FAIL [${at()}] aborted: ${err.message}`);
+		// An aborted run keeps its sessions (as always), but not its alerts in Pendientes.
+		if (process.env.KEEP === "1") return;
+		return clearInbox().catch((e) => {
+			failures++;
+			console.log(`FAIL [${at()}] inbox cleanup aborted: ${e.message}`);
+		});
 	})
 	.finally(() => {
 		console.log(failures ? `${failures} FAILED` : "ALL PASS");

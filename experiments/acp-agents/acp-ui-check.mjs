@@ -497,7 +497,30 @@ stepName = "cleanup";
 try {
 	const after = (await json(page, "/api/acp/agents")).body.filter((a) => !a.name.startsWith(`${P}-`)).map((a) => [a.name, a.projectId]);
 	await check(page, "agents outside this run kept their project", others === null || JSON.stringify(after) === JSON.stringify(others), JSON.stringify(after).slice(0, 160));
+	// This run's leftovers in Pendientes: it interrupts a run on purpose and reviews it from
+	// Pendientes, but a failed step leaves it (or an open question) there, and the owner
+	// would see it forever under agents that no longer exist. Taken from the inbox itself.
+	const mine = (name) => typeof name === "string" && name.startsWith(`${P}-`);
+	const leftovers = async () => {
+		const inbox = (await json(page, "/api/acp/inbox")).body;
+		return {
+			questions: (inbox?.action?.questions ?? []).filter((q) => mine(q.agent)),
+			interrupted: (inbox?.action?.interrupted ?? []).filter((x) => mine(x.from_id) || mine(x.to_id)),
+		};
+	};
 	if (process.env.KEEP !== "1") {
+		// Before the sessions go: a question is cancelled while its runner can still hear it,
+		// and that first, so its message finishes instead of being interrupted.
+		const left = await leftovers();
+		for (const q of left.questions) await json(page, `/api/acp/questions/${q.id}/answer`, { method: "POST", body: JSON.stringify({ action: "cancel" }) });
+		for (const x of left.interrupted) await json(page, `/api/acp/messages/${x.id}/review`, { method: "POST" });
+		const after = await leftovers();
+		await check(
+			page,
+			"no interrupted run or open question of this test is left in the inbox",
+			after.questions.length === 0 && after.interrupted.length === 0,
+			`reviewed ${left.interrupted.map((x) => `#${x.id}`).join(" ") || "none"}, cancelled ${left.questions.map((q) => `#${q.id}`).join(" ") || "none"}; left ${after.interrupted.length + after.questions.length}`,
+		);
 		for (const sid of created) {
 			const d = await json(page, `/api/sessions/${sid}?hard=true`, { method: "DELETE" });
 			await check(page, `session ${sid.slice(0, 8)} removed`, d.status < 300, String(d.status));
@@ -506,6 +529,9 @@ try {
 			const a = await json(page, `/api/projects/${pid}`, { method: "DELETE" });
 			await check(page, "the run's project archived", a.status < 300, String(a.status));
 		}
+	} else {
+		const left = await leftovers();
+		console.log(`kept: inbox not reviewed (KEEP=1): ${left.interrupted.length} interrupted, ${left.questions.length} open questions of this run`);
 	}
 } catch (err) {
 	await fail(page, "cleanup aborted", String(err?.message ?? err).split("\n")[0], "");

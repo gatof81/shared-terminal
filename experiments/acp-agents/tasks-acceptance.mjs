@@ -289,6 +289,30 @@ const created = { sessions: [], projects: [] };
 const ctx = {}; // ids shared between sections (S15 compares them)
 const msgIds = new Set();
 
+// This run's leftovers in Pendientes: S10 interrupts a run on purpose and reviews it, but a
+// failed step leaves it (or another) there, and the owner would see it forever under agents
+// that no longer exist. Taken from the inbox itself, so a step added later is covered too.
+const mine = (name) => typeof name === "string" && name.startsWith(`${PREFIX}-`);
+async function inboxLeftovers() {
+	const inbox = (await api("GET", "/api/acp/inbox")).body;
+	return {
+		questions: (inbox?.action?.questions ?? []).filter((q) => mine(q.agent)),
+		interrupted: (inbox?.action?.interrupted ?? []).filter((m) => mine(m.from_id) || mine(m.to_id)),
+	};
+}
+async function clearInbox() {
+	const left = await inboxLeftovers();
+	// A question first: cancelling it lets its message finish instead of being interrupted.
+	for (const q of left.questions) await api("POST", `/api/acp/questions/${q.id}/answer`, { action: "cancel" });
+	for (const m of left.interrupted) await api("POST", `/api/acp/messages/${m.id}/review`);
+	const after = await inboxLeftovers();
+	check(
+		"no interrupted run or open question of this test is left in the inbox",
+		after.questions.length === 0 && after.interrupted.length === 0,
+		`reviewed ${left.interrupted.map((m) => `#${m.id}`).join(" ") || "none"}, cancelled ${left.questions.map((q) => `#${q.id}`).join(" ") || "none"}; left ${after.interrupted.length + after.questions.length}`,
+	);
+}
+
 async function main() {
 	console.log(`Tasks acceptance against ${ST} — prefix ${PREFIX}, sections ${ONLY.join(",")}`);
 	// No backend answering is a FAIL, never a quiet exit (OPS-RESULT 3: a run
@@ -850,13 +874,18 @@ async function main() {
 	wsA?.close();
 
 	if (env.KEEP !== "1") {
+		// Before the sessions go: a question is cancelled while its runner can still hear it.
+		await clearInbox();
 		for (const s of created.sessions) {
 			const d = await api("DELETE", `/api/sessions/${s}?hard=true`);
 			check(`test session ${s.slice(0, 8)} removed`, d.status < 300, String(d.status));
 		}
 		for (const p of created.projects) await api("DELETE", `/api/projects/${p}`);
 		console.log(`archived ${created.projects.length} test projects (their tasks stay, like any archived project's)`);
-	} else console.log(`kept: projects ${created.projects.join(" ")}, sessions ${created.sessions.join(" ")}`);
+	} else {
+		const left = await inboxLeftovers();
+		console.log(`kept: projects ${created.projects.join(" ")}, sessions ${created.sessions.join(" ")}; inbox not reviewed (KEEP=1): ${left.interrupted.length} interrupted, ${left.questions.length} open questions of this run`);
+	}
 }
 
 // The verdict is the last line, ALL PASS or N FAILED. Should the process end
@@ -874,6 +903,12 @@ main()
 	.catch((err) => {
 		failures++;
 		console.log(`FAIL [${at()}] aborted: ${err.stack ?? err.message}`);
+		// An aborted run keeps its sessions (as always), but not its alerts in Pendientes.
+		if (env.KEEP === "1") return;
+		return clearInbox().catch((e) => {
+			failures++;
+			console.log(`FAIL [${at()}] inbox cleanup aborted: ${e.message}`);
+		});
 	})
 	.finally(() => {
 		verdict = true;
