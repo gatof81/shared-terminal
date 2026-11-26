@@ -86,8 +86,10 @@ function answerForm(
 				inp.name = name;
 				inp.value = o.value;
 				inputs.push(inp);
-				lab.append(inp, el("span", undefined, o.label));
-				if (o.description) lab.append(el("small", undefined, ` — ${o.description}`));
+				// One text box beside the control: the label and its description wrap together.
+				const text = el("span", "acp-option-text", o.label);
+				if (o.description) text.append(el("small", undefined, ` — ${o.description}`));
+				lab.append(inp, text);
 				box.append(lab);
 			}
 			read.push(() => {
@@ -127,12 +129,26 @@ function answerForm(
 	const actions = el("div", "acp-question-actions");
 	const send = el("button", "btn sm acp-question-send", "Responder");
 	send.type = "submit";
-	const skip = el("button", "btn sm", "Omitir");
+	const skip = el("button", "acp-link acp-question-skip", "Omitir");
 	skip.type = "button";
 	const status = el("span", "acp-chat-hint");
 	actions.append(send, skip, status);
 	f.append(actions);
+	// «Responder» waits for something to answer with (an option, a text):
+	// accepting with nothing chosen said nothing. A form without fields is
+	// a plain confirmation, always answerable. What is sent does not change.
+	const content = () =>
+		Object.fromEntries(read.map((g) => g()).filter((x): x is [string, unknown] => x !== null));
+	const answerable = () => form.fields.length === 0 || Object.keys(content()).length > 0;
+	let sending = false;
+	const syncSend = () => {
+		if (!sending) send.disabled = !answerable();
+	};
+	f.addEventListener("input", syncSend);
+	f.addEventListener("change", syncSend);
+	syncSend();
 	const submit = (body: { action: "accept" | "decline"; content?: Record<string, unknown> }) => {
+		sending = true;
 		send.disabled = skip.disabled = true;
 		status.textContent = "Enviando…";
 		const mark = opts.liveMark?.() ?? 0;
@@ -146,15 +162,16 @@ function answerForm(
 					err.status === 409
 						? "Ya no está abierta; se actualiza sola."
 						: `No se envió: ${err.message}`;
-				send.disabled = skip.disabled = err.status === 409;
+				if (err.status === 409) return;
+				sending = false;
+				skip.disabled = false;
+				syncSend();
 			});
 	};
 	f.addEventListener("submit", (e) => {
 		e.preventDefault();
-		const content = Object.fromEntries(
-			read.map((g) => g()).filter((x): x is [string, unknown] => x !== null),
-		);
-		submit({ action: "accept", content });
+		if (!answerable()) return;
+		submit({ action: "accept", content: content() });
 	});
 	skip.addEventListener("click", () => submit({ action: "decline" }));
 	return f;

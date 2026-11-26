@@ -122,6 +122,39 @@ html[data-kb="open"] .acp-to-queue-short {
 	overflow: hidden;
 	text-overflow: ellipsis;
 }
+/* A touch screen (the composer has to stay short there): the notes are one
+   line — the same facts, joined — that unfolds them on a tap. Still shown
+   before sending: only folded. */
+.acp-to-sum {
+	display: none;
+}
+@media (pointer: coarse) {
+	.acp-to-sum {
+		display: block;
+		width: 100%;
+		min-height: 24px;
+		padding: 0;
+		border: 0;
+		background: transparent;
+		color: var(--c-muted);
+		font: inherit;
+		font-size: 0.72rem;
+		text-align: left;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		cursor: pointer;
+	}
+	.acp-to-sum::after {
+		content: " ▾";
+	}
+	.acp-to-notes.is-open > .acp-to-sum::after {
+		content: " ▴";
+	}
+	.acp-to-notes:not(.is-open) > .acp-to-lines {
+		display: none;
+	}
+}
 @media (max-width: 768px) {
 	.acp-to-row {
 		min-height: 44px;
@@ -341,6 +374,13 @@ button.acp-rs-check:hover {
 	padding: 8px 10px;
 	border-radius: var(--radius-s);
 	background: rgba(255, 255, 255, 0.03);
+}
+/* A phone: no inner indent, only its colour rule (the text gets the width). */
+@media (max-width: 768px) {
+	.acp-nested {
+		padding: 6px 0 6px 8px;
+		border-left-width: 2px;
+	}
 }
 .acp-nested-mark {
 	color: var(--c-muted);

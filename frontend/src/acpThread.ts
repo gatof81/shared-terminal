@@ -129,8 +129,10 @@ export class AcpThread {
 			this.atBottom = true;
 			this.newIds.clear();
 		},
-		// A question's options are the person's to tap: never under the button.
-		avoid: () => this.threadEl.querySelectorAll(".acp-question-open"),
+		// A question's options and a message's buttons («Revisar interrupción»)
+		// are the person's to tap: never under the button.
+		avoid: () =>
+			this.threadEl.querySelectorAll(".acp-question-open, .acp-rs-list .btn, .acp-post .btn"),
 	});
 	/** Says it to a screen reader too (the button itself appears and goes). */
 	private readonly newAnnounce = el("div", "visually-hidden");
@@ -283,6 +285,12 @@ export class AcpThread {
 	private readonly chipBox = el("div", "acp-to-chips");
 	/** Under the field: «Llega a …, a cada uno por separado.» and who will queue it. */
 	private readonly toNotes = el("div", "acp-to-notes");
+	/**
+	 * A touch screen: the notes folded into one line (`toSum`) that unfolds
+	 * them (`toLines`) on a tap; elsewhere `toSum` is not shown (CSS).
+	 */
+	private readonly toSum = el("button", "acp-to-sum");
+	private readonly toLines = el("div", "acp-to-lines");
 	/** The `@` menu over the field: the team and its agents, filtered by what is typed. */
 	private readonly mentionList = el("div", "acp-mention-menu");
 	private mention: { start: number; query: string; active: number } | null = null;
@@ -610,6 +618,7 @@ export class AcpThread {
 			this.flushSeen();
 			this.gen++;
 			this.closePicker(false);
+			this.foldNotes();
 			if (this.source) this.saveDraft(this.source, this.input.value);
 			this.source = source;
 			this.input.value = this.drafts.get(sourceKey(source)) ?? "";
@@ -1938,6 +1947,18 @@ export class AcpThread {
 		this.toRow.append(label, this.chipBox, this.pickBtn);
 		this.toNotes.hidden = true;
 		this.toNotes.setAttribute("aria-live", "polite");
+		this.toSum.type = "button";
+		this.toLines.id = `acp-to-lines-${++pickerSeq}`;
+		this.toSum.setAttribute("aria-controls", this.toLines.id);
+		this.toSum.setAttribute("aria-expanded", "false");
+		// Unfolding the notes while typing keeps the keyboard up (no blur).
+		this.toSum.addEventListener("pointerdown", (e) => {
+			if (document.activeElement === this.input) e.preventDefault();
+		});
+		this.toSum.addEventListener("click", () =>
+			this.foldNotes(!this.toNotes.classList.contains("is-open")),
+		);
+		this.toNotes.append(this.toSum, this.toLines);
 		this.mentionList.hidden = true;
 		this.mentionList.id = `acp-mention-${++pickerSeq}`;
 		this.mentionList.setAttribute("role", "listbox");
@@ -2029,8 +2050,22 @@ export class AcpThread {
 				),
 			);
 		}
-		this.toNotes.replaceChildren(...lines);
+		this.toLines.replaceChildren(...lines);
+		// The folded line: the same facts, short («A cada uno por separado · @dev en cola»).
+		const sum: string[] = [];
+		if (c.team && names.length) sum.push("A cada uno por separado");
+		if (queued.length) sum.push(`${queueShort(queued.map((q) => q.n))} en cola`);
+		const said = sum.join(" · ");
+		if (this.toSum.textContent !== said) this.toSum.textContent = said;
 		this.toNotes.hidden = lines.length === 0;
+		// Notes that come back (another recipient, another topic) start folded.
+		if (lines.length === 0) this.foldNotes();
+	}
+
+	/** Folds (or unfolds) the notes' one line on a touch screen. */
+	private foldNotes(open = false): void {
+		this.toNotes.classList.toggle("is-open", open);
+		this.toSum.setAttribute("aria-expanded", String(open));
 	}
 
 	private chipX(label: string, onClick: () => void): HTMLElement {

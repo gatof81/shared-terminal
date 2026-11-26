@@ -152,8 +152,8 @@ export class ChatEndButton {
 		const pr = parent.getBoundingClientRect();
 		const w = b.offsetWidth;
 		const h = b.offsetHeight;
-		const left = pr.left + pr.width / 2 - w / 2 - REACH;
-		const right = left + w + 2 * REACH;
+		const right = pr.right - RIGHT + REACH;
+		const left = right - w - 2 * REACH;
 		const cards = [...this.opts.avoid()]
 			.map((a) => a.getBoundingClientRect())
 			.filter((r) => r.bottom > box.top && r.top < box.bottom && r.right > left && r.left < right);
@@ -177,10 +177,11 @@ export class ChatEndButton {
 	}
 }
 
-/** Where it rests: 12 px above what is under the thread (chat.css). */
+/** Where it rests: 12 px above what is under the thread, 12 px from its right (chat.css). */
 const REST = 12;
+const RIGHT = 12;
 /** Its 44-px touch target reaches this far past the visible pill. */
-const REACH = 7;
+const REACH = 3;
 
 const STOP_EVENTS = ["wheel", "touchstart", "pointerdown", "keydown"] as const;
 

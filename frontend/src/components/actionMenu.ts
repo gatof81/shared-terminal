@@ -44,6 +44,13 @@ export interface ActionMenuOptions {
 	 * header across the screen. The opener gets `aria-expanded` meanwhile.
 	 */
 	anchor?: HTMLElement;
+	/**
+	 * `"end"`: a menu of the anchor itself (a row's ⋯), not of a header —
+	 * wide, 240 px under it aligned to its right edge; on a phone, under it
+	 * across the screen (8 px from each side), above it when there is no
+	 * room below.
+	 */
+	anchorAlign?: "end";
 	/** Anchored menus: a small caption above the items (the menu's name for a screen reader). */
 	caption?: string;
 	/** Runs after the menu closed with the chosen item (never for a dismissal). */
@@ -74,7 +81,7 @@ export function openActionMenu(opts: ActionMenuOptions): void {
 	const card = el(
 		"div",
 		anchored
-			? "modal-card action-menu action-menu-anchored"
+			? `modal-card action-menu action-menu-anchored${opts.anchorAlign === "end" ? " action-menu-end" : ""}`
 			: "modal-card actions-menu-card action-menu",
 	);
 	card.setAttribute("role", "menu");
@@ -168,7 +175,9 @@ export function openActionMenu(opts: ActionMenuOptions): void {
 	const anchor = opts.anchor;
 	const expands = opts.opener instanceof HTMLElement ? opts.opener : null;
 	const place = (): void => {
-		if (anchor) placeAnchored(card, anchor);
+		if (!anchor) return;
+		if (opts.anchorAlign === "end") placeAtEnd(card, anchor);
+		else placeAnchored(card, anchor);
 	};
 	const vv = typeof window !== "undefined" ? window.visualViewport : null;
 	const dialog = createDialog(root, {
@@ -190,6 +199,8 @@ export function openActionMenu(opts: ActionMenuOptions): void {
 		expands?.setAttribute("aria-expanded", "true");
 	}
 	dialog.open(opts.opener ?? document.activeElement);
+	// Laid out now: a menu that may go above its anchor needs its own height.
+	if (opts.anchorAlign === "end") place();
 }
 
 const PHONE = "(max-width: 768px)";
@@ -218,4 +229,31 @@ function placeAnchored(card: HTMLElement, anchor: HTMLElement): void {
 	s.left = `${Math.round(box.left + 8)}px`;
 	s.width = `${Math.round(Math.min(320, Math.max(240, box.width - 16)))}px`;
 	s.maxHeight = "min(60vh, 420px)";
+}
+
+/** `anchorAlign: "end"` (see ActionMenuOptions): under the anchor, or above it with no room below. */
+function placeAtEnd(card: HTMLElement, anchor: HTMLElement): void {
+	const s = card.style;
+	const box = anchor.getBoundingClientRect();
+	const vh = window.visualViewport?.height ?? window.innerHeight;
+	const phone = window.matchMedia?.(PHONE).matches ?? false;
+	if (phone) {
+		s.left = "8px";
+		s.right = "8px";
+		s.width = "auto";
+	} else {
+		const w = 240;
+		s.left = `${Math.round(Math.max(8, Math.min(box.right - w, window.innerWidth - w - 8)))}px`;
+		s.width = `${w}px`;
+	}
+	const below = vh - box.bottom - 12;
+	const above = box.top - 12;
+	const h = card.offsetHeight;
+	if (h > below && above > below) {
+		s.maxHeight = `${Math.max(120, Math.round(above))}px`;
+		s.top = `${Math.round(Math.max(8, box.top - 4 - Math.min(h, above)))}px`;
+	} else {
+		s.maxHeight = `${Math.max(120, Math.round(below))}px`;
+		s.top = `${Math.round(box.bottom + 4)}px`;
+	}
 }

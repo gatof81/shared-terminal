@@ -399,6 +399,40 @@ test.describe("project rail and topics", () => {
 		).toBeVisible();
 	});
 
+	test("a project without agents: its first action is «Agregar agente» (Equipo first on a phone)", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.acpConversations = [];
+		for (const a of backend.acpAgents) a.projectId = null;
+		await app.login("alice", RAIL);
+		await expect(rail(page).locator(".rail-team .rail-agent")).toHaveCount(0);
+		if (app.mobile) {
+			// The project's screen is the rail: Equipo (with its +) leads it.
+			const y = async (title: string) =>
+				(await rail(page).locator(".rail-section-head h2", { hasText: title }).boundingBox())!.y;
+			await expect(rail(page).locator(".rail-section-team > .rail-note")).toHaveText(
+				"Sin agentes en este proyecto.",
+			);
+			expect(await y("Equipo")).toBeLessThan(await y("Conversaciones"));
+			await rail(page).getByRole("button", { name: "Nueva sesión con agente" }).click();
+		} else {
+			await expect(page.locator(".ps-home-title")).toHaveText(
+				"Este proyecto todavía no tiene agentes",
+			);
+			const home = page.locator(".ps-home");
+			await expect(home.getByRole("button", { name: "Nueva conversación" })).toBeHidden();
+			await home.getByRole("button", { name: "Agregar agente" }).click();
+		}
+		// The same form as Equipo's +: a new agent in this project.
+		await expect(page.locator("#new-session-modal-title")).toHaveText(
+			"Nuevo agente en Educación HZ",
+		);
+		await expect(page.locator("#new-session-acp-project")).toHaveValue(HZ);
+		expect(app.errors).toEqual([]);
+	});
+
 	test("a project that is not there says so, with no empty rail", async ({ app, page }) => {
 		await app.login("alice", "#/projects/6b1f2c3d-0000-4000-8000-000000000999");
 		await expect(page.locator(".ps-home-title")).toHaveText("Proyecto no encontrado");
