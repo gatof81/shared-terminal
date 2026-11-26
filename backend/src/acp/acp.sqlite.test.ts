@@ -2986,6 +2986,77 @@ describe("ACP tasks (v29)", () => {
 		await finish("dev2");
 	});
 
+	it("scope approval: the coordinator records the person's accept to its own question on the goal's request; versioned, once per question", async () => {
+		await teamRequest("team-scope-0001", ["coord"]);
+		const g = (await call(as("coord"), "POST", "/tasks", { goal: true, title: "Con alcance" }))
+			.body;
+		const run = (await call(as("coord"), "GET", "/runner/running")).body;
+		const ask = (message: string) =>
+			call(as("coord"), "POST", "/runner/questions", { messageId: run.id, request: { message } });
+		const q = (await ask("¿Apruebo el alcance?")).body;
+		const approve = (who: Who, body: Record<string, unknown>) =>
+			call(who, "POST", `/tasks/${g.id}/scope-approved`, body);
+		expect((await approve(as("coord"), { version: g.version, questionId: q.id })).body.error).toBe(
+			"question-not-accepted",
+		);
+		await call(owner, "POST", `/questions/${q.id}/answer`, {
+			action: "accept",
+			content: { ok: true },
+		});
+		expect((await approve(as("dev2"), { version: g.version })).body.error).toBe("not-coordinator");
+		expect((await approve(as("coord"), {})).body.error).toBe("version-required");
+		expect((await approve(as("coord"), { version: g.version - 1 })).body).toMatchObject({
+			error: "stale",
+			task: { id: g.id },
+		});
+		const rec = await approve(as("coord"), { version: g.version });
+		expect(rec.status).toBe(201);
+		expect(rec.body).toMatchObject({ recorded: true, question: q.id });
+		// The verb the coordinar skill names; the same question again records nothing.
+		const { execFile } = await import("node:child_process");
+		const cli = await new Promise<string>((resolve) =>
+			execFile(
+				process.execPath,
+				[
+					new URL("../../../acp-runtime/bin/st", import.meta.url).pathname,
+					...["task", "approve", String(g.id), "--question", String(q.id)],
+				],
+				{
+					env: { ...process.env, ST_URL: base.replace(/\/api\/acp$/, ""), ST_TOKEN: tokens.coord },
+				},
+				(_e, out, err) => resolve(`${out}${err}`),
+			),
+		);
+		expect(cli).toMatch(
+			`ya estaba registrado: alcance aprobado del objetivo #${g.id} (pregunta #${q.id})`,
+		);
+		const ev = (await call(owner, "GET", `/tasks/${g.id}`)).body.events.filter(
+			(e: { kind: string }) => e.kind === "scope-approved",
+		);
+		expect(ev).toEqual([expect.objectContaining({ actor: "coord", data: { question: q.id } })]);
+		// A declined answer approves nothing.
+		const q2 = (await ask("¿Y esto?")).body;
+		await call(owner, "POST", `/questions/${q2.id}/answer`, { action: "decline" });
+		expect((await approve(as("coord"), { version: g.version, questionId: q2.id })).body.error).toBe(
+			"question-not-accepted",
+		);
+		await finish("coord");
+		// A question of ANOTHER request of the person is not this goal's.
+		await teamRequest("team-scope-0002", ["coord"]);
+		const run2 = (await call(as("coord"), "GET", "/runner/running")).body;
+		const q3 = (
+			await call(as("coord"), "POST", "/runner/questions", {
+				messageId: run2.id,
+				request: { message: "¿otra?" },
+			})
+		).body;
+		await call(owner, "POST", `/questions/${q3.id}/answer`, { action: "accept", content: {} });
+		expect((await approve(as("coord"), { version: g.version, questionId: q3.id })).body.error).toBe(
+			"question-other-request",
+		);
+		await finish("coord");
+	});
+
 	it("the board: open tasks and the recent done, paged, with links", async () => {
 		const b = await call(as("dev2"), "GET", "/tasks");
 		expect(b.status).toBe(200);

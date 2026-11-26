@@ -745,6 +745,100 @@ export class AcpTasks {
 		return now;
 	}
 
+	/**
+	 * POST /tasks/:id/scope-approved {version, questionId?} — the person approved
+	 * the goal's scope (#794, precisions §4). There is no state for it: the
+	 * coordinator asks with a question to the person (AskUserQuestion →
+	 * agent_questions, in Pendientes) and, once it is answered `accept`, records
+	 * it here — an event on the goal naming the question. A write decided on a
+	 * version, like any other (409 stale), though it changes no column.
+	 *
+	 * An agent: the root's coordinator, and the question is its own, asked while
+	 * working on a message of this goal's request (the chain of `origin_message_id`
+	 * when the goal has one); without `questionId`, its latest answered one on
+	 * the message it is running. The person may name any of their questions.
+	 * Once per question.
+	 */
+	async scopeApproved(ownerUserId: string, actor: TaskActor, id: unknown, body: unknown) {
+		const b = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
+		const version = b.version;
+		if (typeof version !== "number" || !Number.isSafeInteger(version))
+			throw new TaskError(400, "version-required");
+		const t = await this.mustSee(ownerUserId, actor, id);
+		if (t.parent_id !== null) throw new TaskError(400, "not-a-root", { rootId: t.parent_id });
+		if (t.version !== version) throw await this.staleOrGone(ownerUserId, t.id);
+		const qid = b.questionId === undefined || b.questionId === null ? null : Number(b.questionId);
+		if (qid !== null && !Number.isSafeInteger(qid)) throw new TaskError(400, "bad-question");
+		type Q = {
+			id: number;
+			agent: string;
+			state: string;
+			answer: string | null;
+			m_id: number | null;
+			m_root: number | null;
+		};
+		const SEL = `SELECT q.id, q.agent, q.state, q.answer, m.id AS m_id, COALESCE(m.root_id, m.id) AS m_root
+			FROM agent_questions q LEFT JOIN agent_messages m ON m.id = q.message_id AND m.owner_user_id = q.owner_user_id`;
+		let q: Q | undefined;
+		if (actor.kind === "agent") {
+			if (actor.agent.name !== t.coordinator)
+				throw new TaskError(403, "not-coordinator", { coordinator: t.coordinator });
+			let r: { results: Q[] };
+			if (qid === null) {
+				const cur = await this.acp.runningIn(actor.agent, actor.context);
+				if (!cur)
+					throw new TaskError(409, "execution-ended", {
+						message: "the message this process was started for is no longer running",
+					});
+				r = await d1Query<Q>(
+					`${SEL} WHERE q.owner_user_id = ? AND q.message_id = ? AND q.agent = ?
+					 AND q.state IN ('answered', 'delivered') ORDER BY q.id DESC LIMIT 1`,
+					[ownerUserId, cur.id, actor.agent.name],
+				);
+			} else
+				r = await d1Query<Q>(`${SEL} WHERE q.owner_user_id = ? AND q.id = ? AND q.agent = ?`, [
+					ownerUserId,
+					qid,
+					actor.agent.name,
+				]);
+			q = r.results[0];
+			if (!q) throw new TaskError(404, "question-not-found");
+			// Under this goal's request: the question's message is of the chain the goal was made for.
+			if (t.origin_message_id !== null && q.m_root !== t.origin_message_id)
+				throw new TaskError(409, "question-other-request", { question: q.id });
+		} else if (qid !== null) {
+			q = (await d1Query<Q>(`${SEL} WHERE q.owner_user_id = ? AND q.id = ?`, [ownerUserId, qid]))
+				.results[0];
+			if (!q) throw new TaskError(404, "question-not-found");
+		}
+		if (q) {
+			let action: unknown = null;
+			try {
+				action = q.answer ? (JSON.parse(q.answer) as { action?: unknown }).action : null;
+			} catch {}
+			if ((q.state !== "answered" && q.state !== "delivered") || action !== "accept")
+				throw new TaskError(409, "question-not-accepted", {
+					question: q.id,
+					state: q.state,
+					action,
+				});
+		}
+		const r = await d1Query<EventRow>(
+			`INSERT INTO task_events (owner_user_id, task_id, actor, kind, data)
+			 SELECT ?1, ?2, ?3, 'scope-approved', json_object('question', ?4)
+			 WHERE ?4 IS NULL OR NOT EXISTS (SELECT 1 FROM task_events e WHERE e.owner_user_id = ?1 AND e.task_id = ?2
+				AND e.kind = 'scope-approved' AND json_extract(e.data, '$.question') = ?4)
+			 RETURNING *`,
+			[ownerUserId, t.id, actorName(actor), q?.id ?? null],
+		);
+		if (r.results[0]) this.publish(t);
+		return {
+			recorded: Boolean(r.results[0]),
+			question: q?.id ?? null,
+			task: taskView(t, await this.linksOf(ownerUserId, [t.id])),
+		};
+	}
+
 	private async staleOrGone(ownerUserId: string, id: number): Promise<TaskError> {
 		const now = await this.row(ownerUserId, id);
 		if (!now) return new TaskError(404, "task-not-found");

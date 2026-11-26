@@ -428,6 +428,7 @@ comes in PR 3 and is never written over it.
 | `GET /api/acp/tasks/:id` | the task with links, its root (`parent`) or children, the last 200 events |
 | `PATCH /api/acp/tasks/:id {version, title?, description?, assignee?, reviewer?, priority?, status?, blockedReason?, coordinator?}` | a versioned change: 409 `stale` with the current row |
 | `POST /api/acp/tasks/:id/links {version, kind, ref}` | `work` (a work of the project), `pr` (number or https URL — a link, not an approval), `dep` (a task of the project), `external` (a wait the system cannot see); the same link again changes nothing |
+| `POST /api/acp/tasks/:id/scope-approved {version, questionId?}` | the goal's scope approved by the person (#794 precisions §4): no state of its own — the coordinator asks with a question (`AskUserQuestion` → `agent_questions`, in Pendientes) and, once answered `accept`, records a `scope-approved` event on the goal naming it (`st task approve <id> [--question <id>]`; without it, its own answered question on the message it runs). The question must be the coordinator's, on a message of the goal's request (`question-other-request` otherwise); declined or open: 409 `question-not-accepted`. Once per question; the person may name any of theirs |
 
 ### One goal per request
 
@@ -457,7 +458,7 @@ against the token's identity.
 
 `task_events` is append-only, written by the v29 triggers in the statement that made the change:
 `created`, `status`, `assigned`, `coordinator`, `blocked`/`unblocked`, `approved`/`reopened`, `link`,
-`budget`, `updated` — with the actor and every changed field as `[old, new]`. Every write pushes
+`budget`, `updated`, `scope-approved` — with the actor and every changed field as `[old, new]`. Every write pushes
 `{type: "task", task}` over `/ws/acp` to the owner.
 
 ### Messages

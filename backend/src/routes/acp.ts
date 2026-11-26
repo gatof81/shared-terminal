@@ -638,6 +638,16 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 		}),
 	);
 
+	// POST /tasks/:id/scope-approved {version, questionId?} — the goal's scope
+	// approved by the person through a question (acp/tasks.ts scopeApproved).
+	router.post(
+		"/tasks/:id/scope-approved",
+		taskRoute(async (owner, actor, req, res) => {
+			const r = await tasks.scopeApproved(owner, actor, req.params.id, req.body);
+			res.status(r.recorded ? 201 : 200).json(r);
+		}),
+	);
+
 	// ── Owner ─────────────────────────────────────────────────────────────
 
 	const ownerOnly = (res: Response): string | null => {

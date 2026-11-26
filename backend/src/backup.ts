@@ -119,6 +119,11 @@ export const TABLES: ReadonlyArray<{ name: string; orderBy: string; sinceSchema?
 	{ name: "project_agent_creations", orderBy: "owner_user_id, client_request_id", sinceSchema: 19 },
 	// v21 (experimental ACP agents). After users/sessions (FKs). Replaying a
 	// message row is an INSERT, so the reply trigger (UPDATE OF state) never fires.
+	// INVARIANT (v29): agent_messages BEFORE tasks. Replaying a request in a task
+	// fires trg_task_request_counted (AFTER INSERT), which finds no task yet; the
+	// tasks restored after it land with the backup's own counters (and a --force
+	// re-run overwrites them again). Moving tasks above it would count every
+	// request twice. Pinned by backup.tasks.sqlite.test.ts.
 	{ name: "acp_agents", orderBy: "agent_id", sinceSchema: 21 },
 	{ name: "agent_messages", orderBy: "id", sinceSchema: 21 },
 	{ name: "agent_questions", orderBy: "id", sinceSchema: 22 },
@@ -128,10 +133,13 @@ export const TABLES: ReadonlyArray<{ name: string; orderBy: string; sinceSchema?
 	// restored conversation's last_activity_at — restored after them, the
 	// backup's own value is what stays.
 	{ name: "conversations", orderBy: "owner_user_id, id", sinceSchema: 27 },
-	// v29. The history FIRST (no FK): the task and link triggers skip a
-	// creation or link whose event is already there, so replaying the rows
-	// neither duplicates the history nor bumps a restored version. Then the
-	// tasks by id (a child's parent is older) and their links (FK → tasks).
+	// v29. INVARIANT: the history FIRST (no FK): trg_task_created and
+	// trg_task_link_added skip a creation or link whose event is already there,
+	// so replaying the rows neither duplicates the history nor bumps a restored
+	// version — restored after tasks/task_links, every task and link would get a
+	// second event and every link a version bump. Then the tasks by id (a
+	// child's parent is older) and their links (FK → tasks). Pinned by
+	// backup.tasks.sqlite.test.ts.
 	{ name: "task_events", orderBy: "id", sinceSchema: 29 },
 	{ name: "tasks", orderBy: "id", sinceSchema: 29 },
 	{ name: "task_links", orderBy: "task_id, kind, ref", sinceSchema: 29 },
