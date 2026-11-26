@@ -80,6 +80,17 @@ const dump = (d: DatabaseSyncT) => ({
 });
 
 describe("backup → restore of tasks (v29)", () => {
+	it("TABLES keeps the order the v29 triggers rely on", async () => {
+		const { TABLES } = await import("./backup.js");
+		const at = (n: string) => TABLES.findIndex((t) => t.name === n);
+		// Messages before tasks: replaying a request fires the counting trigger,
+		// and the tasks restored after it land with the backup's own counters.
+		expect(at("agent_messages")).toBeLessThan(at("tasks"));
+		// History before tasks and links: their triggers skip what already has its event.
+		expect(at("task_events")).toBeLessThan(at("tasks"));
+		expect(at("tasks")).toBeLessThan(at("task_links"));
+	});
+
 	it("goals, children, links, history and the messages' task_id come back as they were", async () => {
 		const { migrateDb } = await import("./db.js");
 		const { runBackup, runRestore } = await import("./backup.js");
