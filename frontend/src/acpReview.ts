@@ -29,8 +29,12 @@ export interface ReviewContext {
 	activity?: string | null;
 	/** The recovery report, if the caller has it (else Pendientes' `reports`). */
 	report?: AcpMessage | null;
-	/** The row as the review / requeue answered it. */
-	onChanged?: (row: AcpMessage) => void;
+	/**
+	 * The row as the review / requeue answered it, with `liveMark()` as it was
+	 * when that request left (the caller keeps a newer live frame over it).
+	 */
+	onChanged?: (row: AcpMessage, mark: number) => void;
+	liveMark?: () => number;
 }
 
 export interface ReviewHooks {
@@ -153,9 +157,10 @@ export function openReview(m: AcpMessage, ctx: ReviewContext = {}): void {
 	done.addEventListener("click", () => {
 		done.disabled = true;
 		status.textContent = "Guardando…";
+		const mark = ctx.liveMark?.() ?? 0;
 		void acpReview(m.id)
 			.then((row) => {
-				ctx.onChanged?.(row);
+				ctx.onChanged?.(row, mark);
 				refreshInbox(0);
 				dialog.close();
 				showToast("Dada por revisada · no se reencoló");
@@ -205,9 +210,10 @@ export function openReview(m: AcpMessage, ctx: ReviewContext = {}): void {
 		if (!check.checked) return;
 		requeue.disabled = true;
 		status.textContent = "Reencolando…";
+		const mark = ctx.liveMark?.() ?? 0;
 		void acpRequeue(m.id)
 			.then((row) => {
-				ctx.onChanged?.(row);
+				ctx.onChanged?.(row, mark);
 				refreshInbox(0);
 				dialog.close();
 				showToast("Reencolado");
