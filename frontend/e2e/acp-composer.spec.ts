@@ -1,6 +1,6 @@
 import type { Locator, Page } from "@playwright/test";
 import { expect, test } from "./fixtures.js";
-import { CONV_IDS, PROJECT_IDS } from "./mockBackend.js";
+import { CONV_IDS, type MockBackend, PROJECT_IDS } from "./mockBackend.js";
 
 /**
  * A topic's message box as ONE surface (UX iter3 §3): `[field] [arrow]`
@@ -138,9 +138,9 @@ test.describe("ACP composer: one surface", () => {
 			});
 			return true;
 		};
-		const { surface, input } = await openTopic(page, app);
+		const { surface, input, send } = await openTopic(page, app);
 		await input.fill("@arq revisá esto");
-		await input.press("Control+Enter");
+		await send.click();
 		const error = page.locator(`${P} .acp-chat-error`);
 		await expect(error).toHaveText("No se envió a @arq.");
 		await expect(surface).toHaveClass(/is-error/);
@@ -150,5 +150,124 @@ test.describe("ACP composer: one surface", () => {
 		);
 		// The text came back into the field (it was empty).
 		await expect(input).toHaveValue("@arq revisá esto");
+	});
+});
+
+test.describe("ACP composer: the keys", () => {
+	test.beforeEach(({ backend }) => {
+		backend.enableAcp();
+		backend.enableConversations();
+	});
+
+	/** Counts the message POSTs (the mock still answers them). */
+	function countSends(backend: MockBackend) {
+		const sent = { n: 0 };
+		backend.override = async (method, path) => {
+			if (method === "POST" && path.startsWith("/acp/messages")) sent.n++;
+			return false;
+		};
+		return sent;
+	}
+
+	test("Enter sends on a keyboard; on a touch screen it breaks the line and the arrow sends", async ({
+		app,
+		backend,
+		page,
+		isMobile,
+	}) => {
+		const sent = countSends(backend);
+		const { input, send } = await openTopic(page, app);
+		await input.fill("@arq revisá esto");
+		await input.press("Enter");
+		if (!isMobile) {
+			await expect(input).toHaveValue("");
+			await expect.poll(() => sent.n).toBe(1);
+			await expect(send).toHaveAttribute("title", "Enviar (Enter)");
+			await expect(input).not.toHaveAttribute("enterkeyhint");
+			return;
+		}
+		await expect(input).toHaveValue("@arq revisá esto\n");
+		await expect(input).toHaveAttribute("enterkeyhint", "enter");
+		await expect(send).toHaveAttribute("title", "Enviar");
+		expect(sent.n).toBe(0);
+		await send.click();
+		await expect(input).toHaveValue("");
+		await expect.poll(() => sent.n).toBe(1);
+	});
+
+	test("Ctrl+Enter and Cmd+Enter break the line at the caret (undoable) and send nothing", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		const sent = countSends(backend);
+		const { input, send } = await openTopic(page, app);
+		await input.fill("@arq uno dos");
+		// The caret after "uno", " dos" selected: replaced by the break.
+		await input.evaluate((e: HTMLTextAreaElement) => e.setSelectionRange(8, 12));
+		await input.press("Control+Enter");
+		await expect(input).toHaveValue("@arq uno\n");
+		await input.press("Meta+Enter");
+		await expect(input).toHaveValue("@arq uno\n\n");
+		// Undoable like typing (Chromium folds the two breaks into one step).
+		await page.keyboard.press("Control+z");
+		await expect(input).toHaveValue("@arq uno dos");
+		await expect(send).toBeEnabled();
+		// Empty field: nothing, not even a break.
+		await input.fill("");
+		await input.press("Control+Enter");
+		await input.press("Enter");
+		await expect(input).toHaveValue("");
+		expect(sent.n).toBe(0);
+	});
+
+	test("Enter with the @ menu open picks the mention and sends nothing", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		const sent = countSends(backend);
+		const { input } = await openTopic(page, app);
+		await input.click();
+		await input.pressSequentially("hola @ar");
+		await expect(page.locator(`${P} .acp-mention-menu`)).toBeVisible();
+		await page.keyboard.press("Enter");
+		await expect(page.locator(`${P} .acp-mention-menu`)).toBeHidden();
+		await expect(input).not.toHaveValue("");
+		expect(sent.n).toBe(0);
+	});
+
+	test("Enter while an IME composes, and a multi-line paste, send nothing", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		const sent = countSends(backend);
+		const { input } = await openTopic(page, app);
+		await input.fill("@arq こんにちは");
+		const defaulted = await input.evaluate((e) =>
+			[{ isComposing: true }, { keyCode: 229 }].map(
+				(extra) =>
+					!e.dispatchEvent(
+						new KeyboardEvent("keydown", {
+							key: "Enter",
+							bubbles: true,
+							cancelable: true,
+							...extra,
+						}),
+					),
+			),
+		);
+		// Left to the IME: not prevented, not sent.
+		expect(defaulted).toEqual([false, false]);
+		await expect(input).toHaveValue("@arq こんにちは");
+		// A paste goes through no keydown (insertText: what a paste does to the
+		// field, without a clipboard): the lines land in the field.
+		await input.fill("");
+		await input.focus();
+		await page.keyboard.insertText("@arq uno\ndos\n");
+		await expect(input).toHaveValue("@arq uno\ndos\n");
+		await page.waitForTimeout(200);
+		expect(sent.n).toBe(0);
 	});
 });
