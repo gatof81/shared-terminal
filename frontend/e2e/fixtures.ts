@@ -137,7 +137,7 @@ export class App {
 	async showTerminated(): Promise<void> {
 		await this.openSidebar();
 		await this.page.locator(".sgroup-sessions .ssection-menu").click();
-		await this.page.getByRole("menuitem", { name: /^Show terminated/ }).click();
+		await this.page.getByRole("menuitem", { name: /^Mostrar terminadas/ }).click();
 		await expect(this.page.locator("#show-terminated-toggle")).toBeChecked();
 	}
 
@@ -145,7 +145,7 @@ export class App {
 	async refreshSessions(): Promise<void> {
 		await this.openSidebar();
 		await this.page.locator(".sgroup-sessions .ssection-menu").click();
-		await this.page.getByRole("menuitem", { name: /^Refresh/ }).click();
+		await this.page.getByRole("menuitem", { name: /^Actualizar/ }).click();
 	}
 
 	async sidebarOpen(): Promise<boolean> {

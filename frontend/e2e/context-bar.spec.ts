@@ -76,7 +76,7 @@ test.describe("context bar", () => {
 		solo.modelApplied = { requested: "claude-opus-5-5", current: null, error: "no disponible" };
 		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/terminal`);
 		const more = page.locator("#session-menu-btn");
-		await expect(more).toHaveAccessibleName("Session actions (el modelo no se aplicó)");
+		await expect(more).toHaveAccessibleName("Acciones de la sesión (el modelo no se aplicó)");
 		await expect(more.locator(".bar-menu-flag")).toHaveText("!");
 		// The mark sits inside the button, clear of its edge (a fixed icon
 		// width left it touching the edge: it read as outside the button).
@@ -101,7 +101,7 @@ test.describe("context bar", () => {
 		// A traditional session's ⋯ has no such entry, and no flag.
 		await app.openSession("my-project");
 		if (await more.isVisible()) {
-			await expect(more).toHaveAccessibleName("Session actions");
+			await expect(more).toHaveAccessibleName("Acciones de la sesión");
 			await more.click();
 			await expect(page.getByRole("menuitem", { name: /Ajustes del agente/ })).toHaveCount(0);
 		}

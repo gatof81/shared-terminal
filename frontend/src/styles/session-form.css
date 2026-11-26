@@ -46,6 +46,20 @@
   outline: 2px solid var(--c-accent);
   outline-offset: -2px;
 }
+/* A phone: the five Spanish tab names («Puertos», «Avanzado») overflow the
+   row at 0.75rem (and still at 360 px with 0.6rem). The row is shared out
+   instead: each tab grows into the free width, only the horizontal padding
+   and the gap give, the tap height stays. */
+@media (max-width: 480px) {
+  .session-tabs {
+    gap: 0;
+    justify-content: space-between;
+  }
+  .session-tab {
+    flex: 1 1 auto;
+    padding-inline: 0.5rem;
+  }
+}
 .session-tab-panel {
   display: none;
   flex-direction: column;

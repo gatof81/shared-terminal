@@ -53,11 +53,11 @@ test.describe("navigation", () => {
 		await app.switchView("terminal");
 		const panel = page.locator("#terminal-state");
 		await expect(panel).toBeVisible();
-		await expect(panel).toContainText("This session is stopped");
-		await expect(panel.locator("button", { hasText: "Start session" })).toBeEnabled();
+		await expect(panel).toContainText("Esta sesión está detenida");
+		await expect(panel.locator("button", { hasText: "Poner en marcha" })).toBeEnabled();
 		await app.switchView("git");
-		await expect(page.locator("#git-list")).toContainText("isn't running");
-		await expect(page.locator("#git-list button", { hasText: "Start session" })).toBeVisible();
+		await expect(page.locator("#git-list")).toContainText("no está en marcha");
+		await expect(page.locator("#git-list button", { hasText: "Poner en marcha" })).toBeVisible();
 	});
 
 	test("Files: open a file, preview it, breadcrumbs follow; a restricted file is refused", async ({

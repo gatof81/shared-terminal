@@ -300,8 +300,8 @@ describe("effort", () => {
 		error,
 	});
 	it("labels levels: default and words split on _ or -", () => {
-		expect(effortLabel(null)).toBe("Default");
-		expect(effortLabel("default")).toBe("Default");
+		expect(effortLabel(null)).toBe("Por defecto");
+		expect(effortLabel("default")).toBe("Por defecto");
 		expect(effortLabel("high")).toBe("High");
 		expect(effortLabel("extra_high")).toBe("Extra High");
 		expect(effortLabel("x-max")).toBe("X Max");

@@ -71,7 +71,7 @@
         <button
           id="sidebar-toggle"
           type="button"
-          aria-label="Toggle sessions sidebar"
+          aria-label="Lista de proyectos y sesiones"
           aria-expanded="false"
           aria-controls="sidebar"
         >
@@ -129,26 +129,26 @@
             <button id="new-session-btn" class="btn primary sm" type="button">+ Sesión nueva</button>
           </div>
           <div id="sidebar-header">
-            <h2>Sessions</h2>
+            <h2>Sesiones</h2>
             <button
               id="sidebar-refresh-btn"
               type="button"
-              title="Refresh sessions and live usage"
-              aria-label="Refresh"
+              title="Actualizar las sesiones y el uso en vivo"
+              aria-label="Actualizar"
             >
               ↻
             </button>
             <label
               id="show-terminated-label"
-              title="Include terminated sessions so you can restore them"
+              title="Incluir las sesiones terminadas para poder restaurarlas"
             >
               <input type="checkbox" id="show-terminated-toggle" />
-              Show terminated
+              Mostrar terminadas
             </label>
           </div>
           <div id="session-list" class="session-list-grouped"></div>
           <div id="observable-section" class="hidden">
-            <h3 id="observable-section-title">My groups</h3>
+            <h3 id="observable-section-title">Mis grupos</h3>
             <div id="observable-list"></div>
           </div>
           <!-- Under 400 px the user menu opens from here (the bar has no room
@@ -172,7 +172,7 @@
                  resizes, detaches or disposes the terminal. -->
             <!-- Each view button carries an icon (alone on narrow screens,
                  the label on the active one) and a label. -->
-            <div id="view-switch" role="group" aria-label="Session view" hidden>
+            <div id="view-switch" role="group" aria-label="Vista de la sesión" hidden>
               <button id="view-terminal-btn" type="button" aria-pressed="true" title="Terminal" aria-label="Terminal">
                 <svg class="view-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6l6 6-6 6M12 18h8" /></svg>
                 <span class="view-label">Terminal</span>
@@ -195,8 +195,8 @@
               id="session-menu-btn"
               class="btn btn-icon sm"
               type="button"
-              title="Session actions"
-              aria-label="Session actions"
+              title="Acciones de la sesión"
+              aria-label="Acciones de la sesión"
               aria-haspopup="menu"
             >
               ⋯
@@ -352,17 +352,17 @@
         aria-labelledby="new-session-modal-title"
       >
         <div class="modal-header">
-          <h2 id="new-session-modal-title">New session</h2>
+          <h2 id="new-session-modal-title">Sesión nueva</h2>
           <button
             class="modal-close"
             type="button"
-            aria-label="Close"
+            aria-label="Cerrar"
             data-close-modal
           >
             ×
           </button>
         </div>
-        <div class="session-tabs" role="tablist" aria-label="Session configuration sections">
+        <div class="session-tabs" role="tablist" aria-label="Secciones de la configuración">
           <button
             id="session-tab-basics-tab"
             class="session-tab is-active"
@@ -372,7 +372,7 @@
             aria-controls="session-tab-basics"
             data-session-tab="basics"
           >
-            Basics
+            Básico
           </button>
           <button
             id="session-tab-repo-tab"
@@ -405,7 +405,7 @@
             aria-controls="session-tab-ports"
             data-session-tab="ports"
           >
-            Ports
+            Puertos
           </button>
           <button
             id="session-tab-advanced-tab"
@@ -416,7 +416,7 @@
             aria-controls="session-tab-advanced"
             data-session-tab="advanced"
           >
-            Advanced
+            Avanzado
           </button>
         </div>
         <form id="new-session-form" novalidate>
@@ -427,29 +427,30 @@
             aria-labelledby="session-tab-basics-tab"
           >
             <label class="session-field">
-              <span class="session-field-label" id="new-session-input-label">Session name</span>
+              <span class="session-field-label" id="new-session-input-label">Nombre de la sesión</span>
               <input
                 id="new-session-input"
                 type="text"
-                placeholder="my-project"
+                placeholder="mi-proyecto"
                 maxlength="64"
                 autocomplete="off"
                 required
               />
             </label>
             <label class="session-field" id="edit-template-description-field" hidden>
-              <span class="session-field-label">Description (optional)</span>
+              <span class="session-field-label">Descripción (opcional)</span>
               <input
                 id="edit-template-description-input"
                 type="text"
-                placeholder="What's this template for?"
+                placeholder="¿Para qué es esta plantilla?"
                 maxlength="512"
                 autocomplete="off"
               />
             </label>
             <p class="modal-hint">
-              All other settings are optional. Visit the tabs above to add a
-              repo, env vars, exposed ports, or lifecycle hooks.
+              Todo lo demás es opcional. En las pestañas de arriba podés agregar
+              un repo, variables de entorno, puertos expuestos o comandos del
+              ciclo de vida.
             </p>
           </div>
           <div
@@ -460,48 +461,48 @@
             hidden
           >
             <p class="modal-hint">
-              Clone a repo into the workspace before your postCreate
-              hook runs. Leave Target empty to clone into the workspace
-              root (replace mode). PAT and SSH credentials are
-              AES-GCM-encrypted at rest and never echoed back.
+              Clona un repo en el workspace antes de que corra tu comando
+              postCreate. Dejá Destino vacío para clonarlo en la raíz del
+              workspace (la reemplaza). Las credenciales PAT y SSH se guardan
+              cifradas con AES-GCM y nunca se devuelven.
             </p>
             <label class="modal-field">
-              <span>Repository URL</span>
+              <span>URL del repositorio</span>
               <input
                 type="text"
                 id="repo-url"
-                placeholder="https://github.com/owner/repo  or  git@github.com:owner/repo"
+                placeholder="https://github.com/owner/repo  o  git@github.com:owner/repo"
                 autocomplete="off"
                 spellcheck="false"
               />
             </label>
             <div class="repo-fields-row">
               <label class="modal-field">
-                <span>Ref (branch / tag / SHA)</span>
+                <span>Ref (rama / tag / SHA)</span>
                 <input
                   type="text"
                   id="repo-ref"
-                  placeholder="main (empty = remote HEAD)"
+                  placeholder="main (vacío = HEAD del remoto)"
                   autocomplete="off"
                   spellcheck="false"
                 />
               </label>
               <label class="modal-field">
-                <span>Target (workspace-relative)</span>
+                <span>Destino (relativo al workspace)</span>
                 <input
                   type="text"
                   id="repo-target"
-                  placeholder="(empty = workspace root)"
+                  placeholder="(vacío = raíz del workspace)"
                   autocomplete="off"
                   spellcheck="false"
                 />
               </label>
               <label class="modal-field">
-                <span>Shallow depth</span>
+                <span>Profundidad (shallow)</span>
                 <input
                   type="number"
                   id="repo-depth"
-                  placeholder="(empty = full)"
+                  placeholder="(vacío = completo)"
                   min="1"
                   max="10000"
                   step="1"
@@ -509,16 +510,16 @@
               </label>
             </div>
             <label class="modal-field">
-              <span>Auth</span>
+              <span>Autenticación</span>
               <select id="repo-auth">
-                <option value="none">None (public repo)</option>
-                <option value="pat">HTTPS Personal Access Token</option>
-                <option value="ssh">SSH key</option>
+                <option value="none">Ninguna (repo público)</option>
+                <option value="pat">Token de acceso personal (HTTPS)</option>
+                <option value="ssh">Clave SSH</option>
               </select>
             </label>
             <div id="repo-auth-pat-panel" class="repo-auth-panel" hidden>
               <label class="modal-field">
-                <span>Personal access token</span>
+                <span>Token de acceso personal</span>
                 <input
                   type="password"
                   id="repo-auth-pat-token"
@@ -530,7 +531,7 @@
             </div>
             <div id="repo-auth-ssh-panel" class="repo-auth-panel" hidden>
               <label class="modal-field">
-                <span>Private key (OpenSSH format)</span>
+                <span>Clave privada (formato OpenSSH)</span>
                 <textarea
                   id="repo-auth-ssh-key"
                   rows="6"
@@ -540,12 +541,12 @@
                 ></textarea>
               </label>
               <label class="modal-field">
-                <span>Known hosts</span>
+                <span>Hosts conocidos</span>
                 <select id="repo-auth-ssh-known-hosts-mode">
                   <option value="default">
-                    Bundled (github.com / gitlab.com / bitbucket.org)
+                    Incluidos (github.com / gitlab.com / bitbucket.org)
                   </option>
-                  <option value="custom">Custom paste</option>
+                  <option value="custom">Pegar los propios</option>
                 </select>
               </label>
               <label
@@ -553,7 +554,7 @@
                 id="repo-auth-ssh-known-hosts-custom-wrap"
                 hidden
               >
-                <span>Custom known_hosts</span>
+                <span>known_hosts propios</span>
                 <textarea
                   id="repo-auth-ssh-known-hosts-custom"
                   rows="4"
@@ -572,10 +573,10 @@
             hidden
           >
             <p class="modal-hint">
-              Plain values are stored verbatim; secrets are
-              AES-GCM-encrypted at rest and never echoed back. Names use
-              POSIX shell convention (uppercase letters, digits,
-              underscore; must start with a letter or _).
+              Las variables planas se guardan tal cual; las secretas se
+              guardan cifradas con AES-GCM y nunca se devuelven. Los nombres
+              siguen la convención de la shell POSIX (mayúsculas, dígitos y
+              guion bajo; empiezan con una letra o _).
             </p>
             <div class="env-paste-toolbar">
               <button
@@ -585,7 +586,7 @@
                 aria-controls="env-paste-panel"
                 aria-expanded="false"
               >
-                Paste .env
+                Pegar .env
               </button>
               <span id="env-paste-status" class="env-paste-status" aria-live="polite"></span>
             </div>
@@ -593,34 +594,34 @@
               <textarea
                 id="env-paste-textarea"
                 rows="6"
-                placeholder="DATABASE_URL=postgres://...&#10;OPENAI_KEY=sk-...&#10;# comments are ignored"
+                placeholder="DATABASE_URL=postgres://...&#10;OPENAI_KEY=sk-...&#10;# los comentarios se ignoran"
                 spellcheck="false"
               ></textarea>
               <div class="env-paste-actions">
-                <button type="button" id="env-paste-cancel">Cancel</button>
-                <button type="button" id="env-paste-import">Import as plain</button>
+                <button type="button" id="env-paste-cancel">Cancelar</button>
+                <button type="button" id="env-paste-import">Importar como planas</button>
               </div>
             </div>
             <table class="env-table" id="env-table">
               <thead>
                 <tr>
-                  <th scope="col">Name</th>
-                  <th scope="col">Value</th>
-                  <th scope="col">Type</th>
-                  <th scope="col"><span class="visually-hidden">Remove</span></th>
+                  <th scope="col">Nombre</th>
+                  <th scope="col">Valor</th>
+                  <th scope="col">Tipo</th>
+                  <th scope="col"><span class="visually-hidden">Quitar</span></th>
                 </tr>
               </thead>
               <tbody id="env-table-body"></tbody>
             </table>
-            <button type="button" id="env-add-row" class="env-add-row">+ Add entry</button>
+            <button type="button" id="env-add-row" class="env-add-row">+ Agregar variable</button>
             <label class="modal-field modal-field-checkbox env-write-file">
               <input type="checkbox" id="env-write-file" />
               <span>
-                Also write a <code>.env</code> file to the workspace
-                root during bootstrap (so <code>dotenv</code>-style
-                tooling, <code>docker compose --env-file</code>, or
-                <code>set -a; . .env</code> can pick the values up
-                from disk).
+                Escribir también un archivo <code>.env</code> en la raíz
+                del workspace durante el bootstrap (para que herramientas
+                como <code>dotenv</code>, <code>docker compose --env-file</code>
+                o <code>set -a; . .env</code> lean los valores del
+                disco).
               </span>
             </label>
           </div>
@@ -632,24 +633,24 @@
             hidden
           >
             <p class="modal-hint">
-              Container ports published as
-              <code>p&lt;port&gt;-&lt;sessionId&gt;.&lt;base&gt;</code>.
-              Public ports skip the
-              <code>st_token</code> cookie check (webhook /
-              OAuth-callback shape) — only enable for receivers that
-              expect arbitrary callers.
+              Puertos del contenedor publicados como
+              <code>p&lt;puerto&gt;-&lt;sessionId&gt;.&lt;base&gt;</code>.
+              Los puertos públicos no verifican la cookie
+              <code>st_token</code> (para webhooks o callbacks de
+              OAuth): activalo solo para receptores que esperan llamadas
+              de cualquiera.
             </p>
             <table class="ports-table">
               <thead>
                 <tr>
-                  <th>Container port</th>
-                  <th>Public</th>
+                  <th>Puerto del contenedor</th>
+                  <th>Público</th>
                   <th></th>
                 </tr>
               </thead>
               <tbody id="ports-table-body"></tbody>
             </table>
-            <button type="button" id="ports-add-row" class="env-add-row">+ Add port</button>
+            <button type="button" id="ports-add-row" class="env-add-row">+ Agregar puerto</button>
           </div>
           <div
             class="session-tab-panel"
@@ -659,20 +660,21 @@
             hidden
           >
             <p class="modal-hint">
-              These run during session bootstrap. Total wall-clock time
-              across all stages is capped at 10 minutes.
+              Esto corre durante el bootstrap de la sesión. El tiempo total
+              de todas las etapas tiene un tope de 10 minutos.
             </p>
 
             <fieldset class="advanced-section">
-              <legend>Git identity</legend>
+              <legend>Identidad de Git</legend>
               <p class="modal-hint">
-                Sets <code>user.name</code> /
-                <code>user.email</code> globally inside the session
-                container so commits land with the right identity.
+                Configura <code>user.name</code> /
+                <code>user.email</code> de forma global en el contenedor
+                de la sesión, para que los commits salgan con la
+                identidad correcta.
               </p>
               <div class="repo-fields-row">
                 <label class="modal-field">
-                  <span>Name</span>
+                  <span>Nombre</span>
                   <input
                     type="text"
                     id="git-identity-name"
@@ -697,35 +699,35 @@
             <fieldset class="advanced-section">
               <legend>Dotfiles</legend>
               <p class="modal-hint">
-                Cloned into <code>~/dotfiles</code> before the
-                <code>postCreate</code> hook. Uses the same auth
-                credentials as the main repo above (PAT or SSH).
-                Optional install script runs from inside the cloned
-                tree on success.
+                Se clonan en <code>~/dotfiles</code> antes del comando
+                <code>postCreate</code>. Usan las mismas credenciales que
+                el repo principal de arriba (PAT o SSH). Si el clon sale
+                bien, el script de instalación (opcional) corre dentro
+                del árbol clonado.
               </p>
               <label class="modal-field">
-                <span>Repository URL</span>
+                <span>URL del repositorio</span>
                 <input
                   type="text"
                   id="dotfiles-url"
-                  placeholder="https://github.com/owner/dotfiles  or  git@github.com:owner/dotfiles"
+                  placeholder="https://github.com/owner/dotfiles  o  git@github.com:owner/dotfiles"
                   autocomplete="off"
                   spellcheck="false"
                 />
               </label>
               <div class="repo-fields-row">
                 <label class="modal-field">
-                  <span>Ref (optional)</span>
+                  <span>Ref (opcional)</span>
                   <input
                     type="text"
                     id="dotfiles-ref"
-                    placeholder="main (empty = remote HEAD)"
+                    placeholder="main (vacío = HEAD del remoto)"
                     autocomplete="off"
                     spellcheck="false"
                   />
                 </label>
                 <label class="modal-field">
-                  <span>Install script (optional)</span>
+                  <span>Script de instalación (opcional)</span>
                   <input
                     type="text"
                     id="dotfiles-install-script"
@@ -738,11 +740,11 @@
             </fieldset>
 
             <fieldset class="advanced-section">
-              <legend>Agent config seed</legend>
+              <legend>Configuración inicial del agente</legend>
               <p class="modal-hint">
-                Both files are written verbatim into
-                <code>~/.claude/</code> so the Claude CLI starts
-                pre-configured. Settings must be valid JSON.
+                Los dos archivos se escriben tal cual en
+                <code>~/.claude/</code> para que la CLI de Claude arranque
+                configurada. settings.json tiene que ser JSON válido.
               </p>
               <label class="modal-field">
                 <span>~/.claude/settings.json</span>
@@ -764,7 +766,7 @@
                 <textarea
                   id="agent-seed-claude-md"
                   rows="6"
-                  placeholder="# Project notes&#10;- Use TS strict mode."
+                  placeholder="# Notas del proyecto&#10;- Usar TS en modo estricto."
                   autocomplete="off"
                   spellcheck="false"
                 ></textarea>
@@ -772,9 +774,9 @@
             </fieldset>
 
             <fieldset class="advanced-section">
-              <legend>Lifecycle commands</legend>
+              <legend>Comandos del ciclo de vida</legend>
               <label class="modal-field">
-                <span>postCreate command</span>
+                <span>Comando postCreate</span>
                 <textarea
                   id="post-create-cmd"
                   rows="3"
@@ -783,12 +785,13 @@
                   spellcheck="false"
                 ></textarea>
                 <span class="modal-hint-inline">
-                  Runs once on first creation, after clone + dotfiles +
-                  agent seed. Failure aborts session creation.
+                  Corre una sola vez, al crear la sesión, después del
+                  clon, los dotfiles y la configuración del agente. Si
+                  falla, la sesión no se crea.
                 </span>
               </label>
               <label class="modal-field">
-                <span>postStart command</span>
+                <span>Comando postStart</span>
                 <textarea
                   id="post-start-cmd"
                   rows="3"
@@ -797,20 +800,21 @@
                   spellcheck="false"
                 ></textarea>
                 <span class="modal-hint-inline">
-                  Runs every container start in tmux window
-                  <code>bootstrap</code>. For long-running daemons
-                  (e.g. <code>code tunnel</code>, <code>npm run dev</code>).
+                  Corre en cada arranque del contenedor, en la ventana de
+                  tmux <code>bootstrap</code>. Para procesos que quedan
+                  corriendo (p. ej. <code>code tunnel</code>,
+                  <code>npm run dev</code>).
                 </span>
               </label>
             </fieldset>
 
             <fieldset class="advanced-section">
-              <legend>Resources</legend>
+              <legend>Recursos</legend>
               <p class="modal-hint" id="resources-bounds-hint">
-                Per-session limits. Empty fields fall back to the
-                deployment defaults (2 cores / 2 GiB / no auto-stop).
-                Bounds: CPU 0.25–8 cores, memory 256 MiB–16 GiB,
-                idle TTL 1 minute–24 hours.
+                Límites por sesión. Los campos vacíos usan los valores
+                por defecto de la instalación (2 núcleos / 2 GiB / sin
+                detención automática). Rangos: CPU 0.25–8 núcleos,
+                memoria 256 MiB–16 GiB, inactividad 1 minuto–24 horas.
               </p>
               <!-- #202: account-level headroom (own quotas + usage),
                    filled async by refreshQuotaHeadroom on modal open.
@@ -818,7 +822,7 @@
               <p class="modal-hint" id="quota-headroom-hint"></p>
               <div class="repo-fields-row">
                 <label class="modal-field">
-                  <span>CPU (cores)</span>
+                  <span>CPU (núcleos)</span>
                   <input
                     type="number"
                     id="resources-cpu-cores"
@@ -831,7 +835,7 @@
                   />
                 </label>
                 <label class="modal-field">
-                  <span>Memory</span>
+                  <span>Memoria</span>
                   <span class="resources-mem-row">
                     <input
                       type="number"
@@ -850,12 +854,13 @@
                 </label>
               </div>
               <p class="modal-hint">
-                Stops the container after N of inactivity. Workspace
-                files are preserved; opening a tab restarts it.
+                Detiene el contenedor después de N de inactividad. Los
+                archivos del workspace se conservan; abrir una pestaña
+                lo vuelve a poner en marcha.
               </p>
               <div class="repo-fields-row">
                 <label class="modal-field">
-                  <span>Idle auto-stop</span>
+                  <span>Detener si está inactiva</span>
                   <span class="resources-mem-row">
                     <input
                       type="number"
@@ -863,12 +868,12 @@
                       inputmode="numeric"
                       step="1"
                       min="1"
-                      placeholder="Never"
+                      placeholder="Nunca"
                       autocomplete="off"
                     />
                     <select id="resources-idle-unit">
-                      <option value="minutes" selected>minutes</option>
-                      <option value="hours">hours</option>
+                      <option value="minutes" selected>minutos</option>
+                      <option value="hours">horas</option>
                     </select>
                   </span>
                 </label>
@@ -876,30 +881,31 @@
             </fieldset>
 
             <fieldset class="advanced-section">
-              <legend>Privileged ports</legend>
+              <legend>Puertos privilegiados</legend>
               <p class="modal-hint">
-                Container processes can't bind to ports below 1024
-                without <code>CAP_NET_BIND_SERVICE</code>. Toggle this
-                ON to grant exactly that capability (and only that one)
-                on <code>docker run</code>, allowing the Ports tab to
-                accept entries like <code>80</code> or <code>443</code>.
-                The container's other capabilities stay dropped.
+                Los procesos del contenedor no pueden escuchar en puertos
+                menores a 1024 sin <code>CAP_NET_BIND_SERVICE</code>.
+                Activalo para otorgar exactamente esa capacidad (y solo
+                esa) en <code>docker run</code>, así la pestaña Puertos
+                acepta valores como <code>80</code> o <code>443</code>.
+                El resto de las capacidades del contenedor siguen
+                quitadas.
               </p>
               <label class="modal-field modal-field-checkbox">
                 <input
                   type="checkbox"
                   id="allow-privileged-ports"
                 />
-                <span>Allow ports &lt; 1024 (grants CAP_NET_BIND_SERVICE)</span>
+                <span>Permitir puertos &lt; 1024 (otorga CAP_NET_BIND_SERVICE)</span>
               </label>
             </fieldset>
           </div>
           <div class="session-modal-actions">
-            <button type="button" data-close-modal>Cancel</button>
+            <button type="button" data-close-modal>Cancelar</button>
             <button type="button" id="save-as-template-btn" class="modal-secondary-action">
-              Save as template…
+              Guardar como plantilla…
             </button>
-            <button type="submit" id="new-session-submit">Create session</button>
+            <button type="submit" id="new-session-submit">Crear sesión</button>
           </div>
         </form>
       </div>

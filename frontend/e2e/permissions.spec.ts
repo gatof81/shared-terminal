@@ -11,8 +11,8 @@ test.describe("permissions", () => {
 		await app.login("alice");
 		await app.openUserMenu();
 		await expect(page.locator('[role="menu"].action-menu [role="menuitem"]')).toHaveText([
-			/Templates/,
-			/Logout/,
+			/Plantillas/,
+			/Salir/,
 		]);
 		await app.escape();
 		await expect(page.locator("#observable-section")).toHaveClass(/hidden/);
@@ -23,7 +23,7 @@ test.describe("permissions", () => {
 		backend,
 	}) => {
 		await app.login("alice", `#/sessions/${SESSION_IDS.bob}`);
-		await expect(app.toast("Session not found")).toBeVisible();
+		await expect(app.toast("No se encontró la sesión")).toBeVisible();
 		expect(backend.requests.filter((r) => r.path.includes(SESSION_IDS.bob))).toEqual([]);
 	});
 
@@ -52,7 +52,7 @@ test.describe("permissions", () => {
 		const observable = page.locator("#observable-section");
 		await expect(observable).not.toHaveClass(/hidden/);
 		await expect(observable).toContainText("bob-api");
-		await expect(observable).toContainText("read-only");
+		await expect(observable).toContainText("solo lectura");
 	});
 
 	test("a lead observing a session gets a read-only attach (observe=true, input dropped)", async ({

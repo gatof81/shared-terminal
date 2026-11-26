@@ -244,7 +244,7 @@ export function renderSidebarObservables(): void {
 		const select = document.createElement("button");
 		select.type = "button";
 		select.className = "session-select";
-		select.setAttribute("aria-label", `Observe ${s.name} (${s.ownerUsername}, read-only)`);
+		select.setAttribute("aria-label", `Observar ${s.name} (${s.ownerUsername}, solo lectura)`);
 
 		const dot = document.createElement("span");
 		dot.className = `session-dot ${s.status}`;
@@ -259,7 +259,7 @@ export function renderSidebarObservables(): void {
 		nameCol.appendChild(name);
 		const owner = document.createElement("span");
 		owner.className = "observable-owner";
-		owner.textContent = `${s.ownerUsername} — read-only`;
+		owner.textContent = `${s.ownerUsername} — solo lectura`;
 		nameCol.appendChild(owner);
 		select.appendChild(nameCol);
 

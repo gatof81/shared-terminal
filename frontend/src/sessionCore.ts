@@ -186,11 +186,11 @@ export async function runSessionAction(s: SessionInfo, id: SessionActionId): Pro
 		case "start":
 		case "restore":
 			try {
-				if (id === "restore") showToast(`Restoring "${s.name}"…`);
-				else showToast(`Starting "${s.name}"…`);
+				if (id === "restore") showToast(`Restaurando «${s.name}»…`);
+				else showToast(`Poniendo en marcha «${s.name}»…`);
 				await startSession(s.sessionId);
 				await refreshSessions();
-				if (id === "restore") showToast(`Session "${s.name}" restored`);
+				if (id === "restore") showToast(`Sesión «${s.name}» restaurada`);
 			} catch (err) {
 				showToast((err as Error).message, true);
 			}
@@ -200,9 +200,10 @@ export async function runSessionAction(s: SessionInfo, id: SessionActionId): Pro
 			// mid-turn included), so every entry point — the row's quick
 			// button, the ⋯ menu, the session menu — asks first.
 			const ok = await confirmDialog({
-				title: "Stop session",
-				message: `Stop "${s.name}"?\n\nEverything running in it stops now — a Claude working in a terminal tab is interrupted mid-task. Its files and anything installed in the container are kept; you can start it again later.`,
-				confirmLabel: "Stop session",
+				title: "Detener la sesión",
+				message: `¿Detener «${s.name}»?\n\nTodo lo que corre en ella se detiene ahora: un Claude que esté trabajando en una pestaña de la terminal se interrumpe a mitad de la tarea. Sus archivos y lo que esté instalado en el contenedor se conservan; podés ponerla en marcha de nuevo más tarde.`,
+				confirmLabel: "Detener la sesión",
+				cancelLabel: "Cancelar",
 				danger: true,
 			});
 			if (!ok) return;
@@ -247,18 +248,20 @@ export async function runSessionAction(s: SessionInfo, id: SessionActionId): Pro
 			// (Restore) and only needs a plain confirmation.
 			const ok = hard
 				? await confirmDialog({
-						title: "Delete permanently",
-						message: `Delete "${s.name}" permanently?\n\nThis stops and removes the container, wipes the workspace files from disk and removes the session record. This cannot be undone.`,
-						confirmLabel: "Delete permanently",
+						title: "Eliminar definitivamente",
+						message: `¿Eliminar «${s.name}» definitivamente?\n\nEsto detiene y elimina el contenedor, borra del disco los archivos del workspace y elimina los datos de la sesión. No se puede deshacer.`,
+						confirmLabel: "Eliminar definitivamente",
+						cancelLabel: "Cancelar",
 						requireText: {
 							expected: s.name,
-							label: `Type the session name (${s.name}) to confirm`,
+							label: `Escribí el nombre de la sesión (${s.name}) para confirmar`,
 						},
 					})
 				: await confirmDialog({
-						title: "Terminate session",
-						message: `Terminate "${s.name}"?\n\nThe container is stopped and removed. Workspace files are preserved — you can restore the session later.`,
-						confirmLabel: "Terminate",
+						title: "Terminar la sesión",
+						message: `¿Terminar «${s.name}»?\n\nEl contenedor se detiene y se elimina. Los archivos del workspace se conservan: podés restaurar la sesión más tarde.`,
+						confirmLabel: "Terminar",
+						cancelLabel: "Cancelar",
 						danger: true,
 					});
 			if (!ok) return;
@@ -310,10 +313,10 @@ applyTabsHidden(readTabsHidden());
 
 function tabRowItem(): MenuItem[] {
 	if (!isMobile() || getView() !== "terminal" || currentTabs.length === 0) return [];
-	const hint = "Tabs, search and text size row";
+	const hint = "La fila de pestañas, búsqueda y tamaño del texto";
 	return readTabsHidden()
-		? [{ id: "tabs-show", label: "Show tabs", hint }]
-		: [{ id: "tabs-hide", label: "Hide tabs", hint }];
+		? [{ id: "tabs-show", label: "Mostrar las pestañas", hint }]
+		: [{ id: "tabs-hide", label: "Ocultar las pestañas", hint }];
 }
 
 /**
@@ -751,8 +754,8 @@ function sessionsMenuButton(): HTMLElement {
 	more.className = "btn btn-icon sm sgroup-action ssection-menu";
 	more.dataset.role = "sessions-menu";
 	more.textContent = "⋯";
-	more.title = "Sessions: show terminated, refresh";
-	more.setAttribute("aria-label", "Sessions options");
+	more.title = "Sesiones: mostrar terminadas, actualizar";
+	more.setAttribute("aria-label", "Opciones de Sesiones");
 	more.setAttribute("aria-haspopup", "menu");
 	more.addEventListener("click", () => openSessionsMenu(more));
 	return more;
@@ -807,18 +810,18 @@ function paintProjectRows(): void {
 function openSessionsMenu(opener: HTMLElement): void {
 	const showing = showTerminatedToggle.checked;
 	openActionMenu({
-		title: "Sessions",
+		title: "Sesiones",
 		opener,
 		items: [
 			{
 				id: "terminated",
-				label: showing ? "Hide terminated" : "Show terminated",
-				hint: "Include terminated sessions so you can restore them",
+				label: showing ? "Ocultar terminadas" : "Mostrar terminadas",
+				hint: "Incluir las sesiones terminadas para poder restaurarlas",
 			},
 			{
 				id: "refresh",
-				label: "Refresh",
-				hint: "Refresh sessions and live usage",
+				label: "Actualizar",
+				hint: "Actualizar las sesiones y el uso en vivo",
 				enabled: sidebarRefreshBtn?.disabled !== true,
 			},
 		],
@@ -1024,12 +1027,12 @@ function buildSessionItem(s: SessionInfo): HTMLElement {
 	// took two of each row's three lines and pushed the agent out of the
 	// phone's row).
 	if (s.status === "running" && s.usage) {
-		const usage = `CPU ${formatCpuCores(s.usage.cpuPercent / 100)} cores (${formatCpuPercent(s.usage.cpuPercent)}) · Mem ${formatBytes(s.usage.memBytes)} (${s.usage.memPercent.toFixed(0)}%)`;
+		const usage = `CPU ${formatCpuCores(s.usage.cpuPercent / 100)} núcleos (${formatCpuPercent(s.usage.cpuPercent)}) · Memoria ${formatBytes(s.usage.memBytes)} (${s.usage.memPercent.toFixed(0)}%)`;
 		select.title = `${s.name}\n${usage}`;
 		if (s.usage.memPercent >= USAGE_HOT_PERCENT) {
 			const hot = document.createElement("span");
 			hot.className = "session-usage session-usage-hot";
-			hot.textContent = `Mem ${s.usage.memPercent.toFixed(0)}%`;
+			hot.textContent = `Memoria ${s.usage.memPercent.toFixed(0)}%`;
 			meta.appendChild(hot);
 		}
 	} else if (s.status !== "running") {
@@ -1385,7 +1388,7 @@ export async function applyRoute(route: Route | null): Promise<void> {
 			// successful load apply the route. "Not found" is only a verdict
 			// over a list that did load.
 			if (!listLoaded && sessions.length === 0) return;
-			showToast("Session not found", true);
+			showToast("No se encontró la sesión", true);
 			clearRoute();
 			return;
 		}
@@ -1674,7 +1677,7 @@ function openTab(tabId: string) {
 	// fail via the WS and leave a blank pane mounted as the active tab.
 	const s = sessions.find((x) => x.sessionId === activeSessionId);
 	if (!s || s.status !== "running") {
-		showToast("Session isn't running — start it first", true);
+		showToast("La sesión no está en marcha: ponela en marcha primero", true);
 		return;
 	}
 
@@ -1935,7 +1938,7 @@ async function addTab(triggeredBy?: HTMLButtonElement) {
 	// openTab and the post-check below.
 	const statusBefore = sessions.find((x) => x.sessionId === sessionId)?.status;
 	if (!statusBefore || statusBefore !== "running") {
-		showToast("Session isn't running — start it first", true);
+		showToast("La sesión no está en marcha: ponela en marcha primero", true);
 		return;
 	}
 	if (triggeredBy) triggeredBy.disabled = true;
