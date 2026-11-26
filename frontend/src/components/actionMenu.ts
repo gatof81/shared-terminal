@@ -235,6 +235,8 @@ function placeAnchored(card: HTMLElement, anchor: HTMLElement): void {
 function placeAtEnd(card: HTMLElement, anchor: HTMLElement): void {
 	const s = card.style;
 	const box = anchor.getBoundingClientRect();
+	// Above or below the whole row the anchor sits in (a row's ⋯), never over it.
+	const row = (anchor.closest("li") ?? anchor).getBoundingClientRect();
 	const vh = window.visualViewport?.height ?? window.innerHeight;
 	const phone = window.matchMedia?.(PHONE).matches ?? false;
 	if (phone) {
@@ -246,14 +248,19 @@ function placeAtEnd(card: HTMLElement, anchor: HTMLElement): void {
 		s.left = `${Math.round(Math.max(8, Math.min(box.right - w, window.innerWidth - w - 8)))}px`;
 		s.width = `${w}px`;
 	}
-	const below = vh - box.bottom - 12;
-	const above = box.top - 12;
+	const below = vh - row.bottom - 12;
+	const above = row.top - 12;
+	// Its whole height: not the one a previous placement's max-height cut
+	// (re-placed with that, it grew back over the row once the cap moved).
+	s.maxHeight = "none";
 	const h = card.offsetHeight;
 	if (h > below && above > below) {
-		s.maxHeight = `${Math.max(120, Math.round(above))}px`;
-		s.top = `${Math.round(Math.max(8, box.top - 4 - Math.min(h, above)))}px`;
+		// What does not fit scrolls inside; the bottom stays 4 px over the row.
+		const room = Math.max(0, Math.round(above - 4));
+		s.maxHeight = `${room}px`;
+		s.top = `${Math.round(row.top - 4 - Math.min(h, room))}px`;
 	} else {
 		s.maxHeight = `${Math.max(120, Math.round(below))}px`;
-		s.top = `${Math.round(box.bottom + 4)}px`;
+		s.top = `${Math.round(row.bottom + 4)}px`;
 	}
 }

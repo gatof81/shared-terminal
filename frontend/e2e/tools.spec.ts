@@ -365,6 +365,20 @@ test.describe("Herramientas", () => {
 		await expect(menu).toBeHidden();
 		await expect(more).toBeFocused();
 		await expect(more).toHaveAttribute("aria-expanded", "false");
+		if (app.mobile) {
+			// A short screen, no room under the row: above it, never over it.
+			await page.setViewportSize({ width: 390, height: 560 });
+			await more.click();
+			await expect(menu).toBeVisible();
+			const row = (await page.locator(".rail-agent-item", { has: more }).boundingBox())!;
+			await expect
+				.poll(async () => {
+					const m = (await menu.boundingBox())!;
+					return m.y + m.height;
+				})
+				.toBeLessThanOrEqual(row.y);
+			await app.escape();
+		}
 		expect(app.errors).toEqual([]);
 	});
 
