@@ -310,7 +310,7 @@ export class AcpThread {
 		this.input.setAttribute("aria-label", "Mensaje");
 		this.sendBtn.type = "submit";
 		this.sendBtn.setAttribute("aria-label", "Enviar");
-		this.sendBtn.title = "Enviar (Ctrl+Enter)";
+		this.syncEnterMode();
 		// Each button is its 44-px cell; what is seen is a 30-px circle inside.
 		this.sendBtn.append(el("span", "acp-cbtn-face"));
 		this.sendBtn.firstElementChild!.append(sendIcon(), el("span", "acp-send-spin"));
@@ -462,12 +462,29 @@ export class AcpThread {
 			e.preventDefault();
 			void this.send();
 		});
+		this.input.addEventListener("focus", () => this.syncEnterMode());
 		this.input.addEventListener("keydown", (e) => {
+			// The mention menu takes Enter first: it confirms the mention.
 			if (this.mentionKey(e)) return;
-			if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+			// Shift+Enter stays the textarea's own line break.
+			if (e.key !== "Enter" || e.shiftKey || e.altKey) return;
+			// An IME composing (Japanese, Chinese…) confirms its candidate with
+			// Enter: that key is the IME's, never a send. Some browsers report
+			// only keyCode 229 for it.
+			if (e.isComposing || e.keyCode === 229) return;
+			const touch = this.syncEnterMode();
+			if (this.composerMode !== "on" || this.input.value.trim() === "") {
+				e.preventDefault();
+				return;
+			}
+			if (e.ctrlKey || e.metaKey) {
+				e.preventDefault();
+				this.insertLineBreak();
+			} else if (!touch) {
 				e.preventDefault();
 				void this.send();
 			}
+			// A virtual keyboard: Enter is a line break (native); the arrow sends.
 		});
 	}
 
@@ -490,7 +507,7 @@ export class AcpThread {
 	/**
 	 * Lock or hide the message box (the project page keeps it locked until the
 	 * project is confirmed live). Nothing leaves while it is not "on" — not by
-	 * the button, Ctrl+Enter or a restored draft — and the draft stays in the
+	 * the button, Enter or a restored draft — and the draft stays in the
 	 * field. Errors (e.g. "Cargar anteriores") stay visible either way.
 	 */
 	setComposer(mode: ComposerMode): void {
@@ -1650,6 +1667,32 @@ export class AcpThread {
 		this.setPlaceholder();
 	}
 
+	/**
+	 * A touch screen without a mouse (`pointer: coarse`) is taken as a
+	 * virtual keyboard: Enter breaks the line and only the arrow sends, so a
+	 * phone never sends by accident. Read on every focus/key, not once: a
+	 * tablet can gain or lose a pointer. Returns whether it is in that mode.
+	 */
+	private syncEnterMode(): boolean {
+		const touch = typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches;
+		this.sendBtn.title = touch ? "Enviar" : "Enviar (Enter)";
+		if (touch) this.input.setAttribute("enterkeyhint", "enter");
+		else this.input.removeAttribute("enterkeyhint");
+		return touch;
+	}
+
+	/**
+	 * Ctrl/Cmd+Enter: a line break at the caret, replacing the selection.
+	 * `insertText` goes through the browser's editing, so Ctrl+Z undoes it
+	 * and it fires `input` like typing (height, draft, arrow); setRangeText
+	 * is the fallback where execCommand is gone, and does neither by itself.
+	 */
+	private insertLineBreak(): void {
+		if (document.execCommand?.("insertText", false, "\n")) return;
+		this.input.setRangeText("\n", this.input.selectionStart, this.input.selectionEnd, "end");
+		this.input.dispatchEvent(new Event("input", { bubbles: true }));
+	}
+
 	/** The arrow: off when nothing can be sent (still on while another send is out). */
 	private syncSendBtn(): void {
 		const empty = this.input.value.trim() === "";
@@ -2179,7 +2222,7 @@ export class AcpThread {
 			}
 		}
 		// Reserve this send BEFORE any await: the text leaves the field and gets
-		// its client id now, so a second click (or Ctrl+Enter) on the same draft
+		// its client id now, so a second click (or Enter) on the same draft
 		// finds an empty field and sends nothing. A new message typed meanwhile is
 		// a new send, as always. Same text again after a failure ⇒ same id:
 		// recipients that already got it are not sent twice.
