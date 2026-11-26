@@ -98,7 +98,9 @@ if (cmd === "send") {
 	const all = await call("GET", "/agents");
 	const mine = all.find((a) => a.name === me)?.projectId ?? null;
 	for (const a of all)
-		console.log(`@${a.name}${a.name === me ? " (vos)" : ""}${mine && a.projectId === mine ? " · mismo proyecto" : ""}`);
+		console.log(
+			`@${a.name}${a.name === me ? " (vos)" : ""}${mine && a.projectId === mine ? " · mismo proyecto" : ""}${a.skills ? ` · skills ${a.skills.hash ?? "-"}${a.skills.names.length ? ` (${a.skills.names.join(", ")})` : ""}${a.skills.error ? ` · ${a.skills.error}` : ""}` : ""}`,
+		);
 } else if (cmd === "list") {
 	for (const m of await call("GET", "/messages"))
 		console.log(`#${m.id} ${m.kind} @${m.from_id} -> @${m.to_id} ${m.state}${m.reply_to ? ` (re #${m.reply_to})` : ""} | ${m.body.replace(/\s+/g, " ").slice(0, 70)}`);

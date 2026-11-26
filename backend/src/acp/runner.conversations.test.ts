@@ -13,10 +13,21 @@
  * prompt refused because the adapter lost the session (-32002) goes back to
  * pending and runs after a reopen; a `turn` task the adapter opens with no
  * message running holds nothing and is dropped when the slot changes session.
+ * And the shared skills (4A): installed into ~/.claude/skills at start
+ * without touching another skill, reported in /agents; a resumed session
+ * whose file names another protocol gets the current one once.
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import type http from "node:http";
 import { createRequire } from "node:module";
 import type { AddressInfo } from "node:net";
@@ -217,6 +228,15 @@ beforeAll(async () => {
 		).body.id as string;
 	A = await conv(1, "Tema A");
 	B = await conv(2, "Tema B");
+	// rc's ~/.claude/skills before its runner: a skill of its own (never
+	// touched) and one a
+	// previous runner installed that left the package (removed).
+	const skills = path.join(tmp, "rc", "home", ".claude", "skills");
+	mkdirSync(path.join(skills, "propia"), { recursive: true });
+	writeFileSync(path.join(skills, "propia", "SKILL.md"), "mía\n");
+	mkdirSync(path.join(skills, "retirada"), { recursive: true });
+	writeFileSync(path.join(skills, "retirada", "SKILL.md"), "vieja\n");
+	writeFileSync(path.join(skills, "retirada", ".st-managed"), "");
 	startRunner("rc");
 	startRunner("rd");
 }, 30_000);
@@ -380,5 +400,57 @@ describe("runner: what the adapter does on its own (#757)", () => {
 		expect(
 			(await call("GET", "/agents")).body.find((x: { name: string }) => x.name === "rc").heldBy,
 		).toEqual([]);
+	}, 60_000);
+});
+
+describe("runner: shared skills and the protocol of a resumed session (4A)", () => {
+	const rcAgent = async () =>
+		(await call("GET", "/agents")).body.find((x: { name: string }) => x.name === "rc") as {
+			skills: { hash: string | null; names: string[]; error: string | null } | null;
+		};
+
+	it("installs only the packaged skills into ~/.claude/skills and reports their hash", async () => {
+		const skills = path.join(tmp, "rc", "home", ".claude", "skills");
+		// rc started (and reported) in beforeAll and has run messages since.
+		const { skills: reported } = await rcAgent();
+		expect(reported).toMatchObject({ names: ["coordinar"], error: null });
+		expect(reported?.hash).toMatch(/^[0-9a-f]{12}$/);
+		expect(readFileSync(path.join(skills, "coordinar", "SKILL.md"), "utf8")).toBe(
+			readFileSync(path.join(RUNTIME, "skills", "coordinar", "SKILL.md"), "utf8"),
+		);
+		expect(readFileSync(path.join(skills, "propia", "SKILL.md"), "utf8")).toBe("mía\n");
+		expect(existsSync(path.join(skills, "retirada"))).toBe(false);
+	});
+
+	it("a resumed session whose file names another protocol gets the current one once", async () => {
+		const sessionFile = path.join(stateOf("rc"), "conv", `${A}.json`);
+		const sessionInfo = () =>
+			JSON.parse(readFileSync(sessionFile, "utf8")) as { sessionId: string; protocol?: string };
+		const updates = () =>
+			(
+				JSON.parse(
+					readFileSync(
+						path.join(stateOf("rc"), "test-agent", `session-${sessionInfo().sessionId}.json`),
+						"utf8",
+					),
+				) as { protocolUpdates?: number }
+			).protocolUpdates ?? 0;
+		// Every session opened by this runner was given its protocol.
+		const current = sessionInfo().protocol;
+		expect(current).toMatch(/^[0-9a-f]{12}$/);
+		expect(updates()).toBe(0);
+		// The slot is in B's session; A's file as a runner before 4A left it.
+		expect((await settled((await post("rc", "en B", B)).id)).state).toBe("done");
+		const { protocol: _, ...old } = sessionInfo();
+		writeFileSync(sessionFile, JSON.stringify(old));
+		const a = await settled((await post("rc", "en A", A)).id);
+		expect(a.state).toBe("done");
+		expect(a.result_text).toContain("en A"); // the update is not part of the message
+		expect(updates()).toBe(1);
+		expect(sessionInfo().protocol).toBe(current);
+		// Given once: leaving and resuming again sends nothing more.
+		await settled((await post("rc", "en B otra vez", B)).id);
+		await settled((await post("rc", "en A otra vez", A)).id);
+		expect(updates()).toBe(1);
 	}, 60_000);
 });

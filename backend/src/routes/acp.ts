@@ -149,6 +149,7 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 		runtime: a.runtime,
 		model: a.model,
 		modelApplied: acp.modelAppliedOf(a.agent_id),
+		skills: acp.skillsAppliedOf(a.agent_id),
 		effort: a.effort ?? null,
 		effortApplied: acp.effortAppliedOf(a.agent_id),
 		maxConcurrency: a.max_concurrency,
@@ -1018,6 +1019,17 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 			const agent = agentOnly(res);
 			if (!agent) return;
 			acp.setModelApplied(agent, req.body);
+			res.status(204).end();
+		}),
+	);
+
+	// The shared skills the runner installed when it (and its adapter) started.
+	router.post(
+		"/runner/skills",
+		wrap(async (req, res) => {
+			const agent = agentOnly(res);
+			if (!agent) return;
+			acp.setSkillsApplied(agent, req.body);
 			res.status(204).end();
 		}),
 	);

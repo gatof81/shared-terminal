@@ -47,7 +47,8 @@
 //   session falls back to the adapter's own). The adapter of a slot ≥ 2 has no
 //   ST_TOKEN of its own, so a session that missed it speaks for nobody.
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { appendFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 const env = process.env;
@@ -118,7 +119,69 @@ const PROTOCOL = [
 	'Para encargar un trabajo aislado (su propio worktree, rama work/<id> y puertos): st work new @agente <id>, y después st send @agente --work <id> "texto"; st work list, st work close <id> y st work clean <id> completan el ciclo.',
 	"En un trabajo usá solo los puertos de tu rango (ST_PORT_BASE a ST_PORT_BASE+99). Después de levantar un servidor comprobá con st port check <puerto> que quien escucha es tu proceso: un HTTP 200 no prueba nada. Si el bind falla, no uses el servidor de otro. Si una herramienta no permite cambiar de puerto, decilo y no la corras en paralelo.",
 	"Al terminar un trabajo, st work clean no borra el worktree si quedan archivos ignorados que no sean node_modules/ o dist/ (test-results/, playwright-report/, coverage/, un .env…): no es un fallo; si no los necesitás, borralos vos y repetí st work clean; si los necesitás, preservalos antes.",
+	"Antes de encarar un pedido de la persona, clasificalo: directo (lo resolvés vos, alcance claro, riesgo bajo), objetivo con tareas (varias piezas, otros especialistas o dependencias) o plan con una sola aprobación inicial del alcance (alcance dudoso, alternativas o riesgo alto). Lo que la persona pida explícitamente («solo planificá», «hacelo directamente», «no implementes todavía») manda. Para coordinar, usá la skill coordinar.",
 ].join(" ");
+// Claude Code stores the system prompt in the session's transcript and a
+// `session/resume` keeps THAT one: the systemPrompt sent with the resume is
+// ignored (verified against claude-agent-acp 0.108.0 / Claude Code 2.1.326,
+// 2026-11-26). So each session file records the protocol it was given, and a
+// resumed session whose protocol differs gets the current text once, as a
+// block of its next prompt (`protocolBlock`).
+const PROTOCOL_HASH = createHash("sha256").update(PROTOCOL).digest("hex").slice(0, 12);
+
+// ── Shared skills ─────────────────────────────────────────────────────────
+// The skills packaged with this runner (<runner dir>/skills/<name>/, copied by
+// the backend) are installed into ~/.claude/skills/<name>/ every time the
+// runner (and so the adapter) starts. Only those: a marker file says which
+// directories are ours, so another skill — even one with the same name — is
+// never overwritten, and one of ours that left the package is removed. Nothing
+// else under ~/.claude (CLAUDE.md, settings, credentials) is touched.
+// Claude Code reads a skill's body from disk at every use and announces a new
+// skill to a session already open, so a change needs no adapter restart; and
+// the backend rewrites this runner (and its skills) on every boot, which
+// restarts it while idle anyway.
+const SKILLS_SRC = new URL("./skills/", import.meta.url).pathname;
+const SKILLS_DEST = `${env.HOME}/.claude/skills`;
+const SKILL_MARK = ".st-managed";
+function installSkills() {
+	const hash = createHash("sha256");
+	const names = existsSync(SKILLS_SRC) ? readdirSync(SKILLS_SRC).filter((n) => /^[a-z0-9][a-z0-9-]*$/.test(n)).sort() : [];
+	const skipped = [];
+	mkdirSync(SKILLS_DEST, { recursive: true });
+	for (const name of names) {
+		const src = `${SKILLS_SRC}${name}`;
+		const files = readdirSync(src, { recursive: true, withFileTypes: true })
+			.filter((d) => d.isFile())
+			.map((d) => `${d.parentPath}/${d.name}`.slice(src.length + 1))
+			.sort();
+		for (const f of files) hash.update(`${name}/${f}\0`).update(readFileSync(`${src}/${f}`)).update("\0");
+		const dest = `${SKILLS_DEST}/${name}`;
+		if (existsSync(dest) && !existsSync(`${dest}/${SKILL_MARK}`)) {
+			skipped.push(name);
+			continue;
+		}
+		const tmp = `${SKILLS_DEST}/.${name}.st-tmp`;
+		rmSync(tmp, { recursive: true, force: true });
+		cpSync(src, tmp, { recursive: true });
+		writeFileSync(`${tmp}/${SKILL_MARK}`, "Instalada por el runner de Shared Terminal; se reemplaza en cada arranque.\n");
+		rmSync(dest, { recursive: true, force: true });
+		renameSync(tmp, dest);
+	}
+	for (const d of readdirSync(SKILLS_DEST)) {
+		if (!names.includes(d) && existsSync(`${SKILLS_DEST}/${d}/${SKILL_MARK}`)) rmSync(`${SKILLS_DEST}/${d}`, { recursive: true, force: true });
+	}
+	return {
+		hash: hash.digest("hex").slice(0, 12),
+		names: names.filter((n) => !skipped.includes(n)),
+		error: skipped.length ? `ya existe una skill propia con ese nombre (no se tocó): ${skipped.join(", ")}` : null,
+	};
+}
+let skills;
+try {
+	skills = installSkills();
+} catch (err) {
+	skills = { hash: null, names: [], error: String(err.message).slice(0, 300) };
+}
 
 const log = (...a) => console.log(new Date().toISOString(), `[${AGENT}${SLOT === 1 ? "" : `#${SLOT}`}]`, ...a);
 const marker = (msg) => {
@@ -415,6 +478,29 @@ async function initialize() {
 	initialized = true;
 }
 
+function saveSession(file, data) {
+	writeFileSync(`${file}.tmp`, JSON.stringify(data));
+	renameSync(`${file}.tmp`, file);
+}
+
+// The current protocol for a resumed session that was given another one (see
+// PROTOCOL_HASH), as a second block of the prompt — the first stays the
+// message with its header. Recorded once the prompt is answered: one that never
+// reached the session is offered again.
+function protocolBlock(sessionId) {
+	if (open?.sessionId !== sessionId || !open.protocolStale) return [];
+	return [{ type: "text", text: `[st-protocolo] Las instrucciones de Shared Terminal cambiaron; desde ahora rigen estas, en lugar de las del inicio de la sesión: ${PROTOCOL}` }];
+}
+function protocolGiven(sessionId) {
+	if (open?.sessionId !== sessionId || !open.protocolStale) return;
+	open.protocolStale = false;
+	try {
+		saveSession(open.file, { ...JSON.parse(readFileSync(open.file, "utf8")), protocol: PROTOCOL_HASH });
+	} catch (err) {
+		log(`protocol mark ${open.file}: ${err.message}`);
+	}
+}
+
 // Opens (new or resumed) the ACP session of work `ctx` (slot ≥ 2) or of
 // conversation `conv` in the main checkout (slot 1; null = no conversation),
 // closing the one this slot had open — never one with an open task: the claim
@@ -443,18 +529,19 @@ async function openSession(ctx = null, conv = null, token = null, work = null) {
 	const _meta = sessionEnv ? { claudeCode: { options: { env: sessionEnv } } } : undefined;
 	let sessionId;
 	if (existsSync(file)) {
-		sessionId = JSON.parse(readFileSync(file, "utf8")).sessionId;
-		open = { ctx, conv, key, sessionId }; // before the request: what the resume itself sets off is this session's
+		const saved = JSON.parse(readFileSync(file, "utf8"));
+		sessionId = saved.sessionId;
+		// before the request: what the resume itself sets off is this session's
+		open = { ctx, conv, key, sessionId, file, protocolStale: saved.protocol !== PROTOCOL_HASH };
 		keepConfigOptions(await request("session/resume", { sessionId, cwd, mcpServers: [], systemPrompt, _meta }));
 		log(`resumed session ${sessionId} (${key})`);
 	} else {
 		const created = await request("session/new", { cwd, mcpServers: [], systemPrompt, _meta });
 		keepConfigOptions(created);
 		sessionId = created.sessionId;
-		open = { ctx, conv, key, sessionId };
+		open = { ctx, conv, key, sessionId, file, protocolStale: false };
 		mkdirSync(file.slice(0, file.lastIndexOf("/")), { recursive: true });
-		writeFileSync(`${file}.tmp`, JSON.stringify({ sessionId, cwd, ...(conv ? { conversation: conv } : {}) }));
-		renameSync(`${file}.tmp`, file);
+		saveSession(file, { sessionId, cwd, ...(conv ? { conversation: conv } : {}), protocol: PROTOCOL_HASH });
 		log(`new session ${sessionId} (${key})`);
 	}
 	// The ACP equivalent of --dangerously-skip-permissions, for this session only.
@@ -629,7 +716,9 @@ function run(sessionId, msg) {
 		record({ prompt: msg.id });
 		emit({ kind: "turn", phase: "start" });
 		log(`message #${msg.id} from @${msg.from_id}`);
+		const update = protocolBlock(sessionId);
 		const answered = (r) => {
+			if (update.length) protocolGiven(sessionId);
 			if (current?.msg !== msg) return;
 			current.stopReason = r.stopReason;
 			current.promptOpen = false;
@@ -638,7 +727,7 @@ function run(sessionId, msg) {
 			if (!current.checked) current.bgTimer = setTimeout(() => bgCheck(sessionId), BG_CHECK_MS);
 			checkIdle();
 		};
-		request("session/prompt", { sessionId, prompt: [{ type: "text", text: `${marker(msg)}\n${msg.body}` }] })
+		request("session/prompt", { sessionId, prompt: [{ type: "text", text: `${marker(msg)}\n${msg.body}` }, ...update] })
 			.then(answered)
 			.catch((err) => {
 				if (current?.msg !== msg) return;
@@ -744,6 +833,8 @@ async function settleInterrupted(msg) {
 async function main() {
 	log(`starting slot ${SLOT}; adapter ${env.ACP_AGENT_CMD}, cwd ${CWD}, model ${env.ANTHROPIC_MODEL ?? "default"}`);
 	mkdirSync(CWD, { recursive: true });
+	log(`skills ${skills.hash ?? "-"}: ${skills.names.join(", ") || "none"}${skills.error ? ` (${skills.error})` : ""}`);
+	await api("POST", "/runner/skills", skills);
 	// No session is opened at start (it would only be closed by the first
 	// message of another conversation): one is opened for a message this slot
 	// claims, or for the report about an interrupted one.

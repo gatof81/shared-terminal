@@ -51,6 +51,9 @@
 //   anything else            → an echo of the first line
 // With `<state>/test-agent/lose-sessions` present, every prompt drops its
 // session and is refused with -32002 (a session that dies again on reopen).
+// A prompt block starting with "[st-protocolo]" (the runner's protocol update
+// for a resumed session) is counted in the session's file (`protocolUpdates`)
+// and left out of the message.
 // A reply from another agent ("Respuesta de @x a tu mensaje #n: …") is
 // acknowledged. Every answer carries how many prompts this ACP session has
 // seen and the session's model and effort — the session (count, model, effort)
@@ -424,7 +427,14 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
 			// Like claude-agent-acp's startTurn for a session not in its map.
 			loaded.delete(params.sessionId);
 			throw Object.assign(new Error("Resource not found"), { code: -32002, data: { sessionId: params.sessionId } });
-		} else if (method === "session/prompt") result = await prompt(params.sessionId, params.prompt.map((b) => b.text ?? "").join("\n"));
+		} else if (method === "session/prompt") {
+			// The runner's protocol update for a resumed session: counted (the
+			// tests read it from the session's file), never part of the message.
+			const update = params.prompt.filter((b) => b.text?.startsWith("[st-protocolo]"));
+			if (update.length) sessions[params.sessionId].protocolUpdates = (sessions[params.sessionId].protocolUpdates ?? 0) + update.length;
+			const text = params.prompt.filter((b) => !update.includes(b)).map((b) => b.text ?? "").join("\n");
+			result = await prompt(params.sessionId, text);
+		}
 		else throw Object.assign(new Error(`unsupported ${method}`), { code: -32601 });
 		out({ id, result });
 	} catch (err) {
