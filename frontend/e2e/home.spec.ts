@@ -76,6 +76,19 @@ test.describe("phone home", () => {
 		await expect(page.locator("body")).not.toHaveClass(/\bhome-on\b/);
 		await page.goBack();
 		await expect(page.locator("body")).toHaveClass(/\bhome-on\b/);
+		// The project's ‹ is the same way out: Back to the home it came from,
+		// with its row focused — no drawer over the project, no extra entry.
+		await page.goForward();
+		await page.locator(".rail-head .rail-back").click();
+		await expect(page.locator("body")).toHaveClass(/\bhome-on\b/);
+		expect(await app.sidebarOpen()).toBe(false);
+		await expect(
+			page.locator(`#session-list a.project-row[data-project-id="${PROJECT_IDS.hz}"]`),
+		).toBeFocused();
+		await page.goForward();
+		await expect(page.locator(".rail-head .rail-back")).toBeVisible();
+		await page.goBack();
+		await expect(page.locator("body")).toHaveClass(/\bhome-on\b/);
 		// Out of the home (a session), the ☰ opens that same element as a drawer.
 		await app.sessionRow("my-project").click();
 		await app.expectTerminalReady();

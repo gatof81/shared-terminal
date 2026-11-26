@@ -664,7 +664,7 @@ function labelSessionRow(select: HTMLElement): void {
 	const session = select.dataset.sessionName ? ` ${select.dataset.sessionName}` : "";
 	select.setAttribute(
 		"aria-label",
-		`${words}, sesión${session} ${STATE_WORD.get(status) ?? status}${status === "failed" ? " — ver el registro del arranque" : ""}${agent}`,
+		`${words}, sesión${session} ${STATE_WORD.get(status) ?? status}${status === "failed" ? " — ver el registro del arranque" : status === "terminated" ? " — archivos conservados" : ""}${agent}`,
 	);
 	const base = select.dataset.baseTitle ?? "";
 	const tip = [base, select.dataset.agentLabel ? `Agente: ${select.dataset.agentLabel}` : ""]
@@ -1033,6 +1033,9 @@ function buildSessionItem(s: SessionInfo): HTMLElement {
 			meta.appendChild(hot);
 		}
 	} else if (s.status !== "running") {
+		// The row keeps one short word: the rest is said in the tooltip and
+		// the accessible name, never at the cost of the session's name.
+		if (s.status === "terminated") select.title = `${s.name}\nTerminada: los archivos se conservan`;
 		// The dot's colour alone told stopped / terminated / failed apart.
 		// The row's aria-label already says it: this line is for the eye.
 		// An agent's row has no dot: the word is its one indicator, a chip.
@@ -1045,7 +1048,7 @@ function buildSessionItem(s: SessionInfo): HTMLElement {
 			s.status === "stopped"
 				? "Detenida"
 				: s.status === "terminated"
-					? "Terminada · archivos conservados"
+					? "Terminada"
 					: s.status === "failed"
 						? "Falló · abrí el registro"
 						: s.status;

@@ -90,18 +90,23 @@ test.describe("terminal invariant", () => {
 		await expect(page.locator(".rail-body")).toBeVisible();
 		// The rail's ‹ to the main level: the terminal again. Wide it goes back
 		// to the entry the project was entered from (Forward returns to the
-		// rail); on a phone it opens the drawer, whose row is a new entry.
+		// rail); on a phone it is a new entry for the home (the list as the
+		// screen), whose row is one more.
 		await page.locator(".rail-back").click();
 		if (app.mobile) {
-			await expect(page.locator("main")).toHaveClass(/sidebar-open/);
+			await expect(page.locator("body")).toHaveClass(/\bhome-on\b/);
 			await app.sessionRow("my-project").locator(".session-select").click();
 		}
 		await expect(page.locator("#project-view")).toBeHidden();
-		if (app.mobile) await page.goBack();
-		else await page.goForward();
+		if (app.mobile) {
+			await page.goBack();
+			await page.goBack();
+		} else await page.goForward();
 		await expect(page.locator(".rail-body")).toBeVisible();
-		if (app.mobile) await page.goForward();
-		else await page.goBack();
+		if (app.mobile) {
+			await page.goForward();
+			await page.goForward();
+		} else await page.goBack();
 		await expect(page.locator("#project-view")).toBeHidden();
 		// Pendientes and the account's menu with the terminal on screen.
 		await page.locator("#inbox-btn").click();
