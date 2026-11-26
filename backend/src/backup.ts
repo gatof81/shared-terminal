@@ -128,6 +128,13 @@ export const TABLES: ReadonlyArray<{ name: string; orderBy: string; sinceSchema?
 	// restored conversation's last_activity_at — restored after them, the
 	// backup's own value is what stays.
 	{ name: "conversations", orderBy: "owner_user_id, id", sinceSchema: 27 },
+	// v29. The history FIRST (no FK): the task and link triggers skip a
+	// creation or link whose event is already there, so replaying the rows
+	// neither duplicates the history nor bumps a restored version. Then the
+	// tasks by id (a child's parent is older) and their links (FK → tasks).
+	{ name: "task_events", orderBy: "id", sinceSchema: 29 },
+	{ name: "tasks", orderBy: "id", sinceSchema: 29 },
+	{ name: "task_links", orderBy: "task_id, kind, ref", sinceSchema: 29 },
 ];
 
 export interface BackupManifest {

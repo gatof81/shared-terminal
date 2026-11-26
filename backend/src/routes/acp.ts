@@ -33,6 +33,7 @@ import {
 	conversationView,
 	type Recipients,
 } from "../acp/conversations.js";
+import { AcpTasks, type TaskActor, TaskError, taskView } from "../acp/tasks.js";
 import { type AcpWorks, WorkError, workDir, workView } from "../acp/works.js";
 import { type AuthedRequest, requireAuth } from "../auth.js";
 import { logger } from "../logger.js";
@@ -57,6 +58,7 @@ declare module "express-serve-static-core" {
 export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 	const router = Router();
 	const conversations = new AcpConversations(acp);
+	const tasks = new AcpTasks(acp, works);
 	router.use(express.json({ limit: acp.config.maxMessageBytes + 64 * 1024 }));
 
 	// Bearer acp1.* ⇒ agent; anything else ⇒ the cookie session.
@@ -77,6 +79,8 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 
 	const caller = (res: Response) => res.locals.acpCaller as Caller;
 	const ownerOf = (c: Caller) => (c.kind === "owner" ? c.userId : c.agent.owner_user_id);
+	const actorOf = (c: Caller): TaskActor =>
+		c.kind === "owner" ? { kind: "owner" } : { kind: "agent", agent: c.agent, context: c.context };
 	const agentOnly = (res: Response): AgentRow | null => {
 		const c = caller(res);
 		if (c.kind !== "agent" || !c.runner) {
@@ -121,7 +125,7 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 	const refuse = (res: Response, err: unknown) => {
 		if (err instanceof ConversationError)
 			return void res.status(err.status).json({ error: err.code });
-		if (!(err instanceof WorkError)) throw err;
+		if (!(err instanceof WorkError) && !(err instanceof TaskError)) throw err;
 		res.status(err.status).json({ error: err.code, ...err.detail });
 	};
 	const wrap =
@@ -211,6 +215,7 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 				work,
 				conversationId,
 				team,
+				task,
 				context: freeContext,
 			} = (req.body ?? {}) as Record<string, unknown>;
 			// The free `context` is gone (v26): a caller still sending it meant an
@@ -288,6 +293,20 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 			if (hasWork && targets.length > 1)
 				return void res.status(400).json({ error: "work-needs-one-recipient" });
 			const target = targets[0];
+
+			// `task` (v29, `st send --task`): a task the sender sees, of the
+			// recipients' project. Inheriting it from the running message is PR 3's.
+			let taskId: number | null = null;
+			if (task !== undefined && task !== null) {
+				const t = await tasks.visible(owner, actorOf(c), task);
+				if (!t) return void res.status(404).json({ error: "task-not-found", task });
+				const away = targets.find((a) => a.project_id !== t.project_id);
+				if (away)
+					return void res
+						.status(400)
+						.json({ error: "task-other-project", agent: away.name, task: t.id });
+				taskId = t.id;
+			}
 
 			let scope: string | null = conv?.project_id ?? null;
 			let convId: string | null = conv?.id ?? null;
@@ -389,6 +408,7 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 						rootId,
 						conversationId: convId,
 						team: isTeam,
+						taskId,
 					})
 					.catch((err: unknown) => {
 						if (err instanceof ClientIdConflictError) return err;
@@ -555,6 +575,66 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 			)
 				return void res.status(404).json({ error: "not-found" });
 			res.json(msg);
+		}),
+	);
+
+	// ── Tasks (v29, both callers; acp/tasks.ts has who may do what) ───────
+
+	const taskRoute = (
+		fn: (owner: string, actor: TaskActor, req: Request, res: Response) => Promise<void>,
+	) =>
+		wrap(async (req, res) => {
+			const c = caller(res);
+			res.setHeader("Cache-Control", "no-store");
+			try {
+				await fn(ownerOf(c), actorOf(c), req, res);
+			} catch (err) {
+				refuse(res, err);
+			}
+		});
+
+	// POST /tasks {title, description?, parentId?, goal?, assignee?, reviewer?,
+	// priority?; the person: projectId, originMessageId?, coordinator?} — a goal
+	// already created for the same request of the person answers 200 with it
+	// (`existing: true`) and its coordinator.
+	router.post(
+		"/tasks",
+		taskRoute(async (owner, actor, req, res) => {
+			const r = await tasks.create(owner, actor, req.body);
+			res.status(r.created ? 201 : 200).json({ ...taskView(r.task), existing: !r.created });
+		}),
+	);
+
+	// GET /tasks?projectId=&openAfter=&doneBefore= — the board (an agent: its project).
+	router.get(
+		"/tasks",
+		taskRoute(async (owner, actor, req, res) => {
+			res.json(await tasks.board(owner, actor, req.query));
+		}),
+	);
+
+	router.get(
+		"/tasks/:id",
+		taskRoute(async (owner, actor, req, res) => {
+			res.json(await tasks.show(owner, actor, req.params.id));
+		}),
+	);
+
+	// PATCH /tasks/:id {version, title?, description?, assignee?, reviewer?,
+	// priority?, status?, blockedReason?, coordinator?} — 409 stale with the row.
+	router.patch(
+		"/tasks/:id",
+		taskRoute(async (owner, actor, req, res) => {
+			res.json(taskView(await tasks.update(owner, actor, req.params.id, req.body)));
+		}),
+	);
+
+	// POST /tasks/:id/links {version, kind: work|pr|dep|external, ref}
+	router.post(
+		"/tasks/:id/links",
+		taskRoute(async (owner, actor, req, res) => {
+			const t = await tasks.link(owner, actor, req.params.id, req.body);
+			res.json((await tasks.show(owner, actor, t.id)).task);
 		}),
 	);
 

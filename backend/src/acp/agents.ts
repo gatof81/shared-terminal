@@ -58,6 +58,8 @@ export interface AcpConfig {
 	maxChain: number;
 	/** Free space the agent's workspace must have to create a work (ACP_WORK_MIN_FREE_MB). */
 	workMinFreeMb: number;
+	/** Agent → agent requests a goal (root task) starts with (ACP_GOAL_BUDGET); only the person raises it. */
+	goalBudget: number;
 	/** Install the deterministic test adapter as runtime `st-test-agent` (ACP_TEST_RUNTIME=1). */
 	testRuntime: boolean;
 }
@@ -73,6 +75,7 @@ export function acpConfigFromEnv(workspaceRoot: string, port: number): AcpConfig
 		maxDepth: Number(env.ACP_MAX_DEPTH ?? DEFAULT_MAX_DEPTH),
 		maxRunning: Number(env.ACP_MAX_RUNNING ?? 6),
 		maxChain: Number(env.ACP_MAX_CHAIN ?? 40),
+		goalBudget: Number(env.ACP_GOAL_BUDGET ?? 150),
 		// 20 GiB: the workspace shares its filesystem with everything else, and the
 		// nightly backup refuses to run under 15 GiB free — a lower floor would let
 		// works be created long after the host stopped getting backups.
@@ -188,6 +191,8 @@ export interface MessageRow {
 	reviewed_at: string | null;
 	/** On the runner's recovery message: the interrupted message it reports on (v27). */
 	recovery_of: number | null;
+	/** The task (v29) it is part of; NULL = none. */
+	task_id: number | null;
 }
 
 export type QuestionState = "open" | "answered" | "delivered" | "withdrawn" | "orphaned";
@@ -214,7 +219,8 @@ export type AcpEvent =
 	| { type: "question"; question: QuestionRow }
 	| { type: "activity"; agent: string; events: ActivityEvent[] }
 	| { type: "agents" }
-	| { type: "conversation"; conversation: Record<string, unknown> };
+	| { type: "conversation"; conversation: Record<string, unknown> }
+	| { type: "task"; task: Record<string, unknown> };
 
 /** A message as an agent's state names it: where it is (conversation, work). */
 export interface MessageRef {
@@ -815,6 +821,8 @@ export class AcpAgents {
 		conversationId?: string | null;
 		/** Sent by the person to the whole team (one row per agent). */
 		team?: boolean;
+		/** The task it is part of (v29). */
+		taskId?: number | null;
 	}): Promise<{ message: MessageRow; replayed: boolean }> {
 		const params = [
 			m.ownerUserId,
@@ -829,9 +837,10 @@ export class AcpAgents {
 			m.rootId ?? null,
 			m.conversationId ?? null,
 			m.team ? 1 : 0,
+			m.taskId ?? null,
 		];
 		const r = await d1Query<MessageRow>(
-			"INSERT OR IGNORE INTO agent_messages (owner_user_id, from_id, to_id, kind, body, state, project_id, depth, client_id, context, from_context, root_id, conversation_id, team) VALUES (?, ?, ?, 'request', ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *",
+			"INSERT OR IGNORE INTO agent_messages (owner_user_id, from_id, to_id, kind, body, state, project_id, depth, client_id, context, from_context, root_id, conversation_id, team, task_id) VALUES (?, ?, ?, 'request', ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *",
 			params,
 		);
 		if (r.results[0])
@@ -853,7 +862,8 @@ export class AcpAgents {
 			p.project_id !== (m.projectId ?? null) ||
 			p.context !== (m.context ?? null) ||
 			p.conversation_id !== (m.conversationId ?? null) ||
-			Boolean(p.team) !== Boolean(m.team)
+			Boolean(p.team) !== Boolean(m.team) ||
+			p.task_id !== (m.taskId ?? null)
 		)
 			throw new ClientIdConflictError(p.id);
 		return { message: p, replayed: true };
