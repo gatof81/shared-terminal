@@ -1092,6 +1092,10 @@ export const ACP_TASKS_DDL: readonly string[] = [
 	END`,
 	// One event per write that changed something tracked: its headline kind and
 	// every changed field as [old, new]. A bare version bump (a link) adds none.
+	// The changed fields come from json_each over [field, old, new] triples, not
+	// from a UNION ALL of one SELECT per field: D1 refuses a compound SELECT of
+	// more than 5 terms (SQLite allows 500 — d1Limits.ts), and that UNION ALL
+	// of 10 once stopped the backend at boot on real D1.
 	`CREATE TRIGGER IF NOT EXISTS trg_task_updated
 	AFTER UPDATE ON tasks
 	WHEN OLD.title IS NOT NEW.title OR OLD.description IS NOT NEW.description OR OLD.assignee IS NOT NEW.assignee
@@ -1112,16 +1116,19 @@ export const ACP_TASKS_DDL: readonly string[] = [
 				ELSE 'updated'
 			END,
 			(SELECT json_group_object(f, json_array(o, n)) FROM (
-				SELECT 'title' AS f, OLD.title AS o, NEW.title AS n
-				UNION ALL SELECT 'description', OLD.description, NEW.description
-				UNION ALL SELECT 'assignee', OLD.assignee, NEW.assignee
-				UNION ALL SELECT 'reviewer', OLD.reviewer, NEW.reviewer
-				UNION ALL SELECT 'coordinator', OLD.coordinator, NEW.coordinator
-				UNION ALL SELECT 'priority', OLD.priority, NEW.priority
-				UNION ALL SELECT 'status', OLD.status, NEW.status
-				UNION ALL SELECT 'blockedReason', OLD.blocked_reason, NEW.blocked_reason
-				UNION ALL SELECT 'budgetLimit', OLD.budget_limit, NEW.budget_limit
-				UNION ALL SELECT 'requestsLimit', OLD.requests_limit, NEW.requests_limit
+				SELECT json_extract(value, '$[0]') AS f, json_extract(value, '$[1]') AS o, json_extract(value, '$[2]') AS n
+				FROM json_each(json_array(
+					json_array('title', OLD.title, NEW.title),
+					json_array('description', OLD.description, NEW.description),
+					json_array('assignee', OLD.assignee, NEW.assignee),
+					json_array('reviewer', OLD.reviewer, NEW.reviewer),
+					json_array('coordinator', OLD.coordinator, NEW.coordinator),
+					json_array('priority', OLD.priority, NEW.priority),
+					json_array('status', OLD.status, NEW.status),
+					json_array('blockedReason', OLD.blocked_reason, NEW.blocked_reason),
+					json_array('budgetLimit', OLD.budget_limit, NEW.budget_limit),
+					json_array('requestsLimit', OLD.requests_limit, NEW.requests_limit)
+				))
 			) WHERE o IS NOT n),
 			NEW.updated_at);
 	END`,
