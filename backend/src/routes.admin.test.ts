@@ -322,6 +322,37 @@ describe("GET /api/admin/stats (#241a)", () => {
 		expect(body.error).toBe("Internal server error");
 		expect(body.error).not.toContain("D1 transient");
 	});
+
+	it("?top= sizes the rows-read breakdown: 10 by default, 1–200, anything else 400", async () => {
+		const countByStatus = vi.fn(async () => ({ running: 0, stopped: 0, terminated: 0, failed: 0 }));
+		await spinUp(countByStatus);
+		dbStubs.getD1RowsRead.mockClear();
+		for (const [q, top] of [
+			["", 10],
+			["?top=1", 1],
+			["?top=200", 200],
+		] as const) {
+			const res = await fetch(`${baseUrl}/api/admin/stats${q}`);
+			expect(res.status).toBe(200);
+			expect(dbStubs.getD1RowsRead).toHaveBeenLastCalledWith(top);
+		}
+		const calls = dbStubs.getD1RowsRead.mock.calls.length;
+		for (const q of [
+			"top=0",
+			"top=201",
+			"top=1.5",
+			"top=-1",
+			"top=abc",
+			"top=1000",
+			"top=5&top=6",
+		]) {
+			const res = await fetch(`${baseUrl}/api/admin/stats?${q}`);
+			expect(res.status, q).toBe(400);
+		}
+		// Refused before any D1 read.
+		expect(dbStubs.getD1RowsRead.mock.calls.length).toBe(calls);
+		expect(countByStatus).toHaveBeenCalledTimes(3);
+	});
 });
 
 // ── Cross-user sessions list + force-actions (#241d) ─────────────────────
