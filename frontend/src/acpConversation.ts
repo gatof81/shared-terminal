@@ -83,7 +83,10 @@ thread.onState = (s) => {
 	paint();
 	revealPending();
 };
-onRailChange(() => paint());
+onRailChange(() => {
+	paint();
+	thread.titlesChanged();
+});
 
 back.addEventListener("click", (e) => {
 	if (!pid || e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;

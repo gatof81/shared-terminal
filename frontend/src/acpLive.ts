@@ -3,12 +3,22 @@
 // (re)connect is announced as `{type: "open"}` so a listener reloads its page
 // over REST: the socket carries only what happens AFTER it opened, and
 // nothing is replayed. While it is down, listeners fall back to a slow poll.
+// A new listener gets one first signal: `open` (`initial` when the socket was
+// already up), or `down` during an outage, or — while the first connection is
+// on its way — nothing until its hello. That signal is the listener's first
+// load: a load made before the hello could miss what happens until it.
 
 import type { AcpActivity, AcpConversation, AcpMessage, AcpQuestion } from "./api.js";
 import { openAcpSocket } from "./api.js";
 
 export type AcpLiveEvent =
-	| { type: "open" }
+	/**
+	 * `initial`: the socket was already up when the listener subscribed —
+	 * nothing it could miss happened between its subscription and this
+	 * (a load it makes now is complete). Without it, a hello: a first
+	 * connection or a reconnect, after which everything is read again.
+	 */
+	| { type: "open"; initial?: true }
 	| { type: "down" }
 	| { type: "message"; message: AcpMessage }
 	| { type: "question"; question: AcpQuestion }
@@ -106,7 +116,7 @@ export function subscribeAcp(fn: Listener): () => void {
 	if (idleTimer) clearTimeout(idleTimer);
 	idleTimer = null;
 	connect();
-	if (up) queueMicrotask(() => listeners.has(fn) && fn({ type: "open" }));
+	if (up) queueMicrotask(() => listeners.has(fn) && fn({ type: "open", initial: true }));
 	// A listener joining during an outage polls too.
 	else if (downSaid) queueMicrotask(() => listeners.has(fn) && fn({ type: "down" }));
 	return () => {

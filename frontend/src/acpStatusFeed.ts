@@ -2,9 +2,12 @@
 // without any topic open, for the sidebar. Each read of /api/acp/agents is
 // three D1 queries, so the budget is:
 //
-// - The period: the registry is read when it is 30 s old — counting ANY read
-//   that refreshed it (an open chat's 15 s status poll included, so with a
-//   chat open this feed reads nothing) — and only while the tab is visible.
+// - The period: the registry is read when it is 30 s old — 15 s while a
+//   project's rail or a thread is on screen (`watchAcpAgents`: runner
+//   liveness and queue sizes are not pushed) — counting ANY read that
+//   refreshed it, and only while the tab is visible. The rail and the
+//   thread have no clock of their own: they read the list here
+//   (`onAcpAgentsRead`) and ask for a read with `requestAcpAgentsRead`.
 // - Live events patch the registry at once and, when the patch leaves it
 //   right, cause no read: a message going `running` (the agent works on it)
 //   or final (it no longer does), a question opening (it waits for you),
@@ -32,13 +35,16 @@ import {
 	patchAcpAgent,
 	setAcpAgents,
 } from "./acpRegistry.js";
-import { acpListAgents, isLoggedIn } from "./api.js";
+import { type AcpAgentInfo, acpListAgents, isLoggedIn } from "./api.js";
 
 const PERIOD_MS = 30_000;
+const WATCHED_PERIOD_MS = 15_000;
 const DEBOUNCE_MS = 3_000;
 const FINAL = new Set(["done", "failed", "uncertain"]);
 
 let started = false;
+/** The socket went down since the last open this feed saw: the next open covers an outage. */
+let sawDown = false;
 let unsubscribe: (() => void) | null = null;
 let periodTimer: ReturnType<typeof setTimeout> | null = null;
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -49,6 +55,44 @@ let inFlight: Promise<void> | null = null;
 let inFlightTicket = 0;
 /** When this module last asked (a failed read must not make the period retry at once). */
 let lastAttempt = 0;
+/** The list as last read here, whole (the registry keeps only its fields). */
+let lastList: AcpAgentInfo[] | null = null;
+const readListeners = new Set<(list: AcpAgentInfo[]) => void>();
+/** Rails and threads on screen (`watchAcpAgents`). */
+let watchers = 0;
+
+function period(): number {
+	return watchers > 0 ? WATCHED_PERIOD_MS : PERIOD_MS;
+}
+
+/** A read of the list is on its way. */
+export function acpAgentsReading(): boolean {
+	return inFlight !== null;
+}
+
+/** The list as last read through readAcpAgents (null: not yet). */
+export function acpAgentsList(): AcpAgentInfo[] | null {
+	return lastList;
+}
+
+/** Told after every read here that answered, in the order the reads were sent. */
+export function onAcpAgentsRead(fn: (list: AcpAgentInfo[]) => void): () => void {
+	readListeners.add(fn);
+	return () => readListeners.delete(fn);
+}
+
+/** A rail or thread is on screen: the period is 15 s until it is released. */
+export function watchAcpAgents(): () => void {
+	watchers++;
+	startAcpStatusFeed();
+	armPeriod();
+	let released = false;
+	return () => {
+		if (released) return;
+		released = true;
+		watchers--;
+	};
+}
 
 /**
  * The one read of the agents list (shared by overlapping callers: the
@@ -61,9 +105,21 @@ export function readAcpAgents(): Promise<void> {
 	lastAttempt = Date.now();
 	const ticket = acpReadTicket();
 	inFlightTicket = ticket;
+	// One read at a time: answers land in the order they were sent, so an
+	// older list never lands over a newer one.
 	inFlight = acpListAgents()
 		.then(
-			(list) => setAcpAgents(list, ticket),
+			(list) => {
+				setAcpAgents(list, ticket);
+				lastList = list;
+				for (const fn of [...readListeners]) {
+					try {
+						fn(list);
+					} catch (err) {
+						console.error("[acp-agents]", err);
+					}
+				}
+			},
 			() => retryLater(),
 		)
 		.finally(() => {
@@ -113,7 +169,7 @@ function armPeriod(): void {
 	periodTimer = setTimeout(
 		() => {
 			periodTimer = null;
-			if (age() >= PERIOD_MS && !document.hidden) {
+			if (age() >= period() && !document.hidden) {
 				readIfVisible();
 				// Re-armed from the read's own time once it lands.
 				void (inFlight ?? Promise.resolve()).finally(armPeriod);
@@ -122,21 +178,37 @@ function armPeriod(): void {
 			if (document.hidden) dirty = true;
 			armPeriod();
 		},
-		Math.max(1_000, PERIOD_MS - age()),
+		Math.max(1_000, period() - age()),
 	);
 }
 
 /** The stale mark the pending re-read must cover (0: none pending). */
 let wanted = 0;
 let staleRetryMs = DEBOUNCE_MS;
+/** When (performance.now) the pending debounce fires. */
+let staleDue = 0;
+
+/**
+ * Something happened that only a new read can show: a read that STARTS
+ * after now follows within `ms` (sooner if another asker wants it sooner;
+ * every ask until it starts shares it).
+ */
+export function requestAcpAgentsRead(ms = DEBOUNCE_MS): void {
+	wanted = markAcpStale();
+	armStale(ms);
+}
 
 function readSoon(): void {
-	wanted = markAcpStale();
-	armStale(DEBOUNCE_MS);
+	requestAcpAgentsRead(DEBOUNCE_MS);
 }
 
 function armStale(ms: number): void {
-	if (debounceTimer) return;
+	const due = performance.now() + ms;
+	if (debounceTimer) {
+		if (due >= staleDue) return;
+		clearTimeout(debounceTimer);
+	}
+	staleDue = due;
 	debounceTimer = setTimeout(() => {
 		debounceTimer = null;
 		readStale();
@@ -179,7 +251,7 @@ function afterStaleRead(): void {
 	}
 	if (!started) return;
 	// It failed: tried again, backing off up to the period.
-	staleRetryMs = Math.min(PERIOD_MS, staleRetryMs * 2);
+	staleRetryMs = Math.min(period(), staleRetryMs * 2);
 	armStale(staleRetryMs);
 }
 
@@ -191,8 +263,14 @@ export function startAcpStatusFeed(): void {
 	unsubscribe = subscribeAcp((ev) => {
 		switch (ev.type) {
 			case "open":
-				// A (re)connect: what happened while it was down is read once.
-				readSoon();
+				// A reconnect: what happened while it was down is read once. A
+				// first hello (or subscribed with the socket up) covers no outage:
+				// the start's own read (and the period) say the rest.
+				if (sawDown || !(acpAgentsLoaded() || inFlight)) readSoon();
+				sawDown = false;
+				return;
+			case "down":
+				sawDown = true;
 				return;
 			case "message": {
 				// Patched only: the period confirms (and fills the queue count).
@@ -240,6 +318,8 @@ export function stopAcpStatusFeed(): void {
 	wanted = 0;
 	staleRetryMs = DEBOUNCE_MS;
 	dirty = false;
+	sawDown = false;
+	lastList = null;
 }
 
 if (typeof document !== "undefined")
@@ -254,6 +334,6 @@ if (typeof document !== "undefined")
 		if (wanted !== 0 && acpFreshThrough() < wanted) {
 			dirty = false;
 			readStale();
-		} else if (dirty || age() >= PERIOD_MS) readIfVisible();
+		} else if (dirty || age() >= period()) readIfVisible();
 		armPeriod();
 	});

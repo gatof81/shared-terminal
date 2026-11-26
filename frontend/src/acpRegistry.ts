@@ -3,9 +3,9 @@
 // queue, login, a question waiting, runner liveness). The one store every
 // view reads agents from (the sidebar's agent rows, a project row's
 // activity dot, which agents have no project); every
-// read of the list writes it (a topic's thread, the project's rail, the
-// agent's settings, the session form, and acpStatusFeed.ts, which keeps it
-// current on a budget). A leaf module (no imports), so the sidebar
+// read of the list writes it (acpStatusFeed.ts — the one read a topic's
+// thread and the project's rail share, kept current on a budget — the
+// agent's settings and the session form). A leaf module (no imports), so the sidebar
 // (sessionCore.ts) can use it without importing the ACP modules.
 //
 // Announced changes: `st:acp-agents` when who is an agent or their project
