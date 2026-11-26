@@ -150,7 +150,7 @@ function taskUsage() {
   st task link <id> work|pr|dep|external <ref>
   st task done <id>                                 (el reviewer o el coordinador; nunca el responsable)
   st task handoff <id> @agente                      (el coordinador pasa el objetivo)
-  st task approve <id> [--question <id>]            (el coordinador declara el alcance aprobado, después de que la persona respondió su pregunta; queda su respuesta)
+  st task scope-approved <id> [--question <id>]     (también: approve; el coordinador declara el alcance aprobado, después de que la persona respondió su pregunta; queda su respuesta)
   cualquier cambio acepta --version N`);
 	process.exit(2);
 }

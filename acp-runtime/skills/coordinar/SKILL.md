@@ -33,7 +33,7 @@ Ante la duda entre dos formas, elegí la más liviana que no esconda un riesgo.
 
 - Con una **pregunta a la persona** (la herramienta AskUserQuestion): el plan resumido y las opciones (aprobar / ajustar). Queda en sus Pendientes; no la pidas por un mensaje suelto ni la des por implícita.
 - Hasta que responda **no delegás nada** a otro agente ni empezás a implementar. Podés crear el objetivo y leer lo que necesites para planificar.
-- Si aprueba, registralo en el objetivo: `st task approve <objetivo> --question <id de la pregunta>` (deja el evento `scope-approved`). Si pide ajustes, ajustá y volvé a preguntar.
+- Si aprueba, registralo en el objetivo: `st task scope-approved <objetivo> --question <id de la pregunta>` (deja el evento `scope-approved` con la respuesta de la persona: el backend verifica que respondió, la aprobación la declarás vos). Si pide ajustes, ajustá y volvé a preguntar.
 
 ## 2. Objetivo y tareas
 
