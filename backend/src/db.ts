@@ -1073,6 +1073,13 @@ export const ACP_TASKS_DDL: readonly string[] = [
 		WHERE task_id IS NOT NULL AND state IN ('pending', 'running')`,
 	`CREATE INDEX IF NOT EXISTS idx_agent_messages_task_unreviewed ON agent_messages(owner_user_id, task_id)
 		WHERE task_id IS NOT NULL AND state = 'uncertain' AND reviewed_at IS NULL`,
+	// R21's pending reads (released with v29): an agent's messages page
+	// (`GET /messages?agent=`, what `st list` reads) is two bounded ranges —
+	// to it and from it, each newest first by id — instead of every message
+	// to or from it; a request's reply is found by `reply_to` (settle, the
+	// unfinished notice) instead of the owner's whole history.
+	"CREATE INDEX IF NOT EXISTS idx_agent_messages_to ON agent_messages(owner_user_id, to_id, id)",
+	"CREATE INDEX IF NOT EXISTS idx_agent_messages_reply ON agent_messages(owner_user_id, reply_to) WHERE reply_to IS NOT NULL",
 	`CREATE TRIGGER IF NOT EXISTS trg_task_created
 	AFTER INSERT ON tasks
 	WHEN NOT EXISTS (SELECT 1 FROM task_events e WHERE e.owner_user_id = NEW.owner_user_id AND e.task_id = NEW.id AND e.kind = 'created')
