@@ -1028,10 +1028,6 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 		wrap(async (req, res) => {
 			const agent = agentOnly(res);
 			if (!agent) return;
-			// The model this agent should run, with every claim: the runner switches
-			// to it while idle, before it starts the next message.
-			res.setHeader("X-ST-Model", agent.model ?? acp.config.defaultModel);
-			res.setHeader("X-ST-Effort", agent.effort ?? "default");
 			const slot = slotOf(req);
 			if (slot === null) return void res.status(400).json({ error: "bad-slot" });
 			// `context`: the slot holds that context's session open (processes the
@@ -1047,10 +1043,6 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 			// No longer active ⇒ told to close it — the runner does, idle and with no
 			// open task (a process it left wins: the session stays).
 			const open = (req.body as { open?: unknown } | undefined)?.open;
-			if (typeof open === "string" && CONTEXT_RE.test(open)) {
-				const w = await works.get(agent.owner_user_id, open);
-				if (w?.state !== "active") res.setHeader("X-ST-Release", open);
-			}
 			// `conversation` (slot 1): the same for the conversation whose session it
 			// holds with processes in it; null = the session of no conversation.
 			const body = (req.body ?? {}) as { conversation?: unknown };
@@ -1079,21 +1071,33 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 					keepConv as string | null | undefined,
 				);
 			let msg = await claim();
-			if (msg) return void res.json(await withContext(agent, msg));
-			const running = await acp.runningInSlot(agent, slot);
-			if (running) return void res.status(409).json({ error: "running", id: running.id });
+			const running = msg ? null : await acp.runningInSlot(agent, slot);
 			// `wait: true` (an idle runner): hold the answer until something may be
 			// claimable, then claim once more (AcpAgents.waitForWork). A runner that
 			// went away meanwhile gets nothing claimed for it.
-			if ((req.body as { wait?: unknown } | undefined)?.wait === true) {
+			if (!msg && !running && (req.body as { wait?: unknown } | undefined)?.wait === true) {
 				const gone = new AbortController();
 				res.on("close", () => gone.abort());
 				await acp.waitForWork(agent, CLAIM_WAIT_MS, gone.signal);
 				if (gone.signal.aborted) return;
 				res.setHeader("X-ST-Waited", "1");
 				msg = await claim();
-				if (msg) return void res.json(await withContext(agent, msg));
 			}
+			// Nothing read before the wait is used after it: what the answer says about
+			// the agent and its work is read here, once, for all three answers. The
+			// model and effort come from the agent's current row (setModel/setEffort
+			// update it and publish {type:"agents"}, which ends the wait), so a change
+			// made while the claim waited reaches the runner with this very answer and
+			// it switches while idle, before the next message.
+			const now = acp.current(agent);
+			res.setHeader("X-ST-Model", now.model ?? acp.config.defaultModel);
+			res.setHeader("X-ST-Effort", now.effort ?? "default");
+			if (typeof open === "string" && CONTEXT_RE.test(open)) {
+				const w = await works.get(agent.owner_user_id, open);
+				if (w?.state !== "active") res.setHeader("X-ST-Release", open);
+			}
+			if (msg) return void res.json(await withContext(agent, msg));
+			if (running) return void res.status(409).json({ error: "running", id: running.id });
 			res.status(204).end();
 		}),
 	);

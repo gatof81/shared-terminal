@@ -535,6 +535,13 @@ export class AcpAgents {
 	 * back to the launch-time ANTHROPIC_MODEL. What the adapter confirmed comes
 	 * back through `setModelApplied`.
 	 */
+	/** The agent's row as this process last wrote or read it (setModel and the
+	 *  other setters keep it), without a D1 read: a long-held request (the
+	 *  claim's wait) answers with what is true now, not when it arrived. */
+	current(agent: AgentRow): AgentRow {
+		return this.byId.get(agent.agent_id) ?? agent;
+	}
+
 	async setModel(ownerUserId: string, name: string, model: string): Promise<AgentRow | null> {
 		const r = await d1Query<AgentRow>(
 			"UPDATE acp_agents SET model = ? WHERE owner_user_id = ? AND name = ? RETURNING *",
