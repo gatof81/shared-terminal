@@ -282,6 +282,11 @@ const msgIds = new Set();
 
 async function main() {
 	console.log(`Tasks acceptance against ${ST} — prefix ${PREFIX}, sections ${ONLY.join(",")}`);
+	// No backend answering is a FAIL, never a quiet exit (OPS-RESULT 3: a run
+	// against a backend still migrating printed its header and nothing else).
+	const status = await fetch(`${ST}/api/auth/status`, { signal: AbortSignal.timeout(15_000) }).catch((err) => err);
+	if (!(status instanceof Response) || !status.ok)
+		throw new Error(`cannot reach the backend at ${ST}/api/auth/status: ${status instanceof Response ? status.status : status.message}`);
 	console.log(`config: ${J({ ...CFG, LAB_B_ST, LAB_A_CONTAINER: A_C, LAB_B_CONTAINER: B_C, D1_VARIANT: env.D1_VARIANT ?? "auto" })}`);
 	const s0 = await d1();
 	const rowsMode = env.D1_VARIANT ? env.D1_VARIANT === "rows" : s0.rows > 0 || s0.top.size > 0;
@@ -845,12 +850,24 @@ async function main() {
 	} else console.log(`kept: projects ${created.projects.join(" ")}, sessions ${created.sessions.join(" ")}`);
 }
 
+// The verdict is the last line, ALL PASS or N FAILED. Should the process end
+// without reaching it (the event loop drained with main() still pending),
+// that is a failure, never exit 0.
+let verdict = false;
+process.on("exit", (code) => {
+	if (verdict || code !== 0) return;
+	console.log(`FAIL [${at()}] ended without a verdict`);
+	console.log("1 FAILED");
+	process.exitCode = 1;
+});
+
 main()
 	.catch((err) => {
 		failures++;
 		console.log(`FAIL [${at()}] aborted: ${err.stack ?? err.message}`);
 	})
 	.finally(() => {
+		verdict = true;
 		console.log(failures ? `${failures} FAILED` : "ALL PASS");
 		process.exit(failures ? 1 : 0);
 	});

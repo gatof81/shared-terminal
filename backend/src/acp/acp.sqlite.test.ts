@@ -16,6 +16,7 @@ import type { AddressInfo } from "node:net";
 import type { DatabaseSync as DatabaseSyncT } from "node:sqlite";
 import express from "express";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { d1LimitViolations } from "../d1Limits.js";
 
 const { DatabaseSync } = createRequire(import.meta.url)(
 	"node:sqlite",
@@ -128,6 +129,14 @@ const bindOf = (params: unknown[]) =>
 	params.map((p) => (typeof p === "boolean" ? Number(p) : p)) as Array<string | number | null>;
 
 function run(sql: string, params: unknown[]) {
+	// What real D1 would refuse fails here too, whatever SQLite accepts.
+	const overLimit = d1LimitViolations(sql, params.length);
+	if (overLimit.length)
+		return {
+			success: false,
+			errors: [{ code: 7500, message: `D1 limits: ${overLimit.join("; ")}` }],
+			result: [],
+		};
 	try {
 		const st = db.prepare(sql);
 		const bind = bindOf(params);

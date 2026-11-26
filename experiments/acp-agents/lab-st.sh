@@ -51,7 +51,8 @@ up)
 		-e ACP_TEST_RUNTIME=1 -e ACP_DEFAULT_RUNTIME="claude-acp-${ADAPTER:-0.108.0}" -e ACP_DEFAULT_MODEL="${MODEL:-claude-sonnet-5-5}" \
 		-e ACP_MAX_RUNNING="${MAX_RUNNING:-6}" ${budgets[@]+"${budgets[@]}"} \
 		"$TAG" >/dev/null
-	sleep 5
+	# Until it answers (real D1 takes ~40 s for the migrations), or 180 s.
+	for _ in $(seq 90); do curl -fsS -o /dev/null "http://127.0.0.1:$PORT/api/auth/status" && break; sleep 2; done
 	docker logs "$LAB_NAME-backend" 2>&1 | grep -E "ACP|listening|acp\]|migration 2[0-9]|error" | head
 	;;
 web)
