@@ -537,8 +537,8 @@ async function main() {
 	const taskNow = async () => (await api("GET", `/api/acp/tasks/${gid}`)).body;
 	const settled = async (used) => {
 		const t = await taskNow();
-		const s = t.task?.state;
-		return s && t.task.budget.used === used && !s.running.length && !s.queued.length ? t : null;
+		const busy = t.task?.activity?.some((a) => a.kind === "running" || a.kind === "queued");
+		return t.task && t.task.budget.used === used && !busy ? t : null;
 	};
 	const inGoal = async (body) => {
 		const r = await api("POST", "/api/acp/messages", { to: ARQ, body, conversationId: CONV, task: gid, clientId: randomUUID() });
@@ -548,7 +548,7 @@ async function main() {
 	await inGoal(`rondas 3: consultá a @${DEV}: una ronda dentro del objetivo`);
 	// Each of @arq's requests inherits the goal from the message it runs (the person's, then each reply).
 	const three = await waitFor("three rounds", () => settled(3), 180_000);
-	check("three rounds inside the goal: each request spent it, nothing exhausted", !!three && !three.task.state.budget.goal.exhausted, three && JSON.stringify(three.task.state.budget));
+	check("three rounds inside the goal: each request spent it, nothing exhausted", !!three && !three.task.budget.exhausted, three && JSON.stringify(three.task.budget));
 	await inGoal(`rondas 8: consultá a @${DEV}: otra ronda`);
 	const cut = await waitFor("loop cut", async () => {
 		const t = await settled(4);
@@ -556,8 +556,8 @@ async function main() {
 	}, 180_000);
 	check(
 		"a loop of 8 rounds is cut at the goal's budget (4): refused, recorded once, visible in the state",
-		!!cut && cut.task.state.budget.goal.exhausted && cut.events.filter((e) => e.kind === "budget-exhausted").length === 1,
-		cut && JSON.stringify(cut.task.state.budget),
+		!!cut && cut.task.budget.exhausted && cut.events.filter((e) => e.kind === "budget-exhausted").length === 1,
+		cut && JSON.stringify(cut.task.budget),
 	);
 	const told = await waitFor("arq told", async () =>
 		(await convFeed()).messages.find((m) => m.to_id === ARQ && m.task_id === gid && /goal-budget/.test(m.result_text ?? "")),

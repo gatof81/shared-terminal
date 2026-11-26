@@ -3173,7 +3173,7 @@ describe("ACP tasks: inheritance, budgets, derived state (PR 3)", () => {
 				data: { budget: "goal", limit: 3, used: 3, task: goal.id },
 			}),
 		]);
-		expect(shown.body.task.state.budget.goal).toEqual({ limit: 3, used: 3, exhausted: true });
+		expect(shown.body.task.budget).toEqual({ limit: 3, used: 3, exhausted: true });
 		// Only the person raises it.
 		expect((await call(as("ta"), "POST", `/tasks/${goal.id}/budget`, { add: 2 })).status).toBe(403);
 		const raised = await call(owner, "POST", `/tasks/${goal.id}/budget`, { add: 2 });
@@ -3224,7 +3224,7 @@ describe("ACP tasks: inheritance, budgets, derived state (PR 3)", () => {
 			).toBe(201);
 			expect(taskRow(goal.id)).toMatchObject({ requests_used: 1, budget_used: 3 });
 			const raised = await call(owner, "POST", `/tasks/${child.id}/budget`, { add: 1 });
-			expect(raised.body.state.budget.task).toEqual({ limit: 3, used: 2, exhausted: false });
+			expect(raised.body.taskBudget).toEqual({ limit: 3, used: 2, exhausted: false });
 			expect(
 				(await call(owner, "POST", `/tasks/${child.id}/budget`, { add: 1, scope: "goal" })).body
 					.error,
@@ -3253,71 +3253,151 @@ describe("ACP tasks: inheritance, budgets, derived state (PR 3)", () => {
 		await drain(["solo", ...Object.keys(SIDS)]);
 	});
 
-	it("derived state: queued, running, the run that outlives a reassignment, contradictions, interrupted, open questions, works", async () => {
+	it("the board's reading contract: activity[], contradiction, dependencies, budget on the root, the run after a reassignment, stale with the last event", async () => {
 		const goal = (
 			await call(owner, "POST", "/tasks", { projectId: P3, title: "Estado", coordinator: "ta" })
 		).body;
 		let t = (
 			await call(as("ta"), "POST", "/tasks", { parentId: goal.id, title: "Hacer", assignee: "tb" })
 		).body;
+		const kinds = (x: { activity: Array<{ kind: string }> }) => x.activity.map((a) => a.kind);
+		const read = async () => (await call(owner, "GET", `/tasks/${t.id}`)).body.task;
 		const m = await call(owner, "POST", "/messages", { to: "tb", body: "hacelo", task: t.id });
-		let st = (await call(owner, "GET", `/tasks/${t.id}`)).body.task.state;
-		expect(st.queued).toEqual([{ messageId: m.body.id, agent: "tb" }]);
-		expect(st.running).toEqual([]);
-		expect((await claim("tb")).id).toBe(m.body.id);
+		expect((await read()).activity).toEqual([
+			{
+				kind: "queued",
+				agent: "tb",
+				conversationId: null,
+				since: m.body.created_at,
+				messageId: m.body.id,
+			},
+		]);
+		const run = await claim("tb");
+		expect(run.id).toBe(m.body.id);
 		// Reassigned while tb runs it: no cancellation, the answer says whose run goes on.
 		const re = await call(as("ta"), "PATCH", `/tasks/${t.id}`, {
 			version: t.version,
 			assignee: "tc",
 		});
 		expect(re.body.assignee).toBe("tc");
-		expect(re.body.state.running).toEqual([
-			expect.objectContaining({ messageId: m.body.id, agent: "tb" }),
+		expect(re.body.activity).toEqual([
+			{
+				kind: "running",
+				agent: "tb",
+				conversationId: null,
+				since: run.started_at,
+				messageId: m.body.id,
+			},
 		]);
-		expect(re.body.state.previousRunActive).toEqual([{ messageId: m.body.id, agent: "tb" }]);
+		expect(re.body.previousRunActive).toEqual([{ messageId: m.body.id, agent: "tb" }]);
+		// A write on the old version: the whole current row and who changed what last.
+		const old = await call(as("ta"), "PATCH", `/tasks/${t.id}`, {
+			version: t.version,
+			priority: "high",
+		});
+		expect(old.status).toBe(409);
+		expect(old.body.task).toMatchObject({
+			version: re.body.version,
+			assignee: "tc",
+			previousRunActive: [expect.anything()],
+		});
+		expect(old.body.lastEvent).toMatchObject({
+			actor: "ta",
+			kind: "assigned",
+			data: { assignee: ["tb", "tc"] },
+		});
 		// Declared done while it runs: the contradiction is said, the declared status stays.
 		const done = await call(owner, "PATCH", `/tasks/${t.id}`, {
 			version: re.body.version,
 			status: "done",
 		});
 		expect(done.body.status).toBe("done");
-		expect(done.body.state.contradictions).toEqual(["done-while-running"]);
-		// A question asked while working on it is the task's.
+		expect(done.body.contradiction).toBe("done-with-running");
+		// A question asked while working on it: waitOwner.
 		const q = await call(as("tb"), "POST", "/runner/questions", {
 			messageId: m.body.id,
 			request: { message: "¿?" },
 		});
-		st = (await call(as("ta"), "GET", `/tasks/${t.id}`)).body.task.state;
-		expect(st.questions).toEqual([{ id: q.body.id, agent: "tb", messageId: m.body.id }]);
-		expect(st.contradictions).toEqual(["done-while-running", "done-with-open-question"]);
+		const withQ = (await call(as("ta"), "GET", `/tasks/${t.id}`)).body.task;
+		expect(withQ.activity).toContainEqual(
+			expect.objectContaining({
+				kind: "waitOwner",
+				agent: "tb",
+				messageId: m.body.id,
+				questionId: q.body.id,
+			}),
+		);
 		await call(owner, "POST", `/questions/${q.body.id}/answer`, { action: "cancel" });
 		// Interrupted: shown until the person reviews it.
 		await settle("tb", m.body.id, "uncertain");
-		st = (await call(owner, "GET", `/tasks/${t.id}`)).body.task.state;
-		expect(st.running).toEqual([]);
-		expect(st.interrupted).toEqual([{ messageId: m.body.id, agent: "tb" }]);
+		expect(kinds(await read())).toEqual(["uncertain"]);
+		expect((await read()).contradiction).toBeNull();
 		await call(owner, "POST", `/messages/${m.body.id}/review`);
-		expect((await call(owner, "GET", `/tasks/${t.id}`)).body.task.state.interrupted).toEqual([]);
-		// A linked work: its state, and `done` with an active work is a contradiction.
+		expect(kinds(await read())).toEqual([]);
+		// A linked active work, and a dependency with the other task's status.
 		await call(owner, "PATCH", "/agents/tc", { maxConcurrency: 2 });
 		expect((await call(owner, "POST", "/works", { agent: "tc", id: "pr3-estado" })).status).toBe(
 			201,
 		);
-		t = (await call(owner, "GET", `/tasks/${t.id}`)).body.task;
+		t = await read();
 		const linked = await call(as("tc"), "POST", `/tasks/${t.id}/links`, {
 			version: t.version,
 			kind: "work",
 			ref: "pr3-estado",
 		});
-		expect(linked.body.state.works).toEqual([{ id: "pr3-estado", state: "active" }]);
-		expect(linked.body.state.contradictions).toEqual(["done-with-active-work"]);
-		const board = (await call(as("tc"), "GET", "/tasks")).body;
-		const onBoard = board.done.find((x: { id: number }) => x.id === t.id);
-		expect(onBoard.state.contradictions).toEqual(["done-with-active-work"]);
-		expect(
-			board.open.find((x: { id: number }) => x.id === goal.id).state.budget.goal,
-		).toMatchObject({ used: 0 });
+		expect(linked.body.activity).toEqual([
+			expect.objectContaining({ kind: "work", agent: "tc", workId: "pr3-estado" }),
+		]);
+		expect(linked.body.contradiction).toBe("done-with-active-work");
+		const other = (await call(as("ta"), "POST", "/tasks", { parentId: goal.id, title: "Después" }))
+			.body;
+		await call(as("ta"), "POST", `/tasks/${other.id}/links`, {
+			version: other.version,
+			kind: "dep",
+			ref: t.id,
+		});
+		// The board: the same reading, from its fixed statements; the goal's budget on the root.
+		const board = (await call(as("tc"), "GET", `/tasks?project=${P3}`)).body;
+		expect(board.done.find((x: { id: number }) => x.id === t.id).contradiction).toBe(
+			"done-with-active-work",
+		);
+		expect(board.open.find((x: { id: number }) => x.id === other.id).dependencies).toEqual([
+			{ taskId: t.id, title: "Hacer", status: "done" },
+		]);
+		const root = board.open.find((x: { id: number }) => x.id === goal.id);
+		expect(root.budget).toEqual({ used: 0, limit: 150, exhausted: false });
+		expect(board.open.find((x: { id: number }) => x.id === other.id).budget).toBeNull();
 		await drain();
+	});
+
+	it("the rail's summary: open, blocked, awaiting the person — not in the inbox", async () => {
+		const goal = (
+			await call(owner, "POST", "/tasks", { projectId: P3, title: "Resumen", coordinator: "ta" })
+		).body;
+		const before = (await call(owner, "GET", `/tasks/summary?project=${P3}`)).body;
+		const a = (
+			await call(as("ta"), "POST", "/tasks", { parentId: goal.id, title: "A", assignee: "tb" })
+		).body;
+		const b = (
+			await call(as("ta"), "POST", "/tasks", { parentId: goal.id, title: "B", assignee: "tb" })
+		).body;
+		await call(as("tb"), "PATCH", `/tasks/${a.id}`, {
+			version: a.version,
+			blockedReason: "espera",
+		});
+		await call(as("tb"), "PATCH", `/tasks/${b.id}`, { version: b.version, status: "review" });
+		const inbox = (await call(owner, "GET", "/inbox")).body;
+		const after = await call(as("tc"), "GET", "/tasks/summary");
+		expect(after.status).toBe(200);
+		expect(after.body).toEqual({
+			projectId: P3,
+			open: before.open + 2,
+			blocked: before.blocked + 1,
+			awaitingOwner: before.awaitingOwner + 1,
+		});
+		// «Espera tu aprobación» is the board's, never the inbox's or its counter.
+		expect((await call(owner, "GET", "/inbox")).body.count).toBe(inbox.count);
+		expect((await call(as("lejos"), "GET", `/tasks/summary?project=${P3}`)).status).toBe(404);
 	});
 });
 
@@ -3427,6 +3507,14 @@ describe("D1 reads: the board goes by index (v29)", () => {
 				);
 				expect(lines).toMatch(/idx_agent_questions_state \(owner_user_id=\? AND state=\?\)/);
 			}
+		});
+
+		it("the rail's summary is one statement by the open-tasks index", async () => {
+			const ps = await plans(`/tasks/summary?project=${PB}`);
+			expect(ps.length).toBe(1);
+			expect(ps[0].plan.join("\n")).toMatch(
+				/idx_tasks_open \(owner_user_id=\? AND project_id=\?\)/,
+			);
 		});
 
 		it("a task's page: children, links and history by the task", async () => {

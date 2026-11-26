@@ -480,18 +480,28 @@ a task spends these INSTEAD of the per-message round budget (`ACP_MAX_CHAIN`, wh
 requests in no task); depth (`ACP_MAX_DEPTH`) applies to both. Creating tasks spends nothing; replies
 and the person's messages count nothing.
 
-### Derived state
+### Derived state (the board's reading contract, #794 third comment)
 
-Every task the API shows carries `state`, read in four statements per page (each by the task's partial
-index; questions from the open ones):
+Every task the API shows (board, task page, the answer to a write) carries, computed on read in five
+fixed statements per page (each by the task's partial index; questions from the open ones; no N+1):
 
-- `running`, `queued` (`{messageId, agent}`), `interrupted` (`uncertain` not reviewed), `questions`
-  (open, asked while working on a message of the task), `works` (linked works and their state);
+- `activity[]`: `{kind, agent, conversationId, since, messageId?, questionId?, workId?}` with `kind`
+  `running` | `queued` | `uncertain` (interrupted, not reviewed) | `waitOwner` (an open question asked
+  while working on a message of the task) | `work` (a linked work that is active). «En cola detrás de
+  #N» is the client's to deduce from the same answer (the running task of the same agent);
+- `contradiction`: `done-with-running`, `done-with-active-work`, `done-with-queued`,
+  `done-with-open-question` (the most serious one) or null — the declared `done` stays;
+- `dependencies`: `{taskId, title, status}` of each `dep` link;
 - `previousRunActive`: a run of someone other than the assignee still going — after a reassignment
   there is no cancellation, the answer to the PATCH and every read say whose run goes on;
-- `contradictions`: `done-while-running`, `done-while-queued`, `done-with-active-work`,
-  `done-with-open-question` — the declared `done` stays, the contradiction is said;
-- `budget`: `{task: {limit, used, exhausted}, goal: {…} | null}` (a child's goal when its root is at hand).
+- `taskBudget` `{used, limit, exhausted}`; on a root, `budget` `{used, limit, exhausted}` (the goal's).
+
+`GET /api/acp/tasks/summary?project=` — the rail: `{open, blocked, awaitingOwner}` (awaiting the
+person = in review with no reviewer), one statement by the open-tasks index; the `task` frame of
+`/ws/acp` carries the changed task, so a client keeps it without rereading. «Espera tu aprobación» is
+never in `GET /inbox` nor its counter. The board also takes `project=` for `projectId=`.
+
+A 409 `stale` answers the whole current task (as a read shows it) and `lastEvent` — who changed what.
 
 ### Backup
 

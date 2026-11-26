@@ -629,11 +629,19 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 		}),
 	);
 
-	// GET /tasks?projectId=&openAfter=&doneBefore= — the board (an agent: its project).
+	// GET /tasks?project=&openAfter=&doneBefore= (or projectId=) — the board (an agent: its project).
 	router.get(
 		"/tasks",
 		taskRoute(async (owner, actor, req, res) => {
 			res.json(await tasks.board(owner, actor, req.query));
+		}),
+	);
+
+	// GET /tasks/summary?project= — the rail: {open, blocked, awaitingOwner}.
+	router.get(
+		"/tasks/summary",
+		taskRoute(async (owner, actor, req, res) => {
+			res.json(await tasks.summary(owner, actor, req.query));
 		}),
 	);
 
