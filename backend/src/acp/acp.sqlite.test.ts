@@ -2440,4 +2440,756 @@ describe("D1 reads: the hot reads go by index, never through the owner's whole h
 	});
 });
 
+describe("ACP tasks (v29)", () => {
+	const PT = "p-t";
+	const SIDS: Record<string, string> = {
+		coord: "e0000000-0000-4000-8000-000000000001",
+		dev2: "e0000000-0000-4000-8000-000000000002",
+		qa2: "e0000000-0000-4000-8000-000000000003",
+		lejos: "e0000000-0000-4000-8000-000000000004",
+	};
+	let conv: string;
+	const task = (who: Who, id: number) => call(who, "GET", `/tasks/${id}`);
+	const patch = (who: Who, id: number, body: Record<string, unknown>) =>
+		call(who, "PATCH", `/tasks/${id}`, body);
+	const version = async (id: number) => (await task(owner, id)).body.task.version as number;
+	/** The person posts to the whole team of PT; every agent named claims its row. */
+	async function teamRequest(clientId: string, claimers: string[]) {
+		// Whatever earlier cases left in their queues first: the claim takes the oldest.
+		// (Finishing a consult queues its reply to the asker: until all are empty.)
+		for (let busy = true; busy; ) {
+			busy = false;
+			for (const a of Object.keys(SIDS)) {
+				await finish(a);
+				while ((await call(as(a), "POST", "/runner/claim")).status === 200) {
+					busy = true;
+					await finish(a);
+				}
+			}
+		}
+		const r = await call(owner, "POST", "/messages", {
+			team: true,
+			body: "armen el plan",
+			conversationId: conv,
+			clientId,
+		});
+		expect(r.status).toBe(201);
+		for (const a of claimers) expect((await call(as(a), "POST", "/runner/claim")).status).toBe(200);
+		return r.body.messages as MessageRowT[];
+	}
+	async function finish(agent: string) {
+		const run = await call(as(agent), "GET", "/runner/running");
+		if (run.status === 200)
+			await call(as(agent), "POST", `/runner/messages/${run.body.id}/result`, {
+				state: "done",
+				text: "ok",
+			});
+	}
+
+	beforeAll(async () => {
+		db.prepare(
+			"INSERT INTO projects (project_id, owner_user_id, name, client_request_id, request_hash) VALUES (?, ?, 'Tareas', 'c-pt', 'h')",
+		).run(PT, OWNER);
+		for (const [name, sid] of Object.entries(SIDS)) {
+			db.prepare(
+				"INSERT INTO sessions (session_id, user_id, name, container_name, status) VALUES (?, ?, ?, ?, 'running')",
+			).run(sid, OWNER, name, `st-${sid.slice(0, 12)}`);
+			const a = await acp.create(sid, OWNER, name, { projectId: name === "lejos" ? "p-2" : PT });
+			tokens[name] = acp.tokenFor(a.agent_id);
+		}
+		conv = (
+			await call(owner, "POST", "/conversations", {
+				projectId: PT,
+				title: "Plan",
+				clientRequestId: "f0000000-0000-4000-8000-000000000001",
+			})
+		).body.id;
+	});
+
+	it("v29 is recorded; two agents given the same team request get ONE goal, coordinated by the first", async () => {
+		expect(db.prepare("SELECT 1 FROM schema_migrations WHERE version = 29").get()).toBeTruthy();
+		await teamRequest("team-goal-0001", ["coord", "dev2"]);
+		const first = await call(as("coord"), "POST", "/tasks", { goal: true, title: "Optimizar CI" });
+		expect(first.status).toBe(201);
+		expect(first.body).toMatchObject({
+			parentId: null,
+			coordinator: "coord",
+			projectId: PT,
+			conversationId: conv,
+			originKey: "c:team-goal-0001",
+			status: "todo",
+			version: 1,
+			existing: false,
+			budget: { limit: 150, used: 0 },
+		});
+		const second = await call(as("dev2"), "POST", "/tasks", { goal: true, title: "Otro título" });
+		expect(second.status).toBe(200);
+		expect(second.body).toMatchObject({ id: first.body.id, coordinator: "coord", existing: true });
+		// The person naming one of the request's rows reaches the same goal.
+		const row = db
+			.prepare("SELECT id FROM agent_messages WHERE client_id = 'team-goal-0001' AND to_id = 'qa2'")
+			.get() as { id: number };
+		const mine = await call(owner, "POST", "/tasks", {
+			projectId: PT,
+			title: "x",
+			originMessageId: row.id,
+		});
+		expect(mine.body).toMatchObject({ id: first.body.id, existing: true });
+		expect(
+			(
+				db
+					.prepare("SELECT COUNT(*) AS n FROM tasks WHERE origin_key = 'c:team-goal-0001'")
+					.get() as { n: number }
+			).n,
+		).toBe(1);
+		await finish("coord");
+		await finish("dev2");
+	});
+
+	it("concurrent goal creations for one request: one created, the other gets it", async () => {
+		await teamRequest("team-goal-0002", ["coord", "dev2"]);
+		const both = await Promise.all(
+			["coord", "dev2"].map((a) => call(as(a), "POST", "/tasks", { goal: true, title: `de ${a}` })),
+		);
+		expect(both.map((r) => r.status).sort()).toEqual([200, 201]);
+		expect(new Set(both.map((r) => r.body.id)).size).toBe(1);
+		await finish("coord");
+		await finish("dev2");
+	});
+
+	it("an agent's goal needs a running message; the origin is never an argument", async () => {
+		const r = await call(as("coord"), "POST", "/tasks", { goal: true, title: "sin mensaje" });
+		expect(r.status).toBe(409);
+		expect(r.body.error).toBe("execution-ended");
+		expect(
+			(await call(as("coord"), "POST", "/tasks", { title: "t", originMessageId: 1 })).body.error,
+		).toBe("computed-by-backend");
+		for (const [m, path, body] of [
+			["POST", "/tasks", { title: "t" }],
+			["GET", "/tasks", undefined],
+			["GET", "/tasks/1", undefined],
+			["PATCH", "/tasks/1", { version: 1, status: "doing" }],
+		] as const) {
+			const r = await call(as("solo"), m, path, body);
+			expect([r.status, r.body.error]).toEqual([409, "no-project"]);
+		}
+	});
+
+	let goal: number;
+	let child: number;
+	it("children: one level, created by the coordinator or the person", async () => {
+		goal = (await call(as("coord"), "POST", "/tasks", { title: "Objetivo suelto" })).body.id;
+		const c = await call(as("coord"), "POST", "/tasks", {
+			parentId: goal,
+			title: "Medir tiempos",
+			assignee: "@dev2",
+			reviewer: "qa2",
+			priority: "high",
+		});
+		expect(c.status).toBe(201);
+		expect(c.body).toMatchObject({
+			parentId: goal,
+			assignee: "dev2",
+			reviewer: "qa2",
+			coordinator: null,
+			budget: null,
+		});
+		child = c.body.id;
+		expect(
+			(await call(as("dev2"), "POST", "/tasks", { parentId: goal, title: "x" })).body.error,
+		).toBe("not-coordinator");
+		const grand = await call(as("coord"), "POST", "/tasks", { parentId: child, title: "nieta" });
+		expect(grand.status).toBe(400);
+		expect(grand.body.error).toBe("one-level");
+		expect(
+			(await call(owner, "POST", "/tasks", { parentId: goal, title: "de la persona" })).status,
+		).toBe(201);
+		expect(
+			(await call(as("coord"), "POST", "/tasks", { parentId: goal, title: "x", assignee: "lejos" }))
+				.body,
+		).toMatchObject({
+			error: "not-in-project",
+		});
+		// The statement itself refuses a grandchild, whatever the caller checked.
+		expect(() =>
+			db
+				.prepare(
+					"INSERT INTO tasks (owner_user_id, project_id, parent_id, title, created_by, updated_by, coordinator) VALUES (?, ?, ?, 't', 'x', 'x', 'x')",
+				)
+				.run(OWNER, PT, child),
+		).toThrow(/CHECK/);
+	});
+
+	it("the matrix: the assignee moves and blocks its task, the coordinator assigns; nobody else", async () => {
+		let v = await version(child);
+		const moved = await patch(as("dev2"), child, { version: v, status: "doing" });
+		expect(moved.status).toBe(200);
+		expect(moved.body).toMatchObject({ status: "doing", version: v + 1, updatedBy: "dev2" });
+		v++;
+		expect((await patch(as("coord"), child, { version: v, status: "review" })).body).toMatchObject({
+			error: "not-allowed",
+			need: "assignee",
+		});
+		expect((await patch(as("dev2"), child, { version: v, priority: "low" })).body).toMatchObject({
+			error: "not-allowed",
+			need: "coordinator",
+		});
+		expect((await patch(as("qa2"), child, { version: v, blockedReason: "x" })).status).toBe(403);
+		expect(
+			(await patch(as("dev2"), child, { version: v, blockedReason: "espera el runner" })).status,
+		).toBe(200);
+		v++;
+		expect(
+			(await patch(as("dev2"), child, { version: v, blockedReason: null })).body.blockedReason,
+		).toBeNull();
+		v++;
+		expect((await patch(as("coord"), child, { version: v, priority: "normal" })).status).toBe(200);
+		expect((await patch(as("dev2"), child, { version: v + 1 })).body.error).toBe(
+			"nothing-to-change",
+		);
+		expect((await patch(as("dev2"), child, { status: "todo" })).body.error).toBe(
+			"version-required",
+		);
+	});
+
+	it("done: never the assignee; the reviewer, the coordinator (not assignee) or the person", async () => {
+		let v = await version(child);
+		expect((await patch(as("dev2"), child, { version: v, status: "review" })).status).toBe(200);
+		v++;
+		const self = await patch(as("dev2"), child, { version: v, status: "done" });
+		expect(self.status).toBe(403);
+		expect(self.body.error).toBe("self-approval");
+		const ok = await patch(as("qa2"), child, { version: v, status: "done" });
+		expect(ok.status).toBe(200);
+		expect(ok.body).toMatchObject({ status: "done", doneBy: "qa2" });
+		expect(ok.body.doneAt).toBeTruthy();
+		v++;
+		// Reopening is an approver's too; the assignee cannot undo it.
+		expect((await patch(as("dev2"), child, { version: v, status: "doing" })).body.error).toBe(
+			"self-approval",
+		);
+		const reopened = await patch(as("coord"), child, { version: v, status: "doing" });
+		expect(reopened.body).toMatchObject({ status: "doing", doneAt: null, doneBy: null });
+		v++;
+		// The coordinator assigned to its own task cannot approve it.
+		const own = (
+			await call(as("coord"), "POST", "/tasks", { parentId: goal, title: "mía", assignee: "coord" })
+		).body;
+		expect(
+			(await patch(as("coord"), own.id, { version: own.version, status: "done" })).body.error,
+		).toBe("self-approval");
+		// Nor by reassigning it away in the same write.
+		expect(
+			(await patch(as("coord"), own.id, { version: own.version, status: "done", assignee: "dev2" }))
+				.body.error,
+		).toBe("self-approval");
+		// Nor by reassigning it away first and approving it in a later write.
+		const away = await patch(as("coord"), own.id, { version: own.version, assignee: "dev2" });
+		expect(away.status).toBe(200);
+		expect(
+			(await patch(as("coord"), own.id, { version: away.body.version, status: "done" })).body.error,
+		).toBe("self-approval");
+		expect(
+			(await patch(owner, own.id, { version: away.body.version, status: "done" })).body.doneBy,
+		).toBe("owner");
+	});
+
+	it("concurrency: a write decided on an old version is refused with the current row", async () => {
+		const v = await version(child);
+		const [a, b] = await Promise.all([
+			patch(as("coord"), child, { version: v, priority: "high" }),
+			patch(as("coord"), child, { version: v, priority: "low" }),
+		]);
+		const statuses = [a.status, b.status].sort();
+		expect(statuses).toEqual([200, 409]);
+		const lost = a.status === 409 ? a : b;
+		const won = a.status === 200 ? a : b;
+		expect(lost.body.error).toBe("stale");
+		expect(lost.body.task).toMatchObject({ version: v + 1, priority: won.body.priority });
+		expect((await patch(as("coord"), child, { version: v, title: "viejo" })).status).toBe(409);
+	});
+
+	it("another project's task is the same 404 as a missing one, on every route", async () => {
+		for (const id of [child, 999_999]) {
+			expect((await task(as("lejos"), id)).body).toEqual({ error: "task-not-found" });
+			expect((await patch(as("lejos"), id, { version: 1, status: "doing" })).body).toEqual({
+				error: "task-not-found",
+			});
+			expect(
+				(
+					await call(as("lejos"), "POST", `/tasks/${id}/links`, {
+						version: 1,
+						kind: "pr",
+						ref: "1",
+					})
+				).body,
+			).toEqual({ error: "task-not-found" });
+		}
+		expect((await call(as("lejos"), "GET", `/tasks?projectId=${PT}`)).status).toBe(404);
+		expect((await call(as("lejos"), "POST", "/tasks", { parentId: goal, title: "x" })).status).toBe(
+			404,
+		);
+		expect((await call({ user: OTHER }, "GET", `/tasks/${child}`)).status).toBe(404);
+		expect((await call({ user: OTHER }, "GET", `/tasks?projectId=${PT}`)).status).toBe(404);
+	});
+
+	it("links: dependencies by the coordinator, work/pr/external by the assignee; versioned; one per ref", async () => {
+		let v = await version(child);
+		const pr = await call(as("dev2"), "POST", `/tasks/${child}/links`, {
+			version: v,
+			kind: "pr",
+			ref: "812",
+		});
+		expect(pr.status).toBe(200);
+		expect(pr.body.version).toBe(v + 1);
+		expect(pr.body.links).toEqual([
+			expect.objectContaining({ kind: "pr", ref: "812", createdBy: "dev2" }),
+		]);
+		v++;
+		expect(
+			(
+				await call(as("dev2"), "POST", `/tasks/${child}/links`, {
+					version: v - 1,
+					kind: "external",
+					ref: "x",
+				})
+			).body.error,
+		).toBe("stale");
+		expect(
+			(
+				await call(as("dev2"), "POST", `/tasks/${child}/links`, {
+					version: v,
+					kind: "dep",
+					ref: goal,
+				})
+			).body,
+		).toMatchObject({
+			error: "not-allowed",
+			need: "coordinator",
+		});
+		expect(
+			(
+				await call(as("coord"), "POST", `/tasks/${child}/links`, {
+					version: v,
+					kind: "dep",
+					ref: child,
+				})
+			).body.error,
+		).toBe("self-dependency");
+		const sibling = (await call(as("coord"), "POST", "/tasks", { parentId: goal, title: "antes" }))
+			.body.id;
+		expect(
+			(
+				await call(as("coord"), "POST", `/tasks/${child}/links`, {
+					version: v,
+					kind: "dep",
+					ref: sibling,
+				})
+			).status,
+		).toBe(200);
+		v++;
+		expect(
+			(
+				await call(as("dev2"), "POST", `/tasks/${child}/links`, {
+					version: v,
+					kind: "work",
+					ref: "no-existe",
+				})
+			).body.error,
+		).toBe("work-not-found");
+		expect(
+			(
+				await call(as("dev2"), "POST", `/tasks/${child}/links`, {
+					version: v,
+					kind: "pr",
+					ref: "rm -rf",
+				})
+			).body.error,
+		).toBe("bad-pr");
+		// The same link again: nothing changes, not even the version.
+		const again = await call(as("dev2"), "POST", `/tasks/${child}/links`, {
+			version: v,
+			kind: "pr",
+			ref: "812",
+		});
+		expect(again.status).toBe(200);
+		expect(again.body.version).toBe(v);
+		expect(
+			(await call(as("qa2"), "POST", `/tasks/${child}/links`, { version: v, kind: "pr", ref: "9" }))
+				.status,
+		).toBe(403);
+	});
+
+	it("handoff: the coordinator or the person hands the goal over; the old one loses its authority; all of it is history", async () => {
+		const g = await task(owner, goal);
+		expect(
+			(await patch(as("dev2"), goal, { version: g.body.task.version, coordinator: "dev2" })).status,
+		).toBe(403);
+		const h = await patch(as("coord"), goal, { version: g.body.task.version, coordinator: "@qa2" });
+		expect(h.body).toMatchObject({ coordinator: "qa2" });
+		expect(
+			(await call(as("coord"), "POST", "/tasks", { parentId: goal, title: "x" })).body.error,
+		).toBe("not-coordinator");
+		expect(
+			(await patch(as("coord"), child, { version: await version(child), priority: "low" })).status,
+		).toBe(403);
+		expect(
+			(await patch(as("qa2"), child, { version: await version(child), priority: "low" })).status,
+		).toBe(200);
+		expect((await patch(as("qa2"), child, { version: 1, coordinator: "dev2" })).body.error).toBe(
+			"not-a-root",
+		);
+		expect(
+			(await patch(as("qa2"), goal, { version: h.body.version, coordinator: null })).body.error,
+		).toBe("coordinator-required");
+
+		const shown = await task(as("dev2"), child);
+		expect(shown.body.parent).toMatchObject({ id: goal, coordinator: "qa2" });
+		const kinds = shown.body.events.map((e: { kind: string }) => e.kind);
+		expect(kinds[0]).toBe("created");
+		expect(kinds).toEqual(
+			expect.arrayContaining([
+				"status",
+				"blocked",
+				"unblocked",
+				"approved",
+				"reopened",
+				"link",
+				"updated",
+			]),
+		);
+		const approved = shown.body.events.find((e: { kind: string }) => e.kind === "approved");
+		expect(approved).toMatchObject({ actor: "qa2", data: { status: ["review", "done"] } });
+		const goalEvents = (await task(owner, goal)).body.events;
+		expect(goalEvents.at(-1)).toMatchObject({
+			kind: "coordinator",
+			actor: "coord",
+			data: { coordinator: ["coord", "qa2"] },
+		});
+		expect((await task(owner, goal)).body.children.map((c: { id: number }) => c.id)).toContain(
+			child,
+		);
+	});
+
+	it("st send --task: the task travels on the message; another project's is refused; live `task` events reach the owner only", async () => {
+		const before = events.length;
+		await teamRequest("team-goal-0003", ["coord"]);
+		const sent = await call(as("coord"), "POST", "/messages", {
+			to: "dev2",
+			body: "medí",
+			task: child,
+		});
+		expect(sent.status).toBe(201);
+		expect(sent.body.task_id).toBe(child);
+		// An agent's request in a task counts against it and its root, in the INSERT;
+		// the reply (by trigger) and the person's messages count nothing.
+		const counts = () =>
+			[child, goal].map(
+				(id) =>
+					db
+						.prepare("SELECT requests_used AS r, budget_used AS b FROM tasks WHERE id = ?")
+						.get(id) as { r: number; b: number },
+			);
+		expect(counts()).toEqual([
+			{ r: 1, b: 0 },
+			{ r: 0, b: 1 },
+		]);
+		await call(owner, "POST", "/messages", { to: "dev2", body: "y esto", task: child });
+		expect(counts()[0].r).toBe(1);
+		while ((await call(as("dev2"), "POST", "/runner/claim")).status === 200) await finish("dev2");
+		const reply = db
+			.prepare("SELECT task_id, kind FROM agent_messages WHERE reply_to = ?")
+			.get(sent.body.id) as { task_id: number; kind: string };
+		expect(reply).toEqual({ task_id: child, kind: "reply" });
+		expect(counts()[1].b).toBe(1);
+		expect(
+			(await call(as("coord"), "POST", "/messages", { to: "dev2", body: "x", task: 999_999 })).body
+				.error,
+		).toBe("task-not-found");
+		expect(
+			(await call(owner, "POST", "/messages", { to: "lejos", body: "x", task: child })).body.error,
+		).toBe("task-other-project");
+		await finish("coord");
+		await patch(owner, child, { version: await version(child), title: "Medir tiempos de CI" });
+		const ev = events.slice(before).filter((e) => e.type === "task");
+		expect(ev.length).toBeGreaterThan(0);
+		expect(ev.every((e) => e.owner === OWNER)).toBe(true);
+	});
+
+	it("st task: the CLI speaks the same API, with the token as the caller", async () => {
+		const { execFile } = await import("node:child_process");
+		const bin = new URL("../../../acp-runtime/bin/st", import.meta.url).pathname;
+		const st = (agent: string, ...args: string[]) =>
+			new Promise<{ code: number; out: string; err: string }>((resolve) =>
+				execFile(
+					process.execPath,
+					[bin, ...args],
+					{
+						env: {
+							...process.env,
+							ST_URL: base.replace(/\/api\/acp$/, ""),
+							ST_TOKEN: tokens[agent],
+							ST_AGENT: agent,
+						},
+					},
+					(e, out, err) => resolve({ code: e ? Number(e.code ?? 1) : 0, out, err }),
+				),
+			);
+		await teamRequest("team-goal-cli1", ["coord", "dev2"]);
+		const g = await st("coord", "task", "goal", "Bajar", "el", "tiempo");
+		expect(g.out).toMatch(/^creada #(\d+) \[todo\] Bajar el tiempo · coordina @coord · v1/);
+		const gid = /#(\d+)/.exec(g.out)?.[1] as string;
+		expect((await st("dev2", "task", "goal", "otro")).out).toMatch(
+			new RegExp(`ya existe el objetivo de esta solicitud: #${gid} .*coordina @coord`),
+		);
+		const c = await st(
+			"coord",
+			"task",
+			"new",
+			"Medir",
+			"--parent",
+			gid,
+			"--assign",
+			"@dev2",
+			"--review",
+			"@qa2",
+			"--prio",
+			"high",
+		);
+		const cid = /#(\d+)/.exec(c.out)?.[1] as string;
+		expect(c.out).toMatch(`(de #${gid}) [todo] high · Medir · @dev2 · revisa @qa2`);
+		expect((await st("dev2", "task", "move", cid, "doing")).out).toMatch("[doing]");
+		expect((await st("dev2", "task", "link", cid, "pr", "812")).out).toMatch("v3");
+		const self = await st("dev2", "task", "done", cid);
+		expect(self.code).toBe(1);
+		expect(self.err).toMatch(/el responsable de una tarea no la aprueba.*self-approval/);
+		const old = await st("qa2", "task", "done", cid, "--version", "1");
+		expect(old.err).toMatch(
+			/cambió desde que la leíste.*\(stale\)\n {2}ahora: #\d+ .*\[doing\].* v3/,
+		);
+		expect((await st("qa2", "task", "done", cid)).out).toMatch("[done]");
+		const show = await st("dev2", "task", "show", cid);
+		expect(show.out).toMatch(`objetivo: #${gid}`);
+		expect(show.out).toMatch("enlace pr: 812");
+		expect(show.out).toMatch(/@qa2 approved/);
+		expect((await st("dev2", "task", "list")).out).toMatch(/— terminadas recientes —[\s\S]*Medir/);
+		const sent = await st("coord", "send", "@dev2", "--task", cid, "mirá", "esto");
+		expect(sent.code).toBe(0);
+		const last = db
+			.prepare("SELECT task_id FROM agent_messages WHERE body = 'mirá esto'")
+			.get() as { task_id: number };
+		expect(last.task_id).toBe(Number(cid));
+		expect((await st("lejos", "task", "show", cid)).err).toMatch(
+			/no existe esa tarea en tu proyecto/,
+		);
+		await finish("coord");
+		await finish("dev2");
+	});
+
+	it("scope approval: the coordinator records the person's accept to its own question on the goal's request; versioned, once per question", async () => {
+		await teamRequest("team-scope-0001", ["coord"]);
+		const g = (await call(as("coord"), "POST", "/tasks", { goal: true, title: "Con alcance" }))
+			.body;
+		const run = (await call(as("coord"), "GET", "/runner/running")).body;
+		const ask = (message: string) =>
+			call(as("coord"), "POST", "/runner/questions", { messageId: run.id, request: { message } });
+		const q = (await ask("¿Apruebo el alcance?")).body;
+		const approve = (who: Who, body: Record<string, unknown>) =>
+			call(who, "POST", `/tasks/${g.id}/scope-approved`, body);
+		expect((await approve(as("coord"), { version: g.version, questionId: q.id })).body.error).toBe(
+			"question-not-accepted",
+		);
+		await call(owner, "POST", `/questions/${q.id}/answer`, {
+			action: "accept",
+			content: { ok: true },
+		});
+		expect((await approve(as("dev2"), { version: g.version })).body.error).toBe("not-coordinator");
+		expect((await approve(as("coord"), {})).body.error).toBe("version-required");
+		expect((await approve(as("coord"), { version: g.version - 1 })).body).toMatchObject({
+			error: "stale",
+			task: { id: g.id },
+		});
+		const rec = await approve(as("coord"), { version: g.version });
+		expect(rec.status).toBe(201);
+		expect(rec.body).toMatchObject({ recorded: true, question: q.id });
+		// The verb the coordinar skill names; the same question again records nothing.
+		const { execFile } = await import("node:child_process");
+		const cli = await new Promise<string>((resolve) =>
+			execFile(
+				process.execPath,
+				[
+					new URL("../../../acp-runtime/bin/st", import.meta.url).pathname,
+					...["task", "approve", String(g.id), "--question", String(q.id)],
+				],
+				{
+					env: { ...process.env, ST_URL: base.replace(/\/api\/acp$/, ""), ST_TOKEN: tokens.coord },
+				},
+				(_e, out, err) => resolve(`${out}${err}`),
+			),
+		);
+		expect(cli).toMatch(
+			`ya estaba registrado: alcance aprobado del objetivo #${g.id} (pregunta #${q.id})`,
+		);
+		const ev = (await call(owner, "GET", `/tasks/${g.id}`)).body.events.filter(
+			(e: { kind: string }) => e.kind === "scope-approved",
+		);
+		// The event keeps what the person answered: the backend checks that they
+		// answered (the form was submitted), the coordinator declares the approval.
+		expect(ev).toEqual([
+			expect.objectContaining({ actor: "coord", data: { question: q.id, answer: '{"ok":true}' } }),
+		]);
+		// A declined answer approves nothing.
+		const q2 = (await ask("¿Y esto?")).body;
+		await call(owner, "POST", `/questions/${q2.id}/answer`, { action: "decline" });
+		expect((await approve(as("coord"), { version: g.version, questionId: q2.id })).body.error).toBe(
+			"question-not-accepted",
+		);
+		await finish("coord");
+		// A question of ANOTHER request of the person is not this goal's.
+		await teamRequest("team-scope-0002", ["coord"]);
+		const run2 = (await call(as("coord"), "GET", "/runner/running")).body;
+		const q3 = (
+			await call(as("coord"), "POST", "/runner/questions", {
+				messageId: run2.id,
+				request: { message: "¿otra?" },
+			})
+		).body;
+		await call(owner, "POST", `/questions/${q3.id}/answer`, { action: "accept", content: {} });
+		expect((await approve(as("coord"), { version: g.version, questionId: q3.id })).body.error).toBe(
+			"question-other-request",
+		);
+		await finish("coord");
+	});
+
+	it("the board: open tasks and the recent done, paged, with links", async () => {
+		const b = await call(as("dev2"), "GET", "/tasks");
+		expect(b.status).toBe(200);
+		expect(b.body.projectId).toBe(PT);
+		expect(b.body.open.every((t: { status: string }) => t.status !== "done")).toBe(true);
+		expect(b.body.done.every((t: { status: string }) => t.status === "done")).toBe(true);
+		expect(b.body.open.find((t: { id: number }) => t.id === child).links.length).toBe(2);
+		expect((await call(owner, "GET", `/tasks?projectId=${PT}&doneBefore=bad`)).body.error).toBe(
+			"bad-cursor",
+		);
+	});
+});
+
+describe("D1 reads: the board goes by index (v29)", () => {
+	const PB = "p-board";
+	beforeAll(() => {
+		db.prepare(
+			"INSERT INTO projects (project_id, owner_user_id, name, client_request_id, request_hash) VALUES (?, ?, 'Board', 'c-pb', 'h')",
+		).run(PB, OWNER);
+		const ins = db.prepare(
+			`INSERT INTO tasks (owner_user_id, project_id, parent_id, title, status, done_at, coordinator, created_by, updated_by)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, 'owner', 'owner')`,
+		);
+		const link = db.prepare(
+			"INSERT INTO task_links (owner_user_id, task_id, kind, ref, created_by) VALUES (?, ?, 'pr', ?, 'owner')",
+		);
+		const STATUSES = ["todo", "doing", "review", "done", "done", "done"];
+		// ~500 tasks per project, most of them done (the board's history grows).
+		for (const pid of [PB, "p-2"]) {
+			let root = 0;
+			for (let i = 0; i < 500; i++) {
+				const st = STATUSES[i % STATUSES.length];
+				const isRoot = i % 10 === 0;
+				const r = ins.run(
+					OWNER,
+					pid,
+					isRoot ? null : root,
+					`t${i}`,
+					st,
+					st === "done" ? new Date(Date.UTC(2026, 5, 1) + i * 1000).toISOString() : null,
+					isRoot ? "coord" : null,
+				);
+				if (isRoot) root = Number(r.lastInsertRowid);
+				if (i % 3 === 0) link.run(OWNER, Number(r.lastInsertRowid), String(i));
+			}
+		}
+	});
+
+	const plans = async (path: string) => {
+		const got: Array<{ sql: string; params: unknown[] }> = [];
+		captured = got;
+		try {
+			const r = await call(owner, "GET", path);
+			expect(r.status).toBe(200);
+		} finally {
+			captured = null;
+		}
+		return got
+			.filter((s) => /\b(tasks|task_links|task_events)\b/.test(s.sql))
+			.map((s) => ({
+				sql: s.sql.replace(/\s+/g, " ").trim(),
+				plan: (
+					db.prepare(`EXPLAIN QUERY PLAN ${s.sql}`).all(...bindOf(s.params)) as Array<{
+						detail: string;
+					}>
+				).map((r) => r.detail),
+			}));
+	};
+	// No scan of the tasks' tables, no read bounded only by the owner.
+	const BAD =
+		/^SCAN (tasks|task_links|task_events)\b|USING (?:COVERING )?INDEX \w+ \(owner_user_id=\?\)$/;
+
+	describe.each([
+		["without statistics", false],
+		["after ANALYZE", true],
+	])("%s", (_label, analyze) => {
+		beforeAll(() => {
+			if (analyze) db.exec("ANALYZE");
+		});
+
+		it("open, done (first page and a later one) and their links read by the partial indexes", async () => {
+			const first = await call(owner, "GET", `/tasks?projectId=${PB}`);
+			expect(first.body.open.length + first.body.done.length).toBe(200);
+			expect(first.body.open.length).toBe(150);
+			expect(first.body.done.length).toBe(50);
+			expect(first.body.nextOpen).toBeTruthy();
+			expect(first.body.nextDone).toBeTruthy();
+			const next = await call(
+				owner,
+				"GET",
+				`/tasks?projectId=${PB}&openAfter=${first.body.nextOpen}&doneBefore=${encodeURIComponent(first.body.nextDone)}`,
+			);
+			expect(next.body.done[0].doneAt < first.body.done.at(-1).doneAt).toBe(true);
+			expect(next.body.open[0].id).toBeGreaterThan(first.body.nextOpen);
+			for (const path of [
+				`/tasks?projectId=${PB}`,
+				`/tasks?projectId=${PB}&openAfter=${first.body.nextOpen}&doneBefore=${encodeURIComponent(first.body.nextDone)}`,
+			]) {
+				const ps = await plans(path);
+				const open = ps.find((p) => /status != 'done'/.test(p.sql));
+				const done = ps.find((p) => /status = 'done'/.test(p.sql));
+				expect(open?.plan.join("\n")).toMatch(
+					/idx_tasks_open \(owner_user_id=\? AND project_id=\? AND id>\?\)/,
+				);
+				expect(done?.plan.join("\n")).toMatch(
+					/idx_tasks_done \(owner_user_id=\? AND project_id=\?/,
+				);
+				const bad = ps.flatMap((p) =>
+					p.plan.filter((l) => BAD.test(l)).map((l) => `${l} ← ${p.sql}`),
+				);
+				expect(bad).toEqual([]);
+			}
+		});
+
+		it("a task's page: children, links and history by the task", async () => {
+			const root = (
+				db
+					.prepare("SELECT id FROM tasks WHERE project_id = ? AND parent_id IS NULL LIMIT 1")
+					.get(PB) as { id: number }
+			).id;
+			const ps = await plans(`/tasks/${root}`);
+			const bad = ps.flatMap((p) =>
+				p.plan.filter((l) => BAD.test(l)).map((l) => `${l} ← ${p.sql}`),
+			);
+			expect(bad).toEqual([]);
+			expect(ps.some((p) => p.plan.some((l) => /idx_tasks_parent/.test(l)))).toBe(true);
+			expect(ps.some((p) => p.plan.some((l) => /idx_task_events_task/.test(l)))).toBe(true);
+		});
+	});
+});
+
 type MessageRowT = import("./agents.js").MessageRow;

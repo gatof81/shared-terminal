@@ -90,6 +90,7 @@ services:
       - ACP_MESSAGE_MAX_BYTES=${ACP_MESSAGE_MAX_BYTES:-262144}
       - ACP_MAX_DEPTH=${ACP_MAX_DEPTH:-6}
       - ACP_MAX_CHAIN=${ACP_MAX_CHAIN:-40}
+      - ACP_GOAL_BUDGET=${ACP_GOAL_BUDGET:-150}
       - ACP_MAX_RUNNING=${ACP_MAX_RUNNING:-6}
       - ACP_WORK_MIN_FREE_MB=${ACP_WORK_MIN_FREE_MB:-20480}
       # 1 ⇒ also installs the deterministic test adapter as runtime

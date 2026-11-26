@@ -410,6 +410,71 @@ its requests to other agents not finished yet (pending or running), from a run t
 and a `{type: "conversation", conversation}` frame (the view above) on create, rename, archive, read
 and every post's recipients. `lastActivityAt` changes ride the message frames.
 
+## 4c. Tasks (v29)
+
+What a project's agents are working on (`acp/tasks.ts`, issue #794). A **root** (`parent_id` NULL) is
+a goal or a loose task and carries the coordinator; a **child** hangs from a root — one level only,
+enforced by the creating statement and a CHECK — and uses its root's coordinator. A conversation
+creates no task and a task creates no worktree: a work is only linked. `status` (todo / doing /
+review / done) is what was declared; derived state (what really runs, waits or was interrupted)
+comes in PR 3 and is never written over it.
+
+### Endpoints (owner cookie or agent token; a task of another project, or of another owner, is the same 404 as a missing one)
+
+| Route | |
+| --- | --- |
+| `POST /api/acp/tasks {title, description?, parentId?, goal?, assignee?, reviewer?, priority?}` (an agent in no project: 409 `no-project` here and on every task route) | a child of `parentId` (its root's coordinator, or the person) or a root in the caller's project. The person adds `projectId`, `originMessageId?`, `coordinator?` |
+| `GET /api/acp/tasks?projectId=&openAfter=&doneBefore=` | the board: open tasks by id (150 a page, `nextOpen`), done ones newest first (50 a page, `nextDone`) — ≤ 200 tasks a page, no cap per project —, with links; an agent: its project |
+| `GET /api/acp/tasks/:id` | the task with links, its root (`parent`) or children, the last 200 events |
+| `PATCH /api/acp/tasks/:id {version, title?, description?, assignee?, reviewer?, priority?, status?, blockedReason?, coordinator?}` | a versioned change: 409 `stale` with the current row |
+| `POST /api/acp/tasks/:id/links {version, kind, ref}` | `work` (a work of the project), `pr` (number or https URL — a link, not an approval), `dep` (a task of the project), `external` (a wait the system cannot see); the same link again changes nothing |
+| `POST /api/acp/tasks/:id/scope-approved {version, questionId?}` | the goal's scope approved by the person (#794 precisions §4): no state of its own — the coordinator asks with a question (`AskUserQuestion` → `agent_questions`, in Pendientes) and, once the person answered it, records a `scope-approved` event on the goal naming it and keeping the answer (`data.answer`, ≤ 1000 chars). The backend verifies that the person ANSWERED (ACP `accept` = the form was submitted, whatever the option — «ajustar» too), not that they approved: the coordinator declares it, and the history shows what was answered (`st task scope-approved <id> [--question <id>]`, alias `approve`; without it, its own answered question on the message it runs). The question must be the coordinator's, on a message of the goal's request (`question-other-request` otherwise); declined or open: 409 `question-not-accepted`. Once per question; the person may name any of theirs |
+
+### One goal per request
+
+`goal: true` from an agent creates THE goal of the person's request it is running. Its identity is
+computed by the backend from the running message — never an argument: the chain's root (through the
+interrupted message, for a recovery report), `c:<client_id>` when it has one (a post to several agents
+or to «Todo el equipo» shares it) or `m:<id>`. `UNIQUE (owner, origin_key)`: the second agent (or a
+concurrent one) gets the existing goal — 200, `existing: true`, with its `coordinator` — and nothing is
+created. The person reaches the same goal with `originMessageId` (any row of the request). The
+coordinator of an agent's root is that agent; the person may name one, or none.
+
+### Who may do what
+
+- the person: everything;
+- the **coordinator**: create children, title/description, `assignee`/`reviewer`, priority, `dep`
+  links, hand the goal over (`coordinator`; to nobody only the person);
+- the **assignee**: `status` among todo/doing/review, `blockedReason` (set / `null`), `work`/`pr`/`external` links;
+- `done`, and reopening a done task: an agent that is **not the assignee** (neither the current one,
+  the one the same write sets, nor any it had before — its history says) and is the task's `reviewer` or the coordinator; the assignee
+  never (403 `self-approval`). A status grants nothing else (no deploy, no merge).
+
+Every write is `UPDATE … WHERE version = ?`; a write on a child allowed by being its root's coordinator
+also requires the root to still have that coordinator, in the same statement. The rules are checked
+against the token's identity.
+
+### History and live
+
+`task_events` is append-only, written by the v29 triggers in the statement that made the change:
+`created`, `status`, `assigned`, `coordinator`, `blocked`/`unblocked`, `approved`/`reopened`, `link`,
+`budget`, `updated`, `scope-approved` — with the actor and every changed field as `[old, new]`. Every write pushes
+`{type: "task", task}` over `/ws/acp` to the owner.
+
+### Messages
+
+`st send --task <id>` (`task` on `POST /messages`) puts the message in that task (`agent_messages.task_id`):
+a task the sender sees, of the recipients' project (400 `task-other-project`). The reply (trigger),
+the unfinished notice and the runner's recovery report copy it. An agent's request in a task counts
+against the task (`requests_used`) and its root (`budget_used`) by trigger, in the INSERT; replies and
+the person's messages count nothing. Inheriting the task into an agent's request from the message it
+runs, the derived state and the budget limits (`ACP_GOAL_BUDGET`, per task) are PR 3.
+
+### Backup
+
+`task_events`, `tasks`, `task_links` are in `TABLES` (`sinceSchema: 29`) in that order: history
+first, so the triggers skip what a replay re-inserts (no duplicated history, no bumped version).
+
 ## 5. Agent ↔ agent: the `st` CLI
 
 Inside an agent session, `st` is on the runner's `PATH` and calls the same API with the agent's token
@@ -417,7 +482,8 @@ Inside an agent session, `st` is on the runner's `PATH` and calls the same API w
 
 ```
 st agents                  st send @name "text"       st send @name -f file.md
-st list                    st get <id>
+st list                    st get <id>                st send @name --task <id> "text"
+st task goal|new|list|show|move|assign|prio|block|unblock|link|done|handoff …   (§4c)
 ```
 
 The runner's protocol tells the agent that the answer to its request arrives later as a new message,
@@ -465,6 +531,7 @@ session.
    | `ACP_MESSAGE_MAX_BYTES` | `262144` | per-message cap |
    | `ACP_MAX_DEPTH` | `6` | agent → agent nesting limit |
    | `ACP_MAX_CHAIN` | `40` | agent → agent requests under one person's message |
+   | `ACP_GOAL_BUDGET` | `150` | agent → agent requests a goal starts with (§4c; counted from PR 3) |
    | `ACP_MAX_RUNNING` | `6` | messages running at once on this backend, all agents (each agent: `max_concurrency`) |
    | `ACP_WORK_MIN_FREE_MB` | `20480` | free space an agent's workspace needs to create a work |
    | `ACP_TEST_RUNTIME` | unset | `1` installs the deterministic `st-test-agent` runtime |

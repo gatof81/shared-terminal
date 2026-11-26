@@ -58,6 +58,8 @@ export interface AcpConfig {
 	maxChain: number;
 	/** Free space the agent's workspace must have to create a work (ACP_WORK_MIN_FREE_MB). */
 	workMinFreeMb: number;
+	/** Agent → agent requests a goal (root task) starts with (ACP_GOAL_BUDGET); only the person raises it. */
+	goalBudget: number;
 	/** Install the deterministic test adapter as runtime `st-test-agent` (ACP_TEST_RUNTIME=1). */
 	testRuntime: boolean;
 }
@@ -73,6 +75,7 @@ export function acpConfigFromEnv(workspaceRoot: string, port: number): AcpConfig
 		maxDepth: Number(env.ACP_MAX_DEPTH ?? DEFAULT_MAX_DEPTH),
 		maxRunning: Number(env.ACP_MAX_RUNNING ?? 6),
 		maxChain: Number(env.ACP_MAX_CHAIN ?? 40),
+		goalBudget: Number(env.ACP_GOAL_BUDGET ?? 150),
 		// 20 GiB: the workspace shares its filesystem with everything else, and the
 		// nightly backup refuses to run under 15 GiB free — a lower floor would let
 		// works be created long after the host stopped getting backups.
@@ -188,6 +191,8 @@ export interface MessageRow {
 	reviewed_at: string | null;
 	/** On the runner's recovery message: the interrupted message it reports on (v27). */
 	recovery_of: number | null;
+	/** The task (v29) it is part of; NULL = none. */
+	task_id: number | null;
 }
 
 export type QuestionState = "open" | "answered" | "delivered" | "withdrawn" | "orphaned";
@@ -214,7 +219,8 @@ export type AcpEvent =
 	| { type: "question"; question: QuestionRow }
 	| { type: "activity"; agent: string; events: ActivityEvent[] }
 	| { type: "agents" }
-	| { type: "conversation"; conversation: Record<string, unknown> };
+	| { type: "conversation"; conversation: Record<string, unknown> }
+	| { type: "task"; task: Record<string, unknown> };
 
 /** A message as an agent's state names it: where it is (conversation, work). */
 export interface MessageRef {
@@ -815,6 +821,8 @@ export class AcpAgents {
 		conversationId?: string | null;
 		/** Sent by the person to the whole team (one row per agent). */
 		team?: boolean;
+		/** The task it is part of (v29). */
+		taskId?: number | null;
 	}): Promise<{ message: MessageRow; replayed: boolean }> {
 		const params = [
 			m.ownerUserId,
@@ -829,9 +837,10 @@ export class AcpAgents {
 			m.rootId ?? null,
 			m.conversationId ?? null,
 			m.team ? 1 : 0,
+			m.taskId ?? null,
 		];
 		const r = await d1Query<MessageRow>(
-			"INSERT OR IGNORE INTO agent_messages (owner_user_id, from_id, to_id, kind, body, state, project_id, depth, client_id, context, from_context, root_id, conversation_id, team) VALUES (?, ?, ?, 'request', ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *",
+			"INSERT OR IGNORE INTO agent_messages (owner_user_id, from_id, to_id, kind, body, state, project_id, depth, client_id, context, from_context, root_id, conversation_id, team, task_id) VALUES (?, ?, ?, 'request', ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *",
 			params,
 		);
 		if (r.results[0])
@@ -853,7 +862,8 @@ export class AcpAgents {
 			p.project_id !== (m.projectId ?? null) ||
 			p.context !== (m.context ?? null) ||
 			p.conversation_id !== (m.conversationId ?? null) ||
-			Boolean(p.team) !== Boolean(m.team)
+			Boolean(p.team) !== Boolean(m.team) ||
+			p.task_id !== (m.taskId ?? null)
 		)
 			throw new ClientIdConflictError(p.id);
 		return { message: p, replayed: true };
@@ -1065,8 +1075,8 @@ export class AcpAgents {
 		recoveryOf: number | null = null,
 	): Promise<MessageRow | null> {
 		const r = await d1Query<MessageRow>(
-			`INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, body, state, attempts, started_at, slot, context, recovery_of, conversation_id, project_id)
-			 SELECT ?1, 'system', ?2, 'request', ?6, 'running', 1, ${NOW}, ?3, ?4, o.id, o.conversation_id, o.project_id
+			`INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, body, state, attempts, started_at, slot, context, recovery_of, conversation_id, project_id, task_id)
+			 SELECT ?1, 'system', ?2, 'request', ?6, 'running', 1, ${NOW}, ?3, ?4, o.id, o.conversation_id, o.project_id, o.task_id
 			 FROM (SELECT 1) LEFT JOIN agent_messages o ON o.owner_user_id = ?1 AND o.to_id = ?2 AND o.id = ?7
 			 WHERE NOT EXISTS (SELECT 1 FROM agent_messages x WHERE x.owner_user_id = ?1 AND x.to_id = ?2 AND x.state = 'running' AND x.context IS ?4)
 			 AND ${RUN_GUARD}
@@ -1153,14 +1163,14 @@ export class AcpAgents {
 	 */
 	private async noticeUnfinished(ownerUserId: string, id: number): Promise<void> {
 		const r = await d1Query<MessageRow>(
-			`INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, reply_to, body, state, project_id, depth, note, context, root_id, conversation_id)
+			`INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, reply_to, body, state, project_id, depth, note, context, root_id, conversation_id, task_id)
 			 SELECT m.owner_user_id, m.to_id, m.from_id, 'reply', m.id,
 				'Tu mensaje #' || m.id || ' a @' || m.to_id || ' no terminó: ' ||
 				CASE m.state WHEN 'failed' THEN 'falló' ELSE 'se interrumpió y su estado es incierto: pudo haber hecho parte del trabajo' END ||
 				COALESCE(' — ' || m.note, '') || '. No hay respuesta de @' || m.to_id || ' para ese pedido. ' ||
 				'No lo repitas ni lo reenvíes por tu cuenta: puede haber tenido efectos, y si se reintenta lo decide la persona. ' ||
 				'Decí en tu respuesta que ese pedido no terminó y seguí solo con lo que no dependa de él.',
-				'pending', m.project_id, MAX(m.depth - 1, 0), 'unfinished:' || m.state, m.from_context, m.root_id, m.conversation_id
+				'pending', m.project_id, MAX(m.depth - 1, 0), 'unfinished:' || m.state, m.from_context, m.root_id, m.conversation_id, m.task_id
 			 FROM agent_messages m
 			 WHERE m.owner_user_id = ?1 AND m.id = ?2 AND m.kind = 'request' AND m.state IN ('failed', 'uncertain')
 			 AND EXISTS (SELECT 1 FROM acp_agents a WHERE a.owner_user_id = m.owner_user_id AND a.name = m.from_id)

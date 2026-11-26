@@ -971,6 +971,196 @@ export const MIGRATIONS: readonly Migration[] = [
 			"ACP read indexes — unread, needs-action and open questions without the owner's history",
 		apply: () => d1Batch([...ACP_READ_INDEXES_DDL]),
 	},
+	{
+		// Additive: three new tables; NULL task_id = what every message was before.
+		version: 29,
+		description: "ACP tasks — goals, tasks, links and their history; a message's task",
+		apply: async () => {
+			await addColumnIfMissing("agent_messages", "task_id INTEGER");
+			await d1Batch([...ACP_TASKS_DDL]);
+		},
+	},
+];
+
+/**
+ * v29. TASKS (acp/tasks.ts, issue #794 §2–§4): what a project's agents are
+ * working on, declared by them or by the person. A root (`parent_id` NULL) is
+ * a goal or a loose task and carries the `coordinator`; a child has one level
+ * only (its parent is a root — enforced by the creating statement) and uses
+ * its root's coordinator. `status` is only what was DECLARED; what is really
+ * happening is derived on read from the messages (`agent_messages.task_id`),
+ * questions and linked works, and never written over it.
+ *
+ * - `origin_key`: the person's request a goal was created for (`c:<client_id>`
+ *   of the person's root message, or `m:<id>` without one), computed by the
+ *   backend from the message the agent is running — never an argument. Unique
+ *   per owner: two agents given the same team request get ONE goal.
+ * - `version`: every write is `UPDATE … WHERE version = ?` (409 stale).
+ * - Budgets (§5): a root's `budget_limit`/`budget_used` count the agent →
+ *   agent requests of the whole goal, `requests_limit` (NULL = ACP_TASK_BUDGET)
+ *   /`requests_used` those of one task; only the person raises a limit.
+ * - `updated_by`: the actor of the last write — what the history trigger records.
+ * - `task_events` is append-only and written ONLY by these triggers, in the
+ *   statement that made the change (D1 over HTTP has no transaction across
+ *   calls). It has no FK and restores BEFORE `tasks` (backup.ts): the triggers
+ *   skip a creation or link whose event already exists, so replaying a backup
+ *   (INSERTs, which fire no UPDATE trigger) neither duplicates history nor
+ *   bumps a restored version. A new task id never has events (AUTOINCREMENT).
+ * - A link is added by `INSERT … SELECT … WHERE version = ?`: its trigger bumps
+ *   the task's version, so two concurrent writes on one version cannot both land.
+ */
+export const ACP_TASKS_DDL: readonly string[] = [
+	`CREATE TABLE IF NOT EXISTS tasks (
+		id                INTEGER PRIMARY KEY AUTOINCREMENT,
+		owner_user_id     TEXT NOT NULL REFERENCES users(id),
+		project_id        TEXT NOT NULL REFERENCES projects(project_id),
+		parent_id         INTEGER REFERENCES tasks(id),
+		title             TEXT NOT NULL,
+		description       TEXT NOT NULL DEFAULT '',
+		assignee          TEXT,
+		reviewer          TEXT,
+		coordinator       TEXT,
+		priority          TEXT NOT NULL DEFAULT 'normal' CHECK (priority IN ('low', 'normal', 'high')),
+		status            TEXT NOT NULL DEFAULT 'todo' CHECK (status IN ('todo', 'doing', 'review', 'done')),
+		blocked_reason    TEXT,
+		version           INTEGER NOT NULL DEFAULT 1,
+		origin_key        TEXT,
+		origin_message_id INTEGER,
+		conversation_id   TEXT,
+		budget_limit      INTEGER,
+		budget_used       INTEGER NOT NULL DEFAULT 0,
+		requests_used     INTEGER NOT NULL DEFAULT 0,
+		requests_limit    INTEGER,
+		created_by        TEXT NOT NULL,
+		updated_by        TEXT NOT NULL,
+		created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+		updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+		done_at           TEXT,
+		done_by           TEXT,
+		CHECK (parent_id IS NULL OR (coordinator IS NULL AND origin_key IS NULL AND budget_limit IS NULL))
+	)`,
+	"CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_origin ON tasks(owner_user_id, origin_key) WHERE origin_key IS NOT NULL",
+	"CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(owner_user_id, parent_id)",
+	// The board: open tasks of a project by id, done ones newest first.
+	"CREATE INDEX IF NOT EXISTS idx_tasks_open ON tasks(owner_user_id, project_id, id) WHERE status != 'done'",
+	"CREATE INDEX IF NOT EXISTS idx_tasks_done ON tasks(owner_user_id, project_id, done_at, id) WHERE status = 'done'",
+	`CREATE TABLE IF NOT EXISTS task_links (
+		owner_user_id TEXT NOT NULL,
+		task_id       INTEGER NOT NULL REFERENCES tasks(id),
+		kind          TEXT NOT NULL CHECK (kind IN ('work', 'pr', 'dep', 'external')),
+		ref           TEXT NOT NULL,
+		created_by    TEXT NOT NULL,
+		created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+		PRIMARY KEY (task_id, kind, ref)
+	)`,
+	// Which tasks name a work / depend on a task. Owner LAST: with it first the
+	// planner took this index for a task's links (an owner-wide range).
+	"CREATE INDEX IF NOT EXISTS idx_task_links_ref ON task_links(kind, ref, owner_user_id)",
+	`CREATE TABLE IF NOT EXISTS task_events (
+		id            INTEGER PRIMARY KEY AUTOINCREMENT,
+		owner_user_id TEXT NOT NULL,
+		task_id       INTEGER NOT NULL,
+		actor         TEXT NOT NULL,
+		kind          TEXT NOT NULL,
+		data          TEXT,
+		created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+	)`,
+	"CREATE INDEX IF NOT EXISTS idx_task_events_task ON task_events(owner_user_id, task_id, id)",
+	// A task's messages (PR 3's derived state): what is active, interrupted and
+	// unreviewed, and its whole activity — each bounded by the task.
+	"CREATE INDEX IF NOT EXISTS idx_agent_messages_task ON agent_messages(owner_user_id, task_id, id) WHERE task_id IS NOT NULL",
+	`CREATE INDEX IF NOT EXISTS idx_agent_messages_task_active ON agent_messages(owner_user_id, task_id)
+		WHERE task_id IS NOT NULL AND state IN ('pending', 'running')`,
+	`CREATE INDEX IF NOT EXISTS idx_agent_messages_task_unreviewed ON agent_messages(owner_user_id, task_id)
+		WHERE task_id IS NOT NULL AND state = 'uncertain' AND reviewed_at IS NULL`,
+	// R21's pending reads (released with v29): an agent's messages page
+	// (`GET /messages?agent=`, what `st list` reads) is two bounded ranges —
+	// to it and from it, each newest first by id — instead of every message
+	// to or from it; a request's reply is found by `reply_to` (settle, the
+	// unfinished notice) instead of the owner's whole history.
+	"CREATE INDEX IF NOT EXISTS idx_agent_messages_to ON agent_messages(owner_user_id, to_id, id)",
+	"CREATE INDEX IF NOT EXISTS idx_agent_messages_reply ON agent_messages(owner_user_id, reply_to) WHERE reply_to IS NOT NULL",
+	`CREATE TRIGGER IF NOT EXISTS trg_task_created
+	AFTER INSERT ON tasks
+	WHEN NOT EXISTS (SELECT 1 FROM task_events e WHERE e.owner_user_id = NEW.owner_user_id AND e.task_id = NEW.id AND e.kind = 'created')
+	BEGIN
+		INSERT INTO task_events (owner_user_id, task_id, actor, kind, data, created_at)
+		VALUES (NEW.owner_user_id, NEW.id, NEW.created_by, 'created',
+			json_object('title', NEW.title, 'parentId', NEW.parent_id, 'assignee', NEW.assignee, 'reviewer', NEW.reviewer,
+				'coordinator', NEW.coordinator, 'priority', NEW.priority, 'status', NEW.status, 'originKey', NEW.origin_key),
+			NEW.created_at);
+	END`,
+	// One event per write that changed something tracked: its headline kind and
+	// every changed field as [old, new]. A bare version bump (a link) adds none.
+	`CREATE TRIGGER IF NOT EXISTS trg_task_updated
+	AFTER UPDATE ON tasks
+	WHEN OLD.title IS NOT NEW.title OR OLD.description IS NOT NEW.description OR OLD.assignee IS NOT NEW.assignee
+		OR OLD.reviewer IS NOT NEW.reviewer OR OLD.coordinator IS NOT NEW.coordinator OR OLD.priority IS NOT NEW.priority
+		OR OLD.status IS NOT NEW.status OR OLD.blocked_reason IS NOT NEW.blocked_reason OR OLD.budget_limit IS NOT NEW.budget_limit
+		OR OLD.requests_limit IS NOT NEW.requests_limit
+	BEGIN
+		INSERT INTO task_events (owner_user_id, task_id, actor, kind, data, created_at)
+		VALUES (NEW.owner_user_id, NEW.id, NEW.updated_by,
+			CASE
+				WHEN NEW.status = 'done' AND OLD.status != 'done' THEN 'approved'
+				WHEN OLD.status = 'done' AND NEW.status != 'done' THEN 'reopened'
+				WHEN NEW.coordinator IS NOT OLD.coordinator THEN 'coordinator'
+				WHEN NEW.assignee IS NOT OLD.assignee THEN 'assigned'
+				WHEN NEW.status != OLD.status THEN 'status'
+				WHEN NEW.blocked_reason IS NOT OLD.blocked_reason THEN CASE WHEN NEW.blocked_reason IS NULL THEN 'unblocked' ELSE 'blocked' END
+				WHEN NEW.budget_limit IS NOT OLD.budget_limit OR NEW.requests_limit IS NOT OLD.requests_limit THEN 'budget'
+				ELSE 'updated'
+			END,
+			(SELECT json_group_object(f, json_array(o, n)) FROM (
+				SELECT 'title' AS f, OLD.title AS o, NEW.title AS n
+				UNION ALL SELECT 'description', OLD.description, NEW.description
+				UNION ALL SELECT 'assignee', OLD.assignee, NEW.assignee
+				UNION ALL SELECT 'reviewer', OLD.reviewer, NEW.reviewer
+				UNION ALL SELECT 'coordinator', OLD.coordinator, NEW.coordinator
+				UNION ALL SELECT 'priority', OLD.priority, NEW.priority
+				UNION ALL SELECT 'status', OLD.status, NEW.status
+				UNION ALL SELECT 'blockedReason', OLD.blocked_reason, NEW.blocked_reason
+				UNION ALL SELECT 'budgetLimit', OLD.budget_limit, NEW.budget_limit
+				UNION ALL SELECT 'requestsLimit', OLD.requests_limit, NEW.requests_limit
+			) WHERE o IS NOT n),
+			NEW.updated_at);
+	END`,
+	`CREATE TRIGGER IF NOT EXISTS trg_task_link_added
+	AFTER INSERT ON task_links
+	WHEN NOT EXISTS (SELECT 1 FROM task_events e WHERE e.owner_user_id = NEW.owner_user_id AND e.task_id = NEW.task_id
+		AND e.kind = 'link' AND json_extract(e.data, '$.kind') = NEW.kind AND json_extract(e.data, '$.ref') = NEW.ref)
+	BEGIN
+		UPDATE tasks SET version = version + 1, updated_at = NEW.created_at, updated_by = NEW.created_by
+		WHERE id = NEW.task_id AND owner_user_id = NEW.owner_user_id;
+		INSERT INTO task_events (owner_user_id, task_id, actor, kind, data, created_at)
+		VALUES (NEW.owner_user_id, NEW.task_id, NEW.created_by, 'link', json_object('kind', NEW.kind, 'ref', NEW.ref), NEW.created_at);
+	END`,
+	// The budgets (§5): an agent's request in a task counts against that task
+	// (`requests_used`) and its root (`budget_used`), in the INSERT itself. The
+	// person's and the system's messages, and replies, count nothing. Counters
+	// are not declared state: no version bump, no event. A restore replays the
+	// messages BEFORE the tasks (backup.ts), which then land with their own counts.
+	`CREATE TRIGGER IF NOT EXISTS trg_task_request_counted
+	AFTER INSERT ON agent_messages
+	WHEN NEW.task_id IS NOT NULL AND NEW.kind = 'request' AND NEW.from_id NOT IN ('owner', 'system')
+	BEGIN
+		UPDATE tasks SET requests_used = requests_used + 1 WHERE id = NEW.task_id AND owner_user_id = NEW.owner_user_id;
+		UPDATE tasks SET budget_used = budget_used + 1
+		WHERE owner_user_id = NEW.owner_user_id
+			AND id = (SELECT COALESCE(t.parent_id, t.id) FROM tasks t WHERE t.id = NEW.task_id AND t.owner_user_id = NEW.owner_user_id);
+	END`,
+	// v27's reply trigger, plus the task: the reply to a request in a task is in it.
+	"DROP TRIGGER IF EXISTS trg_agent_message_reply",
+	`CREATE TRIGGER IF NOT EXISTS trg_agent_message_reply
+	AFTER UPDATE OF state ON agent_messages
+	WHEN OLD.state = 'running' AND NEW.state = 'done' AND NEW.kind = 'request'
+		AND EXISTS (SELECT 1 FROM acp_agents WHERE owner_user_id = NEW.owner_user_id AND name = NEW.from_id)
+	BEGIN
+		INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, reply_to, body, state, project_id, depth, context, root_id, conversation_id, task_id)
+		VALUES (NEW.owner_user_id, NEW.to_id, NEW.from_id, 'reply', NEW.id,
+			'Respuesta de @' || NEW.to_id || ' a tu mensaje #' || NEW.id || ':' || char(10) || char(10) || COALESCE(NEW.result_text, '(sin texto)'),
+			'pending', NEW.project_id, MAX(NEW.depth - 1, 0), NEW.from_context, NEW.root_id, NEW.conversation_id, NEW.task_id);
+	END`,
 ];
 
 /**

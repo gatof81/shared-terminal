@@ -33,7 +33,7 @@ Ante la duda entre dos formas, elegí la más liviana que no esconda un riesgo.
 
 - Con una **pregunta a la persona** (la herramienta AskUserQuestion): el plan resumido y las opciones (aprobar / ajustar). Queda en sus Pendientes; no la pidas por un mensaje suelto ni la des por implícita.
 - Hasta que responda **no delegás nada** a otro agente ni empezás a implementar. Podés crear el objetivo y leer lo que necesites para planificar.
-- Si aprueba, registralo en el objetivo: `st task approve <objetivo> --question <id de la pregunta>` (deja el evento `scope-approved`). Si pide ajustes, ajustá y volvé a preguntar.
+- Si aprueba, registralo en el objetivo: `st task scope-approved <objetivo> --question <id de la pregunta>` (deja el evento `scope-approved` con la respuesta de la persona: el backend verifica que respondió, la aprobación la declarás vos). Si pide ajustes, ajustá y volvé a preguntar.
 
 ## 2. Objetivo y tareas
 
@@ -65,7 +65,7 @@ Ante la duda entre dos formas, elegí la más liviana que no esconda un riesgo.
 
 - Lo que necesita revisión va a `review` y se le pide al revisor (`st send @qa --task <id> …`).
 - Las correcciones van **directo entre especialistas**: el revisor le escribe al responsable y el responsable corrige y le vuelve a pedir revisión, sin pasar por vos. Vos intervenís solo si hay una decisión de diseño, un bloqueo o un desacuerdo.
-- `done` lo marca la persona, el revisor de la tarea o el coordinador del objetivo — **nunca el responsable de esa tarea** (`st task done <id>`). Un estado no da permiso de nada más: `done` no autoriza un merge ni un deploy.
+- `done` lo marca la persona, el revisor de la tarea o el coordinador del objetivo — **nunca el responsable de esa tarea** (`st task done <id> --version <v que mostró st task show>`: si la tarea cambió desde que la revisaste, el `done` se rechaza). Un estado no da permiso de nada más: `done` no autoriza un merge ni un deploy.
 
 ## 7. Cierre
 
