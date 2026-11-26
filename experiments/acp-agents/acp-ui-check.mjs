@@ -161,9 +161,18 @@ const field = "#project-view .ps-topic .acp-chat-input";
 const sendBtn = "#project-view .ps-topic .acp-chat-send";
 const thread = "#project-view .ps-topic .acp-chat-thread";
 
+/**
+ * Adds `label` to «Para» with "+". A row that is already checked is a recipient
+ * already there, and a tap REMOVES it: the step fails here, naming it, instead
+ * of later at a send that has no recipients.
+ */
 async function pick(page, label) {
 	await page.locator("#project-view .acp-pick-btn").click();
-	await page.getByRole("menuitemcheckbox", { name: label }).click();
+	const row = page.getByRole("menuitemcheckbox", { name: label });
+	const before = await row.getAttribute("aria-checked");
+	await row.click();
+	const after = await row.getAttribute("aria-checked");
+	if (after !== "true") await fail(page, `«Para» did not get ${label}`, `aria-checked ${before} → ${after}`, "#project-view .acp-pick-menu [role=menuitemcheckbox]");
 	await page.keyboard.press("Escape");
 }
 async function clearChips(page) {
@@ -194,8 +203,17 @@ try {
 	await step(page, "agents-from-the-form", async () => {
 		async function createAgent(agent, projectChoice) {
 			await page.click("#new-session-btn");
+			// The form focuses its first field once more on the next frame
+			// (newSession.ts, a requestAnimationFrame) and fill() does not wait for
+			// frames: that focus landing inside the agent field's fill sent its text
+			// to the session's name («acp X» + «X», agent empty). rAF callbacks run in
+			// the order they were asked for, so once ours runs the form's has.
+			await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
 			await page.fill("#new-session-input", `acp ${agent}`);
 			await page.fill("#new-session-acp-agent", agent);
+			const typed = await page.evaluate(() => [document.querySelector("#new-session-input")?.value, document.querySelector("#new-session-acp-agent")?.value]);
+			if (typed[0] !== `acp ${agent}` || typed[1] !== agent)
+				await fail(page, "the form holds what was typed", JSON.stringify(typed), "#new-session-input, #new-session-acp-agent");
 			await page.waitForFunction(() => document.querySelector("#new-session-acp-project")?.options.length > 1, null, { timeout: 10_000 });
 			if (projectChoice.new) {
 				await page.selectOption("#new-session-acp-project", "__new__");
@@ -203,6 +221,14 @@ try {
 			} else await page.selectOption("#new-session-acp-project", projectChoice.id);
 			await page.selectOption("#new-session-acp-runtime", "st-test-agent");
 			await page.click("#new-session-submit");
+			// The API has the agent as soon as the POST lands, while the form still
+			// waits for its own reads before closing: the next "+ New session" goes
+			// after the form closed, not into it.
+			const closed = await page
+				.waitForFunction(() => !document.querySelector("#new-session-modal")?.classList.contains("open"), null, { timeout: 60_000 })
+				.then(() => true)
+				.catch(() => false);
+			if (!closed) await fail(page, "the form closed after «Crear»", "", "#new-session-modal.open");
 			const a = await until(() => agentRow(page, agent), 60_000);
 			await check(page, `session with @${agent} created from the form`, !!a, a && `${a.runtime} project ${a.projectId}`, "#new-session-submit");
 			if (a) created.push(a.sessionId);
@@ -434,6 +460,11 @@ try {
 			return { page: document.documentElement.scrollWidth - innerWidth, view: v ? v.scrollWidth - v.clientWidth : 0 };
 		});
 		await check(m, "no horizontal overflow", overflow.page <= 1 && overflow.view <= 1, JSON.stringify(overflow));
+		// The title comes from the rail's list, the topic's recipients with its
+		// feed, which may land later: cleared before it, «Para» was still empty,
+		// then showed @arq (the desktop's last post) checked in "+", and the tap
+		// removed it. The feed's own content says it landed.
+		await sees(m, "the topic's thread (the desktop's last post)", `${thread} .acp-post`, { text: "esperá 90" });
 		await clearChips(m);
 		await pick(m, new RegExp(`@${ARQ}\\b`));
 		await post(m, "hola desde el móvil");
