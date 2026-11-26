@@ -197,7 +197,7 @@ test.describe("the Archive", () => {
 		await page.locator("#inbox-btn").click();
 		const item = page.locator(".acp-inbox-card .acp-ib-item.is-interrupted");
 		await expect(item.locator(".acp-ib-where")).toHaveText(
-			"Educación HZ › Archivo › @arq · chat individual",
+			/^Educación HZ › Archivo › @arq · chat individual · \d\d:\d\d$/,
 		);
 		// «Ver en el Archivo»: the agent's chat, the message highlighted.
 		await item.getByRole("button", { name: "Ver en el Archivo" }).click();
@@ -207,10 +207,10 @@ test.describe("the Archive", () => {
 		).toBeFocused();
 		// Reviewed from Pendientes: it leaves the count.
 		await page.locator("#inbox-btn").click();
-		await item.getByRole("button", { name: "Revisar interrupción" }).click();
+		await item.getByRole("button", { name: "Revisar", exact: true }).click();
 		await page
 			.locator(".acp-review-card")
-			.getByRole("button", { name: "Dar por revisada, sin reencolar" })
+			.getByRole("button", { name: "Dar por revisada" })
 			.click();
 		await expect
 			.poll(() => backend.acpMessages.find((m) => m.id === cut.id)?.reviewed_at)
@@ -228,7 +228,7 @@ test.describe("the Archive", () => {
 		await page.locator("#inbox-btn").click();
 		const item = page.locator(".acp-inbox-card .acp-ib-item.is-interrupted");
 		await expect(item).toContainText("Ordená el README");
-		await expect(item.getByRole("button", { name: "Revisar interrupción" })).toBeVisible();
+		await expect(item.getByRole("button", { name: "Revisar", exact: true })).toBeVisible();
 		await expect(item.getByRole("button", { name: /^Ver en/ })).toHaveCount(0);
 	});
 

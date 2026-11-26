@@ -1,20 +1,24 @@
-// acpReview.ts — «Revisar interrupción» (PROPUESTA §11.1): an `uncertain`
-// run may have done part of its work, so it is never resent by a tap. The
-// dialog shows the facts the rows carry — the original message, when and
-// why it was cut (`note`), the last activity known (only if there is one),
-// the agent's read-only report (`recovery_of`) once it is there — and the
-// agent's Git and Terminal. Its actions, safest first:
+// acpReview.ts — «Revisar interrupción» (PROPUESTA §11.1, revisión UI §14):
+// an `uncertain` run may have done part of its work, so it is never resent
+// by a tap. The card is titled with what happened in plain words
+// (acpModel.interruptCause; the runner's note stays in «Detalle técnico»)
+// and answers three facts — Qué pasó, Informe (the agent's read-only report,
+// `recovery_of`), Ahora (the agent's state from the registry, or that it no
+// longer exists) — then a «Recomendado» box with the case's action:
 //
-//   - «Dar por revisada, sin reencolar» (POST …/review): out of Pendientes,
-//     nothing written or sent; the message reads «interrumpida · revisada,
-//     no reencolada»;
-//   - «Escribirle un mensaje nuevo»: its topic, with that agent as recipient;
-//   - «Reencolar el mensaje original…», folded and locked until «Revisé el
-//     estado y acepto que puede repetir operaciones.» is checked: the owner's
-//     `requeue`, unchanged (the same message, no copy).
+//   - with a report: «Dar por revisada» (POST …/review: out of Pendientes,
+//     nothing written or sent) or «Escribirle un mensaje nuevo»;
+//   - without one: «Ver cambios en Git» first;
+//   - its agent deleted: only «Dar por revisada» — Git, Terminal, writing to
+//     it and requeueing cannot work without the agent, so none is offered.
+//
+// «Reencolar el mensaje original… (no recomendado)» stays folded and locked
+// until «Revisé el estado y acepto que puede repetir operaciones.» is
+// checked: the owner's `requeue`, unchanged (the same message, no copy).
 
 import { inboxNow, refreshInbox } from "./acpInboxStore.js";
-import { acpSessionOf } from "./acpRegistry.js";
+import { agentNow, interruptCause, interruptTitle, reportState } from "./acpModel.js";
+import { acpAgentGone, acpEntryByName, acpSessionOf } from "./acpRegistry.js";
 import { type AcpMessage, acpRequeue, acpReview } from "./api.js";
 import { markdownBlock } from "./chatMarkdown.js";
 import { createDialog } from "./components/dialog.js";
@@ -68,8 +72,10 @@ export function openReview(m: AcpMessage, ctx: ReviewContext = {}): void {
 	card.setAttribute("aria-labelledby", `${id}-title`);
 	root.append(backdrop, card);
 
+	const gone = acpAgentGone(m.to_id);
+	const agent = `@${m.to_id}`;
 	const header = el("div", "modal-header");
-	const h2 = el("h2", undefined, "Revisar interrupción");
+	const h2 = el("h2", undefined, interruptTitle(m));
 	h2.id = `${id}-title`;
 	const close = el("button", "modal-close", "×");
 	close.type = "button";
@@ -84,68 +90,56 @@ export function openReview(m: AcpMessage, ctx: ReviewContext = {}): void {
 		el(
 			"p",
 			"acp-review-sub",
-			`${mine ? `Tu mensaje a @${m.to_id}` : `La consulta de @${m.from_id} a @${m.to_id}`}${where} · ${time(m.created_at)}`,
+			`${mine ? `Tu mensaje a ${agent}` : `La consulta de @${m.from_id} a ${agent}`}${where} · ${clockTime(m.created_at)}`,
 		),
 		el("blockquote", "acp-review-quote", m.body),
 	);
+
+	// ── The three facts ──
 	const facts = el("dl", "acp-review-facts");
-	const fact = (k: string, v: string | HTMLElement) => {
+	const fact = (k: string, ...v: Array<string | Node>) => {
 		const dd = el("dd");
-		dd.append(v);
+		dd.append(...v);
 		facts.append(el("dt", undefined, k), dd);
 	};
+	const cut = m.finished_at ? ` a las ${clockTime(m.finished_at)}` : "";
+	const tech = el("details", "acp-review-tech");
+	tech.append(el("summary", undefined, "Detalle técnico"));
+	tech.append(el("code", undefined, m.note ?? "sin detalle del motivo"));
+	if (ctx.activity) tech.append(el("code", undefined, `última actividad: ${ctx.activity}`));
 	fact(
-		"Se interrumpió",
-		`${m.finished_at ? `${time(m.finished_at)} — ` : ""}${m.note ?? "sin detalle del motivo"}`,
+		"Qué pasó",
+		`${agent} ${interruptCause(m.note).what}${cut}, en medio de este trabajo. `,
+		el("b", undefined, "Ya no está corriendo"),
+		": nada se reintenta solo.",
+		tech,
 	);
-	if (ctx.activity) fact("Última actividad", el("code", undefined, ctx.activity));
-	body.append(
-		facts,
-		el(
-			"p",
-			"acp-review-warn",
-			"Puede haber hecho parte del trabajo (comandos, archivos, commits, mensajes a otros agentes). Nada se reenvía solo.",
-		),
-	);
+
 	const report = ctx.report ?? inboxNow()?.reports.find((r) => r.recovery_of === m.id) ?? null;
-	if (report) {
-		const box = el("section", "acp-review-report");
-		box.setAttribute("aria-label", `Informe de @${report.to_id}`);
-		const head = el("div", "acp-review-report-head");
-		head.append(el("b", undefined, `Informe de @${report.to_id}`), " (solo lectura)");
-		box.append(head);
-		if (report.result_text) {
-			const text = el("div", "acp-md");
-			text.append(markdownBlock(report.result_text));
-			box.append(text);
-		} else box.append(el("p", "acp-review-muted", `@${report.to_id} todavía lo está escribiendo.`));
-		body.append(box);
-	}
+	const has = reportState(report);
+	if (report && has === "done") {
+		const box = el("div", "acp-review-report acp-md");
+		box.setAttribute("aria-label", `Informe de ${agent}`);
+		box.append(markdownBlock(report.result_text ?? ""));
+		const by = report.finished_at
+			? `Lo escribió ${agent} a las ${clockTime(report.finished_at)}, después del corte (solo lectura).`
+			: `Lo escribió ${agent} después del corte (solo lectura).`;
+		fact("Informe", box, el("p", "acp-review-muted", by));
+	} else if (has === "writing") fact("Informe", `${agent} está escribiendo su informe.`);
+	else fact("Informe", "No dejó informe.");
 
-	// The agent's Git and Terminal: what it left done is looked at there.
-	const toolsRow = el("div", "acp-review-tools");
-	for (const [tool, label] of [
-		["git", "Ver cambios en Git"],
-		["terminal", "Abrir Terminal"],
-	] as const) {
-		const b = el("button", "btn sm", label);
-		b.type = "button";
-		b.addEventListener("click", () => {
-			dialog.close();
-			if (!hooks.tools?.(m.to_id, tool)) {
-				const sid = acpSessionOf(m.to_id);
-				if (sid) window.location.hash = routeHash({ sessionId: sid, view: tool, detail: null });
-			}
-		});
-		toolsRow.append(b);
-	}
-	body.append(toolsRow);
+	const now = acpEntryByName(m.to_id);
+	if (gone)
+		fact("Ahora", el("b", undefined, `${agent} ya no existe`), ": su sesión fue eliminada.");
+	else if (now) fact("Ahora", `${agent} ${agentNow(now).sentence}`);
+	body.append(facts);
 
-	const actions = el("div", "acp-review-actions");
 	const status = el("p", "acp-review-status");
 	status.setAttribute("role", "status");
 	const reviewed = Boolean(m.reviewed_at) || m.state !== "uncertain";
-	const done = el("button", "btn acp-review-done", "Dar por revisada, sin reencolar");
+
+	// ── Recomendado ──
+	const done = el("button", "btn acp-review-done", "Dar por revisada");
 	done.type = "button";
 	if (reviewed) {
 		done.disabled = true;
@@ -181,11 +175,66 @@ export function openReview(m: AcpMessage, ctx: ReviewContext = {}): void {
 		dialog.close();
 		hooks.writeNew(m);
 	});
-	actions.append(done, write);
+	const toolButton = (tool: "git" | "terminal", label: string, cls = "btn") => {
+		const b = el("button", cls, label);
+		b.type = "button";
+		b.addEventListener("click", () => {
+			dialog.close();
+			if (!hooks.tools?.(m.to_id, tool)) {
+				const sid = acpSessionOf(m.to_id);
+				if (sid) window.location.hash = routeHash({ sessionId: sid, view: tool, detail: null });
+			}
+		});
+		return b;
+	};
+
+	const reco = el("section", "acp-review-reco");
+	reco.setAttribute("aria-label", "Recomendado");
+	reco.append(el("b", "acp-review-reco-head", "Recomendado"));
+	const recoActs = el("div", "acp-review-actions");
+	// Git leads when there is no report: what it left done is looked at there.
+	const gitFirst = !gone && has !== "done";
+	if (gone) {
+		reco.append(
+			el(
+				"p",
+				undefined,
+				"Dala por revisada. No se puede retomar ni reencolar: no hay agente que lo reciba.",
+			),
+		);
+		recoActs.append(done);
+	} else if (has === "done") {
+		reco.append(
+			el(
+				"p",
+				undefined,
+				"El informe dice qué quedó hecho. Si está bien, dala por revisada. Si querés que lo termine, escribile un mensaje nuevo: reencolar puede repetir lo que ya hizo.",
+			),
+		);
+		recoActs.append(done, write);
+	} else {
+		reco.append(
+			el(
+				"p",
+				undefined,
+				"Mirá los cambios en Git antes de decidir: puede haber hecho parte del trabajo (comandos, archivos, commits, mensajes a otros agentes). Reencolar puede repetir lo que ya hizo.",
+			),
+		);
+		done.classList.remove("acp-review-done");
+		recoActs.append(toolButton("git", "Ver cambios en Git", "btn acp-review-done"), done, write);
+	}
+	reco.append(recoActs);
+
+	// The agent's tools: only an agent that exists has any.
+	const toolsRow = el("div", "acp-review-tools");
+	if (!gone) {
+		if (!gitFirst) toolsRow.append(toolButton("git", "Ver cambios en Git"));
+		toolsRow.append(toolButton("terminal", "Abrir Terminal"));
+	}
 
 	// Requeue: folded, and locked until the person says they checked.
 	const fold = el("details", "acp-review-requeue");
-	fold.append(el("summary", undefined, "Reencolar el mensaje original…"));
+	fold.append(el("summary", undefined, "Reencolar el mensaje original… (no recomendado)"));
 	fold.append(
 		el(
 			"p",
@@ -227,7 +276,7 @@ export function openReview(m: AcpMessage, ctx: ReviewContext = {}): void {
 			});
 	});
 	fold.append(ack, requeue);
-	if (m.state !== "uncertain") fold.hidden = true;
+	if (m.state !== "uncertain" || gone) fold.hidden = true;
 
 	const foot = el("div", "modal-actions");
 	const closeBtn = el("button", "dialog-cancel", "Cerrar");
@@ -236,17 +285,21 @@ export function openReview(m: AcpMessage, ctx: ReviewContext = {}): void {
 	foot.append(closeBtn);
 
 	const scroll = el("div", "acp-review-scroll");
-	scroll.append(body, actions, status, fold);
+	scroll.append(body, reco, status);
+	if (toolsRow.childElementCount) scroll.append(toolsRow);
+	scroll.append(fold);
 	card.append(header, scroll, foot);
 	document.body.append(root);
 	const dialog = createDialog(root, {
-		initialFocus: () => (done.disabled ? closeBtn : done),
+		initialFocus: () =>
+			recoActs.querySelector<HTMLButtonElement>("button:not(:disabled)") ?? closeBtn,
 		onClose: () => root.remove(),
 	});
 	dialog.open(document.activeElement);
 }
 
-function time(iso: string): string {
+/** «10:25»: a row's time as Pendientes and the review show it. */
+export function clockTime(iso: string): string {
 	const d = new Date(iso);
 	return Number.isNaN(d.getTime())
 		? ""

@@ -20,6 +20,8 @@ export interface AcpSessionEntry {
 	pending: number;
 	authRequired: boolean;
 	waitingInput: boolean;
+	/** Slots kept by a process the agent left running (#761). */
+	heldBy: Array<{ conversationId: string | null; work: string | null; since: string }>;
 }
 
 /** The fields of an /api/acp/agents row the registry keeps (structural: no import). */
@@ -32,6 +34,7 @@ export interface AcpAgentRowLike {
 	pending?: number;
 	authRequired?: boolean;
 	waitingInput?: boolean;
+	heldBy?: Array<{ conversationId: string | null; work: string | null; since: string }>;
 }
 
 let bySession = new Map<string, AcpSessionEntry>();
@@ -58,6 +61,11 @@ function entry(a: AcpAgentRowLike): AcpSessionEntry {
 		pending: a.pending ?? 0,
 		authRequired: a.authRequired === true,
 		waitingInput: a.waitingInput === true,
+		heldBy: (a.heldBy ?? []).map((h) => ({
+			conversationId: h.conversationId,
+			work: h.work,
+			since: h.since,
+		})),
 	};
 }
 
@@ -115,6 +123,15 @@ export function acpEntry(sessionId: string): AcpSessionEntry | null {
 export function acpEntryByName(name: string): AcpSessionEntry | null {
 	for (const e of bySession.values()) if (e.name === name) return e;
 	return null;
+}
+
+/**
+ * Agent `name` no longer exists: the list was read and has no agent by that
+ * name (its session was deleted). Before the first read: false — unknown is
+ * never «gone».
+ */
+export function acpAgentGone(name: string): boolean {
+	return loaded && acpEntryByName(name) === null;
 }
 
 /** The agents taking part in project `projectId`, as last read. */

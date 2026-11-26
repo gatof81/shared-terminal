@@ -273,7 +273,7 @@ test.describe("visual", () => {
 		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/c/${CONV_IDS.backend}`);
 		await page.getByRole("button", { name: "Revisar interrupción" }).click();
 		const review = page.locator(".acp-review-card");
-		await expect(review.locator(".acp-review-facts")).toContainText("Última actividad");
+		await expect(review.locator(".acp-review-tech")).toContainText("última actividad");
 		await expect(review.locator(".acp-review-report")).toContainText("no hice commits");
 		await review.getByText("Reencolar el mensaje original…").click();
 		await expect(review.getByRole("button", { name: "Reencolar", exact: true })).toBeDisabled();
