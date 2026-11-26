@@ -3566,6 +3566,35 @@ describe("D1 reads: the board goes by index (v29)", () => {
 			expect(ps.some((p) => p.plan.some((l) => /idx_tasks_parent/.test(l)))).toBe(true);
 			expect(ps.some((p) => p.plan.some((l) => /idx_task_events_task/.test(l)))).toBe(true);
 		});
+
+		it("the request counter trigger updates tasks by key (trg_task_request_counted)", () => {
+			// EXPLAIN QUERY PLAN of the INSERT into agent_messages does not show what its
+			// triggers run, so the trigger's own statements are planned, read back from the
+			// schema (the migrated text, not a copy) with NEW.* bound as parameters.
+			const { sql } = db
+				.prepare("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?")
+				.get("trg_task_request_counted") as { sql: string };
+			const body = /\bBEGIN\b([\s\S]*)\bEND\s*$/i.exec(sql)?.[1] ?? "";
+			const stmts = body
+				.split(";")
+				.map((s) => s.trim())
+				.filter(Boolean);
+			expect(stmts.length).toBe(2);
+			const child = (
+				db
+					.prepare("SELECT id FROM tasks WHERE project_id = ? AND parent_id IS NOT NULL LIMIT 1")
+					.get(PB) as { id: number }
+			).id;
+			for (const s of stmts) {
+				const bound = s.replace(/\bNEW\.task_id\b/g, "?1").replace(/\bNEW\.owner_user_id\b/g, "?2");
+				expect(bound).not.toMatch(/\bNEW\./);
+				const plan = (
+					db.prepare(`EXPLAIN QUERY PLAN ${bound}`).all(child, OWNER) as Array<{ detail: string }>
+				).map((r) => r.detail);
+				expect(plan.filter((l) => /^SCAN\b/.test(l))).toEqual([]);
+				expect(plan.join("\n")).toMatch(/SEARCH (tasks|t) USING INTEGER PRIMARY KEY \(rowid=\?\)/);
+			}
+		});
 	});
 });
 
