@@ -341,6 +341,17 @@ export function isHomeAddress(): boolean {
 	);
 }
 
+/**
+ * An address in the app's own shape (`#/…`) that names nothing it knows
+ * (`#/garbage/x`, a session with an unknown view): the app treats it as
+ * «not found» instead of leaving it in the bar. Other fragments are not ours.
+ */
+export function isUnknownAddress(): boolean {
+	return (
+		window.location.hash.startsWith("#/") && readRoute() === null && readProjectRoute() === null
+	);
+}
+
 /** On a phone, such an address shows the main list as the screen (main.ts). */
 export function homeShown(): boolean {
 	return phoneMq?.matches === true && isHomeAddress();
@@ -447,7 +458,7 @@ export function pushSessionAddress(): void {
  */
 export function clear(): void {
 	current = null;
-	if (readRoute() === null) return;
+	if (readRoute() === null && !isUnknownAddress()) return;
 	history.replaceState({ st: { n: depth() } }, "", bare());
 	for (const l of writeListeners) l();
 }
@@ -470,7 +481,9 @@ function emit(source: RouteSource): void {
 	// Our own writes (navigate) set `current` first; a Back/Forward lands
 	// on an entry we wrote earlier and must be applied even though its
 	// shape is known. Only an unchanged route is skipped.
-	if (sameRoute(route, current)) return;
+	// An unknown address is no route, but it must reach the listeners even
+	// with nothing on screen (`current` null too): they answer «not found».
+	if (sameRoute(route, current) && !isUnknownAddress()) return;
 	current = route;
 	for (const l of listeners) l(route, source);
 }
