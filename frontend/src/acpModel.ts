@@ -75,16 +75,17 @@ export function effortLabel(level: string | null | undefined): string {
 export function recipientsOf(
 	text: string,
 	names: readonly string[],
-): { to: string[]; error: string | null } {
+): { to: string[]; unknown: string[]; error: string | null } {
 	const lead = /^\s*((?:@[A-Za-z0-9_-]+[\s,;:.!?]*)+)/.exec(text);
-	if (!lead) return { to: [], error: null };
+	if (!lead) return { to: [], unknown: [], error: null };
 	const known = new Set(names);
 	const valid = names.map((n) => `@${n}`).join(", ");
 	const to = [...new Set([...lead[1]!.matchAll(/@([A-Za-z0-9_-]+)/g)].map((m) => m[1]!))];
 	const unknown = to.filter((n) => !known.has(n));
-	if (unknown.length === 0) return { to, error: null };
+	if (unknown.length === 0) return { to, unknown, error: null };
 	return {
 		to: [],
+		unknown,
 		error: `${unknown.map((n) => `@${n}`).join(", ")} no ${unknown.length === 1 ? "es un agente" : "son agentes"} de este proyecto${names.length ? ` (agentes: ${valid})` : ""}. No se envió nada.`,
 	};
 }

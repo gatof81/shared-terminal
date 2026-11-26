@@ -376,6 +376,9 @@ export class AcpThread {
 					if (document.activeElement === this.input) e.preventDefault();
 				});
 		this.input.addEventListener("input", () => {
+			// «Para:» shows who this text reaches as it is typed (a leading
+			// mention included), from the same rule the send applies.
+			if (this.source?.kind === "conversation" && this.toKey() !== this.shownTo) this.renderChips();
 			this.syncMention();
 			this.renderHint();
 			this.syncSendBtn();
@@ -1915,18 +1918,39 @@ export class AcpThread {
 	 * leading mentions, or the one agent mentioned in the text — never "the
 	 * project's only agent" — and with nobody, «Elegí a quién con + o @».
 	 */
-	private recipients(text: string): { to: string[]; team: boolean; error: string | null } {
+	private recipients(text: string): {
+		to: string[];
+		team: boolean;
+		unknown: string[];
+		error: string | null;
+	} {
 		const names = [...this.agents.keys()];
 		// The chips, plus the agents named at the start of the text
 		// (typed without the menu) — never one named inside the instruction.
 		const c = this.currentChips();
-		if (c.team) return { to: names, team: true, error: null };
+		if (c.team) return { to: names, team: true, unknown: [], error: null };
 		const lead = /^\s*@[A-Za-z0-9_-]/.test(text) ? recipientsOf(text, names) : null;
-		if (lead?.error) return { to: [], team: false, error: lead.error };
+		if (lead?.error) return { to: [], team: false, unknown: lead.unknown, error: lead.error };
 		const to = [...new Set([...c.agents, ...(lead?.to ?? [])])];
 		return to.length
-			? { to, team: false, error: null }
-			: { to: [], team: false, error: "Elegí a quién con + o @" };
+			? { to, team: false, unknown: [], error: null }
+			: { to: [], team: false, unknown: [], error: "Elegí a quién con + o @" };
+	}
+
+	/**
+	 * The field's text as «Para:» judges it: a mention still being typed at
+	 * the end (`@de`, the `@` menu open) is not judged yet — it is not
+	 * "not an agent", it is not finished.
+	 */
+	private typedSoFar(): string {
+		return this.input.value.replace(/@[A-Za-z0-9_-]*$/, "");
+	}
+
+	/** What `recipients` answers for the field now, as a key: «Para:» re-renders only when it changes. */
+	private shownTo = "";
+	private toKey(): string {
+		const r = this.recipients(this.typedSoFar());
+		return JSON.stringify([r.team, r.to, r.unknown]);
 	}
 
 	// ── A topic's recipients: chips, "+", the `@` menu (3B F2) ───────────
@@ -2006,6 +2030,11 @@ export class AcpThread {
 	private renderChips(): void {
 		const c = this.currentChips();
 		const names = this.teamNames();
+		// Who the field's text reaches if sent now — the send's own rule
+		// (`recipients`): the chips plus the agents named at its start.
+		const r = this.recipients(this.typedSoFar());
+		this.shownTo = this.toKey();
+		const typed = r.team ? [] : r.to.filter((n) => !c.agents.includes(n));
 		const nodes: HTMLElement[] = [];
 		if (c.team) {
 			const chip = el("span", "acp-chip acp-chip-team");
@@ -2037,14 +2066,43 @@ export class AcpThread {
 				);
 				nodes.push(chip);
 			}
+		// Named at the start of the text: the same chip, without × — it goes
+		// away by editing the text, which is where it comes from.
+		for (const n of typed) {
+			const chip = el("span", "acp-chip acp-chip-typed");
+			chip.setAttribute("role", "listitem");
+			chip.title = "Mencionado al principio del mensaje";
+			chip.style.setProperty("--acp-hue", String(agentHue(n)));
+			chip.append(avatarOf(n), el("span", "acp-chip-name", `@${n}`));
+			const busy = busyElsewhere(this.agents.get(n), this.topicId(), this.titleOf);
+			if (busy) {
+				const b = el("span", "acp-chip-busy", busy.startsWith("ocupado") ? "ocupado" : "espera");
+				b.title = busy;
+				chip.append(b);
+			}
+			nodes.push(chip);
+		}
+		// A leading mention that is not an agent of the project: the send
+		// refuses the whole text, and the row says so before it is sent.
+		const chips = nodes.length;
+		if (r.unknown.length) {
+			const who = r.unknown.map((n) => `@${n}`).join(", ");
+			nodes.push(
+				el(
+					"span",
+					"acp-to-error",
+					`${who} no ${r.unknown.length === 1 ? "es un agente" : "son agentes"} del proyecto`,
+				),
+			);
+		}
 		// A list only when there are chips: the empty line is not an item.
-		if (nodes.length) {
+		if (chips && !r.unknown.length) {
 			this.chipBox.setAttribute("role", "list");
 			this.chipBox.setAttribute("aria-label", "Destinatarios");
 		} else {
 			this.chipBox.removeAttribute("role");
 			this.chipBox.removeAttribute("aria-label");
-			nodes.push(el("span", "acp-to-empty", "Elegí a quién con + o @"));
+			if (!r.unknown.length) nodes.push(el("span", "acp-to-empty", "Elegí a quién con + o @"));
 		}
 		this.chipBox.replaceChildren(...nodes);
 		// Under the field: who it reaches, and who will queue it (dato real: /agents).
@@ -2054,7 +2112,7 @@ export class AcpThread {
 		// variants are in the DOM and CSS picks one, so the keyboard opening or
 		// closing renders nothing (the thread's box change alone moves nothing).
 		const lines: HTMLElement[] = [];
-		const to = c.team ? names : c.agents;
+		const to = r.error ? [] : r.to;
 		if (c.team && names.length)
 			lines.push(
 				el(
@@ -2328,6 +2386,7 @@ export class AcpThread {
 		const bodies = retry?.bodies ?? new Map<string, string>();
 		this.input.value = "";
 		this.syncSendBtn();
+		this.renderChips();
 		this.closePicker(false);
 		this.drafts.delete(sourceKey(src));
 		// A send that did not go out gives its text back to ITS chat: into the

@@ -687,9 +687,15 @@ function labelSessionRow(select: HTMLElement): void {
  */
 function renderGroupedSessions(): void {
 	const known = new Set(projects().map((p) => p.projectId));
-	// An agent of a project the list does not have (archived, not read yet)
-	// is shown with the agents without one: never hidden.
-	const loose = sessions.filter((s) => !known.has(acpEntry(s.sessionId)?.projectId ?? ""));
+	const listed = projectsLoaded();
+	// An agent of a project the list does not have (archived) is shown with
+	// the agents without one: never hidden. Until the list has been read,
+	// "not in the list" says nothing — an agent with a project waits for it
+	// instead of showing under «Agentes sin proyecto» and jumping away.
+	const loose = sessions.filter((s) => {
+		const pid = acpEntry(s.sessionId)?.projectId ?? "";
+		return pid === "" || (listed && !known.has(pid));
+	});
 	const agents = loose.filter((s) => acpEntry(s.sessionId) !== null);
 	const plain = loose.filter((s) => acpEntry(s.sessionId) === null);
 	sessionList.appendChild(
@@ -699,7 +705,8 @@ function renderGroupedSessions(): void {
 			cls: "sgroup-projects",
 			head: newProjectButton(),
 			rows: projects().map((p) => buildProjectRow(p.projectId, p.name)),
-			empty: projectsLoaded()
+			loading: !listed && !projectsLoadFailed(),
+			empty: listed
 				? "Sin proyectos. Un proyecto agrupa agentes ACP y les da conversaciones."
 				: projectsLoadFailed()
 					? "No se pudieron cargar los proyectos; reintentando."
@@ -894,6 +901,8 @@ function buildGroup(g: {
 	/** A control at the heading's end (Proyectos' +, Sesiones' ⋯). */
 	head?: HTMLElement;
 	empty?: string;
+	/** Not read yet: placeholder rows (with `empty` said to a screen reader) and no count. */
+	loading?: boolean;
 	countLabel?: (n: number) => string;
 }): HTMLElement {
 	const isCollapsed = collapsed().has(g.key);
@@ -953,7 +962,8 @@ function buildGroup(g: {
 		g.countLabel?.(g.rows.length) ??
 		(g.rows.length === 1 ? "1 sesión" : `${g.rows.length} sesiones`);
 	count.setAttribute("aria-label", count.title);
-	head.appendChild(count);
+	// A count of what has not been read would be a 0 that later jumps.
+	if (!g.loading) head.appendChild(count);
 	if (g.head) head.appendChild(g.head);
 	section.appendChild(head);
 
@@ -961,7 +971,19 @@ function buildGroup(g: {
 	rows.className = "sgroup-rows";
 	rows.id = rowsId;
 	rows.hidden = isCollapsed;
-	if (g.rows.length === 0 && g.empty) {
+	if (g.rows.length === 0 && g.loading) {
+		rows.setAttribute("aria-busy", "true");
+		const said = document.createElement("p");
+		said.className = "visually-hidden";
+		said.textContent = g.empty ?? "Cargando…";
+		rows.appendChild(said);
+		for (let i = 0; i < 2; i++) {
+			const ph = document.createElement("div");
+			ph.className = "sgroup-skeleton";
+			ph.setAttribute("aria-hidden", "true");
+			rows.appendChild(ph);
+		}
+	} else if (g.rows.length === 0 && g.empty) {
 		const empty = document.createElement("p");
 		empty.className = "sgroup-empty";
 		empty.textContent = g.empty;

@@ -165,6 +165,37 @@ test.describe("a topic's recipients and their states", () => {
 		expect(app.errors).toEqual([]);
 	});
 
+	test("«Para:» follows a mention as it is typed — the send's own rule; an unknown one says so", async ({
+		app,
+		page,
+	}) => {
+		await app.login("alice", topic(CONV_IDS.ci));
+		await expect(page.locator(THREAD)).toContainText("el job de e2e tarda");
+		await expect(chips(page)).toHaveText("Elegí a quién con + o @");
+		await field(page).click();
+		// A mention still being typed is not judged.
+		await field(page).pressSequentially("@de");
+		await expect(chips(page)).toHaveText("Elegí a quién con + o @");
+		await page.keyboard.press("Escape");
+		await field(page).pressSequentially("v bajá el lint");
+		await expect(chips(page).locator(".acp-chip-name")).toHaveText(["@dev"]);
+		await expect(chips(page).locator(".acp-chip-typed")).toHaveCount(1);
+		// It goes where the row said.
+		const req = posts(page);
+		await page.locator("#project-view .acp-chat-send").click();
+		expect((await req).postDataJSON()).toMatchObject({ to: ["dev"], body: "@dev bajá el lint" });
+		// Not an agent of the project: the row says it before sending.
+		await field(page).click();
+		await field(page).pressSequentially("@devv revisá");
+		await expect(chips(page).locator(".acp-to-error")).toHaveText(
+			"@devv no es un agente del proyecto",
+		);
+		await expect(chips(page).locator(".acp-chip-typed")).toHaveCount(0);
+		await field(page).fill("");
+		await expect(chips(page).locator(".acp-to-error")).toHaveCount(0);
+		expect(app.errors).toEqual([]);
+	});
+
 	test("3 · a new topic starts empty; a topic keeps its chips across a switch", async ({
 		app,
 		backend,
@@ -526,11 +557,16 @@ test.describe("Pendientes and the review of an interruption", () => {
 		await expect(q.locator(".acp-ib-where")).toHaveText("Educación HZ › Rediseño de UI/UX");
 		await q.getByLabel("GitHub").check();
 		await q.getByRole("button", { name: "Responder" }).click();
+		// Where the person was looking: what was sent, for a moment, then it leaves.
+		const done = page.locator(".acp-inbox-card .acp-ib-item.is-answered");
+		await expect(done.getByRole("status")).toHaveText("✓ Respondida: GitHub · @arq sigue");
 		await expect(page.locator("#inbox-btn")).toHaveAttribute(
 			"aria-label",
 			"Pendientes: 2 te esperan",
 		);
 		await expect(page.locator(".acp-inbox-card .acp-ib-item.is-question")).toHaveCount(0);
+		await expect(done).toHaveCount(0, { timeout: 4000 });
+		await expect(page.locator(".acp-inbox-card")).toBeVisible();
 		expect(app.errors).toEqual([]);
 	});
 

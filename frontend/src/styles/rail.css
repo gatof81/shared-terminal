@@ -685,20 +685,3 @@ a.rail-row:focus-visible,
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* The project without topics: its one action, in the accent (not the green of "New session"). */
-.ps-new {
-  min-height: 36px;
-  padding: 0 14px;
-  border: 0;
-  border-radius: var(--radius-s);
-  background: var(--c-accent-strong);
-  color: #fff;
-  font-weight: 600;
-}
-.ps-new:hover {
-  background: var(--c-accent);
-}
-.ps-new:focus-visible {
-  outline: 2px solid var(--c-accent);
-  outline-offset: 2px;
-}

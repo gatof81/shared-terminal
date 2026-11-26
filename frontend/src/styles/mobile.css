@@ -320,4 +320,43 @@
   body.home-on header #inbox-btn {
     margin-left: auto;
   }
+  /* «+ Sesión nueva» goes to the foot, within the thumb's reach, on the row of
+     «Cuenta» (shown only under 400 px): the list starts right under the
+     header. A grid, so the button stays where it is in the DOM — the
+     drawer opened from a session keeps it first. */
+  body.home-on #sidebar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: minmax(0, 1fr) auto auto;
+  }
+  body.home-on #session-list,
+  body.home-on #observable-section {
+    grid-column: 1 / -1;
+  }
+  body.home-on #sidebar.sidebar-tree #sidebar-actions,
+  body.home-on #sidebar-footer {
+    grid-row: 3;
+    padding: 0.5rem 0.75rem;
+    border-top: 1px solid var(--c-border);
+    background: var(--c-bg);
+  }
+  body.home-on #sidebar.sidebar-tree #sidebar-actions {
+    grid-column: 1 / -1;
+  }
+  body.home-on #sidebar.sidebar-tree #sidebar-actions #new-session-btn {
+    min-height: 44px;
+  }
+}
+@media (max-width: 399px) {
+  body.home-on #sidebar.sidebar-tree #sidebar-actions {
+    grid-column: 1;
+    padding-right: 0;
+  }
+  body.home-on #sidebar-footer {
+    grid-column: 2;
+    padding-left: 0.5rem;
+  }
+  body.home-on #sidebar-account-btn {
+    width: auto;
+  }
 }

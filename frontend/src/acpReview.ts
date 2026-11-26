@@ -139,7 +139,7 @@ export function openReview(m: AcpMessage, ctx: ReviewContext = {}): void {
 	const reviewed = Boolean(m.reviewed_at) || m.state !== "uncertain";
 
 	// ── Recomendado ──
-	const done = el("button", "btn acp-review-done", "Dar por revisada");
+	const done = el("button", "btn primary", "Dar por revisada");
 	done.type = "button";
 	if (reviewed) {
 		done.disabled = true;
@@ -220,8 +220,8 @@ export function openReview(m: AcpMessage, ctx: ReviewContext = {}): void {
 				"Mirá los cambios en Git antes de decidir: puede haber hecho parte del trabajo (comandos, archivos, commits, mensajes a otros agentes). Reencolar puede repetir lo que ya hizo.",
 			),
 		);
-		done.classList.remove("acp-review-done");
-		recoActs.append(toolButton("git", "Ver cambios en Git", "btn acp-review-done"), done, write);
+		done.classList.remove("primary");
+		recoActs.append(toolButton("git", "Ver cambios en Git", "btn primary"), done, write);
 	}
 	reco.append(recoActs);
 

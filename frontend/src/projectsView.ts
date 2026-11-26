@@ -229,12 +229,12 @@ const homeEl = el("div", "ps-home");
 const homeTitle = el("h2", "ps-home-title", "Elegí una conversación");
 homeTitle.tabIndex = -1;
 const homeNote = el("p", "ps-home-note");
-const homeNew = button("Nueva conversación", "btn sm ps-new", () => {
+const homeNew = button("Nueva conversación", "btn sm primary", () => {
 	if (shown) void newConversationFlow(shown);
 });
 // No agent in the project: a conversation would reach no one — the first
 // step is an agent (the same form as Equipo's +).
-const homeAddAgent = button("Agregar agente", "btn sm ps-new", () => {
+const homeAddAgent = button("Agregar agente", "btn sm primary", () => {
 	if (shown)
 		window.dispatchEvent(
 			new CustomEvent("st:new-acp-session", {

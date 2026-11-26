@@ -127,7 +127,7 @@ function answerForm(
 		f.append(box);
 	});
 	const actions = el("div", "acp-question-actions");
-	const send = el("button", "btn sm acp-question-send", "Responder");
+	const send = el("button", "btn sm primary", "Responder");
 	send.type = "submit";
 	const skip = el("button", "acp-link acp-question-skip", "Omitir");
 	skip.type = "button";
