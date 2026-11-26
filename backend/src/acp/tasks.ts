@@ -8,7 +8,7 @@
  *
  * `status` is what was DECLARED (todo / doing / review / done). What is really
  * going on is derived on read from the messages, questions and linked works
- * (PR 3) and never written over it.
+ * (DERIVED STATE below) and never written over it.
  *
  * Who may do what (the token says who the caller is, never the body):
  * - the person: everything, in any of their projects;
@@ -26,11 +26,21 @@
  * = ?`, else 409 `stale` with the current row. A write whose permission came
  * from being the coordinator of a child's root also requires the root still
  * to have that coordinator, in the same statement. History (`task_events`)
- * is written by the v29 triggers in the statement that made each change.
+ * is written by the v29 triggers in the statement that made each change (and,
+ * for a request refused by a budget, by the one INSERT that records it).
+ *
+ * DERIVED STATE (`state` on every task the API shows) is read, never stored:
+ * the task's messages running / queued / interrupted and not reviewed, the
+ * open questions asked while working on them, its linked works' states, its
+ * budgets — and what contradicts the declared status (a `done` task with a
+ * run, a queued message, an active work or an open question). After a
+ * reassignment there is no cancellation: a run of someone other than the
+ * assignee still going is reported as `previousRunActive`, with whose it is.
+ * A page derives all its tasks in four statements, each by the task.
  */
 
 import { d1Query } from "../db.js";
-import type { AcpAgents, AgentRow, MessageRow } from "./agents.js";
+import type { AcpAgents, AgentRow, BudgetError, MessageRow } from "./agents.js";
 import { WORK_ID_RE, type WorkRow } from "./works.js";
 
 const NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
@@ -123,7 +133,21 @@ export class TaskError extends Error {
 	}
 }
 
-export function taskView(t: TaskRow, links?: LinkRow[]) {
+export interface DerivedState {
+	running: Array<{ messageId: number; agent: string; since: string | null }>;
+	queued: Array<{ messageId: number; agent: string }>;
+	interrupted: Array<{ messageId: number; agent: string }>;
+	questions: Array<{ id: number; agent: string; messageId: number }>;
+	works: Array<{ id: string; state: string | null }>;
+	previousRunActive: Array<{ messageId: number; agent: string }>;
+	contradictions: string[];
+	budget: {
+		task: { limit: number; used: number; exhausted: boolean };
+		goal: { limit: number; used: number; exhausted: boolean } | null;
+	};
+}
+
+export function taskView(t: TaskRow, links?: LinkRow[], state?: DerivedState) {
 	return {
 		id: t.id,
 		projectId: t.project_id,
@@ -148,6 +172,7 @@ export function taskView(t: TaskRow, links?: LinkRow[]) {
 		updatedAt: t.updated_at,
 		doneAt: t.done_at,
 		doneBy: t.done_by,
+		...(state ? { state } : {}),
 		...(links
 			? {
 					links: links
@@ -314,7 +339,13 @@ export class AcpTasks {
 		const by = actorName(actor);
 		const hasParent = b.parentId !== undefined && b.parentId !== null;
 		if (hasParent) {
-			for (const k of ["goal", "originMessageId", "coordinator", "projectId"] as const)
+			for (const k of [
+				"goal",
+				"originMessageId",
+				"coordinator",
+				"projectId",
+				"budgetLimit",
+			] as const)
 				if (b[k] !== undefined && b[k] !== null && b[k] !== false)
 					throw new TaskError(400, "child-field", { field: k });
 			const parent = await this.mustSee(ownerUserId, actor, b.parentId);
@@ -365,6 +396,7 @@ export class AcpTasks {
 		let coordinator: string | null;
 		let origin: { key: string; messageId: number } | null = null;
 		let conversationId: string | null = null;
+		let budgetLimit = this.acp.config.goalBudget;
 		if (actor.kind === "agent") {
 			const a = actor.agent;
 			if (a.project_id === null) throw new TaskError(409, "no-project");
@@ -372,6 +404,7 @@ export class AcpTasks {
 				throw new TaskError(404, "project-not-found");
 			if (
 				b.originMessageId !== undefined ||
+				b.budgetLimit !== undefined ||
 				(b.coordinator !== undefined && b.coordinator !== null)
 			)
 				throw new TaskError(400, "computed-by-backend", {
@@ -397,6 +430,13 @@ export class AcpTasks {
 			)
 				throw new TaskError(404, "project-not-found");
 			projectId = b.projectId;
+			// The person may start a goal with another budget than ACP_GOAL_BUDGET.
+			if (b.budgetLimit !== undefined) {
+				const n = b.budgetLimit;
+				if (typeof n !== "number" || !Number.isInteger(n) || n < 0 || n > 10_000)
+					throw new TaskError(400, "bad-budget", { min: 0, max: 10_000 });
+				budgetLimit = n;
+			}
 			coordinator =
 				b.coordinator === undefined
 					? null
@@ -435,7 +475,7 @@ export class AcpTasks {
 				origin?.key ?? null,
 				origin?.messageId ?? null,
 				conversationId,
-				this.acp.config.goalBudget,
+				budgetLimit,
 				by,
 				by,
 			],
@@ -510,11 +550,12 @@ export class AcpTasks {
 			ownerUserId,
 			[...openRows, ...doneRows].map((t) => t.id),
 		);
+		const states = await this.derive(ownerUserId, [...openRows, ...doneRows], links);
 		const lastDone = doneRows.at(-1);
 		return {
 			projectId,
-			open: openRows.map((t) => taskView(t, links)),
-			done: doneRows.map((t) => taskView(t, links)),
+			open: openRows.map((t) => taskView(t, links, states.get(t.id))),
+			done: doneRows.map((t) => taskView(t, links, states.get(t.id))),
 			nextOpen: open.results.length > OPEN_PAGE ? (openRows.at(-1)?.id ?? null) : null,
 			nextDone:
 				done.results.length > DONE_PAGE && lastDone ? `${lastDone.done_at}~${lastDone.id}` : null,
@@ -558,11 +599,20 @@ export class AcpTasks {
 						related.results.map((c) => c.id),
 					)
 				: [];
+		const states = await this.derive(
+			ownerUserId,
+			t.parent_id === null ? [t, ...related.results] : [t],
+			[...links, ...childLinks],
+			t.parent_id === null ? undefined : related.results[0],
+		);
 		return {
-			task: taskView(t, links),
+			task: taskView(t, links, states.get(t.id)),
 			parent:
 				t.parent_id === null ? null : related.results[0] ? taskView(related.results[0]) : null,
-			children: t.parent_id === null ? related.results.map((c) => taskView(c, childLinks)) : [],
+			children:
+				t.parent_id === null
+					? related.results.map((c) => taskView(c, childLinks, states.get(c.id)))
+					: [],
 			events: events.results.map(eventView),
 		};
 	}
@@ -846,8 +896,176 @@ export class AcpTasks {
 		return {
 			recorded: Boolean(r.results[0]),
 			question: q?.id ?? null,
-			task: taskView(t, await this.linksOf(ownerUserId, [t.id])),
+			task: await this.view(ownerUserId, t),
 		};
+	}
+
+	/** A task as the API answers it after a write: with its links and derived state. */
+	async view(ownerUserId: string, t: TaskRow) {
+		const links = await this.linksOf(ownerUserId, [t.id]);
+		const root =
+			t.parent_id === null ? undefined : ((await this.row(ownerUserId, t.parent_id)) ?? undefined);
+		return taskView(t, links, (await this.derive(ownerUserId, [t], links, root)).get(t.id));
+	}
+
+	/** The derived state of `rows` (header), in four statements whatever their number. */
+	private async derive(
+		ownerUserId: string,
+		rows: TaskRow[],
+		links: LinkRow[],
+		root?: TaskRow,
+	): Promise<Map<number, DerivedState>> {
+		const out = new Map<number, DerivedState>();
+		if (!rows.length) return out;
+		const ids = JSON.stringify(rows.map((t) => t.id));
+		const workIds = [...new Set(links.filter((l) => l.kind === "work").map((l) => l.ref))];
+		const [active, interrupted, questions, works] = await Promise.all([
+			d1Query<{
+				id: number;
+				task_id: number;
+				to_id: string;
+				state: string;
+				started_at: string | null;
+			}>(
+				`SELECT id, task_id, to_id, state, started_at FROM agent_messages
+				 WHERE owner_user_id = ? AND task_id IN (SELECT value FROM json_each(?)) AND state IN ('pending', 'running')
+				 ORDER BY id`,
+				[ownerUserId, ids],
+			),
+			d1Query<{ id: number; task_id: number; to_id: string }>(
+				`SELECT id, task_id, to_id FROM agent_messages
+				 WHERE owner_user_id = ? AND task_id IN (SELECT value FROM json_each(?)) AND state = 'uncertain' AND reviewed_at IS NULL
+				 ORDER BY id`,
+				[ownerUserId, ids],
+			),
+			// From the few open questions (v28 index) to their message, never the other way.
+			d1Query<{ id: number; agent: string; message_id: number; task_id: number }>(
+				`SELECT q.id, q.agent, q.message_id, m.task_id FROM agent_questions q
+				 CROSS JOIN agent_messages m ON m.id = q.message_id AND m.owner_user_id = q.owner_user_id
+				 WHERE q.owner_user_id = ? AND q.state = 'open' AND m.task_id IN (SELECT value FROM json_each(?))
+				 ORDER BY q.id`,
+				[ownerUserId, ids],
+			),
+			workIds.length
+				? d1Query<{ id: string; state: string }>(
+						"SELECT id, state FROM agent_works WHERE owner_user_id = ? AND id IN (SELECT value FROM json_each(?))",
+						[ownerUserId, JSON.stringify(workIds)],
+					)
+				: Promise.resolve({ results: [] as Array<{ id: string; state: string }> }),
+		]);
+		const workState = new Map(works.results.map((w) => [w.id, w.state]));
+		const cfg = this.acp.config;
+		for (const t of rows) {
+			const mine = active.results.filter((m) => m.task_id === t.id);
+			const running = mine
+				.filter((m) => m.state === "running")
+				.map((m) => ({ messageId: m.id, agent: m.to_id, since: m.started_at }));
+			const queued = mine
+				.filter((m) => m.state === "pending")
+				.map((m) => ({ messageId: m.id, agent: m.to_id }));
+			const ws = links
+				.filter((l) => l.task_id === t.id && l.kind === "work")
+				.map((l) => ({ id: l.ref, state: workState.get(l.ref) ?? null }));
+			const qs = questions.results
+				.filter((q) => q.task_id === t.id)
+				.map((q) => ({ id: q.id, agent: q.agent, messageId: q.message_id }));
+			const contradictions: string[] = [];
+			if (t.status === "done") {
+				if (running.length) contradictions.push("done-while-running");
+				if (queued.length) contradictions.push("done-while-queued");
+				if (ws.some((w) => w.state === "active" || w.state === "creating"))
+					contradictions.push("done-with-active-work");
+				if (qs.length) contradictions.push("done-with-open-question");
+			}
+			const taskLimit = t.requests_limit ?? cfg.taskBudget;
+			// A child's goal budget is its root's: shown when the root is at hand
+			// (a task's page, a write's answer); on the board the root row has it.
+			const goal =
+				t.parent_id === null
+					? t
+					: root?.id === t.parent_id
+						? root
+						: rows.find((r) => r.id === t.parent_id);
+			const goalLimit = goal ? (goal.budget_limit ?? cfg.goalBudget) : 0;
+			out.set(t.id, {
+				running,
+				queued,
+				interrupted: interrupted.results
+					.filter((m) => m.task_id === t.id)
+					.map((m) => ({ messageId: m.id, agent: m.to_id })),
+				questions: qs,
+				works: ws,
+				previousRunActive:
+					t.assignee === null
+						? []
+						: running
+								.filter((r) => r.agent !== t.assignee)
+								.map(({ messageId, agent }) => ({ messageId, agent })),
+				contradictions,
+				budget: {
+					task: {
+						limit: taskLimit,
+						used: t.requests_used,
+						exhausted: t.requests_used >= taskLimit,
+					},
+					goal: goal
+						? { limit: goalLimit, used: goal.budget_used, exhausted: goal.budget_used >= goalLimit }
+						: null,
+				},
+			});
+		}
+		return out;
+	}
+
+	/**
+	 * A request refused by a budget: recorded once per limit (until the person
+	 * raises it, the next refusals add nothing), on the goal or on the task.
+	 */
+	async budgetExhausted(ownerUserId: string, actor: string, e: BudgetError): Promise<void> {
+		const on = e.budget === "goal" ? e.goalId : e.taskId;
+		const r = await d1Query<EventRow>(
+			`INSERT INTO task_events (owner_user_id, task_id, actor, kind, data)
+			 SELECT ?1, ?2, ?3, 'budget-exhausted', json_object('budget', ?4, 'limit', ?5, 'used', ?6, 'task', ?7)
+			 WHERE NOT EXISTS (SELECT 1 FROM task_events e WHERE e.owner_user_id = ?1 AND e.task_id = ?2 AND e.kind = 'budget-exhausted'
+				AND json_extract(e.data, '$.budget') = ?4 AND json_extract(e.data, '$.limit') = ?5)
+			 RETURNING *`,
+			[ownerUserId, on, actor, e.budget, e.limit, e.used, e.taskId],
+		);
+		const t = r.results[0] ? await this.row(ownerUserId, on) : null;
+		if (t) this.publish(t);
+	}
+
+	/**
+	 * POST /tasks/:id/budget {add, scope?} — the person only (the route checks):
+	 * `goal` (a root's default) raises the goal's budget, `task` (a child's
+	 * default) the task's own cap. Additive, so no version: it never makes an
+	 * agent's pending write stale. The history trigger records it.
+	 */
+	async raiseBudget(ownerUserId: string, id: unknown, body: unknown) {
+		const b = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
+		const add = b.add;
+		if (typeof add !== "number" || !Number.isInteger(add) || add < 1 || add > 10_000)
+			throw new TaskError(400, "bad-add", { min: 1, max: 10_000 });
+		const t = await this.mustSee(ownerUserId, { kind: "owner" }, id);
+		const scope = b.scope === undefined ? (t.parent_id === null ? "goal" : "task") : b.scope;
+		if (scope !== "goal" && scope !== "task") throw new TaskError(400, "bad-scope");
+		if (scope === "goal" && t.parent_id !== null)
+			throw new TaskError(400, "not-a-root", { rootId: t.parent_id });
+		const col = scope === "goal" ? "budget_limit" : "requests_limit";
+		const r = await d1Query<TaskRow>(
+			`UPDATE tasks SET ${col} = COALESCE(${col}, ?) + ?, updated_at = ${NOW}, updated_by = 'owner'
+			 WHERE id = ? AND owner_user_id = ? RETURNING *`,
+			[
+				scope === "goal" ? this.acp.config.goalBudget : this.acp.config.taskBudget,
+				add,
+				t.id,
+				ownerUserId,
+			],
+		);
+		const row = r.results[0];
+		if (!row) throw new TaskError(404, "task-not-found");
+		this.publish(row);
+		return this.view(ownerUserId, row);
 	}
 
 	private async staleOrGone(ownerUserId: string, id: number): Promise<TaskError> {

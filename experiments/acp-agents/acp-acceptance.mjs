@@ -512,6 +512,60 @@ async function main() {
 	const bLast = await waitMsg((await inB("sigo en B")).id);
 	check("topic B's session continues after the restart", bLast.state === "done" && countOf(bLast.result_text) > countOf(ap.result_text), `${countOf(ap.result_text)} → ${countOf(bLast.result_text)}`);
 
+	// 6i. Tasks (v29, Etapa 4): a team request whose agents both run `st task goal` gets ONE goal;
+	// rounds of consult and answer inside a goal spend its budget; a loop is cut by it, never by luck.
+	const goalCid = randomUUID();
+	const team = await api("POST", "/api/acp/messages", {
+		team: true,
+		conversationId: CONV,
+		clientId: goalCid,
+		body: "st: task goal Objetivo de aceptación",
+	});
+	check("a team request asking both agents for the goal", team.status === 201 && team.body.messages?.length === 2, `${team.status}`);
+	const ran = await Promise.all((team.body.messages ?? []).map((m) => waitMsg(m.id)));
+	const goals = (await api("GET", `/api/acp/tasks?projectId=${pid}`)).body.open?.filter((t) => t.originKey === `c:${goalCid}`) ?? [];
+	check(
+		"two agents on one team request ⇒ one goal; one created it, the other was told it exists",
+		goals.length === 1 &&
+			ran.filter((m) => /creada #\d+/.test(m.result_text ?? "")).length === 1 &&
+			ran.filter((m) => /ya existe el objetivo de esta solicitud/.test(m.result_text ?? "")).length === 1,
+		ran.map((m) => short(m.result_text, 80)).join(" | "),
+	);
+	const budgeted = await api("POST", "/api/acp/tasks", { projectId: pid, title: "Rondas", coordinator: ARQ, budgetLimit: 4 });
+	check("the person creates a goal with a budget of 4", budgeted.status === 201 && budgeted.body.budget?.limit === 4, JSON.stringify(budgeted.body?.budget));
+	const gid = budgeted.body.id;
+	const taskNow = async () => (await api("GET", `/api/acp/tasks/${gid}`)).body;
+	const settled = async (used) => {
+		const t = await taskNow();
+		const s = t.task?.state;
+		return s && t.task.budget.used === used && !s.running.length && !s.queued.length ? t : null;
+	};
+	const inGoal = async (body) => {
+		const r = await api("POST", "/api/acp/messages", { to: ARQ, body, conversationId: CONV, task: gid, clientId: randomUUID() });
+		if (r.status !== 201) throw new Error(`send in goal: ${r.status} ${JSON.stringify(r.body)}`);
+		return r.body;
+	};
+	await inGoal(`rondas 3: consultá a @${DEV}: una ronda dentro del objetivo`);
+	// Each of @arq's requests inherits the goal from the message it runs (the person's, then each reply).
+	const three = await waitFor("three rounds", () => settled(3), 180_000);
+	check("three rounds inside the goal: each request spent it, nothing exhausted", !!three && !three.task.state.budget.goal.exhausted, three && JSON.stringify(three.task.state.budget));
+	await inGoal(`rondas 8: consultá a @${DEV}: otra ronda`);
+	const cut = await waitFor("loop cut", async () => {
+		const t = await settled(4);
+		return t?.events.some((e) => e.kind === "budget-exhausted") ? t : null;
+	}, 180_000);
+	check(
+		"a loop of 8 rounds is cut at the goal's budget (4): refused, recorded once, visible in the state",
+		!!cut && cut.task.state.budget.goal.exhausted && cut.events.filter((e) => e.kind === "budget-exhausted").length === 1,
+		cut && JSON.stringify(cut.task.state.budget),
+	);
+	const told = await waitFor("arq told", async () =>
+		(await convFeed()).messages.find((m) => m.to_id === ARQ && m.task_id === gid && /goal-budget/.test(m.result_text ?? "")),
+	);
+	check("…and @arq was told by st why nothing was sent (goal-budget)", !!told, told && short(told.result_text));
+	const more = await api("POST", `/api/acp/tasks/${gid}/budget`, { add: 2 });
+	check("only the person raises it: +2", more.status === 200 && more.body.budget?.limit === 6, JSON.stringify(more.body?.budget));
+
 	// 7. Terminal, Files and Git of the same agent session still answer.
 	const sid = sids[DEV];
 	check("Files: list answers", (await api("GET", `/api/sessions/${sid}/fs/list?path=`)).status === 200);

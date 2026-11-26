@@ -417,7 +417,7 @@ a goal or a loose task and carries the coordinator; a **child** hangs from a roo
 enforced by the creating statement and a CHECK — and uses its root's coordinator. A conversation
 creates no task and a task creates no worktree: a work is only linked. `status` (todo / doing /
 review / done) is what was declared; derived state (what really runs, waits or was interrupted)
-comes in PR 3 and is never written over it.
+is read with it (`state`, below) and never written over it.
 
 ### Endpoints (owner cookie or agent token; a task of another project, or of another owner, is the same 404 as a missing one)
 
@@ -429,6 +429,9 @@ comes in PR 3 and is never written over it.
 | `PATCH /api/acp/tasks/:id {version, title?, description?, assignee?, reviewer?, priority?, status?, blockedReason?, coordinator?}` | a versioned change: 409 `stale` with the current row |
 | `POST /api/acp/tasks/:id/links {version, kind, ref}` | `work` (a work of the project), `pr` (number or https URL — a link, not an approval), `dep` (a task of the project), `external` (a wait the system cannot see); the same link again changes nothing |
 | `POST /api/acp/tasks/:id/scope-approved {version, questionId?}` | the goal's scope approved by the person (#794 precisions §4): no state of its own — the coordinator asks with a question (`AskUserQuestion` → `agent_questions`, in Pendientes) and, once the person answered it, records a `scope-approved` event on the goal naming it and keeping the answer (`data.answer`, ≤ 1000 chars). The backend verifies that the person ANSWERED (ACP `accept` = the form was submitted, whatever the option — «ajustar» too), not that they approved: the coordinator declares it, and the history shows what was answered (`st task scope-approved <id> [--question <id>]`, alias `approve`; without it, its own answered question on the message it runs). The question must be the coordinator's, on a message of the goal's request (`question-other-request` otherwise); declined or open: 409 `question-not-accepted`. Once per question; the person may name any of theirs |
+| `POST /api/acp/tasks/:id/budget {add, scope?}` | the person only: `goal` (a root's default) raises the goal's budget, `task` (a child's default) that task's own cap; additive, no version |
+
+The person may also start a root with `budgetLimit` (0–10000) instead of `ACP_GOAL_BUDGET`.
 
 ### One goal per request
 
@@ -461,14 +464,34 @@ against the token's identity.
 `budget`, `updated`, `scope-approved` — with the actor and every changed field as `[old, new]`. Every write pushes
 `{type: "task", task}` over `/ws/acp` to the owner.
 
-### Messages
+### Messages and budgets
 
-`st send --task <id>` (`task` on `POST /messages`) puts the message in that task (`agent_messages.task_id`):
-a task the sender sees, of the recipients' project (400 `task-other-project`). The reply (trigger),
-the unfinished notice and the runner's recovery report copy it. An agent's request in a task counts
-against the task (`requests_used`) and its root (`budget_used`) by trigger, in the INSERT; replies and
-the person's messages count nothing. Inheriting the task into an agent's request from the message it
-runs, the derived state and the budget limits (`ACP_GOAL_BUDGET`, per task) are PR 3.
+A message is in a task (`agent_messages.task_id`): `st send --task <id>` (`task` on `POST /messages`:
+a task the sender sees, of the recipients' project — 400 `task-other-project`), or, for an agent's
+request without it, the task of the message it is running, when the recipient is of that task's
+project (else none). The reply (trigger), the unfinished notice and the runner's recovery report copy
+it, so rounds of consult and answer stay in the task.
+
+An agent's request in a task is written only while the task is under its cap (`requests_limit`, NULL
+= `ACP_TASK_BUDGET`) and its goal under `budget_limit` — checked in the INSERT, counted by trigger in
+the same statement, so concurrent sends cannot overshoot. Past it: 409 `goal-budget` / `task-budget`
+(`task`, `goal`, `limit`, `used`), nothing written, one `budget-exhausted` event per limit. A request in
+a task spends these INSTEAD of the per-message round budget (`ACP_MAX_CHAIN`, which still rules
+requests in no task); depth (`ACP_MAX_DEPTH`) applies to both. Creating tasks spends nothing; replies
+and the person's messages count nothing.
+
+### Derived state
+
+Every task the API shows carries `state`, read in four statements per page (each by the task's partial
+index; questions from the open ones):
+
+- `running`, `queued` (`{messageId, agent}`), `interrupted` (`uncertain` not reviewed), `questions`
+  (open, asked while working on a message of the task), `works` (linked works and their state);
+- `previousRunActive`: a run of someone other than the assignee still going — after a reassignment
+  there is no cancellation, the answer to the PATCH and every read say whose run goes on;
+- `contradictions`: `done-while-running`, `done-while-queued`, `done-with-active-work`,
+  `done-with-open-question` — the declared `done` stays, the contradiction is said;
+- `budget`: `{task: {limit, used, exhausted}, goal: {…} | null}` (a child's goal when its root is at hand).
 
 ### Backup
 
@@ -531,7 +554,8 @@ session.
    | `ACP_MESSAGE_MAX_BYTES` | `262144` | per-message cap |
    | `ACP_MAX_DEPTH` | `6` | agent → agent nesting limit |
    | `ACP_MAX_CHAIN` | `40` | agent → agent requests under one person's message |
-   | `ACP_GOAL_BUDGET` | `150` | agent → agent requests a goal starts with (§4c; counted from PR 3) |
+   | `ACP_GOAL_BUDGET` | `150` | agent → agent requests a goal starts with (§4c) |
+   | `ACP_TASK_BUDGET` | `40` | agent → agent requests one task allows (§4c) |
    | `ACP_MAX_RUNNING` | `6` | messages running at once on this backend, all agents (each agent: `max_concurrency`) |
    | `ACP_WORK_MIN_FREE_MB` | `20480` | free space an agent's workspace needs to create a work |
    | `ACP_TEST_RUNTIME` | unset | `1` installs the deterministic `st-test-agent` runtime |
