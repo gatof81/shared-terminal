@@ -37,7 +37,7 @@ Herramientas). Modelo: #794 §2–§5.
 | Estado **declarado** | La **columna** (en el teléfono, el grupo); en el detalle, una pastilla «En progreso ▾» con «declarado por @dev · 10:41» | Solo cambia con «Mover a…» |
 | Actividad **derivada** | Líneas con un **punto** y texto: `● @dev trabajando en «tema» desde 10:41`, `○ en cola para @dev: detrás de #21`, `● ejecución interrumpida · Revisar`, `● @arq espera tu respuesta · Responder`, `■ trabajo ⎇ x activo` | Nunca mueve la tarjeta de columna. Los textos repiten las palabras del Equipo de 3B |
 | Contradicción | La tarjeta en Terminado con borde ámbar y «⚠ Terminado, pero con trabajo activo». En el detalle explica que el estado no se corrige solo | El backend la devuelve como tal (#794 §4) |
-| Bloqueo | Borde izquierdo rojo + «Bloqueada: motivo» | Es declarado: va fuera de «Ahora» |
+| Bloqueo | Borde rojo + «Bloqueada: motivo» | Es declarado: va fuera de «Ahora» |
 | Dependencia | «↳ Depende de #21 (en progreso)». Desaparece cuando la otra está terminada | |
 | Externa | «⏱ Espera algo externo: …». Sin barra ni porcentaje | No se inventa progreso |
 | Presupuesto | Tarea: «Presupuesto de la tarea agotado (12/12)». Objetivo: en la franja, en rojo, con «Ampliar» | |

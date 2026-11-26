@@ -111,7 +111,7 @@ button { background: none; border: 0; cursor: pointer; padding: 0; }
 .card { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 10px 10px 9px 12px; border-radius: var(--r-m); background: var(--c-surface); border: 1px solid var(--c-border-soft); text-align: left; width: 100%; cursor: pointer; }
 .card:hover { border-color: var(--c-border); }
 .card.sel { border-color: var(--c-accent); box-shadow: 0 0 0 1px var(--c-accent); }
-.card.blocked { box-shadow: inset 3px 0 0 var(--c-err); }
+.card.blocked { border-color: rgba(248,81,73,.55); }
 .card.contra { border-color: rgba(227,179,65,.55); }
 .card.flash { animation: flash 1.8s ease-out; }
 @keyframes flash { 0%, 40% { box-shadow: 0 0 0 2px var(--c-warn); } 100% { box-shadow: 0 0 0 2px transparent; } }
