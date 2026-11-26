@@ -3033,7 +3033,11 @@ describe("ACP tasks (v29)", () => {
 		const ev = (await call(owner, "GET", `/tasks/${g.id}`)).body.events.filter(
 			(e: { kind: string }) => e.kind === "scope-approved",
 		);
-		expect(ev).toEqual([expect.objectContaining({ actor: "coord", data: { question: q.id } })]);
+		// The event keeps what the person answered: the backend checks that they
+		// answered (the form was submitted), the coordinator declares the approval.
+		expect(ev).toEqual([
+			expect.objectContaining({ actor: "coord", data: { question: q.id, answer: '{"ok":true}' } }),
+		]);
 		// A declined answer approves nothing.
 		const q2 = (await ask("¿Y esto?")).body;
 		await call(owner, "POST", `/questions/${q2.id}/answer`, { action: "decline" });

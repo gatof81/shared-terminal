@@ -749,9 +749,15 @@ export class AcpTasks {
 	 * POST /tasks/:id/scope-approved {version, questionId?} — the person approved
 	 * the goal's scope (#794, precisions §4). There is no state for it: the
 	 * coordinator asks with a question to the person (AskUserQuestion →
-	 * agent_questions, in Pendientes) and, once it is answered `accept`, records
+	 * agent_questions, in Pendientes) and, once the person has answered it, records
 	 * it here — an event on the goal naming the question. A write decided on a
 	 * version, like any other (409 stale), though it changes no column.
+	 *
+	 * What the backend verifies is that the person ANSWERED (ACP `accept` = the
+	 * form was submitted, whatever option was chosen — «ajustar» too), not that
+	 * they approved: the coordinator declares the approval, and the event keeps
+	 * the person's answer (`answer`, its content, cut at 1000 chars) so anyone
+	 * reading the history sees what was actually answered.
 	 *
 	 * An agent: the root's coordinator, and the question is its own, asked while
 	 * working on a message of this goal's request (the chain of `origin_message_id`
@@ -811,10 +817,15 @@ export class AcpTasks {
 				.results[0];
 			if (!q) throw new TaskError(404, "question-not-found");
 		}
+		let answerText: string | null = null;
 		if (q) {
 			let action: unknown = null;
 			try {
-				action = q.answer ? (JSON.parse(q.answer) as { action?: unknown }).action : null;
+				const a = q.answer
+					? (JSON.parse(q.answer) as { action?: unknown; content?: unknown })
+					: null;
+				action = a?.action ?? null;
+				answerText = a?.content === undefined ? null : JSON.stringify(a.content).slice(0, 1000);
 			} catch {}
 			if ((q.state !== "answered" && q.state !== "delivered") || action !== "accept")
 				throw new TaskError(409, "question-not-accepted", {
@@ -825,11 +836,11 @@ export class AcpTasks {
 		}
 		const r = await d1Query<EventRow>(
 			`INSERT INTO task_events (owner_user_id, task_id, actor, kind, data)
-			 SELECT ?1, ?2, ?3, 'scope-approved', json_object('question', ?4)
+			 SELECT ?1, ?2, ?3, 'scope-approved', json_object('question', ?4, 'answer', ?5)
 			 WHERE ?4 IS NULL OR NOT EXISTS (SELECT 1 FROM task_events e WHERE e.owner_user_id = ?1 AND e.task_id = ?2
 				AND e.kind = 'scope-approved' AND json_extract(e.data, '$.question') = ?4)
 			 RETURNING *`,
-			[ownerUserId, t.id, actorName(actor), q?.id ?? null],
+			[ownerUserId, t.id, actorName(actor), q?.id ?? null, answerText],
 		);
 		if (r.results[0]) this.publish(t);
 		return {
