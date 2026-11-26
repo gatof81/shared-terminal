@@ -222,7 +222,12 @@ main {
   position: relative;
 }
 main.sidebar-open {
-  grid-template-columns: 260px 1fr;
+  /* 296, not a round 300: at 300 the e2e harness's 1280-px window leaves
+     the terminal 958 px = exactly 114 cells of its 14-px Liberation Mono
+     (8.4035 px), and xterm's cell measure jitters by ~0.005 px there, so
+     each fit flipped 113 ⇄ 114 columns and a view switch sent a resize
+     (terminal-invariant.spec). 296 puts that width mid-cell. */
+  grid-template-columns: 296px 1fr;
 }
 /* No transition on the grid: an animated grid-template-columns change
    races the terminal's resize path. ResizeObserver fires every frame
