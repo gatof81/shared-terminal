@@ -38,7 +38,9 @@
 //     ACP_GOAL_BUDGET=150 ACP_TASK_BUDGET=3 ./lab-st.sh up                       # lab B :3102, empty
 //   ST=http://127.0.0.1:3101 LAB_LOGIN=1 node tasks-acceptance.mjs
 // Lab B must be FRESH (no user registered): the restore refuses a non-empty target, which is
-// the point of the second half of S15. Do not log into it before the run.
+// the point of the second half of S15. Do not log into it before the run. S15 stops it after
+// comparing (same session ids as A on one Docker daemon); `LAB=$HOME/acp-lab2 LAB_NAME=acplab2
+// ./lab-st.sh down` removes it.
 //
 // Variables (defaults in brackets; the run prints them):
 //   ST [http://127.0.0.1:3101]  LAB_LOGIN=1 (registers/logs in labowner; lab only)  PREFIX  KEEP=1
@@ -47,7 +49,7 @@
 //   S17_SLACK [0] (rows the INSERT may grow from 50 to 500 tasks)  ROUND_MS [30000] (per round, S11)
 //   IDLE_MS [600000] IDLE_MAX_CALLS_PER_MIN [60] IDLE_MAX_ROWS_PER_MIN [3000]
 //   LAB_B_ST [http://127.0.0.1:3102] LAB_A_CONTAINER [acplab-backend] LAB_B_CONTAINER [acplab2-backend]
-//   BACKUP_CMD / RESTORE_CMD / RESTORE_FORCE_CMD / COPY_CMD / RESTART_B_CMD: shell templates for S15
+//   BACKUP_CMD / RESTORE_CMD / COPY_CMD / RESTART_B_CMD / STOP_B_CMD: shell templates for S15
 //     ({dir} = backup dir in lab A, {dirB} = the same in lab B, both under <WORKSPACE_ROOT>/.backups/,
 //     {name} = its name; with BACKUP_CMD/RESTORE_CMD set, build paths from {name}); defaults drive
 //     the two containers with docker.
@@ -230,7 +232,9 @@ async function stBy(agent, args, extra = {}) {
 // ── D1 counters (GET /api/admin/stats → d1) ─────────────────────────────
 
 async function d1() {
-	const r = await api("GET", "/api/admin/stats");
+	// Every statement key the backend keeps (≤ 200), not the default top 10: S14 and S17 look for
+	// statements with few rows. A backend without `?top=` ignores it and answers its 10.
+	const r = await api("GET", "/api/admin/stats?top=200");
 	if (r.status !== 200) throw new Error(`admin stats: ${r.status} (the lab owner must be admin)`);
 	const d = r.body.d1;
 	return {
@@ -683,7 +687,7 @@ async function main() {
 				// The round's total includes the waiting polls (a variable number): it proves nothing.
 				skip(
 					"S17 rows read by the request INSERT, 50 vs 500 tasks",
-					`the INSERT is not among admin stats' top 10 statements (by rows since boot) before and after both rounds; round totals ${r17a?.rows} → ${r17b?.rows} rows, ${r17a?.calls} → ${r17b?.calls} statements, polling included`,
+					`the INSERT is not among the statements admin stats lists (?top=200; a backend without it lists 10) before and after both rounds; round totals ${r17a?.rows} → ${r17b?.rows} rows, ${r17a?.calls} → ${r17b?.calls} statements, polling included`,
 				);
 		}
 		ctx.PB = PB;
@@ -769,6 +773,7 @@ async function main() {
 			copy: env.COPY_CMD ?? `docker exec ${B_C} mkdir -p ${rootB}/.backups && docker cp ${A_C}:{dir} - | docker cp - ${B_C}:${rootB}/.backups/`,
 			restore: env.RESTORE_CMD ?? `docker exec -w /app ${B_C} npm run -s restore -- {dirB}`,
 			restart: env.RESTART_B_CMD ?? `docker restart ${B_C}`,
+			stop: env.STOP_B_CMD ?? `docker stop ${B_C}`,
 		};
 		const bk = sh(fill(T.backup, vars));
 		check("S15 backup in lab A", bk.code === 0, short(bk.code === 0 ? bk.out.split("\n").filter((l) => /task|manifest/i.test(l)).join(" | ") : bk.out.trim().split("\n").slice(-3).join(" | "), 300));
@@ -785,6 +790,10 @@ async function main() {
 		const up = await waitFor(async () => (await fetch(`${LAB_B_ST}/api/auth/status`).catch(() => null))?.ok, 120_000);
 		check("S15 lab B up after the restore", !!up);
 		const after = await snapshot(B.api, PA);
+		// Lab B holds the same session ids as A on the same Docker daemon: its watchdog acts on
+		// containers by name, so it must not stay up while A runs (S14). Its data dirs stay.
+		const stopB = sh(fill(T.stop, vars));
+		check("S15 lab B stopped after the comparison", stopB.code === 0, short(stopB.out) || "ok");
 		const diffs = [];
 		for (const id of new Set([...Object.keys(before.tasks), ...Object.keys(after.tasks)])) {
 			for (const part of ["task", "children", "events"])
@@ -819,7 +828,7 @@ async function main() {
 		check(`S14 D1 statements at rest ≤ ${CFG.IDLE_MAX_CALLS_PER_MIN}/min (${Math.round(CFG.IDLE_MAX_CALLS_PER_MIN * min)})`, d.calls <= CFG.IDLE_MAX_CALLS_PER_MIN * min, `${d.calls} (${(d.calls / min).toFixed(1)}/min)`);
 		if (rowsMode) {
 			check(`S14 rows read at rest ≤ ${CFG.IDLE_MAX_ROWS_PER_MIN}/min (${Math.round(CFG.IDLE_MAX_ROWS_PER_MIN * min)})`, d.rows <= CFG.IDLE_MAX_ROWS_PER_MIN * min, `${d.rows} (${(d.rows / min).toFixed(1)}/min)`);
-			check("S14 no statement on tasks/task_links/task_events among the statements that ran (admin stats' top 10)", taskStmts.length === 0, taskStmts.map((s) => s.statement).join(" | ") || "none");
+			check("S14 no statement on tasks/task_links/task_events among the statements that ran (the statements admin stats lists: ?top=200, 10 on a backend without it)", taskStmts.length === 0, taskStmts.map((s) => s.statement).join(" | ") || "none");
 		} else skip("S14 no statement on tasks at rest, per statement", "shim reports no rows_read, so admin stats has no per-statement view; totals above");
 		const liveTask = frames.a.slice(frames0).filter((f) => f.type === "task");
 		check("S14 …and no task event on the open /ws/acp meanwhile", liveTask.length === 0, `${frames.a.length - frames0} frames, ${liveTask.length} task`);
