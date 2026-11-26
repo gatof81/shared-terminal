@@ -143,6 +143,18 @@ describe("backup → restore of tasks (v29)", () => {
 		await runRestore(out);
 		expect(dump(db)).toEqual(before);
 
+		// --force over a target that already holds all of it (the re-run after a
+		// partial restore): the request replays fire the counting trigger and
+		// the task/link replays meet their events — the TABLES order is what
+		// keeps counters, versions and history identical to the dump.
+		expect(before.tasks.find((t) => t.id === a)).toMatchObject({ requests_used: 1 });
+		expect(before.tasks.find((t) => t.id === goal)).toMatchObject({ budget_used: 1 });
+		await expect(runRestore(out)).rejects.toThrow(/not empty/);
+		await runRestore(out, { force: true });
+		expect(dump(db)).toEqual(before);
+		await runRestore(out, { force: true });
+		expect(dump(db)).toEqual(before);
+
 		// A live write after the restore still records its history and bumps the version.
 		db.prepare(
 			"INSERT INTO task_links (owner_user_id, task_id, kind, ref, created_by) VALUES (?, ?, 'pr', '900', 'dev')",
