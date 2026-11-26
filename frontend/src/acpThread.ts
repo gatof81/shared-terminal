@@ -377,9 +377,10 @@ export class AcpThread {
 				});
 		this.input.addEventListener("input", () => {
 			// «Para:» shows who this text reaches as it is typed (a leading
-			// mention included), from the same rule the send applies.
-			if (this.source?.kind === "conversation" && this.toKey() !== this.shownTo) this.renderChips();
+			// mention included), from the same rule the send applies — after
+			// the menu, which says whether a trailing mention is still being typed.
 			this.syncMention();
+			this.syncChips();
 			this.renderHint();
 			this.syncSendBtn();
 			// What is written by hand shows in the menu as it is typed.
@@ -1939,11 +1940,16 @@ export class AcpThread {
 
 	/**
 	 * The field's text as «Para:» judges it: a mention still being typed at
-	 * the end (`@de`, the `@` menu open) is not judged yet — it is not
-	 * "not an agent", it is not finished.
+	 * the end (`@de`, the `@` menu open on it) is not judged yet — it is not
+	 * "not an agent", it is not finished. Only while the menu is open: a
+	 * finished one at the end («@dev @arq», menu closed) is judged, as the
+	 * send judges it.
 	 */
 	private typedSoFar(): string {
-		return this.input.value.replace(/@[A-Za-z0-9_-]*$/, "");
+		const v = this.input.value;
+		const m = this.mention;
+		if (m && /^@[A-Za-z0-9_-]*$/.test(v.slice(m.start))) return v.slice(0, m.start);
+		return v;
 	}
 
 	/** What `recipients` answers for the field now, as a key: «Para:» re-renders only when it changes. */
@@ -2247,6 +2253,12 @@ export class AcpThread {
 		this.mentionList.replaceChildren();
 		this.input.removeAttribute("aria-activedescendant");
 		this.input.removeAttribute("aria-expanded");
+		// A trailing mention left unfinished (Escape, blur) is judged now.
+		this.syncChips();
+	}
+
+	private syncChips(): void {
+		if (this.source?.kind === "conversation" && this.toKey() !== this.shownTo) this.renderChips();
 	}
 
 	/** The `@query` typed leaves the text and becomes a chip. */
