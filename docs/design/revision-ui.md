@@ -23,6 +23,8 @@ Las capturas están en [`assets/ui-review/`](../../assets/ui-review/).
 
 ### 1. Las respuestas de los agentes usan todo el ancho en el teléfono
 
+**Estado:** implementada en #811.
+
 | Hoy (390) | Hoy (430) |
 |---|---|
 | ![](../../assets/ui-review/390-06-topic-scroll1.png) | ![](../../assets/ui-review/430-06-topic-scroll1.png) |
@@ -48,6 +50,8 @@ Las capturas están en [`assets/ui-review/`](../../assets/ui-review/).
 
 ### 2. Composer más bajo, sobre todo con el teclado abierto
 
+**Estado:** implementada en #811.
+
 | Vacío (390×844) | Escribiendo, teclado simulado (390×508) |
 |---|---|
 | ![](../../assets/ui-review/390-05-topic-top.png) | ![](../../assets/ui-review/390-08-composer-keyboard-sim.png) |
@@ -68,6 +72,8 @@ Las capturas están en [`assets/ui-review/`](../../assets/ui-review/).
 
 ### 3. La tarjeta de pregunta, cómoda para el dedo y con una acción principal
 
+**Estado:** implementada en #811.
+
 ![](../../assets/ui-review/390-06-topic-scroll3.png)
 
 **Qué se ve hoy.**
@@ -86,6 +92,8 @@ Las capturas están en [`assets/ui-review/`](../../assets/ui-review/).
 **Tamaño:** chico.
 
 ### 4. El menú ⋯ del agente, anclado como el selector de proyecto
+
+**Estado:** implementada en #811 y #815.
 
 | Teléfono | Escritorio |
 |---|---|
@@ -111,6 +119,8 @@ Las capturas están en [`assets/ui-review/`](../../assets/ui-review/).
 
 ### 5. Proyecto sin agentes: la primera acción es agregar uno
 
+**Estado:** implementada en #811.
+
 | Teléfono | Escritorio |
 |---|---|
 | ![](../../assets/ui-review/390-16-empty-project.png) | ![](../../assets/ui-review/d-16-empty-project.png) |
@@ -127,6 +137,8 @@ Las capturas están en [`assets/ui-review/`](../../assets/ui-review/).
 
 ### 6. Terminal en táctil: sacar la pista «Hold Shift + drag»
 
+**Estado:** implementada en #811.
+
 ![](../../assets/ui-review/390-15-session-terminal.png)
 
 **Qué se ve hoy.** En el teléfono aparece «Hold Shift + drag to select text» (`main.ts` ~731), en inglés. En una pantalla táctil no hay Shift.
@@ -140,6 +152,8 @@ Las capturas están en [`assets/ui-review/`](../../assets/ui-review/).
 **Tamaño:** chico.
 
 ### 7. El botón «↓» no tapa acciones
+
+**Estado:** implementada en #811.
 
 ![](../../assets/ui-review/390-05-topic-top.png)
 
@@ -157,6 +171,8 @@ Las capturas están en [`assets/ui-review/`](../../assets/ui-review/).
 
 ### 8. En el teléfono, la pantalla de inicio es la lista y no un vacío con ☰
 
+**Estado:** implementada en #819. Pendiente: en el teléfono, ‹ del rail todavía abre el drawer (ver revision-ui-2.md §1).
+
 | Hoy al abrir | Después de tocar ☰ |
 |---|---|
 | ![](../../assets/ui-review/390-01-landing.png) | ![](../../assets/ui-review/390-02-drawer.png) |
@@ -172,6 +188,8 @@ Las capturas están en [`assets/ui-review/`](../../assets/ui-review/).
 **Tamaño:** mediano: `sessionCore` y `projectsView` deciden qué se muestra al arrancar, y hay que coordinarlo con @developer.
 
 ### 9. Pendientes en el teléfono: más ancho y menos botones
+
+**Estado:** pendiente.
 
 ![](../../assets/ui-review/390-10-pendientes.png)
 
@@ -193,6 +211,8 @@ Las capturas están en [`assets/ui-review/`](../../assets/ui-review/).
 **Tamaño:** chico/mediano.
 
 ### 10. Código y tablas en las respuestas, en el teléfono
+
+**Estado:** pendiente.
 
 ![](../../assets/ui-review/390-06-topic-scroll2.png)
 
@@ -217,6 +237,8 @@ Las capturas están en [`assets/ui-review/`](../../assets/ui-review/).
 
 ### 11. Textos de interfaz en español en las superficies principales
 
+**Estado:** implementada en #819 (el segundo pase de textos está en curso).
+
 **Qué se ve hoy.** Quedan textos en inglés en lo que se ve a diario:
 
 | Texto actual | Dónde aparece |
@@ -239,6 +261,8 @@ Conviven con todo lo de 3B, que ya está en español.
 
 ### 12. Escritorio: largo de línea de las respuestas
 
+**Estado:** pendiente.
+
 ![](../../assets/ui-review/d-06-topic-scroll1.png)
 
 **Qué se ve hoy.** A 1280, el texto de una respuesta llega a ~690 px y ~95 caracteres por línea (`.acp-bubble { max-width: min(85%, 46rem) }`). Con más ancho de ventana crece hasta 46 rem.
@@ -254,6 +278,8 @@ Conviven con todo lo de 3B, que ya está en español.
 ## Para discutir
 
 ### 13. Dónde entra el Tablero (Etapa 4) en la navegación del proyecto
+
+**Estado:** pendiente (Etapa 4).
 
 ![](../../assets/ui-review/390-03-rail.png)
 
@@ -277,6 +303,8 @@ Conviven con todo lo de 3B, que ya está en español.
 La 14 va con «vale la pena» y es la primera de ese grupo por lo que molesta hoy. La 15 es solo el lugar.
 
 ### 14. Interrupciones: que se entienda qué pasó y qué hacer (pedido del owner, #1614)
+
+**Estado:** implementada en #810, #812 y #813.
 
 | Hoy: Pendientes (390) | Hoy: la tarjeta, con un agente que ya no existe |
 |---|---|
@@ -360,6 +388,8 @@ Cada dato es un chip de texto de 22 px de alto: borde `--c-border`, `--c-ok` par
 **Tamaño:** mediano, solo frontend: `acpInbox.ts`, `acpReview.ts` y que el registro guarde `heldBy`.
 
 ### 15. Dónde iría «Eliminar definitivamente» (solo el lugar; la decisión es de datos y backend)
+
+**Estado:** pendiente (decisión de datos y backend).
 
 No lo diseño. Si se decide, la acción va siempre al final de un menú ⋯, en `kind-danger`, con el texto «Eliminar definitivamente…» y un diálogo de confirmación que diga qué se borra y que no se puede deshacer:
 
