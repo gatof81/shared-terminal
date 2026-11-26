@@ -406,6 +406,7 @@ export function navigateProject(route: ProjectRoute, opts: { replace?: boolean }
 	const url = bare() + hash;
 	if (opts.replace) history.replaceState({ st: { n: depth() } }, "", url);
 	else {
+		pushedFromHome = isHomeAddress();
 		historyNav = false;
 		history.pushState({ st: { n: depth() + 1 } }, "", url);
 	}
@@ -417,6 +418,22 @@ export function navigateProject(route: ProjectRoute, opts: { replace?: boolean }
  * session row or on the session bar): a new entry with that session's
  * route — or none when no session is open — so Back returns to the page.
  */
+/**
+ * A new entry for the main level with no address — the phone's home (the
+ * list) — over whatever is open underneath, which stays as it is.
+ */
+export function pushHome(): void {
+	historyNav = false;
+	history.pushState({ st: { n: depth() + 1 } }, "", bare());
+	for (const l of writeListeners) l();
+}
+
+let pushedFromHome = false;
+/** Whether the last project page pushed was pushed from the home's address. */
+export function lastPushFromHome(): boolean {
+	return pushedFromHome;
+}
+
 export function pushSessionAddress(): void {
 	historyNav = false;
 	const url = bare() + (current === null ? "" : routeHash(current));

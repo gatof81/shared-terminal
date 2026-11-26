@@ -183,6 +183,16 @@ test.describe("session actions", () => {
 		await app.login("alice");
 		await app.openSidebar();
 		await app.showTerminated();
+		// One short word on the row, never at the cost of the name; the rest is
+		// in the tooltip and the accessible name.
+		const row = app.sessionRow("old-poc");
+		await expect(row.locator(".session-state")).toHaveText("Terminada");
+		await expect(row.locator(".session-name")).toHaveText("old-poc");
+		await expect(row.locator(".session-select")).toHaveAttribute(
+			"aria-label",
+			/, sesión terminada — archivos conservados$/,
+		);
+		await expect(row.locator(".session-select")).toHaveAttribute("title", /archivos se conservan/);
 		await app.openSession("old-poc");
 		await app.switchView("terminal");
 		const panel = page.locator("#terminal-state");

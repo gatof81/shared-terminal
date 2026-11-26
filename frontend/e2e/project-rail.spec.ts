@@ -63,12 +63,15 @@ test.describe("project rail and topics", () => {
 		// The foot keeps only «Ajustes».
 		await expect(page.locator(".rail-foot button")).toHaveText(["Ajustes"]);
 		if (app.mobile) {
-			// The project's screen: ‹ in place of the ☰, and it opens the main list.
+			// The project's screen: ‹ in place of the ☰, and it goes to the home
+			// (the main list as the screen, not the drawer); Back returns.
 			await expect(page.locator("#sidebar-toggle")).toBeHidden();
 			await back.click();
-			await expect(page.locator("main")).toHaveClass(/sidebar-open/);
-			await expect(page.locator(`a.project-row[data-project-id="${HZ}"]`)).toBeVisible();
-			await page.keyboard.press("Escape");
+			await expect(page.locator("body")).toHaveClass(/\bhome-on\b/);
+			await expect(page.locator("main")).not.toHaveClass(/sidebar-open/);
+			await expect(page.locator(`a.project-row[data-project-id="${HZ}"]`)).toBeFocused();
+			await page.goBack();
+			await expect(back).toBeVisible();
 			// In a topic, ‹ is still the way back up to the rail.
 			await convRow(page, "Optimización de CI").click();
 			await expect(page.locator(".rail-back")).toBeHidden();

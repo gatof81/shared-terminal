@@ -86,11 +86,13 @@ import {
 	disableProjectRoutes,
 	enableProjectRoutes,
 	fromHistory,
+	lastPushFromHome,
 	navigateProject,
 	onAddressWrite,
 	type ProjectPage,
 	type ProjectRoute,
 	projectRouteHash,
+	pushHome,
 	pushSessionAddress,
 	readProjectRoute,
 } from "./router.js";
@@ -170,8 +172,10 @@ function sync(): void {
 		// Into the project from the main level: by a choice, a new entry —
 		// the one ‹ goes back from; by Back / Forward, the same entry as when
 		// it was pushed, or no known way back.
-		if (!fromHistory()) entryDepth = depth();
-		else if (entryDepth !== depth()) entryDepth = null;
+		if (!fromHistory()) {
+			entryDepth = depth();
+			entryFromHome = lastPushFromHome();
+		} else if (entryDepth !== depth()) entryDepth = null;
 	}
 	syncSpace(r, shown, shownPage);
 	renderSection();
@@ -468,25 +472,32 @@ function hidePage(): void {
 let entryDepth: number | null = null;
 /** ‹ was used: the project's row in the sidebar takes the focus once it shows. */
 let homeFocus: string | null = null;
+/** That entry was pushed from the phone's home (the list as the screen). */
+let entryFromHome = false;
 
 /**
- * The rail's ‹. On a phone, what the ☰ it replaces does: the drawer with
- * the main list (the page stays under it). Wider, the page gives way to the
- * main level: when the project was entered from it by a new entry, Back to
+ * The rail's ‹: the page gives way to the main level (on a phone, the home:
+ * the list as the screen). Wider: when the project was entered from it by a new entry, Back to
  * that entry — so the browser's Back after ‹ does not land on the project
  * again, and Forward still does; otherwise (a deep link, an address typed)
  * a new entry for the session underneath, which Back undoes. Neither
  * touches a session, an agent or tmux.
  */
-function goHome(opener: HTMLElement): void {
-	if (phoneMq?.matches) {
-		window.dispatchEvent(new CustomEvent("st:open-sidebar", { detail: { opener } }));
-		return;
-	}
+function goHome(): void {
 	if (shown === null) return;
 	homeFocus = shown;
 	const d = depth();
-	if (entryDepth !== null && entryDepth > 0 && d >= entryDepth) history.go(entryDepth - 1 - d);
+	const back = entryDepth !== null && entryDepth > 0 && d >= entryDepth;
+	// A phone's main level is its home, the list as the screen — never the
+	// drawer over the project (one list, revision-ui §8): Back to the entry
+	// the project was entered from when that was the home, else a new entry
+	// for it (Back returns to the project).
+	if (phoneMq?.matches) {
+		if (back && entryFromHome) history.go(entryDepth! - 1 - d);
+		else pushHome();
+		return;
+	}
+	if (back) history.go(entryDepth! - 1 - d);
 	else leaveForSession();
 }
 
@@ -636,7 +647,7 @@ function wire(): void {
 			window.dispatchEvent(
 				new CustomEvent("st:new-acp-session", { detail: { projectId: pid, opener } }),
 			),
-		home: (opener) => goHome(opener),
+		home: () => goHome(),
 		openTerminal: (name) => openTools({ agent: name, work: null, tool: "terminal" }),
 		settings: (opener) =>
 			window.dispatchEvent(new CustomEvent("st:open-user-menu", { detail: { opener } })),
