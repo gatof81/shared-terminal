@@ -1,5 +1,5 @@
 import { expect, FIXED_NOW, test } from "./fixtures.js";
-import { PROJECT_IDS, PROJECT_SESSION_IDS } from "./mockBackend.js";
+import { PROJECT_SESSION_IDS } from "./mockBackend.js";
 
 const FRESH = "2026-10-31T10:29:58Z";
 
@@ -9,12 +9,15 @@ const FRESH = "2026-10-31T10:29:58Z";
  * current): in the tree an agent's row is its face, "@name" and ONE chip —
  * the agent's state word — with the session's name and the full label in the
  * tooltip and the accessible name; the two states that ask something of the
- * person show on the project's heading too ("●N"), folded or not.
- * Traditional rows are unchanged.
+ * person show on the section's heading too ("●N"), folded or not.
+ * Traditional rows are unchanged. The tree lists only the agents WITHOUT a
+ * project (a project's are reached from its Equipo), so here every agent
+ * takes part in none.
  */
 test.describe("sidebar: agents and their state", () => {
 	test.beforeEach(({ backend }) => {
 		backend.enableAcp();
+		for (const a of backend.acpAgents) a.projectId = null;
 		const set = (name: string, p: Record<string, unknown>) =>
 			Object.assign(backend.acpAgents.find((a) => a.name === name)!, { runnerSeenAt: FRESH }, p);
 		set("arq", {});
@@ -67,7 +70,7 @@ test.describe("sidebar: agents and their state", () => {
 		);
 	});
 
-	test("a live event moves a row's state without opening anything; a waiting agent shows on its folded project", async ({
+	test("a live event moves a row's state without opening anything; a waiting agent shows on its folded section", async ({
 		app,
 		backend,
 		page,
@@ -82,22 +85,21 @@ test.describe("sidebar: agents and their state", () => {
 		await expect(arq).toHaveText("trabajando");
 		await expect(page.locator("#project-view")).toBeHidden();
 
-		// A question opens: "te espera", on the row and on the project's heading.
+		// A question opens: "te espera", on the row and on the section's heading.
 		const q = { id: 9, agent: "arq", message_id: row.id, state: "open" };
 		backend.acpAgents.find((a) => a.name === "arq")!.waitingInput = true;
 		backend.pushAcp({ type: "question", question: q });
 		await expect(arq).toHaveText("te espera");
-		const head = page.locator(`.sgroup[data-group="${PROJECT_IDS.hz}"] .sgroup-head`);
+		const head = page.locator(`.sgroup[data-group="~agents"] .sgroup-head`);
 		await head.locator(".sgroup-toggle").click();
 		await expect(app.sessionRow("hz-architect")).toBeHidden();
 		const flag = head.locator(".sgroup-asks");
 		// How many wait, then who (for a screen reader, through aria-describedby).
-		await expect(flag).toHaveText(/^●2 — 2 agentes te esperan: .*@arq: esperando tu respuesta/);
-		// The folded heading's controls say it to a screen reader (Tab through headings).
-		for (const control of [head.locator(".sgroup-toggle"), head.locator("a.sgroup-title")])
-			await expect(control).toHaveAccessibleDescription(
-				/agentes te esperan: .*@arq: esperando tu respuesta/,
-			);
+		await expect(flag).toHaveText(/^●3 — 3 agentes te esperan: .*@arq: esperando tu respuesta/);
+		// The folded heading's chevron says it to a screen reader (Tab through headings).
+		await expect(head.locator(".sgroup-toggle")).toHaveAccessibleDescription(
+			/agentes te esperan: .*@arq: esperando tu respuesta/,
+		);
 	});
 
 	test("a just-started session whose runner has not connected says 'iniciando', not 'sin señal'", async ({
@@ -154,7 +156,8 @@ test.describe("sidebar: agents and their state", () => {
 test.describe("sidebar: agent state re-reads (clock running)", { tag: "@any-viewport" }, () => {
 	test.beforeEach(async ({ backend, page }) => {
 		backend.enableAcp();
-		for (const a of backend.acpAgents) a.runnerSeenAt = FRESH;
+		// Rows in the tree: agents without a project.
+		for (const a of backend.acpAgents) Object.assign(a, { runnerSeenAt: FRESH, projectId: null });
 		await page.clock.install({ time: new Date(FIXED_NOW) });
 	});
 	const reads = (backend: { requests: Array<{ path: string }> }) =>

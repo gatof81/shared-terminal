@@ -2,40 +2,118 @@ import { expect, test } from "./fixtures.js";
 import { PROJECT_IDS, PROJECT_SESSION_IDS } from "./mockBackend.js";
 
 /**
- * The sidebar tree (UX iter3 §1, alternative A): "+ New session" first,
- * then Projects with their agents, then the agents without a project, then
- * the sessions worked from their Terminal — whose ⋯ holds "Show terminated"
- * and Refresh.
+ * The sidebar tree (UX iter3 §1, ui-nav): "+ New session" first, then three
+ * foldable sections with the same heading — Proyectos (one row per project,
+ * a link to its page; its agents are not listed), the agents without a
+ * project, and the sessions worked from their Terminal — whose ⋯ holds
+ * "Show terminated" and Refresh.
  */
 test.describe("sidebar tree", () => {
 	test.beforeEach(({ backend }) => backend.enableAcp());
 
-	test("order: the primary action, Projects with their agents, agents without a project, Sessions", async ({
+	const group = (key: string) => `.sgroup[data-group="${key}"]`;
+
+	test("order: the primary action, Proyectos, agents without a project, Sesiones; a project is one row", async ({
 		app,
 		page,
 	}) => {
 		await app.login("alice");
 		await app.openSidebar();
-		await expect(app.sessionRow("hz-architect")).toBeVisible();
+		await expect(app.sessionRow("scratch")).toBeVisible();
 		const top = async (sel: string) => (await page.locator(sel).first().boundingBox())!.y;
 		const order = [
 			await top("#new-session-btn"),
-			await top("#project-section-title"),
-			await top(`.sgroup[data-group="${PROJECT_IDS.hz}"]`),
-			await top("#ssection-title-agents"),
-			await top("#ssection-title-sessions"),
+			await top(group("~projects")),
+			await top(group("~agents")),
+			await top(group("~sessions")),
 		];
 		expect([...order].sort((a, b) => a - b)).toEqual(order);
-		// The old bar above the list is gone with the tree.
+		// The same heading for the three: a chevron, the name, a count.
+		for (const [key, name] of [
+			["~projects", "Proyectos"],
+			["~agents", "Agentes sin proyecto"],
+			["~sessions", "Sesiones"],
+		] as const) {
+			const head = page.locator(`${group(key)} .sgroup-head`);
+			await expect(head.locator(".sgroup-toggle")).toHaveAccessibleName(`Collapse ${name}`);
+			await expect(head.locator(".sgroup-name")).toHaveText(name);
+		}
+		// The old bar and the old Projects section are gone with the tree.
 		await expect(page.locator("#sidebar-header")).toBeHidden();
-		// Each kind of row in its own place.
+		await expect(page.locator("#project-section")).toHaveCount(0);
+		// A project: one link row, no chevron, none of its agents under it.
+		const row = page.locator(`${group("~projects")} a.project-row`);
+		await expect(row).toHaveCount(1);
+		await expect(row).toHaveAttribute("href", `#/projects/${PROJECT_IDS.hz}`);
+		await expect(row.locator(".sgroup-toggle")).toHaveCount(0);
 		const agentRow = (name: string) => `.session-select[data-session-name="${name}"]`;
-		const hz = page.locator(`.sgroup[data-group="${PROJECT_IDS.hz}"]`);
-		await expect(hz.locator(agentRow("hz-architect"))).toHaveCount(1);
-		await expect(page.locator(".ssection-agents").locator(agentRow("scratch"))).toHaveCount(1);
-		const sessions = page.locator(".ssection-sessions");
+		await expect(page.locator(agentRow("hz-architect"))).toHaveCount(0);
+		await expect(page.locator(agentRow("hz-dev-2"))).toHaveCount(0);
+		await expect(page.locator(group("~agents")).locator(agentRow("scratch"))).toHaveCount(1);
+		const sessions = page.locator(group("~sessions"));
 		await expect(sessions.locator(".session-name", { hasText: /^my-project$/ })).toHaveCount(1);
 		await expect(sessions.locator(".session-agent-item")).toHaveCount(0);
+		// Folding is remembered under the section's key only.
+		await page.locator(`${group("~sessions")} .sgroup-toggle`).click();
+		await expect(sessions.locator(".sgroup-rows")).toBeHidden();
+		await expect(page.locator(`${group("~sessions")} .sgroup-toggle`)).toBeFocused();
+		expect(
+			await page.evaluate(() => JSON.parse(localStorage.getItem("st.sidebarCollapsed") ?? "[]")),
+		).toEqual(["~sessions"]);
+	});
+
+	test("no agent without a project: that section is not there; Proyectos always is", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.acpAgents = [];
+		backend.projects = [];
+		await app.login("alice");
+		await app.openSidebar();
+		await expect(app.sessionRow("my-project")).toBeVisible();
+		await expect(page.locator(group("~agents"))).toHaveCount(0);
+		await expect(page.locator(`${group("~projects")} .sgroup-empty`)).toHaveText(
+			/^Sin proyectos\./,
+		);
+	});
+
+	test("a project's row: the activity dot, ONE pill by priority, said in its name; it opens the page", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		// @dev works; a question of the project waits; a result is new.
+		backend.acpAgents.find((a) => a.name === "dev")!.running = [12];
+		const asked = backend.addAcpMessage({
+			to_id: "arq",
+			body: "@arq ¿seguimos?",
+			state: "running",
+			project_id: PROJECT_IDS.hz,
+		});
+		backend.acpQuestions.push({ id: 9, agent: "arq", message_id: asked.id, state: "open" });
+		await app.login("alice");
+		await app.openSidebar();
+		const row = page.locator(`${group("~projects")} a.project-row`);
+		await expect(row.locator(".psig-dot")).toHaveClass(/\bon\b/);
+		await expect(row.locator(".psig-pill")).toHaveText("1");
+		await expect(row.locator(".psig-pill")).toHaveClass(/psig-waits/);
+		await expect(row).toHaveAccessibleName("Educación HZ — 1 agente trabajando, 1 te espera");
+		// Folded, Proyectos says what waits in place of its count.
+		await page.locator(`${group("~projects")} .sgroup-toggle`).click();
+		await expect(page.locator(`${group("~projects")} .sgroup-asks`)).toHaveText(/^●1/);
+		await page.locator(`${group("~projects")} .sgroup-toggle`).click();
+		// The question answered: nothing waits; nothing new either (no topic read).
+		backend.acpQuestions.length = 0;
+		backend.acpAgents.find((a) => a.name === "dev")!.running = [];
+		backend.pushAcp({ type: "agents" });
+		backend.pushAcp({ type: "question", question: { id: 9, agent: "arq", state: "answered" } });
+		await expect(row.locator(".psig-pill")).toHaveCount(0);
+		await expect(row.locator(".psig-dot")).not.toHaveClass(/\bon\b/);
+		await expect(row).toHaveAccessibleName("Educación HZ");
+		await row.click();
+		await expect(page).toHaveURL(new RegExp(`#/projects/${PROJECT_IDS.hz}`));
+		await expect(page.locator("#project-view")).toBeVisible();
 	});
 
 	test("the Sessions ⋯ shows terminated sessions and refreshes the list", async ({
@@ -47,7 +125,7 @@ test.describe("sidebar tree", () => {
 		await app.openSidebar();
 		await expect(app.sessionRow("my-project")).toBeVisible();
 		await expect(app.sessionRow("old-poc")).toHaveCount(0);
-		const more = page.locator(".ssection-sessions .ssection-menu");
+		const more = page.locator(".sgroup-sessions .ssection-menu");
 		await expect(more).toHaveAccessibleName("Sessions options");
 		await more.click();
 		await page.getByRole("menuitem", { name: /^Show terminated/ }).click();
@@ -94,10 +172,11 @@ test.describe("sidebar tree on a phone", () => {
 		await app.login("alice");
 		await app.openSidebar();
 		await expect(app.sessionRow("hz-design")).toBeVisible();
-		for (const name of ["hz-architect", "my-project"])
+		for (const name of ["scratch", "my-project"])
 			expect(Math.round((await app.sessionRow(name).boundingBox())!.height)).toBe(48);
+		expect(Math.round((await page.locator("a.project-row").boundingBox())!.height)).toBe(48);
 		// No hover on a touch screen: every row's ⋯ shows, not only the selected one's.
-		for (const name of ["hz-architect", "my-project"])
+		for (const name of ["scratch", "my-project"])
 			expect(
 				await app
 					.sessionRow(name)

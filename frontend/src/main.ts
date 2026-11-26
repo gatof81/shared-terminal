@@ -913,16 +913,9 @@ sessionList.addEventListener("click", (e) => {
 	// switch the active session, so dismissing the drawer is jarring.
 	const target = e.target as HTMLElement;
 	if (target.closest(".session-actions")) return;
-	// A project's heading in the tree opens its page (its chevron only folds
-	// the group, so the drawer stays for that).
-	if (target.closest(".session-item, .project-item")) setSidebarOpen(false);
-});
-
-// Same for a project (P3a) picked from the drawer: the page is what they want to see.
-document.getElementById("project-section")?.addEventListener("click", (e) => {
-	if (!isMobile()) return;
-	const target = e.target as HTMLElement;
-	if (target.closest("#new-project-btn")) setSidebarOpen(false);
+	// A project's row opens its page, Proyectos' "+" its dialog (a section's
+	// chevron only folds it, so the drawer stays for that).
+	if (target.closest(".session-item, .project-row, #new-project-btn")) setSidebarOpen(false);
 });
 
 // Crossing the breakpoint resets to the default state for that mode —

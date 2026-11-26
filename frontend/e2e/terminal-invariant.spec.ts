@@ -66,9 +66,9 @@ test.describe("terminal invariant", () => {
 		const rowsBefore = await page.locator(".tab-pane.active .xterm-rows > div").count();
 		const topicRow = (title: string) => page.locator(".rail-body .rail-conv", { hasText: title });
 
-		// The project from its heading in the sidebar: its rail.
+		// The project from its row in the sidebar: its rail.
 		await app.openSidebar();
-		await page.locator(`.sgroup[data-group="${PROJECT_IDS.hz}"] a.sgroup-title`).click();
+		await page.locator(`a.project-row[data-project-id="${PROJECT_IDS.hz}"]`).click();
 		await expect(page.locator(".rail-body")).toBeVisible();
 		// Topic, another topic, back to the rail.
 		await topicRow("Optimización de CI").click();
@@ -88,16 +88,20 @@ test.describe("terminal invariant", () => {
 		await expect(page.locator('[role="menu"].action-menu')).toBeHidden();
 		await page.goBack();
 		await expect(page.locator(".rail-body")).toBeVisible();
-		// The sessions from the rail's foot: the terminal again; Back to the rail.
-		await page.locator(".rail-foot").getByRole("button", { name: "Sesiones" }).click();
+		// The rail's ‹ to the main level: the terminal again. Wide it goes back
+		// to the entry the project was entered from (Forward returns to the
+		// rail); on a phone it opens the drawer, whose row is a new entry.
+		await page.locator(".rail-back").click();
 		if (app.mobile) {
 			await expect(page.locator("main")).toHaveClass(/sidebar-open/);
 			await app.sessionRow("my-project").locator(".session-select").click();
 		}
 		await expect(page.locator("#project-view")).toBeHidden();
-		await page.goBack();
+		if (app.mobile) await page.goBack();
+		else await page.goForward();
 		await expect(page.locator(".rail-body")).toBeVisible();
-		await page.goForward();
+		if (app.mobile) await page.goForward();
+		else await page.goBack();
 		await expect(page.locator("#project-view")).toBeHidden();
 		// Pendientes and the account's menu with the terminal on screen.
 		await page.locator("#inbox-btn").click();
@@ -132,7 +136,7 @@ test.describe("terminal invariant", () => {
 
 		// The project, its Archive, the previous Project Chat.
 		await app.openSidebar();
-		await page.locator(`.sgroup[data-group="${PROJECT_IDS.hz}"] a.sgroup-title`).click();
+		await page.locator(`a.project-row[data-project-id="${PROJECT_IDS.hz}"]`).click();
 		await page.locator(".rail-body .rail-archive-row").click();
 		await page.locator(".ps-archive-row", { hasText: "Project Chat anterior" }).click();
 		await expect(page.locator("#ps-archive-title")).toHaveText("Project Chat anterior");
@@ -147,9 +151,9 @@ test.describe("terminal invariant", () => {
 		await expect(page.locator("#ps-archive-title")).toHaveText("Project Chat anterior");
 		await page.goBack();
 		await expect(page.locator("#ps-archive-title")).toHaveText("Archivo · solo lectura");
-		// A phone's stack: the project's screen (the rail, with its foot) is one more Back.
+		// A phone's stack: the project's screen (the rail, with its ‹) is one more Back.
 		if (app.mobile) await page.goBack();
-		await page.locator(".rail-foot").getByRole("button", { name: "Sesiones" }).click();
+		await page.locator(".rail-back").click();
 		if (app.mobile) await app.sessionRow("my-project").locator(".session-select").click();
 		await expect(page.locator("#project-view")).toBeHidden();
 		await page.waitForTimeout(400);

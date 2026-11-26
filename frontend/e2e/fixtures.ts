@@ -134,7 +134,7 @@ export class App {
 	/** The Sessions section's ⋯ (the sidebar tree): Show/Hide terminated. */
 	async showTerminated(): Promise<void> {
 		await this.openSidebar();
-		await this.page.locator(".ssection-sessions .ssection-menu").click();
+		await this.page.locator(".sgroup-sessions .ssection-menu").click();
 		await this.page.getByRole("menuitem", { name: /^Show terminated/ }).click();
 		await expect(this.page.locator("#show-terminated-toggle")).toBeChecked();
 	}
@@ -142,7 +142,7 @@ export class App {
 	/** The Sessions section's ⋯ → Refresh: re-reads the session list. */
 	async refreshSessions(): Promise<void> {
 		await this.openSidebar();
-		await this.page.locator(".ssection-sessions .ssection-menu").click();
+		await this.page.locator(".sgroup-sessions .ssection-menu").click();
 		await this.page.getByRole("menuitem", { name: /^Refresh/ }).click();
 	}
 

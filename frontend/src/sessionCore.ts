@@ -9,6 +9,7 @@
  * used only inside functions, so the circular import is TDZ-safe.
  */
 
+import { onInbox } from "./acpInboxStore.js";
 import { agentHue, sidebarAgentStatus } from "./acpModel.js";
 import { acpAgentsLoaded, acpAgentsReadAt, acpEntry } from "./acpRegistry.js";
 import { readAcpAgents, startAcpStatusFeed } from "./acpStatusFeed.js";
@@ -55,7 +56,14 @@ import { renderSidebarObservables } from "./myGroups.js";
 import { openBootstrapLogModal } from "./newSession.js";
 import { openObserveModalFor } from "./observeModal.js";
 import { openPortsModalFor } from "./ports.js";
-import { currentProject, projects } from "./projectDirectory.js";
+import {
+	canCreateProject,
+	currentProject,
+	projects,
+	projectsLoaded,
+	projectsLoadFailed,
+} from "./projectDirectory.js";
+import { paintProjectSignals, projectSignals } from "./projectSignals.js";
 import {
 	clear as clearRoute,
 	navigateProject,
@@ -472,15 +480,19 @@ if (typeof window !== "undefined")
 		if (sessionListLoaded()) renderSessionList();
 		paintBarIdentity();
 	});
-// Only an agent's state changed: its row and its group heading are
-// repainted in place — no rebuild, so focus, scroll, hover and the
-// groups' folding are untouched.
+// Only an agent's state changed: its row, its section heading and the
+// project rows' signals are repainted in place — no rebuild, so focus,
+// scroll, hover and the sections' folding are untouched.
 window.addEventListener("st:acp-status", () => {
 	if (sessionListLoaded()) paintAgentStatus();
 	paintBarIdentity();
 });
 // A project renamed: the bar's "proyecto ↗" link says the new name.
 window.addEventListener("st:projects-changed", () => paintBarIdentity());
+// Pendientes re-read: what waits and what is new, per project row.
+onInbox(() => {
+	if (sessionListLoaded()) paintProjectRows();
+});
 
 export function renderSessionList() {
 	noteStarts();
@@ -491,15 +503,16 @@ export function renderSessionList() {
 			? active.closest<HTMLElement>(".session-item")?.dataset.sessionId
 			: undefined;
 	const focusedRole = active instanceof HTMLElement ? (active.dataset.role ?? "select") : "select";
-	// …also on a group's heading (its chevron or its project link).
+	// …a project's row…
+	const focusedProject =
+		active instanceof HTMLElement && sessionList.contains(active)
+			? active.closest<HTMLElement>("a.project-row")?.dataset.projectId
+			: undefined;
+	// …or a section's heading (its chevron, its + or ⋯).
 	const focusedGroup =
 		active instanceof HTMLElement && sessionList.contains(active)
 			? active.closest<HTMLElement>(".sgroup-head")?.parentElement?.dataset.group
 			: undefined;
-	const focusedSectionMenu =
-		active instanceof HTMLElement &&
-		sessionList.contains(active) &&
-		active.matches(".ssection-menu");
 	sessionList.replaceChildren();
 	// The tree (UX iter3 §1: projects → agents without a project → sessions).
 	renderGroupedSessions();
@@ -509,14 +522,16 @@ export function renderSessionList() {
 				`.session-item[data-session-id="${CSS.escape(focusedId)}"] [data-role="${CSS.escape(focusedRole)}"]`,
 			)
 			?.focus();
+	} else if (focusedProject !== undefined) {
+		sessionList
+			.querySelector<HTMLElement>(`a.project-row[data-project-id="${CSS.escape(focusedProject)}"]`)
+			?.focus();
 	} else if (focusedGroup !== undefined) {
 		sessionList
 			.querySelector<HTMLElement>(
 				`.sgroup[data-group="${CSS.escape(focusedGroup)}"] .sgroup-head [data-role="${CSS.escape(focusedRole)}"]`,
 			)
 			?.focus();
-	} else if (focusedSectionMenu) {
-		sessionList.querySelector<HTMLElement>(".ssection-menu")?.focus();
 	}
 	paintAgentStatus();
 	// Agents' states keep current without any chat open (acpStatusFeed.ts).
@@ -529,8 +544,9 @@ export function renderSessionList() {
 /**
  * Each agent row's state (mark + one word; the full label in its tooltip
  * and accessible name) and, on each group heading, whether an agent of the
- * group waits for the person — visible with the group folded. Run after
- * every build and on `st:acp-status`; it only touches the agent parts.
+ * group waits for the person — visible with the group folded — then the
+ * project rows' signals. Run after every build and on `st:acp-status`; it
+ * only touches those parts.
  */
 function paintAgentStatus(): void {
 	const now = acpAgentsReadAt();
@@ -553,34 +569,48 @@ function paintAgentStatus(): void {
 	}
 	for (const head of sessionList.querySelectorAll<HTMLElement>(".sgroup-head")) {
 		const group = head.parentElement?.dataset.group ?? "";
+		if (group === PROJECTS_GROUP) continue;
 		const who = asking.get(group);
-		let flag = head.querySelector<HTMLElement>(".sgroup-asks");
-		// The heading's focusable controls (chevron, project link) describe the
-		// flag: with the group folded, Tab through the headings still says it.
-		const controls = head.querySelectorAll<HTMLElement>(".sgroup-toggle, a.sgroup-title");
-		if (!who) {
-			flag?.remove();
-			for (const c of controls) c.removeAttribute("aria-describedby");
-			continue;
-		}
-		if (!flag) {
-			flag = document.createElement("span");
-			flag.className = "sgroup-asks";
-			flag.id = `sgroup-asks-${group.replace(/[^a-zA-Z0-9-]/g, "_")}`;
-			head.querySelector(".sgroup-count")?.before(flag);
-		}
-		// "●N": how many agents of the group wait (the who, in words, below).
-		flag.textContent = `●${who.length}`;
-		const text = `${who.length === 1 ? "Un agente te espera" : `${who.length} agentes te esperan`}: ${who.join(", ")}`;
-		flag.title = text;
-		// Read through aria-describedby: its visible word plus who waits.
-		const detail =
-			flag.querySelector<HTMLElement>(".visually-hidden") ?? document.createElement("span");
-		detail.className = "visually-hidden";
-		detail.textContent = ` — ${text}`;
-		flag.append(detail);
-		for (const c of controls) c.setAttribute("aria-describedby", flag.id);
+		setGroupFlag(
+			head,
+			who?.length ?? 0,
+			who
+				? `${who.length === 1 ? "Un agente te espera" : `${who.length} agentes te esperan`}: ${who.join(", ")}`
+				: "",
+		);
 	}
+	paintProjectRows();
+}
+
+/**
+ * A section heading's "●N" (instead of its count): N things wait for the
+ * person in it, visible with the section folded. 0 removes it.
+ */
+function setGroupFlag(head: HTMLElement, n: number, text: string): void {
+	const group = head.parentElement?.dataset.group ?? "";
+	let flag = head.querySelector<HTMLElement>(".sgroup-asks");
+	// The heading's chevron describes the flag: with the section folded, Tab
+	// through the headings still says it.
+	const toggle = head.querySelector<HTMLElement>(".sgroup-toggle");
+	if (n === 0) {
+		flag?.remove();
+		toggle?.removeAttribute("aria-describedby");
+		return;
+	}
+	if (!flag) {
+		flag = document.createElement("span");
+		flag.className = "sgroup-asks";
+		flag.id = `sgroup-asks-${group.replace(/[^a-zA-Z0-9-]/g, "_")}`;
+		head.querySelector(".sgroup-count")?.before(flag);
+	}
+	flag.textContent = `●${n}`;
+	flag.title = text;
+	// Read through aria-describedby: its visible word plus who waits.
+	const detail = document.createElement("span");
+	detail.className = "visually-hidden";
+	detail.textContent = ` — ${text}`;
+	flag.append(detail);
+	toggle?.setAttribute("aria-describedby", flag.id);
 }
 
 /**
@@ -635,106 +665,132 @@ function labelSessionRow(select: HTMLElement): void {
 }
 
 /**
- * The rows are grouped by the project their ACP agent
- * takes part in (acpRegistry.ts), in the project list's order and including
- * the projects without a session yet — the tree is where projects are
- * listed. Then two sections: the agents that take part in no project, and
- * the sessions worked from their Terminal (buildSection).
+ * The tree (UX iter3 §1, ui-nav): three foldable sections with the same
+ * heading — Proyectos (one row per project, a link to its page: its agents
+ * are reached from its Equipo, never listed here), the agents that take
+ * part in no project (only when there are some), and the sessions worked
+ * from their Terminal.
  */
 function renderGroupedSessions(): void {
-	const byProject = new Map<string, SessionInfo[]>();
-	for (const p of projects()) byProject.set(p.projectId, []);
-	const loose: SessionInfo[] = [];
-	for (const s of sessions) {
-		const rows = byProject.get(acpEntry(s.sessionId)?.projectId ?? "");
-		if (rows) rows.push(s);
-		else loose.push(s);
-	}
-	for (const p of projects()) {
-		const rows = byProject.get(p.projectId) ?? [];
-		sessionList.appendChild(
-			buildGroup({
-				key: p.projectId,
-				title: p.name,
-				project: p.projectId,
-				cls: "sgroup-project",
-				tooltip: `Abrir ${p.name}`,
-				rows: rows.map((s) => buildSessionItem(s)),
-				// "shown": its sessions may also be terminated ones the list hides.
-				empty: p.agentCount === 0 ? "Sin agentes todavía." : "No sessions shown.",
-			}),
-		);
-	}
-	// Then the agents that take part in no project, then the sessions worked
-	// from their Terminal: two sections, never one mixed "Sin proyecto".
+	const known = new Set(projects().map((p) => p.projectId));
+	// An agent of a project the list does not have (archived, not read yet)
+	// is shown with the agents without one: never hidden.
+	const loose = sessions.filter((s) => !known.has(acpEntry(s.sessionId)?.projectId ?? ""));
 	const agents = loose.filter((s) => acpEntry(s.sessionId) !== null);
 	const plain = loose.filter((s) => acpEntry(s.sessionId) === null);
+	sessionList.appendChild(
+		buildGroup({
+			key: PROJECTS_GROUP,
+			title: "Proyectos",
+			cls: "sgroup-projects",
+			head: newProjectButton(),
+			rows: projects().map((p) => buildProjectRow(p.projectId, p.name)),
+			empty: projectsLoaded()
+				? "Sin proyectos. Un proyecto agrupa agentes ACP y les da conversaciones."
+				: projectsLoadFailed()
+					? "No se pudieron cargar los proyectos; reintentando."
+					: "Cargando proyectos…",
+			countLabel: (n) => (n === 1 ? "1 proyecto" : `${n} proyectos`),
+		}),
+	);
 	if (agents.length > 0)
 		sessionList.appendChild(
-			buildSection({
-				key: "agents",
+			buildGroup({
+				key: "~agents",
 				title: "Agentes sin proyecto",
+				cls: "sgroup-agents",
 				rows: agents.map((s) => buildSessionItem(s)),
 			}),
 		);
 	sessionList.appendChild(
-		buildSection({
-			key: "sessions",
-			title: "Sessions",
-			menu: true,
+		buildGroup({
+			key: "~sessions",
+			title: "Sesiones",
+			cls: "sgroup-sessions",
+			head: sessionsMenuButton(),
 			rows: plain.map((s) => buildSessionItem(s)),
 			empty: "No sessions shown.",
 		}),
 	);
 }
 
+const PROJECTS_GROUP = "~projects";
+
+/** Proyectos' "+": a new project (projectsView.ts listens). */
+function newProjectButton(): HTMLElement {
+	const b = document.createElement("button");
+	b.type = "button";
+	b.className = "btn btn-icon sm sgroup-action";
+	b.id = "new-project-btn";
+	b.dataset.role = "new-project";
+	b.textContent = "+";
+	const can = canCreateProject();
+	b.disabled = !can;
+	b.title = can ? "Crear un proyecto para tus agentes" : "Llegaste al límite de proyectos";
+	b.setAttribute("aria-label", "Proyecto nuevo");
+	b.addEventListener("click", () =>
+		window.dispatchEvent(new CustomEvent("st:new-project", { detail: { opener: b } })),
+	);
+	return b;
+}
+
+/** Sesiones' ⋯: what used to sit above the whole list — "Show terminated" and Refresh. */
+function sessionsMenuButton(): HTMLElement {
+	const more = document.createElement("button");
+	more.type = "button";
+	more.className = "btn btn-icon sm sgroup-action ssection-menu";
+	more.dataset.role = "sessions-menu";
+	more.textContent = "⋯";
+	more.title = "Sessions: show terminated, refresh";
+	more.setAttribute("aria-label", "Sessions options");
+	more.setAttribute("aria-haspopup", "menu");
+	more.addEventListener("click", () => openSessionsMenu(more));
+	return more;
+}
+
 /**
- * A section of the tree under its small heading: the agents without a
- * project, the sessions. Not foldable (the projects are). "Sessions" carries
- * a ⋯ with what used to sit above the whole list: "Show terminated" and
- * Refresh (the original controls stay in #sidebar-header, the flat list's).
+ * A project's row: a link to its page with its signals (projectSignals.ts),
+ * painted by paintProjectRows — in place, so a repaint keeps focus.
  */
-function buildSection(sec: {
-	key: string;
-	title: string;
-	rows: HTMLElement[];
-	menu?: boolean;
-	empty?: string;
-}): HTMLElement {
-	const section = document.createElement("section");
-	section.className = `ssection ssection-${sec.key}`;
-	section.dataset.section = sec.key;
-	const id = `ssection-title-${sec.key}`;
-	section.setAttribute("aria-labelledby", id);
-	const head = document.createElement("div");
-	head.className = "ssection-head";
-	const title = document.createElement("h3");
-	title.id = id;
-	title.textContent = sec.title;
-	head.appendChild(title);
-	if (sec.menu) {
-		const more = document.createElement("button");
-		more.type = "button";
-		more.className = "btn btn-icon sm ssection-menu";
-		more.textContent = "⋯";
-		more.title = "Sessions: show terminated, refresh";
-		more.setAttribute("aria-label", "Sessions options");
-		more.setAttribute("aria-haspopup", "menu");
-		more.addEventListener("click", () => openSessionsMenu(more));
-		head.appendChild(more);
+function buildProjectRow(projectId: string, name: string): HTMLElement {
+	const a = document.createElement("a");
+	const route = { projectId };
+	a.className = "project-row";
+	a.dataset.projectId = projectId;
+	a.dataset.role = "project";
+	a.dataset.name = name;
+	a.href = projectRouteHash(route);
+	a.title = `Abrir ${name}`;
+	if (currentProject() === projectId) a.setAttribute("aria-current", "page");
+	const label = document.createElement("span");
+	label.className = "project-row-name";
+	label.textContent = name;
+	a.appendChild(label);
+	a.addEventListener("click", (e) => {
+		if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+		e.preventDefault();
+		navigateProject(route);
+	});
+	return a;
+}
+
+/** Each project row's dot and pill; Proyectos folded says what waits in all of them. */
+function paintProjectRows(): void {
+	let waits = 0;
+	for (const a of sessionList.querySelectorAll<HTMLElement>("a.project-row[data-project-id]")) {
+		const sig = projectSignals(a.dataset.projectId!);
+		waits += sig.waits;
+		a.setAttribute("aria-label", `${a.dataset.name ?? ""}${paintProjectSignals(a, sig)}`);
 	}
-	section.appendChild(head);
-	const rows = document.createElement("div");
-	rows.className = "ssection-rows";
-	if (sec.rows.length === 0 && sec.empty) {
-		const empty = document.createElement("p");
-		empty.className = "sgroup-empty";
-		empty.textContent = sec.empty;
-		rows.appendChild(empty);
-	}
-	for (const r of sec.rows) rows.appendChild(r);
-	section.appendChild(rows);
-	return section;
+	const group = sessionList.querySelector<HTMLElement>(`.sgroup[data-group="${PROJECTS_GROUP}"]`);
+	const head = group?.querySelector<HTMLElement>(".sgroup-head");
+	if (!head) return;
+	const folded = group!.classList.contains("collapsed");
+	setGroupFlag(
+		head,
+		folded && waits > 0 ? waits : 0,
+		`${waits === 1 ? "Uno te espera" : `${waits} te esperan`} en tus proyectos`,
+	);
 }
 
 /** The "Sessions" ⋯: the list's own options, through the original controls. */
@@ -768,9 +824,10 @@ function openSessionsMenu(opener: HTMLElement): void {
 // ── Sidebar tree: collapsible groups ────────────────────────────────────────
 
 /**
- * Which groups this browser keeps collapsed (project ids and the "~…" keys
- * of the non-project groups). A per-viewer convenience, so localStorage is
- * the right place; unreadable storage just means "all expanded".
+ * Which sections this browser keeps collapsed ("~projects", "~agents",
+ * "~sessions"; any other stored key — a project id of the old tree — is
+ * simply never asked for). A per-viewer convenience, so localStorage is the
+ * right place; unreadable storage just means "all expanded".
  */
 const COLLAPSED_KEY = "st.sidebarCollapsed";
 let collapsedGroups: Set<string> | null = null;
@@ -782,7 +839,7 @@ function collapsed(): Set<string> {
 		const raw = localStorage.getItem(COLLAPSED_KEY);
 		const list: unknown = raw ? JSON.parse(raw) : [];
 		if (Array.isArray(list))
-			for (const k of list) if (typeof k === "string") collapsedGroups.add(k);
+			for (const k of list) if (typeof k === "string" && k.startsWith("~")) collapsedGroups.add(k);
 	} catch {
 		// Private mode / blocked storage / a corrupt value: start expanded.
 	}
@@ -818,15 +875,12 @@ const USAGE_HOT_PERCENT = 80;
 function buildGroup(g: {
 	key: string;
 	title: string;
-	/** A project's id: its title is then the link to its page. */
-	project: string | null;
 	cls: string;
 	rows: HTMLElement[];
-	tooltip?: string;
-	note?: string;
+	/** A control at the heading's end (Proyectos' +, Sesiones' ⋯). */
+	head?: HTMLElement;
 	empty?: string;
-	/** The rows are not the whole truth (bindings unread): show no number. */
-	countUnknown?: boolean;
+	countLabel?: (n: number) => string;
 }): HTMLElement {
 	const isCollapsed = collapsed().has(g.key);
 	const section = document.createElement("section");
@@ -863,65 +917,37 @@ function buildGroup(g: {
 	toggle.addEventListener("click", flip);
 	head.appendChild(toggle);
 
-	let title: HTMLElement;
-	if (g.project !== null) {
-		// A project's name opens its page (the chevron beside it folds the
-		// group): the same link the old Projects list was, same class.
-		const a = document.createElement("a");
-		const route = { projectId: g.project };
-		a.className = "sgroup-title project-item";
-		a.dataset.projectId = g.project;
-		a.dataset.role = "project";
-		a.href = projectRouteHash(route);
-		if (currentProject() === g.project) a.setAttribute("aria-current", "page");
-		a.addEventListener("click", (e) => {
-			if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-			e.preventDefault();
-			navigateProject(route);
-		});
-		title = a;
-	} else {
-		// No page behind these groups: the whole heading folds them.
-		const b = document.createElement("button");
-		b.type = "button";
-		b.className = "sgroup-title";
-		b.tabIndex = -1; // the chevron is the Tab stop; this is the bigger target
-		b.setAttribute("aria-hidden", "true");
-		b.addEventListener("click", flip);
-		title = b;
-	}
+	// The whole heading folds the section: the chevron is the Tab stop, this
+	// the bigger target.
+	const title = document.createElement("button");
+	title.type = "button";
+	title.className = "sgroup-title";
+	title.tabIndex = -1;
+	title.setAttribute("aria-hidden", "true");
+	title.addEventListener("click", flip);
 	const name = document.createElement("span");
-	name.className = "sgroup-name project-item-name";
+	name.className = "sgroup-name";
 	name.textContent = g.title;
 	title.appendChild(name);
-	title.title = g.tooltip ?? g.title;
+	title.title = g.title;
 	head.appendChild(title);
 
 	const count = document.createElement("span");
 	count.className = "sgroup-count";
-	if (g.countUnknown) {
-		// Never a known zero for an unknown (PROJECTS.md §4.6).
-		count.textContent = "–";
-		count.title = "Couldn't read which sessions belong to this project";
-	} else {
-		count.textContent = String(g.rows.length);
-		count.title = g.rows.length === 1 ? "1 session" : `${g.rows.length} sessions`;
-	}
+	count.textContent = String(g.rows.length);
+	count.title =
+		g.countLabel?.(g.rows.length) ??
+		(g.rows.length === 1 ? "1 session" : `${g.rows.length} sessions`);
 	count.setAttribute("aria-label", count.title);
 	head.appendChild(count);
+	if (g.head) head.appendChild(g.head);
 	section.appendChild(head);
 
 	const rows = document.createElement("div");
 	rows.className = "sgroup-rows";
 	rows.id = rowsId;
 	rows.hidden = isCollapsed;
-	if (g.note) {
-		const note = document.createElement("p");
-		note.className = "session-group-note";
-		note.textContent = g.note;
-		rows.appendChild(note);
-	}
-	if (g.rows.length === 0 && g.empty && !g.countUnknown) {
+	if (g.rows.length === 0 && g.empty) {
 		const empty = document.createElement("p");
 		empty.className = "sgroup-empty";
 		empty.textContent = g.empty;

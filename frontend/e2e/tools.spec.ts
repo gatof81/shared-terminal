@@ -334,19 +334,47 @@ test.describe("Herramientas", () => {
 		expect(app.errors).toEqual([]);
 	});
 
-	test("Equipo: an agent's row is its menu", async ({ app, page }) => {
+	test("Equipo: an agent's row opens its Terminal; its ⋯ the rest of the menu", async ({
+		app,
+		page,
+	}) => {
 		await app.login("alice", RAIL);
-		await page.locator(".rail-body .rail-agent", { hasText: "@arq" }).click();
-		await page.getByRole("menuitem", { name: /^Git · principal/ }).click();
 		// (Wide, the project opened its last topic: Herramientas comes from it.)
-		const fromTopic = (agent: string) =>
-			new RegExp(`#/projects/${HZ}(/c/[^/]+)?/tools/${agent}/~/git$`);
-		await expect(page).toHaveURL(fromTopic("arq"));
+		const fromTopic = (agent: string, tool: string) =>
+			new RegExp(`#/projects/${HZ}(/c/[^/]+)?/tools/${agent}/~/${tool}$`);
+		const row = page.locator(".rail-body .rail-agent", { hasText: "@arq" });
+		await expect(row).toHaveAccessibleName(/^@arq .* — abrir Terminal$/);
+		const before = page.url();
+		await row.click();
+		await expect(page).toHaveURL(fromTopic("arq", "terminal"));
+		await app.expectView("terminal");
+		await expect(page.locator("#terminal-toolbar")).toHaveAttribute(
+			"data-session-name",
+			"hz-architect",
+		);
+		// The project's page stayed under it: Back is where it was.
+		await page.goBack();
+		await expect(page).toHaveURL(before);
+		await expect(page.locator(".rail-body")).toBeVisible();
+
+		// The ⋯ beside the row (a sibling, not inside it): no Terminal there.
+		const more = page.getByRole("button", { name: "Más acciones de @arq" });
+		await expect(row.locator(".rail-agent-more")).toHaveCount(0);
+		await more.click();
+		const menu = page.locator('[role="menu"].action-menu');
+		await expect(menu.getByRole("menuitem")).toHaveText([
+			/^Files · principal/,
+			/^Git · principal/,
+			/^Ajustes del agente/,
+		]);
+		await expect(menu.locator(".action-menu-sep")).toHaveCount(1);
+		await menu.getByRole("menuitem", { name: /^Git · principal/ }).click();
+		await expect(page).toHaveURL(fromTopic("arq", "git"));
 		await app.expectView("git");
 		await expect(strip(page)).toContainText("rama main");
 		// Another agent from the selector: its session, its principal workspace.
 		await page.locator(".tools-agent").selectOption("dev");
-		await expect(page).toHaveURL(fromTopic("dev"));
+		await expect(page).toHaveURL(fromTopic("dev", "git"));
 		await expect(page.locator("#terminal-toolbar")).toHaveAttribute(
 			"data-session-name",
 			"hz-dev-2",

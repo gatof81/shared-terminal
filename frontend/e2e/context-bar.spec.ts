@@ -16,7 +16,8 @@ test.describe("context bar", () => {
 	}) => {
 		await app.login("alice");
 		const heights: number[] = [];
-		for (const name of ["my-project", "hz-architect"]) {
+		// (An agent's session the sidebar lists: @solo's, without a project.)
+		for (const name of ["my-project", "scratch"]) {
 			await app.openSession(name);
 			for (const view of ["terminal", "files", "git"] as const) {
 				await app.switchView(view);
