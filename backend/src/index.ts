@@ -518,6 +518,9 @@ function shutdown() {
 		}
 	}
 	wss.close();
+	// Idle runners' claims held open (long-poll): answer them now, or
+	// server.close() would wait up to their 20 s.
+	acpAgents.stopWaiting();
 
 	// #348 — abort in-flight bootstraps and await their failure teardown
 	// (status → failed, log persisted with the abort reason, container

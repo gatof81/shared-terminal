@@ -239,6 +239,7 @@ async function api(method, path, body) {
 				model: res.headers.get("x-st-model"),
 				effort: res.headers.get("x-st-effort"),
 				release: res.headers.get("x-st-release"),
+				waited: res.headers.get("x-st-waited") === "1",
 			};
 		} catch (err) {
 			log(`backend unreachable (${err.cause?.code ?? err.message}); retrying`);
@@ -926,7 +927,12 @@ async function main() {
 		// longer active gets its session closed (below), freeing its processes.
 		const ask = SLOT !== 1 && open && Date.now() - openAskedAt >= OPEN_ASK_MS ? open.ctx : null;
 		if (ask) openAskedAt = Date.now();
+		// `wait`: with nothing to claim, the backend holds the answer until
+		// something may be claimable (≤ 20 s) instead of being asked every 2 s.
+		// Not while a task holds the session (`keep`): what frees the slot then
+		// is that task ending here, which the backend never hears of.
 		const r = await api("POST", "/runner/claim", {
+			wait: !keep,
 			slot: SLOT,
 			...(keep && SLOT !== 1 ? { context: keep.ctx } : {}),
 			...(keep && SLOT === 1 ? { conversation: keep.conv } : {}),
@@ -944,6 +950,14 @@ async function main() {
 		// A task that spawned while the claim was in flight holds this session:
 		// the message of another one goes back to pending (it never left), and
 		// the next claim keeps to this session.
+		// The claim may have waited: the agent may have started something of its
+		// own meanwhile (a turn it opened). Not idle ⇒ the message goes back to
+		// pending (it was never sent) and is claimed again once idle.
+		if (want && !agentIdle()) {
+			await api("POST", `/runner/messages/${r.body.id}/release`, { note: "el agente no estaba en reposo al llegar el mensaje: vuelve a la cola" });
+			log(`message #${r.body.id}: back to pending (the agent was busy when the claim answered)`);
+			continue;
+		}
 		if (want && open && keyOf(want.ctx, want.conv) !== open.key && holding()) {
 			await api("POST", `/runner/messages/${r.body.id}/release`, { note: "el slot quedó retenido por una tarea abierta: vuelve a la cola" });
 			log(`message #${r.body.id}: back to pending (a task spawned during the claim holds ${open.key})`);
@@ -974,7 +988,7 @@ async function main() {
 			// landed but its answer was lost. Judge it like a restart would.
 			const cur = await api("GET", `/runner/running?slot=${SLOT}`);
 			if (cur.status === 200 && !current) await settleInterrupted(cur.body);
-		} else await new Promise((ok) => setTimeout(ok, 2_000));
+		} else if (!r.waited) await new Promise((ok) => setTimeout(ok, 2_000));
 	}
 }
 

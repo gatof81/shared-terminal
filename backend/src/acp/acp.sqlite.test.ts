@@ -2429,6 +2429,41 @@ describe("D1 reads: the hot reads go by index, never through the owner's whole h
 			}
 		});
 
+		it("an agent's page (st list, GET /messages?agent=) is two ranges bounded by the page, by to_id and by from_id", async () => {
+			for (const who of [as("solo"), owner]) {
+				for (const q of ["", "?before=500"]) {
+					const path = "user" in who ? `/messages?agent=ana${q}` : `/messages${q}`;
+					const plans = await plansOf(async () => {
+						expect((await call(who, "GET", path)).status).toBe(200);
+					});
+					const page = plans.find((p) => /UNION/.test(p.sql));
+					const lines = page?.plan.join("\n") ?? "";
+					expect(lines).toMatch(
+						/idx_agent_messages_to \(owner_user_id=\? AND to_id=\? AND id<\?\)/,
+					);
+					expect(lines).toMatch(
+						/idx_agent_messages_from \(owner_user_id=\? AND from_id=\? AND id<\?\)/,
+					);
+					expectBounded(plans);
+				}
+			}
+		});
+
+		it("a request's reply is found by reply_to, not through the owner's history", () => {
+			for (const sql of [
+				"SELECT * FROM agent_messages WHERE owner_user_id = ? AND reply_to = ? AND kind = 'reply'",
+				`SELECT 1 FROM agent_messages m WHERE m.owner_user_id = ? AND m.id = ? AND NOT EXISTS (SELECT 1 FROM agent_messages x
+					WHERE x.owner_user_id = m.owner_user_id AND x.reply_to = m.id AND x.kind = 'reply' AND x.note = 'unfinished:' || m.state)`,
+			]) {
+				const plan = (
+					db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(OWNER, 1) as Array<{ detail: string }>
+				).map((r) => r.detail);
+				expect(plan.join("\n")).toMatch(
+					/idx_agent_messages_reply \(owner_user_id=\? AND reply_to=\?\)/,
+				);
+			}
+		});
+
 		it("the topic list, the inbox and /agents read no owner-wide range of messages or questions", async () => {
 			for (const path of [`/projects/${PD}/conversations`, "/inbox", "/agents"]) {
 				const plans = await plansOf(async () => {
@@ -3531,6 +3566,82 @@ describe("D1 reads: the board goes by index (v29)", () => {
 			expect(ps.some((p) => p.plan.some((l) => /idx_tasks_parent/.test(l)))).toBe(true);
 			expect(ps.some((p) => p.plan.some((l) => /idx_task_events_task/.test(l)))).toBe(true);
 		});
+	});
+});
+
+// Last in the file: its final case calls stopWaiting(), which is for good.
+describe("ACP idle runners: the claim waits for work (R21)", () => {
+	const SID_W = "e4000000-0000-4000-8000-000000000001";
+	beforeAll(async () => {
+		db.prepare(
+			"INSERT INTO sessions (session_id, user_id, name, container_name, status) VALUES (?, ?, 'espera', ?, 'running')",
+		).run(SID_W, OWNER, `st-${SID_W.slice(0, 12)}`);
+		tokens.espera = acp.tokenFor((await acp.create(SID_W, OWNER, "espera")).agent_id);
+	});
+	const claimWait = (signal?: AbortSignal) =>
+		realFetch(`${base}/runner/claim`, {
+			method: "POST",
+			headers: { authorization: `Bearer ${tokens.espera}`, "content-type": "application/json" },
+			body: JSON.stringify({ wait: true }),
+			signal,
+		});
+	const until = async (cond: () => boolean) => {
+		for (let i = 0; i < 100 && !cond(); i++) await new Promise((ok) => setTimeout(ok, 20));
+	};
+
+	it("an idle claim is answered when a message arrives, not on the next poll; the runner counts as seen while it waits", async () => {
+		const t0 = Date.now();
+		const pending = claimWait();
+		await until(() => acp.waitingClaims === 1);
+		expect(acp.waitingClaims).toBe(1);
+		const seen = (await call(owner, "GET", "/agents")).body.find(
+			(a: { name: string }) => a.name === "espera",
+		);
+		expect(Date.now() - Date.parse(seen.runnerSeenAt)).toBeLessThan(1_000);
+		const sent = await call(owner, "POST", "/messages", { to: "espera", body: "llegó" });
+		const res = await pending;
+		expect(res.status).toBe(200);
+		expect(res.headers.get("x-st-waited")).toBe("1");
+		expect(((await res.json()) as { id: number }).id).toBe(sent.body.id);
+		expect(Date.now() - t0).toBeLessThan(5_000);
+		expect(acp.waitingClaims).toBe(0);
+		// With a message running in the slot it answers 409 at once, as before.
+		const busy = await claimWait();
+		expect(busy.status).toBe(409);
+		await call(as("espera"), "POST", `/runner/messages/${sent.body.id}/result`, {
+			state: "done",
+			text: "ok",
+		});
+	});
+
+	it("a runner that left while waiting gets nothing claimed for it", async () => {
+		const ac = new AbortController();
+		const pending = claimWait(ac.signal).catch(() => null);
+		await until(() => acp.waitingClaims === 1);
+		ac.abort();
+		await pending;
+		await until(() => acp.waitingClaims === 0);
+		expect(acp.waitingClaims).toBe(0);
+		const sent = await call(owner, "POST", "/messages", { to: "espera", body: "nadie espera" });
+		await new Promise((ok) => setTimeout(ok, 100));
+		expect((await call(owner, "GET", `/messages/${sent.body.id}`)).body.state).toBe("pending");
+		const c = await call(as("espera"), "POST", "/runner/claim");
+		await call(as("espera"), "POST", `/runner/messages/${c.body.id}/result`, {
+			state: "done",
+			text: "ok",
+		});
+	});
+
+	it("another owner's message does not wake it; at shutdown every waiting claim answers 204", async () => {
+		const pending = claimWait();
+		await until(() => acp.waitingClaims === 1);
+		await call({ user: OTHER }, "POST", "/messages", { to: "ajeno", body: "de otro dueño" });
+		await new Promise((ok) => setTimeout(ok, 100));
+		expect(acp.waitingClaims).toBe(1);
+		acp.stopWaiting();
+		const res = await pending;
+		expect(res.status).toBe(204);
+		expect(acp.waitingClaims).toBe(0);
 	});
 });
 

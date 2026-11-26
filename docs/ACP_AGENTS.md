@@ -590,6 +590,12 @@ session.
 
 ## 9. Operation and recovery
 
+- **Idle runners wait in the claim.** A slot with nothing to claim sends `wait: true`; the backend holds
+  the answer (≤ 20 s) until a message row of the same owner is written or changes, an agent changes,
+  or any run ends (the backend-wide cap), then claims once more (`X-ST-Waited: 1`). An idle slot costs
+  one claim every 20 s instead of every 2 s; a missed wake costs at most 20 s, never a message. A slot
+  whose session a task holds does not wait (what frees it is local). While waiting the runner counts
+  as seen; a runner that left gets nothing claimed for it; shutdown answers every waiting claim.
 - **Launch.** On every container start and at backend boot, the backend `docker exec`s the runner
   under `flock -n` inside a restart loop: two runners for one agent cannot run.
 - **Watchdog.** Every `ACP_WATCHDOG_MS`, each running agent's loop is checked through its processes
