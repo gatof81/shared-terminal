@@ -39,7 +39,7 @@ bind-mounted **read-only** at `/opt/st-acp` only into agent sessions:
 
 ```
 .acp-runtime/
-  st/                       runner.mjs, bin/st — copied from the backend image at every boot
+  st/                       runner.mjs, bin/st, skills/ — copied from the backend image at every boot
   claude-acp-0.108.0/       one directory per adapter version (acp-runtime/install.sh)
     agent                   the entry point the runner executes
   st-test-agent/            only with ACP_TEST_RUNTIME=1: deterministic adapter, no model
@@ -50,6 +50,35 @@ bind-mounted **read-only** at `/opt/st-acp` only into agent sessions:
 - A backend upgrade replaces `st/`; a running runner restarts into the new version as soon as it is idle.
 - The session image still ships the Claude Code CLI, used for the Terminal (and for logging in from
   it). Nothing in Shared Terminal checks its version.
+
+### 2a. Shared skills and the protocol (4A)
+
+- `acp-runtime/skills/<name>/` (today: `coordinar`, the coordination procedure) is copied to
+  `st/skills/` before the runner. Every time slot 1's runner starts (so every adapter start; the
+  slots share `HOME`, so only slot 1 installs and reports) it installs
+  exactly those into `~/.claude/skills/<name>/` (= `workspace/.st/claude-state/skills`) with a
+  `.st-managed` marker: a directory without the marker is the agent's own and is never touched (even
+  with the same name — reported as `error`), one with the marker that left the package is removed.
+  `CLAUDE.md`, settings and credentials are not touched; the role stays in the agent's private
+  `~/.claude/CLAUDE.md`.
+- The runner reports `{hash, names, error}` (`POST /runner/skills`, memory only; `hash` = the first 12
+  hex of the sha256 over every package file, by its path `<name>/<file>` in byte order of the whole
+  path, as `path NUL content NUL`); `GET /agents` shows
+  `skills: {hash, names, error, at} | null` and `st agents` prints it.
+- What Claude Code does (verified with claude-agent-acp 0.108.0 / Claude Code 2.1.326, 2026-11-26):
+  a **new** session lists the installed skills; a skill's body is read from disk at **every use**, so a
+  changed skill is current in an open or resumed session; a skill added later is announced to an open
+  or resumed session as a `skill_listing` reminder in its next turn (and can be invoked). So a skill
+  change needs no adapter restart — and the backend rewrites the runner on every boot, which restarts
+  it while idle anyway.
+- **A resumed session keeps the system prompt it was created with**: Claude Code stores it in the
+  transcript and ignores the `systemPrompt` of `session/resume`. So each session file
+  (`session.json`, `conv/<id>.json`, `ctx/<id>.json`) records `protocol` (the hash of the runner's
+  `PROTOCOL`), and a resumed session whose file names another one (or none: a session from before
+  4A) gets the current text once, as a second `[st-protocolo]` block of its next prompt; the mark is
+  written when that prompt is answered.
+- `PROTOCOL` carries only the short classification rule (direct / goal with tasks / plan with one
+  initial approval of the scope; the person's explicit instructions win); the procedure is the skill.
 
 ## 3. Messages
 
@@ -363,6 +392,9 @@ PROPUESTA §4 (never slots):
   "heldBy":     [{"conversationId": "…", "work": null, "since": "…"}],
   "waitingInput": true, "running": [12], "pending": 1 }
 ```
+
+`skills`: `{hash, names, error, at} | null` — the shared skills the runner installed at its last start
+(§2a); null until a runner of this backend reported.
 
 `heldBy`: `[{conversationId, work, since}]` — a slot kept in a conversation (or work) by a process the
 agent left running there, so it cannot switch to another topic («ocupado en «X» · proceso en curso»).

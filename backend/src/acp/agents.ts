@@ -271,6 +271,17 @@ export interface ActivityEvent {
 }
 
 /** What a runner reported after asking its adapter for a model. */
+/** What the runner reported after installing the shared skills into ~/.claude/skills. */
+export interface SkillsApplied {
+	/** Hash of the packaged skills (12 hex), null if the install failed. */
+	hash: string | null;
+	/** The skills it installed (one with an own skill of the same name is not). */
+	names: string[];
+	/** Why some or all were not installed, if so. */
+	error: string | null;
+	at: string;
+}
+
 export interface ModelApplied {
 	/** The model id the runner asked for. */
 	requested: string;
@@ -378,6 +389,15 @@ export class AcpAgents {
 	async installRunnerFiles(): Promise<void> {
 		const dest = path.join(this.config.runtimeDir, "st");
 		await fs.mkdir(path.join(dest, "bin"), { recursive: true });
+		// The shared skills (acp-runtime/skills/<name>/) BEFORE the runner: a
+		// runner restarts itself when its file changes, and installs into the
+		// agent's ~/.claude/skills whatever skills/ holds at that moment. Swapped
+		// as a whole directory, so a skill removed from the package goes too.
+		const skillsTmp = path.join(dest, "skills.tmp");
+		await fs.rm(skillsTmp, { recursive: true, force: true });
+		await fs.cp(path.join(this.config.runnerSrc, "skills"), skillsTmp, { recursive: true });
+		await fs.rm(path.join(dest, "skills"), { recursive: true, force: true });
+		await fs.rename(skillsTmp, path.join(dest, "skills"));
 		for (const f of ["runner.mjs", "bin/st", "package.json"]) {
 			const tmp = path.join(dest, `${f}.tmp`);
 			await fs.copyFile(path.join(this.config.runnerSrc, f), tmp);
@@ -578,6 +598,30 @@ export class AcpAgents {
 		return [...(this.held.get(agentId)?.values() ?? [])]
 			.filter((h) => now - h.atMs <= HELD_TTL_MS)
 			.map(({ conversationId, work, since }) => ({ conversationId, work, since }));
+	}
+
+	/** The shared skills the runner installed at its last start (memory only, like modelApplied). */
+	private readonly skillsApplied = new Map<string, SkillsApplied>();
+
+	setSkillsApplied(agent: AgentRow, body: unknown): void {
+		const b = (body ?? {}) as { hash?: unknown; names?: unknown; error?: unknown };
+		const str = (v: unknown, max: number) => (typeof v === "string" && v.length <= max ? v : null);
+		const names = Array.isArray(b.names)
+			? b.names
+					.filter((n): n is string => typeof n === "string" && /^[a-z0-9][a-z0-9-]{0,63}$/.test(n))
+					.slice(0, 32)
+			: [];
+		this.skillsApplied.set(agent.agent_id, {
+			hash: typeof b.hash === "string" && /^[0-9a-f]{12}$/.test(b.hash) ? b.hash : null,
+			names,
+			error: str(b.error, 300),
+			at: new Date().toISOString(),
+		});
+		this.publish(agent.owner_user_id, { type: "agents" });
+	}
+
+	skillsAppliedOf(agentId: string): SkillsApplied | null {
+		return this.skillsApplied.get(agentId) ?? null;
 	}
 
 	modelAppliedOf(agentId: string): ModelApplied | null {
@@ -1164,6 +1208,7 @@ export class AcpAgents {
 		this.loginMethods.delete(agent.agent_id);
 		this.modelApplied.delete(agent.agent_id);
 		this.effortApplied.delete(agent.agent_id);
+		this.skillsApplied.delete(agent.agent_id);
 		this.held.delete(agent.agent_id);
 		this.publish(agent.owner_user_id, { type: "agents" });
 	}

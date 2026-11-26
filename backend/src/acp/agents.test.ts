@@ -198,3 +198,30 @@ describe("ACP runner and the creation bootstrap", () => {
 		await vi.waitFor(() => expect(calls.launches).toHaveLength(1));
 	});
 });
+
+describe("installRunnerFiles", () => {
+	it("copies the shared skills next to the runner, replacing the previous set", async () => {
+		const fs = await import("node:fs");
+		const os = await import("node:os");
+		const path = await import("node:path");
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "st-runtime-"));
+		try {
+			const stale = path.join(dir, "st", "skills", "retirada");
+			fs.mkdirSync(stale, { recursive: true });
+			fs.writeFileSync(path.join(stale, "SKILL.md"), "vieja\n");
+			const acp = new AcpAgents(
+				{ ...acpConfigFromEnv("/ws", 3001), runtimeDir: dir, testRuntime: false },
+				{} as never,
+			);
+			await acp.installRunnerFiles();
+			const src = path.resolve(__dirname, "../../../acp-runtime/skills/coordinar/SKILL.md");
+			expect(fs.readFileSync(path.join(dir, "st", "skills", "coordinar", "SKILL.md"), "utf8")).toBe(
+				fs.readFileSync(src, "utf8"),
+			);
+			expect(fs.existsSync(stale)).toBe(false);
+			expect(fs.existsSync(path.join(dir, "st", "runner.mjs"))).toBe(true);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
