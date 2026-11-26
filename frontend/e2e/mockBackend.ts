@@ -330,6 +330,8 @@ export interface TerminalSocket {
 	sessionId: string;
 	tabId: string | null;
 	observe: boolean;
+	/** The grid the attach asked for (its URL's cols/rows). */
+	attach: { cols: number; rows: number };
 	/** Every frame the app sent, parsed. */
 	sent: Array<Record<string, unknown>>;
 	route: WebSocketRoute;
@@ -1136,6 +1138,10 @@ export class MockBackend {
 				sessionId,
 				tabId: url.searchParams.get("tab"),
 				observe,
+				attach: {
+					cols: Number(url.searchParams.get("cols")),
+					rows: Number(url.searchParams.get("rows")),
+				},
 				sent: [],
 				route: ws,
 				closed: false,
