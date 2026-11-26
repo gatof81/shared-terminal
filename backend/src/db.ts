@@ -1122,6 +1122,32 @@ export const ACP_TASKS_DDL: readonly string[] = [
 		INSERT INTO task_events (owner_user_id, task_id, actor, kind, data, created_at)
 		VALUES (NEW.owner_user_id, NEW.task_id, NEW.created_by, 'link', json_object('kind', NEW.kind, 'ref', NEW.ref), NEW.created_at);
 	END`,
+	// The budgets (§5): an agent's request in a task counts against that task
+	// (`requests_used`) and its root (`budget_used`), in the INSERT itself. The
+	// person's and the system's messages, and replies, count nothing. Counters
+	// are not declared state: no version bump, no event. A restore replays the
+	// messages BEFORE the tasks (backup.ts), which then land with their own counts.
+	`CREATE TRIGGER IF NOT EXISTS trg_task_request_counted
+	AFTER INSERT ON agent_messages
+	WHEN NEW.task_id IS NOT NULL AND NEW.kind = 'request' AND NEW.from_id NOT IN ('owner', 'system')
+	BEGIN
+		UPDATE tasks SET requests_used = requests_used + 1 WHERE id = NEW.task_id AND owner_user_id = NEW.owner_user_id;
+		UPDATE tasks SET budget_used = budget_used + 1
+		WHERE owner_user_id = NEW.owner_user_id
+			AND id = (SELECT COALESCE(t.parent_id, t.id) FROM tasks t WHERE t.id = NEW.task_id AND t.owner_user_id = NEW.owner_user_id);
+	END`,
+	// v27's reply trigger, plus the task: the reply to a request in a task is in it.
+	"DROP TRIGGER IF EXISTS trg_agent_message_reply",
+	`CREATE TRIGGER IF NOT EXISTS trg_agent_message_reply
+	AFTER UPDATE OF state ON agent_messages
+	WHEN OLD.state = 'running' AND NEW.state = 'done' AND NEW.kind = 'request'
+		AND EXISTS (SELECT 1 FROM acp_agents WHERE owner_user_id = NEW.owner_user_id AND name = NEW.from_id)
+	BEGIN
+		INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, reply_to, body, state, project_id, depth, context, root_id, conversation_id, task_id)
+		VALUES (NEW.owner_user_id, NEW.to_id, NEW.from_id, 'reply', NEW.id,
+			'Respuesta de @' || NEW.to_id || ' a tu mensaje #' || NEW.id || ':' || char(10) || char(10) || COALESCE(NEW.result_text, '(sin texto)'),
+			'pending', NEW.project_id, MAX(NEW.depth - 1, 0), NEW.from_context, NEW.root_id, NEW.conversation_id, NEW.task_id);
+	END`,
 ];
 
 /**

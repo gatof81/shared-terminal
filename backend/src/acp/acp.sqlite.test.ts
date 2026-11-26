@@ -2869,6 +2869,27 @@ describe("ACP tasks (v29)", () => {
 		});
 		expect(sent.status).toBe(201);
 		expect(sent.body.task_id).toBe(child);
+		// An agent's request in a task counts against it and its root, in the INSERT;
+		// the reply (by trigger) and the person's messages count nothing.
+		const counts = () =>
+			[child, goal].map(
+				(id) =>
+					db
+						.prepare("SELECT requests_used AS r, budget_used AS b FROM tasks WHERE id = ?")
+						.get(id) as { r: number; b: number },
+			);
+		expect(counts()).toEqual([
+			{ r: 1, b: 0 },
+			{ r: 0, b: 1 },
+		]);
+		await call(owner, "POST", "/messages", { to: "dev2", body: "y esto", task: child });
+		expect(counts()[0].r).toBe(1);
+		while ((await call(as("dev2"), "POST", "/runner/claim")).status === 200) await finish("dev2");
+		const reply = db
+			.prepare("SELECT task_id, kind FROM agent_messages WHERE reply_to = ?")
+			.get(sent.body.id) as { task_id: number; kind: string };
+		expect(reply).toEqual({ task_id: child, kind: "reply" });
+		expect(counts()[1].b).toBe(1);
 		expect(
 			(await call(as("coord"), "POST", "/messages", { to: "dev2", body: "x", task: 999_999 })).body
 				.error,

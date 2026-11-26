@@ -1075,8 +1075,8 @@ export class AcpAgents {
 		recoveryOf: number | null = null,
 	): Promise<MessageRow | null> {
 		const r = await d1Query<MessageRow>(
-			`INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, body, state, attempts, started_at, slot, context, recovery_of, conversation_id, project_id)
-			 SELECT ?1, 'system', ?2, 'request', ?6, 'running', 1, ${NOW}, ?3, ?4, o.id, o.conversation_id, o.project_id
+			`INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, body, state, attempts, started_at, slot, context, recovery_of, conversation_id, project_id, task_id)
+			 SELECT ?1, 'system', ?2, 'request', ?6, 'running', 1, ${NOW}, ?3, ?4, o.id, o.conversation_id, o.project_id, o.task_id
 			 FROM (SELECT 1) LEFT JOIN agent_messages o ON o.owner_user_id = ?1 AND o.to_id = ?2 AND o.id = ?7
 			 WHERE NOT EXISTS (SELECT 1 FROM agent_messages x WHERE x.owner_user_id = ?1 AND x.to_id = ?2 AND x.state = 'running' AND x.context IS ?4)
 			 AND ${RUN_GUARD}
@@ -1163,14 +1163,14 @@ export class AcpAgents {
 	 */
 	private async noticeUnfinished(ownerUserId: string, id: number): Promise<void> {
 		const r = await d1Query<MessageRow>(
-			`INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, reply_to, body, state, project_id, depth, note, context, root_id, conversation_id)
+			`INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, reply_to, body, state, project_id, depth, note, context, root_id, conversation_id, task_id)
 			 SELECT m.owner_user_id, m.to_id, m.from_id, 'reply', m.id,
 				'Tu mensaje #' || m.id || ' a @' || m.to_id || ' no terminó: ' ||
 				CASE m.state WHEN 'failed' THEN 'falló' ELSE 'se interrumpió y su estado es incierto: pudo haber hecho parte del trabajo' END ||
 				COALESCE(' — ' || m.note, '') || '. No hay respuesta de @' || m.to_id || ' para ese pedido. ' ||
 				'No lo repitas ni lo reenvíes por tu cuenta: puede haber tenido efectos, y si se reintenta lo decide la persona. ' ||
 				'Decí en tu respuesta que ese pedido no terminó y seguí solo con lo que no dependa de él.',
-				'pending', m.project_id, MAX(m.depth - 1, 0), 'unfinished:' || m.state, m.from_context, m.root_id, m.conversation_id
+				'pending', m.project_id, MAX(m.depth - 1, 0), 'unfinished:' || m.state, m.from_context, m.root_id, m.conversation_id, m.task_id
 			 FROM agent_messages m
 			 WHERE m.owner_user_id = ?1 AND m.id = ?2 AND m.kind = 'request' AND m.state IN ('failed', 'uncertain')
 			 AND EXISTS (SELECT 1 FROM acp_agents a WHERE a.owner_user_id = m.owner_user_id AND a.name = m.from_id)

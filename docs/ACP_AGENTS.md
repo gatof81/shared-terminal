@@ -463,8 +463,11 @@ against the token's identity.
 ### Messages
 
 `st send --task <id>` (`task` on `POST /messages`) puts the message in that task (`agent_messages.task_id`):
-a task the sender sees, of the recipients' project (400 `task-other-project`). Inheriting it into
-requests and replies, the derived state and the budgets (`ACP_GOAL_BUDGET`, per task) are PR 3.
+a task the sender sees, of the recipients' project (400 `task-other-project`). The reply (trigger),
+the unfinished notice and the runner's recovery report copy it. An agent's request in a task counts
+against the task (`requests_used`) and its root (`budget_used`) by trigger, in the INSERT; replies and
+the person's messages count nothing. Inheriting the task into an agent's request from the message it
+runs, the derived state and the budget limits (`ACP_GOAL_BUDGET`, per task) are PR 3.
 
 ### Backup
 
