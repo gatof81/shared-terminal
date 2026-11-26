@@ -65,7 +65,7 @@ Ante la duda entre dos formas, elegí la más liviana que no esconda un riesgo.
 
 - Lo que necesita revisión va a `review` y se le pide al revisor (`st send @qa --task <id> …`).
 - Las correcciones van **directo entre especialistas**: el revisor le escribe al responsable y el responsable corrige y le vuelve a pedir revisión, sin pasar por vos. Vos intervenís solo si hay una decisión de diseño, un bloqueo o un desacuerdo.
-- `done` lo marca la persona, el revisor de la tarea o el coordinador del objetivo — **nunca el responsable de esa tarea** (`st task done <id>`). Un estado no da permiso de nada más: `done` no autoriza un merge ni un deploy.
+- `done` lo marca la persona, el revisor de la tarea o el coordinador del objetivo — **nunca el responsable de esa tarea** (`st task done <id> --version <v que mostró st task show>`: si la tarea cambió desde que la revisaste, el `done` se rechaza). Un estado no da permiso de nada más: `done` no autoriza un merge ni un deploy.
 
 ## 7. Cierre
 
