@@ -171,7 +171,7 @@ test.describe("visual", () => {
 		await app.login("alice");
 		await app.openSession("docs");
 		await app.switchView("terminal");
-		await expect(page.locator("#terminal-state")).toContainText("stopped");
+		await expect(page.locator("#terminal-state")).toContainText("detenida");
 		await shot(page, "terminal-stopped");
 	});
 
