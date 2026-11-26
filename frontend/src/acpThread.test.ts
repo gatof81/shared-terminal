@@ -14,13 +14,20 @@ const live = vi.hoisted(() => ({
 	listener: null as null | ((ev: unknown) => void),
 }));
 vi.mock("./acpLive.js", () => ({
-	acpLiveUp: () => false,
+	acpLiveUp: () => true,
+	// As the real one with the socket up: the first signal, an initial open (the first load).
 	subscribeAcp: (fn: (ev: unknown) => void) => {
 		live.listener = fn;
+		queueMicrotask(() => live.listener === fn && fn({ type: "open", initial: true }));
 		return () => {
 			live.listener = null;
 		};
 	},
+}));
+vi.mock("./acpStatusFeed.js", () => ({
+	onAcpAgentsRead: () => () => {},
+	requestAcpAgentsRead: vi.fn(),
+	watchAcpAgents: () => () => {},
 }));
 vi.mock("./main.js", () => ({ showCopySuccessToast: vi.fn(), showToast: vi.fn() }));
 
@@ -343,6 +350,8 @@ describe("consistency", () => {
 		api.acpConversationFeed.mockReturnValueOnce(page.promise);
 		const t = mount();
 		t.open(topic("A"));
+		// The page is asked for (the socket's first signal): #5 lands while it is on its way.
+		await Promise.resolve();
 		live.listener!({
 			type: "message",
 			message: inTopic(msg(5, { to_id: "solo", state: "done", result_text: "ok" }), "A"),

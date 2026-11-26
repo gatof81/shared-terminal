@@ -648,7 +648,7 @@ test.describe("a topic whose rows grow after they were placed", () => {
 		backend.acpConversations.find((c) => c.id === CONV_IDS.backend)!.readAt = readAt;
 		await app.login("alice", topic(CONV_IDS.backend));
 		await expect(page.locator(THREAD)).toContainText("Revisado el punto 11.");
-		await expect.poll(() => backend.requests.filter((r) => r.path === FEED).length).toBe(2);
+		await expect.poll(() => backend.requests.filter((r) => r.path === FEED).length).toBe(1);
 		await frames(page);
 	}
 

@@ -16,13 +16,18 @@
 import { inboxNow, onInbox } from "./acpInboxStore.js";
 import { acpLiveUp, subscribeAcp } from "./acpLive.js";
 import { agentHue, type TeamState, teamState } from "./acpModel.js";
-import { acpReadTicket, setAcpAgents } from "./acpRegistry.js";
+import {
+	acpAgentsList,
+	acpAgentsReading,
+	onAcpAgentsRead,
+	requestAcpAgentsRead,
+	watchAcpAgents,
+} from "./acpStatusFeed.js";
 import {
 	type AcpAgentInfo,
 	type AcpConversation,
 	type AcpWork,
 	acpConversations,
-	acpListAgents,
 	acpWorks,
 } from "./api.js";
 import { openActionMenu } from "./components/actionMenu.js";
@@ -77,8 +82,14 @@ let agentsRead = false;
 let works: AcpWork[] = [];
 let showClosed = false;
 let unsubscribe: (() => void) | null = null;
+/** Releases the 15 s agents period (acpStatusFeed.ts) while the rail is shown. */
+let unwatch: (() => void) | null = null;
+/** The first load of this subscription was made (by its first signal, acpLive.ts). */
+let loadedSinceSub = false;
 let poll: ReturnType<typeof setInterval> | null = null;
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
+/** Re-reads that fell due while the tab was hidden: made once it shows. */
+const dueOnShow = new Set<"convs" | "agents" | "works">();
 const listeners: Array<() => void> = [];
 
 /** Told after every change of what the rail knows (the topic's header uses it). */
@@ -266,18 +277,23 @@ export function showRail(projectId: string, topic: string | null, archive = fals
 		showClosed = false;
 		for (const t of timers.values()) clearTimeout(t);
 		timers.clear();
+		dueOnShow.clear();
 	}
+	// Agents' state is not all pushed (runner liveness, queues): the shared
+	// list is read every 15 s while a rail is shown (acpStatusFeed.ts).
+	if (!unwatch) unwatch = watchAcpAgents();
+	if (!agentsRead) takeAgents(acpAgentsList());
 	if (!unsubscribe) {
+		// The socket's first signal (open, or down) makes the first load: one
+		// per showing, and none that could miss what comes before its hello.
+		loadedSinceSub = false;
 		unsubscribe = subscribeAcp((ev) => onLive(ev));
+		// Everything else is polled only while the socket is down (a first
+		// connection that hangs included).
 		poll = setInterval(() => {
-			if (document.hidden) return;
-			// Agents' state is not all pushed (runner liveness, queues): read it
-			// on a budget; everything else only while the socket is down.
-			soon("agents", 0);
-			if (!acpLiveUp()) reloadAll();
+			if (!document.hidden && !acpLiveUp()) reloadAll(true);
 		}, POLL_MS);
-	}
-	if (changed) reloadAll();
+	} else if (changed) reloadAll(false);
 	render();
 }
 
@@ -285,6 +301,9 @@ export function showRail(projectId: string, topic: string | null, archive = fals
 export function hideRail(): void {
 	unsubscribe?.();
 	unsubscribe = null;
+	unwatch?.();
+	unwatch = null;
+	dueOnShow.clear();
 	if (poll) clearInterval(poll);
 	poll = null;
 }
@@ -331,28 +350,57 @@ export function patchConversation(c: AcpConversation): void {
 	render();
 }
 
-function reloadAll(): void {
+/**
+ * `agents`: the agents' list too. It is the tab's, kept by its period
+ * (acpStatusFeed.ts): a first load or another project takes the list
+ * already read (or the read on its way); after an outage it is read again.
+ */
+function reloadAll(agents: boolean): void {
 	if (!pid) return;
-	void loadConvs(pid, gen);
-	if (showArchived) void loadArchived(pid, gen);
-	soon("agents", 0);
+	loadedSinceSub = true;
+	soon("convs", 0);
+	if (agents || !(acpAgentsList() || acpAgentsReading())) soon("agents", 0);
 	soon("works", 0);
 }
 
 function soon(what: "convs" | "agents" | "works", delay = LIVE_DEBOUNCE_MS): void {
-	if (timers.has(what) || !pid) return;
+	if (!pid) return;
+	// One read of the tab's shared list, for every view that asks meanwhile.
+	if (what === "agents") {
+		requestAcpAgentsRead(delay);
+		return;
+	}
+	const pending = timers.get(what);
+	if (pending) {
+		if (delay > 0) return;
+		clearTimeout(pending);
+	}
 	const p = pid;
 	const g = gen;
 	timers.set(
 		what,
 		setTimeout(() => {
 			timers.delete(what);
-			if (what === "convs") void loadConvs(p, g);
-			else if (what === "agents") void loadAgents(g);
-			else void loadWorks(g);
+			if (g !== gen) return;
+			// Hidden: nothing on screen to keep current; read once when it shows.
+			if (document.hidden) {
+				dueOnShow.add(what);
+				return;
+			}
+			if (what === "convs") {
+				void loadConvs(p, g);
+				if (showArchived) void loadArchived(p, g);
+			} else void loadWorks(g);
 		}, delay),
 	);
 }
+
+if (typeof document !== "undefined")
+	document.addEventListener("visibilitychange", () => {
+		if (document.hidden || !unsubscribe) return;
+		for (const what of dueOnShow) soon(what, 0);
+		dueOnShow.clear();
+	});
 
 async function loadConvs(p: string, g: number): Promise<void> {
 	try {
@@ -378,19 +426,19 @@ async function loadArchived(p: string, g: number): Promise<void> {
 	if (g === gen) render();
 }
 
-async function loadAgents(g: number): Promise<void> {
-	try {
-		const ticket = acpReadTicket();
-		const all = await acpListAgents();
-		setAcpAgents(all, ticket);
-		if (g !== gen) return;
-		agents = all;
-		agentsRead = true;
-	} catch {
-		/* keep */
-	}
-	if (g === gen) render();
+/** `name` is an agent of the project on screen, as last read. */
+function isTeam(name: string): boolean {
+	return agents.some((a) => a.name === name && a.projectId === pid);
 }
+
+/** A read of the tab's agents list landed (whoever asked for it). */
+function takeAgents(all: AcpAgentInfo[] | null): void {
+	if (!all) return;
+	agents = all;
+	agentsRead = true;
+	if (pid) render();
+}
+onAcpAgentsRead(takeAgents);
 
 async function loadWorks(g: number): Promise<void> {
 	try {
@@ -405,20 +453,27 @@ async function loadWorks(g: number): Promise<void> {
 function onLive(ev: Parameters<Parameters<typeof subscribeAcp>[0]>[0]): void {
 	switch (ev.type) {
 		case "open":
-			reloadAll();
+			// After its first load, an open is a reconnect: everything again.
+			reloadAll(loadedSinceSub);
 			return;
 		case "down":
+			// Subscribed during an outage (or the first connection failed): its first load.
+			if (!loadedSinceSub) reloadAll(false);
 			return;
 		case "message": {
 			const m = ev.message;
-			// Its topic's counts and activity, the agents' state and the inbox
-			// (a result, an interruption) — whatever project it is in: the inbox is global.
-			if (m.project_id === pid || convs.some((c) => c.id === m.conversation_id)) soon("convs");
-			soon("agents");
-			if (m.context) soon("works");
+			// Its topic's counts and activity, and the state of an agent of this
+			// project; another project's row changes nothing here (the inbox,
+			// which is global, reads for itself: acpInboxStore.ts).
+			const mineAgent = isTeam(m.to_id) || isTeam(m.from_id);
+			const mineTopic = m.project_id === pid || convs.some((c) => c.id === m.conversation_id);
+			if (mineTopic) soon("convs");
+			if (mineTopic || mineAgent) soon("agents");
+			if (m.context && mineAgent) soon("works");
 			return;
 		}
 		case "question":
+			if (!isTeam(ev.question.agent)) return;
 			soon("agents", 0);
 			soon("convs");
 			return;
