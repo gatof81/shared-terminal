@@ -42,7 +42,8 @@ test.describe("dialogs", () => {
 		page,
 	}) => {
 		test.skip(!app.mobile, "the drawer only exists on mobile");
-		await app.login("alice");
+		// Over a session: with no address the list is the screen, not a drawer.
+		await app.login("alice", `#/sessions/${SESSION_IDS.running}`);
 		await app.openSidebar();
 		await page.click("#new-session-btn");
 		await expect(page.locator("#new-session-modal")).toHaveClass(/open/);

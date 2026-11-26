@@ -169,7 +169,8 @@
      The bar goes (its tabs and ⋯ act on the session underneath); every
      control is 44 px tall, so the header keeps its height: the terminal
      under the page is not resized on entering or leaving it. */
-  body.project-page-on header #terminal-toolbar {
+  body.project-page-on header #terminal-toolbar,
+  body.home-on header #terminal-toolbar {
     /* !important: sessionCore sets the bar's display inline. */
     display: none !important;
   }
@@ -279,5 +280,30 @@
   /* Without a label the active tab is told by colour alone: underline it too. */
   header #view-switch button[aria-pressed="true"] {
     box-shadow: inset 0 -2px 0 var(--c-accent);
+  }
+}
+
+/* ── The phone's home: the main list is the screen ──
+   An address that names nothing (main.ts syncHome): the drawer's own
+   element at full width, no backdrop, no slide. The terminal under it keeps
+   its box (it is covered, not hidden: no fit, no resize); the session bar
+   leaves the header as on a project page, and the ☰ has nothing to open. */
+@media (max-width: 768px) {
+  body.home-on #sidebar {
+    width: 100%;
+    transform: none;
+    transition: none;
+    box-shadow: none;
+  }
+  body.home-on #sidebar-backdrop {
+    display: none;
+  }
+  body.home-on header #sidebar-toggle {
+    visibility: hidden;
+  }
+  /* Without the session bar to fill the row, the header's icons keep their
+     place at its end. */
+  body.home-on header #inbox-btn {
+    margin-left: auto;
   }
 }

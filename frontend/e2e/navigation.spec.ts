@@ -10,7 +10,7 @@ test.describe("navigation", () => {
 		await app.openSession("my-project");
 		await app.expectTerminalReady();
 		expect(page.url()).toContain(`#/sessions/${SESSION_IDS.running}`);
-		await expect(page.locator("#terminal-status-badge")).toHaveText("running");
+		await expect(page.locator("#terminal-status-badge")).toHaveText("en marcha");
 		await expect(page.locator("#terminal-tabs .tab-chip")).toHaveCount(2);
 	});
 

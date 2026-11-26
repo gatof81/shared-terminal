@@ -89,6 +89,7 @@ import {
 	getView,
 	landingFor,
 	landView,
+	leaveHome,
 	reflectRoute,
 	registerRouteDetail,
 	setView,
@@ -120,8 +121,17 @@ const BADGE_TONE = new Map([
 	["reconnecting", "busy"],
 	["failed", "err"],
 ]);
+/** The state's word on screen; the state itself (class, data) stays the server's. */
+const STATE_WORD = new Map([
+	["running", "en marcha"],
+	["stopped", "detenida"],
+	["terminated", "terminada"],
+	["failed", "falló"],
+	["disconnected", "desconectada"],
+	["reconnecting", "reconectando"],
+]);
 function setStatusBadge(state: string): void {
-	terminalStatusBadge.textContent = state;
+	terminalStatusBadge.textContent = STATE_WORD.get(state) ?? state;
 	terminalStatusBadge.className = `chip tone-${BADGE_TONE.get(state) ?? "off"} ${state}`;
 }
 const terminalTabs = document.getElementById("terminal-tabs")!;
@@ -471,7 +481,7 @@ function reattachIfStarted(): void {
 	const id = filesOnlySessionId;
 	filesOnlySessionId = null;
 	setActiveSessionId(null);
-	void openSession(id);
+	void openSession(id, { background: true });
 }
 
 // ACP agents joined / left a project: their rows move between groups.
@@ -654,7 +664,7 @@ function labelSessionRow(select: HTMLElement): void {
 	const session = select.dataset.sessionName ? ` ${select.dataset.sessionName}` : "";
 	select.setAttribute(
 		"aria-label",
-		`${words}, session${session} ${status}${status === "failed" ? " — view the bootstrap log" : ""}${agent}`,
+		`${words}, sesión${session} ${STATE_WORD.get(status) ?? status}${status === "failed" ? " — ver el registro del arranque" : ""}${agent}`,
 	);
 	const base = select.dataset.baseTitle ?? "";
 	const tip = [base, select.dataset.agentLabel ? `Agente: ${select.dataset.agentLabel}` : ""]
@@ -709,7 +719,7 @@ function renderGroupedSessions(): void {
 			cls: "sgroup-sessions",
 			head: sessionsMenuButton(),
 			rows: plain.map((s) => buildSessionItem(s)),
-			empty: "No sessions shown.",
+			empty: "No hay sesiones para mostrar.",
 		}),
 	);
 }
@@ -898,7 +908,7 @@ function buildGroup(g: {
 	toggle.dataset.role = "toggle";
 	toggle.setAttribute("aria-expanded", String(!isCollapsed));
 	toggle.setAttribute("aria-controls", rowsId);
-	toggle.setAttribute("aria-label", `${isCollapsed ? "Expand" : "Collapse"} ${g.title}`);
+	toggle.setAttribute("aria-label", `${isCollapsed ? "Desplegar" : "Plegar"} ${g.title}`);
 	const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
 	svg.setAttribute("viewBox", "0 0 16 16");
 	svg.setAttribute("aria-hidden", "true");
@@ -937,7 +947,7 @@ function buildGroup(g: {
 	count.textContent = String(g.rows.length);
 	count.title =
 		g.countLabel?.(g.rows.length) ??
-		(g.rows.length === 1 ? "1 session" : `${g.rows.length} sessions`);
+		(g.rows.length === 1 ? "1 sesión" : `${g.rows.length} sesiones`);
 	count.setAttribute("aria-label", count.title);
 	head.appendChild(count);
 	if (g.head) head.appendChild(g.head);
@@ -1033,11 +1043,11 @@ function buildSessionItem(s: SessionInfo): HTMLElement {
 		state.setAttribute("aria-hidden", "true");
 		state.textContent =
 			s.status === "stopped"
-				? "Stopped"
+				? "Detenida"
 				: s.status === "terminated"
-					? "Terminated · files kept"
+					? "Terminada · archivos conservados"
 					: s.status === "failed"
-						? "Failed · open the log"
+						? "Falló · abrí el registro"
 						: s.status;
 		meta.appendChild(state);
 	}
@@ -1094,8 +1104,8 @@ function buildSessionItem(s: SessionInfo): HTMLElement {
 	more.className = "session-menu-btn";
 	more.dataset.role = "menu";
 	more.textContent = "⋯";
-	more.title = "More actions";
-	more.setAttribute("aria-label", `More actions: ${s.name}`);
+	more.title = "Más acciones";
+	more.setAttribute("aria-label", `Más acciones: ${s.name}`);
 	more.setAttribute("aria-haspopup", "menu");
 	more.addEventListener("click", () => openSessionMenu(s, more));
 	actions.appendChild(more);
@@ -1134,9 +1144,15 @@ let wantedTabId: string | null = null;
 
 export async function openSession(
 	sessionId: string,
-	opts: { tabId?: string | null; view?: View | null } = {},
+	opts: { tabId?: string | null; view?: View | null; background?: boolean } = {},
 ) {
-	if (activeSessionId === sessionId) return;
+	// The person opened it (a background re-open never does): on the phone's
+	// home it leaves the list — the session already open underneath included.
+	const leave = opts.background !== true;
+	if (activeSessionId === sessionId) {
+		if (leave) leaveHome();
+		return;
+	}
 	wantedTabId = opts.tabId ?? null;
 
 	// Tabs stay alive across tab-switch, but are torn down on session-switch.
@@ -1158,7 +1174,11 @@ export async function openSession(
 	// nor is blocked by it, and every exit of this function ends it.
 	if (landing !== null) beginLanding(sessionId);
 	try {
-		await openSessionBody(sessionId, meta, running, landing, choiceAt);
+		// Its synchronous part re-keys the views and writes the address in
+		// place (held on the home): the entry that leaves the home goes after.
+		const body = openSessionBody(sessionId, meta, running, landing, choiceAt);
+		if (leave) leaveHome();
+		await body;
 	} finally {
 		if (landing !== null) endLanding(sessionId);
 	}

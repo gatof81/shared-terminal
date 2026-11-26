@@ -14,7 +14,7 @@ test.describe("session actions", () => {
 		const rows = page.locator("#session-list .sgroup-sessions .session-select");
 		await expect(rows).toHaveCount(3);
 		await rows.first().focus();
-		await expect(rows.first()).toHaveAttribute("aria-label", /^my-project.*, session running/);
+		await expect(rows.first()).toHaveAttribute("aria-label", /^my-project.*, sesión en marcha/);
 		await page.keyboard.press("ArrowDown");
 		await expect(rows.nth(1)).toBeFocused();
 		await page.keyboard.press("Enter");
@@ -202,14 +202,14 @@ test.describe("session actions", () => {
 		backend.dropTerminalSockets(SESSION_IDS.running);
 		const panel = page.locator("#terminal-state");
 		await expect(panel).toContainText("Connection lost");
-		await expect(page.locator("#terminal-status-badge")).toHaveText("disconnected");
+		await expect(page.locator("#terminal-status-badge")).toHaveText("desconectada");
 		await expect(page.locator("#terminal-container")).toBeHidden();
 		await panel.locator('button[data-action="reconnect"]').click();
 		await expect(panel).toBeHidden();
 		await expect.poll(() => backend.terminalSockets.filter((s) => !s.closed).length).toBe(1);
 		await expect(backend.terminalSockets.at(-1)?.tabId ?? "").toBe("tab-1");
 		await app.expectTerminalReady();
-		await expect(page.locator("#terminal-status-badge")).toHaveText("running");
+		await expect(page.locator("#terminal-status-badge")).toHaveText("en marcha");
 	});
 
 	test("the state panel never shares the box with a live terminal", async ({
@@ -258,7 +258,7 @@ test.describe("sidebar status text", () => {
 	test("a stopped session says so in words, not only by its dot's colour", async ({ app }) => {
 		await app.login("alice");
 		await app.openSidebar();
-		await expect(app.sessionRow("docs").locator(".session-state")).toHaveText("Stopped");
+		await expect(app.sessionRow("docs").locator(".session-state")).toHaveText("Detenida");
 		await expect(app.sessionRow("my-project").locator(".session-state")).toHaveCount(0);
 	});
 });

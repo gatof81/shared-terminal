@@ -14,8 +14,8 @@ function copyButton(label: string, text: () => string, title?: string): HTMLButt
 		"files-btn chat-copy",
 		() => {
 			void copyText(text(), b).then(
-				(ok) => (ok ? showCopySuccessToast() : showToast("Copy failed", true)),
-				() => showToast("Copy failed", true),
+				(ok) => (ok ? showCopySuccessToast() : showToast("No se pudo copiar", true)),
+				() => showToast("No se pudo copiar", true),
 			);
 		},
 		title,
@@ -36,7 +36,7 @@ export function markdownBlock(text: string): HTMLElement {
 		pre.replaceWith(wrap);
 		wrap.appendChild(pre);
 		const code = pre.textContent ?? "";
-		wrap.appendChild(copyButton("Copy", () => code, "Copy code"));
+		wrap.appendChild(copyButton("Copiar", () => code, "Copiar el código"));
 	}
 	return md;
 }
