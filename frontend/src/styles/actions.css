@@ -55,6 +55,12 @@
      positioning context here either. */
   overflow-x: clip;
   flex-shrink: 0;
+  /* The row's height with the + shown, border-box: padding-top 4 px +
+     #actions-btn min-height 28 px + #tab-tools padding-bottom 4 px +
+     border 1 px. The + appears only once the terminal exists — right after
+     its first fit — so without this the row grew 3 px then and shrank the
+     box that fit had just measured. */
+  min-height: 37px;
 }
 .tab-chip {
   display: inline-flex;
