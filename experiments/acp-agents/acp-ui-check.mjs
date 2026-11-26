@@ -329,13 +329,19 @@ try {
 		await page.click("#inbox-btn");
 		const item = page.locator(".acp-inbox-card .acp-ib-item.is-interrupted", { hasText: "esperá 90" }).first();
 		await sees(page, "Pendientes lists the interruption", ".acp-inbox-card .acp-ib-item.is-interrupted", { text: "esperá 90" });
-		await item.getByRole("button", { name: "Revisar interrupción" }).click();
+		// #810: the row's way into the card is «Ver informe» once the agent's
+		// read-only report is there, «Revisar» while it is not (still being
+		// written): whichever the row shows. Its one-tap «Dar por revisada» is not
+		// used here: the card is what proves the requeue stays locked.
+		const open = item.getByRole("button", { name: /^(Ver informe|Revisar)$/ });
+		await check(page, "the row opens the review («Ver informe» or «Revisar»)", (await open.count()) === 1, (await item.locator("button").allTextContents()).join(" | "), ".acp-ib-item.is-interrupted button");
+		await open.click();
 		const review = page.locator(".acp-review-card");
 		await sees(page, "«Revisar interrupción» opens", ".acp-review-card");
-		await review.getByText("Reencolar el mensaje original…").click();
+		await review.getByText("Reencolar el mensaje original… (no recomendado)", { exact: true }).click();
 		const requeue = review.getByRole("button", { name: "Reencolar", exact: true });
 		await check(page, "«Reencolar» is off until acknowledged", await requeue.isDisabled().catch(() => false), "", ".acp-review-card button «Reencolar»");
-		await review.getByRole("button", { name: "Dar por revisada, sin reencolar" }).click();
+		await review.getByRole("button", { name: "Dar por revisada", exact: true }).click();
 		await check(page, "«Dar por revisada» lowers the count", (await until(async () => (await inboxCount(page)) === countBefore - 1, 15_000)) !== null, `before ${countBefore}, now ${await inboxCount(page)}`, "#inbox-btn");
 		await page.keyboard.press("Escape").catch(() => {});
 		await page.waitForTimeout(3_000);
