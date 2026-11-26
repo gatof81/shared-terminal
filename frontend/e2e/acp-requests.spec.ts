@@ -203,4 +203,33 @@ test.describe("a topic's request budget (clock running)", { tag: "@any-viewport"
 		expect(t["/acp/inbox"]).toBe(1);
 		expect(t["/acp/agents"]).toBe(1);
 	});
+
+	test("(f) a slow socket (hello 5 s late): the thread, the rail and the inbox load within ~1.5 s", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.acpHelloDelayMs = 5_000;
+		const firstGet = new Map<string, number>();
+		page.on("request", (r) => {
+			if (r.method() !== "GET") return;
+			const p = new URL(r.url()).pathname.replace(/^\/api/, "");
+			if (!firstGet.has(p)) firstGet.set(p, Date.now());
+		});
+		await app.login("alice", topic(CONV_IDS.ui));
+		await expect.poll(() => backend.acpFirstConnectAt, "the socket was opened").not.toBeNull();
+		const start = backend.acpFirstConnectAt!;
+		// Looked at once, 1.5 s after the socket's first connection (the page's
+		// own load is not the subject; a retrying expect would measure its backoff).
+		await page.waitForTimeout(Math.max(0, start + 1_500 - Date.now()));
+		await expect(page.locator(THREAD)).toContainText("¿qué falta del prototipo?", { timeout: 1 });
+		await expect(page.locator(".rail-body .rail-conv").first()).toBeVisible({ timeout: 1 });
+		for (const p of [FEED(CONV_IDS.ui), TOPICS, "/acp/inbox"]) {
+			expect(firstGet.get(p), p).toBeDefined();
+			expect(firstGet.get(p)! - start, p).toBeLessThan(1_500);
+		}
+		// The late hello reads again (the double read stays on the slow connection).
+		await run(page, 6_000);
+		await expect.poll(() => tally(backend)[FEED(CONV_IDS.ui)] ?? 0).toBeGreaterThanOrEqual(2);
+	});
 });

@@ -378,6 +378,10 @@ export class MockBackend {
 	/** Activity events per message id the feeds return. */
 	acpActivity: Record<string, Array<Record<string, unknown>>> = {};
 	acpSockets: WebSocketRoute[] = [];
+	/** Real ms before a `/ws/acp` socket says hello (a slow handshake over the Tunnel). */
+	acpHelloDelayMs = 0;
+	/** Real time (`Date.now()` of the test) of the first `/ws/acp` connection. */
+	acpFirstConnectAt: number | null = null;
 	private acpSeq = 0;
 	/** v27 topics (none until `enableConversations()`). */
 	acpConversations: MockConversation[] = [];
@@ -1166,7 +1170,10 @@ export class MockBackend {
 			ws.onClose(() => {
 				this.acpSockets = this.acpSockets.filter((x) => x !== ws);
 			});
-			ws.send(JSON.stringify({ type: "hello" }));
+			this.acpFirstConnectAt ??= Date.now();
+			const hello = () => ws.send(JSON.stringify({ type: "hello" }));
+			if (this.acpHelloDelayMs > 0) setTimeout(hello, this.acpHelloDelayMs);
+			else hello();
 			return;
 		}
 		ws.close({ code: 1008, reason: "Unknown route" });

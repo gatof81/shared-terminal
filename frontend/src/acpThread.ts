@@ -674,12 +674,12 @@ export class AcpThread {
 			};
 		}
 		if (!this.unsubscribe) {
-			// The socket's first signal (open, or down) makes the first load:
-			// one read per opening, and none that could miss what comes before
-			// the socket's hello.
+			// The socket's first signal (open, down, or slow after ~1 s without
+			// a hello) makes the first load: one read per opening when the
+			// socket is quick.
 			this.loadedSinceSub = false;
 			this.unsubscribe = subscribeAcp((ev) => this.onLive(ev));
-			// A first connection that hangs (no hello, no close): the fallback poll reads.
+			// A first connection that hangs (no hello, no close): `slow` loads, then the fallback poll.
 			if (!acpLiveUp()) this.startPoll();
 			return;
 		}
@@ -913,6 +913,10 @@ export class AcpThread {
 			case "down":
 				this.startPoll();
 				// Subscribed during an outage (or the first connection failed): its first load.
+				if (!this.loadedSinceSub) void this.reload();
+				return;
+			case "slow":
+				// The first connection is slow (its poll already runs): load now, its hello reads again.
 				if (!this.loadedSinceSub) void this.reload();
 				return;
 			case "message":
