@@ -83,7 +83,7 @@ Cross-user observability + force-actions surfaced to the admin dashboard. All ro
 
 | Method | Path                            | Description                                                                                  |
 | ------ | ------------------------------- | -------------------------------------------------------------------------------------------- |
-| GET    | /api/admin/stats                | Boot time, uptime, sessions by status, idle-sweeper / reconcile / dispatcher / D1 counters   |
+| GET    | /api/admin/stats[?top=N]        | Boot time, uptime, sessions by status, idle-sweeper / reconcile / dispatcher / D1 counters; `top` (1–200, default 10) = statements in the D1 rows-read breakdown |
 | GET    | /api/admin/sessions             | Cross-user session list (capped at 500 rows, includes `userId` + `ownerUsername`)            |
 | POST   | /api/admin/sessions/:id/stop    | Force-stop any session (no ownership gate). Returns 204                                      |
 | DELETE | /api/admin/sessions/:id         | Force soft-delete any session                                                                |
