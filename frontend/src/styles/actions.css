@@ -315,6 +315,11 @@
 .action-menu-anchored .actions-menu-item-hint {
   flex: none;
 }
+/* A row's menu: with less room than it needs, it scrolls (never over its row). */
+.action-menu-end {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 /* A row's menu (240 px): the label first, its hint takes what is left. */
 .action-menu-end .actions-menu-item-title {
   flex: 0 1 auto;
