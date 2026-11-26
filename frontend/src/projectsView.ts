@@ -75,6 +75,7 @@ import {
 	railBody,
 	railConversations,
 	railHead,
+	railTeamEmpty,
 	repaintRail,
 	resetRail,
 	showRail,
@@ -225,7 +226,17 @@ const homeNote = el("p", "ps-home-note");
 const homeNew = button("Nueva conversación", "btn sm ps-new", () => {
 	if (shown) void newConversationFlow(shown);
 });
-homeEl.append(homeTitle, homeNote, homeNew);
+// No agent in the project: a conversation would reach no one — the first
+// step is an agent (the same form as Equipo's +).
+const homeAddAgent = button("Agregar agente", "btn sm ps-new", () => {
+	if (shown)
+		window.dispatchEvent(
+			new CustomEvent("st:new-acp-session", {
+				detail: { projectId: shown, opener: homeAddAgent },
+			}),
+		);
+});
+homeEl.append(homeTitle, homeNote, homeNew, homeAddAgent);
 const phoneMq = typeof window !== "undefined" ? window.matchMedia?.("(max-width: 768px)") : null;
 phoneMq?.addEventListener?.("change", () => placeSpace());
 
@@ -348,17 +359,25 @@ function paintSpace(): void {
 	const name = projectName(shown);
 	const gone = projectsLoaded() && name === null;
 	const list = railConversations();
+	const empty = !gone && list?.length === 0;
+	const noTeam = empty && railTeamEmpty() === true;
 	homeTitle.textContent = gone
 		? "Proyecto no encontrado"
-		: list?.length === 0
-			? "Sin conversaciones todavía"
-			: "";
+		: noTeam
+			? "Este proyecto todavía no tiene agentes"
+			: empty
+				? "Sin conversaciones todavía"
+				: "";
 	homeNote.textContent = gone
 		? "No existe o fue archivado."
-		: list?.length === 0
-			? "Cada tema es una conversación con el equipo del proyecto."
-			: "";
-	homeNew.hidden = gone || list?.length !== 0;
+		: noTeam
+			? "Las conversaciones son con los agentes del proyecto: agregá uno para empezar."
+			: empty
+				? "Cada tema es una conversación con el equipo del proyecto."
+				: "";
+	// «Nueva conversación» once there is someone to talk to.
+	homeNew.hidden = !empty || railTeamEmpty() !== false;
+	homeAddAgent.hidden = !noTeam;
 	// Nothing of a rail for a project that is not there: the sidebar keeps its
 	// sessions, and a phone shows this line instead of an empty project screen.
 	document.body.classList.toggle("ps-gone", gone);

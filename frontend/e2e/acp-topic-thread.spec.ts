@@ -715,6 +715,8 @@ test.describe("a phone's visible band with the keyboard up", () => {
 			backend.acpAgents.push({ ...dev, name, sessionId: sid });
 	}
 	const visibleNotes = (page: Page) => page.locator(`${ROOT} .acp-to-notes .acp-to-note:visible`);
+	/** A touch screen: the notes' folded line, which unfolds them on a tap. */
+	const foldedNotes = (page: Page) => page.locator(`${ROOT} .acp-to-notes .acp-to-sum`);
 
 	test("360 × 390 with the box's notes and a long draft: the thread keeps room, and the row being read", async ({
 		app,
@@ -727,6 +729,13 @@ test.describe("a phone's visible band with the keyboard up", () => {
 		backend.acpConversations.find((c) => c.id === CONV_IDS.backend)!.recipients = { team: true };
 		await page.setViewportSize({ width: 390, height: 844 });
 		const t = await open(app, page, CONV_IDS.backend, "Respuesta 30.");
+		// Folded: one line with the same facts; unfolded, the full notes.
+		await expect(visibleNotes(page)).toHaveCount(0);
+		await expect(foldedNotes(page)).toHaveText(
+			"A cada uno por separado · @dev, @qa y 1 más en cola",
+		);
+		await foldedNotes(page).click();
+		await expect(foldedNotes(page)).toHaveAttribute("aria-expanded", "true");
 		await expect(visibleNotes(page)).toHaveText([
 			"Llega a @arq, @dev, @qa, @ux, a cada uno por separado.",
 			/^Les queda en cola a @dev \(ocupado en «Optimización de CI»\), @qa .+ y @ux .+\.$/,
@@ -800,8 +809,13 @@ test.describe("a phone's visible band with the keyboard up", () => {
 			await page.keyboard.press("Escape");
 		};
 		await add("dev");
+		// Folded (a touch screen), the one line names them; unfolded, the queue line.
+		await expect(foldedNotes(page)).toHaveText("@dev en cola");
+		await expect(visibleNotes(page)).toHaveCount(0);
+		await foldedNotes(page).click();
 		await expect(visibleNotes(page)).toHaveText(["Le queda en cola a @dev."]);
 		await add("qa");
+		await expect(foldedNotes(page)).toHaveText("@dev y @qa en cola");
 		await expect(visibleNotes(page)).toHaveText(["Les queda en cola a @dev y @qa."]);
 		await add("ux");
 		await expect(visibleNotes(page)).toHaveText(["Les queda en cola a @dev, @qa y 1 más."]);

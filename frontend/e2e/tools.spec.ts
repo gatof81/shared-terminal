@@ -62,7 +62,9 @@ test.describe("Herramientas", () => {
 		await expect(page.locator("#ps-topic-title")).toHaveText("Optimización de CI");
 		await page.locator(`${THREAD} .acp-agent-id[data-agent="dev"]`).first().click();
 		const menu = page.locator('[role="menu"].action-menu');
-		await expect(menu).toContainText("@dev · trabajando aquí");
+		// Anchored where it was tapped; its name only (the state is the row's).
+		await expect(menu).toHaveClass(/action-menu-anchored/);
+		await expect(menu.locator(".action-menu-caption")).toHaveText("@dev");
 		await expect(menu.getByRole("menuitem", { name: /^⎇ ci-cache/ })).toBeVisible();
 		await menu.getByRole("menuitem", { name: /^Files · principal/ }).click();
 
@@ -331,6 +333,38 @@ test.describe("Herramientas", () => {
 			await expect(page).toHaveURL(urlEnds(RAIL));
 			await expect(page.locator(".rail-body")).toBeVisible();
 		}
+		expect(app.errors).toEqual([]);
+	});
+
+	test("Equipo's ⋯ opens the agent's menu anchored to it, titled with the name alone", async ({
+		app,
+		page,
+	}) => {
+		await app.login("alice", RAIL);
+		const more = page.getByRole("button", { name: "Más acciones de @dev" });
+		await more.click();
+		const menu = page.locator('[role="menu"].action-menu');
+		await expect(menu).toHaveClass(/action-menu-anchored/);
+		await expect(menu.locator(".action-menu-caption")).toHaveText("@dev");
+		await expect(more).toHaveAttribute("aria-expanded", "true");
+		const b = (await more.boundingBox())!;
+		const m = (await menu.boundingBox())!;
+		const vw = page.viewportSize()!.width;
+		// Under the ⋯ (or right above it with no room below)…
+		expect(m.y >= b.y + b.height || m.y + m.height <= b.y).toBe(true);
+		if (app.mobile) {
+			// …across the screen, 8 px from each side.
+			expect(Math.round(m.x)).toBe(8);
+			expect(Math.round(m.width)).toBe(vw - 16);
+		} else {
+			// …240 px wide, its right edge on the ⋯'s.
+			expect(Math.round(m.width)).toBe(240);
+			expect(Math.abs(m.x + m.width - (b.x + b.width))).toBeLessThanOrEqual(1);
+		}
+		await app.escape();
+		await expect(menu).toBeHidden();
+		await expect(more).toBeFocused();
+		await expect(more).toHaveAttribute("aria-expanded", "false");
 		expect(app.errors).toEqual([]);
 	});
 

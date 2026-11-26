@@ -315,6 +315,18 @@
 .action-menu-anchored .actions-menu-item-hint {
   flex: none;
 }
+/* A row's menu (240 px): the label first, its hint takes what is left. */
+.action-menu-end .actions-menu-item-title {
+  flex: 0 1 auto;
+}
+.action-menu-end .actions-menu-item-hint {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+}
 /* The danger item is set apart by its separator, not by a border of its own. */
 .action-menu-anchored .actions-menu-item:not(.kind-danger) + .actions-menu-item.kind-danger {
   border-top: 0;

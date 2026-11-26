@@ -38,6 +38,13 @@
   pointer-events: none;
   user-select: none;
 }
+/* A touch screen has no Shift: no hint there. An overlay, so hiding it
+   moves nothing in the terminal's box (no fit, no resize). */
+@media (pointer: coarse) {
+  .select-hint {
+    display: none;
+  }
+}
 .select-hint kbd {
   background: var(--c-surface-2);
   border: 1px solid var(--c-border);

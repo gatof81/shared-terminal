@@ -35,7 +35,7 @@ import { openActionMenu } from "./components/actionMenu.js";
 import { gitBranch, onGitStatus, requestGitStatus } from "./gitView.js";
 import { isMobile, sessions } from "./main.js";
 import { projectName } from "./projectDirectory.js";
-import { agentState, onRailChange, railAgents, railWorks, topicTitle } from "./projectRail.js";
+import { onRailChange, railAgents, railWorks, topicTitle } from "./projectRail.js";
 import {
 	currentRoute,
 	depth,
@@ -172,11 +172,14 @@ export function openAgentMenu(
 	opts: { terminal: boolean } = { terminal: true },
 ): void {
 	if (!readProjectRoute()) return;
-	const info = railAgents().find((a) => a.name === name);
 	const works = worksOf(name).filter((w) => w.state !== "cleaned");
+	// Anchored to what was tapped, like the project selector; the title is
+	// the name alone (the row beside it already says the agent's state).
 	openActionMenu({
-		title: info ? `@${name} · ${agentState(info).label}` : `@${name}`,
+		title: `@${name}`,
 		opener,
+		anchor: opener,
+		anchorAlign: "end",
 		items: [
 			{ id: "files", label: "Files · principal" },
 			{ id: "git", label: "Git · principal" },

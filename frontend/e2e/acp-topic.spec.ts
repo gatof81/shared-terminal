@@ -71,7 +71,21 @@ test.describe("a topic's recipients and their states", () => {
 		await expect(chips(page)).toContainText("@dev");
 		await expect(field(page)).toHaveValue("");
 		// Before sending: who will queue it, and why (the agents' real state).
-		await expect(notes(page)).toHaveText(
+		// A touch screen folds the notes into one line; a tap unfolds them.
+		if (app.mobile) {
+			const sum = notes(page).locator(".acp-to-sum");
+			await expect(sum).toHaveText("@dev en cola");
+			await expect(sum).toHaveAttribute("aria-expanded", "false");
+			await expect(notes(page).locator(".acp-to-lines")).toBeHidden();
+			await sum.click();
+			await expect(sum).toHaveAttribute("aria-expanded", "true");
+			await expect(field(page)).toBeFocused();
+			await expect(notes(page).locator(".acp-to-lines")).toHaveText(
+				"Le queda en cola a @dev (ocupado en «Optimización de CI»).",
+				{ useInnerText: true },
+			);
+		} else await expect(notes(page).locator(".acp-to-sum")).toBeHidden();
+		await expect(notes(page).locator(".acp-to-lines")).toHaveText(
 			"Le queda en cola a @dev (ocupado en «Optimización de CI»).",
 			{ useInnerText: true },
 		);
@@ -418,6 +432,59 @@ test.describe("Pendientes and the review of an interruption", () => {
 		await expect(page.locator(".tools-bar")).toBeHidden();
 		await expect(page.locator("#ps-topic-title")).toHaveText("Mejoras del backend");
 		await expect(panel).toBeHidden();
+		expect(app.errors).toEqual([]);
+	});
+
+	test("a question's option is its whole row; «Responder» waits for one and sends it", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		const asking = backend.addAcpMessage({
+			to_id: "arq",
+			body: "@arq elegí el proveedor",
+			project_id: HZ,
+			conversation_id: CONV_IDS.ui,
+			state: "running",
+		});
+		backend.acpQuestions = [
+			{
+				id: 8,
+				agent: "arq",
+				message_id: asking.id,
+				request: JSON.stringify({
+					message: "¿Qué proveedor usamos?",
+					requestedSchema: {
+						type: "object",
+						properties: { p: { type: "string", title: "Proveedor", enum: ["GitHub", "Google"] } },
+					},
+				}),
+				state: "open",
+				answer: null,
+				created_at: at(1300),
+				answered_at: null,
+				delivered_at: null,
+				note: null,
+			},
+		];
+		await app.login("alice", topic(CONV_IDS.ui));
+		const card = page.locator(`${THREAD} .acp-question-open`);
+		await expect(card).toContainText("¿Qué proveedor usamos?");
+		const send = card.getByRole("button", { name: "Responder" });
+		await expect(send).toBeDisabled();
+		await expect(card.getByRole("button", { name: "Omitir" })).toBeEnabled();
+		const row = card.locator(".acp-option", { hasText: "Google" });
+		const box = (await row.boundingBox())!;
+		expect(Math.round(box.height)).toBeGreaterThanOrEqual(app.mobile ? 44 : 36);
+		// A tap at the row's far end, nowhere near the radio, picks it.
+		await row.click({ position: { x: box.width - 4, y: box.height / 2 } });
+		await expect(card.getByLabel("Google")).toBeChecked();
+		await expect(send).toBeEnabled();
+		const req = page.waitForRequest(
+			(r) => r.url().endsWith("/api/acp/questions/8/answer") && r.method() === "POST",
+		);
+		await send.click();
+		expect((await req).postDataJSON()).toEqual({ action: "accept", content: { p: "Google" } });
 		expect(app.errors).toEqual([]);
 	});
 

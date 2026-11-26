@@ -90,6 +90,12 @@ export function railAgents(): readonly AcpAgentInfo[] {
 	return agents;
 }
 
+/** The shown project has no agent (true), has some (false), or its team is not read yet (null). */
+export function railTeamEmpty(): boolean | null {
+	if (!agentsRead || !pid) return null;
+	return !agents.some((a) => a.projectId === pid);
+}
+
 /** Every work of the owner's agents, as last read (Herramientas' workspaces). */
 export function railWorks(): readonly AcpWork[] {
 	return works;
@@ -204,11 +210,16 @@ settingsBtn.type = "button";
 settingsBtn.addEventListener("click", () => actions?.settings(settingsBtn));
 foot.append(settingsBtn);
 
+// Placed first on a phone while the project has no agent (rail.css): adding
+// one is then the only next step.
+const teamSection = section(teamHead, teamList, teamNote);
+teamSection.classList.add("rail-section-team");
+
 const scroll = el("div", "rail-scroll");
 scroll.append(
 	attention,
 	section(convHead, convList, convNote, archivedToggle),
-	section(teamHead, teamList, teamNote),
+	teamSection,
 	section(worksHead, worksList, worksNote, closedToggle),
 	section(archiveHead, archiveList),
 );
@@ -513,6 +524,7 @@ function paint(): void {
 		}),
 	);
 	teamNote.hidden = team.length > 0;
+	scroll.classList.toggle("is-team-empty", agentsRead && team.length === 0);
 	teamNote.textContent = agentsRead ? "Sin agentes en este proyecto." : "Cargando…";
 
 	// Trabajos

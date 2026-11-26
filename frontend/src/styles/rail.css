@@ -582,6 +582,17 @@ a.rail-row:focus-visible,
   .ps-rail-slot .rail-scroll {
     padding: 8px 12px 16px;
   }
+  /* No agent yet: Equipo (its +) first, under the attention row. */
+  .rail-scroll.is-team-empty {
+    display: flex;
+    flex-direction: column;
+  }
+  .rail-scroll.is-team-empty > .rail-section-team {
+    order: -1;
+  }
+  .rail-scroll.is-team-empty > .rail-attention {
+    order: -2;
+  }
   /* 44-px targets everywhere on the project's screen. */
   .rail-row,
   .rail-more,

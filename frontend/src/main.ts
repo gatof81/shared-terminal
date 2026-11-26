@@ -728,11 +728,11 @@ export function maybeInjectSelectionHint(pane: HTMLElement) {
 	// no user input flows in. Using innerHTML rather than three
 	// createElements keeps the markup readable.
 	label.innerHTML = isMac
-		? "Hold <kbd>⌥ Option</kbd> + drag to select text"
-		: "Hold <kbd>Shift</kbd> + drag to select text";
+		? "Mantené <kbd>⌥ Option</kbd> y arrastrá para seleccionar"
+		: "Mantené <kbd>Shift</kbd> y arrastrá para seleccionar";
 	const close = document.createElement("button");
 	close.type = "button";
-	close.setAttribute("aria-label", "Dismiss selection hint");
+	close.setAttribute("aria-label", "Cerrar la pista de selección");
 	close.textContent = "×";
 	close.addEventListener("click", () => {
 		try {

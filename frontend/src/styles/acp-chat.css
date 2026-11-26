@@ -109,22 +109,6 @@
 .pv-menu-btn {
 	font-size: 1rem;
 }
-@media (max-width: 640px) {
-	.acp-chat-thread,
-	.acp-chat-composer {
-		padding-left: 10px;
-		padding-right: 10px;
-	}
-	pre.acp-msg-body {
-		max-height: 50vh;
-	}
-	.acp-bubble {
-		max-width: 92%;
-	}
-	.acp-chat-thread {
-		gap: 14px;
-	}
-}
 .acp-chat-meta {
 	opacity: 0.75;
 }
@@ -177,6 +161,22 @@
 	background: var(--c-surface);
 	border: 1px solid var(--c-border);
 	border-bottom-left-radius: 4px;
+}
+/* A phone: 10 px at the sides (after the base rules above, which it
+   overrides). An agent's answer takes the thread's whole width — its colour
+   rule, avatar and name already say who speaks — while the person's own
+   messages stay on the right (3A's «me right, them left»). */
+@media (max-width: 640px) {
+	.acp-chat-thread {
+		padding-left: 10px;
+		padding-right: 10px;
+	}
+}
+@media (max-width: 768px) {
+	.acp-in {
+		align-self: stretch;
+		max-width: none;
+	}
 }
 /* A Shared Terminal note is not a voice of the conversation: left, quieter,
    marked by a rule instead of a bubble. */
@@ -571,17 +571,21 @@ pre.acp-msg-body {
 		min-height: 44px;
 	}
 	.acp-chat-composer {
-		padding-top: 8px;
-		padding-bottom: 8px;
+		padding: 8px 10px;
 	}
 	.acp-chat-input {
 		max-height: max(42px, min(calc(8 * 22px + 20px), calc(var(--app-vh, 100dvh) * 0.3)));
 	}
 }
-/* 16 px on a touch screen: iOS zooms into a smaller field on focus. */
+/* 16 px on a touch screen: iOS zooms into a smaller field on focus. Focused
+   (the keyboard up), it grows to 4 lines at most, then scrolls inside: the
+   thread keeps room above it. */
 @media (pointer: coarse) {
 	.acp-chat-input {
 		font-size: 16px;
+	}
+	.acp-chat-input:focus {
+		max-height: calc(4 * 22px + 20px);
 	}
 }
 
@@ -616,12 +620,26 @@ pre.acp-msg-body {
 	flex-direction: column;
 	gap: 4px;
 }
+/* Each option is its whole row to tap (the label holds the input): 36 px,
+   44 on a touch screen; an 18-px control in the accent. */
 .acp-option {
 	display: flex;
-	align-items: baseline;
-	gap: 6px;
-	min-height: 1.9rem;
+	align-items: center;
+	gap: 10px;
+	min-height: 36px;
 	cursor: pointer;
+}
+.acp-option > input {
+	flex: none;
+	width: 18px;
+	height: 18px;
+	margin: 0;
+	accent-color: var(--c-accent);
+}
+@media (pointer: coarse) {
+	.acp-option {
+		min-height: 44px;
+	}
 }
 .acp-question-input,
 .acp-question-other {
@@ -636,8 +654,32 @@ pre.acp-msg-body {
 .acp-question-actions {
 	display: flex;
 	flex-wrap: wrap;
-	gap: 8px;
+	gap: 8px 16px;
 	align-items: center;
+}
+/* «Responder» is the card's main action (the review's accent); «Omitir» a text button. */
+.btn.acp-question-send {
+	background: var(--c-accent-strong);
+	border-color: var(--c-accent-strong);
+	color: #fff;
+}
+.btn.acp-question-send:hover:not(:disabled) {
+	background: var(--c-accent);
+	border-color: var(--c-accent);
+}
+.acp-link.acp-question-skip {
+	min-height: 32px;
+	color: var(--c-text-2);
+}
+.acp-link.acp-question-skip:disabled {
+	opacity: 0.6;
+	cursor: default;
+}
+@media (pointer: coarse) {
+	.btn.acp-question-send,
+	.acp-link.acp-question-skip {
+		min-height: 44px;
+	}
 }
 .acp-question-state {
 	font-size: 0.85rem;
