@@ -238,7 +238,7 @@ function render(): void {
 	if (batch && !batch.running && interrupted.length === 0) batch = null;
 	if (interrupted.length) {
 		const { live, gone } = splitByAgent(interrupted, agentExists);
-		nodes.push(interruptsHead(interrupted, gone));
+		nodes.push(interruptsHead(interrupted));
 		if (batch) nodes.push(batch.el);
 		for (const m of live) nodes.push(interruptedItem(m, false));
 		if (gone.length) nodes.push(goneGroup(gone));
@@ -261,16 +261,20 @@ function reportOf(m: AcpMessage): AcpMessage | null {
 }
 
 /** «Interrupciones · N» and «Dar por revisadas…» (a summary, then a confirmation). */
-function interruptsHead(all: AcpMessage[], gone: AcpMessage[]): HTMLElement {
+function interruptsHead(all: AcpMessage[]): HTMLElement {
 	const ids = all.map((m) => m.id);
 	const head = keep("h:interrupts", ids, () => {
 		const h = el("div", "acp-inbox-sechead");
 		const more = el("button", "acp-inbox-more", "Dar por revisadas…");
 		more.type = "button";
+		// The header is kept while the ids stay the same, but who exists and
+		// which reports landed can change meanwhile: judged at the click.
 		more.addEventListener("click", () => {
-			const goneIds = new Set(gone.map((m) => m.id));
 			const summary = interruptSummary(
-				all.map((m) => ({ report: reportState(reportOf(m)), gone: goneIds.has(m.id) })),
+				all.map((m) => ({
+					report: reportState(reportOf(m)),
+					gone: agentExists(m.to_id) === false,
+				})),
 			);
 			confirmBatch(ids, summary);
 		});
