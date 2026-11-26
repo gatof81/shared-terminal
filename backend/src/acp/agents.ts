@@ -391,6 +391,7 @@ export class AcpAgents {
 	}
 
 	private publish(ownerUserId: string, ev: AcpEvent): void {
+		if (ev.type === "message" || ev.type === "agents") this.wakeWaiters(ownerUserId, ev);
 		for (const fn of this.listeners) {
 			try {
 				fn(ownerUserId, ev);
@@ -767,6 +768,8 @@ export class AcpAgents {
 	}
 
 	runnerSeenAt(agentId: string): string | null {
+		// A runner waiting in a claim is there right now.
+		for (const w of this.waiters) if (w.agentId === agentId) return new Date().toISOString();
 		const a = this.activity.get(agentId);
 		return a?.seenAt ? new Date(a.seenAt).toISOString() : null;
 	}
@@ -964,9 +967,18 @@ export class AcpAgents {
 			where = "conversation_id IS NULL AND (to_id = ? OR from_id = ?)";
 			params = [source.agentArchive, source.agentArchive];
 		} else if (source.agent !== null) {
-			from = "agent_messages";
-			where = "(to_id = ? OR from_id = ?)";
-			params = [source.agent, source.agent];
+			// To it and from it: two ranges, each newest first by its own index and
+			// cut at `limit`, merged — never every message the agent ever had.
+			const page = (col: "to_id" | "from_id", idx: string) =>
+				`SELECT * FROM (SELECT * FROM agent_messages INDEXED BY ${idx}
+					WHERE owner_user_id = ? AND ${col} = ? AND id < ? ORDER BY id DESC LIMIT ?)`;
+			const b = before ?? Number.MAX_SAFE_INTEGER;
+			const r = await d1Query<MessageRow>(
+				`SELECT * FROM (${page("to_id", "idx_agent_messages_to")} UNION ${page("from_id", "idx_agent_messages_from")}
+				 ORDER BY id DESC LIMIT ?) ORDER BY id`,
+				[ownerUserId, source.agent, b, limit, ownerUserId, source.agent, b, limit, limit],
+			);
+			return r.results;
 		} else {
 			from = "agent_messages";
 			where = "1";
@@ -1487,6 +1499,55 @@ export class AcpAgents {
 		const line = `${m.command.map((a) => `'${a}'`).join(" ")}; echo; echo 'Listo. Si el login terminó bien, el agente se reactiva solo en unos segundos. Podés cerrar esta pestaña.'; exec bash -l`;
 		const tab = await this.docker.createTab(agent.session_id, "Conectar cuenta", line);
 		return { tabId: tab.tabId };
+	}
+
+	// ── Idle runners: the claim waits for work ─────────────────────────────
+	// An idle slot used to claim every 2 s: one UPDATE (with its subqueries)
+	// read from D1 each time, per slot, all day. Now a claim that finds nothing
+	// waits here (≤ CLAIM_WAIT_MS) and claims once more when something that can
+	// make a message claimable happens. Every write goes through this object,
+	// so its events are complete: any message row of the same owner written or
+	// changed (a new one, a release, a requeue, a run that ends and frees the
+	// agent's cap) or an agent change (its slots); a run of ANY owner that ends
+	// frees the backend-wide cap (ACP_MAX_RUNNING). A missed wake costs at
+	// most CLAIM_WAIT_MS, never a message.
+
+	private readonly waiters = new Set<{ agentId: string; owner: string; wake: () => void }>();
+	private waitingClosed = false;
+
+	waitForWork(agent: AgentRow, ms: number, signal?: AbortSignal): Promise<void> {
+		if (this.waitingClosed || signal?.aborted) return Promise.resolve();
+		return new Promise((resolve) => {
+			const w = {
+				agentId: agent.agent_id,
+				owner: agent.owner_user_id,
+				wake: () => {
+					clearTimeout(timer);
+					this.waiters.delete(w);
+					signal?.removeEventListener("abort", w.wake);
+					resolve();
+				},
+			};
+			const timer = setTimeout(w.wake, ms);
+			signal?.addEventListener("abort", w.wake, { once: true });
+			this.waiters.add(w);
+		});
+	}
+
+	private wakeWaiters(ownerUserId: string, ev: AcpEvent): void {
+		const freesGlobal =
+			ev.type === "message" && ev.message.state !== "pending" && ev.message.state !== "running";
+		for (const w of [...this.waiters]) if (w.owner === ownerUserId || freesGlobal) w.wake();
+	}
+
+	/** Shutdown: every waiting claim answers now (and nothing new waits). */
+	stopWaiting(): void {
+		this.waitingClosed = true;
+		for (const w of [...this.waiters]) w.wake();
+	}
+
+	get waitingClaims(): number {
+		return this.waiters.size;
 	}
 
 	// ── Activity (memory only) ─────────────────────────────────────────────

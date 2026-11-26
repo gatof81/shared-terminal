@@ -40,6 +40,8 @@ import { type AuthedRequest, requireAuth } from "../auth.js";
 import { logger } from "../logger.js";
 
 const CLIENT_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
+/** How long an idle runner's claim waits for work (below the runner's 30 s API timeout). */
+const CLAIM_WAIT_MS = 20_000;
 /** Recipients of one post (`to` as a list). */
 const MAX_RECIPIENTS = 16;
 
@@ -1069,15 +1071,30 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 						? { conversationId: null, work: only, since: "" }
 						: null,
 			);
-			const msg = await acp.claim(
-				agent,
-				slot,
-				typeof only === "string" ? only : null,
-				keepConv as string | null | undefined,
-			);
+			const claim = () =>
+				acp.claim(
+					agent,
+					slot,
+					typeof only === "string" ? only : null,
+					keepConv as string | null | undefined,
+				);
+			let msg = await claim();
 			if (msg) return void res.json(await withContext(agent, msg));
 			const running = await acp.runningInSlot(agent, slot);
-			running ? res.status(409).json({ error: "running", id: running.id }) : res.status(204).end();
+			if (running) return void res.status(409).json({ error: "running", id: running.id });
+			// `wait: true` (an idle runner): hold the answer until something may be
+			// claimable, then claim once more (AcpAgents.waitForWork). A runner that
+			// went away meanwhile gets nothing claimed for it.
+			if ((req.body as { wait?: unknown } | undefined)?.wait === true) {
+				const gone = new AbortController();
+				res.on("close", () => gone.abort());
+				await acp.waitForWork(agent, CLAIM_WAIT_MS, gone.signal);
+				if (gone.signal.aborted) return;
+				res.setHeader("X-ST-Waited", "1");
+				msg = await claim();
+				if (msg) return void res.json(await withContext(agent, msg));
+			}
+			res.status(204).end();
 		}),
 	);
 
