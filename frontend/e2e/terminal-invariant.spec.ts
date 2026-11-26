@@ -297,7 +297,7 @@ test.describe("terminal invariant", () => {
 		await inbox.click();
 		await panel
 			.locator(".acp-ib-item.is-interrupted", { hasText: "variante sin shards" })
-			.getByRole("button", { name: "Revisar interrupción" })
+			.getByRole("button", { name: "Revisar", exact: true })
 			.click();
 		const review = page.locator(".acp-review-card");
 		await expect(review).toBeVisible();

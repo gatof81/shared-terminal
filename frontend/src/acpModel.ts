@@ -644,3 +644,123 @@ export function mentionQuery(text: string, caret: number): { query: string; star
 	if (!m) return null;
 	return { query: m[2]!, start: caret - m[2]!.length - 1 };
 }
+
+// ── Interruptions in plain words (revisión UI §14) ──────────────────────────
+//
+// The runner writes an interrupted run's `note` as free text. The person
+// reads what happened in plain words; the note itself stays in the review's
+// «Detalle técnico». Matched by prefix on what runner.mjs writes today
+// (`adapter exited (…)`, `runner restarted: …`, `prompt error: …`, `la
+// sesión ACP tampoco estaba …`): a stable cause code from the runner is a
+// backend follow-up — until then a text this table does not know reads as
+// the generic phrase, never as an empty title and never as the raw note.
+
+export interface InterruptCause {
+	kind: "restart" | "error" | "session" | "unknown";
+	/** After the agent's name, in a title: «@dev se reinició mientras trabajaba». */
+	phrase: string;
+	/** The same, without «mientras trabajaba», for «… a las 10:25, en medio de este trabajo». */
+	what: string;
+}
+
+const CAUSES: ReadonlyArray<{ test: RegExp; cause: InterruptCause }> = [
+	{
+		test: /^(adapter exited|runner restarted)\b/i,
+		cause: { kind: "restart", phrase: "se reinició mientras trabajaba", what: "se reinició" },
+	},
+	{
+		test: /^prompt error\b/i,
+		cause: { kind: "error", phrase: "tuvo un error mientras trabajaba", what: "tuvo un error" },
+	},
+	{
+		test: /sesión ACP/i,
+		cause: {
+			kind: "session",
+			phrase: "no pudo retomar su sesión",
+			what: "no pudo retomar su sesión",
+		},
+	},
+];
+
+const UNKNOWN_CAUSE: InterruptCause = {
+	kind: "unknown",
+	phrase: "se reinició mientras trabajaba",
+	what: "se reinició",
+};
+
+export function interruptCause(note: string | null | undefined): InterruptCause {
+	const t = (note ?? "").trim();
+	return CAUSES.find((c) => c.test.test(t))?.cause ?? UNKNOWN_CAUSE;
+}
+
+/** The title of an interruption: what happened, by the agent it happened to. */
+export function interruptTitle(m: Pick<AcpMessage, "to_id" | "note">): string {
+	return `@${m.to_id} ${interruptCause(m.note).phrase}`;
+}
+
+/** The agent's read-only report on an interruption (`recovery_of`): there, being written, none. */
+export function reportState(
+	report: Pick<AcpMessage, "state" | "result_text"> | null | undefined,
+): "done" | "writing" | "none" {
+	if (!report) return "none";
+	if (report.result_text) return "done";
+	return report.state === "pending" || report.state === "running" ? "writing" : "none";
+}
+
+/** What an existing agent does now, from the registry's facts (no request of its own). */
+export function agentNow(a: {
+	running: readonly unknown[];
+	pending: number;
+	heldBy?: readonly unknown[];
+}): { chip: string; sentence: string; tone: "ok" | "busy" | "warn" } {
+	if (a.heldBy?.length)
+		return {
+			chip: "Dejó un proceso abierto",
+			sentence: "dejó un proceso abierto: no toma otro tema hasta que termine.",
+			tone: "warn",
+		};
+	if (a.running.length)
+		return {
+			chip: "Ahora: trabajando en otro",
+			sentence: "está trabajando en otro mensaje.",
+			tone: "busy",
+		};
+	if (a.pending)
+		return {
+			chip: `Ahora: ${a.pending} en cola`,
+			sentence: `tiene ${a.pending} en cola.`,
+			tone: "busy",
+		};
+	return { chip: "Ahora: disponible", sentence: "está disponible.", tone: "ok" };
+}
+
+/**
+ * Pendientes' interruptions split by whether their agent still exists.
+ * `exists(name)`: true / false from the agents registry, null while it has
+ * not been read — then nothing is «gone» (a name's shape never decides it).
+ */
+export function splitByAgent<T extends Pick<AcpMessage, "to_id">>(
+	list: readonly T[],
+	exists: (name: string) => boolean | null,
+): { live: T[]; gone: T[] } {
+	const live: T[] = [];
+	const gone: T[] = [];
+	for (const m of list) (exists(m.to_id) === false ? gone : live).push(m);
+	return { live, gone };
+}
+
+/** «4 interrupciones: 1 con informe, 3 de agentes que ya no existen.» — what a batch review covers. */
+export function interruptSummary(
+	items: ReadonlyArray<{ report: "done" | "writing" | "none"; gone: boolean }>,
+): string {
+	const n = items.length;
+	const count = (f: (i: (typeof items)[number]) => boolean) => items.filter(f).length;
+	const parts = [
+		[count((i) => !i.gone && i.report === "done"), "con informe"],
+		[count((i) => !i.gone && i.report === "writing"), "escribiendo su informe"],
+		[count((i) => !i.gone && i.report === "none"), "sin informe"],
+		[count((i) => i.gone), "de agentes que ya no existen"],
+	] as const;
+	const said = parts.filter(([k]) => k > 0).map(([k, w]) => `${k} ${w}`);
+	return `${n} ${n === 1 ? "interrupción" : "interrupciones"}: ${said.join(", ")}.`;
+}

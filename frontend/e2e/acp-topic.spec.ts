@@ -307,17 +307,19 @@ test.describe("Pendientes and the review of an interruption", () => {
 		await inbox.click();
 		const panel = page.locator(".acp-inbox-card");
 		await expect(panel.locator(".acp-inbox-sec")).toHaveText([
-			"Requieren tu acción",
+			"Interrupciones · 2",
 			"Resultados sin ver",
 		]);
 		const item = panel.locator(".acp-ib-item.is-interrupted", { hasText: "variante sin shards" });
-		await expect(item).toContainText("Se interrumpió tu mensaje a @arq");
-		await expect(item.locator(".acp-ib-where")).toHaveText("Educación HZ › Optimización de CI");
+		await expect(item.locator(".acp-ib-what")).toHaveText("@arq se reinició mientras trabajaba");
+		await expect(item.locator(".acp-ib-where")).toHaveText(
+			/^Educación HZ › Optimización de CI · \d\d:\d\d$/,
+		);
 		await shot(page, "5-inbox", info.project.name);
-		await item.getByRole("button", { name: "Revisar interrupción" }).click();
+		await item.getByRole("button", { name: "Ver informe" }).click();
 		const review = page.locator(".acp-review-card");
-		await expect(review).toContainText("se reinició el runner de @arq");
-		await expect(review).toContainText("Nada se reenvía solo.");
+		await expect(review.locator(".acp-review-tech")).toContainText("se reinició el runner de @arq");
+		await expect(review).toContainText("nada se reintenta solo.");
 		await expect(review.locator(".acp-review-report")).toContainText("no hice commits");
 		// Requeue: folded, and locked until the acknowledgement.
 		await review.getByText("Reencolar el mensaje original…").click();
@@ -330,7 +332,7 @@ test.describe("Pendientes and the review of an interruption", () => {
 		page.on("request", (r) => {
 			if (r.method() === "POST" && r.url().endsWith("/api/acp/messages")) sent.push(r.url());
 		});
-		await review.getByRole("button", { name: "Dar por revisada, sin reencolar" }).click();
+		await review.getByRole("button", { name: "Dar por revisada" }).click();
 		await expect(review).toBeHidden();
 		await expect(inbox).toHaveAttribute("aria-label", "Pendientes: 1 te espera");
 		await expect(panel.locator(".acp-ib-item.is-interrupted")).toHaveCount(1);
@@ -367,7 +369,7 @@ test.describe("Pendientes and the review of an interruption", () => {
 		const row = page.locator(`${THREAD} .acp-post`, { hasText: "informe de tiempos" });
 		await row.getByRole("button", { name: "Revisar interrupción" }).click();
 		const review = page.locator(".acp-review-card");
-		await expect(review).toContainText("el contenedor se detuvo");
+		await expect(review.locator(".acp-review-tech")).toContainText("el contenedor se detuvo");
 		// «Escribirle un mensaje nuevo»: the topic with that agent as its recipient.
 		await review.getByRole("button", { name: "Escribirle un mensaje nuevo" }).click();
 		await expect(review).toBeHidden();
@@ -387,7 +389,7 @@ test.describe("Pendientes and the review of an interruption", () => {
 			await page.locator("#inbox-btn").click();
 			await panel
 				.locator(".acp-ib-item.is-interrupted", { hasText: text })
-				.getByRole("button", { name: "Revisar interrupción" })
+				.getByRole("button", { name: /^(Revisar|Ver informe)$/ })
 				.click();
 			await expect(review).toBeVisible();
 		};
@@ -470,7 +472,7 @@ test.describe("Pendientes and the review of an interruption", () => {
 		for (const c of backend.acpConversations) c.readAt = at(1799);
 		await app.login("alice", topic(CONV_IDS.ci));
 		await page.locator("#inbox-btn").click();
-		await expect(page.locator(".acp-inbox-body")).toHaveText("Requieren tu acciónNada pendiente");
+		await expect(page.locator(".acp-inbox-body")).toHaveText("Nada pendiente");
 		await expect(page.locator("#inbox-btn .inbox-count")).toBeHidden();
 	});
 });

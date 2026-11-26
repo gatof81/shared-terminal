@@ -542,6 +542,120 @@ button.rail-attention:hover {
 .acp-ib-main .acp-question {
 	margin-top: 4px;
 }
+
+/* ── Pendientes' interruptions (revisión UI §14) ── */
+.acp-inbox-sechead {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+.acp-inbox-sechead .acp-inbox-sec {
+	flex: 1;
+}
+.acp-inbox-more {
+	margin-top: 8px;
+	min-height: 32px;
+	padding: 0 4px;
+	border: 0;
+	background: none;
+	color: var(--c-accent);
+	font: inherit;
+	font-size: 0.8rem;
+	cursor: pointer;
+}
+.acp-inbox-more:disabled {
+	opacity: 0.45;
+	cursor: not-allowed;
+}
+.acp-ib-item.is-interrupted .acp-ib-what {
+	font-weight: 600;
+}
+.acp-ib-quote {
+	margin: 2px 0 0;
+	font-size: 0.82rem;
+	color: var(--c-muted);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.acp-ib-chips {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	margin-top: 6px;
+}
+/* A chip says its fact in words: the colour only repeats it. */
+.acp-ib-chip {
+	display: inline-flex;
+	align-items: center;
+	height: 22px;
+	padding: 0 8px;
+	border: 1px solid var(--c-border);
+	border-radius: 999px;
+	font-size: 0.74rem;
+	color: var(--c-text-2);
+	white-space: nowrap;
+}
+.acp-ib-chip[hidden] {
+	display: none;
+}
+.acp-ib-chip.is-ok {
+	border-color: rgba(var(--c-ok-rgb), 0.45);
+	color: var(--c-ok);
+}
+.acp-ib-chip.is-busy {
+	border-color: rgba(var(--c-accent-rgb), 0.45);
+	color: var(--c-accent);
+}
+.acp-ib-chip.is-warn {
+	border-color: rgba(var(--c-warn-rgb), 0.5);
+	color: var(--c-warn);
+}
+.btn.acp-ib-textbtn {
+	background: none;
+	border-color: transparent;
+	color: var(--c-accent);
+}
+.acp-ib-status {
+	margin: 4px 0 0;
+	font-size: 0.8rem;
+	color: var(--c-muted);
+}
+.acp-ib-status:empty {
+	display: none;
+}
+.acp-avatar.is-gone {
+	background: transparent;
+	border: 1.5px dashed var(--c-muted);
+	color: var(--c-muted);
+	box-sizing: border-box;
+}
+.acp-ib-onebyone {
+	margin-top: 6px;
+}
+.acp-ib-onebyone summary {
+	min-height: 28px;
+	font-size: 0.8rem;
+	color: var(--c-muted);
+	cursor: pointer;
+}
+.acp-ib-onebyone .acp-ib-item:last-child {
+	border-bottom: 0;
+}
+.acp-ib-batch {
+	margin: 4px 0 6px;
+	padding: 10px 12px;
+	border: 1px solid rgba(var(--c-accent-rgb), 0.35);
+	border-radius: var(--radius-s);
+	background: var(--c-accent-bg);
+}
+.acp-ib-batch-text {
+	margin: 0;
+	font-size: 0.86rem;
+}
+.acp-ib-batch-text:focus {
+	outline: none;
+}
 @media (max-width: 768px) {
 	.modal.acp-inbox .modal-backdrop {
 		display: none;
@@ -559,7 +673,9 @@ button.rail-attention:hover {
 		min-width: 44px;
 		min-height: 44px;
 	}
-	.acp-ib-acts .btn {
+	.acp-ib-acts .btn,
+	.acp-inbox-more,
+	.acp-ib-onebyone summary {
 		min-height: 44px;
 	}
 }
@@ -602,27 +718,50 @@ button.rail-attention:hover {
 	margin: 0;
 	overflow-wrap: anywhere;
 }
-.acp-review-warn {
+/* «Recomendado» (revisión UI §14): the case's advice and its action, in
+   accent — it replaced a red warning that read as a failure. */
+.acp-review-reco {
 	margin: 0 0 10px;
-	padding: 8px 10px;
+	padding: 10px 12px;
+	border: 1px solid rgba(var(--c-accent-rgb), 0.35);
 	border-radius: var(--radius-s);
-	background: rgba(var(--c-err-rgb), 0.12);
-	color: var(--c-err-soft);
-	font-size: 0.84rem;
+	background: var(--c-accent-bg);
+	font-size: 0.86rem;
+}
+.acp-review-reco-head {
+	display: block;
+	margin-bottom: 4px;
+	font-size: 0.72rem;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	color: var(--c-accent);
+}
+.acp-review-reco p {
+	margin: 0 0 10px;
+}
+.acp-review-reco .acp-review-actions {
+	flex-direction: row;
+	margin: 0;
+}
+.acp-review-tech {
+	margin-top: 4px;
+	font-size: 0.8rem;
+	color: var(--c-muted);
+}
+.acp-review-tech summary {
+	cursor: pointer;
+}
+.acp-review-tech code {
+	display: block;
+	margin-top: 2px;
+	overflow-wrap: anywhere;
 }
 .acp-review-report {
-	margin: 0 0 10px;
+	margin: 0 0 4px;
 	padding: 8px 10px;
 	border-radius: var(--radius-s);
 	background: var(--c-surface-2);
 	font-size: 0.86rem;
-}
-.acp-review-report-head {
-	margin-bottom: 4px;
-	color: var(--c-muted);
-}
-.acp-review-report-head b {
-	color: var(--c-text);
 }
 .acp-review-muted {
 	margin: 4px 0;
@@ -667,6 +806,7 @@ button.rail-attention:hover {
 	.acp-review-actions .btn,
 	.acp-review-tools .btn,
 	.acp-review-requeue summary,
+	.acp-review-tech summary,
 	.acp-review-ack {
 		min-height: 44px;
 	}
@@ -698,12 +838,14 @@ button.rail-attention:hover {
 }
 
 /* The review's main action: the accent, like the app's other main actions. */
-.btn.acp-review-done {
+.btn.acp-review-done,
+.btn.acp-accent {
 	background: var(--c-accent-strong);
 	border-color: var(--c-accent-strong);
 	color: #fff;
 }
-.btn.acp-review-done:hover:not(:disabled) {
+.btn.acp-review-done:hover:not(:disabled),
+.btn.acp-accent:hover:not(:disabled) {
 	background: var(--c-accent);
 	border-color: var(--c-accent);
 }

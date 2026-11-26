@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
 	activityRows,
+	agentNow,
 	agentStatus,
 	answerText,
 	authFromActivity,
@@ -10,6 +11,9 @@ import {
 	effortState,
 	eventTime,
 	groupThread,
+	interruptCause,
+	interruptSummary,
+	interruptTitle,
 	isUnread,
 	mentionQuery,
 	modelLabel,
@@ -17,7 +21,9 @@ import {
 	questionForm,
 	recipientState,
 	recipientsOf,
+	reportState,
 	sidebarAgentStatus,
+	splitByAgent,
 	teamState,
 	topicTimeline,
 	upsert,
@@ -529,5 +535,72 @@ describe("composer chips (3B F2)", () => {
 		expect(mentionQuery("@", 1)).toEqual({ query: "", start: 0 });
 		expect(mentionQuery("mail@x", 6)).toBeNull();
 		expect(mentionQuery("@de y", 5)).toBeNull();
+	});
+});
+
+describe("interruptions in plain words (§14)", () => {
+	it("translates the notes the runner writes today", () => {
+		expect(interruptCause("adapter exited (SIGTERM)").kind).toBe("restart");
+		expect(interruptCause("adapter exited (1); tasks: t1(bash):running").kind).toBe("restart");
+		expect(interruptCause("runner restarted: turn in progress").kind).toBe("restart");
+		expect(interruptCause("prompt error: Internal error").kind).toBe("error");
+		expect(interruptCause("la sesión ACP tampoco estaba tras reabrirla: gone").kind).toBe(
+			"session",
+		);
+		expect(interruptTitle({ to_id: "dev", note: "prompt error: x" })).toBe(
+			"@dev tuvo un error mientras trabajaba",
+		);
+	});
+
+	it("an unknown or missing note reads as the generic phrase, never raw or empty", () => {
+		for (const note of ["el contenedor se detuvo", "", null, undefined]) {
+			const c = interruptCause(note);
+			expect(c.kind).toBe("unknown");
+			expect(c.phrase).toBe("se reinició mientras trabajaba");
+		}
+		expect(interruptTitle({ to_id: "qa", note: "something new: SIGKILL" })).toBe(
+			"@qa se reinició mientras trabajaba",
+		);
+	});
+
+	it("the report: written, being written, none", () => {
+		expect(reportState(null)).toBe("none");
+		expect(reportState({ state: "done", result_text: "hecho" })).toBe("done");
+		expect(reportState({ state: "running", result_text: null })).toBe("writing");
+		expect(reportState({ state: "pending", result_text: null })).toBe("writing");
+		expect(reportState({ state: "failed", result_text: null })).toBe("none");
+	});
+
+	it("what the agent does now", () => {
+		expect(agentNow({ running: [], pending: 0 }).chip).toBe("Ahora: disponible");
+		expect(agentNow({ running: [3], pending: 2 }).chip).toBe("Ahora: trabajando en otro");
+		expect(agentNow({ running: [], pending: 2 }).chip).toBe("Ahora: 2 en cola");
+		expect(agentNow({ running: [3], pending: 0, heldBy: [{}] }).chip).toBe(
+			"Dejó un proceso abierto",
+		);
+	});
+
+	it("groups by an agent the registry does not have, never by the name's shape", () => {
+		const list = [{ to_id: "t3f9a-arq" }, { to_id: "dev" }, { to_id: "viejo" }];
+		const names = new Set(["t3f9a-arq", "dev"]);
+		const { live, gone } = splitByAgent(list, (n) => names.has(n));
+		expect(live.map((m) => m.to_id)).toEqual(["t3f9a-arq", "dev"]);
+		expect(gone.map((m) => m.to_id)).toEqual(["viejo"]);
+		// Registry not read yet: nothing is gone.
+		expect(splitByAgent(list, () => null).gone).toEqual([]);
+	});
+
+	it("summarises a batch", () => {
+		expect(
+			interruptSummary([
+				{ report: "done", gone: false },
+				{ report: "done", gone: true },
+				{ report: "none", gone: true },
+				{ report: "none", gone: true },
+			]),
+		).toBe("4 interrupciones: 1 con informe, 3 de agentes que ya no existen.");
+		expect(interruptSummary([{ report: "writing", gone: false }])).toBe(
+			"1 interrupción: 1 escribiendo su informe.",
+		);
 	});
 });
