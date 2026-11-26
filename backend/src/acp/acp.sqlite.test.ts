@@ -2564,9 +2564,15 @@ describe("ACP tasks (v29)", () => {
 		expect(
 			(await call(as("coord"), "POST", "/tasks", { title: "t", originMessageId: 1 })).body.error,
 		).toBe("computed-by-backend");
-		expect((await call(as("solo"), "POST", "/tasks", { title: "t" })).body.error).toBe(
-			"no-project",
-		);
+		for (const [m, path, body] of [
+			["POST", "/tasks", { title: "t" }],
+			["GET", "/tasks", undefined],
+			["GET", "/tasks/1", undefined],
+			["PATCH", "/tasks/1", { version: 1, status: "doing" }],
+		] as const) {
+			const r = await call(as("solo"), m, path, body);
+			expect([r.status, r.body.error]).toEqual([409, "no-project"]);
+		}
 	});
 
 	let goal: number;
@@ -3056,7 +3062,8 @@ describe("D1 reads: the board goes by index (v29)", () => {
 
 		it("open, done (first page and a later one) and their links read by the partial indexes", async () => {
 			const first = await call(owner, "GET", `/tasks?projectId=${PB}`);
-			expect(first.body.open.length).toBe(200);
+			expect(first.body.open.length + first.body.done.length).toBe(200);
+			expect(first.body.open.length).toBe(150);
 			expect(first.body.done.length).toBe(50);
 			expect(first.body.nextOpen).toBeTruthy();
 			expect(first.body.nextDone).toBeTruthy();

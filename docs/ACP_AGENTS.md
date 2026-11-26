@@ -423,8 +423,8 @@ comes in PR 3 and is never written over it.
 
 | Route | |
 | --- | --- |
-| `POST /api/acp/tasks {title, description?, parentId?, goal?, assignee?, reviewer?, priority?}` | a child of `parentId` (its root's coordinator, or the person) or a root in the caller's project. The person adds `projectId`, `originMessageId?`, `coordinator?` |
-| `GET /api/acp/tasks?projectId=&openAfter=&doneBefore=` | the board: open tasks by id (200 a page, `nextOpen`), done ones newest first (50 a page, `nextDone`), with links; an agent: its project |
+| `POST /api/acp/tasks {title, description?, parentId?, goal?, assignee?, reviewer?, priority?}` (an agent in no project: 409 `no-project` here and on every task route) | a child of `parentId` (its root's coordinator, or the person) or a root in the caller's project. The person adds `projectId`, `originMessageId?`, `coordinator?` |
+| `GET /api/acp/tasks?projectId=&openAfter=&doneBefore=` | the board: open tasks by id (150 a page, `nextOpen`), done ones newest first (50 a page, `nextDone`) — ≤ 200 tasks a page, no cap per project —, with links; an agent: its project |
 | `GET /api/acp/tasks/:id` | the task with links, its root (`parent`) or children, the last 200 events |
 | `PATCH /api/acp/tasks/:id {version, title?, description?, assignee?, reviewer?, priority?, status?, blockedReason?, coordinator?}` | a versioned change: 409 `stale` with the current row |
 | `POST /api/acp/tasks/:id/links {version, kind, ref}` | `work` (a work of the project), `pr` (number or https URL — a link, not an approval), `dep` (a task of the project), `external` (a wait the system cannot see); the same link again changes nothing |

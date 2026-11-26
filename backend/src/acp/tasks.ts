@@ -39,7 +39,8 @@ export const DESCRIPTION_MAX = 8000;
 const REASON_MAX = 500;
 const EXTERNAL_MAX = 200;
 /** Board pages: open tasks by id, done ones newest first. */
-const OPEN_PAGE = 200;
+// ≤ 200 tasks a page in all (#794, precisions §7): no cap on tasks per project.
+const OPEN_PAGE = 150;
 const DONE_PAGE = 50;
 const CHILDREN_MAX = 500;
 const EVENTS_MAX = 200;
@@ -199,6 +200,11 @@ function oneOf<T extends string>(v: unknown, list: readonly T[], code: string): 
 
 const actorName = (a: TaskActor) => (a.kind === "owner" ? "owner" : a.agent.name);
 
+/** Every task has a project: an agent in none has no tasks to see or make (409, not a 404). */
+function noProject(a: TaskActor): void {
+	if (a.kind === "agent" && a.agent.project_id === null) throw new TaskError(409, "no-project");
+}
+
 // ── Tasks ──────────────────────────────────────────────────────────────────
 
 export class AcpTasks {
@@ -234,6 +240,7 @@ export class AcpTasks {
 	}
 
 	private async mustSee(ownerUserId: string, actor: TaskActor, id: unknown): Promise<TaskRow> {
+		noProject(actor);
 		const t = await this.visible(ownerUserId, actor, id);
 		if (!t) throw new TaskError(404, "task-not-found");
 		return t;
@@ -348,7 +355,7 @@ export class AcpTasks {
 		let conversationId: string | null = null;
 		if (actor.kind === "agent") {
 			const a = actor.agent;
-			if (a.project_id === null) throw new TaskError(403, "no-project");
+			if (a.project_id === null) throw new TaskError(409, "no-project");
 			if (b.projectId !== undefined && b.projectId !== null && b.projectId !== a.project_id)
 				throw new TaskError(404, "project-not-found");
 			if (
@@ -449,6 +456,7 @@ export class AcpTasks {
 		q: { projectId?: unknown; openAfter?: unknown; doneBefore?: unknown },
 	) {
 		let projectId: string;
+		noProject(actor);
 		if (actor.kind === "agent") {
 			const own = actor.agent.project_id;
 			if (own === null || (q.projectId !== undefined && q.projectId !== own))
