@@ -996,6 +996,9 @@ export const MIGRATIONS: readonly Migration[] = [
  *   backend from the message the agent is running — never an argument. Unique
  *   per owner: two agents given the same team request get ONE goal.
  * - `version`: every write is `UPDATE … WHERE version = ?` (409 stale).
+ * - Budgets (§5): a root's `budget_limit`/`budget_used` count the agent →
+ *   agent requests of the whole goal, `requests_limit` (NULL = ACP_TASK_BUDGET)
+ *   /`requests_used` those of one task; only the person raises a limit.
  * - `updated_by`: the actor of the last write — what the history trigger records.
  * - `task_events` is append-only and written ONLY by these triggers, in the
  *   statement that made the change (D1 over HTTP has no transaction across
@@ -1027,6 +1030,7 @@ export const ACP_TASKS_DDL: readonly string[] = [
 		budget_limit      INTEGER,
 		budget_used       INTEGER NOT NULL DEFAULT 0,
 		requests_used     INTEGER NOT NULL DEFAULT 0,
+		requests_limit    INTEGER,
 		created_by        TEXT NOT NULL,
 		updated_by        TEXT NOT NULL,
 		created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
@@ -1086,6 +1090,7 @@ export const ACP_TASKS_DDL: readonly string[] = [
 	WHEN OLD.title IS NOT NEW.title OR OLD.description IS NOT NEW.description OR OLD.assignee IS NOT NEW.assignee
 		OR OLD.reviewer IS NOT NEW.reviewer OR OLD.coordinator IS NOT NEW.coordinator OR OLD.priority IS NOT NEW.priority
 		OR OLD.status IS NOT NEW.status OR OLD.blocked_reason IS NOT NEW.blocked_reason OR OLD.budget_limit IS NOT NEW.budget_limit
+		OR OLD.requests_limit IS NOT NEW.requests_limit
 	BEGIN
 		INSERT INTO task_events (owner_user_id, task_id, actor, kind, data, created_at)
 		VALUES (NEW.owner_user_id, NEW.id, NEW.updated_by,
@@ -1096,7 +1101,7 @@ export const ACP_TASKS_DDL: readonly string[] = [
 				WHEN NEW.assignee IS NOT OLD.assignee THEN 'assigned'
 				WHEN NEW.status != OLD.status THEN 'status'
 				WHEN NEW.blocked_reason IS NOT OLD.blocked_reason THEN CASE WHEN NEW.blocked_reason IS NULL THEN 'unblocked' ELSE 'blocked' END
-				WHEN NEW.budget_limit IS NOT OLD.budget_limit THEN 'budget'
+				WHEN NEW.budget_limit IS NOT OLD.budget_limit OR NEW.requests_limit IS NOT OLD.requests_limit THEN 'budget'
 				ELSE 'updated'
 			END,
 			(SELECT json_group_object(f, json_array(o, n)) FROM (
@@ -1109,6 +1114,7 @@ export const ACP_TASKS_DDL: readonly string[] = [
 				UNION ALL SELECT 'status', OLD.status, NEW.status
 				UNION ALL SELECT 'blockedReason', OLD.blocked_reason, NEW.blocked_reason
 				UNION ALL SELECT 'budgetLimit', OLD.budget_limit, NEW.budget_limit
+				UNION ALL SELECT 'requestsLimit', OLD.requests_limit, NEW.requests_limit
 			) WHERE o IS NOT n),
 			NEW.updated_at);
 	END`,

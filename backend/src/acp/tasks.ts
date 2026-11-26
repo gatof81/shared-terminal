@@ -77,6 +77,8 @@ export interface TaskRow {
 	budget_limit: number | null;
 	budget_used: number;
 	requests_used: number;
+	/** This task's own cap of agent requests; NULL = ACP_TASK_BUDGET. */
+	requests_limit: number | null;
 	created_by: string;
 	updated_by: string;
 	created_at: string;
