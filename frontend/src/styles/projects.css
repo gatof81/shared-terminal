@@ -175,6 +175,13 @@ button.sgroup-title:focus-visible {
 .sgroup-rows[hidden] {
   display: none;
 }
+/* Proyectos while its list has not been read: two rows' worth of space, no words that jump. */
+.sgroup-skeleton {
+  height: 32px;
+  margin: 2px 0;
+  border-radius: var(--radius-s);
+  background: var(--c-border-soft);
+}
 .sgroup-empty {
   font-size: 0.72rem;
   color: var(--c-muted);

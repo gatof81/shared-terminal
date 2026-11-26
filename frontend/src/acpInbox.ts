@@ -24,8 +24,10 @@ import { inboxNow, onInbox, refreshInbox } from "./acpInboxStore.js";
 import {
 	agentHue,
 	agentNow,
+	answerText,
 	interruptSummary,
 	interruptTitle,
+	questionForm,
 	reportState,
 	splitByAgent,
 } from "./acpModel.js";
@@ -97,6 +99,15 @@ let openGen = 0;
 
 /** Question cards and rows kept across renders (typed answers and focus survive a refresh). */
 const cards = new Map<number, { state: string; el: HTMLElement }>();
+
+type InboxQuestion = AcpQuestion & { conversation_id: string | null; project_id: string | null };
+/**
+ * Questions answered from this panel, kept on screen for a moment as
+ * «✓ Respondida: …» where the person was looking — the inbox read that
+ * follows no longer lists them, and a row that just vanished says nothing.
+ */
+const answered = new Map<number, { q: InboxQuestion; said: string }>();
+const ANSWERED_MS = 1500;
 const rows = new Map<string, { sig: string; el: HTMLElement }>();
 
 /** Topic titles of other projects, read once per project while the panel needs them. */
@@ -109,6 +120,7 @@ export function openInbox(opener?: Element | null): void {
 	openGen++;
 	cards.clear();
 	rows.clear();
+	answered.clear();
 	render();
 	refreshInbox(0);
 	const onInboxChange = onInbox(() => render());
@@ -219,20 +231,25 @@ function render(): void {
 	if (!list) return;
 	const box = inboxNow();
 	const nodes: HTMLElement[] = [];
-	const questions = [...(box?.action.questions ?? [])].sort(byTime((q) => q.created_at));
+	const open = (box?.action.questions ?? []).filter((q) => !answered.has(q.id));
+	const questions = [...open, ...[...answered.values()].map((a) => a.q)].sort(
+		byTime((q) => q.created_at),
+	);
 	const interrupted = [...(box?.action.interrupted ?? [])].sort(
 		byTime((m) => m.finished_at ?? m.created_at),
 	);
 	if (box === null) nodes.push(keep("loading", 0, () => el("p", "acp-inbox-none", "Cargando…")));
-	else if (questions.length === 0 && interrupted.length === 0)
+	else if (questions.length === 0 && interrupted.length === 0 && answered.size === 0)
 		nodes.push(keep("none", 0, () => el("p", "acp-inbox-none", "Nada pendiente")));
 	if (questions.length) {
-		nodes.push(
-			keep("h:questions", questions.length, () =>
-				el("h3", "acp-inbox-sec", `Preguntas · ${questions.length}`),
-			),
-		);
-		for (const q of questions) nodes.push(questionItem(q));
+		// The count is what still waits: a confirmation on screen is not pending.
+		if (open.length)
+			nodes.push(
+				keep("h:questions", open.length, () =>
+					el("h3", "acp-inbox-sec", `Preguntas · ${open.length}`),
+				),
+			);
+		for (const q of questions) nodes.push(answered.has(q.id) ? answeredItem(q) : questionItem(q));
 	}
 	// A batch whose confirmation outlived its list (all reviewed elsewhere) has nothing to do.
 	if (batch && !batch.running && interrupted.length === 0) batch = null;
@@ -342,10 +359,10 @@ function interruptedItem(m: AcpMessage, gone: boolean): HTMLElement {
 			// always fits: one tap. Without one, or with a process it left open,
 			// the review card comes first.
 			if (gone || (report === "done" && !held)) {
-				done.classList.add("acp-accent");
+				done.classList.add("primary");
 				acts.append(done, review);
 			} else {
-				review.classList.add("acp-accent");
+				review.classList.add("primary");
 				done.classList.add("acp-ib-textbtn");
 				acts.append(review, done);
 			}
@@ -415,7 +432,7 @@ function goneGroup(gone: AcpMessage[]): HTMLElement {
 		const acts = el("div", "acp-ib-acts");
 		const all = el(
 			"button",
-			"btn sm acp-accent acp-ib-gone-all",
+			"btn sm primary acp-ib-gone-all",
 			n === 1 ? "Dar por revisada" : `Dar por revisadas las ${n}`,
 		);
 		all.type = "button";
@@ -478,7 +495,7 @@ function confirmBatch(ids: number[], summary: string): void {
 	text.textContent = `${summary} No se reenvía nada.`;
 	const go = el(
 		"button",
-		"btn sm acp-accent",
+		"btn sm primary",
 		ids.length === 1 ? "Dar por revisada" : `Dar por revisadas las ${ids.length}`,
 	);
 	go.type = "button";
@@ -532,7 +549,7 @@ function runBatch(ids: number[]): void {
 			return;
 		}
 		text.textContent = `${reviewed}; ${failed.length} no se ${failed.length === 1 ? "pudo" : "pudieron"} guardar y ${failed.length === 1 ? "sigue" : "siguen"} en la lista.`;
-		const retry = el("button", "btn sm acp-accent", "Volver a intentar");
+		const retry = el("button", "btn sm primary", "Volver a intentar");
 		retry.type = "button";
 		retry.addEventListener("click", () => {
 			batch = null;
@@ -604,9 +621,7 @@ function goButton(
 	return b;
 }
 
-function questionItem(
-	q: AcpQuestion & { conversation_id: string | null; project_id: string | null },
-): HTMLElement {
+function questionItem(q: InboxQuestion): HTMLElement {
 	const where = whereOf(q.project_id, q.conversation_id, q.agent);
 	return keep(`q:${q.id}`, [q.state, where], () => {
 		const { item, main } = itemShell("is-question", q.agent, where);
@@ -617,8 +632,8 @@ function questionItem(
 				state: q.state,
 				el: questionCard(q, {
 					stillHere: () => g === openGen,
-					// Answered: it leaves the section when the inbox is read again.
-					onAnswered: () => refreshInbox(0),
+					// Answered: confirmed in place for a moment, then it leaves.
+					onAnswered: (row) => onQuestionAnswered(q, row),
 				}),
 			};
 			cards.set(q.id, card);
@@ -634,6 +649,47 @@ function questionItem(
 					);
 		if (go) acts.append(go);
 		main.append(card.el, acts);
+		return item;
+	});
+}
+
+function onQuestionAnswered(q: InboxQuestion, row: AcpQuestion): void {
+	const g = openGen;
+	answered.set(q.id, { q, said: answerText(questionForm(q.request), row.answer) });
+	const list = listEl;
+	const focusWasIn = Boolean(list?.contains(document.activeElement));
+	render();
+	// The focus goes on to the next question still waiting; with none, to the
+	// confirmation itself (so it is not lost while the row is replaced).
+	if (focusWasIn && list) {
+		const next = list.querySelector<HTMLElement>(
+			".acp-ib-item.is-question :is(input, textarea, select, button):not(:disabled)",
+		);
+		(next ?? list.querySelector<HTMLElement>(`[data-answered="${q.id}"]`))?.focus();
+	}
+	refreshInbox(0);
+	setTimeout(() => {
+		if (g !== openGen) return;
+		answered.delete(q.id);
+		render();
+	}, ANSWERED_MS);
+}
+
+/** «✓ Respondida: GitHub · @arq sigue» — what was sent, where it was answered. */
+function answeredItem(q: InboxQuestion): HTMLElement {
+	const said = answered.get(q.id)?.said ?? "";
+	return keep(`a:${q.id}`, said, () => {
+		const where = whereOf(q.project_id, q.conversation_id, q.agent);
+		const { item, main } = itemShell("is-answered", q.agent, where);
+		item.dataset.answered = String(q.id);
+		item.tabIndex = -1;
+		const line = el(
+			"p",
+			"acp-ib-answered",
+			`✓ Respondida${said ? `: ${said}` : ""} · @${q.agent} sigue`,
+		);
+		line.setAttribute("role", "status");
+		main.append(line);
 		return item;
 	});
 }

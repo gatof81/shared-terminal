@@ -55,7 +55,7 @@ describe("leading mentions in a topic's text", () => {
 		expect(recipientsOf("@arquitecto consultá a @dev: ¿listo?", names).to).toEqual(["arquitecto"]);
 		expect(recipientsOf("@arquitecto @dev, revisen esto", names).to).toEqual(["arquitecto", "dev"]);
 		expect(recipientsOf("@dev @dev hola", names).to).toEqual(["dev"]);
-		expect(recipientsOf("Revisá esto @dev", names)).toEqual({ to: [], error: null });
+		expect(recipientsOf("Revisá esto @dev", names)).toEqual({ to: [], unknown: [], error: null });
 	});
 	it("an unknown leading mention refuses the whole post (no partial send, no fallback)", () => {
 		const typo = recipientsOf("@devv revisá con @qa-1", names);

@@ -21,13 +21,26 @@ test.describe("sidebar tree", () => {
 		await app.openSidebar();
 		await expect(app.sessionRow("scratch")).toBeVisible();
 		const top = async (sel: string) => (await page.locator(sel).first().boundingBox())!.y;
-		const order = [
-			await top("#new-session-btn"),
+		const sections = [
 			await top(group("~projects")),
 			await top(group("~agents")),
 			await top(group("~sessions")),
 		];
+		// The phone's home (revisión 2 §6): «+ Sesión nueva» in the foot, with
+		// «Cuenta» on its row; a wide sidebar (and the drawer) has it first.
+		const order = app.mobile
+			? [...sections, await top("#new-session-btn")]
+			: [await top("#new-session-btn"), ...sections];
 		expect([...order].sort((a, b) => a - b)).toEqual(order);
+		if (app.mobile) {
+			const btn = (await page.locator("#new-session-btn").boundingBox())!;
+			const acct = (await page.locator("#sidebar-account-btn").boundingBox())!;
+			const vh = page.viewportSize()!.height;
+			expect(btn.y + btn.height).toBeGreaterThan(vh - 70);
+			expect(btn.height).toBeGreaterThanOrEqual(44);
+			expect(Math.abs(btn.y - acct.y)).toBeLessThan(2);
+			expect(btn.x).toBeLessThan(acct.x);
+		}
 		// The same heading for the three: a chevron, the name, a count.
 		for (const [key, name] of [
 			["~projects", "Proyectos"],
@@ -206,5 +219,64 @@ test.describe("sidebar tree on a phone", () => {
 		await page.mouse.click(vw - 20, Math.round(drawer.height / 2));
 		await expect(page.locator("main")).not.toHaveClass(/sidebar-open/);
 		await expect(page.locator("#sidebar-toggle")).toBeFocused();
+	});
+});
+
+// Revisión 2 §4: until the project list is read, an agent of a project is
+// not shown as one without a project (it would jump away when the list lands).
+test.describe("sidebar tree while the project list is not known", () => {
+	test.beforeEach(({ backend }) => backend.enableAcp());
+	const group = (key: string) => `.sgroup[data-group="${key}"]`;
+	const agentRow = (name: string) => `.session-select[data-session-name="${name}"]`;
+
+	test("projects still loading: placeholder rows, no count, no agent shown out of its project", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.delays.projects = 2500;
+		await app.login("alice");
+		await app.openSidebar();
+		const projects = page.locator(group("~projects"));
+		await expect(app.sessionRow("scratch")).toBeVisible();
+		await expect(projects.locator(".sgroup-skeleton")).toHaveCount(2);
+		await expect(projects.locator(".sgroup-rows")).toHaveAttribute("aria-busy", "true");
+		await expect(projects.locator(".sgroup-count")).toHaveCount(0);
+		// The agent without a project is where it is; the project's are not anywhere yet.
+		await expect(page.locator(group("~agents")).locator(agentRow("scratch"))).toHaveCount(1);
+		await expect(page.locator(agentRow("hz-architect"))).toHaveCount(0);
+		await expect(page.locator(agentRow("hz-dev-2"))).toHaveCount(0);
+		// The list lands: the project's row, and still none of its agents outside it.
+		await expect(projects.locator("a.project-row")).toHaveCount(1, { timeout: 6000 });
+		await expect(projects.locator(".sgroup-skeleton")).toHaveCount(0);
+		await expect(projects.locator(".sgroup-count")).toHaveText("1");
+		await expect(page.locator(agentRow("hz-architect"))).toHaveCount(0);
+		expect(app.errors).toEqual([]);
+	});
+
+	test("projects fail to load: it says so, and invents no agent without a project", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.override = async (method, path, route) => {
+			if (method !== "GET" || path !== "/projects") return false;
+			await route.fulfill({
+				status: 503,
+				contentType: "application/json",
+				body: '{"error":"down"}',
+			});
+			return true;
+		};
+		await app.login("alice");
+		await app.openSidebar();
+		const projects = page.locator(group("~projects"));
+		await expect(projects.locator(".sgroup-empty")).toHaveText(
+			"No se pudieron cargar los proyectos; reintentando.",
+		);
+		await expect(projects.locator(".sgroup-skeleton")).toHaveCount(0);
+		await expect(page.locator(group("~agents")).locator(agentRow("scratch"))).toHaveCount(1);
+		await expect(page.locator(agentRow("hz-architect"))).toHaveCount(0);
+		await expect(page.locator(agentRow("hz-dev-2"))).toHaveCount(0);
 	});
 });

@@ -657,16 +657,7 @@ pre.acp-msg-body {
 	gap: 8px 16px;
 	align-items: center;
 }
-/* «Responder» is the card's main action (the review's accent); «Omitir» a text button. */
-.btn.acp-question-send {
-	background: var(--c-accent-strong);
-	border-color: var(--c-accent-strong);
-	color: #fff;
-}
-.btn.acp-question-send:hover:not(:disabled) {
-	background: var(--c-accent);
-	border-color: var(--c-accent);
-}
+/* «Responder» is the card's main action (.btn.primary); «Omitir» a text button. */
 .acp-link.acp-question-skip {
 	min-height: 32px;
 	color: var(--c-text-2);
@@ -676,7 +667,6 @@ pre.acp-msg-body {
 	cursor: default;
 }
 @media (pointer: coarse) {
-	.btn.acp-question-send,
 	.acp-link.acp-question-skip {
 		min-height: 44px;
 	}
