@@ -3681,6 +3681,43 @@ describe("ACP idle runners: the claim waits for work (R21)", () => {
 		});
 	});
 
+	it("a model/effort change while the claim waits comes back in that claim's answer", async () => {
+		const pending = claimWait();
+		await until(() => acp.waitingClaims === 1);
+		const p = await call(owner, "PATCH", "/agents/espera", {
+			model: "claude-opus-5-5",
+			effort: "high",
+		});
+		expect(p.status).toBe(200);
+		const res = await pending;
+		expect(res.status).toBe(204);
+		expect(res.headers.get("x-st-model")).toBe("claude-opus-5-5");
+		expect(res.headers.get("x-st-effort")).toBe("high");
+	});
+
+	it("a message queued right after the change is claimed with the new model, never the old one", async () => {
+		const pending = claimWait();
+		await until(() => acp.waitingClaims === 1);
+		const [, sent] = await Promise.all([
+			call(owner, "PATCH", "/agents/espera", { model: "claude-fable-5-2" }),
+			call(owner, "POST", "/messages", { to: "espera", body: "con el modelo nuevo" }),
+		]);
+		// The PATCH may end the wait before or after the message is written: an
+		// empty answer first is fine, an answer with the old model never is.
+		let res = await pending;
+		expect(res.headers.get("x-st-model")).toBe("claude-fable-5-2");
+		if (res.status === 204) {
+			res = await claimWait();
+			expect(res.headers.get("x-st-model")).toBe("claude-fable-5-2");
+		}
+		expect(res.status).toBe(200);
+		expect(((await res.json()) as { id: number }).id).toBe(sent.body.id);
+		await call(as("espera"), "POST", `/runner/messages/${sent.body.id}/result`, {
+			state: "done",
+			text: "ok",
+		});
+	});
+
 	it("a runner that left while waiting gets nothing claimed for it", async () => {
 		const ac = new AbortController();
 		const pending = claimWait(ac.signal).catch(() => null);
