@@ -437,6 +437,53 @@ test.describe("terminal invariant", () => {
 		expect(app.errors).toEqual([]);
 	});
 
+	// The tab row's + appears only once the terminal exists, i.e. right
+	// after its first fit: without a reserved height the row grew 3 px then
+	// and the box the first fit measured was not the box the terminal kept.
+	test("opening a session: the first fit's box is the final one, and the attach is the only size sent", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		await page.addInitScript(() => {
+			// The first height the app reads for a tab pane (its first fit).
+			const w = window as unknown as { __firstPaneHeight?: string };
+			const original = window.getComputedStyle;
+			window.getComputedStyle = function (el: Element, pseudo?: string | null) {
+				const style = original.call(window, el, pseudo);
+				if (w.__firstPaneHeight === undefined && el.classList.contains("tab-pane"))
+					w.__firstPaneHeight = style.height;
+				return style;
+			} as typeof window.getComputedStyle;
+		});
+		backend.enableConversations();
+		backend.enableWorks();
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/c/${CONV_IDS.ci}`);
+		await page.locator('#project-view .acp-agent-id[data-agent="dev"]').first().click();
+		await page
+			.locator('[role="menu"].action-menu')
+			.getByRole("menuitem", { name: /^Terminal de la sesión/ })
+			.click();
+		await app.expectTerminalReady();
+		await page.waitForTimeout(400);
+		const [first, final] = await page.evaluate(() => [
+			(window as unknown as { __firstPaneHeight?: string }).__firstPaneHeight,
+			getComputedStyle(document.querySelector(".tab-pane.active")!).height,
+		]);
+		expect(Number.parseInt(String(first), 10), `first fit ${first}, final ${final}`).toBe(
+			Number.parseInt(final, 10),
+		);
+		const sock = backend.terminalSockets.find(
+			(s) => s.sessionId === PROJECT_SESSION_IDS.developer2 && !s.closed,
+		)!;
+		expect(sock.attach.cols).toBeGreaterThan(0);
+		expect(
+			sock.sent.filter((f) => f.type === "resize"),
+			"no resize after the attach",
+		).toEqual([]);
+		expect(app.errors).toEqual([]);
+	});
+
 	test("typing reaches the session and the echo renders", async ({ app, backend, page }) => {
 		await app.login("alice");
 		await app.openSession("my-project");
