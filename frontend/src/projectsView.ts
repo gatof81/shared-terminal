@@ -1,6 +1,6 @@
 /**
- * projectsView.ts — Projects: the sidebar's Projects section (its "+"), the
- * project's pages and the new-project dialog. A project groups ACP agents
+ * projectsView.ts — Projects: the project's pages and the new-project
+ * dialog (opened from the sidebar's Proyectos "+", sessionCore.ts). A project groups ACP agents
  * and gives them topics; each agent keeps its own session.
  *
  *   #/projects/<pid>          the project: its rail (projectRail.ts) — in the
@@ -66,6 +66,7 @@ import {
 	projectsLoaded,
 	setCurrentProject,
 	setProjects,
+	setProjectsStatus,
 } from "./projectDirectory.js";
 import {
 	configureRail,
@@ -80,6 +81,7 @@ import {
 	topicTitle,
 } from "./projectRail.js";
 import {
+	depth,
 	disableProjectRoutes,
 	enableProjectRoutes,
 	fromHistory,
@@ -103,9 +105,6 @@ import {
 } from "./toolsView.js";
 import { button, el } from "./ui.js";
 
-const section = document.getElementById("project-section");
-const projectList = document.getElementById("project-list");
-const newProjectBtn = document.getElementById("new-project-btn") as HTMLButtonElement | null;
 const pageEl = document.getElementById("project-view");
 const terminalArea = document.getElementById("terminal-area");
 
@@ -119,55 +118,30 @@ let shownTopic: string | null = null;
 /** The Archive's chat on screen (`page: "archive"`; null: its list). */
 let shownArchive: string | null = null;
 let gen = 0; // bumped by every reset (logout): a load started before applies nothing
-let loadError = false;
-let canCreate = true;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 
 async function loadProjects(): Promise<void> {
 	const myGen = gen;
 	const a = await fetchProjects().catch(() => null);
 	if (myGen !== gen || !active) return;
+	let changed = false;
 	if (a?.ok) {
-		loadError = false;
-		canCreate = a.body.can.createProject.allowed;
-		if (setProjects(a.body.projects) && sessionListLoaded()) renderSessionList();
-	} else if (a?.code !== "stale") loadError = true;
+		changed = setProjectsStatus({
+			loadFailed: false,
+			canCreate: a.body.can.createProject.allowed,
+		});
+		changed = setProjects(a.body.projects) || changed;
+	} else if (a?.code !== "stale") changed = setProjectsStatus({ loadFailed: true });
+	if (changed && sessionListLoaded()) renderSessionList();
 	renderSection();
 	paintSpace();
 	repaintRail();
 }
 
-// ── Sidebar section ─────────────────────────────────────────────────────────
+// ── Sidebar ─────────────────────────────────────────────────────────────────
 
+/** The sidebar's Proyectos (sessionCore.ts) marks the project on screen. */
 function renderSection(): void {
-	if (!section || !projectList) return;
-	section.hidden = !active;
-	projectList.replaceChildren();
-	if (!active) return;
-	if (newProjectBtn) {
-		newProjectBtn.disabled = !canCreate;
-		newProjectBtn.title = canCreate
-			? "Crear un proyecto para tus agentes"
-			: "Llegaste al límite de proyectos";
-	}
-	// The projects themselves are the headings of the sidebar tree
-	// (sessionCore.ts): this section says what the tree can't.
-	if (!projectsLoaded())
-		projectList.appendChild(
-			el(
-				"p",
-				"project-list-note",
-				loadError ? "No se pudieron cargar los proyectos; reintentando." : "Cargando proyectos…",
-			),
-		);
-	else if (projects().length === 0)
-		projectList.appendChild(
-			el(
-				"p",
-				"project-list-note",
-				"Sin proyectos. Un proyecto agrupa agentes ACP y les da conversaciones.",
-			),
-		);
 	if (currentProject() !== shown) {
 		setCurrentProject(shown);
 		if (sessionListLoaded()) renderSessionList();
@@ -179,7 +153,10 @@ function renderSection(): void {
 function sync(): void {
 	const r = active ? readProjectRoute() : null;
 	if (r === null) {
+		const left = shown;
 		hidePage();
+		if (left !== null && homeFocus === left) focusProjectRow(left);
+		homeFocus = null;
 		return;
 	}
 	// The address in its canonical form (an encoding written differently):
@@ -187,6 +164,13 @@ function sync(): void {
 	if (window.location.hash !== projectRouteHash(r)) {
 		navigateProject(r, { replace: true });
 		return;
+	}
+	if (shown === null) {
+		// Into the project from the main level: by a choice, a new entry —
+		// the one ‹ goes back from; by Back / Forward, the same entry as when
+		// it was pushed, or no known way back.
+		if (!fromHistory()) entryDepth = depth();
+		else if (entryDepth !== depth()) entryDepth = null;
 	}
 	syncSpace(r, shown, shownPage);
 	renderSection();
@@ -459,6 +443,44 @@ function hidePage(): void {
 	renderSection();
 }
 
+// ── ‹: back to the main level ───────────────────────────────────────────────
+
+/** The depth of the entry the project was entered by from the main level (null: none known). */
+let entryDepth: number | null = null;
+/** ‹ was used: the project's row in the sidebar takes the focus once it shows. */
+let homeFocus: string | null = null;
+
+/**
+ * The rail's ‹. On a phone, what the ☰ it replaces does: the drawer with
+ * the main list (the page stays under it). Wider, the page gives way to the
+ * main level: when the project was entered from it by a new entry, Back to
+ * that entry — so the browser's Back after ‹ does not land on the project
+ * again, and Forward still does; otherwise (a deep link, an address typed)
+ * a new entry for the session underneath, which Back undoes. Neither
+ * touches a session, an agent or tmux.
+ */
+function goHome(opener: HTMLElement): void {
+	if (phoneMq?.matches) {
+		window.dispatchEvent(new CustomEvent("st:open-sidebar", { detail: { opener } }));
+		return;
+	}
+	if (shown === null) return;
+	homeFocus = shown;
+	const d = depth();
+	if (entryDepth !== null && entryDepth > 0 && d >= entryDepth) history.go(entryDepth - 1 - d);
+	else leaveForSession();
+}
+
+function focusProjectRow(pid: string): void {
+	requestAnimationFrame(() =>
+		document
+			.querySelector<HTMLElement>(
+				`#session-list a.project-row[data-project-id="${CSS.escape(pid)}"]`,
+			)
+			?.focus(),
+	);
+}
+
 /**
  * A session row picked while the page is up — the active session's too, which
  * would not change the address on its own: the page gives way to it (Back
@@ -595,16 +617,11 @@ function wire(): void {
 			window.dispatchEvent(
 				new CustomEvent("st:new-acp-session", { detail: { projectId: pid, opener } }),
 			),
-		// Sessions: on a phone the drawer (the page stays under it); wider,
-		// the page gives way to the session underneath (Back returns).
-		sessions: (opener) => {
-			if (phoneMq?.matches)
-				window.dispatchEvent(new CustomEvent("st:open-sidebar", { detail: { opener } }));
-			else leaveForSession();
-		},
+		home: (opener) => goHome(opener),
+		openTerminal: (name) => openTools({ agent: name, work: null, tool: "terminal" }),
 		settings: (opener) =>
 			window.dispatchEvent(new CustomEvent("st:open-user-menu", { detail: { opener } })),
-		agentMenu: (name, opener) => openAgentMenu(name, opener),
+		agentMenu: (name, opener) => openAgentMenu(name, opener, { terminal: false }),
 		openWork: (w) => openTools({ agent: w.agent, work: w.id, tool: "git" }),
 		openInbox: (opener) => openInbox(opener),
 	});
@@ -657,7 +674,8 @@ function wire(): void {
 	onTopicWork(work);
 	onArchiveWork(work);
 	mountInboxButton();
-	newProjectBtn?.addEventListener("click", () => void openCreateProjectDialog());
+	// Proyectos' "+" in the sidebar (sessionCore.ts).
+	window.addEventListener("st:new-project", () => void openCreateProjectDialog());
 	// A session row or the session bar used while the page is up: the page
 	// gives way to the session (and Back returns to it).
 	for (const id of ["session-list", "terminal-toolbar"]) {
@@ -735,8 +753,8 @@ export function resetProjects(): void {
 	resetTools();
 	resetInboxPanel();
 	resetInbox();
-	loadError = false;
-	canCreate = true;
+	entryDepth = null;
+	homeFocus = null;
 	hidePage();
 	renderSection();
 }

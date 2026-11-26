@@ -3,7 +3,8 @@
 // icon with its count is the app header's, on every screen), the topics (Conversaciones: create, unread per topic),
 // the team with each agent's state in the seven fixed words (Equipo), the
 // works (Trabajos: active ones; closed ones on demand), the Archive's entry
-// and a foot with the sessions and the settings.
+// and a foot with the settings. Its head: ‹ back to the main level, and the
+// selector.
 //
 // One rail, for the project on screen: projectsView.ts places its two parts
 // (`railHead`, `railBody`) in the sidebar on a wide screen, and on a phone
@@ -26,6 +27,7 @@ import {
 } from "./api.js";
 import { openActionMenu } from "./components/actionMenu.js";
 import { projectName, projects } from "./projectDirectory.js";
+import { paintProjectSignals, projectSignals } from "./projectSignals.js";
 import { navigateProject, projectRouteHash } from "./router.js";
 import { el, syncChildren } from "./ui.js";
 
@@ -39,9 +41,12 @@ export interface RailActions {
 	archiveProject: (pid: string) => void;
 	newConversation: (pid: string) => void;
 	newAgent: (pid: string, opener: HTMLElement) => void;
-	sessions: (opener: HTMLElement) => void;
+	/** ‹: out of the project, to the main level (the sidebar's tree). */
+	home: (opener: HTMLElement) => void;
 	settings: (opener: HTMLElement) => void;
-	/** An agent's menu: Files · Git · Terminal · its works (toolsView.ts). */
+	/** An Equipo row: its agent's Terminal in Herramientas. */
+	openTerminal: (name: string) => void;
+	/** An Equipo row's ⋯: Files · Git · its works · its settings (toolsView.ts). */
 	agentMenu: (name: string, opener: HTMLElement) => void;
 	/** A work's row: Herramientas on that work. */
 	openWork: (work: AcpWork) => void;
@@ -124,16 +129,34 @@ export const railHead = el("div", "rail-head");
 export const railBody = el("nav", "rail-body");
 railBody.setAttribute("aria-label", "Proyecto");
 
+// ‹ (the same glyph as a topic's way back, `.ps-back`): the main level.
+const back = el("button", "btn btn-icon rail-back", "‹");
+back.type = "button";
+back.setAttribute("aria-label", "Volver a proyectos");
+back.title = "Volver a proyectos";
+back.addEventListener("click", () => actions?.home(back));
+
 const selector = el("button", "rail-project");
 selector.type = "button";
 selector.setAttribute("aria-haspopup", "menu");
+selector.setAttribute("aria-expanded", "false");
 const selectorName = el("span", "rail-project-name");
-const caret = el("span", "rail-project-caret", "▾");
-caret.setAttribute("aria-hidden", "true");
-selector.append(selectorName, caret);
+selector.append(selectorName, chevronDown());
 selector.addEventListener("click", () => openSelector());
 
-railHead.append(selector);
+railHead.append(back, selector);
+
+/** The sidebar sections' chevron (`.sgroup-toggle`), pointing down. */
+function chevronDown(): SVGSVGElement {
+	const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+	svg.setAttribute("viewBox", "0 0 16 16");
+	svg.setAttribute("aria-hidden", "true");
+	svg.classList.add("rail-project-caret");
+	const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+	path.setAttribute("d", "M4 6l4 4 4-4");
+	svg.append(path);
+	return svg;
+}
 
 // «N te esperan · N resultados nuevos»: a way into Pendientes.
 const attention = el("button", "rail-attention");
@@ -173,14 +196,13 @@ closedToggle.addEventListener("click", () => {
 const archiveHead = sectionHead("Archivo · solo lectura");
 const archiveList = el("ul", "rail-list rail-archive");
 
+// The account's way in: wide, the sidebar's own account foot is hidden
+// while the rail is up.
 const foot = el("div", "rail-foot");
-const sessionsBtn = el("button", "rail-foot-btn", "Sesiones");
-sessionsBtn.type = "button";
-sessionsBtn.addEventListener("click", () => actions?.sessions(sessionsBtn));
 const settingsBtn = el("button", "rail-foot-btn", "Ajustes");
 settingsBtn.type = "button";
 settingsBtn.addEventListener("click", () => actions?.settings(settingsBtn));
-foot.append(sessionsBtn, el("span", "rail-foot-sep", "·"), settingsBtn);
+foot.append(settingsBtn);
 
 const scroll = el("div", "rail-scroll");
 scroll.append(
@@ -591,21 +613,37 @@ function convStatus(c: AcpConversation): { label: string; tone: string } | null 
 }
 
 function agentRow(a: AcpAgentInfo, st: TeamState): HTMLElement {
-	const li = el("li");
-	// Its menu: Files · Git · Terminal of its session, and its works (F4).
+	const li = el("li", "rail-agent-item");
+	li.style.setProperty("--acp-hue", String(agentHue(a.name)));
+	// Two targets, siblings: the row opens the agent's Terminal (the same
+	// Herramientas route as before: the page stays mounted under it), its ⋯
+	// the rest of its menu.
 	const link = el("button", "rail-row rail-agent");
 	link.type = "button";
-	link.setAttribute("aria-haspopup", "menu");
-	link.addEventListener("click", () => actions?.agentMenu(a.name, link));
-	link.style.setProperty("--acp-hue", String(agentHue(a.name)));
-	link.title = `Herramientas de @${a.name}`;
-	const face = el("span", "acp-avatar rail-face", a.name.slice(0, 1).toUpperCase());
+	link.dataset.agent = a.name;
+	link.addEventListener("click", () => actions?.openTerminal(a.name));
+	link.title = "Abrir Terminal";
+	// The initial is drawn by CSS (like a sidebar row's face): as text it
+	// would be a word of the row its accessible name does not start with.
+	const face = el("span", "acp-avatar rail-face");
+	face.dataset.initial = a.name.slice(0, 1).toUpperCase();
 	face.setAttribute("aria-hidden", "true");
 	face.append(el("span", `rail-dot tone-${st.tone}`));
 	const text = el("span", "rail-row-text");
-	text.append(el("span", "rail-row-title", `@${a.name}`), stateLine(st));
+	const line = stateLine(st);
+	// The space is a word break for whoever reads the text (axe joins the two
+	// lines without it); a flex column does not render it.
+	text.append(el("span", "rail-row-title", `@${a.name}`), " ", line);
 	link.append(face, text);
-	li.append(link);
+	// The words on the row first (a voice user says what they see), then what it does.
+	link.setAttribute("aria-label", `@${a.name} ${line.textContent ?? ""} — abrir Terminal`);
+	const more = el("button", "rail-agent-more", "⋯");
+	more.type = "button";
+	more.setAttribute("aria-label", `Más acciones de @${a.name}`);
+	more.setAttribute("aria-haspopup", "menu");
+	more.title = `Más acciones de @${a.name}`;
+	more.addEventListener("click", () => actions?.agentMenu(a.name, more));
+	li.append(link, more);
 	return li;
 }
 
@@ -655,21 +693,30 @@ function openSelector(): void {
 	const a = actions;
 	openActionMenu({
 		title: "Proyectos",
+		caption: "Cambiar de proyecto",
 		opener: selector,
+		// Wide: under the rail's head. A phone places it under the app's header.
+		anchor: railHead,
 		items: [
-			...projects().map((p) => ({
-				id: `p:${p.projectId}`,
-				label: p.name,
-				hint: p.projectId === current ? "el proyecto abierto" : undefined,
-			})),
-			{ id: "new", label: "+ Proyecto nuevo…" },
-			{ id: "rename", label: "Renombrar este proyecto" },
-			{
-				id: "archive",
-				label: "Archivar este proyecto",
-				kind: "danger",
-				hint: "No se puede deshacer desde la app; el historial sigue legible.",
-			},
+			...projects().map((p) => {
+				// The sidebar row's dot and pill, painted on a holder the menu adopts.
+				const holder = document.createElement("span");
+				const said = paintProjectSignals(holder, projectSignals(p.projectId));
+				const leading = holder.querySelector(".psig-dot") ?? undefined;
+				const trailing = holder.querySelector(".psig-end") ?? undefined;
+				return {
+					id: `p:${p.projectId}`,
+					label: p.name,
+					radio: { checked: p.projectId === current },
+					leading,
+					trailing,
+					scroll: true,
+					ariaLabel: `${p.name}${said}`,
+				};
+			}),
+			{ id: "new", label: "+ Proyecto nuevo", sepBefore: true },
+			{ id: "rename", label: "Renombrar…" },
+			{ id: "archive", label: "Archivar proyecto…", kind: "danger", sepBefore: true },
 		],
 		onPick: (id) => {
 			if (id === "new") a.newProject();

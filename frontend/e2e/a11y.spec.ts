@@ -82,7 +82,8 @@ test.describe("accessibility — axe on the main views", () => {
 		// The tree: the sidebar of a session (a wide project page puts its rail there).
 		await page.goto(`/#/sessions/${SESSION_IDS.running}`);
 		await app.openSidebar();
-		await expect(app.sessionRow("hz-architect")).toBeVisible();
+		await expect(app.sessionRow("scratch")).toBeVisible();
+		await expect(page.locator("a.project-row")).toBeVisible();
 		await expectClean(page, "sidebar");
 	});
 

@@ -33,7 +33,7 @@ body.ps-gone #project-rail {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
   min-height: 40px;
   padding: 0 8px;
@@ -56,10 +56,32 @@ body.ps-gone #project-rail {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.rail-project[aria-expanded="true"] {
+  background: var(--c-surface-2);
+}
+/* The sections' chevron, pointing down, right after the name. */
 .rail-project-caret {
   flex: none;
-  color: var(--c-muted);
-  font-size: 0.75rem;
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: var(--c-muted);
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+/* ‹ out of the project (`.ps-back`'s glyph): wide, the rail replaces the
+   sidebar, so this is the visible way back to it. */
+.rail-back {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  font-size: 1.3rem;
+  line-height: 1;
+}
+.rail-back:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: -2px;
 }
 
 .rail-body {
@@ -240,6 +262,9 @@ a.rail-row:focus-visible,
   font-size: 0.8rem;
   font-weight: 700;
 }
+.rail-face::before {
+  content: attr(data-initial);
+}
 .rail-dot {
   position: absolute;
   right: -2px;
@@ -301,6 +326,69 @@ a.rail-row:focus-visible,
   padding: 6px 10px;
   border-top: 1px solid var(--c-border);
   color: var(--c-muted);
+}
+/* An Equipo row: the row (→ Terminal) and its ⋯, siblings; the state line
+   ends before the ⋯. The ⋯ shows on hover / focus (always on touch), like
+   a session row's actions. */
+.rail-agent-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.rail-agent-item > .rail-agent {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  background: transparent;
+  border: 0;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.rail-agent-item:hover > .rail-agent {
+  background: var(--c-surface-2);
+}
+.rail-agent:focus-visible,
+.rail-agent-more:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: -2px;
+}
+.rail-agent-more {
+  /* Over the row's end: the row is positioned (its selection bar), so the
+     ⋯ must be too, or the row takes its taps. */
+  position: relative;
+  z-index: 1;
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  margin-left: -32px;
+  margin-right: 4px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-s);
+  color: var(--c-muted);
+  font-size: 16px;
+  cursor: pointer;
+  opacity: 0;
+}
+.rail-agent-item:is(:hover, :focus-within) .rail-agent-more {
+  opacity: 1;
+}
+.rail-agent-more:hover {
+  color: var(--c-text);
+  background: var(--c-border-soft);
+}
+/* The state line stops before the ⋯ (it overlays the row's end). */
+.rail-agent-item > .rail-agent {
+  padding-right: 36px;
+}
+@media (pointer: coarse) {
+  .rail-agent-more {
+    opacity: 1;
+  }
 }
 .rail-foot-btn {
   min-height: 36px;
@@ -503,6 +591,27 @@ a.rail-row:focus-visible,
   .rail-add {
     width: 44px;
     height: 44px;
+  }
+  .rail-agent-more {
+    width: 44px;
+    height: 44px;
+    margin-left: -44px;
+    margin-right: 0;
+    opacity: 1;
+  }
+  .rail-agent-item > .rail-agent {
+    padding-right: 48px;
+  }
+  .rail-back {
+    width: 40px;
+    min-width: 40px;
+    height: 44px;
+    font-size: 1.4rem;
+  }
+  /* The project's screen: ‹ is the way out (it opens the main list, as the
+     ☰ did); the two never show together — the same rule as a topic's. */
+  body.project-space-on:not(.ps-on-topic):not(.tools-on):not(.ps-gone) header #sidebar-toggle {
+    display: none;
   }
   .rail-row-title {
     font-size: 0.95rem;

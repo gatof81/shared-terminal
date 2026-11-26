@@ -11,7 +11,7 @@ test.describe("session actions", () => {
 	test("session rows are buttons: arrow keys move, Enter opens", async ({ app, page }) => {
 		await app.login("alice");
 		await app.openSidebar();
-		const rows = page.locator("#session-list .ssection-sessions .session-select");
+		const rows = page.locator("#session-list .sgroup-sessions .session-select");
 		await expect(rows).toHaveCount(3);
 		await rows.first().focus();
 		await expect(rows.first()).toHaveAttribute("aria-label", /^my-project.*, session running/);

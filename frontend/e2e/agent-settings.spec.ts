@@ -156,7 +156,7 @@ test.describe("agent settings", () => {
 
 	test("from the project: the agent's menu has «Ajustes del agente»", async ({ app, page }) => {
 		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
-		await page.locator(".rail-agent", { hasText: "@arq" }).click();
+		await page.getByRole("button", { name: "Más acciones de @arq" }).click();
 		await page.getByRole("menuitem", { name: /^Ajustes del agente/ }).click();
 		await expect(page.locator(`${DIALOG} h2`)).toHaveText("Ajustes de @arq");
 	});

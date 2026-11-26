@@ -161,10 +161,16 @@ export function openTools(t: { agent: string; work: string | null; tool: ToolNam
 }
 
 /**
- * The agent's menu (its avatar in a thread, the topic's header, Equipo):
- * Files · Git · Terminal of its session, and its works.
+ * The agent's menu: Files · Git · its works, then its settings. From an
+ * Equipo row's ⋯ the row itself opens the Terminal (`terminal: false`);
+ * from an avatar in a thread or the Archive nothing else does, so the menu
+ * keeps «Terminal de la sesión».
  */
-export function openAgentMenu(name: string, opener: HTMLElement): void {
+export function openAgentMenu(
+	name: string,
+	opener: HTMLElement,
+	opts: { terminal: boolean } = { terminal: true },
+): void {
 	if (!readProjectRoute()) return;
 	const info = railAgents().find((a) => a.name === name);
 	const works = worksOf(name).filter((w) => w.state !== "cleaned");
@@ -174,13 +180,18 @@ export function openAgentMenu(name: string, opener: HTMLElement): void {
 		items: [
 			{ id: "files", label: "Files · principal" },
 			{ id: "git", label: "Git · principal" },
-			{ id: "terminal", label: "Terminal de la sesión" },
+			...(opts.terminal ? [{ id: "terminal", label: "Terminal de la sesión" }] : []),
 			...works.map((w) => ({
 				id: `w:${w.id}`,
 				label: `⎇ ${w.id}`,
 				hint: `trabajo · ${workWords(w)}`,
 			})),
-			{ id: "settings", label: "Ajustes del agente", hint: "modelo · effort · cuenta" },
+			{
+				id: "settings",
+				label: "Ajustes del agente",
+				hint: "modelo · effort · cuenta",
+				sepBefore: true,
+			},
 		],
 		onPick: (id) => {
 			if (id === "settings") openAgentSettings(name, opener);

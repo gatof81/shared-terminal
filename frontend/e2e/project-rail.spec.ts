@@ -46,6 +46,54 @@ async function scrollThread(page: Page, top: number): Promise<void> {
 test.describe("project rail and topics", () => {
 	test.beforeEach(({ backend }) => backend.enableConversations());
 
+	test("‹ in the rail's head: back to the main level; the browser's Back does not loop into the project", async ({
+		app,
+		page,
+	}) => {
+		await app.login("alice");
+		await app.openSession("my-project");
+		await app.expectTerminalReady();
+		const main = page.url();
+		// Into the project from its row in the sidebar.
+		await app.openSidebar();
+		await page.locator(`a.project-row[data-project-id="${HZ}"]`).click();
+		await expect(rail(page)).toBeVisible();
+		const back = page.locator(".rail-head .rail-back");
+		await expect(back).toHaveAccessibleName("Volver a proyectos");
+		// The foot keeps only «Ajustes».
+		await expect(page.locator(".rail-foot button")).toHaveText(["Ajustes"]);
+		if (app.mobile) {
+			// The project's screen: ‹ in place of the ☰, and it opens the main list.
+			await expect(page.locator("#sidebar-toggle")).toBeHidden();
+			await back.click();
+			await expect(page.locator("main")).toHaveClass(/sidebar-open/);
+			await expect(page.locator(`a.project-row[data-project-id="${HZ}"]`)).toBeVisible();
+			await page.keyboard.press("Escape");
+			// In a topic, ‹ is still the way back up to the rail.
+			await convRow(page, "Optimización de CI").click();
+			await expect(page.locator(".rail-back")).toBeHidden();
+			await page.locator(".ps-back").click();
+			await expect(back).toBeVisible();
+			return;
+		}
+		// Wide: a topic opened in the project's place; another one chosen.
+		await convRow(page, "Rediseño de UI/UX").click();
+		await expect(page.locator("#ps-topic-title")).toHaveText("Rediseño de UI/UX");
+		await back.click();
+		await expect(page.locator("#project-view")).toBeHidden();
+		await expect(page).toHaveURL(main);
+		await expect(page.locator(`a.project-row[data-project-id="${HZ}"]`)).toBeFocused();
+		// Back leaves the main level for what came before it — not the project again.
+		await page.goBack();
+		await expect(page).not.toHaveURL(/#\/projects\//);
+		// Forward walks into the project, and on, as it was.
+		await page.goForward();
+		await page.goForward();
+		await expect(page).toHaveURL(/#\/projects\//);
+		await expect(rail(page)).toBeVisible();
+		expect(app.errors).toEqual([]);
+	});
+
 	test("the rail: topics with their unread and state, the team in words, works, the Archive", async ({
 		app,
 		backend,
