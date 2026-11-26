@@ -6,10 +6,10 @@
 // A new listener gets one first signal: `open` (`initial` when the socket was
 // already up), or `down` during an outage, or — while the first connection is
 // on its way — nothing until its hello, for up to FIRST_LOAD_WAIT_MS since the
-// connection started. That
-// signal is the listener's first load: a load made before the hello could miss
-// what happens until it. Past the wait it gets `slow` and loads over REST at
-// once; the hello that follows is an `open` like any other and reads again.
+// connection started. That signal is the listener's first load: a load made
+// before the hello could miss what happens until it. Past the wait it gets
+// `slow` and loads over REST at once; the hello that follows is an `open` like
+// any other and reads again.
 
 import type { AcpActivity, AcpConversation, AcpMessage, AcpQuestion } from "./api.js";
 import { openAcpSocket } from "./api.js";
