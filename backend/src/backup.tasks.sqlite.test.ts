@@ -83,6 +83,9 @@ describe("backup → restore of tasks (v29)", () => {
 	it("TABLES keeps the order the v29 triggers rely on", async () => {
 		const { TABLES } = await import("./backup.js");
 		const at = (n: string) => TABLES.findIndex((t) => t.name === n);
+		// A missing table is -1, which would pass every "before" below.
+		for (const n of ["agent_messages", "task_events", "tasks", "task_links"])
+			expect(at(n), n).toBeGreaterThanOrEqual(0);
 		// Messages before tasks: replaying a request fires the counting trigger,
 		// and the tasks restored after it land with the backup's own counters.
 		expect(at("agent_messages")).toBeLessThan(at("tasks"));
