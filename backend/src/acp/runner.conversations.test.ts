@@ -96,12 +96,17 @@ function run(sql: string, params: unknown[]) {
 const stateOf = (name: string) => path.join(tmp, name, "state");
 
 /** One agent's slot-1 runner, as `ensureRunner` launches it (without the restart loop). */
-function startRunner(name: string) {
+function startRunner(name: string, slot = 1, home = path.join(tmp, name, "home")) {
 	const ws = path.join(tmp, name, "workspace");
-	const p = spawn(process.execPath, ["--no-warnings", path.join(RUNTIME, "runner.mjs")], {
+	const argv = [
+		"--no-warnings",
+		path.join(RUNTIME, "runner.mjs"),
+		...(slot === 1 ? [] : [String(slot)]),
+	];
+	const p = spawn(process.execPath, argv, {
 		env: {
 			...process.env,
-			HOME: path.join(tmp, name, "home"),
+			HOME: home,
 			ST_URL: url,
 			ST_TOKEN: tokens[name],
 			ST_AGENT: name,
@@ -115,7 +120,7 @@ function startRunner(name: string) {
 	const keep = (b: Buffer) => logs.set(name, (logs.get(name) ?? "") + b.toString());
 	p.stdout?.on("data", keep);
 	p.stderr?.on("data", keep);
-	runners.set(name, p);
+	runners.set(slot === 1 ? name : `${name}#${slot}`, p);
 	return p;
 }
 
@@ -421,6 +426,20 @@ describe("runner: shared skills and the protocol of a resumed session (4A)", () 
 		expect(readFileSync(path.join(skills, "propia", "SKILL.md"), "utf8")).toBe("mía\n");
 		expect(existsSync(path.join(skills, "retirada"))).toBe(false);
 	});
+
+	it("a slot ≥ 2 installs and reports nothing (the slots share HOME and start together)", async () => {
+		const before = (await rcAgent()).skills;
+		const home = path.join(tmp, "rc-slot2-home");
+		const p = startRunner("rc", 2, home);
+		try {
+			await until("slot 2 started", () => (logs.get("rc") ?? "").includes("starting slot 2"));
+			await new Promise((ok) => setTimeout(ok, 1_000));
+			expect(existsSync(path.join(home, ".claude", "skills"))).toBe(false);
+			expect((await rcAgent()).skills).toEqual(before);
+		} finally {
+			p.kill("SIGKILL");
+		}
+	}, 30_000);
 
 	it("a resumed session whose file names another protocol gets the current one once", async () => {
 		const sessionFile = path.join(stateOf("rc"), "conv", `${A}.json`);

@@ -131,8 +131,8 @@ const PROTOCOL_HASH = createHash("sha256").update(PROTOCOL).digest("hex").slice(
 
 // ── Shared skills ─────────────────────────────────────────────────────────
 // The skills packaged with this runner (<runner dir>/skills/<name>/, copied by
-// the backend) are installed into ~/.claude/skills/<name>/ every time the
-// runner (and so the adapter) starts. Only those: a marker file says which
+// the backend) are installed into ~/.claude/skills/<name>/ every time slot 1's
+// runner (and so its adapter) starts. Only those: a marker file says which
 // directories are ours, so another skill — even one with the same name — is
 // never overwritten, and one of ours that left the package is removed. Nothing
 // else under ~/.claude (CLAUDE.md, settings, credentials) is touched.
@@ -146,15 +146,20 @@ const SKILL_MARK = ".st-managed";
 function installSkills() {
 	const hash = createHash("sha256");
 	const names = existsSync(SKILLS_SRC) ? readdirSync(SKILLS_SRC).filter((n) => /^[a-z0-9][a-z0-9-]*$/.test(n)).sort() : [];
+	// The hash: every file of the package by its relative path `<name>/<file>`,
+	// in byte order of the whole path (`a-b/…` before `a/…`), path NUL content NUL.
+	const paths = names
+		.flatMap((name) =>
+			readdirSync(`${SKILLS_SRC}${name}`, { recursive: true, withFileTypes: true })
+				.filter((d) => d.isFile())
+				.map((d) => `${d.parentPath}/${d.name}`.slice(SKILLS_SRC.length)),
+		)
+		.sort((x, y) => Buffer.compare(Buffer.from(x), Buffer.from(y)));
+	for (const f of paths) hash.update(`${f}\0`).update(readFileSync(`${SKILLS_SRC}${f}`)).update("\0");
 	const skipped = [];
 	mkdirSync(SKILLS_DEST, { recursive: true });
 	for (const name of names) {
 		const src = `${SKILLS_SRC}${name}`;
-		const files = readdirSync(src, { recursive: true, withFileTypes: true })
-			.filter((d) => d.isFile())
-			.map((d) => `${d.parentPath}/${d.name}`.slice(src.length + 1))
-			.sort();
-		for (const f of files) hash.update(`${name}/${f}\0`).update(readFileSync(`${src}/${f}`)).update("\0");
 		const dest = `${SKILLS_DEST}/${name}`;
 		if (existsSync(dest) && !existsSync(`${dest}/${SKILL_MARK}`)) {
 			skipped.push(name);
@@ -176,11 +181,17 @@ function installSkills() {
 		error: skipped.length ? `ya existe una skill propia con ese nombre (no se tocó): ${skipped.join(", ")}` : null,
 	};
 }
-let skills;
-try {
-	skills = installSkills();
-} catch (err) {
-	skills = { hash: null, names: [], error: String(err.message).slice(0, 300) };
+// Only slot 1 installs (and reports): every slot of an agent shares this HOME
+// and they start together, and concurrent installs remove each other's
+// directories. A slot ≥ 2 never needs its own copy — Claude Code reads the
+// skills from disk.
+let skills = null;
+if (SLOT === 1) {
+	try {
+		skills = installSkills();
+	} catch (err) {
+		skills = { hash: null, names: [], error: String(err.message).slice(0, 300) };
+	}
 }
 
 const log = (...a) => console.log(new Date().toISOString(), `[${AGENT}${SLOT === 1 ? "" : `#${SLOT}`}]`, ...a);
@@ -833,8 +844,10 @@ async function settleInterrupted(msg) {
 async function main() {
 	log(`starting slot ${SLOT}; adapter ${env.ACP_AGENT_CMD}, cwd ${CWD}, model ${env.ANTHROPIC_MODEL ?? "default"}`);
 	mkdirSync(CWD, { recursive: true });
-	log(`skills ${skills.hash ?? "-"}: ${skills.names.join(", ") || "none"}${skills.error ? ` (${skills.error})` : ""}`);
-	await api("POST", "/runner/skills", skills);
+	if (skills) {
+		log(`skills ${skills.hash ?? "-"}: ${skills.names.join(", ") || "none"}${skills.error ? ` (${skills.error})` : ""}`);
+		await api("POST", "/runner/skills", skills);
+	}
 	// No session is opened at start (it would only be closed by the first
 	// message of another conversation): one is opened for a message this slot
 	// claims, or for the report about an interrupted one.

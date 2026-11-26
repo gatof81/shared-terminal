@@ -54,13 +54,16 @@ bind-mounted **read-only** at `/opt/st-acp` only into agent sessions:
 ### 2a. Shared skills and the protocol (4A)
 
 - `acp-runtime/skills/<name>/` (today: `coordinar`, the coordination procedure) is copied to
-  `st/skills/` before the runner. Every time a runner starts (so every adapter start) it installs
+  `st/skills/` before the runner. Every time slot 1's runner starts (so every adapter start; the
+  slots share `HOME`, so only slot 1 installs and reports) it installs
   exactly those into `~/.claude/skills/<name>/` (= `workspace/.st/claude-state/skills`) with a
   `.st-managed` marker: a directory without the marker is the agent's own and is never touched (even
   with the same name — reported as `error`), one with the marker that left the package is removed.
   `CLAUDE.md`, settings and credentials are not touched; the role stays in the agent's private
   `~/.claude/CLAUDE.md`.
-- The runner reports `{hash, names, error}` (`POST /runner/skills`, memory only); `GET /agents` shows
+- The runner reports `{hash, names, error}` (`POST /runner/skills`, memory only; `hash` = the first 12
+  hex of the sha256 over every package file, by its path `<name>/<file>` in byte order of the whole
+  path, as `path NUL content NUL`); `GET /agents` shows
   `skills: {hash, names, error, at} | null` and `st agents` prints it.
 - What Claude Code does (verified with claude-agent-acp 0.108.0 / Claude Code 2.1.326, 2026-11-26):
   a **new** session lists the installed skills; a skill's body is read from disk at **every use**, so a
