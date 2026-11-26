@@ -87,6 +87,6 @@ test.describe("auth and load races", () => {
 		expect(page.url(), "the deep link was cleared although the session may well exist").toContain(
 			hash,
 		);
-		await expect(app.toast(/Session not found/)).toHaveCount(0);
+		await expect(app.toast(/No se encontró la sesión/)).toHaveCount(0);
 	});
 });

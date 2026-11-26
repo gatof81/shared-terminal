@@ -55,7 +55,7 @@ export function effortState(a: {
 
 /** An effort level as people read it: `default` → "Default", `extra_high` → "Extra High". */
 export function effortLabel(level: string | null | undefined): string {
-	if (!level || level === "default") return "Default";
+	if (!level || level === "default") return "Por defecto";
 	return level
 		.split(/[_-]+/)
 		.filter(Boolean)

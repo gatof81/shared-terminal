@@ -140,8 +140,8 @@ test.describe("new agent form", () => {
 		await page.goto(`/#/sessions/${SESSION_IDS.running}`);
 		await app.openSidebar();
 		await page.click("#new-session-btn");
-		await expect(page.locator("#new-session-modal-title")).toHaveText("New session");
-		await expect(page.locator("#new-session-submit")).toHaveText("Create session");
+		await expect(page.locator("#new-session-modal-title")).toHaveText("Sesión nueva");
+		await expect(page.locator("#new-session-submit")).toHaveText("Crear sesión");
 		const session = page.locator("#new-session-input");
 		await expect(session).toBeFocused();
 		const agent = page.locator("#new-session-acp-agent");
@@ -150,7 +150,9 @@ test.describe("new agent form", () => {
 		expect((await session.boundingBox())!.y).toBeLessThan((await agent.boundingBox())!.y);
 		// Empty name: said next to the field, nothing sent.
 		await page.click("#new-session-submit");
-		await expect(page.locator("#new-session-input-error")).toHaveText("Enter a session name.");
+		await expect(page.locator("#new-session-input-error")).toHaveText(
+			"Escribí un nombre para la sesión.",
+		);
 		await expect(session).toHaveAttribute("aria-invalid", "true");
 		await expect(session).toBeFocused();
 		// An optional agent name is still checked when written.
@@ -164,7 +166,7 @@ test.describe("new agent form", () => {
 		await page.click("#new-session-submit");
 		await expect.poll(() => posts.length).toBe(1);
 		expect(posts[0]).toEqual({ name: "plain" });
-		await expect(app.toast('Session "plain" created')).toBeVisible();
+		await expect(app.toast("Sesión «plain» creada")).toBeVisible();
 	});
 
 	test("a name already taken is said next to the field; what was written stays", async ({
@@ -198,16 +200,16 @@ test.describe("new agent form", () => {
 			if (close === "Escape") await page.keyboard.press("Escape");
 			else if (close === "cancel")
 				await page
-					.locator("#new-session-modal button[data-close-modal]", { hasText: "Cancel" })
+					.locator("#new-session-modal button[data-close-modal]", { hasText: "Cancelar" })
 					.click();
 			else await page.locator("#new-session-modal .modal-close").click();
 			await expect(page.locator("#new-session-modal-title")).toBeHidden();
 			await expect(group, `after ${close}`).toBeFocused();
 		}
-		// The sidebar's dialog keeps its English label.
+		// The sidebar's dialog is the ordinary one again.
 		await page.goto(`/#/sessions/${SESSION_IDS.running}`);
 		await app.openSidebar();
 		await page.click("#new-session-btn");
-		await expect(page.locator("#new-session-input-label")).toHaveText("Session name");
+		await expect(page.locator("#new-session-input-label")).toHaveText("Nombre de la sesión");
 	});
 });

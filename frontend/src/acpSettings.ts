@@ -112,7 +112,7 @@ function paintMenuFlag(): void {
 	let mark = btn.querySelector<HTMLElement>(".bar-menu-flag");
 	if (!why) {
 		mark?.remove();
-		btn.setAttribute("aria-label", "Session actions");
+		btn.setAttribute("aria-label", "Acciones de la sesión");
 		return;
 	}
 	if (!mark) {
@@ -121,7 +121,7 @@ function paintMenuFlag(): void {
 		btn.append(mark);
 	}
 	mark.textContent = why.startsWith("cambio") ? "…" : "!";
-	btn.setAttribute("aria-label", `Session actions (${why})`);
+	btn.setAttribute("aria-label", `Acciones de la sesión (${why})`);
 }
 
 // ── The dialog ──────────────────────────────────────────────────────────────
