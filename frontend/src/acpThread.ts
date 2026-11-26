@@ -618,6 +618,7 @@ export class AcpThread {
 			this.flushSeen();
 			this.gen++;
 			this.closePicker(false);
+			this.foldNotes();
 			if (this.source) this.saveDraft(this.source, this.input.value);
 			this.source = source;
 			this.input.value = this.drafts.get(sourceKey(source)) ?? "";
@@ -1954,11 +1955,9 @@ export class AcpThread {
 		this.toSum.addEventListener("pointerdown", (e) => {
 			if (document.activeElement === this.input) e.preventDefault();
 		});
-		this.toSum.addEventListener("click", () => {
-			const open = !this.toNotes.classList.contains("is-open");
-			this.toNotes.classList.toggle("is-open", open);
-			this.toSum.setAttribute("aria-expanded", String(open));
-		});
+		this.toSum.addEventListener("click", () =>
+			this.foldNotes(!this.toNotes.classList.contains("is-open")),
+		);
 		this.toNotes.append(this.toSum, this.toLines);
 		this.mentionList.hidden = true;
 		this.mentionList.id = `acp-mention-${++pickerSeq}`;
@@ -2059,6 +2058,14 @@ export class AcpThread {
 		const said = sum.join(" · ");
 		if (this.toSum.textContent !== said) this.toSum.textContent = said;
 		this.toNotes.hidden = lines.length === 0;
+		// Notes that come back (another recipient, another topic) start folded.
+		if (lines.length === 0) this.foldNotes();
+	}
+
+	/** Folds (or unfolds) the notes' one line on a touch screen. */
+	private foldNotes(open = false): void {
+		this.toNotes.classList.toggle("is-open", open);
+		this.toSum.setAttribute("aria-expanded", String(open));
 	}
 
 	private chipX(label: string, onClick: () => void): HTMLElement {
