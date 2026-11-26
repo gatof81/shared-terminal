@@ -355,8 +355,8 @@ describe("status states", () => {
 		);
 		api.fetchGitLog.mockRejectedValueOnce(new api.GitApiError("x", 409, "session-not-running"));
 		await openGit("s1", "stopped");
-		expect($("git-list").textContent).toContain("isn't running");
-		buttonNamed($("git-list"), "Start session")?.click();
+		expect($("git-list").textContent).toContain("no está en marcha");
+		buttonNamed($("git-list"), "Poner en marcha")?.click();
 		await flush();
 		// The same verb as the sidebar and the terminal's stopped state.
 		expect(core.runSessionAction).toHaveBeenCalledWith(

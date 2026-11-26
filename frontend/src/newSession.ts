@@ -125,9 +125,9 @@ let editingTemplateId: string | null = null;
 function setNewSessionModalMode(template: Template | null): void {
 	editingTemplateId = template ? template.id : null;
 	if (template) {
-		newSessionModalTitle.textContent = "Edit template";
-		newSessionInputLabel.textContent = "Template name";
-		newSessionSubmitBtn.textContent = "Save changes";
+		newSessionModalTitle.textContent = "Editar plantilla";
+		newSessionInputLabel.textContent = "Nombre de la plantilla";
+		newSessionSubmitBtn.textContent = "Guardar cambios";
 		// Hide the save-as-template-from-edit path entirely. Nesting
 		// "save as template" inside an edit form is a UX trap (does it
 		// fork the template? overwrite? open a second modal?) the
@@ -136,9 +136,9 @@ function setNewSessionModalMode(template: Template | null): void {
 		editTemplateDescriptionField.hidden = false;
 		editTemplateDescriptionInput.value = template.description ?? "";
 	} else {
-		newSessionModalTitle.textContent = "New session";
-		newSessionInputLabel.textContent = "Session name";
-		newSessionSubmitBtn.textContent = "Create session";
+		newSessionModalTitle.textContent = "Sesión nueva";
+		newSessionInputLabel.textContent = "Nombre de la sesión";
+		newSessionSubmitBtn.textContent = "Crear sesión";
 		saveTemplateBtn.hidden = false;
 		editTemplateDescriptionField.hidden = true;
 		editTemplateDescriptionInput.value = "";
@@ -207,7 +207,7 @@ function ensureAcpAgentField(): void {
 	acpModelLabel.hidden = true;
 	acpEffortSelect = document.createElement("select");
 	acpEffortSelect.id = "new-session-acp-effort";
-	acpEffortLabel = acpField("Effort", acpEffortSelect);
+	acpEffortLabel = acpField("Esfuerzo", acpEffortSelect);
 	acpEffortLabel.hidden = true;
 	fillAcpEffort();
 	acpModelSelect.addEventListener("change", fillAcpEffort);
@@ -253,7 +253,7 @@ function fillAcpEffort(): void {
 	const levels =
 		acpKnownAgents.find((a) => a.effortApplied && a.effortApplied.model === model)?.effortApplied
 			?.levels ?? [];
-	select.replaceChildren(new Option("Default", "default"));
+	select.replaceChildren(new Option(effortLabel("default"), "default"));
 	for (const v of levels) if (v !== "default") select.append(new Option(effortLabel(v), v));
 	select.value = [...select.options].some((o) => o.value === keep) ? keep : "default";
 }
@@ -354,11 +354,9 @@ function validateBasics(): boolean {
 		setFieldError(
 			newSessionInput,
 			sessionNameError,
-			agentMode
-				? "Escribí un nombre para la sesión."
-				: editingTemplateId !== null
-					? "Enter a template name."
-					: "Enter a session name.",
+			editingTemplateId !== null
+				? "Escribí un nombre para la plantilla."
+				: "Escribí un nombre para la sesión.",
 		);
 		bad.push(newSessionInput);
 	} else clearFieldError(newSessionInput, sessionNameError);
@@ -506,12 +504,12 @@ function startBootstrapLiveTail(session: SessionInfo, createdToast: string) {
 	panel.className = "bootstrap-tail";
 	panel.id = "bootstrap-error-panel"; // reused id so clearBootstrapError() removes either kind
 	const heading = document.createElement("strong");
-	heading.textContent = "Bootstrapping session…";
+	heading.textContent = "Bootstrap de la sesión en curso…";
 	panel.appendChild(heading);
 	const hint = document.createElement("p");
 	hint.className = "bootstrap-error-hint";
 	hint.textContent =
-		"Live output from session bootstrap (clone, dotfiles, agent seed, postCreate). The modal will close on success.";
+		"Salida en vivo del bootstrap de la sesión (clon, dotfiles, configuración del agente, postCreate). El diálogo se cierra cuando termina bien.";
 	panel.appendChild(hint);
 	const pre = document.createElement("pre");
 	pre.className = "bootstrap-error-output";
@@ -559,12 +557,12 @@ function startBootstrapLiveTail(session: SessionInfo, createdToast: string) {
 			// "postCreate hook failed" label this PR is fixing.
 			const stageLabel = stage ?? "bootstrap";
 			heading.textContent = error
-				? `Bootstrap stage '${stageLabel}' failed (${error})`
-				: `Bootstrap stage '${stageLabel}' failed (exit ${exitCode ?? "?"})`;
+				? `Falló la etapa «${stageLabel}» del bootstrap (${error})`
+				: `Falló la etapa «${stageLabel}» del bootstrap (código de salida ${exitCode ?? "?"})`;
 			hint.textContent =
 				stage === "postCreate"
-					? "The postCreate command exited non-zero, so the container was killed and the session marked failed. Captured output above — fix the command and create a new session."
-					: `The '${stageLabel}' bootstrap stage failed, so the container was killed and the session marked failed. Captured output above — fix the ${stageLabel} config and create a new session.`;
+					? "El comando postCreate terminó con un código distinto de cero, así que el contenedor se eliminó y la sesión quedó marcada como fallida. La salida capturada está arriba: corregí el comando y creá una sesión nueva."
+					: `Falló la etapa «${stageLabel}» del bootstrap, así que el contenedor se eliminó y la sesión quedó marcada como fallida. La salida capturada está arriba: corregí la configuración de ${stageLabel} y creá una sesión nueva.`;
 			void refreshSessions();
 			newSessionSubmitBtn.disabled = false;
 		},
@@ -633,12 +631,12 @@ async function openBootstrapLogModal(session: SessionInfo): Promise<void> {
 	const header = document.createElement("div");
 	header.className = "modal-header";
 	const h2 = document.createElement("h2");
-	h2.textContent = `Bootstrap log — ${session.name}`;
+	h2.textContent = `Registro del bootstrap — ${session.name}`;
 	header.appendChild(h2);
 	const closeBtn = document.createElement("button");
 	closeBtn.className = "modal-close";
 	closeBtn.type = "button";
-	closeBtn.setAttribute("aria-label", "Close");
+	closeBtn.setAttribute("aria-label", "Cerrar");
 	closeBtn.setAttribute("data-close-modal", "");
 	closeBtn.textContent = "×";
 	header.appendChild(closeBtn);
@@ -648,13 +646,13 @@ async function openBootstrapLogModal(session: SessionInfo): Promise<void> {
 	hint.className = "modal-hint";
 	hint.textContent =
 		session.status === "failed"
-			? "Captured output from the failed bootstrap (gitIdentity / clone / dotfiles / agentSeed / writeEnvFile / postCreate). Fix the cause and create a new session."
-			: "Captured output from the last bootstrap run.";
+			? "Salida capturada del bootstrap que falló (gitIdentity / clone / dotfiles / agentSeed / writeEnvFile / postCreate). Corregí la causa y creá una sesión nueva."
+			: "Salida capturada del último bootstrap.";
 	card.appendChild(hint);
 
 	const pre = document.createElement("pre");
 	pre.className = "bootstrap-error-output";
-	pre.textContent = "Loading…";
+	pre.textContent = "Cargando…";
 	card.appendChild(pre);
 
 	modal.appendChild(card);
@@ -678,7 +676,7 @@ async function openBootstrapLogModal(session: SessionInfo): Promise<void> {
 		const log = await fetchBootstrapLog(session.sessionId);
 		if (log === null || log === "") {
 			pre.textContent =
-				"(no captured output — session may pre-date the bootstrap-log feature, or no bootstrap ever ran)";
+				"(sin salida capturada: la sesión puede ser anterior al registro del bootstrap, o nunca corrió un bootstrap)";
 		} else {
 			pre.textContent = log;
 			// Auto-scroll to the bottom so the user sees the tail —
@@ -687,7 +685,7 @@ async function openBootstrapLogModal(session: SessionInfo): Promise<void> {
 			pre.scrollTop = pre.scrollHeight;
 		}
 	} catch (err) {
-		pre.textContent = `Failed to load log: ${(err as Error).message}`;
+		pre.textContent = `No se pudo cargar el registro: ${(err as Error).message}`;
 	}
 }
 
@@ -966,7 +964,7 @@ function validateAgentSeedSettings(): boolean {
 		agentSeedSettingsError.textContent = "";
 		return true;
 	} catch (err) {
-		agentSeedSettingsError.textContent = `Invalid JSON: ${(err as Error).message}`;
+		agentSeedSettingsError.textContent = `JSON inválido: ${(err as Error).message}`;
 		return false;
 	}
 }
@@ -999,9 +997,9 @@ function applyResourceCapsToForm(): void {
 			? `${caps.memMaxMiB / 1024} GiB`
 			: `${caps.memMaxMiB} MiB`;
 	resourcesBoundsHint.textContent =
-		`Per-session limits. Empty fields fall back to the deployment defaults ` +
-		`(2 cores / 2 GiB / no auto-stop). Bounds: CPU 0.25–${caps.cpuMaxCores} cores, ` +
-		`memory 256 MiB–${memMaxStr}, idle TTL 1 minute–24 hours.`;
+		`Límites por sesión. Los campos vacíos usan los valores por defecto de la instalación ` +
+		`(2 núcleos / 2 GiB / sin detención automática). Rangos: CPU 0.25–${caps.cpuMaxCores} núcleos, ` +
+		`memoria 256 MiB–${memMaxStr}, inactividad 1 minuto–24 horas.`;
 }
 
 // #202 — the caller's own quota headroom, shown under the bounds hint.
@@ -1015,15 +1013,15 @@ async function refreshQuotaHeadroom(): Promise<void> {
 	quotaHeadroomHint.textContent = "";
 	try {
 		const q = await fetchMyQuotas();
-		const parts = [`Your account: ${q.usage.activeSessions}/${q.effective.maxSessions} sessions`];
+		const parts = [`Tu cuenta: ${q.usage.activeSessions}/${q.effective.maxSessions} sesiones`];
 		if (q.effective.maxTotalCpu !== null) {
 			parts.push(
-				`${q.usage.cpuNanos / 1e9}/${q.effective.maxTotalCpu / 1e9} cores of CPU budget in use`,
+				`${q.usage.cpuNanos / 1e9}/${q.effective.maxTotalCpu / 1e9} núcleos del presupuesto de CPU en uso`,
 			);
 		}
 		if (q.effective.maxTotalMem !== null) {
 			parts.push(
-				`${Math.round(q.usage.memBytes / 2 ** 20)}/${Math.round(q.effective.maxTotalMem / 2 ** 20)} MiB of memory budget in use`,
+				`${Math.round(q.usage.memBytes / 2 ** 20)}/${Math.round(q.effective.maxTotalMem / 2 ** 20)} MiB del presupuesto de memoria en uso`,
 			);
 		}
 		quotaHeadroomHint.textContent = `${parts.join(" · ")}.`;
@@ -1231,7 +1229,7 @@ function renderEnvRows() {
 		// purely UX (shoulder-surfing defence).
 		valueInput.type = row.type === "secret" ? "password" : "text";
 		valueInput.value = row.value;
-		valueInput.placeholder = row.type === "secret" ? "••••••••" : "value";
+		valueInput.placeholder = row.type === "secret" ? "••••••••" : "valor";
 		valueInput.spellcheck = false;
 		valueInput.autocomplete = "off";
 		valueInput.className = "env-input env-input-value";
@@ -1243,11 +1241,11 @@ function renderEnvRows() {
 		const typeToggle = document.createElement("button");
 		typeToggle.type = "button";
 		typeToggle.className = `env-type-toggle env-type-${row.type}`;
-		typeToggle.textContent = row.type === "secret" ? "secret" : "plain";
+		typeToggle.textContent = row.type === "secret" ? "secreta" : "plana";
 		typeToggle.title =
 			row.type === "secret"
-				? "Click to mark this entry plain (value visible)"
-				: "Click to mark this entry secret (value masked + encrypted server-side)";
+				? "Marcarla plana (valor visible)"
+				: "Marcarla secreta (valor oculto y cifrado en el servidor)";
 		typeToggle.dataset.action = "toggle-type";
 		typeCell.appendChild(typeToggle);
 		tr.appendChild(typeCell);
@@ -1257,8 +1255,8 @@ function renderEnvRows() {
 		removeBtn.type = "button";
 		removeBtn.className = "env-row-remove";
 		removeBtn.textContent = "✕";
-		removeBtn.title = "Remove this entry";
-		removeBtn.setAttribute("aria-label", `Remove ${row.name || "entry"}`);
+		removeBtn.title = "Quitar esta variable";
+		removeBtn.setAttribute("aria-label", `Quitar ${row.name || "la variable"}`);
 		removeBtn.dataset.action = "remove";
 		removeCell.appendChild(removeBtn);
 		tr.appendChild(removeCell);
@@ -1359,14 +1357,16 @@ envPasteImport.addEventListener("click", () => {
 	}
 	const skippedSummary = result.skipped
 		.slice(0, 3) // first 3 reasons; "+N more" if longer
-		.map((s) => `line ${s.line}: ${s.reason}`)
+		.map((s) => `línea ${s.line}: ${s.reason}`)
 		.join("; ");
 	const moreCount = result.skipped.length - 3;
-	const more = moreCount > 0 ? ` (+${moreCount} more)` : "";
+	const more = moreCount > 0 ? ` (+${moreCount} más)` : "";
 	envPasteStatus.textContent =
 		result.skipped.length === 0
-			? `Imported ${result.parsed.length} entr${result.parsed.length === 1 ? "y" : "ies"}.`
-			: `Imported ${result.parsed.length}, skipped ${result.skipped.length} — ${skippedSummary}${more}`;
+			? result.parsed.length === 1
+				? "Se importó 1 variable."
+				: `Se importaron ${result.parsed.length} variables.`
+			: `Importadas: ${result.parsed.length}; salteadas: ${result.skipped.length} — ${skippedSummary}${more}`;
 	envPasteTextarea.value = "";
 	envPastePanel.hidden = true;
 	envPasteToggle.setAttribute("aria-expanded", "false");
@@ -1419,7 +1419,7 @@ newSessionForm.addEventListener("submit", async (e) => {
 				description: description.length > 0 ? description : null,
 				config,
 			});
-			showToast(`Template "${name}" saved`);
+			showToast(`Plantilla «${name}» guardada`);
 			closeNewSessionModal();
 			// Re-open the templates modal so the user lands back on the
 			// list (with the freshly-saved row at the top via D1's
@@ -1435,14 +1435,14 @@ newSessionForm.addEventListener("submit", async (e) => {
 	}
 
 	try {
-		showToast(agentMode ? "Creando agente…" : "Creating session…");
+		showToast(agentMode ? "Creando agente…" : "Creando la sesión…");
 		const config = buildSessionConfigPayload();
 		const acpAgent = await acpAgentForCreate();
 		const session = await createSession(name, undefined, config, acpAgent);
 		// The sidebar files an agent session under its project from this list.
 		if (acpAgent) await acpListAgents().then(setAcpAgents, () => {});
 		addCreatedSession(session);
-		const created = acpAgent ? `Agente @${acpAgent.name} creado` : `Session "${name}" created`;
+		const created = acpAgent ? `Agente @${acpAgent.name} creado` : `Sesión «${name}» creada`;
 		if (session.bootstrapping) {
 			// PR 185b2b: postCreate is running asynchronously on the
 			// server. Switch the modal into live-tail mode and wait
@@ -1965,7 +1965,7 @@ function renderPortRows() {
 		if (row.public) {
 			const chip = document.createElement("span");
 			chip.className = "ports-public-warning";
-			chip.textContent = "anyone with the URL can reach this port";
+			chip.textContent = "abierto a cualquiera con la URL";
 			publicWrap.appendChild(chip);
 		}
 		publicCell.appendChild(publicWrap);
@@ -1976,8 +1976,8 @@ function renderPortRows() {
 		removeBtn.type = "button";
 		removeBtn.className = "env-row-remove";
 		removeBtn.textContent = "✕";
-		removeBtn.title = "Remove this port";
-		removeBtn.setAttribute("aria-label", `Remove port ${row.container || "(empty)"}`);
+		removeBtn.title = "Quitar este puerto";
+		removeBtn.setAttribute("aria-label", `Quitar el puerto ${row.container || "(vacío)"}`);
 		removeBtn.dataset.action = "remove";
 		removeCell.appendChild(removeBtn);
 		tr.appendChild(removeCell);

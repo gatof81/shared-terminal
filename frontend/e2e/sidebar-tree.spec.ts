@@ -126,17 +126,17 @@ test.describe("sidebar tree", () => {
 		await expect(app.sessionRow("my-project")).toBeVisible();
 		await expect(app.sessionRow("old-poc")).toHaveCount(0);
 		const more = page.locator(".sgroup-sessions .ssection-menu");
-		await expect(more).toHaveAccessibleName("Sessions options");
+		await expect(more).toHaveAccessibleName("Opciones de Sesiones");
 		await more.click();
-		await page.getByRole("menuitem", { name: /^Show terminated/ }).click();
+		await page.getByRole("menuitem", { name: /^Mostrar terminadas/ }).click();
 		await expect(app.sessionRow("old-poc")).toBeVisible();
 		await expect(page.locator("#show-terminated-toggle")).toBeChecked();
 		// The same ⋯ says the other way round now.
 		await app.openSidebar();
 		await more.click();
-		await expect(page.getByRole("menuitem", { name: /^Hide terminated/ })).toBeVisible();
+		await expect(page.getByRole("menuitem", { name: /^Ocultar terminadas/ })).toBeVisible();
 		const reads = backend.requests.filter((r) => r.path.startsWith("/sessions")).length;
-		await page.getByRole("menuitem", { name: /^Refresh/ }).click();
+		await page.getByRole("menuitem", { name: /^Actualizar/ }).click();
 		await expect
 			.poll(() => backend.requests.filter((r) => r.path.startsWith("/sessions")).length)
 			.toBeGreaterThan(reads);

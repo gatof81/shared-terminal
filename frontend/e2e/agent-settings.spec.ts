@@ -94,7 +94,7 @@ test.describe("agent settings", () => {
 		};
 		await app.login("alice", ARQ);
 		const more = page.locator("#session-menu-btn");
-		await expect(more).toHaveAccessibleName("Session actions (el modelo no se aplicó)");
+		await expect(more).toHaveAccessibleName("Acciones de la sesión (el modelo no se aplicó)");
 		await expect(more.locator(".bar-menu-flag")).toBeVisible();
 		await app.openAgentSettings();
 		await expect(page.locator(`${DIALOG} .acp-model-state`)).toContainText("modelo no disponible");
@@ -110,7 +110,7 @@ test.describe("agent settings", () => {
 		arq.loginMethods = [{ id: "claude-ai", name: "Claude.ai", description: "Cuenta de Claude.ai" }];
 		await app.login("alice", ARQ);
 		await expect(page.locator("#session-menu-btn")).toHaveAccessibleName(
-			"Session actions (falta conectar una cuenta)",
+			"Acciones de la sesión (falta conectar una cuenta)",
 		);
 		await app.openAgentSettings();
 		await page.locator(DIALOG).getByRole("button", { name: "Conectar cuenta · Claude.ai" }).click();
@@ -129,7 +129,7 @@ test.describe("agent settings", () => {
 	}) => {
 		await app.login("alice", SOLO);
 		await expect(page.locator("#session-menu-btn")).toHaveAccessibleName(
-			"Session actions (Sin proyecto · Asignale uno para conversar)",
+			"Acciones de la sesión (Sin proyecto · Asignale uno para conversar)",
 		);
 		await app.openAgentSettings();
 		const dialog = page.locator(DIALOG);
@@ -151,7 +151,7 @@ test.describe("agent settings", () => {
 		await dialog.getByRole("button", { name: "Guardar" }).click();
 		await expect(dialog).not.toContainText("Sin proyecto no tiene conversaciones");
 		await app.escape();
-		await expect(page.locator("#session-menu-btn")).toHaveAccessibleName("Session actions");
+		await expect(page.locator("#session-menu-btn")).toHaveAccessibleName("Acciones de la sesión");
 	});
 
 	test("from the project: the agent's menu has «Ajustes del agente»", async ({ app, page }) => {
@@ -228,9 +228,9 @@ test.describe("a new agent's model and effort", () => {
 		await page.fill("#new-session-input", "arquitectura");
 		await page.fill("#new-session-acp-agent", "architect");
 		const effort = page.locator("#new-session-acp-effort");
-		await expect.poll(() => effort.locator("option").allTextContents()).toEqual(["Default"]);
+		await expect.poll(() => effort.locator("option").allTextContents()).toEqual(["Por defecto"]);
 		await page.locator("#new-session-acp-model").selectOption("claude-opus-5-5");
-		expect(await effort.locator("option").allTextContents()).toEqual(["Default", "Low", "Max"]);
+		expect(await effort.locator("option").allTextContents()).toEqual(["Por defecto", "Low", "Max"]);
 		await page.click("#new-session-submit");
 		await expect.poll(() => created.length).toBe(1);
 		expect(created[0]?.acpAgent).not.toHaveProperty("effort");

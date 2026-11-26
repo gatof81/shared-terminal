@@ -320,12 +320,14 @@ function showAuth() {
 export function setServerReachable(ok: boolean): void {
 	for (const elx of [userDisplay, sidebarUserDisplay]) {
 		elx.classList.toggle("unreachable", !ok);
-		elx.title = ok ? "Connected to the server" : "Can't refresh from the server — retrying";
+		elx.title = ok
+			? "Conectado al servidor"
+			: "No se puede actualizar desde el servidor; reintentando";
 	}
 	userDisplay.setAttribute("role", "img");
 	userDisplay.setAttribute(
 		"aria-label",
-		ok ? "Connected to the server" : "Can't refresh from the server — retrying",
+		ok ? "Conectado al servidor" : "No se puede actualizar desde el servidor; reintentando",
 	);
 }
 
@@ -387,14 +389,20 @@ function notificationsItem(): MenuItem | null {
 	if (s === "unsupported") return null;
 	const [label, hint] =
 		s === "on"
-			? ["Disable notifications", "Disable browser notifications for this device"]
+			? [
+					"Desactivar las notificaciones",
+					"Dejar de recibir notificaciones del navegador en este dispositivo",
+				]
 			: s === "off"
-				? ["Enable notifications", "Get notified when a session needs attention"]
+				? ["Activar las notificaciones", "Recibir un aviso cuando una sesión necesita atención"]
 				: s === "blocked"
-					? ["Notifications blocked", "Notifications are blocked in your browser settings"]
+					? [
+							"Notificaciones bloqueadas",
+							"Las notificaciones están bloqueadas en la configuración del navegador",
+						]
 					: [
-							"Install to enable notifications",
-							"Add this app to your home screen to enable notifications",
+							"Instalá la app para activar las notificaciones",
+							"Agregá esta app a la pantalla de inicio para activar las notificaciones",
 						];
 	const enabled = s !== "blocked" && !pushToggleBusy;
 	return { id: "notifications", label, hint, enabled, reason: enabled ? undefined : hint };
@@ -420,16 +428,16 @@ async function onNotificationsClick() {
 		// iOS-not-installed is a hint, not an action: clicking can't install
 		// the PWA, so surface the guidance and bail before touching the push API.
 		if (current === "ios-needs-install") {
-			showToast("Add this app to your home screen to enable notifications");
+			showToast("Agregá esta app a la pantalla de inicio para activar las notificaciones");
 			return;
 		}
 		renderNotificationsToggle(current);
 		if (current === "on") {
 			await disablePush();
-			showToast("Notifications disabled");
+			showToast("Notificaciones desactivadas");
 		} else {
 			await enablePush();
-			showToast("Notifications enabled");
+			showToast("Notificaciones activadas");
 		}
 	} catch (err) {
 		showToast((err as Error).message, true);
@@ -645,12 +653,14 @@ function handleLogout(toastMessage?: string): void {
 function openUserMenu(opener: HTMLElement): void {
 	const notifications = notificationsItem();
 	const items: MenuItem[] = [
-		{ id: "templates", label: "Templates", hint: "Session templates" },
-		...(isAdmin() ? [{ id: "invites", label: "Invites", hint: "Manage invite codes" }] : []),
-		...(isLead() ? [{ id: "my-groups", label: "My groups", hint: "Groups you lead" }] : []),
-		...(isAdmin() ? [{ id: "admin", label: "Admin", hint: "Admin dashboard" }] : []),
+		{ id: "templates", label: "Plantillas", hint: "Plantillas de sesión" },
+		...(isAdmin()
+			? [{ id: "invites", label: "Invitaciones", hint: "Administrar los códigos de invitación" }]
+			: []),
+		...(isLead() ? [{ id: "my-groups", label: "Mis grupos", hint: "Los grupos que liderás" }] : []),
+		...(isAdmin() ? [{ id: "admin", label: "Admin", hint: "Panel de administración" }] : []),
 		...(notifications ? [notifications] : []),
-		{ id: "logout", label: "Logout", kind: "danger" },
+		{ id: "logout", label: "Salir", kind: "danger" },
 	];
 	openActionMenu({
 		title: "Cuenta",

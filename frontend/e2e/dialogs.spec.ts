@@ -83,7 +83,7 @@ test.describe("dialogs", () => {
 		await page.locator('[role="menuitem"][data-action="delete"]').click();
 		const dialog = page.locator('[role="alertdialog"]');
 		await expect(dialog).toBeVisible();
-		await expect(dialog).toContainText("Delete permanently");
+		await expect(dialog).toContainText("Eliminar definitivamente");
 		const confirm = dialog.locator(".modal-danger-action");
 		await expect(confirm).toBeDisabled();
 		await dialog.locator("input").fill("old-po");
@@ -107,7 +107,7 @@ test.describe("dialogs", () => {
 		await app.sessionRow("my-project").locator(".session-menu-btn").click();
 		await page.locator('[role="menuitem"][data-action="terminate"]').click();
 		const dialog = page.locator('[role="alertdialog"]');
-		await expect(dialog).toContainText("Terminate");
+		await expect(dialog).toContainText("Terminar la sesión");
 		await expect(dialog.locator("input")).toHaveCount(0);
 		await expect(dialog.locator(".dialog-cancel")).toBeFocused();
 		await dialog.locator(".dialog-cancel").click();

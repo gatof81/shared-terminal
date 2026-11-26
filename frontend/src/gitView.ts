@@ -682,11 +682,11 @@ function errorBox(err: { message: string; httpStatus: number; code: string | nul
 		const s = sessions.find((x) => x.sessionId === stateSessionId);
 		const actions: HTMLElement[] = [];
 		if (s?.status === "stopped") {
-			actions.push(button("Start session", "files-btn primary", () => void startThisSession()));
+			actions.push(button("Poner en marcha", "files-btn primary", () => void startThisSession()));
 		}
 		return stateBox(
 			"info",
-			"This session isn't running. Git runs inside the session container, so start it to see changes.",
+			"Esta sesión no está en marcha. Git corre dentro del contenedor de la sesión: ponela en marcha para ver los cambios.",
 			...actions,
 		);
 	}

@@ -759,16 +759,17 @@ function renderPreview(): void {
 	}
 	const content = data.content;
 	const copyBtn = button(
-		"Copy",
+		"Copiar",
 		"files-btn",
 		() => {
 			void copyText(content, copyBtn).then((ok) => {
-				if (!ok) showToast("Copy failed — clipboard permission denied?", true);
-				else if (data.truncated) showToast("Copied the previewed part only (file is truncated)");
+				if (!ok) showToast("No se pudo copiar", true);
+				else if (data.truncated)
+					showToast("Se copió solo la parte mostrada (el archivo está truncado)");
 				else showCopySuccessToast();
 			});
 		},
-		"Copy file contents",
+		"Copiar el contenido del archivo",
 	);
 	actions.push(copyBtn, download);
 	previewEl.appendChild(previewHeader(name, meta, actions));
