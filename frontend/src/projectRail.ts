@@ -284,8 +284,8 @@ export function showRail(projectId: string, topic: string | null, archive = fals
 	if (!unwatch) unwatch = watchAcpAgents();
 	if (!agentsRead) takeAgents(acpAgentsList());
 	if (!unsubscribe) {
-		// The socket's first signal (open, or down) makes the first load: one
-		// per showing, and none that could miss what comes before its hello.
+		// The socket's first signal (open, down, or slow after ~1 s without a
+		// hello) makes the first load: one per showing when the socket is quick.
 		loadedSinceSub = false;
 		unsubscribe = subscribeAcp((ev) => onLive(ev));
 		// Everything else is polled only while the socket is down (a first
@@ -457,7 +457,8 @@ function onLive(ev: Parameters<Parameters<typeof subscribeAcp>[0]>[0]): void {
 			reloadAll(loadedSinceSub);
 			return;
 		case "down":
-			// Subscribed during an outage (or the first connection failed): its first load.
+		case "slow":
+			// Subscribed during an outage, the first connection failed or is slow: its first load.
 			if (!loadedSinceSub) reloadAll(false);
 			return;
 		case "message": {
