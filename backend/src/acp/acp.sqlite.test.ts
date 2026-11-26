@@ -3074,6 +3074,333 @@ describe("ACP tasks (v29)", () => {
 	});
 });
 
+describe("ACP tasks: inheritance, budgets, derived state (PR 3)", () => {
+	const P3 = "p-t3";
+	const SIDS: Record<string, string> = {
+		ta: "e3000000-0000-4000-8000-000000000001",
+		tb: "e3000000-0000-4000-8000-000000000002",
+		tc: "e3000000-0000-4000-8000-000000000003",
+	};
+	const taskRow = (id: number) =>
+		db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Record<
+			string,
+			number | string | null
+		>;
+	const claim = async (a: string) => {
+		const c = await call(as(a), "POST", "/runner/claim");
+		expect(c.status).toBe(200);
+		return c.body as MessageRowT;
+	};
+	const settle = (a: string, id: number, state = "done") =>
+		call(as(a), "POST", `/runner/messages/${id}/result`, { state, text: "ok" });
+	async function drain(names = Object.keys(SIDS)) {
+		for (let busy = true; busy; ) {
+			busy = false;
+			for (const a of names) {
+				for (
+					let c = await call(as(a), "POST", "/runner/claim");
+					c.status === 200;
+					c = await call(as(a), "POST", "/runner/claim")
+				) {
+					busy = true;
+					await settle(a, c.body.id);
+				}
+			}
+		}
+	}
+
+	beforeAll(async () => {
+		db.prepare(
+			"INSERT INTO projects (project_id, owner_user_id, name, client_request_id, request_hash) VALUES (?, ?, 'PR3', 'c-pt3', 'h')",
+		).run(P3, OWNER);
+		for (const [name, sid] of Object.entries(SIDS)) {
+			db.prepare(
+				"INSERT INTO sessions (session_id, user_id, name, container_name, status) VALUES (?, ?, ?, ?, 'running')",
+			).run(sid, OWNER, name, `st-${sid.slice(0, 12)}`);
+			const a = await acp.create(sid, OWNER, name, { projectId: P3 });
+			tokens[name] = acp.tokenFor(a.agent_id);
+		}
+	});
+
+	it("an agent's request inherits the task of the message it runs; the reply keeps it; each request spends the goal's budget; past it, 409 and one event", async () => {
+		const goal = (
+			await call(owner, "POST", "/tasks", {
+				projectId: P3,
+				title: "Rondas",
+				coordinator: "ta",
+				budgetLimit: 3,
+			})
+		).body;
+		expect(goal).toMatchObject({ budget: { limit: 3, used: 0 } });
+		const start = await call(owner, "POST", "/messages", {
+			to: "ta",
+			body: "empezá",
+			task: goal.id,
+		});
+		expect(start.body.task_id).toBe(goal.id);
+		let run = await claim("ta");
+		// Three rounds of consult and answer: each request in the goal, each reply too.
+		for (let round = 1; round <= 3; round++) {
+			const req = await call(as("ta"), "POST", "/messages", { to: "tb", body: `ronda ${round}` });
+			expect(req.status).toBe(201);
+			expect(req.body.task_id).toBe(goal.id);
+			await settle("ta", run.id);
+			const got = await claim("tb");
+			expect(got.id).toBe(req.body.id);
+			await settle("tb", got.id);
+			run = await claim("ta");
+			expect(run).toMatchObject({ kind: "reply", reply_to: req.body.id, task_id: goal.id });
+		}
+		expect(taskRow(goal.id)).toMatchObject({ budget_used: 3, requests_used: 3 });
+		// The loop is cut: nothing written, the refusal says which budget and the person decides.
+		const cut = await call(as("ta"), "POST", "/messages", { to: "tb", body: "ronda 4" });
+		expect(cut.status).toBe(409);
+		expect(cut.body).toMatchObject({ error: "goal-budget", goal: goal.id, limit: 3, used: 3 });
+		expect(
+			db
+				.prepare(
+					"SELECT id, from_id, to_id, task_id, state FROM agent_messages WHERE body = 'ronda 4' AND from_id = 'ta'",
+				)
+				.all(),
+		).toEqual([]);
+		await call(as("ta"), "POST", "/messages", { to: "tb", body: "ronda 4 otra vez" });
+		const shown = await call(owner, "GET", `/tasks/${goal.id}`);
+		expect(
+			shown.body.events.filter((e: { kind: string }) => e.kind === "budget-exhausted"),
+		).toEqual([
+			expect.objectContaining({
+				actor: "ta",
+				data: { budget: "goal", limit: 3, used: 3, task: goal.id },
+			}),
+		]);
+		expect(shown.body.task.budget).toEqual({ limit: 3, used: 3, exhausted: true });
+		// Only the person raises it.
+		expect((await call(as("ta"), "POST", `/tasks/${goal.id}/budget`, { add: 2 })).status).toBe(403);
+		const raised = await call(owner, "POST", `/tasks/${goal.id}/budget`, { add: 2 });
+		expect(raised.body).toMatchObject({ budget: { limit: 5, used: 3 }, version: goal.version });
+		expect((await call(owner, "GET", `/tasks/${goal.id}`)).body.events.at(-1)).toMatchObject({
+			kind: "budget",
+			actor: "owner",
+			data: { budgetLimit: [3, 5] },
+		});
+		expect(
+			(await call(as("ta"), "POST", "/messages", { to: "tb", body: "ronda 4, ya ampliado" }))
+				.status,
+		).toBe(201);
+		await settle("ta", run.id);
+		await drain();
+	});
+
+	it("a task's own budget cuts the back-and-forth on one task; the person raises it for that task", async () => {
+		const goal = (
+			await call(owner, "POST", "/tasks", { projectId: P3, title: "Grande", coordinator: "ta" })
+		).body;
+		const child = (
+			await call(as("ta"), "POST", "/tasks", { parentId: goal.id, title: "Chica", assignee: "tb" })
+		).body;
+		const cfg = acp.config as { taskBudget: number };
+		const before = cfg.taskBudget;
+		cfg.taskBudget = 2;
+		try {
+			await call(owner, "POST", "/messages", { to: "tb", body: "hacé la chica", task: child.id });
+			const run = await claim("tb");
+			for (const n of [1, 2])
+				expect(
+					(await call(as("tb"), "POST", "/messages", { to: "tc", body: `pregunta ${n}` })).body
+						.task_id,
+				).toBe(child.id);
+			const cut = await call(as("tb"), "POST", "/messages", { to: "tc", body: "pregunta 3" });
+			expect(cut.body).toMatchObject({
+				error: "task-budget",
+				task: child.id,
+				goal: goal.id,
+				limit: 2,
+				used: 2,
+			});
+			// `--task` naming another task is that task's budget, not this one's.
+			expect(
+				(await call(as("tb"), "POST", "/messages", { to: "tc", body: "otra", task: goal.id }))
+					.status,
+			).toBe(201);
+			expect(taskRow(goal.id)).toMatchObject({ requests_used: 1, budget_used: 3 });
+			const raised = await call(owner, "POST", `/tasks/${child.id}/budget`, { add: 1 });
+			expect(raised.body.taskBudget).toEqual({ limit: 3, used: 2, exhausted: false });
+			expect(
+				(await call(owner, "POST", `/tasks/${child.id}/budget`, { add: 1, scope: "goal" })).body
+					.error,
+			).toBe("not-a-root");
+			expect(
+				(await call(as("tb"), "POST", "/messages", { to: "tc", body: "pregunta 3" })).status,
+			).toBe(201);
+			await settle("tb", run.id);
+		} finally {
+			cfg.taskBudget = before;
+		}
+		await drain();
+	});
+
+	it("a recipient outside the task's project gets no task: its request spends nothing", async () => {
+		const goal = (
+			await call(owner, "POST", "/tasks", { projectId: P3, title: "Fuera", coordinator: "ta" })
+		).body;
+		await call(owner, "POST", "/messages", { to: "ta", body: "consultá a solo", task: goal.id });
+		const run = await claim("ta");
+		const away = await call(as("ta"), "POST", "/messages", { to: "solo", body: "hola" });
+		expect(away.status).toBe(201);
+		expect(away.body.task_id).toBeNull();
+		expect(taskRow(goal.id).budget_used).toBe(0);
+		await settle("ta", run.id);
+		await drain(["solo", ...Object.keys(SIDS)]);
+	});
+
+	it("the board's reading contract: activity[], contradiction, dependencies, budget on the root, the run after a reassignment, stale with the last event", async () => {
+		const goal = (
+			await call(owner, "POST", "/tasks", { projectId: P3, title: "Estado", coordinator: "ta" })
+		).body;
+		let t = (
+			await call(as("ta"), "POST", "/tasks", { parentId: goal.id, title: "Hacer", assignee: "tb" })
+		).body;
+		const kinds = (x: { activity: Array<{ kind: string }> }) => x.activity.map((a) => a.kind);
+		const read = async () => (await call(owner, "GET", `/tasks/${t.id}`)).body.task;
+		const m = await call(owner, "POST", "/messages", { to: "tb", body: "hacelo", task: t.id });
+		expect((await read()).activity).toEqual([
+			{
+				kind: "queued",
+				agent: "tb",
+				conversationId: null,
+				since: m.body.created_at,
+				messageId: m.body.id,
+			},
+		]);
+		const run = await claim("tb");
+		expect(run.id).toBe(m.body.id);
+		// Reassigned while tb runs it: no cancellation, the answer says whose run goes on.
+		const re = await call(as("ta"), "PATCH", `/tasks/${t.id}`, {
+			version: t.version,
+			assignee: "tc",
+		});
+		expect(re.body.assignee).toBe("tc");
+		expect(re.body.activity).toEqual([
+			{
+				kind: "running",
+				agent: "tb",
+				conversationId: null,
+				since: run.started_at,
+				messageId: m.body.id,
+			},
+		]);
+		expect(re.body.previousRunActive).toEqual([{ messageId: m.body.id, agent: "tb" }]);
+		// A write on the old version: the whole current row and who changed what last.
+		const old = await call(as("ta"), "PATCH", `/tasks/${t.id}`, {
+			version: t.version,
+			priority: "high",
+		});
+		expect(old.status).toBe(409);
+		expect(old.body.task).toMatchObject({
+			version: re.body.version,
+			assignee: "tc",
+			previousRunActive: [expect.anything()],
+		});
+		expect(old.body.lastEvent).toMatchObject({
+			actor: "ta",
+			kind: "assigned",
+			data: { assignee: ["tb", "tc"] },
+		});
+		// Declared done while it runs: the contradiction is said, the declared status stays.
+		const done = await call(owner, "PATCH", `/tasks/${t.id}`, {
+			version: re.body.version,
+			status: "done",
+		});
+		expect(done.body.status).toBe("done");
+		expect(done.body.contradiction).toBe("done-with-running");
+		// A question asked while working on it: waitOwner.
+		const q = await call(as("tb"), "POST", "/runner/questions", {
+			messageId: m.body.id,
+			request: { message: "¿?" },
+		});
+		const withQ = (await call(as("ta"), "GET", `/tasks/${t.id}`)).body.task;
+		expect(withQ.activity).toContainEqual(
+			expect.objectContaining({
+				kind: "waitOwner",
+				agent: "tb",
+				messageId: m.body.id,
+				questionId: q.body.id,
+			}),
+		);
+		await call(owner, "POST", `/questions/${q.body.id}/answer`, { action: "cancel" });
+		// Interrupted: shown until the person reviews it.
+		await settle("tb", m.body.id, "uncertain");
+		expect(kinds(await read())).toEqual(["uncertain"]);
+		expect((await read()).contradiction).toBeNull();
+		await call(owner, "POST", `/messages/${m.body.id}/review`);
+		expect(kinds(await read())).toEqual([]);
+		// A linked active work, and a dependency with the other task's status.
+		await call(owner, "PATCH", "/agents/tc", { maxConcurrency: 2 });
+		expect((await call(owner, "POST", "/works", { agent: "tc", id: "pr3-estado" })).status).toBe(
+			201,
+		);
+		t = await read();
+		const linked = await call(as("tc"), "POST", `/tasks/${t.id}/links`, {
+			version: t.version,
+			kind: "work",
+			ref: "pr3-estado",
+		});
+		expect(linked.body.activity).toEqual([
+			expect.objectContaining({ kind: "work", agent: "tc", workId: "pr3-estado" }),
+		]);
+		expect(linked.body.contradiction).toBe("done-with-active-work");
+		const other = (await call(as("ta"), "POST", "/tasks", { parentId: goal.id, title: "Después" }))
+			.body;
+		await call(as("ta"), "POST", `/tasks/${other.id}/links`, {
+			version: other.version,
+			kind: "dep",
+			ref: t.id,
+		});
+		// The board: the same reading, from its fixed statements; the goal's budget on the root.
+		const board = (await call(as("tc"), "GET", `/tasks?project=${P3}`)).body;
+		expect(board.done.find((x: { id: number }) => x.id === t.id).contradiction).toBe(
+			"done-with-active-work",
+		);
+		expect(board.open.find((x: { id: number }) => x.id === other.id).dependencies).toEqual([
+			{ taskId: t.id, title: "Hacer", status: "done" },
+		]);
+		const root = board.open.find((x: { id: number }) => x.id === goal.id);
+		expect(root.budget).toEqual({ used: 0, limit: 150, exhausted: false });
+		expect(board.open.find((x: { id: number }) => x.id === other.id).budget).toBeNull();
+		await drain();
+	});
+
+	it("the rail's summary: open, blocked, awaiting the person — not in the inbox", async () => {
+		const goal = (
+			await call(owner, "POST", "/tasks", { projectId: P3, title: "Resumen", coordinator: "ta" })
+		).body;
+		const before = (await call(owner, "GET", `/tasks/summary?project=${P3}`)).body;
+		const a = (
+			await call(as("ta"), "POST", "/tasks", { parentId: goal.id, title: "A", assignee: "tb" })
+		).body;
+		const b = (
+			await call(as("ta"), "POST", "/tasks", { parentId: goal.id, title: "B", assignee: "tb" })
+		).body;
+		await call(as("tb"), "PATCH", `/tasks/${a.id}`, {
+			version: a.version,
+			blockedReason: "espera",
+		});
+		await call(as("tb"), "PATCH", `/tasks/${b.id}`, { version: b.version, status: "review" });
+		const inbox = (await call(owner, "GET", "/inbox")).body;
+		const after = await call(as("tc"), "GET", "/tasks/summary");
+		expect(after.status).toBe(200);
+		expect(after.body).toEqual({
+			projectId: P3,
+			open: before.open + 2,
+			blocked: before.blocked + 1,
+			awaitingOwner: before.awaitingOwner + 1,
+		});
+		// «Espera tu aprobación» is the board's, never the inbox's or its counter.
+		expect((await call(owner, "GET", "/inbox")).body.count).toBe(inbox.count);
+		expect((await call(as("lejos"), "GET", `/tasks/summary?project=${P3}`)).status).toBe(404);
+	});
+});
+
 describe("D1 reads: the board goes by index (v29)", () => {
 	const PB = "p-board";
 	beforeAll(() => {
@@ -3119,7 +3446,7 @@ describe("D1 reads: the board goes by index (v29)", () => {
 			captured = null;
 		}
 		return got
-			.filter((s) => /\b(tasks|task_links|task_events)\b/.test(s.sql))
+			.filter((s) => /\b(tasks|task_links|task_events|task_id)\b/.test(s.sql))
 			.map((s) => ({
 				sql: s.sql.replace(/\s+/g, " ").trim(),
 				plan: (
@@ -3131,7 +3458,7 @@ describe("D1 reads: the board goes by index (v29)", () => {
 	};
 	// No scan of the tasks' tables, no read bounded only by the owner.
 	const BAD =
-		/^SCAN (tasks|task_links|task_events)\b|USING (?:COVERING )?INDEX \w+ \(owner_user_id=\?\)$/;
+		/^SCAN (tasks|task_links|task_events|agent_messages|agent_questions|m|q)\b|USING (?:COVERING )?INDEX (?!idx_agent_questions_state)\w+ \(owner_user_id=\?\)$/;
 
 	describe.each([
 		["without statistics", false],
@@ -3172,7 +3499,22 @@ describe("D1 reads: the board goes by index (v29)", () => {
 					p.plan.filter((l) => BAD.test(l)).map((l) => `${l} ← ${p.sql}`),
 				);
 				expect(bad).toEqual([]);
+				// The derived state: each read by the task's partial index, questions from the open ones.
+				const lines = ps.flatMap((p) => p.plan).join("\n");
+				expect(lines).toMatch(/idx_agent_messages_task_active \(owner_user_id=\? AND task_id=\?\)/);
+				expect(lines).toMatch(
+					/idx_agent_messages_task_unreviewed \(owner_user_id=\? AND task_id=\?\)/,
+				);
+				expect(lines).toMatch(/idx_agent_questions_state \(owner_user_id=\? AND state=\?\)/);
 			}
+		});
+
+		it("the rail's summary is one statement by the open-tasks index", async () => {
+			const ps = await plans(`/tasks/summary?project=${PB}`);
+			expect(ps.length).toBe(1);
+			expect(ps[0].plan.join("\n")).toMatch(
+				/idx_tasks_open \(owner_user_id=\? AND project_id=\?\)/,
+			);
 		});
 
 		it("a task's page: children, links and history by the task", async () => {

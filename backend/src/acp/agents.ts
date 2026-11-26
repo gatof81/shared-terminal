@@ -60,6 +60,8 @@ export interface AcpConfig {
 	workMinFreeMb: number;
 	/** Agent → agent requests a goal (root task) starts with (ACP_GOAL_BUDGET); only the person raises it. */
 	goalBudget: number;
+	/** Agent → agent requests one task allows (ACP_TASK_BUDGET), unless the person raised its own. */
+	taskBudget: number;
 	/** Install the deterministic test adapter as runtime `st-test-agent` (ACP_TEST_RUNTIME=1). */
 	testRuntime: boolean;
 }
@@ -76,6 +78,7 @@ export function acpConfigFromEnv(workspaceRoot: string, port: number): AcpConfig
 		maxRunning: Number(env.ACP_MAX_RUNNING ?? 6),
 		maxChain: Number(env.ACP_MAX_CHAIN ?? 40),
 		goalBudget: Number(env.ACP_GOAL_BUDGET ?? 150),
+		taskBudget: Number(env.ACP_TASK_BUDGET ?? 40),
 		// 20 GiB: the workspace shares its filesystem with everything else, and the
 		// nightly backup refuses to run under 15 GiB free — a lower floor would let
 		// works be created long after the host stopped getting backups.
@@ -324,6 +327,19 @@ export interface EffortApplied {
 export function effortOf(v: unknown): string | null | undefined {
 	if (v === null || v === "default") return null;
 	return typeof v === "string" && /^[a-z][a-z0-9_-]{0,31}$/.test(v) ? v : undefined;
+}
+
+/** An agent's request refused because its task or its goal used up its budget (§5). */
+export class BudgetError extends Error {
+	constructor(
+		readonly budget: "goal" | "task",
+		readonly taskId: number,
+		readonly goalId: number,
+		readonly limit: number,
+		readonly used: number,
+	) {
+		super(`${budget}-budget`);
+	}
 }
 
 /** A `clientId` already used for a different message to the same recipient. */
@@ -839,17 +855,29 @@ export class AcpAgents {
 			m.team ? 1 : 0,
 			m.taskId ?? null,
 		];
+		// An agent's request in a task is written only while the task and its
+		// goal are under their budgets — checked in the INSERT, so concurrent
+		// sends cannot overshoot; v29's trigger counts it in the same statement.
 		const r = await d1Query<MessageRow>(
-			"INSERT OR IGNORE INTO agent_messages (owner_user_id, from_id, to_id, kind, body, state, project_id, depth, client_id, context, from_context, root_id, conversation_id, team, task_id) VALUES (?, ?, ?, 'request', ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *",
-			params,
+			`INSERT OR IGNORE INTO agent_messages (owner_user_id, from_id, to_id, kind, body, state, project_id, depth, client_id, context, from_context, root_id, conversation_id, team, task_id)
+			 SELECT ?1, ?2, ?3, 'request', ?4, 'pending', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
+			 WHERE ?13 IS NULL OR ?2 IN ('owner', 'system') OR (
+				(SELECT t.requests_used < COALESCE(t.requests_limit, ?14) FROM tasks t WHERE t.id = ?13 AND t.owner_user_id = ?1)
+				AND (SELECT g.budget_used < COALESCE(g.budget_limit, ?15) FROM tasks t JOIN tasks g ON g.id = COALESCE(t.parent_id, t.id)
+					WHERE t.id = ?13 AND t.owner_user_id = ?1 AND g.owner_user_id = ?1))
+			 RETURNING *`,
+			[...params, this.config.taskBudget, this.config.goalBudget],
 		);
 		if (r.results[0])
 			return { message: this.published(r.results[0]) as MessageRow, replayed: false };
-		const prior = await d1Query<MessageRow>(
-			"SELECT * FROM agent_messages WHERE owner_user_id = ? AND client_id = ? AND to_id = ?",
-			[m.ownerUserId, m.clientId ?? null, m.to],
-		);
-		const p = prior.results[0];
+		const prior = m.clientId
+			? await d1Query<MessageRow>(
+					"SELECT * FROM agent_messages WHERE owner_user_id = ? AND client_id = ? AND to_id = ?",
+					[m.ownerUserId, m.clientId, m.to],
+				)
+			: null;
+		const p = prior?.results[0];
+		if (!p && m.taskId != null) throw await this.budgetRefusal(m.ownerUserId, m.taskId);
 		if (!p) throw new Error("message insert returned nothing");
 		// A replay is the SAME send retried: same sender, text and scope. The key
 		// space is per owner, shared by the person and that owner's agents, so a
@@ -867,6 +895,26 @@ export class AcpAgents {
 		)
 			throw new ClientIdConflictError(p.id);
 		return { message: p, replayed: true };
+	}
+
+	/** Which budget refused a send in task `taskId` (the goal's first). */
+	private async budgetRefusal(ownerUserId: string, taskId: number): Promise<BudgetError | Error> {
+		const r = await d1Query<{
+			goal: number;
+			g_used: number;
+			g_limit: number | null;
+			t_used: number;
+			t_limit: number | null;
+		}>(
+			`SELECT g.id AS goal, g.budget_used AS g_used, g.budget_limit AS g_limit, t.requests_used AS t_used, t.requests_limit AS t_limit
+			 FROM tasks t JOIN tasks g ON g.id = COALESCE(t.parent_id, t.id) WHERE t.id = ? AND t.owner_user_id = ?`,
+			[taskId, ownerUserId],
+		);
+		const x = r.results[0];
+		if (!x) return new Error("message insert returned nothing (task gone)");
+		const gLimit = x.g_limit ?? this.config.goalBudget;
+		if (x.g_used >= gLimit) return new BudgetError("goal", taskId, x.goal, gLimit, x.g_used);
+		return new BudgetError("task", taskId, x.goal, x.t_limit ?? this.config.taskBudget, x.t_used);
 	}
 
 	/**

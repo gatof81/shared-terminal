@@ -19,6 +19,7 @@ import {
 	type AcpAgents,
 	type AgentLoad,
 	type AgentRow,
+	BudgetError,
 	ClientIdConflictError,
 	CONTEXT_RE,
 	effortOf,
@@ -295,7 +296,8 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 			const target = targets[0];
 
 			// `task` (v29, `st send --task`): a task the sender sees, of the
-			// recipients' project. Inheriting it from the running message is PR 3's.
+			// recipients' project. Without it, an agent's request inherits the task of
+			// the message it runs (below).
 			let taskId: number | null = null;
 			if (task !== undefined && task !== null) {
 				const t = await tasks.visible(owner, actorOf(c), task);
@@ -365,7 +367,15 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 				// The chain's root: the person's message it started from (a root
 				// itself, or a system message, has none and is its own).
 				rootId = cur.root_id ?? cur.id;
-				if ((await acp.chainRequests(owner, rootId)) >= acp.config.maxChain)
+				// No `--task`: the request is in the task of the message being run,
+				// when the recipient is of that task's project (else it is in none).
+				if (taskId === null && cur.task_id !== null) {
+					const t = await tasks.visible(owner, actorOf(c), cur.task_id);
+					if (t && t.project_id === target.project_id) taskId = t.id;
+				}
+				// A request in a task spends the task's and the goal's budgets
+				// (checked in the INSERT); the per-message round budget is for the rest.
+				if (taskId === null && (await acp.chainRequests(owner, rootId)) >= acp.config.maxChain)
 					return void res.status(409).json({
 						error: "chain-budget",
 						message: `ya hay ${acp.config.maxChain} pedidos entre agentes para un mismo mensaje de la persona: no se envió nada. Informá el estado y esperá a la persona.`,
@@ -411,11 +421,25 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 						taskId,
 					})
 					.catch((err: unknown) => {
-						if (err instanceof ClientIdConflictError) return err;
+						if (err instanceof ClientIdConflictError || err instanceof BudgetError) return err;
 						throw err;
 					});
 				if (r instanceof ClientIdConflictError)
 					return void res.status(409).json({ error: "client-id-reused", id: r.existingId });
+				if (r instanceof BudgetError) {
+					await tasks.budgetExhausted(owner, from, r);
+					return void res.status(409).json({
+						error: `${r.budget}-budget`,
+						task: r.taskId,
+						goal: r.goalId,
+						limit: r.limit,
+						used: r.used,
+						message:
+							r.budget === "goal"
+								? `el objetivo #${r.goalId} usó sus ${r.limit} pedidos entre agentes: no se envió nada. Informá el estado y esperá a la persona (solo ella amplía el presupuesto).`
+								: `la tarea #${r.taskId} usó sus ${r.limit} pedidos entre agentes: no se envió nada. Informá el estado y esperá a la persona (solo ella amplía el presupuesto).`,
+					});
+				}
 				sent.push(r);
 			}
 			if (conv) {
@@ -605,11 +629,19 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 		}),
 	);
 
-	// GET /tasks?projectId=&openAfter=&doneBefore= — the board (an agent: its project).
+	// GET /tasks?project=&openAfter=&doneBefore= (or projectId=) — the board (an agent: its project).
 	router.get(
 		"/tasks",
 		taskRoute(async (owner, actor, req, res) => {
 			res.json(await tasks.board(owner, actor, req.query));
+		}),
+	);
+
+	// GET /tasks/summary?project= — the rail: {open, blocked, awaitingOwner}.
+	router.get(
+		"/tasks/summary",
+		taskRoute(async (owner, actor, req, res) => {
+			res.json(await tasks.summary(owner, actor, req.query));
 		}),
 	);
 
@@ -625,7 +657,7 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 	router.patch(
 		"/tasks/:id",
 		taskRoute(async (owner, actor, req, res) => {
-			res.json(taskView(await tasks.update(owner, actor, req.params.id, req.body)));
+			res.json(await tasks.view(owner, await tasks.update(owner, actor, req.params.id, req.body)));
 		}),
 	);
 
@@ -633,8 +665,17 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 	router.post(
 		"/tasks/:id/links",
 		taskRoute(async (owner, actor, req, res) => {
-			const t = await tasks.link(owner, actor, req.params.id, req.body);
-			res.json((await tasks.show(owner, actor, t.id)).task);
+			res.json(await tasks.view(owner, await tasks.link(owner, actor, req.params.id, req.body)));
+		}),
+	);
+
+	// POST /tasks/:id/budget {add, scope?: "goal"|"task"} — the person only:
+	// raises the goal's budget (a root, by default) or one task's own cap.
+	router.post(
+		"/tasks/:id/budget",
+		taskRoute(async (owner, actor, req, res) => {
+			if (actor.kind !== "owner") return void res.status(403).json({ error: "owner-only" });
+			res.json(await tasks.raiseBudget(owner, req.params.id, req.body));
 		}),
 	);
 
