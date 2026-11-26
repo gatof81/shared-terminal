@@ -37,8 +37,8 @@ export function startInbox(): void {
 	loadedSinceSub = false;
 	unsubscribe = subscribeAcp((ev) => {
 		if (ev.type === "open") refreshInbox(0);
-		// Started during an outage (or the first connection failed): its first read.
-		else if (ev.type === "down") {
+		// Started during an outage, the first connection failed or is slow: its first read.
+		else if (ev.type === "down" || ev.type === "slow") {
 			if (!loadedSinceSub) refreshInbox(0);
 		}
 		// A read mark arrives as a `conversation` frame: an answer just seen
