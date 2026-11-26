@@ -30,6 +30,7 @@ import {
 	newTopicDialog,
 	onTopicWork,
 	placeTopicHeader,
+	repaintTopic,
 	resetTopic,
 	revealInTopic,
 	suspendTopic,
@@ -139,6 +140,7 @@ async function loadProjects(): Promise<void> {
 	renderSection();
 	paintSpace();
 	repaintRail();
+	repaintTopic();
 }
 
 // ── Sidebar ─────────────────────────────────────────────────────────────────

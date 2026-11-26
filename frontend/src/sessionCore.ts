@@ -66,6 +66,7 @@ import {
 import { paintProjectSignals, projectSignals } from "./projectSignals.js";
 import {
 	clear as clearRoute,
+	isUnknownAddress,
 	navigateProject,
 	projectRouteHash,
 	type Route,
@@ -415,7 +416,7 @@ export function renderTerminalState(): void {
 let listGen = 0;
 // Whether a list has ever been applied since the last invalidation. The
 // deep-link resolver needs to tell "the list never loaded" from "loaded
-// and the session is not in it" — only the latter is "Session not found".
+// and the session is not in it" — only the latter is «No se encontró la sesión».
 let listLoaded = false;
 
 export function invalidateSessionList(): void {
@@ -1309,7 +1310,7 @@ async function openSessionBody(
  *      view and detail the route names.
  *   2. Not own + admin → resolve via the admin list and open the observe
  *      modal (take-control available, exactly the dashboard's path).
- *   3. Anything else → one "Session not found" toast and the address
+ *   3. Anything else → one «No se encontró la sesión» toast and the address
  *      cleared, so a reload does not replay it.
  *
  * No-existence-leak invariant: for a NON-admin, foreign and nonexistent
@@ -1323,8 +1324,25 @@ async function openSessionBody(
 // (Back then Forward in quick succession) — and does nothing.
 let routeGen = 0;
 
+/**
+ * An address that names nothing (an unknown session, `#/garbage`): said,
+ * and replaced by what the screen shows — the session still open, written
+ * in place, or no address (on a phone, the list) — so screen and bar agree.
+ */
+function addressNotFound(message: string): void {
+	showToast(message, true);
+	clearRoute();
+	reflectRoute({ push: false });
+}
+
 export async function applyRoute(route: Route | null): Promise<void> {
-	if (route === null) return;
+	if (route === null) {
+		if (isUnknownAddress()) {
+			++routeGen;
+			addressNotFound("No se encontró la dirección");
+		}
+		return;
+	}
 	const gen = ++routeGen;
 	const id = route.sessionId;
 	if (id !== activeSessionId) {
@@ -1388,8 +1406,7 @@ export async function applyRoute(route: Route | null): Promise<void> {
 			// successful load apply the route. "Not found" is only a verdict
 			// over a list that did load.
 			if (!listLoaded && sessions.length === 0) return;
-			showToast("No se encontró la sesión", true);
-			clearRoute();
+			addressNotFound("No se encontró la sesión");
 			return;
 		}
 	}

@@ -164,8 +164,10 @@ test.describe("router", () => {
 		await expect(app.toast("No se encontró la sesión")).toBeVisible();
 		await expect.poll(() => page.url()).not.toContain(SESSION_IDS.bob);
 		expect(backend.requests.filter((r) => r.path.includes(SESSION_IDS.bob))).toEqual([]);
-		// A malformed route is simply ignored.
+		// A malformed route is «not found» too: said, and out of the bar.
 		await page.goto(`/#/sessions/${S}/settings`);
+		await expect(app.toast("No se encontró la dirección")).toBeVisible();
+		await expect.poll(() => new URL(page.url()).hash).toBe("");
 		await expect(page.locator("#empty-state")).toBeVisible();
 	});
 
