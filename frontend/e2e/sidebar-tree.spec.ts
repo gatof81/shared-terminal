@@ -1,5 +1,5 @@
 import { expect, test } from "./fixtures.js";
-import { PROJECT_IDS, PROJECT_SESSION_IDS } from "./mockBackend.js";
+import { PROJECT_IDS, PROJECT_SESSION_IDS, SESSION_IDS } from "./mockBackend.js";
 
 /**
  * The sidebar tree (UX iter3 §1, ui-nav): "+ New session" first, then three
@@ -35,7 +35,7 @@ test.describe("sidebar tree", () => {
 			["~sessions", "Sesiones"],
 		] as const) {
 			const head = page.locator(`${group(key)} .sgroup-head`);
-			await expect(head.locator(".sgroup-toggle")).toHaveAccessibleName(`Collapse ${name}`);
+			await expect(head.locator(".sgroup-toggle")).toHaveAccessibleName(`Plegar ${name}`);
 			await expect(head.locator(".sgroup-name")).toHaveText(name);
 		}
 		// The old bar and the old Projects section are gone with the tree.
@@ -169,7 +169,8 @@ test.describe("sidebar tree on a phone", () => {
 		page,
 	}, info) => {
 		test.skip(!info.project.use.isMobile, "the phone's drawer");
-		await app.login("alice");
+		// Over a session: with no address the list is the screen, not a drawer.
+		await app.login("alice", `#/sessions/${SESSION_IDS.running}`);
 		await app.openSidebar();
 		await expect(app.sessionRow("hz-design")).toBeVisible();
 		for (const name of ["scratch", "my-project"])
@@ -196,7 +197,7 @@ test.describe("sidebar tree on a phone", () => {
 		});
 		expect(clear).toBe(true);
 		// Focus: inside on open; the backdrop closes it and gives it back to ☰.
-		await expect(page.locator("#sidebar")).toContainText("New session");
+		await expect(page.locator("#sidebar")).toContainText("Sesión nueva");
 		expect(
 			await page.evaluate(() =>
 				document.getElementById("sidebar")!.contains(document.activeElement),

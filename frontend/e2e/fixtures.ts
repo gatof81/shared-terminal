@@ -59,7 +59,7 @@ export class App {
 		page.on("pageerror", (err) => this.errors.push(String(err)));
 	}
 
-	/** Open the user menu: the avatar, or under 400 px the drawer's "Account" row. */
+	/** Open the user menu: the avatar, or under 400 px the drawer's «Cuenta» row. */
 	async openUserMenu(): Promise<void> {
 		if (await this.page.locator("#user-menu-btn").isVisible()) {
 			await this.page.click("#user-menu-btn");
@@ -73,7 +73,7 @@ export class App {
 	/**
 	 * Pick an entry of the user menu by its id (templates, invites,
 	 * my-groups, admin, notifications, logout): from the avatar, or under
-	 * 400 px from the drawer's "Account" row.
+	 * 400 px from the drawer's «Cuenta» row.
 	 */
 	async appMenu(id: string): Promise<void> {
 		await this.openUserMenu();
@@ -122,6 +122,8 @@ export class App {
 
 	async openSidebar(): Promise<void> {
 		if (!this.mobile) return;
+		// The phone's home (an address that names nothing): the list is the screen.
+		if (await this.page.locator("body").evaluate((b) => b.classList.contains("home-on"))) return;
 		const main = this.page.locator("main");
 		if (!(await main.evaluate((el) => el.classList.contains("sidebar-open")))) {
 			await this.page.click("#sidebar-toggle");

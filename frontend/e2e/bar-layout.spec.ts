@@ -200,10 +200,11 @@ test.describe("the bar layout", () => {
 		await menu.locator('[data-action="admin"]').click();
 		await expect(page.locator("#admin-modal")).toHaveClass(/open/);
 		await app.escape();
-		// Back to the opener: the avatar, or under 400 px the ☰ (the drawer row's drawer is closed).
+		// Back to the opener: the avatar, or under 400 px the list's «Cuenta» row
+		// (on the phone's home the list is the screen; in a drawer, closed, the ☰).
 		const avatar = page.locator("#user-menu-btn");
 		await expect(
-			(await avatar.isVisible()) ? avatar : page.locator("#sidebar-toggle"),
+			(await avatar.isVisible()) ? avatar : page.locator("#sidebar-account-btn"),
 		).toBeFocused();
 		// No copy of the old buttons left.
 		await expect(

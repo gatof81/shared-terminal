@@ -31,7 +31,7 @@ test.describe("base controls", () => {
 		await app.login("alice");
 		await app.openSession("my-project");
 		const badge = page.locator("#terminal-status-badge");
-		await expect(badge).toHaveText("running");
+		await expect(badge).toHaveText("en marcha");
 		await expect(badge).toHaveClass(/\bchip\b.*\btone-ok\b/);
 		const dot = () =>
 			badge.evaluate((e) => {
@@ -41,7 +41,7 @@ test.describe("base controls", () => {
 		expect((await dot()).fill).not.toBe("rgba(0, 0, 0, 0)");
 
 		await app.openSession("docs");
-		await expect(badge).toHaveText("stopped");
+		await expect(badge).toHaveText("detenida");
 		// Not amber: a stopped session asks nothing of the person.
 		await expect(badge).toHaveClass(/\btone-off\b/);
 		expect(await dot()).toEqual({ fill: "rgba(0, 0, 0, 0)", ring: "solid" });

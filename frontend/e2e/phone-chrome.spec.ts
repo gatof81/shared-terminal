@@ -1,4 +1,5 @@
 import { expect, test } from "./fixtures.js";
+import { SESSION_IDS } from "./mockBackend.js";
 
 /**
  * Phone chrome (UX audit 2026-11-13, N3 / M6): the drawer uses the screen
@@ -13,7 +14,8 @@ test.describe("phone chrome", () => {
 		app,
 		page,
 	}) => {
-		await app.login("alice");
+		// Over a session: with no address the list is the screen, not a drawer.
+		await app.login("alice", `#/sessions/${SESSION_IDS.running}`);
 		for (const width of [320, 390, 430]) {
 			await page.setViewportSize({ width, height: 800 });
 			await app.openSidebar();

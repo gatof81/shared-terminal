@@ -56,7 +56,7 @@ import {
 	type PushToggleState,
 	registerServiceWorker,
 } from "./push.js";
-import { onRoute, readRoute, start as startRouter } from "./router.js";
+import { homeShown, onAddressWrite, onRoute, readRoute, start as startRouter } from "./router.js";
 import { initTerminalSearch } from "./searchBar.js";
 import {
 	applyRoute,
@@ -653,7 +653,7 @@ function openUserMenu(opener: HTMLElement): void {
 		{ id: "logout", label: "Logout", kind: "danger" },
 	];
 	openActionMenu({
-		title: "Account",
+		title: "Cuenta",
 		opener,
 		items,
 		onPick: (id) => {
@@ -668,7 +668,14 @@ function openUserMenu(opener: HTMLElement): void {
 }
 const userMenuBtn = document.getElementById("user-menu-btn") as HTMLButtonElement;
 userMenuBtn.addEventListener("click", () => openUserMenu(userMenuBtn));
-document.getElementById("sidebar-account-btn")?.addEventListener("click", () => {
+const sidebarAccountBtn = document.getElementById("sidebar-account-btn");
+sidebarAccountBtn?.addEventListener("click", () => {
+	// On the phone's home the list is the screen, not a drawer: it stays,
+	// and so does the row the menu was opened from.
+	if (document.body.classList.contains("home-on")) {
+		openUserMenu(sidebarAccountBtn);
+		return;
+	}
 	setSidebarOpen(false);
 	openUserMenu(sidebarToggleBtn);
 });
@@ -935,6 +942,33 @@ mobileMql.addEventListener("change", () => {
 // styles/sidebar.css `main { ... }`.)
 setSidebarOpen(!isMobile());
 mainEl.setAttribute("data-sidebar-ready", "");
+
+// ── The phone's home: the main list ─────────────────────────────────────────
+// On a phone, an address that names nothing (router.homeShown) shows the
+// sidebar — the same element the ☰ and the project's ‹ open, so one list —
+// as the screen (mobile.css `body.home-on`). The session underneath, if any,
+// stays open and keeps its box: the list is drawn over it like the drawer,
+// never by hiding the terminal (no fit, no resize, no socket).
+const terminalAreaEl = document.getElementById("terminal-area")!;
+function syncHome(): void {
+	const on = homeShown();
+	const was = document.body.classList.contains("home-on");
+	document.body.classList.toggle("home-on", on);
+	// Out of the keyboard's and the screen reader's reach while covered.
+	terminalAreaEl.inert = on;
+	if (on && !was) {
+		// The drawer is the screen now; leaving the home must not uncover it.
+		setSidebarOpen(false);
+		// Keystrokes must not keep going to a terminal the list now covers.
+		const focused = document.activeElement;
+		if (focused instanceof HTMLElement && terminalAreaEl.contains(focused)) focused.blur();
+	}
+}
+onAddressWrite(syncHome);
+window.addEventListener("popstate", syncHome);
+window.addEventListener("hashchange", syncHome);
+mobileMql.addEventListener("change", syncHome);
+syncHome();
 
 // ── Terminal-only controls ──────────────────────────────────────────────────
 // The Insert (+) menu (paste / attach / select) writes into the terminal:

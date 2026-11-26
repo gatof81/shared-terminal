@@ -472,7 +472,7 @@ button.acp-rs-check:hover {
 /* 360 px and less, a session's bar takes the header's whole width (its tabs
    never go under 40 px): the icon stays on the project's screens only. */
 @media (max-width: 360px) {
-	body:not(.project-page-on) #inbox-btn {
+	body:not(.project-page-on):not(.home-on) #inbox-btn {
 		display: none;
 	}
 }

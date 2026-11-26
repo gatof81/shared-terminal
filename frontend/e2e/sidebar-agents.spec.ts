@@ -52,7 +52,7 @@ test.describe("sidebar: agents and their state", () => {
 		await expect(select).toHaveAttribute("title", /^hz-dev-2\n[\s\S]*Agente: trabajando en #12/);
 		await expect(select).toHaveAttribute(
 			"aria-label",
-			/^@dev trabajando, session hz-dev-2 running, agente: trabajando en #12$/,
+			/^@dev trabajando, sesión hz-dev-2 en marcha, agente: trabajando en #12$/,
 		);
 		await expect(app.sessionRow("hz-dev-2").locator(".session-name")).toHaveText("@dev");
 		// One indicator per agent row: its face and the agent's chip, no session dot.
@@ -66,7 +66,7 @@ test.describe("sidebar: agents and their state", () => {
 		await expect(app.sessionRow("my-project").locator(".session-agent-line")).toHaveCount(0);
 		await expect(app.sessionRow("my-project").locator(".session-select")).toHaveAttribute(
 			"aria-label",
-			"my-project, session running",
+			"my-project, sesión en marcha",
 		);
 	});
 
@@ -142,7 +142,7 @@ test.describe("sidebar: agents and their state", () => {
 		await app.login("alice");
 		await app.openSidebar();
 		const row = app.sessionRow("scratch");
-		await expect(row.locator(".session-state")).toHaveText("Stopped");
+		await expect(row.locator(".session-state")).toHaveText("Detenida");
 		await expect(row.locator(".session-agent-tag")).toHaveText("@solo");
 		await expect(row.locator(".session-agent-status")).toHaveCount(0);
 	});

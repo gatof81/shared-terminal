@@ -313,7 +313,37 @@ export function navigate(route: Route | null, opts: { replace?: boolean } = {}):
 	// page lands on the session as it is now. A push is a choice the
 	// person made (a view) and leaves the page.
 	if (opts.replace && projectPageShown()) return;
+	// The phone's home (the list) the same way: only the person's choice
+	// leaves it (a push, `leaveHome` in viewSwitch.ts) — a poll re-opening
+	// the session underneath must not take the list away.
+	if (opts.replace && homeShown()) return;
 	write(hash, opts.replace === true);
+}
+
+// ── The phone's home ────────────────────────────────────────────────────────
+
+// Mirrors the mobile breakpoint (main.ts MOBILE_BREAKPOINT_PX, mobile.css).
+const phoneMq =
+	typeof window !== "undefined" && typeof window.matchMedia === "function"
+		? window.matchMedia("(max-width: 768px)")
+		: null;
+
+/**
+ * An address that names nothing: no session, no project page, not the
+ * service worker's one-shot `#session=` jump. Derived from the address
+ * alone — no "last view" is kept anywhere.
+ */
+export function isHomeAddress(): boolean {
+	return (
+		readRoute() === null &&
+		readProjectRoute() === null &&
+		!window.location.hash.startsWith("#session=")
+	);
+}
+
+/** On a phone, such an address shows the main list as the screen (main.ts). */
+export function homeShown(): boolean {
+	return phoneMq?.matches === true && isHomeAddress();
 }
 
 function write(hash: string, replace: boolean): void {
@@ -402,6 +432,7 @@ export function clear(): void {
 	current = null;
 	if (readRoute() === null) return;
 	history.replaceState({ st: { n: depth() } }, "", bare());
+	for (const l of writeListeners) l();
 }
 
 // ── Reads ───────────────────────────────────────────────────────────────────

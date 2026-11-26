@@ -32,7 +32,7 @@ import {
 	sessions,
 	updateTerminalControls,
 } from "./main.js";
-import { navigate } from "./router.js";
+import { homeShown, navigate } from "./router.js";
 import { setGeometryFrozen } from "./terminalGeometry.js";
 import { chooseLanding, readViewPref, writeViewPref } from "./viewPolicy.js";
 
@@ -116,6 +116,17 @@ export function reflectRoute(opts: { push: boolean }): void {
 	// Landed, or superseded by the person's own choice: either way done.
 	if (pendingRoute !== null && pendingRoute.view === view) pendingRoute = null;
 	navigate({ sessionId: activeSessionId, view, detail }, { replace: !opts.push || landed });
+}
+
+/**
+ * The phone's home (the list) left for the active session — a session picked
+ * from it, created or jumped to: a new entry, so Back returns to the list.
+ * Its in-place writes are held while the list is the screen (router.ts).
+ */
+export function leaveHome(): void {
+	if (activeSessionId === null || !homeShown()) return;
+	const detail = detailHandlers[view]?.current() ?? null;
+	navigate({ sessionId: activeSessionId, view, detail });
 }
 
 /** Show the view and detail a route names, for the ACTIVE session. */
