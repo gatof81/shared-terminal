@@ -35,8 +35,8 @@ import {
 	upsert,
 } from "./acpModel.js";
 import { questionCard } from "./acpQuestionCard.js";
-import { acpReadTicket, setAcpAgents } from "./acpRegistry.js";
 import { openReview } from "./acpReview.js";
+import { onAcpAgentsRead, requestAcpAgentsRead, watchAcpAgents } from "./acpStatusFeed.js";
 import {
 	type AcpActivity,
 	type AcpAgentInfo,
@@ -46,7 +46,6 @@ import {
 	type AcpQuestion,
 	acpConversationFeed,
 	acpFeed,
-	acpListAgents,
 	acpPost,
 	acpProjectFeed,
 	acpReadConversation,
@@ -68,7 +67,6 @@ export type ThreadSource =
 
 const PAGE = 100;
 const FALLBACK_POLL_MS = 10_000;
-const STATUS_MS = 15_000;
 
 export interface ThreadState {
 	agents: AcpAgentInfo[];
@@ -235,8 +233,12 @@ export class AcpThread {
 	private readonly recoverBtn = el("button", "btn sm acp-recover", "Recuperar el texto");
 	private unsubscribe: (() => void) | null = null;
 	private poll: ReturnType<typeof setInterval> | null = null;
-	private statusTimer: ReturnType<typeof setInterval> | null = null;
-	private agentsTimer: ReturnType<typeof setTimeout> | null = null;
+	/** Releases the 15 s agents period and the list listener (acpStatusFeed.ts). */
+	private unwatch: (() => void) | null = null;
+	/** The first load of this subscription was made (by its first signal, acpLive.ts). */
+	private loadedSinceSub = false;
+	/** A reload fell due while the tab was hidden: made once it shows. */
+	private reloadOnShow = false;
 	private renderQueued = false;
 	private questions = new Map<number, AcpQuestion>();
 	/** Question cards kept across renders (keyed by id + state): typed answers and focus survive. */
@@ -314,6 +316,11 @@ export class AcpThread {
 	onOpenInbox: (opener: HTMLElement) => void = () => {};
 
 	constructor() {
+		document.addEventListener("visibilitychange", () => {
+			if (document.hidden || !this.reloadOnShow) return;
+			this.reloadOnShow = false;
+			void this.reload();
+		});
 		// One line at rest; CSS (field-sizing) grows it with the text up to a cap.
 		this.input.rows = 1;
 		this.input.setAttribute("aria-label", "Mensaje");
@@ -656,12 +663,26 @@ export class AcpThread {
 			this.threadEl.replaceChildren(el("div", "acp-chat-empty", "Cargando…"));
 			this.setPlaceholder();
 		}
-		if (!this.unsubscribe) this.unsubscribe = subscribeAcp((ev) => this.onLive(ev));
-		// Runner liveness and queue sizes are not pushed: re-read every 15 s while shown.
-		if (!this.statusTimer)
-			this.statusTimer = setInterval(() => {
-				if (!document.hidden) this.refreshAgentsSoon(0);
-			}, STATUS_MS);
+		if (!this.unwatch) {
+			// Runner liveness and queue sizes are not pushed: the shared list is
+			// re-read every 15 s while a thread is shown (one clock for the tab).
+			const release = watchAcpAgents();
+			const off = onAcpAgentsRead((all) => this.takeAgents(all));
+			this.unwatch = () => {
+				release();
+				off();
+			};
+		}
+		if (!this.unsubscribe) {
+			// The socket's first signal (open, or down) makes the first load:
+			// one read per opening, and none that could miss what comes before
+			// the socket's hello.
+			this.loadedSinceSub = false;
+			this.unsubscribe = subscribeAcp((ev) => this.onLive(ev));
+			// A first connection that hangs (no hello, no close): the fallback poll reads.
+			if (!acpLiveUp()) this.startPoll();
+			return;
+		}
 		if (same) return;
 		void this.reload();
 	}
@@ -691,6 +712,14 @@ export class AcpThread {
 		this.changed();
 	}
 
+	/**
+	 * What `titleOf` answers changed (the rail read the project's topics):
+	 * repainted, since «ocupado en «X»» is said with it.
+	 */
+	titlesChanged(): void {
+		if (this.source && this.unsubscribe) this.changed();
+	}
+
 	/** Stops following (the DOM and state stay for a quick return). */
 	close(): void {
 		this.notePlaceAtLeave();
@@ -699,8 +728,9 @@ export class AcpThread {
 		this.unsubscribe?.();
 		this.unsubscribe = null;
 		this.stopPoll();
-		if (this.statusTimer) clearInterval(this.statusTimer);
-		this.statusTimer = null;
+		this.unwatch?.();
+		this.unwatch = null;
+		this.reloadOnShow = false;
 	}
 
 	/**
@@ -728,6 +758,7 @@ export class AcpThread {
 		const src = this.source;
 		const gen = this.gen;
 		if (!src) return;
+		this.loadedSinceSub = true;
 		const mark = this.liveTick;
 		try {
 			const feed = await feedOf(src);
@@ -875,10 +906,14 @@ export class AcpThread {
 		switch (ev.type) {
 			case "open":
 				this.stopPoll();
-				void this.reload();
+				// Hidden: one read when it shows (nothing on screen to keep current).
+				if (document.hidden && this.loadedSinceSub) this.reloadOnShow = true;
+				else void this.reload();
 				return;
 			case "down":
 				this.startPoll();
+				// Subscribed during an outage (or the first connection failed): its first load.
+				if (!this.loadedSinceSub) void this.reload();
 				return;
 			case "message":
 				if (!this.relevant(ev.message)) return;
@@ -930,30 +965,26 @@ export class AcpThread {
 		this.auth.set(agent, authFromActivity(events, this.auth.get(agent) ?? false));
 	}
 
-	/** Agent status (running / queue / project membership): one list read, debounced. */
+	/**
+	 * Agent status (running / queue / project membership): a read of the
+	 * shared list that starts after now (acpStatusFeed.ts: one request for
+	 * every view that asks meanwhile, the rail's included).
+	 */
 	private refreshAgentsSoon(delay = 800): void {
-		if (this.agentsTimer) return;
-		this.agentsTimer = setTimeout(() => {
-			this.agentsTimer = null;
-			const gen = this.gen;
-			const src = this.source;
-			const ticket = acpReadTicket();
-			void acpListAgents()
-				.then((all) => {
-					// Every read of the list keeps the one registry current (sidebar).
-					setAcpAgents(all, ticket);
-					if (gen !== this.gen || !src) return;
-					const mine =
-						src.kind === "archive" && src.agent
-							? all.filter((a) => a.name === src.agent)
-							: all.filter((a) => a.projectId === src.projectId);
-					this.agents = new Map(mine.map((a) => [a.name, a]));
-					for (const a of mine)
-						if (a.authRequired !== undefined) this.auth.set(a.name, a.authRequired);
-					this.changed();
-				})
-				.catch(() => {});
-		}, delay);
+		requestAcpAgentsRead(delay);
+	}
+
+	/** A read of the agents list landed (whoever asked): this chat's agents from it. */
+	private takeAgents(all: AcpAgentInfo[]): void {
+		const src = this.source;
+		if (!src) return;
+		const mine =
+			src.kind === "archive" && src.agent
+				? all.filter((a) => a.name === src.agent)
+				: all.filter((a) => a.projectId === src.projectId);
+		this.agents = new Map(mine.map((a) => [a.name, a]));
+		for (const a of mine) if (a.authRequired !== undefined) this.auth.set(a.name, a.authRequired);
+		this.changed();
 	}
 
 	private startPoll(): void {

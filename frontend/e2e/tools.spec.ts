@@ -392,6 +392,9 @@ test.describe("Herramientas", () => {
 			new RegExp(`#/projects/${HZ}(/c/[^/]+)?/tools/${agent}/~/${tool}$`);
 		const row = page.locator(".rail-body .rail-agent", { hasText: "@arq" });
 		await expect(row).toHaveAccessibleName(/^@arq .* — abrir Terminal$/);
+		// The team (the tab's agents list) can show before the topics: wide,
+		// the last topic opens once they are in.
+		if (!app.mobile) await expect(page).toHaveURL(/\/c\/[^/]+$/);
 		const before = page.url();
 		await row.click();
 		await expect(page).toHaveURL(fromTopic("arq", "terminal"));

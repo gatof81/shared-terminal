@@ -1,7 +1,8 @@
 // acpInboxStore.ts — Pendientes' data (GET /api/acp/inbox, every project):
-// one copy for the tab, read on start, re-read (debounced) on every /ws/acp
-// frame that can change it — a row written, a question — and polled slowly
-// while the socket is down. The rail's attention row, the header's counter
+// one copy for the tab, read by the socket's first signal (acpLive.ts: its
+// hello, or `down`), re-read (debounced) on every /ws/acp frame that can
+// change it — a row written, a question — and polled slowly while the socket
+// is down. Hidden, a re-read is only noted: one read when the tab shows. The rail's attention row, the header's counter
 // and the inbox panel all read it here, so they never disagree.
 
 import { acpLiveUp, subscribeAcp } from "./acpLive.js";
@@ -15,6 +16,9 @@ let gen = 0;
 let timer: ReturnType<typeof setTimeout> | null = null;
 let poll: ReturnType<typeof setInterval> | null = null;
 let unsubscribe: (() => void) | null = null;
+let loadedSinceSub = false;
+/** A read fell due while the tab was hidden. */
+let dueOnShow = false;
 const listeners = new Set<() => void>();
 
 export function inboxNow(): AcpInbox | null {
@@ -30,8 +34,13 @@ export function onInbox(fn: () => void): () => void {
 /** The account is shown: read now and follow. */
 export function startInbox(): void {
 	if (unsubscribe) return;
+	loadedSinceSub = false;
 	unsubscribe = subscribeAcp((ev) => {
 		if (ev.type === "open") refreshInbox(0);
+		// Started during an outage (or the first connection failed): its first read.
+		else if (ev.type === "down") {
+			if (!loadedSinceSub) refreshInbox(0);
+		}
 		// A read mark arrives as a `conversation` frame: an answer just seen
 		// leaves «Resultados sin ver» (and the rail's count) without waiting for a row.
 		else if (ev.type === "message" || ev.type === "question" || ev.type === "conversation")
@@ -40,7 +49,6 @@ export function startInbox(): void {
 	poll = setInterval(() => {
 		if (!document.hidden && !acpLiveUp()) refreshInbox(0);
 	}, POLL_MS);
-	refreshInbox(0);
 }
 
 /** Logout: nothing of this account stays. */
@@ -52,6 +60,7 @@ export function resetInbox(): void {
 	poll = null;
 	if (timer) clearTimeout(timer);
 	timer = null;
+	dueOnShow = false;
 	inbox = null;
 	for (const l of listeners) l();
 }
@@ -63,8 +72,16 @@ export function refreshInbox(delay = DEBOUNCE_MS): void {
 		clearTimeout(timer);
 	}
 	const g = gen;
+	loadedSinceSub = true;
 	timer = setTimeout(() => {
 		timer = null;
+		if (g !== gen) return;
+		// Nothing on screen to keep current (the push notifications are the
+		// server's, sw.js): one read when the tab shows.
+		if (document.hidden) {
+			dueOnShow = true;
+			return;
+		}
 		void Promise.resolve()
 			.then(() => acpInbox())
 			.then((box) => {
@@ -77,3 +94,10 @@ export function refreshInbox(delay = DEBOUNCE_MS): void {
 			});
 	}, delay);
 }
+
+if (typeof document !== "undefined")
+	document.addEventListener("visibilitychange", () => {
+		if (document.hidden || !dueOnShow) return;
+		dueOnShow = false;
+		if (unsubscribe) refreshInbox(0);
+	});

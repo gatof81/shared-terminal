@@ -799,7 +799,22 @@ let autoPollTickCount = 0;
 let autoPollInFlight = false;
 // Ticks skipped because the previous refresh is still waiting on the server.
 let autoPollStalled = 0;
-async function autoPollTick(): Promise<void> {
+// With every session and the session list covered — a project's space on
+// screen, not its Herramientas — the list is read on every 3rd tick (15 s):
+// nothing on screen shows it but the reachability light, which then reacts
+// that much later (accepted). Each read is a D1 query. Uncovering the list or
+// a session reads at once (watchSessionsInSight).
+const OUT_OF_SIGHT_EVERY_N_TICKS = 3;
+// Timer ticks skipped out of sight since the last read.
+let autoPollSlowSkipped = 0;
+function sessionsOutOfSight(): boolean {
+	const b = document.body.classList;
+	if (!b.contains("project-space-on") || b.contains("tools-on") || b.contains("ps-gone"))
+		return false;
+	// A phone's drawer shows the session list over the project's screen.
+	return !(isMobile() && mainEl.classList.contains("sidebar-open"));
+}
+async function autoPollTick(fromTimer = false): Promise<void> {
 	if (autoPollInFlight) {
 		// A request the server accepted but never answers would keep the
 		// light green until the browser/Tunnel gives up (~100 s). After three
@@ -816,6 +831,9 @@ async function autoPollTick(): Promise<void> {
 	// throws, refreshSessions toasts). Matches the pre-existing 15 s
 	// timer's gate that this poller replaces.
 	if (!isLoggedIn()) return;
+	if (fromTimer && sessionsOutOfSight() && ++autoPollSlowSkipped < OUT_OF_SIGHT_EVERY_N_TICKS)
+		return;
+	autoPollSlowSkipped = 0;
 	autoPollInFlight = true;
 	try {
 		// `refreshSessions` owns its own error path (catch → toast),
@@ -835,8 +853,17 @@ async function autoPollTick(): Promise<void> {
 	}
 }
 setInterval(() => {
-	void autoPollTick();
+	void autoPollTick(true);
 }, AUTO_POLL_INTERVAL_MS);
+// Back to the list or to a session after a slowed tick: read now, not up to 10 s later.
+let sessionsWereOutOfSight = false;
+const watchSessionsInSight = new MutationObserver(() => {
+	const out = sessionsOutOfSight();
+	if (sessionsWereOutOfSight && !out && autoPollSlowSkipped > 0) void autoPollTick();
+	sessionsWereOutOfSight = out;
+});
+watchSessionsInSight.observe(document.body, { attributes: true, attributeFilter: ["class"] });
+watchSessionsInSight.observe(mainEl, { attributes: true, attributeFilter: ["class"] });
 // Re-fire immediately when the tab regains focus so the user
 // doesn't have to wait up to 5 s for the first refresh after
 // switching back. Use `visibilitychange` rather than `focus`
