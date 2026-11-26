@@ -264,19 +264,22 @@ function delta(a, b) {
 	return { calls: b.calls - a.calls, rows: b.rows - a.rows, top };
 }
 /**
- * D1 spent by `fn` alone: stats, stats (the stats read's own cost + background), fn, stats —
- * minus the empty pair. Best (lowest) of `n` tries: background (an idle runner's claim) only adds.
+ * D1 spent around `fn`: stats, fn, stats — the raw delta, best (lowest) of `n` tries. Nothing is
+ * subtracted: background work (an idle runner's claim waking up) only ever ADDS to a raw delta,
+ * so the minimum is the pass with the least of it. (Subtracting an empty stats pair broke that:
+ * background inside the empty pair inflated the base, and the minimum picked exactly that pass —
+ * «-2 statements» in OPS-RESULT 3.) What stays in is the cost of the second stats read itself:
+ * one statement and a few rows, the same with 50 and 500 tasks — the statement count is compared
+ * 50 vs 500, and in rows it fits in ROWS_SLACK.
  */
-async function measure(fn, n = 3) {
+async function measure(fn, n = 5) {
 	let best = null;
 	for (let i = 0; i < n; i++) {
-		const s0 = await d1();
 		const s1 = await d1();
 		const result = await fn();
 		const s2 = await d1();
-		const base = delta(s0, s1);
 		const d = delta(s1, s2);
-		const m = { calls: d.calls - base.calls, rows: d.rows - base.rows, top: d.top, result };
+		const m = { calls: d.calls, rows: d.rows, top: d.top, result };
 		if (!best || m.calls < best.calls || (m.calls === best.calls && m.rows < best.rows)) best = m;
 	}
 	return best;
