@@ -8,8 +8,13 @@ import { type AcpQuestion, acpAnswer } from "./api.js";
 import { el } from "./ui.js";
 
 export interface QuestionCardOptions {
-	/** The answer as the server took it (the caller lays it over what it shows). */
-	onAnswered: (row: AcpQuestion) => void;
+	/**
+	 * The answer as the server took it (the caller lays it over what it shows),
+	 * with `liveMark()` as it was when the answer left: a newer live frame of
+	 * the question (the runner's `delivered`) stays over it.
+	 */
+	onAnswered: (row: AcpQuestion, mark: number) => void;
+	liveMark?: () => number;
 	/** False once the card's chat or panel is gone: a late answer then changes nothing there. */
 	stillHere: () => boolean;
 	/** An orphaned question: put the decision in the message box, as an ordinary message. */
@@ -130,9 +135,10 @@ function answerForm(
 	const submit = (body: { action: "accept" | "decline"; content?: Record<string, unknown> }) => {
 		send.disabled = skip.disabled = true;
 		status.textContent = "Enviando…";
+		const mark = opts.liveMark?.() ?? 0;
 		void acpAnswer(q.id, body)
 			.then((row) => {
-				if (opts.stillHere()) opts.onAnswered(row);
+				if (opts.stillHere()) opts.onAnswered(row, mark);
 			})
 			.catch((err: Error & { status?: number }) => {
 				// 409: someone (another tab, Pendientes) answered first, or the agent restarted.

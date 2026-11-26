@@ -294,7 +294,8 @@ export class AcpThread {
 			where: this.conversation?.title ?? null,
 			activity: this.lastActivity(m.id),
 			report: this.messages.find((x) => x.recovery_of === m.id) ?? null,
-			onChanged: (row) => this.applyRow(row),
+			liveMark: () => this.liveTick,
+			onChanged: (row, mark) => this.applyRow(row, mark),
 		});
 	/**
 	 * Where `⎇ <work>` leads (Herramientas, 3B F4). Until something is
@@ -656,11 +657,14 @@ export class AcpThread {
 		void this.reload();
 	}
 
-	/** A message row as a write just answered it (a review, a requeue): shown at once. */
-	applyRow(row: AcpMessage): void {
+	/**
+	 * A message row as a write just answered it (a review, a requeue), its
+	 * request sent at `mark` (`liveTick` then): shown at once, unless that
+	 * row already came live after `mark` — that frame is newer (layAnswer).
+	 */
+	applyRow(row: AcpMessage, mark: number): void {
 		if (!this.relevant(row)) return;
-		this.noteLive({ row });
-		this.messages = upsert(this.messages, row);
+		this.layAnswer(mark, { row });
 		this.changed();
 	}
 
@@ -824,6 +828,27 @@ export class AcpThread {
 				this.messages = upsert(this.messages, row);
 		for (const { tick, q } of this.liveQuestions.values())
 			if (tick > mark) this.questions.set(q.id, q);
+	}
+
+	/**
+	 * A write's answer (a send, a review, a requeue, an answer to a question)
+	 * whose request left at `mark`: the same rule as a page (replayLive), for
+	 * one row. The answer is the row as the write left it; a frame of that row
+	 * that came after `mark` is at least as new — the runner's claim, woken in
+	 * the backend by the write itself, can push `running` before the send's 201
+	 * reaches the page — so then the answer is dropped, and not noted as live
+	 * either (it would be laid back over the next page).
+	 */
+	private layAnswer(mark: number, x: { row?: AcpMessage; q?: AcpQuestion }): void {
+		const newer = (seen: { tick: number } | undefined) => seen !== undefined && seen.tick > mark;
+		if (x.row && !newer(this.liveRows.get(x.row.id))) {
+			this.noteLive({ row: x.row });
+			this.messages = upsert(this.messages, x.row);
+		}
+		if (x.q && !newer(this.liveQuestions.get(x.q.id))) {
+			this.noteLive({ q: x.q });
+			this.questions.set(x.q.id, x.q);
+		}
 	}
 
 	private relevant(m: AcpMessage): boolean {
@@ -1615,9 +1640,9 @@ export class AcpThread {
 			stillHere: () => gen === this.gen,
 			readOnly: this.readOnly,
 			onOpenInbox: (opener) => this.onOpenInbox(opener),
-			onAnswered: (row) => {
-				this.noteLive({ q: row });
-				this.questions.set(row.id, row);
+			liveMark: () => this.liveTick,
+			onAnswered: (row, mark) => {
+				this.layAnswer(mark, { q: row });
 				this.changed();
 			},
 			onResend: this.readOnly
@@ -2274,6 +2299,7 @@ export class AcpThread {
 			const asPost = !tooBig;
 			if (asPost) {
 				try {
+					const mark = this.liveTick;
 					const r = await acpPost(src.conversationId, to.team ? "team" : to.to, text, clientId);
 					// What the topic keeps now (the server stored the same): the
 					// chips go back to being the topic's own.
@@ -2285,11 +2311,7 @@ export class AcpThread {
 						this.chips.delete(src.conversationId);
 					}
 					if (sameChat(this.source, src))
-						for (const row of r.messages)
-							if (this.relevant(row)) {
-								this.noteLive({ row });
-								this.messages = upsert(this.messages, row);
-							}
+						for (const row of r.messages) if (this.relevant(row)) this.layAnswer(mark, { row });
 				} catch (err) {
 					const why = SEND_REFUSED.get((err as { code?: string }).code ?? "");
 					failed.push(...to.to.map((n) => (why ? `@${n} (${why})` : `@${n}`)));
@@ -2306,14 +2328,12 @@ export class AcpThread {
 						body = `Te envío un mensaje largo como adjunto (${file.size} bytes): ${paths[0]}\nLeelo completo y tratalo como el contenido de este mensaje.`;
 						bodies.set(name, body);
 					}
+					const mark = this.liveTick;
 					const row = await acpSend(name, body, {
 						conversationId: src.conversationId,
 						clientId,
 					});
-					if (sameChat(this.source, src) && this.relevant(row)) {
-						this.noteLive({ row });
-						this.messages = upsert(this.messages, row);
-					}
+					if (sameChat(this.source, src) && this.relevant(row)) this.layAnswer(mark, { row });
 				} catch (err) {
 					const why = SEND_REFUSED.get((err as { code?: string }).code ?? "");
 					failed.push(why ? `@${name} (${why})` : `@${name}`);
