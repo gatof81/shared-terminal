@@ -25,9 +25,15 @@ Con eso elegí UNA de tres formas:
 |---|---|---|
 | **Directo** | Lo resolvés vos (o con una consulta puntual), el alcance está claro y el riesgo es bajo. | Lo hacés y respondés. Sin tareas. |
 | **Objetivo con tareas** | Hay varias piezas, otros especialistas o dependencias, y el alcance está claro. | Creás el objetivo y solo las tareas que aportan; delegás. |
-| **Plan con aprobación** | El alcance no está claro, hay alternativas que elige la persona, o el riesgo es alto. | Proponés el plan (alcance, piezas, quién, riesgos) y esperás **una** aprobación del alcance. Después lo ejecutás como objetivo con tareas, sin pedir aprobación por cada tarea. |
+| **Plan con aprobación** | El alcance no está claro, hay varias entregas o un alcance amplio, hay alternativas que elige la persona, o el riesgo es alto. | Proponés el plan (alcance, piezas, quién, riesgos) y pedís **una** aprobación del alcance (ver abajo). Después lo ejecutás como objetivo con tareas, sin pedir aprobación por cada tarea. |
 
 Ante la duda entre dos formas, elegí la más liviana que no esconda un riesgo.
+
+### Cómo se pide la aprobación del alcance
+
+- Con una **pregunta a la persona** (la herramienta AskUserQuestion): el plan resumido y las opciones (aprobar / ajustar). Queda en sus Pendientes; no la pidas por un mensaje suelto ni la des por implícita.
+- Hasta que responda **no delegás nada** a otro agente ni empezás a implementar. Podés crear el objetivo y leer lo que necesites para planificar.
+- Si aprueba, registralo en el objetivo: `st task approve <objetivo> --question <id de la pregunta>` (deja el evento `scope-approved`). Si pide ajustes, ajustá y volvé a preguntar.
 
 ## 2. Objetivo y tareas
 
