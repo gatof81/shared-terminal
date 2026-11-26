@@ -343,7 +343,29 @@ export function openTerminalSession(opts: {
 	// unconditional, so the symmetry is now properly established.
 	container.addEventListener("webglcontextlost", onContextLost);
 
-	fitAddon.fit();
+	// What the grid depends on: the container's box as FitAddon reads it
+	// (parseInt of the computed width/height), the font size and the
+	// devicePixelRatio. A fit with the same signature as the last one is
+	// skipped, because fit() is not idempotent: xterm's DOM renderer sets
+	// cell.width = round(charWidth × cols) / cols, so the cell it measures
+	// depends on the current column count, and on a box at a cell edge
+	// (e.g. 958 px of 8.4014-px Liberation Mono) each fit flips 114 ⇄ 113
+	// columns and sends tmux a resize. Without this, a view switch that
+	// merely thawed a deferred fit (terminalGeometry.ts) resized every
+	// viewer at those widths. Recorded only when the fit could measure
+	// (a terminal opened hidden has no cell yet and must fit later).
+	let lastFitSignature: string | null = null;
+	const fitSignature = () => {
+		const style = getComputedStyle(container);
+		return `${Number.parseInt(style.width, 10)}x${Number.parseInt(style.height, 10)}@${term.options.fontSize}/${window.devicePixelRatio}`;
+	};
+	const fitIfChanged = () => {
+		const signature = fitSignature();
+		if (signature === lastFitSignature) return;
+		fitAddon.fit();
+		if (fitAddon.proposeDimensions()) lastFitSignature = signature;
+	};
+	fitIfChanged();
 
 	// Helper: write to clipboard and surface success/failure to the
 	// caller. Used by both the Cmd-C handler (explicit user gesture)
@@ -1059,7 +1081,7 @@ export function openTerminalSession(opts: {
 		requestAnimationFrame(() => {
 			fitScheduled = false;
 			try {
-				fitAddon.fit();
+				fitIfChanged();
 			} catch {
 				/* container detached mid-resize */
 			}

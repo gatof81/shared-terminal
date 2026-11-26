@@ -324,6 +324,69 @@ test.describe("terminal invariant", () => {
 		expect(app.errors).toEqual([]);
 	});
 
+	// The previous fit's box is the only thing a view switch may reuse: a
+	// fit re-measures xterm's cell, and on a box at a cell edge that
+	// measure flickers by ~0.005 px — one column more or less, a resize per
+	// switch. One width passing proves nothing, so sweep 1 px around the
+	// project's width (desktop crosses several cell edges in ±12 px).
+	test("every window width: a view switch sends no resize and opens no socket", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		test.setTimeout(180_000);
+		backend.enableConversations();
+		backend.enableWorks();
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/c/${CONV_IDS.ci}`);
+		await expect(page.locator("#ps-topic-title")).toHaveText("Optimización de CI");
+		const menu = page.locator('[role="menu"].action-menu');
+		await page.locator('#project-view .acp-agent-id[data-agent="dev"]').first().click();
+		await menu.getByRole("menuitem", { name: /^Terminal de la sesión/ }).click();
+		await app.expectTerminalReady();
+		const sock = backend.terminalSockets.find(
+			(s) => s.sessionId === PROJECT_SESSION_IDS.developer2 && !s.closed,
+		)!;
+		expect(sock).toBeTruthy();
+		const base = page.viewportSize()!;
+		const widths = app.mobile
+			? [501, 518]
+			: Array.from({ length: 25 }, (_, i) => base.width - 12 + i);
+		const failed: string[] = [];
+		const resizesBefore = sock.sent.filter((f) => f.type === "resize").length;
+		for (const width of widths) {
+			// The window itself changing is a real change: it may resize.
+			await page.setViewportSize({ width, height: base.height });
+			await page.waitForTimeout(300);
+			const sockets = backend.terminalSockets.length;
+			const frames = sock.sent.length;
+			await app.switchView("files");
+			await app.switchView("terminal");
+			await app.switchView("git");
+			// «‹ Tema» and Forward: the topic and back to the tools. On the
+			// topic the window shrinks and comes back (a phone's keyboard for
+			// the composer): the terminal's box ends where it was.
+			await page.locator(".tools-back").click();
+			await expect(page.locator("#ps-topic-title")).toBeVisible();
+			await page.setViewportSize({ width, height: base.height - 300 });
+			await page.waitForTimeout(150);
+			await page.setViewportSize({ width, height: base.height });
+			await page.waitForTimeout(150);
+			await page.goForward();
+			await expect(page.locator(".tools-bar")).toBeVisible();
+			await app.switchView("terminal");
+			await page.waitForTimeout(250);
+			const resizes = sock.sent.slice(frames).filter((f) => f.type === "resize").length;
+			const opened = backend.terminalSockets.length - sockets;
+			if (resizes || opened || sock.sent.length !== frames)
+				failed.push(`${width}px: ${resizes} resize, ${opened} socket`);
+		}
+		expect(sock.closed, "the attach stayed open").toBe(false);
+		// The window's own changes still refit: the grid followed the sweep.
+		expect(sock.sent.filter((f) => f.type === "resize").length).toBeGreaterThan(resizesBefore);
+		expect(failed, "widths where a view switch touched the terminal").toEqual([]);
+		expect(app.errors).toEqual([]);
+	});
+
 	test("typing reaches the session and the echo renders", async ({ app, backend, page }) => {
 		await app.login("alice");
 		await app.openSession("my-project");
