@@ -96,7 +96,7 @@ test.describe("readable interruptions in Pendientes", () => {
 			"3 interrupciones de agentes eliminados",
 		);
 		await expect(group.locator("> .acp-ib-main > .acp-ib-quote")).toHaveText(
-			"@t3f9a-arq, @t3f9a-dev, @t81c0-dev · no se pueden retomar",
+			"No se pueden retomar · @t3f9a-arq, @t3f9a-dev, @t81c0-dev",
 		);
 		// One by one: folded, each in plain words (a prompt error is not a restart).
 		const one = group.locator(".acp-ib-onebyone .acp-ib-item");

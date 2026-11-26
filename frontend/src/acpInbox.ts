@@ -406,7 +406,7 @@ function goneGroup(gone: AcpMessage[]): HTMLElement {
 					? "1 interrupción de un agente eliminado"
 					: `${n} interrupciones de agentes eliminados`,
 			),
-			el("p", "acp-ib-quote", `${names.join(", ")} · no se pueden retomar`),
+			el("p", "acp-ib-quote", `No se pueden retomar · ${names.join(", ")}`),
 		);
 		const acts = el("div", "acp-ib-acts");
 		const all = el(
