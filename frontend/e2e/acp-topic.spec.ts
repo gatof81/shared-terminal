@@ -193,6 +193,15 @@ test.describe("a topic's recipients and their states", () => {
 		await expect(chips(page).locator(".acp-chip-typed")).toHaveCount(0);
 		await field(page).fill("");
 		await expect(chips(page).locator(".acp-to-error")).toHaveCount(0);
+		// Only mentions, the last one finished (menu closed, no space after it):
+		// «Para:» names both, as the send does.
+		await field(page).pressSequentially("@dev @arq");
+		await expect(chips(page).locator(".acp-chip-name")).toHaveText(["@dev"]);
+		await page.keyboard.press("Escape");
+		await expect(chips(page).locator(".acp-chip-name")).toHaveText(["@dev", "@arq"]);
+		const req2 = posts(page);
+		await page.locator("#project-view .acp-chat-send").click();
+		expect((await req2).postDataJSON()).toMatchObject({ to: ["dev", "arq"] });
 		expect(app.errors).toEqual([]);
 	});
 
