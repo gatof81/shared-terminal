@@ -19,7 +19,7 @@ import {
 import { openActionMenu } from "./components/actionMenu.js";
 import { confirmDialog, promptDialog } from "./components/dialog.js";
 import { showToast } from "./components/toast.js";
-import { projectName } from "./projectDirectory.js";
+import { projectName, projectState } from "./projectDirectory.js";
 import {
 	agentState,
 	onRailChange,
@@ -176,6 +176,11 @@ export function writeInTopic(projectId: string, conversationId: string, agent: s
 	requestAnimationFrame(() => thread.input.focus());
 }
 
+/** The project list changed (projectsView): what the topic allows may have too. */
+export function repaintTopic(): void {
+	paint();
+}
+
 /** Off screen: stop following (DOM and state kept for a quick return). */
 export function suspendTopic(): void {
 	thread.close();
@@ -211,16 +216,28 @@ function paint(): void {
 	const sub = [projectName(pid) ?? "", ...here].filter(Boolean).join(" · ");
 	if (subEl.textContent !== sub) subEl.textContent = sub;
 	const isArchived = Boolean(c?.archivedAt);
-	menuBtn.hidden = !c || isArchived || missing;
+	// The topic says nothing of its project: only a project the list confirms
+	// takes messages (#695). Gone (archived, or not there) reads like an
+	// archived topic; not confirmed yet (list unread or its read failed) only
+	// locks the box — a lock, never a hide, so a draft stays in sight.
+	const project = projectState(pid);
+	const projectGone = project === "gone";
+	menuBtn.hidden = !c || isArchived || missing || projectGone;
 	// An archived topic is read here, without a message box; a missing one says so.
-	thread.setComposer(missing || isArchived ? "off" : c ? "on" : "disabled");
+	thread.setComposer(
+		missing || isArchived || projectGone ? "off" : c && project === "active" ? "on" : "disabled",
+	);
 	const note = missing
 		? "Esta conversación no existe o ya no está en este proyecto."
-		: isArchived
-			? "Conversación archivada · solo lectura"
-			: state?.feed === "error"
-				? "No se pudo cargar la conversación."
-				: "";
+		: projectGone
+			? "Proyecto archivado o inexistente · solo lectura"
+			: isArchived
+				? "Conversación archivada · solo lectura"
+				: state?.feed === "error"
+					? "No se pudo cargar la conversación."
+					: project === "error"
+						? "No se pudo leer la lista de proyectos; se vuelve a intentar sola."
+						: "";
 	noteEl.hidden = note === "";
 	noteEl.classList.toggle("pv-status-error", missing || state?.feed === "error");
 	if (noteEl.textContent !== note) {

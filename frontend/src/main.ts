@@ -893,10 +893,23 @@ const MOBILE_BREAKPOINT_PX = 768;
 const mobileMql = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT_PX}px)`);
 export const isMobile = () => mobileMql.matches;
 
+// A phone's closed drawer sits off screen but stays in the DOM: without
+// inert, Tab walks its ~20 invisible controls (Enter on an unseen «Detener»).
+// Not on the phone's home (the list IS the screen) nor on a wide screen (a
+// column of the layout). Recomputed on every input it reads — open/closed,
+// home-on, the breakpoint — so a resize never leaves it hanging.
+function syncSidebarInert(): void {
+	sidebarEl.inert =
+		isMobile() &&
+		!mainEl.classList.contains("sidebar-open") &&
+		!document.body.classList.contains("home-on");
+}
+
 function setSidebarOpen(open: boolean) {
 	const wasOpen = mainEl.classList.contains("sidebar-open");
 	mainEl.classList.toggle("sidebar-open", open);
 	sidebarToggleBtn.setAttribute("aria-expanded", String(open));
+	syncSidebarInert();
 
 	// Focus management is only meaningful on mobile, where the sidebar
 	// is a modal-style drawer — keyboard users opening it expect focus
@@ -991,6 +1004,7 @@ function syncHome(): void {
 	const on = homeShown();
 	const was = document.body.classList.contains("home-on");
 	document.body.classList.toggle("home-on", on);
+	syncSidebarInert();
 	// Out of the keyboard's and the screen reader's reach while covered.
 	terminalAreaEl.inert = on;
 	if (on && !was) {

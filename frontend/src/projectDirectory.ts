@@ -82,6 +82,20 @@ export function projectsLoadFailed(): boolean {
 	return loadFailed;
 }
 
+/**
+ * What the list says of project `projectId`: in it (`active` — kept on a
+ * failed re-read after a good one), absent from a list that was read
+ * (`gone`: archived or never there — the list cannot tell which), or not
+ * known yet (`loading`, `error` when the read failed). Only `active` lets a
+ * page write into the project (#695).
+ */
+export type ProjectState = "active" | "gone" | "loading" | "error";
+export function projectState(projectId: string): ProjectState {
+	if (byId.has(projectId)) return "active";
+	if (loaded) return "gone";
+	return loadFailed ? "error" : "loading";
+}
+
 export function clearProjects(): void {
 	byId = new Map();
 	order = [];
