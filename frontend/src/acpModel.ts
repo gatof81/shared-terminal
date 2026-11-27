@@ -768,9 +768,13 @@ export function interruptSummary(
 
 /**
  * A live row that is news for «@x respondió en …» (revisión 2 §8): the
- * person's message to an agent in a topic, just finished (`prev`, the state
- * this tab last saw of it live, was not `done`), and its topic is not the
- * one on screen. Reloads are never news: only live rows reach this.
+ * person's message to an agent in a topic, just finished — this tab saw it
+ * live as `pending` or `running` before (`prev`) — and its topic is not the
+ * one on screen. Reloads are never news: only live rows reach this. A `done`
+ * row never seen live before (`prev` undefined) is not news either: a later
+ * write to an already finished row must not announce an old answer (the
+ * cost: a message already running when the page loaded, with no live frame
+ * before its end, goes unannounced — the rail and Pendientes still count it).
  */
 export function isReplyNews(
 	m: Pick<AcpMessage, "from_id" | "state" | "conversation_id">,
@@ -780,7 +784,7 @@ export function isReplyNews(
 	return (
 		m.from_id === "owner" &&
 		m.state === "done" &&
-		prev !== "done" &&
+		(prev === "pending" || prev === "running") &&
 		!!m.conversation_id &&
 		m.conversation_id !== onScreen
 	);
