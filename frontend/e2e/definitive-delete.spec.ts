@@ -33,7 +33,8 @@ test.describe("definitive deletion", () => {
 		const row = archivedRow(page, "Mejoras del backend");
 		await row.getByRole("button", { name: "Más acciones de «Mejoras del backend»" }).click();
 		await page.getByRole("menuitem", { name: "Eliminar definitivamente…" }).click();
-		await expect(dialog(page)).toContainText("Se borran para siempre");
+		await expect(dialog(page)).toContainText("Eliminar el tema definitivamente");
+		await expect(dialog(page)).toContainText("No se puede deshacer desde la app.");
 		const confirm = dialog(page).locator(".modal-danger-action");
 		await expect(confirm).toBeDisabled();
 		const field = dialog(page).locator(".dialog-require input");
@@ -42,6 +43,9 @@ test.describe("definitive deletion", () => {
 		await field.fill("Mejoras del backend");
 		await confirm.click();
 		await expect(row).toHaveCount(0);
+		await expect(page.locator("#toast")).toContainText("Se eliminó «Mejoras del backend».");
+		// No archived row left: the focus goes to the list's toggle.
+		await expect(rail(page).getByRole("button", { name: "Ocultar archivadas" })).toBeFocused();
 		expect(backend.acpConversations.some((x) => x.id === CONV_IDS.backend)).toBe(false);
 		expect(backend.requests.filter((r) => r.method === "DELETE").map((r) => r.path)).toEqual([
 			`/acp/conversations/${CONV_IDS.backend}`,
@@ -64,9 +68,10 @@ test.describe("definitive deletion", () => {
 		await page.getByRole("menuitem", { name: "Eliminar definitivamente…" }).click();
 		await dialog(page).locator(".dialog-require input").fill("Optimización de CI");
 		await dialog(page).locator(".modal-danger-action").click();
-		await expect(page.locator("#toast")).toContainText(
-			"Todavía no se puede eliminar: tiene un mensaje pendiente o en curso.",
-		);
+		// The reasons stay on screen, in a dialog.
+		await expect(dialog(page)).toContainText("Todavía no se puede eliminar");
+		await expect(dialog(page)).toContainText("· mensajes pendientes o en curso");
+		await dialog(page).getByRole("button", { name: "Entendido" }).click();
 		expect(backend.acpConversations.some((x) => x.id === CONV_IDS.ci)).toBe(true);
 		await expect(archivedRow(page, "Optimización de CI")).toHaveCount(1);
 	});
@@ -83,14 +88,16 @@ test.describe("definitive deletion", () => {
 		});
 		await app.login("alice", `#/projects/${HZ}/archive/@arq`);
 		await page.getByRole("button", { name: "Vaciar…" }).click();
-		await expect(dialog(page)).toContainText("historial del chat individual de @arq");
-		await expect(dialog(page)).toContainText("con otros agentes");
+		await expect(dialog(page)).toContainText("Vaciar el chat individual de @arq");
+		await expect(dialog(page)).toContainText("mensajes directos entre @arq y otros agentes");
 		const confirm = dialog(page).locator(".modal-danger-action");
 		await dialog(page).locator(".dialog-require input").fill("arq");
 		await expect(confirm).toBeDisabled();
 		await dialog(page).locator(".dialog-require input").fill("@arq");
 		await confirm.click();
-		await expect(page.locator("#toast")).toContainText("quedan 1 en curso");
+		await expect(page.locator("#toast")).toContainText(
+			"Se borraron 2 mensajes. Quedó 1 en curso: podés vaciar de nuevo cuando terminen.",
+		);
 		const thread = page.locator("#project-view .ps-archive .acp-chat-thread");
 		await expect(thread).not.toContainText("OAuth con PKCE");
 		await expect(thread).toContainText("Sigue en curso");
@@ -106,7 +113,11 @@ test.describe("definitive deletion", () => {
 	}) => {
 		await app.login("alice", `#/projects/${HZ}/archive/project`);
 		await page.getByRole("button", { name: "Vaciar…" }).click();
-		await expect(dialog(page)).toContainText("Project Chat anterior");
+		await expect(dialog(page)).toContainText("Vaciar el Project Chat anterior");
+		await expect(dialog(page).locator(".dialog-require input")).toHaveAttribute(
+			"autocapitalize",
+			"none",
+		);
 		await dialog(page).locator(".dialog-require input").fill("Educación HZ");
 		await dialog(page).locator(".modal-danger-action").click();
 		await expect(page).toHaveURL(new RegExp(`#/projects/${HZ}/archive$`));

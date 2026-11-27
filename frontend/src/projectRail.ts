@@ -58,7 +58,7 @@ export interface RailActions {
 	/** Pendientes (acpInbox.ts), from the attention row. */
 	openInbox: (opener: HTMLElement) => void;
 	/** An archived topic's ⋯ «Eliminar definitivamente» (acpConversation.ts). */
-	deleteTopic: (c: AcpConversation) => void;
+	deleteTopic: (c: AcpConversation) => Promise<boolean>;
 }
 
 let actions: RailActions | null = null;
@@ -350,6 +350,18 @@ export function patchConversation(c: AcpConversation): void {
 		if (archived) archived = [c, ...archived.filter((x) => x.id !== c.id)];
 	} else convs = [c, ...convs.filter((x) => x.id !== c.id)].sort(byActivity);
 	render();
+}
+
+/** The ⋯'s deletion: then the focus goes to the next archived row, or the toggle. */
+async function deleteFromRail(c: AcpConversation): Promise<void> {
+	const list = archived ?? [];
+	const i = list.findIndex((x) => x.id === c.id);
+	const next = list[i + 1] ?? list[i - 1] ?? null;
+	if (!(await actions?.deleteTopic(c))) return;
+	const row = next
+		? document.querySelector<HTMLElement>(`.rail-conv[data-conversation="${next.id}"]`)
+		: null;
+	(row ?? archivedToggle).focus();
 }
 
 /** A topic deleted for good: off both lists at once. */
@@ -685,8 +697,10 @@ function convRow(p: string, c: AcpConversation, isArchived: boolean): HTMLElemen
 				openActionMenu({
 					title: c.title,
 					opener: more,
-					items: [{ id: "delete", label: "Eliminar definitivamente…", kind: "danger" }],
-					onPick: () => actions?.deleteTopic(c),
+					items: [
+						{ id: "delete", label: "Eliminar definitivamente…", kind: "danger", sepBefore: true },
+					],
+					onPick: () => void deleteFromRail(c),
 				}),
 			);
 			li.append(more);

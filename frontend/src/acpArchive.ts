@@ -18,6 +18,7 @@
 
 import { newTopicDialog, writeInTopic } from "./acpConversation.js";
 import { openInbox } from "./acpInbox.js";
+import { emptiedText } from "./acpModel.js";
 import { AcpThread, type ThreadState } from "./acpThread.js";
 import {
 	type AcpMessage,
@@ -374,31 +375,26 @@ async function emptyHere(): Promise<void> {
 	const k = key;
 	if (!p || !k) return;
 	const agent = k.startsWith("@") ? k.slice(1) : null;
-	const name = agent ? `@${agent}` : (projectName(p) ?? p);
+	const project = projectName(p) ?? p;
+	const name = agent ? `@${agent}` : project;
+	const keeps =
+		"Lo que está en curso queda: los mensajes pendientes o en curso, los que tienen una pregunta abierta y el resto de su cadena de consultas.";
 	const ok = await confirmDialog({
 		cancelLabel: "Cancelar",
-		title: `Vaciar «${archiveTitle(k)}»`,
+		title: agent ? `Vaciar el chat individual de @${agent}` : "Vaciar el Project Chat anterior",
 		message: agent
-			? `Se borra para siempre el historial del chat individual de @${agent}: sus mensajes directos, con vos y con otros agentes (también desaparecen del chat individual del otro agente), sus preguntas y sus interrupciones sin revisar. Lo escrito en proyectos y conversaciones no se toca. Lo que sigue en curso queda. No se puede deshacer.`
-			: `Se borran para siempre los mensajes del Project Chat anterior de «${name}», sus preguntas y sus interrupciones sin revisar. Las conversaciones no se tocan. Lo que sigue en curso queda. No se puede deshacer.`,
+			? `Se borra el historial de su chat individual: lo que le escribiste, sus respuestas y los mensajes directos entre @${agent} y otros agentes, que también desaparecen del chat individual de esos agentes.\n\nNo se tocan los mensajes de los proyectos ni de sus temas.\n\n${keeps}\n\nNo se puede deshacer desde la app.`
+			: `Se borran los mensajes del Project Chat anterior de «${project}», los que no están en ningún tema. Los temas no se tocan.\n\n${keeps}\n\nNo se puede deshacer desde la app.`,
 		confirmLabel: "Vaciar",
-		requireText: {
-			expected: name,
-			label: agent
-				? "Escribí el nombre del agente (con @) para confirmar"
-				: "Escribí el nombre del proyecto para confirmar",
-		},
+		requireText: { expected: name, label: `Escribí «${name}» para confirmar` },
 	}).catch(() => false);
 	if (!ok) return;
 	try {
 		const r = agent ? await acpEmptyAgentArchive(agent) : await acpEmptyProjectArchive(p);
-		showToast(
-			r.kept
-				? `Se borraron ${r.deleted} mensajes; quedan ${r.kept} en curso.`
-				: `Se borraron ${r.deleted} mensajes.`,
-		);
+		showToast(emptiedText(r.deleted, r.kept));
 		if (pid !== p || key !== k) return;
 		void loadList(p);
+		// An entry left without messages is not listed: back to the list.
 		if (r.kept) thread.forget();
 		else navigateProject({ projectId: p, page: "archive" }, { replace: true });
 	} catch (err) {

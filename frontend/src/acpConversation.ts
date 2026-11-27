@@ -395,8 +395,8 @@ async function archiveTopic(c: AcpConversation): Promise<void> {
 
 /** What keeps a topic from being deleted (409 `in-use`), in the person's words. */
 const IN_USE = new Map([
-	["message-active", "un mensaje pendiente o en curso"],
-	["question-open", "una pregunta sin responder"],
+	["message-active", "mensajes pendientes o en curso"],
+	["question-open", "preguntas sin responder (están en Pendientes)"],
 	["work-open", "un trabajo sin limpiar"],
 	["task-open", "una tarea sin terminar"],
 ]);
@@ -404,36 +404,40 @@ const IN_USE = new Map([
 /**
  * «Eliminar definitivamente» an ARCHIVED topic (#13): never one tap — the
  * person types its title. Nothing in course is touched: the server refuses
- * with the reasons, said here.
+ * with the reasons, which stay on screen in a dialog. True when deleted.
  */
-export async function deleteTopic(c: AcpConversation): Promise<void> {
+export async function deleteTopic(c: AcpConversation): Promise<boolean> {
 	const ok = await confirmDialog({
 		cancelLabel: "Cancelar",
-		title: `Eliminar «${c.title}» definitivamente`,
-		message:
-			"Se borran para siempre todos sus mensajes (los tuyos, las respuestas de los agentes y sus consultas entre ellos), las preguntas de esos mensajes y sus interrupciones sin revisar. No se puede deshacer. Las tareas y los trabajos que salieron de esta conversación no se borran.",
+		title: "Eliminar el tema definitivamente",
+		message: `Se borran todos los mensajes de «${c.title}»: los tuyos, las respuestas de los agentes y las consultas entre agentes, con sus preguntas y las interrupciones sin revisar.\n\nSe conservan las tareas y su historial, los trabajos (worktrees y ramas) y los transcripts de los agentes.\n\nNo se puede deshacer desde la app.`,
 		confirmLabel: "Eliminar definitivamente",
-		requireText: {
-			expected: c.title.trim(),
-			label: "Escribí el título de la conversación para confirmar",
-		},
+		requireText: { expected: c.title, label: `Escribí «${c.title}» para confirmar` },
 	}).catch(() => false);
-	if (!ok) return;
+	if (!ok) return false;
 	try {
 		await acpDeleteConversation(c.id);
 		dropConversation(c.id);
-		showToast("Conversación eliminada");
+		showToast(`Se eliminó «${c.title}».`);
 		if (cid === c.id && pid) upToProject(pid);
+		return true;
 	} catch (err) {
-		const e = err as { status?: number; code?: string; body?: { reasons?: string[] } };
+		const e = err as { code?: string; body?: { reasons?: string[] } };
 		if (e.code === "in-use") {
-			const why = (e.body?.reasons ?? []).map((r) => IN_USE.get(r) ?? r);
-			showToast(
-				`Todavía no se puede eliminar: tiene ${why.length ? why.join(", ") : "algo en curso"}.`,
-				true,
-			);
-		} else if (e.code === "not-archived") showToast("Archivala primero.", true);
+			const why = (e.body?.reasons ?? []).map((r) => `· ${IN_USE.get(r) ?? r}`);
+			await confirmDialog({
+				title: "Todavía no se puede eliminar",
+				message: [
+					`«${c.title}» tiene cosas en curso:`,
+					...why,
+					"Cuando terminen, volvé a intentarlo.",
+				].join("\n\n"),
+				confirmLabel: "Entendido",
+				cancelLabel: "Cerrar",
+			}).catch(() => false);
+		} else if (e.code === "not-archived") showToast("Archivá el tema primero.", true);
 		else showToast(refusal(err, "No se pudo eliminar"), true);
+		return false;
 	}
 }
 

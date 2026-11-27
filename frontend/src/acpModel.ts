@@ -785,3 +785,16 @@ export function isReplyNews(
 		m.conversation_id !== onScreen
 	);
 }
+
+/** What «Vaciar» did, in words (`{deleted, kept}`). */
+export function emptiedText(deleted: number, kept: number): string {
+	const gone = deleted === 1 ? "Se borró 1 mensaje." : `Se borraron ${deleted} mensajes.`;
+	if (deleted > 0 && kept === 0) return gone;
+	if (deleted > 0)
+		return `${gone} ${kept === 1 ? "Quedó 1" : `Quedaron ${kept}`} en curso: podés vaciar de nuevo cuando terminen.`;
+	if (kept > 0)
+		return kept === 1
+			? "No se borró nada: el mensaje está en curso."
+			: `No se borró nada: los ${kept} mensajes están en curso.`;
+	return "No había mensajes para borrar.";
+}

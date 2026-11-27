@@ -9,6 +9,7 @@ import {
 	chipsOf,
 	effortLabel,
 	effortState,
+	emptiedText,
 	eventTime,
 	groupThread,
 	interruptCause,
@@ -618,5 +619,21 @@ describe("isReplyNews (an answer in another topic)", () => {
 		expect(isReplyNews({ ...row, from_id: "arq" }, "running", "c2")).toBe(false);
 		expect(isReplyNews({ ...row, conversation_id: null }, "running", "c2")).toBe(false);
 		expect(isReplyNews({ ...row, state: "running" }, "pending", "c2")).toBe(false);
+	});
+});
+
+describe("emptiedText («Vaciar»'s result)", () => {
+	it("says every combination, singular and plural", () => {
+		expect(emptiedText(1, 0)).toBe("Se borró 1 mensaje.");
+		expect(emptiedText(5, 0)).toBe("Se borraron 5 mensajes.");
+		expect(emptiedText(5, 1)).toBe(
+			"Se borraron 5 mensajes. Quedó 1 en curso: podés vaciar de nuevo cuando terminen.",
+		);
+		expect(emptiedText(1, 3)).toBe(
+			"Se borró 1 mensaje. Quedaron 3 en curso: podés vaciar de nuevo cuando terminen.",
+		);
+		expect(emptiedText(0, 1)).toBe("No se borró nada: el mensaje está en curso.");
+		expect(emptiedText(0, 4)).toBe("No se borró nada: los 4 mensajes están en curso.");
+		expect(emptiedText(0, 0)).toBe("No había mensajes para borrar.");
 	});
 });

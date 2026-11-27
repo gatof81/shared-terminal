@@ -429,6 +429,10 @@ export function confirmDialog(opts: ConfirmOptions): Promise<boolean> {
 			input.type = "text";
 			input.autocomplete = "off";
 			input.spellcheck = false;
+			// A phone's keyboard must not change what is typed (iOS capitalises
+			// «dev», "corrects" a title): the button would never enable.
+			input.setAttribute("autocapitalize", "none");
+			input.setAttribute("autocorrect", "off");
 			field.appendChild(input);
 			b.body.appendChild(field);
 			b.confirmBtn.disabled = true;
