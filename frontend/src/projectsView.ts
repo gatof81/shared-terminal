@@ -84,6 +84,8 @@ import {
 	showRail,
 	topicTitle,
 } from "./projectRail.js";
+import { mountRecents, renderRecents } from "./recentsView.js";
+import { pruneRecents, rememberVisit } from "./recentTopics.js";
 import {
 	depth,
 	disableProjectRoutes,
@@ -137,12 +139,15 @@ async function loadProjects(): Promise<void> {
 			canCreate: a.body.can.createProject.allowed,
 		});
 		changed = setProjects(a.body.projects) || changed;
+		// A project archived elsewhere leaves «Seguir…» and «Recientes».
+		pruneRecents({ projects: new Set(a.body.projects.map((p) => p.projectId)) });
 	} else if (a?.code !== "stale") changed = setProjectsStatus({ loadFailed: true });
 	if (changed && sessionListLoaded()) renderSessionList();
 	renderSection();
 	paintSpace();
 	repaintRail();
 	repaintTopic();
+	renderRecents();
 }
 
 // ── Sidebar ─────────────────────────────────────────────────────────────────
@@ -164,6 +169,7 @@ function sync(): void {
 		hidePage();
 		if (left !== null && homeFocus === left) focusProjectRow(left);
 		homeFocus = null;
+		renderRecents();
 		return;
 	}
 	// The address in its canonical form (an encoding written differently):
@@ -183,6 +189,7 @@ function sync(): void {
 	}
 	syncSpace(r, shown, shownPage);
 	renderSection();
+	renderRecents();
 }
 
 /**
@@ -274,6 +281,9 @@ function syncSpace(r: ProjectRoute, prevPid: string | null, prevPage: ProjectPag
 	document.body.classList.toggle("ps-on-topic", topic !== null || page === "archive");
 	showRail(r.projectId, topic, page === "archive");
 	if (topic) rememberTopic(r.projectId, topic);
+	// «Seguir donde estabas» (recentTopics.ts): a topic or Herramientas.
+	if (page === "conversation" || page === "tools")
+		rememberVisit(projectRouteHash(r), topic ? topicTitle(topic) : null);
 	if (page !== "archive") suspendArchive();
 	if (topic) {
 		// From the rail (a phone's project screen, or the sidebar) by a tap,
@@ -772,6 +782,7 @@ export function startProjects(): void {
 	void loadProjects();
 	void readAcpAgents();
 	startInbox();
+	mountRecents();
 	sync();
 	if (pollTimer) clearInterval(pollTimer);
 	pollTimer = setInterval(() => {
@@ -800,4 +811,5 @@ export function resetProjects(): void {
 	homeFocus = null;
 	hidePage();
 	renderSection();
+	renderRecents();
 }

@@ -33,6 +33,8 @@ import {
 import { openActionMenu } from "./components/actionMenu.js";
 import { projectName, projects } from "./projectDirectory.js";
 import { paintProjectSignals, projectSignals } from "./projectSignals.js";
+import { offered, openRecent, recentLabel } from "./recentsView.js";
+import { pruneRecents } from "./recentTopics.js";
 import { navigateProject, projectRouteHash } from "./router.js";
 import { el, syncChildren } from "./ui.js";
 
@@ -226,12 +228,14 @@ foot.append(settingsBtn);
 const teamSection = section(teamHead, teamList, teamNote);
 teamSection.classList.add("rail-section-team");
 
+const worksSection = section(worksHead, worksList, worksNote, closedToggle);
+
 const scroll = el("div", "rail-scroll");
 scroll.append(
 	attention,
 	section(convHead, convList, convNote, archivedToggle),
 	teamSection,
-	section(worksHead, worksList, worksNote, closedToggle),
+	worksSection,
 	section(archiveHead, archiveList),
 );
 railBody.append(scroll, foot);
@@ -347,7 +351,18 @@ export function patchConversation(c: AcpConversation): void {
 		convs = convs.filter((x) => x.id !== c.id);
 		if (archived) archived = [c, ...archived.filter((x) => x.id !== c.id)];
 	} else convs = [c, ...convs.filter((x) => x.id !== c.id)].sort(byActivity);
+	recentsFollow(c.projectId);
 	render();
+}
+
+/**
+ * «Seguir…» / «Recientes» (recentTopics.ts) follow the project's live topics
+ * as soon as they are known — not on the next paint, which a switch of
+ * project could overtake: an archived or deleted one leaves them, a renamed
+ * one is named anew. The topic on screen stays (a new one may not be listed yet).
+ */
+function recentsFollow(p: string): void {
+	if (convsRead === "ok") pruneRecents({ pid: p, live: convs, keep: here });
 }
 
 /**
@@ -408,6 +423,7 @@ async function loadConvs(p: string, g: number): Promise<void> {
 		if (g !== gen) return;
 		convs = list;
 		convsRead = "ok";
+		recentsFollow(p);
 	} catch {
 		if (g !== gen) return;
 		// A re-read that fails keeps the list already shown.
@@ -584,7 +600,11 @@ function paint(): void {
 	teamNote.textContent = agentsRead ? "Sin agentes en este proyecto." : "Cargando…";
 
 	// Trabajos
-	const mine = works.filter((w) => w.projectId === p);
+	// A cleaned work is gone for good (its worktree removed): the rail stops
+	// listing it, and with nothing left the section is not drawn. Its
+	// Herramientas address still says it is no longer there (toolsView.ts).
+	const mine = works.filter((w) => w.projectId === p && w.state !== "cleaned");
+	worksSection.hidden = mine.length === 0;
 	const open = mine.filter((w) => OPEN_WORK.has(w.state));
 	const closed = mine.filter((w) => !OPEN_WORK.has(w.state));
 	const shownWorks = showClosed ? [...open, ...closed] : open;
@@ -626,7 +646,7 @@ const OPEN_WORK = new Set(["creating", "active", "closing"]);
 
 function workWords(w: AcpWork): string {
 	if (w.state === "creating") return "creándose";
-	if (w.state !== "active") return w.state === "cleaned" ? "limpiado" : "cerrado";
+	if (w.state !== "active") return "cerrado";
 	const runs = agents.find((a) => a.name === w.agent)?.runningIn?.some((r) => r.work === w.id);
 	return runs ? "en curso" : "activo";
 }
@@ -759,14 +779,17 @@ function openSelector(): void {
 	const current = pid;
 	if (!current || !actions) return;
 	const a = actions;
+	// «Recientes» (revisión 2 §7): up to 3 other topics / Herramientas.
+	const recent = offered().slice(0, 3);
 	openActionMenu({
 		title: "Proyectos",
-		caption: "Cambiar de proyecto",
+		caption: recent.length ? "Recientes" : "Cambiar de proyecto",
 		opener: selector,
 		// Wide: under the rail's head. A phone places it under the app's header.
 		anchor: railHead,
 		items: [
-			...projects().map((p) => {
+			...recent.map((e, i) => ({ id: `r:${i}`, label: recentLabel(e) })),
+			...projects().map((p, i) => {
 				// The sidebar row's dot and pill, painted on a holder the menu adopts.
 				const holder = document.createElement("span");
 				const said = paintProjectSignals(holder, projectSignals(p.projectId));
@@ -775,6 +798,7 @@ function openSelector(): void {
 				return {
 					id: `p:${p.projectId}`,
 					label: p.name,
+					...(i === 0 && recent.length ? { sepBefore: true, heading: "Cambiar de proyecto" } : {}),
 					radio: { checked: p.projectId === current },
 					leading,
 					trailing,
@@ -790,7 +814,10 @@ function openSelector(): void {
 			if (id === "new") a.newProject();
 			else if (id === "rename") a.renameProject(current);
 			else if (id === "archive") a.archiveProject(current);
-			else if (id.startsWith("p:") && id.slice(2) !== current)
+			else if (id.startsWith("r:")) {
+				const e = recent[Number(id.slice(2))];
+				if (e) openRecent(e);
+			} else if (id.startsWith("p:") && id.slice(2) !== current)
 				navigateProject({ projectId: id.slice(2) });
 		},
 	});

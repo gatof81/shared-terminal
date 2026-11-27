@@ -401,7 +401,7 @@ try {
 		await page.locator('[role="menu"].action-menu').getByRole("menuitem", { name: /^Terminal de la sesión/ }).click();
 		await sees(page, "Herramientas of the agent, Terminal", ".tools-bar");
 		// A session created by the form has no tmux tab yet: open one, as a person would.
-		const open = page.getByRole("button", { name: /Open a tab/ });
+		const open = page.getByRole("button", { name: "Abrir una pestaña", exact: true });
 		if (await open.isVisible().catch(() => false)) await open.click();
 		await sees(page, "the agent's terminal", "#terminal-container .xterm");
 		await page.waitForTimeout(4_000);

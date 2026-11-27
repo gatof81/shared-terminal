@@ -558,3 +558,68 @@ body.project-page-on #actions-btn {
     font-size: 12px;
   }
 }
+
+/* «Seguir en «Tema» · Proyecto ›» (recentsView.ts, revisión 2 §7): on a
+   phone, a 56-px row above Proyectos; wide, the empty area's card. Nothing
+   opens by itself: the home stays the list. */
+.resume-row {
+  display: none;
+}
+@media (max-width: 768px) {
+  .resume-row:not([hidden]) {
+    display: flex;
+    align-items: center;
+    flex: none;
+    gap: 4px;
+    min-height: 56px;
+    margin: 8px 12px 4px;
+    padding: 0 14px;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    background: var(--c-accent-bg);
+    color: var(--c-text);
+    font: inherit;
+    font-size: 0.95rem;
+    text-align: left;
+    cursor: pointer;
+  }
+}
+.resume-card {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: min(32rem, calc(100% - 32px));
+  min-height: 56px;
+  padding: 0 18px;
+  border: 1px solid var(--c-border);
+  border-radius: 10px;
+  background: var(--c-accent-bg);
+  color: var(--c-text);
+  font: inherit;
+  font-size: 0.95rem;
+  text-align: left;
+  cursor: pointer;
+}
+.resume-card:hover,
+.resume-card:focus-visible,
+.resume-row:focus-visible {
+  border-color: var(--c-accent);
+}
+.resume-text {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.resume-project {
+  flex: none;
+  color: var(--c-muted);
+  white-space: nowrap;
+}
+.resume-go {
+  flex: none;
+  margin-left: auto;
+  padding-left: 10px;
+  color: var(--c-accent);
+  font-size: 1.2rem;
+}

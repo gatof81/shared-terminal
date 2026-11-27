@@ -23,6 +23,8 @@ export interface MenuItem {
 	reason?: string;
 	/** A line above this item (a new group of the menu). */
 	sepBefore?: boolean;
+	/** Anchored menus: the group's name above this item (after its line), as the caption looks. */
+	heading?: string;
 	/** A choice among the items marked `radio` (`menuitemradio`, ✓ when checked). */
 	radio?: { checked: boolean };
 	/** Shown before the label and at the row's end (the project selector's dot and pill). */
@@ -111,6 +113,12 @@ export function openActionMenu(opts: ActionMenuOptions): void {
 			const sep = el("div", "action-menu-sep");
 			sep.setAttribute("role", "separator");
 			card.appendChild(sep);
+		}
+		if (anchored && item.heading) {
+			scroller = null;
+			const h = el("div", "action-menu-caption", item.heading);
+			h.setAttribute("role", "presentation");
+			card.appendChild(h);
 		}
 		const b = el("button", `actions-menu-item kind-${item.kind ?? "normal"}`);
 		b.type = "button";

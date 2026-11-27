@@ -327,15 +327,26 @@
   body.home-on #sidebar {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-rows: minmax(0, 1fr) auto auto;
+    /* Row 1: «Seguir en…» (recentsView.ts), empty when there is none. */
+    grid-template-rows: auto minmax(0, 1fr) auto auto;
   }
+  body.home-on #resume-row,
   body.home-on #session-list,
   body.home-on #observable-section {
     grid-column: 1 / -1;
   }
+  body.home-on #resume-row {
+    grid-row: 1;
+  }
+  body.home-on #session-list {
+    grid-row: 2;
+  }
+  body.home-on #observable-section {
+    grid-row: 3;
+  }
   body.home-on #sidebar.sidebar-tree #sidebar-actions,
   body.home-on #sidebar-footer {
-    grid-row: 3;
+    grid-row: 4;
     padding: 0.5rem 0.75rem;
     border-top: 1px solid var(--c-border);
     background: var(--c-bg);

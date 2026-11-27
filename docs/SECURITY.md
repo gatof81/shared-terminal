@@ -137,6 +137,21 @@ That state includes material operators should be aware of:
   (`chmod 600`, but not covered by `SECRETS_ENCRYPTION_KEY`). Backing up
   or sharing a workspace dir now also copies whatever keys the session
   can push with.
+- **Repo access token** (`.st/git-credentials`, and for github.com
+  `.config/gh/hosts.yml`) — a session created with a repo on `auth:
+  "pat"` keeps the PAT after the clone, like SSH keeps its key, so
+  `git fetch`/`push` and `gh` work without a manual login
+  (`bootstrap/cloneRepo.ts` header). `chmod 600` / gh's own file, both
+  cleartext on the host; `.config/gh/` is excluded from the clone's git
+  index only via its local `.git/info/exclude` when the clone is the
+  workspace root. Concretely: the token sits **in the clear in the
+  workspace** (anyone who can read `<WORKSPACE_ROOT>/<sessionId>` or
+  open a terminal in the session can use it), it **survives a soft
+  delete** (only `?hard=true` removes it, or revocation at the git
+  host), and it **goes into the session's tarball in `npm run backup`**.
+  Use a **fine-grained PAT scoped to the one repository, with an
+  expiry date** and only the permissions the session needs, never a
+  classic token with account-wide scopes.
 
 Same consequences as the `writeEnvFile` section above, for the same
 reason (the workspace bind mount is the persistence boundary):
