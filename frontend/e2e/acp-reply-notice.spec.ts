@@ -13,9 +13,13 @@ const THREAD = "#project-view .ps-topic .acp-chat-thread";
 const NOTICE = ".acp-reply-notice";
 const SHOTS = process.env.ACP_SHOTS;
 
-/** @dev's running message in «Optimización de CI» finishes (pushed live). */
-function finishCi(backend: MockBackend): void {
+/**
+ * @dev's running message in «Optimización de CI» finishes, seen live as
+ * running first (a row the tab never saw live is not news: see the last test).
+ */
+function finishCi(backend: MockBackend, seenRunning = true): void {
 	const run = backend.acpMessages.find((m) => m.body.includes("implementalo"))!;
+	if (seenRunning) backend.pushAcp({ type: "message", message: run });
 	backend.updateAcpMessage(run.id, {
 		state: "done",
 		result_text: "Listo: caché de navegadores en el job.",
@@ -123,6 +127,13 @@ test.describe("an answer in another topic", () => {
 		);
 		await expect(page.locator(".tools-bar")).toBeVisible();
 		backend.updateAcpMessage(q.id, { state: "done", result_text: "Hecho." });
+		await page.waitForTimeout(1_000);
+		await expect(page.locator(NOTICE)).toHaveCount(0);
+	});
+
+	test("a done row this tab never saw live before is not news", async ({ app, page, backend }) => {
+		await openUi(page, app);
+		finishCi(backend, false);
 		await page.waitForTimeout(1_000);
 		await expect(page.locator(NOTICE)).toHaveCount(0);
 	});

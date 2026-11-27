@@ -610,11 +610,14 @@ describe("isReplyNews (an answer in another topic)", () => {
 	const row = { from_id: "owner", state: "done" as const, conversation_id: "c1" };
 	it("the person's message finishing in a topic not on screen", () => {
 		expect(isReplyNews(row, "running", "c2")).toBe(true);
-		expect(isReplyNews(row, undefined, null)).toBe(true);
+		expect(isReplyNews(row, "pending", null)).toBe(true);
 	});
 	it("never for the topic on screen, a row already done, an agent's or an Archive row", () => {
 		expect(isReplyNews(row, "running", "c1")).toBe(false);
 		expect(isReplyNews(row, "done", "c2")).toBe(false);
+		// Never seen live before, or after another end: not news.
+		expect(isReplyNews(row, undefined, "c2")).toBe(false);
+		expect(isReplyNews(row, "uncertain", "c2")).toBe(false);
 		expect(isReplyNews({ ...row, from_id: "arq" }, "running", "c2")).toBe(false);
 		expect(isReplyNews({ ...row, conversation_id: null }, "running", "c2")).toBe(false);
 		expect(isReplyNews({ ...row, state: "running" }, "pending", "c2")).toBe(false);
