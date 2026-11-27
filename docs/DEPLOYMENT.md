@@ -460,24 +460,25 @@ afterwards if you like (`docker rmi st-backend:migrate-check`).
 
 ## Projects (`docs/PROJECTS.md`)
 
-Always on. A project only groups ACP agents and gives them Project Chat. The legacy tables of the retired P3a directory and D1–D3
+Always on. A project only groups ACP agents and gives them topics (conversations). The legacy tables of the retired P3a directory and D1–D3
 conversation (`project_agents`, `agent_bindings`, `project_agent_creations`) and the
 `<WORKSPACE_ROOT>/.projects` directory are no longer read or written. Leave them in place: removing
-them is a separate, owner-approved data step (planned migration v23), after a fresh backup is on the
+them is a separate, owner-approved data step (a later migration), after a fresh backup is on the
 NAS. New backups do not carry `.projects`. Restoring an older backup prints where its
 `projects/<pid>.tar.gz` are and does not restore them.
 
 ## ACP agents (`docs/ACP_AGENTS.md`)
 
 Always on. `docker-compose.yml` forwards the `ACP_*` variables with their defaults. Migrations
-v21–v22 (`acp_agents`, `agent_messages`, `agent_questions`) are additive.
+v21–v29 (agents, messages, questions, effort, slots, chains, works, conversations, read indexes,
+tasks) are additive and run at boot.
 
 The backend:
 
 - mounts `/api/acp` and `/ws/acp`;
 - copies the runner files into `<WORKSPACE_ROOT>/.acp-runtime/st` at boot;
 - mounts that directory read-only into agent sessions;
-- supervises one runner per running agent.
+- supervises one runner loop per slot of each running agent.
 
 Adapters are installed per version into the same directory with `acp-runtime/install.sh`, with no
 session-image rebuild. Runners reach the backend over `SESSIONS_NETWORK` at `ACP_BACKEND_URL` (default

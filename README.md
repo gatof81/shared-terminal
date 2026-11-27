@@ -5,7 +5,7 @@ from any browser, running on your own server, never on your laptop.**
 
 Shared Terminal gives every piece of work its own isolated Docker container with a persistent
 workspace. You open it from a browser — laptop, tablet or phone — and get a real terminal, a file
-browser, the Git diff and a chat with the agent working there. Close the tab or lose the
+browser, the Git diff and — for agents — project conversations where you talk to them. Close the tab or lose the
 connection: the container keeps running, agents keep working, and their messages are stored on the
 server, not in a browser tab.
 
@@ -40,12 +40,15 @@ duplicates, many browsers on the same tab, search, a key bar on touch devices.
 **Files and Git** (read-only) — browse and preview the workspace (Markdown, code, images), download
 files; Git status, per-file diffs and recent commits, run inside the container.
 
-**Chat with an agent** — send a message; it is stored before the server answers, the agent takes it
-when it is free, and you follow what it does live. When the agent needs a decision it asks you in
-the Chat. If it isn't logged in, *Conectar cuenta* opens its login in a Terminal tab.
+**Projects and agents** — group agents into a project and talk to them in its **topics**
+(conversations): address one, several or the whole team; a message is stored before the server
+answers, the agent takes it when it is free, and you follow what it does live, including its consults
+to other agents. **Pendientes** gathers what waits for you — an agent's question, an interrupted run to
+review — across projects. **Herramientas** opens an agent's Terminal, Files and Git (or those of one of
+its works) without leaving the topic. Older messages stay readable in the project's **Archive**.
 
-**Project Chat** — group agents into a project and talk to them in one channel: `@mention` the ones
-you want; their consults to each other appear there too.
+**Tasks** — goals and tasks per project, with a coordinator, assignees, dependencies, links (work, PR)
+and request budgets, managed by the agents through `st task`.
 
 **Also** — per-session port exposure on subdomains, an HTTP exec API, an admin dashboard (live
 CPU/memory, force actions, quotas, read-only observe with an audit trail), backup & restore, and a
@@ -61,8 +64,7 @@ phone-friendly layout.
 | --- | --- | --- |
 | What runs | an agent driven over ACP by Shared Terminal's runner, plus tmux | tmux and whatever you start: a shell, Claude Code, any CLI |
 | Terminal / Files / Git | yes | yes |
-| Chat | the agent's messages, live activity and questions | none |
-| Talking to the agent | the message API (web or `st send`) | its Terminal |
+| Talking to the agent | its project's topics (web) or `st send` from another agent | its Terminal |
 
 ### Create a traditional session
 
@@ -71,10 +73,10 @@ Terminal.
 
 ### Create an agent session
 
-With ACP enabled on the backend (see [Installation](#installation)), the New session form also
-asks for an **agent name** (lowercase, e.g. `developer`), and optionally a project and a runtime. Log
-the agent in once: *Conectar cuenta* in its Chat, or `claude` → `/login` in its Terminal. Over the
-API:
+With an adapter installed in the runtime directory (see [Installation](#installation)), the New
+session form also asks for an **agent name** (lowercase, e.g. `developer`), and optionally a project,
+a model, an effort level and a runtime. Log the agent in once: *Conectar cuenta* in «Ajustes del
+agente», or `claude` → `/login` in its Terminal. Over the API:
 
 ```http
 POST /api/sessions
@@ -92,14 +94,17 @@ st send @reviewer "Please review the branch fix/login"
 st send @reviewer -f notes.md     # longer content from a file
 st list                           # my messages and their states
 st get 42                         # one message, with its result
+st work new @developer fix-login  # a work: its own worktree, branch work/fix-login and ports
+st send @developer --work fix-login "…"
+st task list                      # the project's goals and tasks
 ```
 
-- Each agent takes **one message at a time**, oldest first: `pending → running → done | failed |
-  uncertain`.
+- Each agent takes **one message at a time** by default, oldest first: `pending → running → done |
+  failed | uncertain`. With more **slots** (`maxConcurrency` 2–4) it runs several at once — the extra
+  ones in **works**, each a git worktree with its own branch and port range.
 - When a request from one agent to another ends `done`, the **reply goes back to the sender
   automatically**, in the same scope.
-- A consult started in Project Chat stays in the project. One started in a direct chat stays
-  private. Agents cannot choose otherwise.
+- A consult started in a topic stays in that topic. Agents cannot choose otherwise.
 - Agent → agent requests are capped in depth (`ACP_MAX_DEPTH`, 6: nesting, a reply returns the asker to its depth) and in rounds per person's message (`ACP_MAX_CHAIN`, 40).
 - An interrupted run becomes `uncertain`. It is **never resent automatically**; only you can requeue
   it.
@@ -155,7 +160,7 @@ cd frontend && npm install && npm run dev     # http://localhost:5173
 docker compose up -d --build
 ```
 
-**Agents and Project Chat** are always on; an agent needs an adapter installed into the runtime
+**Agents and projects** are always on; an agent needs an adapter installed into the runtime
 directory — see [docs/ACP_AGENTS.md → Setup](./docs/ACP_AGENTS.md#8-setup).
 
 Read [docs/SECURITY.md](./docs/SECURITY.md) before exposing the backend to the internet.
@@ -167,10 +172,14 @@ Read [docs/SECURITY.md](./docs/SECURITY.md) before exposing the backend to the i
 - Sessions, terminal, Files, Git, templates, quotas, idle stop, ports, exec API, admin, backup &
   restore.
 - ACP agents with Claude:
-  - durable message API, one message at a time;
-  - individual Chat and Project Chat, with a live channel;
+  - durable message API, one message per slot (1–4 slots per agent), works (worktree + branch +
+    ports) for the extra slots;
+  - project topics, Pendientes, Herramientas and a read-only Archive, with a live channel;
   - agent ↔ agent messages through `st`, with automatic replies and a loop guard;
-  - questions to you from Chat, and login from Chat or Terminal;
+  - goals and tasks (`st task`) with budgets per goal and per task;
+  - a shared `coordinar` skill installed in every agent;
+  - questions to you in the topic or Pendientes, and login from «Ajustes del agente» or Terminal;
+  - per-agent model and reasoning effort;
   - recovery without resending after a restart.
 
 **Retired** (2026-11-18): the Composer (typing into a CLI from the Chat), the Composer-based project
@@ -179,6 +188,9 @@ tables are still present but nothing reads them; removing them is a separate, ow
 
 **Retired** (2026-11-22): conversation capture for traditional sessions (their read-only Chat) and
 the administrative container recreation. Their data stays on disk and in D1, unread.
+
+**Retired** (3B, #790): the individual Chat view of an agent's session and the single Project Chat;
+their messages are read-only in the project's Archive.
 
 **Planned**
 
@@ -200,7 +212,7 @@ the administrative container recreation. Their data stays on disk and in D1, unr
 | | |
 | --- | --- |
 | [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md) | Install, production, Cloudflare Tunnel, backup & restore |
-| [docs/ACP_AGENTS.md](./docs/ACP_AGENTS.md) | Agents, messages, Project Chat, questions, login, runtime, operation |
+| [docs/ACP_AGENTS.md](./docs/ACP_AGENTS.md) | Agents, messages, slots and works, topics, tasks, questions, login, runtime, operation |
 | [docs/SECURITY.md](./docs/SECURITY.md) | Threat model and recommended posture |
 | [docs/API.md](./docs/API.md) | REST endpoints and WebSocket channels |
 | [docs/EXEC_API.md](./docs/EXEC_API.md) | HTTP exec API contract |
