@@ -127,7 +127,7 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 	};
 	const refuse = (res: Response, err: unknown) => {
 		if (err instanceof ConversationError)
-			return void res.status(err.status).json({ error: err.code });
+			return void res.status(err.status).json({ error: err.code, ...err.detail });
 		if (!(err instanceof WorkError) && !(err instanceof TaskError)) throw err;
 		res.status(err.status).json({ error: err.code, ...err.detail });
 	};
@@ -904,6 +904,40 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 		"/conversations/:id/archive",
 		conversationRoute(async (owner, req, res) => {
 			res.json(conversationView(await conversations.archive(owner, req.params.id)));
+		}),
+	);
+
+	// DELETE /conversations/:id — deletes an ARCHIVED topic for good, with its
+	// messages and their questions (conversations.ts `remove`): 409
+	// `not-archived`, 409 `in-use` {reasons}. The person only.
+	router.delete(
+		"/conversations/:id",
+		conversationRoute(async (owner, req, res) => {
+			await conversations.remove(owner, req.params.id);
+			res.status(204).end();
+		}),
+	);
+
+	// DELETE /projects/:pid/archive — empties the project's previous Project
+	// Chat (its messages without a topic); what is in course stays. {deleted, kept}
+	router.delete(
+		"/projects/:pid/archive",
+		conversationRoute(async (owner, req, res) => {
+			if (!(await acp.ownsProject(owner, req.params.pid)))
+				return void res.status(404).json({ error: "project-not-found" });
+			res.json(await conversations.emptyArchive(owner, { projectId: req.params.pid }));
+		}),
+	);
+
+	// DELETE /agents/:name/archive — empties the agent's individual chat
+	// history: its direct messages (no project, no topic), with the person and
+	// with other agents; what is in course stays. {deleted, kept}
+	router.delete(
+		"/agents/:name/archive",
+		conversationRoute(async (owner, req, res) => {
+			const agent = await acp.byName(owner, req.params.name);
+			if (!agent) return void res.status(404).json({ error: "not-found" });
+			res.json(await conversations.emptyArchive(owner, { agent: agent.name }));
 		}),
 	);
 

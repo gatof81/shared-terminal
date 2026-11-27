@@ -223,7 +223,9 @@ export type AcpEvent =
 	| { type: "activity"; agent: string; events: ActivityEvent[] }
 	| { type: "agents" }
 	| { type: "conversation"; conversation: Record<string, unknown> }
-	| { type: "task"; task: Record<string, unknown> };
+	| { type: "task"; task: Record<string, unknown> }
+	/** Deleted for good (#13): a topic, or one part of the Archive. The client reloads. */
+	| { type: "deleted"; conversationId?: string; projectId?: string; agent?: string };
 
 /** A message as an agent's state names it: where it is (conversation, work). */
 export interface MessageRef {

@@ -59,6 +59,7 @@ export class ConversationError extends Error {
 	constructor(
 		readonly status: number,
 		readonly code: string,
+		readonly detail: Record<string, unknown> = {},
 	) {
 		super(code);
 	}
@@ -77,6 +78,77 @@ export interface ConversationRow {
 	read_at: string | null;
 	recipients: string | null;
 }
+
+/**
+ * Why a topic cannot be deleted yet (409 `in-use`): something of it is still
+ * being worked on, or waits for the person, or names it.
+ */
+export type InUseReason = "message-active" | "question-open" | "work-open" | "task-open";
+
+/**
+ * DEFINITIVE DELETION (#13) of an archived topic or of the Archive. One rule
+ * for both: nothing still in course is touched. A topic is all or nothing
+ * (409 `in-use` with the reasons); the Archive keeps what is in course and
+ * deletes the rest.
+ *
+ * Every statement carries its own guard — a previous read only gives the
+ * reasons, it does not protect: a requeue or a runner's write may land
+ * between two calls (D1 over HTTP has no transaction across them). Order is
+ * questions → messages → the topic's row, LAST: the row is what a retry needs
+ * to find the topic again, and it goes only once no message names it; a
+ * failure half way leaves a state the same verb finishes.
+ *
+ * What stays and may name what is gone (every read tolerates it): tasks
+ * (`conversation_id`, `origin_message_id`) and their events and links, the
+ * works (`conversation_id`), counters and budgets; in the Archive, a reply
+ * or recovery report of another scope whose request was deleted.
+ */
+const topicFree = (owner: string, id: string, projectId: string) => ({
+	sql: `EXISTS (SELECT 1 FROM conversations c0 WHERE c0.id = ? AND c0.owner_user_id = ? AND c0.archived_at IS NOT NULL)
+		AND NOT EXISTS (SELECT 1 FROM agent_messages a WHERE a.owner_user_id = ? AND a.conversation_id = ?
+			AND a.state IN ('pending', 'running'))
+		AND NOT EXISTS (SELECT 1 FROM agent_questions q CROSS JOIN agent_messages a ON a.id = q.message_id AND a.owner_user_id = q.owner_user_id
+			WHERE q.owner_user_id = ? AND q.state IN ('open', 'answered') AND a.conversation_id = ?)
+		AND NOT EXISTS (SELECT 1 FROM agent_works w WHERE w.owner_user_id = ? AND w.conversation_id = ? AND w.state != 'cleaned')
+		AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.owner_user_id = ? AND t.project_id = ? AND t.status != 'done'
+			AND t.conversation_id = ?)`,
+	params: [id, owner, owner, id, owner, id, owner, id, owner, projectId, id],
+});
+
+/**
+ * The Archive keeps a whole CHAIN (a person's message and every consult,
+ * reply and report under it: `COALESCE(root_id, id)`) while any of it is in
+ * course: deleting its finished requests would lower the round budget
+ * (`chainRequests`) of a chain still running, and leave its pending reply
+ * without its request. Both sets are read once (uncorrelated), by the
+ * running and open-question indexes.
+ */
+const CHAIN_FREE = `COALESCE(m.root_id, m.id) NOT IN (SELECT COALESCE(a.root_id, a.id) FROM agent_messages a
+		WHERE a.state IN ('pending', 'running') AND a.owner_user_id = ?)
+	AND COALESCE(m.root_id, m.id) NOT IN (SELECT COALESCE(a.root_id, a.id)
+		FROM agent_questions q CROSS JOIN agent_messages a ON a.id = q.message_id AND a.owner_user_id = q.owner_user_id
+		WHERE q.owner_user_id = ? AND q.state IN ('open', 'answered'))`;
+
+/** Which part of the Archive: a project's previous Project Chat, or an agent's direct messages. */
+export type ArchiveScope = { projectId: string } | { agent: string };
+
+// `+col IS NULL` keeps the planner off the `(owner, conversation_id …)`
+// indexes, where NULL is the WHOLE Archive of the owner: each scope is read
+// by its own index (the project's, an agent's to/from).
+const archiveScope = (owner: string, s: ArchiveScope) =>
+	"projectId" in s
+		? {
+				sql: "m.owner_user_id = ? AND m.project_id = ? AND +m.conversation_id IS NULL",
+				params: [owner, s.projectId],
+			}
+		: {
+				// Its individual chat's history: direct messages to it and from it
+				// (with the person and with other agents), each side by its index.
+				sql: `m.id IN (
+					SELECT id FROM agent_messages WHERE owner_user_id = ? AND to_id = ? AND +project_id IS NULL AND +conversation_id IS NULL
+					UNION SELECT id FROM agent_messages WHERE owner_user_id = ? AND from_id = ? AND +project_id IS NULL AND +conversation_id IS NULL)`,
+				params: [owner, s.agent, owner, s.agent],
+			};
 
 type SummaryRow = ConversationRow & { unread?: number; needs_action?: number };
 
@@ -229,6 +301,86 @@ export class AcpConversations {
 		);
 		if (!r.results[0]) throw new ConversationError(404, "conversation-not-found");
 		return this.changed(ownerUserId, id);
+	}
+
+	/** What keeps an archived topic from being deleted now (empty: nothing). */
+	async inUse(ownerUserId: string, c: ConversationRow): Promise<InUseReason[]> {
+		const r = await d1Query<Record<InUseReason, number>>(
+			`SELECT
+				EXISTS (SELECT 1 FROM agent_messages a WHERE a.owner_user_id = ? AND a.conversation_id = ?
+					AND a.state IN ('pending', 'running')) AS "message-active",
+				EXISTS (SELECT 1 FROM agent_questions q CROSS JOIN agent_messages a ON a.id = q.message_id AND a.owner_user_id = q.owner_user_id
+					WHERE q.owner_user_id = ? AND q.state IN ('open', 'answered') AND a.conversation_id = ?) AS "question-open",
+				EXISTS (SELECT 1 FROM agent_works w WHERE w.owner_user_id = ? AND w.conversation_id = ? AND w.state != 'cleaned') AS "work-open",
+				EXISTS (SELECT 1 FROM tasks t WHERE t.owner_user_id = ? AND t.project_id = ? AND t.status != 'done'
+					AND t.conversation_id = ?) AS "task-open"`,
+			[ownerUserId, c.id, ownerUserId, c.id, ownerUserId, c.id, ownerUserId, c.project_id, c.id],
+		);
+		const row = r.results[0];
+		const all: InUseReason[] = ["message-active", "question-open", "work-open", "task-open"];
+		return row ? all.filter((k) => Number(row[k]) === 1) : [];
+	}
+
+	/**
+	 * Deletes an archived topic for good (see `topicFree`): 404 foreign or
+	 * missing, 409 `not-archived`, 409 `in-use` with its reasons.
+	 */
+	async remove(ownerUserId: string, id: string): Promise<void> {
+		const c = await this.get(ownerUserId, id);
+		if (!c) throw new ConversationError(404, "conversation-not-found");
+		if (!c.archived_at) throw new ConversationError(409, "not-archived");
+		const busy = await this.inUse(ownerUserId, c);
+		if (busy.length) throw new ConversationError(409, "in-use", { reasons: busy });
+		const free = topicFree(ownerUserId, c.id, c.project_id);
+		await d1Query(
+			`DELETE FROM agent_questions WHERE owner_user_id = ?
+			 AND message_id IN (SELECT id FROM agent_messages WHERE owner_user_id = ? AND conversation_id = ?) AND ${free.sql}`,
+			[ownerUserId, ownerUserId, c.id, ...free.params],
+		);
+		await d1Query(
+			`DELETE FROM agent_messages WHERE owner_user_id = ? AND conversation_id = ? AND ${free.sql}`,
+			[ownerUserId, c.id, ...free.params],
+		);
+		const r = await d1Query<{ id: string }>(
+			`DELETE FROM conversations WHERE id = ? AND owner_user_id = ?
+			 AND NOT EXISTS (SELECT 1 FROM agent_messages x WHERE x.owner_user_id = ? AND x.conversation_id = ?)
+			 AND ${free.sql} RETURNING id`,
+			[c.id, ownerUserId, ownerUserId, c.id, ...free.params],
+		);
+		if (!r.results[0]) {
+			// Something started between the read and the statements: the guards held.
+			const reasons = await this.inUse(ownerUserId, c);
+			throw new ConversationError(409, "in-use", { reasons });
+		}
+		this.acp.emit(ownerUserId, { type: "deleted", conversationId: c.id, projectId: c.project_id });
+	}
+
+	/**
+	 * Empties one part of the Archive (`ArchiveScope`), keeping every chain
+	 * still in course (`CHAIN_FREE`). Questions first, then messages: a retry
+	 * after a failure between them finishes it.
+	 */
+	async emptyArchive(
+		ownerUserId: string,
+		scope: ArchiveScope,
+	): Promise<{ deleted: number; kept: number }> {
+		const s = archiveScope(ownerUserId, scope);
+		await d1Query(
+			`DELETE FROM agent_questions WHERE owner_user_id = ?
+			 AND message_id IN (SELECT m.id FROM agent_messages m WHERE ${s.sql} AND ${CHAIN_FREE})`,
+			[ownerUserId, ...s.params, ownerUserId, ownerUserId],
+		);
+		const d = await d1Query(`DELETE FROM agent_messages AS m WHERE ${s.sql} AND ${CHAIN_FREE}`, [
+			...s.params,
+			ownerUserId,
+			ownerUserId,
+		]);
+		const k = await d1Query<{ n: number }>(
+			`SELECT COUNT(*) AS n FROM agent_messages m WHERE ${s.sql}`,
+			s.params,
+		);
+		this.acp.emit(ownerUserId, { type: "deleted", ...scope });
+		return { deleted: Number(d.meta?.changes ?? 0), kept: Number(k.results[0]?.n ?? 0) };
 	}
 
 	/**

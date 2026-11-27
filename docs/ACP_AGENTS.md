@@ -291,6 +291,9 @@ show only those.
 | `GET /api/acp/conversations/:id/feed[?before=<id>]` | `{conversation, agents, questions, messages, activity, activitySeq, maxMessageBytes}` — like the project feed: 100 messages per page, oldest first, full rows; `questions` = those asked while working on the page's messages; `agents` = the project's agents with their state. |
 | `GET /api/acp/inbox` | The global inbox (below). |
 | `POST /api/acp/messages/:id/review` | "Dar por revisada" (below). |
+| `DELETE /api/acp/conversations/:id` | Deletes an **archived** topic for good (below). `204`; `409 not-archived`; `409 in-use {reasons}`. |
+| `DELETE /api/acp/projects/:pid/archive` | Empties the project's part of the Archive (its old Project Chat). `{deleted, kept}`. |
+| `DELETE /api/acp/agents/:name/archive` | Empties an agent's individual chat history: its direct messages. `{deleted, kept}`. |
 
 A conversation as the API shows it:
 
@@ -378,6 +381,35 @@ written or sent; a repeat keeps the first time); not `uncertain` → `409 not-un
 review shows are already on the rows: `finished_at` and `note` (why it was cut), and the recovery report
 (`reports`, or the row with `recovery_of` = the id in the feed). `requeue` is unchanged except that it
 clears `reviewed_at` (interrupted again, it needs a new review).
+
+### Definitive deletion (#13)
+
+The person only (an agent token is 403, foreign or missing is 404). Nothing in course is ever touched,
+and every statement carries that guard itself (a previous read only produces the reasons): D1 has no
+transaction across calls, and a requeue or a runner's write can land between two of them.
+
+- **An archived topic** (`DELETE /conversations/:id`) goes whole or not at all. A live topic is
+  `409 not-archived` (archive it first). `409 in-use` with `reasons` ⊆ `message-active` (a message of it
+  `pending`/`running`), `question-open` (a question of its messages `open`/`answered`), `work-open` (a work
+  with that `conversation_id` not `cleaned`), `task-open` (a task with that `conversation_id` not `done`).
+  Deleted, in this order: the questions of its messages → its messages (every message, including
+  unreviewed interruptions and recovery reports) → the topic's row, last, only once no message names it.
+  The row is what a retry needs, so a failure half way is finished by the same verb; once the row is gone
+  the verb answers 404.
+- **The Archive** (`DELETE /projects/:pid/archive`: messages with `project_id = pid` and no conversation;
+  `DELETE /agents/:name/archive`: messages to or from that agent with neither project nor conversation —
+  the history of its individual chat, which includes its direct exchanges with **other agents**, gone
+  from theirs too). Questions first, then messages. What is in course stays, by whole **chain**
+  (`COALESCE(root_id, id)`): a chain with a message `pending`/`running` or a question `open`/`answered` is
+  kept entire (its finished requests count for the round budget, its pending reply needs its request).
+  `kept` = what is left in that scope; repeat once it finished.
+- **Not deleted:** projects, tasks and their events and links, works, transcripts, counters and budgets
+  (`requests_used`, `budget_used`). What stays may name what is gone and every read tolerates it: a
+  task's `conversationId`/`originMessageId`, a work's `conversationId`, a reply or report in another
+  scope whose request was deleted (shown without it); a topic link answers «La conversación ya no existe».
+- `/ws/acp` sends `{type: "deleted", conversationId, projectId}` or `{type: "deleted", projectId}` /
+  `{type: "deleted", agent}`; open tabs reload.
+- **A backup taken before the deletion brings it back on restore** (backup format unchanged).
 
 ### Agents' state
 
