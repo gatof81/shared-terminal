@@ -606,6 +606,10 @@ body.project-page-on #actions-btn {
   border-color: var(--c-accent);
 }
 .resume-text {
+  /* Never shrinks while the project can: a flex share of even a fraction of
+     a pixel draws the «…». Its cap leaves the project's 4em, the gaps and the ›. */
+  flex: 0 0 auto;
+  max-width: calc(100% - 4em - 34px);
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
@@ -613,9 +617,8 @@ body.project-page-on #actions-btn {
 }
 .resume-project {
   /* Cut before the topic's title is: the place is what decides the tap. */
-  /* It gives way first (a far higher shrink than the title's), down to a
-     few letters; only then does the title shrink too. */
-  flex: 0 1000 auto;
+  /* Only the project gives way, down to a few letters. */
+  flex: 0 1 auto;
   min-width: 4em;
   overflow: hidden;
   text-overflow: ellipsis;
