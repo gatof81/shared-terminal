@@ -123,6 +123,16 @@ test.describe("project rail and topics", () => {
 				createdAt: at(100),
 				closedAt: at(200),
 			},
+			{
+				id: "gone-try",
+				agent: "arq",
+				projectId: HZ,
+				conversationId: null,
+				branch: "work/gone-try",
+				state: "cleaned",
+				createdAt: at(50),
+				closedAt: at(60),
+			},
 		];
 		// Wide, the rail sits beside a topic («Optimización de CI» here, so the
 		// unread one stays unread); a phone's project screen is the rail.
@@ -143,12 +153,13 @@ test.describe("project rail and topics", () => {
 		await expect(team.filter({ hasText: "@dev" })).toContainText(
 			app.mobile ? "ocupado en «Optimización de CI» · 1 en cola" : "trabajando aquí · 1 en cola",
 		);
-		// Works: the active one; the closed ones on demand.
+		// Works: the active one; the closed ones on demand; a cleaned one never.
 		await expect(rail(page).locator(".rail-work")).toHaveCount(1);
 		await expect(rail(page).locator(".rail-work")).toContainText("ci-cache");
 		await expect(rail(page).locator(".rail-work")).toContainText("@dev · activo");
 		await rail(page).getByRole("button", { name: "Ver cerrados (1)" }).click();
 		await expect(rail(page).locator(".rail-work")).toHaveCount(2);
+		await expect(rail(page).locator(".rail-work", { hasText: "gone-try" })).toHaveCount(0);
 		await expect(rail(page).locator(".rail-archive-row")).toHaveAttribute(
 			"href",
 			`#/projects/${HZ}/archive`,
@@ -171,6 +182,15 @@ test.describe("project rail and topics", () => {
 		await expect(page.locator(".rail-attention")).toHaveText("1 te espera · 1 resultado nuevo");
 		await expect(team.filter({ hasText: "@arq" })).toContainText("ejecución interrumpida");
 		expect(app.errors).toEqual([]);
+	});
+
+	test("only cleaned works: the rail draws no «Trabajos»", async ({ app, backend, page }) => {
+		backend.enableWorks();
+		backend.acpWorks = backend.acpWorks.filter((w) => w.state === "cleaned");
+		await app.login("alice", app.mobile ? RAIL : topic(CONV_IDS.ci));
+		await expect(rail(page).locator(".rail-agent").first()).toBeVisible();
+		await expect(rail(page).getByRole("heading", { name: "Trabajos" })).toBeHidden();
+		await expect(rail(page).locator(".rail-work")).toHaveCount(0);
 	});
 
 	test("a slot held by a process: the rail says «ocupado», the queue shown, the whole state on hover", async ({
