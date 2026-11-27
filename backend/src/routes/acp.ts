@@ -936,10 +936,9 @@ export function buildAcpRouter(acp: AcpAgents, works: AcpWorks): Router {
 			res.json({
 				conversation: conversationView(summary ?? conv),
 				agents: agents.map((a) => agentView(a, loads, waiting)),
-				questions: await acp.questionsFor(
+				questions: await acp.questionsOfPage(
 					owner,
 					messages.map((m) => m.id),
-					[],
 				),
 				maxMessageBytes: acp.config.maxMessageBytes,
 				messages,

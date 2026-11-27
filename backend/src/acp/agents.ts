@@ -1381,6 +1381,23 @@ export class AcpAgents {
 		return r.results;
 	}
 
+	/**
+	 * The questions asked while working on a page of messages (ascending ids),
+	 * by the page's id range on idx_agent_questions_message, kept to the page
+	 * here: `message_id IN json_each(ids)` bills each id twice (the json_each
+	 * row and its probe), the range only the questions in it — those of other
+	 * conversations whose messages fall in the range included.
+	 */
+	async questionsOfPage(ownerUserId: string, messageIds: number[]): Promise<QuestionRow[]> {
+		if (!messageIds.length) return [];
+		const r = await d1Query<QuestionRow>(
+			"SELECT * FROM agent_questions WHERE owner_user_id = ? AND message_id BETWEEN ? AND ? ORDER BY id",
+			[ownerUserId, messageIds[0], messageIds[messageIds.length - 1]],
+		);
+		const page = new Set<number | null>(messageIds);
+		return r.results.filter((q) => page.has(q.message_id));
+	}
+
 	/** The person's answer. One conditional UPDATE: only an open question takes one, once. */
 	async answerQuestion(
 		ownerUserId: string,

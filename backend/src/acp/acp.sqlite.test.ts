@@ -2453,6 +2453,41 @@ describe("D1 reads: the hot reads go by index, never through the owner's whole h
 		}
 	});
 
+	it("a conversation's feed keeps to its page the questions read by the page's id range", async () => {
+		const [mine, other] = [cid(901), cid(902)];
+		for (const [id, n] of [
+			[mine, 901],
+			[other, 902],
+		] as const)
+			db.prepare(
+				"INSERT INTO conversations (id, owner_user_id, project_id, title, client_request_id, request_hash) VALUES (?, ?, ?, 'Q', ?, 'h')",
+			).run(id, OWNER, PD, `cr-d1-${n}`);
+		const post = (conv: string) =>
+			Number(
+				db
+					.prepare(
+						"INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, body, state, project_id, conversation_id) VALUES (?, 'owner', 'ana', 'request', 'x', 'done', ?, ?)",
+					)
+					.run(OWNER, PD, conv).lastInsertRowid,
+			);
+		const ask = (messageId: number) =>
+			Number(
+				db
+					.prepare(
+						"INSERT INTO agent_questions (owner_user_id, agent, message_id, request, state) VALUES (?, 'ana', ?, '{}', 'delivered')",
+					)
+					.run(OWNER, messageId).lastInsertRowid,
+			);
+		const first = post(mine);
+		const foreign = ask(post(other)); // inside [first, last] of the page
+		const own = ask(post(mine));
+		const r = await call(owner, "GET", `/conversations/${mine}/feed`);
+		expect(r.body.messages.map((m: MessageRowT) => m.id)[0]).toBe(first);
+		const got = r.body.questions.map((q: { id: number }) => q.id);
+		expect(got).not.toContain(foreign);
+		expect(got).toEqual([own]);
+	});
+
 	// The same plans with no statistics (D1 as deployed: nobody runs ANALYZE)
 	// and with them (were D1 to run PRAGMA optimize): neither may change them.
 	describe.each([
