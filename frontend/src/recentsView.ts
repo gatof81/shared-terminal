@@ -29,11 +29,12 @@ export function offered(): Recent[] {
 	});
 }
 
-/** «Tema · Proyecto» (the selector's rows), or the place alone. */
-export function recentLabel(e: Recent): string {
+/** A selector row: the place, with its project as the quiet hint (as «Seguir…» shows it). */
+export function recentItem(e: Recent): { label: string; hint?: string; ariaLabel?: string } {
 	const r = parseProjectRoute(e.hash);
 	const project = r ? projectName(r.projectId) : null;
-	return project ? `${recentPlace(e)} · ${project}` : recentPlace(e);
+	const label = recentPlace(e);
+	return project ? { label, hint: project, ariaLabel: `${label} · ${project}` } : { label };
 }
 
 /** Open an entry: a new history entry (Back returns). A gone project's is dropped instead. */

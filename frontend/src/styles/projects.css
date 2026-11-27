@@ -612,7 +612,13 @@ body.project-page-on #actions-btn {
   text-overflow: ellipsis;
 }
 .resume-project {
-  flex: none;
+  /* Cut before the topic's title is: the place is what decides the tap. */
+  /* It gives way first (a far higher shrink than the title's), down to a
+     few letters; only then does the title shrink too. */
+  flex: 0 1000 auto;
+  min-width: 4em;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--c-muted);
   white-space: nowrap;
 }
