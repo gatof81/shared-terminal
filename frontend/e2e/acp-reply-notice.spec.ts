@@ -45,18 +45,15 @@ test.describe("an answer in another topic", () => {
 		await expect(page.locator(".acp-reply-anchor")).toHaveAttribute("role", "status");
 		const box = (await notice.boundingBox())!;
 		expect(box.height).toBeGreaterThanOrEqual(44);
-		if (app.mobile) {
-			// Right above the message box, over the thread: nothing in it moved.
-			const composer = (await page.locator("#project-view .acp-chat-composer").boundingBox())!;
-			expect(box.y + box.height).toBeLessThanOrEqual(composer.y + 1);
-			expect(composer.y - (box.y + box.height)).toBeLessThanOrEqual(12);
-		} else {
-			// Top right, under the topic's header: its ⋯ stays clear.
-			const vw = page.viewportSize()!.width;
-			expect(box.x + box.width).toBeGreaterThan(vw - 40);
-			const head = (await page.locator(".ps-topic-head").boundingBox())!;
-			expect(box.y).toBeGreaterThanOrEqual(head.y + head.height);
-			expect(box.y).toBeLessThan(head.y + head.height + 40);
+		// Right above the message box on every screen, over the thread: nothing
+		// in it moved. Wide, aligned to the thread's right edge, ≤ 380 px.
+		const composer = (await page.locator("#project-view .acp-chat-composer").boundingBox())!;
+		expect(box.y + box.height).toBeLessThanOrEqual(composer.y + 1);
+		expect(composer.y - (box.y + box.height)).toBeLessThanOrEqual(12);
+		if (!app.mobile) {
+			const thread = (await page.locator(THREAD).boundingBox())!;
+			expect(Math.abs(box.x + box.width - (thread.x + thread.width))).toBeLessThanOrEqual(2);
+			expect(box.width).toBeLessThanOrEqual(380);
 		}
 		expect(await scroller.evaluate((t) => [t.scrollTop, t.clientHeight])).toEqual(before);
 		if (SHOTS) await page.screenshot({ path: `${SHOTS}/${info.project.name}-reply-notice.png` });
@@ -88,6 +85,8 @@ test.describe("an answer in another topic", () => {
 		backend.updateAcpMessage(other.id, { state: "done", result_text: "Visto." });
 		const notice = page.locator(NOTICE);
 		await expect(notice).toHaveText(/2 respuestas nuevas\s*·\s*Ver/);
+		// @dev and @arq: no single agent's face on the group.
+		await expect(notice.locator(".acp-avatar")).toHaveCount(0);
 		if (SHOTS) await page.screenshot({ path: `${SHOTS}/${info.project.name}-reply-notice-2.png` });
 		await expect(notice).toHaveCount(0, { timeout: 8_000 });
 	});

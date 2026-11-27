@@ -122,8 +122,10 @@ const container = {
 	},
 };
 const realFetch = globalThis.fetch;
-/** While set, every single-statement SELECT sent to D1 (its SQL and params). */
+/** While set, every single-statement SELECT or DELETE sent to D1 (its SQL and params). */
 let captured: Array<{ sql: string; params: unknown[] }> | null = null;
+/** The next statement matching it fails as a lost D1 call would (then it clears). */
+let failOnce: RegExp | null = null;
 
 const bindOf = (params: unknown[]) =>
 	params.map((p) => (typeof p === "boolean" ? Number(p) : p)) as Array<string | number | null>;
@@ -194,8 +196,12 @@ beforeAll(async () => {
 					),
 				);
 			}
-			if (captured && /^\s*SELECT\b/i.test(body.sql))
+			if (captured && /^\s*(SELECT|DELETE)\b/i.test(body.sql))
 				captured.push({ sql: body.sql, params: body.params ?? [] });
+			if (failOnce?.test(body.sql)) {
+				failOnce = null;
+				return new Response("upstream lost", { status: 502 });
+			}
 			const answer = run(body.sql, body.params ?? []);
 			return new Response(JSON.stringify(answer));
 		}),
@@ -2577,6 +2583,46 @@ describe("D1 reads: the hot reads go by index, never through the owner's whole h
 			}
 		});
 	});
+
+	it("definitive deletion (#13): a topic and the Archive are deleted by index, never by a scan", async () => {
+		const topic = convs[0];
+		db.prepare(
+			"UPDATE agent_questions SET state = 'delivered' WHERE message_id IN (SELECT id FROM agent_messages WHERE conversation_id = ?)",
+		).run(topic);
+		db.prepare(
+			"UPDATE conversations SET archived_at = '2026-01-02T00:00:00.000Z' WHERE id = ?",
+		).run(topic);
+		for (const [path, status] of [
+			[`/conversations/${topic}`, 204],
+			[`/projects/${PD}/archive`, 200],
+			["/agents/solo/archive", 200],
+		] as const) {
+			const plans = await plansOf(async () => {
+				expect((await call(owner, "DELETE", path)).status).toBe(status);
+			});
+			expect(plans.some((p) => /^DELETE/.test(p.sql))).toBe(true);
+			const all = plans.flatMap((p) => p.plan).join("\n");
+			if (path.endsWith(`${PD}/archive`)) expect(all).toMatch(/idx_agent_messages_project/);
+			if (path.startsWith("/agents/")) {
+				expect(all).toMatch(/idx_agent_messages_to \(owner_user_id=\? AND to_id=\?\)/);
+				expect(all).toMatch(/idx_agent_messages_from \(owner_user_id=\? AND from_id=\?\)/);
+			}
+			// Deleting a topic walks that topic (that is the point), nothing wider.
+			// The works (`w`: a few rows per agent, never messages) may be scanned.
+			const bad = plans.flatMap((p) =>
+				p.plan
+					.filter(
+						(l) =>
+							OWNER_ONLY.test(l) || (SCAN.test(l) && l !== "SCAN CONSTANT ROW" && l !== "SCAN w"),
+					)
+					.map((l) => `${l}  ←  ${p.sql}`),
+			);
+			expect(bad).toEqual([]);
+		}
+		expect(
+			db.prepare("SELECT COUNT(*) AS n FROM agent_messages WHERE conversation_id = ?").get(topic),
+		).toEqual({ n: 0 });
+	});
 });
 
 describe("ACP tasks (v29)", () => {
@@ -3821,6 +3867,245 @@ describe("ACP idle runners: the claim waits for work (R21)", () => {
 		const res = await pending;
 		expect(res.status).toBe(204);
 		expect(acp.waitingClaims).toBe(0);
+	});
+});
+
+describe("ACP definitive deletion (#13): an archived topic, the Archive", () => {
+	const PZ = "p-z";
+	const SIDS: Record<string, string> = {
+		zeta: "d0000000-0000-4000-8000-000000000001",
+		yago: "d0000000-0000-4000-8000-000000000002",
+	};
+	const crid = (n: number) => `d0000000-0000-4000-8000-1000000000${String(n).padStart(2, "0")}`;
+	const msg = db_msg();
+	function db_msg() {
+		return (m: {
+			from?: string;
+			to?: string;
+			state?: string;
+			kind?: string;
+			project?: string | null;
+			conv?: string | null;
+			root?: number | null;
+			replyTo?: number | null;
+		}) =>
+			Number(
+				db
+					.prepare(
+						`INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, body, state, project_id, conversation_id, root_id, reply_to)
+						 VALUES (?, ?, ?, ?, 'x', ?, ?, ?, ?, ?)`,
+					)
+					.run(
+						OWNER,
+						m.from ?? "owner",
+						m.to ?? "zeta",
+						m.kind ?? "request",
+						m.state ?? "done",
+						m.project === undefined ? PZ : m.project,
+						m.conv ?? null,
+						m.root ?? null,
+						m.replyTo ?? null,
+					).lastInsertRowid,
+			);
+	}
+	const question = (messageId: number, state: string) =>
+		Number(
+			db
+				.prepare(
+					"INSERT INTO agent_questions (owner_user_id, agent, message_id, request, state) VALUES (?, 'zeta', ?, '{}', ?)",
+				)
+				.run(OWNER, messageId, state).lastInsertRowid,
+		);
+	const count = (sql: string, ...p: Array<string | number>) =>
+		Number((db.prepare(`SELECT COUNT(*) AS n FROM ${sql}`).get(...p) as { n: number }).n);
+	let topic: string;
+	let live: string;
+	let taskId: number;
+
+	beforeAll(async () => {
+		db.prepare(
+			"INSERT INTO projects (project_id, owner_user_id, name, client_request_id, request_hash) VALUES (?, ?, 'Borrado', 'c-pz', 'h')",
+		).run(PZ, OWNER);
+		for (const [name, sid] of Object.entries(SIDS)) {
+			db.prepare(
+				"INSERT INTO sessions (session_id, user_id, name, container_name, status) VALUES (?, ?, ?, ?, 'running')",
+			).run(sid, OWNER, name, `st-${sid.slice(0, 12)}`);
+			const a = await acp.create(sid, OWNER, name, { projectId: PZ });
+			tokens[name] = acp.tokenFor(a.agent_id);
+		}
+		const mk = async (n: number, title: string) =>
+			(
+				await call(owner, "POST", "/conversations", {
+					projectId: PZ,
+					title,
+					clientRequestId: crid(n),
+				})
+			).body.id as string;
+		topic = await mk(1, "Para borrar");
+		live = await mk(2, "Sigue viva");
+		// The topic's history: a person's request with a consult and its reply,
+		// a closed question, an interrupted run never reviewed.
+		const root = msg({ conv: topic });
+		const consult = msg({ from: "zeta", to: "yago", conv: topic, root });
+		msg({ from: "yago", to: "zeta", kind: "reply", conv: topic, root, replyTo: consult });
+		question(root, "delivered");
+		msg({ conv: topic, state: "uncertain" });
+		msg({ conv: live });
+		// A finished task that came from it stays, naming it.
+		taskId = Number(
+			db
+				.prepare(
+					`INSERT INTO tasks (owner_user_id, project_id, title, status, conversation_id, origin_message_id, created_by, updated_by)
+					 VALUES (?, ?, 'hecha', 'done', ?, ?, 'owner', 'owner')`,
+				)
+				.run(OWNER, PZ, topic, root).lastInsertRowid,
+		);
+	});
+
+	it("only the person: an agent's token is 403; a foreign or missing topic is 404; a live one is 409 not-archived", async () => {
+		expect((await call(as("zeta"), "DELETE", `/conversations/${topic}`)).status).toBe(403);
+		expect((await call(as("zeta"), "DELETE", `/projects/${PZ}/archive`)).status).toBe(403);
+		expect((await call(as("zeta"), "DELETE", "/agents/zeta/archive")).status).toBe(403);
+		expect((await call({ user: OTHER }, "DELETE", `/conversations/${topic}`)).status).toBe(404);
+		expect((await call({ user: OTHER }, "DELETE", `/projects/${PZ}/archive`)).status).toBe(404);
+		expect((await call({ user: OTHER }, "DELETE", "/agents/zeta/archive")).status).toBe(404);
+		expect(
+			(await call(owner, "DELETE", "/conversations/d0000000-0000-4000-8000-999999999999")).status,
+		).toBe(404);
+		expect((await call(owner, "DELETE", "/conversations/nope")).status).toBe(404);
+		const r = await call(owner, "DELETE", `/conversations/${topic}`);
+		expect(r.status).toBe(409);
+		expect(r.body.error).toBe("not-archived");
+		expect(count("agent_messages WHERE conversation_id = ?", topic)).toBe(4);
+	});
+
+	it("an archived topic still in use is refused with every reason, and nothing is deleted", async () => {
+		expect((await call(owner, "POST", `/conversations/${topic}/archive`)).status).toBe(200);
+		const pending = msg({ conv: topic, state: "pending" });
+		const asking = msg({ conv: topic, state: "done" });
+		const q = question(asking, "open");
+		db.prepare(
+			`INSERT INTO agent_works (owner_user_id, id, agent_id, project_id, branch, port_base, state, created_by, conversation_id)
+			 SELECT ?, 'del-w', agent_id, ?, 'work/del-w', 29900, 'active', 'owner', ? FROM acp_agents WHERE name = 'zeta'`,
+		).run(OWNER, PZ, topic);
+		const open = Number(
+			db
+				.prepare(
+					`INSERT INTO tasks (owner_user_id, project_id, title, conversation_id, created_by, updated_by)
+					 VALUES (?, ?, 'abierta', ?, 'owner', 'owner')`,
+				)
+				.run(OWNER, PZ, topic).lastInsertRowid,
+		);
+		const r = await call(owner, "DELETE", `/conversations/${topic}`);
+		expect(r.status).toBe(409);
+		expect(r.body).toEqual({
+			error: "in-use",
+			reasons: ["message-active", "question-open", "work-open", "task-open"],
+		});
+		expect(count("agent_messages WHERE conversation_id = ?", topic)).toBe(6);
+		// Release each one.
+		db.prepare("DELETE FROM agent_messages WHERE id IN (?, ?)").run(pending, asking);
+		db.prepare("DELETE FROM agent_questions WHERE id = ?").run(q);
+		db.prepare("UPDATE agent_works SET state = 'cleaned' WHERE id = 'del-w'").run();
+		db.prepare("UPDATE tasks SET status = 'done' WHERE id = ?").run(open);
+	});
+
+	it("a failure half way leaves the topic to retry, and the same verb finishes it; tasks stay", async () => {
+		events.length = 0;
+		failOnce = /^DELETE FROM agent_messages/;
+		expect((await call(owner, "DELETE", `/conversations/${topic}`)).status).toBe(500);
+		// Questions went first; the messages and the row are still there.
+		expect(
+			count(
+				"agent_questions WHERE message_id IN (SELECT id FROM agent_messages WHERE conversation_id = ?)",
+				topic,
+			),
+		).toBe(0);
+		expect(count("agent_messages WHERE conversation_id = ?", topic)).toBe(4);
+		expect(count("conversations WHERE id = ?", topic)).toBe(1);
+		const listed = await call(owner, "GET", `/projects/${PZ}/conversations?archived=1`);
+		expect(listed.body.map((c: { id: string }) => c.id)).toEqual([topic]);
+
+		expect((await call(owner, "DELETE", `/conversations/${topic}`)).status).toBe(204);
+		expect(count("agent_messages WHERE conversation_id = ?", topic)).toBe(0);
+		expect(count("conversations WHERE id = ?", topic)).toBe(0);
+		expect(events).toContainEqual({ owner: OWNER, type: "deleted" });
+		// Done: 404 from now on; the other topic is untouched.
+		expect((await call(owner, "DELETE", `/conversations/${topic}`)).status).toBe(404);
+		expect((await call(owner, "GET", `/conversations/${topic}/feed`)).status).toBe(404);
+		expect(count("agent_messages WHERE conversation_id = ?", live)).toBe(1);
+		// The task that came from it stays and still reads.
+		const t = await call(owner, "GET", `/tasks/${taskId}`);
+		expect(t.status).toBe(200);
+		expect(t.body.task).toMatchObject({ id: taskId, conversationId: topic });
+		expect(count("task_events WHERE task_id = ?", taskId)).toBeGreaterThan(0);
+		// The inbox no longer has its interruption.
+		const inbox = await call(owner, "GET", "/inbox");
+		expect(
+			inbox.body.action.interrupted.filter((m: MessageRowT) => m.conversation_id === topic),
+		).toEqual([]);
+	});
+
+	it("the previous Project Chat is emptied, keeping every chain still in course", async () => {
+		const doneRoot = msg({});
+		const doneReply = msg({ from: "zeta", to: "owner", kind: "reply", root: doneRoot });
+		question(doneRoot, "withdrawn");
+		const busyRoot = msg({});
+		const busyConsult = msg({ from: "zeta", to: "yago", root: busyRoot, state: "running" });
+		const askRoot = msg({});
+		const askQ = question(askRoot, "open");
+		const otherProject = msg({ project: "p-1", to: "arquitecto" });
+		const inTopic = msg({ conv: live });
+
+		const r = await call(owner, "DELETE", `/projects/${PZ}/archive`);
+		expect(r.status).toBe(200);
+		expect(r.body).toEqual({ deleted: 2, kept: 3 });
+		const left = (ids: number[]) =>
+			(
+				db
+					.prepare(`SELECT id FROM agent_messages WHERE id IN (${ids.map(() => "?").join(",")})`)
+					.all(...ids) as Array<{ id: number }>
+			).map((x) => x.id);
+		expect(
+			left([doneRoot, doneReply, busyRoot, busyConsult, askRoot, otherProject, inTopic]),
+		).toEqual([busyRoot, busyConsult, askRoot, otherProject, inTopic]);
+		expect(count("agent_questions WHERE message_id = ?", doneRoot)).toBe(0);
+		expect(count("agent_questions WHERE id = ?", askQ)).toBe(1);
+		// The consult ends: its reply (the trigger's) is now what keeps that chain.
+		db.prepare("UPDATE agent_messages SET state = 'done' WHERE id = ?").run(busyConsult);
+		db.prepare("UPDATE agent_questions SET state = 'delivered' WHERE id = ?").run(askQ);
+		expect((await call(owner, "DELETE", `/projects/${PZ}/archive`)).body).toEqual({
+			deleted: 1,
+			kept: 3,
+		});
+		db.prepare(
+			"UPDATE agent_messages SET state = 'done' WHERE reply_to = ? AND kind = 'reply'",
+		).run(busyConsult);
+		expect((await call(owner, "DELETE", `/projects/${PZ}/archive`)).body).toEqual({
+			deleted: 3,
+			kept: 0,
+		});
+		expect(left([otherProject, inTopic])).toEqual([otherProject, inTopic]);
+	});
+
+	it("an agent's individual chat history: its direct messages, with the person and with other agents", async () => {
+		const mine = msg({ project: null, to: "yago" });
+		const answer = msg({ project: null, from: "yago", to: "owner", kind: "reply", root: mine });
+		const toOther = msg({ project: null, from: "yago", to: "zeta" });
+		const notYago = msg({ project: null, to: "zeta" });
+		const inProject = msg({ to: "yago" });
+		const r = await call(owner, "DELETE", "/agents/yago/archive");
+		expect(r.status).toBe(200);
+		expect(r.body).toEqual({ deleted: 3, kept: 0 });
+		const ids = [mine, answer, toOther, notYago, inProject];
+		expect(
+			(
+				db
+					.prepare(`SELECT id FROM agent_messages WHERE id IN (${ids.map(() => "?").join(",")})`)
+					.all(...ids) as Array<{ id: number }>
+			).map((x) => x.id),
+		).toEqual([notYago, inProject]);
+		expect((await call(owner, "DELETE", "/agents/nadie/archive")).status).toBe(404);
 	});
 });
 

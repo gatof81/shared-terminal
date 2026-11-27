@@ -506,6 +506,10 @@ docker compose exec app npm run restore -- <backupDir>
 docker compose exec app npm run restore -- <backupDir> --force   # non-empty target
 ```
 
+Restore brings back what the backup holds, including what was **deleted for good** after it was taken
+(an archived topic, an emptied Archive: docs/ACP_AGENTS.md §4b): restoring an older backup undoes those
+deletions.
+
 A backup made before 2026-11-18 may hold the retired project conversations (`manifest.projects`,
 `projects/<pid>.tar.gz`). Restore does not restore them: nothing reads them any more. It prints where
 they are, as plain `.tar.gz` of `.projects/<pid>`, for anyone who wants to inspect them by hand.
