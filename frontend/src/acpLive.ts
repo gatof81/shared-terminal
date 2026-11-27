@@ -43,6 +43,14 @@ type Listener = (ev: AcpLiveEvent) => void;
 const FIRST_LOAD_WAIT_MS = 1_000;
 
 const listeners = new Set<Listener>();
+/**
+ * Told when the socket comes up, an outage is announced, or it closes for
+ * lack of listeners (`idle`) — without being a listener: watching the state
+ * never keeps the socket open (acpLiveBanner.ts).
+ */
+const stateWatchers = new Set<(s: AcpLiveState) => void>();
+/** Told every event too, likewise without keeping the socket open (acpReplyNotice.ts). */
+const eventWatchers = new Set<Listener>();
 let sock: WebSocket | null = null;
 let up = false;
 /** "down" was announced for the current outage (once per outage, also before the first hello). */
@@ -53,8 +61,20 @@ let retry = 0;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
 let idleTimer: ReturnType<typeof setTimeout> | null = null;
 
+export type AcpLiveState = "up" | "down" | "idle";
+
+function setState(st: AcpLiveState): void {
+	for (const fn of [...stateWatchers]) {
+		try {
+			fn(st);
+		} catch (err) {
+			console.error("[acp-live]", err);
+		}
+	}
+}
+
 function emit(ev: AcpLiveEvent): void {
-	for (const fn of [...listeners]) {
+	for (const fn of [...listeners, ...eventWatchers]) {
 		try {
 			fn(ev);
 		} catch (err) {
@@ -86,6 +106,7 @@ function connect(): void {
 			up = true;
 			downSaid = false;
 			retry = 0;
+			setState("up");
 			emit({ type: "open" });
 		} else if (
 			ev.type === "message" ||
@@ -111,6 +132,7 @@ function connect(): void {
 function announceDown(): void {
 	if (downSaid) return;
 	downSaid = true;
+	setState("down");
 	emit({ type: "down" });
 }
 
@@ -126,6 +148,22 @@ function schedule(): void {
 /** True while the socket is open and delivering. */
 export function acpLiveUp(): boolean {
 	return up;
+}
+
+/** Where the socket is now: up, in an announced outage, or neither (not needed, or connecting). */
+export function acpLiveState(): AcpLiveState {
+	return up ? "up" : downSaid ? "down" : "idle";
+}
+
+export function watchAcpLiveState(fn: (s: AcpLiveState) => void): () => void {
+	stateWatchers.add(fn);
+	return () => stateWatchers.delete(fn);
+}
+
+/** Every event while the socket is open for someone else; never opens or holds it. */
+export function watchAcpEvents(fn: Listener): () => void {
+	eventWatchers.add(fn);
+	return () => eventWatchers.delete(fn);
 }
 
 export function subscribeAcp(fn: Listener): () => void {
@@ -160,6 +198,8 @@ export function subscribeAcp(fn: Listener): () => void {
 				sock = null;
 				up = false;
 				s?.close();
+				// An outage stays announced (the next listener is told `down`).
+				if (!downSaid) setState("idle");
 			}, 5_000);
 	};
 }
