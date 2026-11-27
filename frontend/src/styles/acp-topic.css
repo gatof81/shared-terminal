@@ -943,14 +943,6 @@ button.rail-attention:hover {
 	height: 0;
 	z-index: 20;
 }
-.acp-reply-anchor.is-floating {
-	position: fixed;
-	/* Under the topic's header row: its ⋯ stays reachable. */
-	top: 120px;
-	right: 16px;
-	height: auto;
-	z-index: 900;
-}
 .acp-reply-notice {
 	position: absolute;
 	left: 8px;
@@ -971,9 +963,16 @@ button.rail-attention:hover {
 	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
 	cursor: pointer;
 }
-.is-floating .acp-reply-notice {
-	position: static;
-	max-width: 380px;
+/* Wide: aligned to the thread's right edge, as wide as its line needs. */
+@media (min-width: 769px) {
+	.acp-reply-notice {
+		left: auto;
+		right: 0;
+		max-width: 380px;
+	}
+	.ps-main > .acp-reply-anchor .acp-reply-notice {
+		right: 16px;
+	}
 }
 .acp-reply-notice:hover,
 .acp-reply-notice:focus-visible {
