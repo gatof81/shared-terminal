@@ -72,10 +72,10 @@ test.describe("navigation", () => {
 		await expect(page.locator("#files-preview")).toContainText("export function login");
 		await expect(page.locator("#files-breadcrumbs")).toContainText("auth.ts");
 		if (app.mobile) {
-			await page.locator("#files-preview button", { hasText: "Files" }).click();
+			await page.locator("#files-preview button", { hasText: "Archivos" }).click();
 		}
 		await page.locator("#files-tree .files-row", { hasText: ".env" }).click();
-		await expect(page.locator("#files-preview")).toContainText("restricted");
+		await expect(page.locator("#files-preview")).toContainText("restringido");
 	});
 
 	test("Git: selecting a change shows its diff", async ({ app, page }) => {

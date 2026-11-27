@@ -244,7 +244,9 @@ test.describe("auth transitions on the real cookie jar", { tag: "@any-viewport" 
 			timeout: 15_000,
 		});
 		await expect(other.locator("#app-view")).toBeHidden();
-		await expect(other.locator("#toast .toast-item", { hasText: "expired" })).toHaveCount(0);
+		await expect(other.locator("#toast .toast-item", { hasText: "Tu acceso venció" })).toHaveCount(
+			0,
+		);
 		expect(await tokenOf(context)).toBe(null);
 	});
 
@@ -275,7 +277,9 @@ test.describe("auth transitions on the real cookie jar", { tag: "@any-viewport" 
 		server.release("sessions", 401);
 		await page.waitForTimeout(1000);
 		await expect(page.locator("#app-view"), "Bob was signed out by Alice's 401").toBeVisible();
-		await expect(page.locator("#toast .toast-item", { hasText: "expired" })).toHaveCount(0);
+		await expect(page.locator("#toast .toast-item", { hasText: "Tu acceso venció" })).toHaveCount(
+			0,
+		);
 		expect(server.received("POST /auth/logout")).toBe(logoutsBefore);
 		expect(await tokenOf(context)).toBe("bob");
 	});
@@ -292,7 +296,9 @@ test.describe("auth transitions on the real cookie jar", { tag: "@any-viewport" 
 		await expect.poll(() => server.isHeld("sessions")).toBe(true);
 		server.release("sessions", 401);
 		await expect(page.locator("#auth-view")).toBeVisible();
-		await expect(page.locator("#toast .toast-item", { hasText: "expired" })).toHaveCount(1);
+		await expect(page.locator("#toast .toast-item", { hasText: "Tu acceso venció" })).toHaveCount(
+			1,
+		);
 		await expect.poll(() => server.received("POST /auth/logout")).toBe(logoutsBefore + 1);
 		await expect.poll(() => tokenOf(context)).toBe(null);
 	});

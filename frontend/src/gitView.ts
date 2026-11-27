@@ -450,26 +450,26 @@ async function startThisSession(): Promise<void> {
 // ── Rendering ───────────────────────────────────────────────────────────────
 
 const AREA_LABEL: Record<GitArea, string> = {
-	staged: "Staged",
-	unstaged: "Changes",
-	untracked: "Untracked",
-	conflict: "Conflicts",
+	staged: "En el índice",
+	unstaged: "Sin agregar al índice",
+	untracked: "Sin seguimiento",
+	conflict: "Conflictos",
 };
 const AREA_ORDER: GitArea[] = ["conflict", "staged", "unstaged", "untracked"];
 
 const STATUS_WORD = new Map<string, string>([
-	["M", "Modified"],
-	["A", "Added"],
-	["D", "Deleted"],
-	["R", "Renamed"],
-	["C", "Copied"],
-	["T", "Type changed"],
-	["U", "Conflict"],
-	["?", "Untracked"],
+	["M", "Modificado"],
+	["A", "Agregado"],
+	["D", "Eliminado"],
+	["R", "Renombrado"],
+	["C", "Copiado"],
+	["T", "Cambió de tipo"],
+	["U", "En conflicto"],
+	["?", "Sin seguimiento"],
 ]);
 
 function statusWord(c: GitChange): string {
-	return c.area === "conflict" ? `Conflict (${c.xy})` : (STATUS_WORD.get(c.status) ?? c.status);
+	return c.area === "conflict" ? `En conflicto (${c.xy})` : (STATUS_WORD.get(c.status) ?? c.status);
 }
 
 function statusLetter(c: GitChange): string {
@@ -501,21 +501,25 @@ function renderSummary(): void {
 			el(
 				"span",
 				"git-branch-name detached",
-				d.head ? `HEAD @ ${d.head.slice(0, 7)}` : "no commits",
+				d.head ? `HEAD @ ${d.head.slice(0, 7)}` : "sin commits",
 			),
 		);
 	}
-	branch.title = d.upstream ? `Tracking ${d.upstream}` : "No upstream";
+	branch.title = d.upstream ? `Sigue a ${d.upstream}` : "Sin upstream";
 	summaryEl.appendChild(branch);
 	if (d.ahead !== null && d.behind !== null && (d.ahead > 0 || d.behind > 0)) {
 		const ab = el("span", "git-ahead-behind", `↑${d.ahead} ↓${d.behind}`);
-		ab.title = `${d.ahead} ahead, ${d.behind} behind ${d.upstream ?? "upstream"}`;
+		ab.title = `${d.ahead} por delante y ${d.behind} por detrás de ${d.upstream ?? "upstream"}`;
 		summaryEl.appendChild(ab);
 	}
 	if (dir !== "") summaryEl.appendChild(el("span", "git-summary-dir", dir));
 	const n = d.changes.length;
 	summaryEl.appendChild(
-		el("span", "git-summary-count", n === 0 ? "clean" : `${n}${d.truncated ? "+" : ""} changed`),
+		el(
+			"span",
+			"git-summary-count",
+			n === 0 ? "sin cambios" : `${n}${d.truncated ? "+" : ""} con cambios`,
+		),
 	);
 }
 
@@ -528,7 +532,7 @@ function renderList(): void {
 	listEl.replaceChildren();
 
 	if (status.status === "idle" || status.status === "loading") {
-		listEl.appendChild(stateBox("loading", "Reading git status…"));
+		listEl.appendChild(stateBox("loading", "Leyendo el estado de git…"));
 		return;
 	}
 	if (status.status === "error") {
@@ -543,7 +547,7 @@ function renderList(): void {
 
 	const frag = document.createDocumentFragment();
 	if (data.changes.length === 0) {
-		frag.appendChild(stateBox("empty", "Working tree clean — nothing to show."));
+		frag.appendChild(stateBox("empty", "No hay cambios en el árbol de trabajo."));
 	}
 	for (const area of AREA_ORDER) {
 		const items = data.changes.filter((c) => c.area === area);
@@ -562,7 +566,11 @@ function renderList(): void {
 	}
 	if (data.truncated) {
 		frag.appendChild(
-			el("div", "files-tree-note", `Showing the first ${data.changes.length} changed files`),
+			el(
+				"div",
+				"files-tree-note",
+				`Se muestran los primeros ${data.changes.length} archivos con cambios`,
+			),
 		);
 	}
 	frag.appendChild(commitsSection());
@@ -601,7 +609,7 @@ function changeRow(c: GitChange): HTMLElement {
 	row.title = c.oldPath
 		? `${statusWord(c)}: ${c.oldPath} → ${c.path}`
 		: c.restricted
-			? `${c.path} — restricted (may contain credentials)`
+			? `${c.path} — restringido (puede contener credenciales)`
 			: `${statusWord(c)}: ${c.path}`;
 	row.addEventListener("click", () => {
 		pendingDetail = null; // the person's choice voids a route's pending detail
@@ -643,16 +651,16 @@ listEl.addEventListener("keydown", (e) => {
 function commitsSection(): HTMLElement {
 	const section = el("section", "git-section git-commits");
 	const heading = el("h3", "git-section-title");
-	heading.appendChild(el("span", undefined, "Recent commits"));
+	heading.appendChild(el("span", undefined, "Commits recientes"));
 	section.appendChild(heading);
 	if (log.status === "loading" || log.status === "idle") {
-		section.appendChild(el("div", "files-tree-note", "Loading…"));
+		section.appendChild(el("div", "files-tree-note", "Cargando…"));
 	} else if (log.status === "error") {
 		const note = el("div", "files-tree-note error");
-		note.appendChild(el("span", undefined, `Couldn't load commits: ${log.message}`));
+		note.appendChild(el("span", undefined, `No se pudieron cargar los commits: ${log.message}`));
 		section.appendChild(note);
 	} else if (log.commits.length === 0) {
-		section.appendChild(el("div", "files-tree-note", "No commits yet"));
+		section.appendChild(el("div", "files-tree-note", "Todavía no hay commits"));
 	} else {
 		const list = el("div", "git-rows");
 		list.setAttribute("role", "list");
@@ -695,38 +703,40 @@ function errorBox(err: { message: string; httpStatus: number; code: string | nul
 	}
 	const msg =
 		err.code === "timeout"
-			? "Git took too long to answer. The repository may be very large or the container busy."
+			? "Git tardó demasiado en responder. Puede que el repositorio sea muy grande o que el contenedor esté ocupado."
 			: err.httpStatus === 429
-				? "Too many git requests at once — try again in a moment."
-				: `Couldn't read the repository: ${err.message}`;
+				? "Demasiados pedidos a git a la vez: probá de nuevo en un momento."
+				: `No se pudo leer el repositorio: ${err.message}`;
 	return stateBox(
 		"error",
 		msg,
-		button("Retry", "files-btn", () => void load()),
+		button("Reintentar", "files-btn", () => void load()),
 	);
 }
 
 function notRepoBox(candidates: string[]): HTMLElement {
-	const where = dir === "" ? "The workspace root" : `"${dir}"`;
+	const where = dir === "" ? "La raíz del workspace" : `«${dir}»`;
 	const actions: HTMLElement[] = [];
 	if (candidates.length > 0) {
 		const wrap = el("div", "git-candidates");
-		wrap.appendChild(el("p", "git-candidates-title", "Repositories found in this workspace:"));
+		wrap.appendChild(
+			el("p", "git-candidates-title", "Repositorios encontrados en este workspace:"),
+		);
 		for (const c of candidates) {
-			wrap.appendChild(button(c, "files-btn", () => chooseDir(c), `Open repository ${c}`));
+			wrap.appendChild(button(c, "files-btn", () => chooseDir(c), `Abrir el repositorio ${c}`));
 		}
 		actions.push(wrap);
 	}
 	if (dir !== "") {
-		actions.push(button("Back to workspace root", "files-btn", () => chooseDir("")));
+		actions.push(button("Volver a la raíz del workspace", "files-btn", () => chooseDir("")));
 	}
-	return stateBox("info", `${where} is not a git repository.`, ...actions);
+	return stateBox("info", `${where} no es un repositorio git.`, ...actions);
 }
 
 function diffHeader(name: string, meta: HTMLElement | string, actions: HTMLElement[]): HTMLElement {
 	const header = el("div", "files-preview-header");
 	header.appendChild(
-		button("‹ Changes", "files-btn files-mobile-only", routeBack, "Back to the change list"),
+		button("‹ Cambios", "files-btn files-mobile-only", routeBack, "Volver a la lista de cambios"),
 	);
 	const title = el("div", "files-preview-title");
 	title.appendChild(el("span", "files-preview-name", name));
@@ -747,33 +757,33 @@ function renderDiff(): void {
 	diffEl.replaceChildren();
 	const sel = selected;
 	if (sel === null) {
-		diffEl.appendChild(stateBox("empty", "Select a changed file to see its diff."));
+		diffEl.appendChild(stateBox("empty", "Elegí un archivo con cambios para ver su diff."));
 		return;
 	}
 	const name = sel.path.slice(sel.path.lastIndexOf("/") + 1);
 	if (sel.directory) {
-		diffEl.appendChild(diffHeader(sel.path, "directory", []));
+		diffEl.appendChild(diffHeader(sel.path, "directorio", []));
 		diffEl.appendChild(
 			stateBox(
 				"info",
-				"This entry is a directory — usually a nested repository, which git lists as one untracked item. Open it from the terminal.",
+				"Esta entrada es un directorio: casi siempre un repositorio anidado, que git muestra como un solo elemento sin seguimiento. Abrilo desde la terminal.",
 			),
 		);
 		return;
 	}
 	if (sel.restricted) {
-		diffEl.appendChild(diffHeader(name, "restricted", []));
+		diffEl.appendChild(diffHeader(name, "restringido", []));
 		diffEl.appendChild(
 			stateBox(
 				"info",
-				"This path is restricted because it may contain credentials (keys, tokens, .env secrets). Its diff can't be shown here.",
+				"Esta ruta está restringida porque puede contener credenciales (claves, tokens, secretos de .env). Acá no se puede mostrar su diff.",
 			),
 		);
 		return;
 	}
 	if (diff.status === "none" || diff.status === "loading") {
 		diffEl.appendChild(diffHeader(name, AREA_LABEL[sel.area], []));
-		diffEl.appendChild(stateBox("loading", "Loading diff…"));
+		diffEl.appendChild(stateBox("loading", "Cargando el diff…"));
 		return;
 	}
 	if (diff.status === "error") {
@@ -781,22 +791,24 @@ function renderDiff(): void {
 		diffEl.appendChild(diffHeader(name, AREA_LABEL[sel.area], []));
 		if (e.httpStatus === 403) {
 			diffEl.appendChild(
-				stateBox("info", "This file is restricted because it may contain credentials."),
+				stateBox("info", "Este archivo está restringido porque puede contener credenciales."),
 			);
 		} else if (e.code === "session-not-running") {
-			diffEl.appendChild(stateBox("info", "The session stopped. Start it to load diffs again."));
+			diffEl.appendChild(
+				stateBox("info", "La sesión se detuvo. Ponela en marcha para volver a cargar los diffs."),
+			);
 		} else {
 			const msg =
 				e.code === "timeout"
-					? "Git took too long to produce this diff."
+					? "Git tardó demasiado en generar este diff."
 					: e.httpStatus === 429
-						? "Too many git requests at once — try again in a moment."
-						: `Couldn't load the diff: ${e.message}`;
+						? "Demasiados pedidos a git a la vez: probá de nuevo en un momento."
+						: `No se pudo cargar el diff: ${e.message}`;
 			diffEl.appendChild(
 				stateBox(
 					"error",
 					msg,
-					button("Retry", "files-btn", () => void openDiff(sel)),
+					button("Reintentar", "files-btn", () => void openDiff(sel)),
 				),
 			);
 		}
@@ -807,7 +819,7 @@ function renderDiff(): void {
 	const parsed = parseUnifiedDiff(data.patch);
 	const meta = el("span", "files-preview-meta");
 	meta.appendChild(el("span", undefined, `${AREA_LABEL[sel.area]} · `));
-	if (sel.oldPath) meta.appendChild(el("span", undefined, `renamed from ${sel.oldPath} · `));
+	if (sel.oldPath) meta.appendChild(el("span", undefined, `renombrado desde ${sel.oldPath} · `));
 	if (!data.binary && parsed.hasHunks) {
 		meta.appendChild(el("span", "git-add", `+${parsed.additions}`));
 		meta.appendChild(el("span", undefined, " "));
@@ -820,12 +832,12 @@ function renderDiff(): void {
 			el(
 				"div",
 				"files-banner",
-				"Large diff — showing the beginning only. Use the terminal for the full patch.",
+				"Diff grande: se muestra solo el comienzo. Usá la terminal para ver el patch completo.",
 			),
 		);
 	}
 	if (data.binary) {
-		diffEl.appendChild(stateBox("info", "Binary file — no textual diff to show."));
+		diffEl.appendChild(stateBox("info", "Archivo binario: no hay un diff de texto para mostrar."));
 		return;
 	}
 	if (sel.area === "conflict" && parsed.hasHunks) {
@@ -833,7 +845,7 @@ function renderDiff(): void {
 			el(
 				"div",
 				"files-banner",
-				"Unresolved conflict — combined diff of the working tree against both sides; the conflict markers show as added lines.",
+				"Conflicto sin resolver: diff combinado del árbol de trabajo contra los dos lados; los marcadores de conflicto se ven como líneas agregadas.",
 			),
 		);
 	}
@@ -844,8 +856,8 @@ function renderDiff(): void {
 			stateBox(
 				"empty",
 				parsed.rows.length > 0
-					? "No content changes — a rename, mode change or identical content."
-					: "No differences to show.",
+					? "El contenido no cambió: es un renombre, un cambio de modo o contenido idéntico."
+					: "No hay diferencias para mostrar.",
 			),
 		);
 	}

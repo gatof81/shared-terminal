@@ -31,7 +31,7 @@ function closeInvitesModal() {
 }
 
 async function renderInvites() {
-	inviteList.textContent = "Loading…";
+	inviteList.textContent = "Cargando…";
 	let invites: Invite[];
 	try {
 		invites = await listInvites();
@@ -45,7 +45,7 @@ async function renderInvites() {
 	if (invites.length === 0) {
 		const empty = document.createElement("div");
 		empty.className = "invite-empty";
-		empty.textContent = "No invites yet — generate one above.";
+		empty.textContent = "Todavía no hay invitaciones: generá una arriba.";
 		inviteList.appendChild(empty);
 		return;
 	}
@@ -72,14 +72,14 @@ async function renderInvites() {
 		// as "starts with abc1, rest hidden" rather than a partial code
 		// the user might try to share.
 		code.textContent = `${invite.codePrefix}••••••••••••`;
-		code.title = `Hash ${invite.codeHash}`;
+		code.title = `Hash: ${invite.codeHash}`;
 		row.appendChild(code);
 
 		const status = document.createElement("span");
 		status.className = `invite-status ${inert ? "used" : "unused"}`;
-		status.textContent = used ? "Used" : expired ? "Expired" : "Unused";
+		status.textContent = used ? "Usada" : expired ? "Vencida" : "Sin usar";
 		if (!used && !expired && invite.expiresAt) {
-			status.title = `Expires ${invite.expiresAt} UTC`;
+			status.title = `Vence el ${invite.expiresAt} UTC`;
 		}
 		row.appendChild(status);
 
@@ -96,12 +96,12 @@ async function renderInvites() {
 			const revokeBtn = document.createElement("button");
 			revokeBtn.type = "button";
 			revokeBtn.className = "invite-action-btn revoke";
-			revokeBtn.textContent = "Revoke";
+			revokeBtn.textContent = "Revocar";
 			revokeBtn.addEventListener("click", async () => {
 				const ok = await confirmDialog({
-					title: "Revoke invite",
-					message: `Revoke the invite starting with "${invite.codePrefix}"? Anyone holding it will no longer be able to register.`,
-					confirmLabel: "Revoke",
+					title: "Revocar la invitación",
+					message: `¿Revocar la invitación que empieza con «${invite.codePrefix}»? Quien la tenga ya no va a poder registrarse.`,
+					confirmLabel: "Revocar",
 					danger: true,
 				});
 				if (!ok) return;
@@ -129,7 +129,8 @@ async function renderInvites() {
 	if (invites.length === SERVER_INVITE_LIMIT) {
 		const footer = document.createElement("div");
 		footer.className = "invite-empty";
-		footer.textContent = "Older invites not shown — only the most recent 100 are listed.";
+		footer.textContent =
+			"Las invitaciones más viejas no se muestran: solo se listan las 100 más recientes.";
 		inviteList.appendChild(footer);
 	}
 }
@@ -149,15 +150,15 @@ inviteCreateBtn.addEventListener("click", async () => {
 			// has it, and the toast element keeps its text in the DOM
 			// for the lifetime of the page. Cheap defense in depth on
 			// top of the textContent-clearing in showToast itself.
-			showToast("Invite code copied to clipboard");
+			showToast("Código de invitación copiado al portapapeles");
 		} catch {
 			// Clipboard write can fail under permission-denied / non-secure-
 			// context. Show the plaintext so it still reaches the user
 			// before it's gone forever.
 			await alertDialog({
-				title: "Invite code",
-				message: `This code won't be shown again — copy it now:\n\n${minted.code}\n\nShare it with the person you want to invite.`,
-				okLabel: "I copied it",
+				title: "Código de invitación",
+				message: `Este código no se vuelve a mostrar: copialo ahora.\n\n${minted.code}\n\nCompartilo con la persona que querés invitar.`,
+				okLabel: "Ya lo copié",
 			});
 		}
 		await renderInvites();

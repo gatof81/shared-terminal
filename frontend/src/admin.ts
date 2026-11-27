@@ -119,34 +119,42 @@ async function refreshAdmin(): Promise<void> {
 			fetchAdminObserveLog(),
 		]);
 		if (statsR.status === "fulfilled") renderAdminStats(statsR.value);
-		else showToast(`Stats: ${statsR.reason.message}`, true);
+		else showToast(`Estadísticas: ${statsR.reason.message}`, true);
 		if (sessionsR.status === "fulfilled") renderAdminSessions(sessionsR.value);
-		else showToast(`Sessions: ${sessionsR.reason.message}`, true);
+		else showToast(`Sesiones: ${sessionsR.reason.message}`, true);
 		if (usersR.status === "fulfilled") renderAdminUsers(usersR.value);
-		else showToast(`Users: ${usersR.reason.message}`, true);
+		else showToast(`Usuarios: ${usersR.reason.message}`, true);
 		if (groupsR.status === "fulfilled") renderAdminGroups(groupsR.value);
-		else showToast(`Groups: ${groupsR.reason.message}`, true);
+		else showToast(`Grupos: ${groupsR.reason.message}`, true);
 		if (observeLogR.status === "fulfilled") renderAdminObserveLog(observeLogR.value);
-		else showToast(`Observe log: ${observeLogR.reason.message}`, true);
+		else showToast(`Registro de observación: ${observeLogR.reason.message}`, true);
 	} finally {
 		adminRefreshBtn.disabled = false;
 	}
 }
 
 function formatRelativeTime(ts: number | null): string {
-	if (ts === null) return "never";
+	if (ts === null) return "nunca";
 	const ageSec = Math.round((Date.now() - ts) / 1000);
-	if (ageSec < 60) return `${ageSec}s ago`;
-	if (ageSec < 3600) return `${Math.round(ageSec / 60)}m ago`;
-	return `${Math.round(ageSec / 3600)}h ago`;
+	if (ageSec < 60) return `hace ${ageSec} s`;
+	if (ageSec < 3600) return `hace ${Math.round(ageSec / 60)} min`;
+	return `hace ${Math.round(ageSec / 3600)} h`;
 }
 
 function formatUptime(seconds: number): string {
-	if (seconds < 60) return `${seconds}s`;
-	if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
-	if (seconds < 86_400) return `${Math.round(seconds / 3600)}h`;
-	return `${Math.round(seconds / 86_400)}d`;
+	if (seconds < 60) return `${seconds} s`;
+	if (seconds < 3600) return `${Math.round(seconds / 60)} min`;
+	if (seconds < 86_400) return `${Math.round(seconds / 3600)} h`;
+	return `${Math.round(seconds / 86_400)} d`;
 }
+
+/** A session's state in the rows; the state itself stays the server's. */
+const STATE_WORD = new Map([
+	["running", "en marcha"],
+	["stopped", "detenida"],
+	["terminated", "terminada"],
+	["failed", "falló"],
+]);
 
 // #270 — caching the limits block from the last `/admin/stats` so the
 // per-row "Edit caps" form has the live max/default/min to validate
@@ -158,7 +166,7 @@ function formatUptime(seconds: number): string {
 let adminResourceLimits: AdminStats["resources"]["limits"] | null = null;
 
 function renderAdminStats(stats: AdminStats): void {
-	adminUptimeEl.textContent = `Uptime ${formatUptime(stats.uptimeSeconds)} · booted ${new Date(stats.bootedAt).toLocaleString()}`;
+	adminUptimeEl.textContent = `En marcha hace ${formatUptime(stats.uptimeSeconds)} · arrancó el ${new Date(stats.bootedAt).toLocaleString()}`;
 	adminResourceLimits = stats.resources.limits;
 	adminStatsEl.textContent = "";
 
@@ -185,37 +193,37 @@ function renderAdminStats(stats: AdminStats): void {
 	};
 
 	const s = stats.sessions.byStatus;
-	panel("Sessions", [
-		["Running", String(s.running)],
-		["Stopped", String(s.stopped)],
-		["Terminated", String(s.terminated)],
-		["Failed", String(s.failed)],
+	panel("Sesiones", [
+		["En marcha", String(s.running)],
+		["Detenidas", String(s.stopped)],
+		["Terminadas", String(s.terminated)],
+		["Fallaron", String(s.failed)],
 	]);
 
 	const sw = stats.idleSweeper;
-	panel("Idle sweeper", [
-		["Last sweep", formatRelativeTime(sw?.lastSweepAt ?? null)],
-		["Reaped since boot", String(sw?.sweptSinceBoot ?? 0)],
-		["Tracked sessions", String(sw?.currentMapSize ?? 0)],
+	panel("Detención por inactividad", [
+		["Última pasada", formatRelativeTime(sw?.lastSweepAt ?? null)],
+		["Detenidas desde el arranque", String(sw?.sweptSinceBoot ?? 0)],
+		["Sesiones seguidas", String(sw?.currentMapSize ?? 0)],
 	]);
 
 	const r = stats.reconcile;
-	panel("Reconcile", [
-		["Last run", formatRelativeTime(r.lastRunAt)],
-		["Sessions checked", String(r.sessionsCheckedSinceBoot)],
-		["Errors", String(r.errorsSinceBoot)],
+	panel("Reconciliación", [
+		["Última pasada", formatRelativeTime(r.lastRunAt)],
+		["Sesiones revisadas", String(r.sessionsCheckedSinceBoot)],
+		["Errores", String(r.errorsSinceBoot)],
 	]);
 
 	const d = stats.dispatcher;
-	panel("Dispatcher", [
-		["Requests", String(d.requestsSinceBoot)],
+	panel("Proxy de puertos", [
+		["Pedidos", String(d.requestsSinceBoot)],
 		["2xx", String(d.responses2xxSinceBoot)],
 		["3xx", String(d.responses3xxSinceBoot)],
 		["4xx", String(d.responses4xxSinceBoot)],
 		["5xx", String(d.responses5xxSinceBoot)],
 	]);
 
-	panel("D1", [["Calls since boot", String(stats.d1.callsSinceBoot)]]);
+	panel("D1", [["Llamadas desde el arranque", String(stats.d1.callsSinceBoot)]]);
 
 	// #270 — host resource saturation card. Renders against running
 	// sessions only; if there are none, the row collapses to "no live
@@ -227,21 +235,21 @@ function renderAdminStats(stats: AdminStats): void {
 		r270.totalCpuLimitNanos > 0 ? (r270.totalCpuPercent / (totalCpuLimitCores * 100)) * 100 : 0;
 	const memUsePctOfAlloc =
 		r270.totalMemLimitBytes > 0 ? (r270.totalMemBytes / r270.totalMemLimitBytes) * 100 : 0;
-	panel("Resources (running)", [
+	panel("Recursos (en marcha)", [
 		[
-			"Sessions",
+			"Sesiones",
 			r270.runningCount === 0
-				? "0 (no live sessions)"
-				: `${r270.runningCount} (stats: ${r270.statsAvailable}/${r270.runningCount})`,
+				? "0 (ninguna en marcha)"
+				: `${r270.runningCount} (con estadísticas: ${r270.statsAvailable}/${r270.runningCount})`,
 		],
 		[
-			"CPU in use",
+			"CPU en uso",
 			r270.runningCount === 0
 				? "—"
-				: `${formatCpuPercent(r270.totalCpuPercent)} / ${formatCpuCores(totalCpuLimitCores)} cores (${cpuUsePctOfAlloc.toFixed(0)}%)`,
+				: `${formatCpuPercent(r270.totalCpuPercent)} / ${formatCpuCores(totalCpuLimitCores)} núcleos (${cpuUsePctOfAlloc.toFixed(0)}%)`,
 		],
 		[
-			"Memory in use",
+			"Memoria en uso",
 			r270.runningCount === 0
 				? "—"
 				: `${formatBytes(r270.totalMemBytes)} / ${formatBytes(r270.totalMemLimitBytes)} (${memUsePctOfAlloc.toFixed(0)}%)`,
@@ -279,7 +287,7 @@ function renderAdminSessions(sessions: AdminSession[]): void {
 	if (sessions.length === 0) {
 		const empty = document.createElement("p");
 		empty.className = "modal-hint";
-		empty.textContent = "No sessions.";
+		empty.textContent = "No hay sesiones.";
 		adminSessionsListEl.appendChild(empty);
 		return;
 	}
@@ -300,7 +308,7 @@ function renderAdminSessions(sessions: AdminSession[]): void {
 		name.textContent = s.name;
 		const sub = document.createElement("span");
 		sub.className = "admin-session-sub";
-		sub.textContent = `${s.ownerUsername} · ${s.status} · ${new Date(s.createdAt).toLocaleString()}`;
+		sub.textContent = `${s.ownerUsername} · ${STATE_WORD.get(s.status) ?? s.status} · ${new Date(s.createdAt).toLocaleString()}`;
 		meta.appendChild(name);
 		meta.appendChild(sub);
 
@@ -325,7 +333,7 @@ function renderAdminSessions(sessions: AdminSession[]): void {
 		if (s.status === "running") {
 			const openBtn = document.createElement("button");
 			openBtn.type = "button";
-			openBtn.textContent = "Open";
+			openBtn.textContent = "Abrir";
 			openBtn.addEventListener("click", () => openAdminObserve(s));
 			actions.appendChild(openBtn);
 		}
@@ -335,19 +343,19 @@ function renderAdminSessions(sessions: AdminSession[]): void {
 		// misleading on a stopped/terminated session.
 		const stopBtn = document.createElement("button");
 		stopBtn.type = "button";
-		stopBtn.textContent = "Stop";
+		stopBtn.textContent = "Detener";
 		stopBtn.disabled = s.status !== "running";
 		stopBtn.addEventListener("click", () =>
 			confirmAndAct(
 				{
-					title: "Force-stop session",
-					message: `Force-stop "${s.name}" (${s.ownerUsername})? The owner's container is stopped; their workspace is preserved.`,
-					confirmLabel: "Force-stop",
+					title: "Detener la sesión",
+					message: `¿Detener «${s.name}» (${s.ownerUsername})? Se detiene el contenedor del dueño; sus archivos se conservan.`,
+					confirmLabel: "Detener",
 				},
 				stopBtn,
 				async () => {
 					await adminForceStop(s.sessionId);
-					showToast(`Stopped ${s.name}`);
+					showToast(`«${s.name}» detenida`);
 				},
 			),
 		);
@@ -357,44 +365,47 @@ function renderAdminSessions(sessions: AdminSession[]): void {
 		// Toggles the inline edit form below the header.
 		const editBtn = document.createElement("button");
 		editBtn.type = "button";
-		editBtn.textContent = "Edit caps";
+		editBtn.textContent = "Editar límites";
 		editBtn.disabled = adminResourceLimits === null;
 
 		const deleteBtn = document.createElement("button");
 		deleteBtn.type = "button";
-		deleteBtn.textContent = "Delete";
+		deleteBtn.textContent = "Terminar";
 		deleteBtn.className = "admin-session-delete";
 		deleteBtn.addEventListener("click", () =>
 			confirmAndAct(
 				{
-					title: "Soft-delete session",
-					message: `Soft-delete "${s.name}" (${s.ownerUsername})?\n\nThe container is stopped and the row terminated; the workspace is preserved and the owner can restore it.`,
-					confirmLabel: "Soft-delete",
+					title: "Terminar la sesión",
+					message: `¿Terminar «${s.name}» (${s.ownerUsername})?\n\nEl contenedor se detiene y la sesión queda terminada; los archivos se conservan y el dueño puede restaurarla.`,
+					confirmLabel: "Terminar",
 				},
 				deleteBtn,
 				async () => {
 					await adminForceDelete(s.sessionId, false);
-					showToast(`Soft-deleted ${s.name}`);
+					showToast(`«${s.name}» terminada`);
 				},
 			),
 		);
 
 		const hardBtn = document.createElement("button");
 		hardBtn.type = "button";
-		hardBtn.textContent = "Hard-delete";
+		hardBtn.textContent = "Eliminar definitivamente";
 		hardBtn.className = "admin-session-delete";
 		hardBtn.addEventListener("click", () =>
 			confirmAndAct(
 				{
-					title: "Hard-delete session",
-					message: `Hard-delete "${s.name}" (${s.ownerUsername})?\n\nThis purges the workspace directory AND drops the session record. Unrecoverable.`,
-					confirmLabel: "Hard-delete",
-					requireText: { expected: s.name, label: `Type the session name (${s.name}) to confirm` },
+					title: "Eliminar definitivamente",
+					message: `¿Eliminar definitivamente «${s.name}» (${s.ownerUsername})?\n\nBorra del disco los archivos del workspace y los datos de la sesión. No se puede deshacer.`,
+					confirmLabel: "Eliminar definitivamente",
+					requireText: {
+						expected: s.name,
+						label: `Escribí el nombre de la sesión (${s.name}) para confirmar`,
+					},
 				},
 				hardBtn,
 				async () => {
 					await adminForceDelete(s.sessionId, true);
-					showToast(`Hard-deleted ${s.name}`);
+					showToast(`«${s.name}» eliminada`);
 				},
 			),
 		);
@@ -439,7 +450,7 @@ function formatQuotaValue(
 	fmt: (n: number) => string,
 ): string {
 	if (override !== null) return fmt(override);
-	return effective === null ? "unlimited (default)" : `${fmt(effective)} (default)`;
+	return effective === null ? "sin límite (por defecto)" : `${fmt(effective)} (por defecto)`;
 }
 
 function renderAdminUsers(users: AdminUser[]): void {
@@ -447,7 +458,7 @@ function renderAdminUsers(users: AdminUser[]): void {
 	if (users.length === 0) {
 		const empty = document.createElement("p");
 		empty.className = "modal-hint";
-		empty.textContent = "No users.";
+		empty.textContent = "No hay usuarios.";
 		adminUsersListEl.appendChild(empty);
 		return;
 	}
@@ -464,17 +475,17 @@ function renderAdminUsers(users: AdminUser[]): void {
 		name.textContent = u.isAdmin ? `${u.username} (admin)` : u.username;
 		const sub = document.createElement("span");
 		sub.className = "admin-session-sub";
-		sub.textContent = `joined ${new Date(u.createdAt).toLocaleDateString()}`;
+		sub.textContent = `desde el ${new Date(u.createdAt).toLocaleDateString()}`;
 		const quotaLine = document.createElement("span");
 		quotaLine.className = "admin-session-sub admin-session-resources";
 		quotaLine.textContent =
-			`sessions: ${u.usage.activeSessions}/${u.effective.maxSessions}` +
-			` · cpu: ${formatCpuCores(u.usage.cpuNanos / 1e9)} of ${formatQuotaValue(
+			`sesiones: ${u.usage.activeSessions}/${u.effective.maxSessions}` +
+			` · cpu: ${formatCpuCores(u.usage.cpuNanos / 1e9)} de ${formatQuotaValue(
 				u.quotas.maxTotalCpu,
 				u.effective.maxTotalCpu,
-				(n) => `${formatCpuCores(n / 1e9)} cores`,
+				(n) => `${formatCpuCores(n / 1e9)} núcleos`,
 			)}` +
-			` · mem: ${formatBytes(u.usage.memBytes)} of ${formatQuotaValue(
+			` · memoria: ${formatBytes(u.usage.memBytes)} de ${formatQuotaValue(
 				u.quotas.maxTotalMem,
 				u.effective.maxTotalMem,
 				formatBytes,
@@ -487,7 +498,7 @@ function renderAdminUsers(users: AdminUser[]): void {
 		actions.className = "admin-session-actions";
 		const editBtn = document.createElement("button");
 		editBtn.type = "button";
-		editBtn.textContent = "Edit quotas";
+		editBtn.textContent = "Editar cuotas";
 		actions.appendChild(editBtn);
 
 		header.appendChild(meta);
@@ -536,26 +547,26 @@ function buildEditQuotasForm(u: AdminUser): HTMLElement {
 
 	// Prefill with the OVERRIDE only — an empty field visibly means
 	// "following the deployment default", which is what Save preserves.
-	const sessionsField = mkInput("Max sessions", u.quotas.maxSessions, "1", "default");
+	const sessionsField = mkInput("Máximo de sesiones", u.quotas.maxSessions, "1", "por defecto");
 	const cpuField = mkInput(
-		"Total CPU (cores)",
+		"CPU total (núcleos)",
 		u.quotas.maxTotalCpu === null ? null : u.quotas.maxTotalCpu / 1e9,
 		"0.25",
-		"default",
+		"por defecto",
 	);
 	const memField = mkInput(
-		"Total memory (MiB)",
+		"Memoria total (MiB)",
 		u.quotas.maxTotalMem === null ? null : u.quotas.maxTotalMem / (1024 * 1024),
 		"256",
-		"default",
+		"por defecto",
 	);
 
 	const saveBtn = document.createElement("button");
 	saveBtn.type = "submit";
-	saveBtn.textContent = "Save";
+	saveBtn.textContent = "Guardar";
 	const cancelBtn = document.createElement("button");
 	cancelBtn.type = "button";
-	cancelBtn.textContent = "Cancel";
+	cancelBtn.textContent = "Cancelar";
 	cancelBtn.addEventListener("click", () => {
 		form.hidden = true;
 	});
@@ -579,7 +590,7 @@ function buildEditQuotasForm(u: AdminUser): HTMLElement {
 		const cpuV = parse(cpuField.input.value);
 		const memV = parse(memField.input.value);
 		if (sessionsV === undefined || cpuV === undefined || memV === undefined) {
-			showToast("Enter valid quota values (or leave empty for the default)", true);
+			showToast("Escribí cuotas válidas (o dejá vacío para usar el valor por defecto)", true);
 			return;
 		}
 		saveBtn.disabled = true;
@@ -590,7 +601,7 @@ function buildEditQuotasForm(u: AdminUser): HTMLElement {
 				maxTotalCpu: cpuV === null ? null : Math.round(cpuV * 1e9),
 				maxTotalMem: memV === null ? null : Math.round(memV) * 1024 * 1024,
 			});
-			showToast(`Updated quotas for ${u.username}`);
+			showToast(`Cuotas de ${u.username} actualizadas`);
 			await refreshAdmin();
 		} catch (err) {
 			showToast((err as Error).message, true);
@@ -619,24 +630,26 @@ function formatRowResources(s: AdminSession): string {
 	const cpuLabel =
 		cpuNanos === null
 			? "?"
-			: `${formatCpuCores(cpuNanos / 1_000_000_000)} cores${s.cpuLimit === null ? " (default)" : ""}`;
+			: `${formatCpuCores(cpuNanos / 1_000_000_000)} núcleos${s.cpuLimit === null ? " (por defecto)" : ""}`;
 	const memLabel =
-		memBytes === null ? "?" : `${formatBytes(memBytes)}${s.memLimit === null ? " (default)" : ""}`;
+		memBytes === null
+			? "?"
+			: `${formatBytes(memBytes)}${s.memLimit === null ? " (por defecto)" : ""}`;
 	if (s.status !== "running") {
-		return `cap: ${cpuLabel} · ${memLabel}`;
+		return `límite: ${cpuLabel} · ${memLabel}`;
 	}
 	// Truthy check covers both null (intentional "no stats") and
 	// undefined (a SessionInfo that came back from a non-list endpoint
 	// before #271's serializeMeta defaults landed); without this the
 	// `.cpuPercent` access on the next line throws on undefined.
 	if (!s.usage) {
-		return `cap: ${cpuLabel} · ${memLabel} · usage: —`;
+		return `límite: ${cpuLabel} · ${memLabel} · uso: —`;
 	}
 	const cpuUsedCores = s.usage.cpuPercent / 100;
 	return (
-		`cap: ${cpuLabel} · ${memLabel}` +
-		` · cpu: ${formatCpuCores(cpuUsedCores)} cores (${formatCpuPercent(s.usage.cpuPercent)})` +
-		` · mem: ${formatBytes(s.usage.memBytes)} (${s.usage.memPercent.toFixed(0)}%)`
+		`límite: ${cpuLabel} · ${memLabel}` +
+		` · cpu: ${formatCpuCores(cpuUsedCores)} núcleos (${formatCpuPercent(s.usage.cpuPercent)})` +
+		` · memoria: ${formatBytes(s.usage.memBytes)} (${s.usage.memPercent.toFixed(0)}%)`
 	);
 }
 
@@ -659,7 +672,7 @@ function buildEditCapsForm(
 	const memMibInitial = (s.memLimit ?? limits.defaultMemBytes) / (1024 * 1024);
 
 	const cpuLabel = document.createElement("label");
-	cpuLabel.textContent = "CPU (cores)";
+	cpuLabel.textContent = "CPU (núcleos)";
 	const cpuInput = document.createElement("input");
 	cpuInput.type = "number";
 	cpuInput.step = "0.25";
@@ -669,7 +682,7 @@ function buildEditCapsForm(
 	cpuLabel.appendChild(cpuInput);
 
 	const memLabel = document.createElement("label");
-	memLabel.textContent = "Memory (MiB)";
+	memLabel.textContent = "Memoria (MiB)";
 	const memInput = document.createElement("input");
 	memInput.type = "number";
 	memInput.step = "256";
@@ -680,11 +693,11 @@ function buildEditCapsForm(
 
 	const saveBtn = document.createElement("button");
 	saveBtn.type = "submit";
-	saveBtn.textContent = "Save";
+	saveBtn.textContent = "Guardar";
 
 	const cancelBtn = document.createElement("button");
 	cancelBtn.type = "button";
-	cancelBtn.textContent = "Cancel";
+	cancelBtn.textContent = "Cancelar";
 	cancelBtn.addEventListener("click", () => {
 		form.hidden = true;
 	});
@@ -699,7 +712,7 @@ function buildEditCapsForm(
 		const cores = Number(cpuInput.value);
 		const mib = Number(memInput.value);
 		if (!Number.isFinite(cores) || !Number.isFinite(mib)) {
-			showToast("Enter valid CPU / memory values", true);
+			showToast("Escribí valores válidos de CPU y memoria", true);
 			return;
 		}
 		saveBtn.disabled = true;
@@ -714,7 +727,7 @@ function buildEditCapsForm(
 				cpuLimit: Math.round(cores * 1_000_000_000),
 				memLimit: Math.round(mib) * 1024 * 1024,
 			});
-			showToast(`Updated caps for ${s.name}`);
+			showToast(`Límites de «${s.name}» actualizados`);
 			await refreshAdmin();
 		} catch (err) {
 			// 409 from the cgroup-rejection branch surfaces a clear
@@ -798,7 +811,7 @@ function renderAdminGroups(groups: AdminGroupSummary[]): void {
 	if (groups.length === 0) {
 		const empty = document.createElement("p");
 		empty.className = "modal-hint";
-		empty.textContent = "No groups yet — create one with + New group.";
+		empty.textContent = "Todavía no hay grupos: creá uno con «+ Grupo nuevo».";
 		adminGroupsListEl.appendChild(empty);
 		return;
 	}
@@ -812,7 +825,7 @@ function renderAdminGroups(groups: AdminGroupSummary[]): void {
 		name.textContent = g.description ? `${g.name} — ${g.description}` : g.name;
 		const sub = document.createElement("span");
 		sub.className = "admin-session-sub";
-		sub.textContent = `lead: ${g.leadUsername} · ${g.memberCount} member${g.memberCount === 1 ? "" : "s"}`;
+		sub.textContent = `líder: ${g.leadUsername} · ${g.memberCount} miembro${g.memberCount === 1 ? "" : "s"}`;
 		meta.appendChild(name);
 		meta.appendChild(sub);
 
@@ -821,33 +834,33 @@ function renderAdminGroups(groups: AdminGroupSummary[]): void {
 
 		const editBtn = document.createElement("button");
 		editBtn.type = "button";
-		editBtn.textContent = "Edit";
+		editBtn.textContent = "Editar";
 		editBtn.addEventListener("click", () => {
 			void openAdminGroupModalForEdit(g);
 		});
 
 		const membersBtn = document.createElement("button");
 		membersBtn.type = "button";
-		membersBtn.textContent = "Members";
+		membersBtn.textContent = "Miembros";
 		membersBtn.addEventListener("click", () => {
 			void openAdminGroupMembersModal(g);
 		});
 
 		const deleteBtn = document.createElement("button");
 		deleteBtn.type = "button";
-		deleteBtn.textContent = "Delete";
+		deleteBtn.textContent = "Eliminar";
 		deleteBtn.className = "admin-session-delete";
 		deleteBtn.addEventListener("click", () =>
 			confirmAndAct(
 				{
-					title: "Delete group",
-					message: `Delete group "${g.name}"?\n\nMembership rows cascade automatically. The lead user is NOT deleted.`,
-					confirmLabel: "Delete group",
+					title: "Eliminar el grupo",
+					message: `¿Eliminar el grupo «${g.name}»?\n\nSus miembros dejan de pertenecer a él. El usuario líder NO se elimina.`,
+					confirmLabel: "Eliminar el grupo",
 				},
 				deleteBtn,
 				async () => {
 					await deleteAdminGroup(g.id);
-					showToast(`Deleted ${g.name}`);
+					showToast(`Grupo «${g.name}» eliminado`);
 				},
 			),
 		);
@@ -863,21 +876,21 @@ function renderAdminGroups(groups: AdminGroupSummary[]): void {
 
 function openAdminGroupModalForCreate(): void {
 	editingGroupId = null;
-	adminGroupModalTitle.textContent = "New group";
+	adminGroupModalTitle.textContent = "Grupo nuevo";
 	adminGroupNameInput.value = "";
 	adminGroupDescriptionInput.value = "";
 	adminGroupLeadUserIdInput.value = "";
-	adminGroupSubmitBtn.textContent = "Create";
+	adminGroupSubmitBtn.textContent = "Crear";
 	adminGroupDialog.open(adminGroupCreateBtn);
 }
 
 function openAdminGroupModalForEdit(g: AdminGroupSummary): void {
 	editingGroupId = g.id;
-	adminGroupModalTitle.textContent = `Edit group "${g.name}"`;
+	adminGroupModalTitle.textContent = `Editar el grupo «${g.name}»`;
 	adminGroupNameInput.value = g.name;
 	adminGroupDescriptionInput.value = g.description ?? "";
 	adminGroupLeadUserIdInput.value = g.leadUserId;
-	adminGroupSubmitBtn.textContent = "Save";
+	adminGroupSubmitBtn.textContent = "Guardar";
 	adminGroupDialog.open(document.activeElement);
 }
 
@@ -893,21 +906,21 @@ adminGroupForm.addEventListener("submit", async (e) => {
 	const description = adminGroupDescriptionInput.value.trim() || null;
 	const leadUserId = adminGroupLeadUserIdInput.value.trim();
 	if (!name) {
-		showToast("Name is required", true);
+		showToast("Falta el nombre", true);
 		return;
 	}
 	if (!leadUserId) {
-		showToast("Lead user id is required", true);
+		showToast("Falta el id del usuario líder", true);
 		return;
 	}
 	adminGroupSubmitBtn.disabled = true;
 	try {
 		if (editingGroupId === null) {
 			await createAdminGroup({ name, description, leadUserId });
-			showToast(`Created group "${name}"`);
+			showToast(`Grupo «${name}» creado`);
 		} else {
 			await updateAdminGroup(editingGroupId, { name, description, leadUserId });
-			showToast(`Saved group "${name}"`);
+			showToast(`Grupo «${name}» guardado`);
 		}
 		closeAdminGroupModal();
 		await refreshAdmin();
@@ -920,13 +933,13 @@ adminGroupForm.addEventListener("submit", async (e) => {
 
 async function openAdminGroupMembersModal(g: AdminGroupSummary): Promise<void> {
 	membersGroupId = g.id;
-	adminGroupMembersModalTitle.textContent = `Members of "${g.name}"`;
-	adminGroupMembersModalHint.textContent = `Lead is "${g.leadUsername}" — cannot be removed (reassign via Edit first).`;
+	adminGroupMembersModalTitle.textContent = `Miembros de «${g.name}»`;
+	adminGroupMembersModalHint.textContent = `El líder es «${g.leadUsername}» y no se puede quitar (primero cambialo con Editar).`;
 	adminGroupAddMemberInput.value = "";
 	adminGroupMembersListEl.textContent = "";
 	const loading = document.createElement("p");
 	loading.className = "modal-hint";
-	loading.textContent = "Loading members…";
+	loading.textContent = "Cargando los miembros…";
 	adminGroupMembersListEl.appendChild(loading);
 	adminGroupMembersDialog.open(document.activeElement);
 	await refreshAdminGroupMembers(g.id, g.leadUserId);
@@ -948,7 +961,7 @@ async function refreshAdminGroupMembers(groupId: string, leadUserId: string): Pr
 	if (detail.members.length === 0) {
 		const empty = document.createElement("p");
 		empty.className = "modal-hint";
-		empty.textContent = "No members.";
+		empty.textContent = "No hay miembros.";
 		adminGroupMembersListEl.appendChild(empty);
 		return;
 	}
@@ -964,8 +977,8 @@ async function refreshAdminGroupMembers(groupId: string, leadUserId: string): Pr
 		sub.className = "admin-session-sub";
 		sub.textContent =
 			m.userId === leadUserId
-				? `lead · added ${new Date(m.addedAt).toLocaleString()}`
-				: `added ${new Date(m.addedAt).toLocaleString()}`;
+				? `líder · agregado el ${new Date(m.addedAt).toLocaleString()}`
+				: `agregado el ${new Date(m.addedAt).toLocaleString()}`;
 		meta.appendChild(sub);
 		row.appendChild(meta);
 
@@ -973,7 +986,7 @@ async function refreshAdminGroupMembers(groupId: string, leadUserId: string): Pr
 		actions.className = "admin-session-actions";
 		const removeBtn = document.createElement("button");
 		removeBtn.type = "button";
-		removeBtn.textContent = "Remove";
+		removeBtn.textContent = "Quitar";
 		removeBtn.className = "admin-session-delete";
 		// Lead can't be removed without reassignment — disable the
 		// button rather than letting the click 409 from the backend.
@@ -981,16 +994,16 @@ async function refreshAdminGroupMembers(groupId: string, leadUserId: string): Pr
 		removeBtn.disabled = m.userId === leadUserId;
 		removeBtn.addEventListener("click", async () => {
 			const ok = await confirmDialog({
-				title: "Remove member",
-				message: `Remove ${m.username} from this group? Their sessions stop being observable by the group's lead.`,
-				confirmLabel: "Remove",
+				title: "Quitar del grupo",
+				message: `¿Quitar a ${m.username} de este grupo? El líder del grupo deja de poder observar sus sesiones.`,
+				confirmLabel: "Quitar",
 				danger: true,
 			});
 			if (!ok) return;
 			removeBtn.disabled = true;
 			try {
 				await removeAdminGroupMember(groupId, m.userId);
-				showToast(`Removed ${m.username}`);
+				showToast(`${m.username} quitado del grupo`);
 				await refreshAdminGroupMembers(groupId, leadUserId);
 				await refreshAdmin();
 			} catch (err) {
@@ -1008,7 +1021,7 @@ adminGroupAddMemberForm.addEventListener("submit", async (e) => {
 	e.preventDefault();
 	const userId = adminGroupAddMemberInput.value.trim();
 	if (!userId) {
-		showToast("User id is required", true);
+		showToast("Falta el id del usuario", true);
 		return;
 	}
 	if (membersGroupId === null) return;
@@ -1024,7 +1037,7 @@ adminGroupAddMemberForm.addEventListener("submit", async (e) => {
 	if (submitBtn) submitBtn.disabled = true;
 	try {
 		await addAdminGroupMember(groupId, userId);
-		showToast("Member added");
+		showToast("Miembro agregado");
 		adminGroupAddMemberInput.value = "";
 		// Refresh the members list — re-fetch the current group's
 		// detail to render the new row, and refresh the parent admin
@@ -1050,7 +1063,7 @@ adminGroupAddMemberForm.addEventListener("submit", async (e) => {
 function observeModePill(mode: "observe" | "operate"): HTMLSpanElement {
 	const pill = document.createElement("span");
 	pill.className = `observe-mode-pill observe-mode-pill--${mode}`;
-	pill.textContent = mode === "operate" ? "operated" : "observed";
+	pill.textContent = mode === "operate" ? "operó" : "observó";
 	return pill;
 }
 
@@ -1059,7 +1072,7 @@ function renderAdminObserveLog(entries: AdminObserveLogEntry[]): void {
 	if (entries.length === 0) {
 		const empty = document.createElement("p");
 		empty.className = "modal-hint";
-		empty.textContent = "No observe events yet.";
+		empty.textContent = "Todavía nadie observó una sesión.";
 		adminObserveLogEl.appendChild(empty);
 		return;
 	}
@@ -1077,8 +1090,8 @@ function renderAdminObserveLog(entries: AdminObserveLogEntry[]): void {
 		const sub = document.createElement("span");
 		sub.className = "admin-session-sub";
 		const started = new Date(e.startedAt).toLocaleString();
-		const ended = e.endedAt ? new Date(e.endedAt).toLocaleString() : "still watching";
-		sub.textContent = `session ${e.sessionId.slice(0, 8)}… · ${started} → ${ended}`;
+		const ended = e.endedAt ? new Date(e.endedAt).toLocaleString() : "sigue observando";
+		sub.textContent = `sesión ${e.sessionId.slice(0, 8)}… · ${started} → ${ended}`;
 		meta.appendChild(nameLine);
 		meta.appendChild(sub);
 		row.appendChild(meta);
@@ -1102,7 +1115,7 @@ export function openObserversModalFor(sessionId: string): void {
 	observersModalListEl.textContent = "";
 	const loading = document.createElement("p");
 	loading.className = "modal-hint";
-	loading.textContent = "Loading…";
+	loading.textContent = "Cargando…";
 	observersModalListEl.appendChild(loading);
 	observersDialog.open(document.activeElement);
 	void refreshObserversModal(sessionId);
@@ -1125,7 +1138,7 @@ async function refreshObserversModal(sessionId: string): Promise<void> {
 	if (entries.length === 0) {
 		const empty = document.createElement("p");
 		empty.className = "modal-hint";
-		empty.textContent = "No observers yet.";
+		empty.textContent = "Todavía nadie observó esta sesión.";
 		observersModalListEl.appendChild(empty);
 		return;
 	}
@@ -1143,7 +1156,7 @@ async function refreshObserversModal(sessionId: string): Promise<void> {
 		const sub = document.createElement("span");
 		sub.className = "admin-session-sub";
 		const started = new Date(e.startedAt).toLocaleString();
-		const ended = e.endedAt ? new Date(e.endedAt).toLocaleString() : "still watching";
+		const ended = e.endedAt ? new Date(e.endedAt).toLocaleString() : "sigue observando";
 		sub.textContent = `${started} → ${ended}`;
 		meta.appendChild(nameLine);
 		meta.appendChild(sub);

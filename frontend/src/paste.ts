@@ -88,7 +88,7 @@ async function runPasteFlow(opener: HTMLButtonElement) {
 	try {
 		const term = getActiveTerminal();
 		if (!term) {
-			showToast("No active session", true);
+			showToast("No hay una sesión activa", true);
 			return;
 		}
 		const clip = await readClipboardText();
@@ -101,11 +101,14 @@ async function runPasteFlow(opener: HTMLButtonElement) {
 		// gives them a long-press path that always works.
 		if (clip) {
 			if (clip.length > MAX_PASTE_CHARS) {
-				showToast(`Clipboard too large (${clip.length} chars; max ${MAX_PASTE_CHARS})`, true);
+				showToast(
+					`El portapapeles es demasiado grande (${clip.length} caracteres; máximo ${MAX_PASTE_CHARS})`,
+					true,
+				);
 				return;
 			}
 			term.paste(clip);
-			showToast(`Pasted ${clip.length} character${clip.length === 1 ? "" : "s"}`);
+			showToast(clip.length === 1 ? "Se pegó 1 carácter" : `Se pegaron ${clip.length} caracteres`);
 			return;
 		}
 		// Clipboard API unavailable, denied, or returned empty —
@@ -137,11 +140,17 @@ pasteClipboardBtn.addEventListener("click", async () => {
 		// covers both interpretations because we can't distinguish
 		// them: iOS doesn't tell us which "" we got.
 		if (!clip) {
-			showToast("Clipboard is empty or couldn't be read — long-press to paste manually", true);
+			showToast(
+				"El portapapeles está vacío o no se pudo leer: mantené apretado para pegar a mano",
+				true,
+			);
 			return;
 		}
 		if (clip.length > MAX_PASTE_CHARS) {
-			showToast(`Clipboard too large (${clip.length} chars; max ${MAX_PASTE_CHARS})`, true);
+			showToast(
+				`El portapapeles es demasiado grande (${clip.length} caracteres; máximo ${MAX_PASTE_CHARS})`,
+				true,
+			);
 			return;
 		}
 		pasteTextarea.value = clip;
@@ -163,17 +172,17 @@ pasteSendBtn.addEventListener("click", () => {
 	// programmatic value sets, so a clipboard-fill of >65 KB could
 	// sneak past it before this point.
 	if (text.length > MAX_PASTE_CHARS) {
-		showToast(`Too large (${text.length} chars; max ${MAX_PASTE_CHARS})`, true);
+		showToast(`Es demasiado grande (${text.length} caracteres; máximo ${MAX_PASTE_CHARS})`, true);
 		return;
 	}
 	const term = getActiveTerminal();
 	if (!term) {
-		showToast("No active session", true);
+		showToast("No hay una sesión activa", true);
 		closePasteModal();
 		return;
 	}
 	term.paste(text);
-	showToast(`Pasted ${text.length} character${text.length === 1 ? "" : "s"}`);
+	showToast(text.length === 1 ? "Se pegó 1 carácter" : `Se pegaron ${text.length} caracteres`);
 	closePasteModal();
 });
 

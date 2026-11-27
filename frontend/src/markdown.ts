@@ -326,7 +326,7 @@ function renderLink(text: Node[], rawHref: string, opts: MarkdownOptions): Node 
 	if (target.kind === "blocked") {
 		// Keep the visible text; drop the dangerous target entirely.
 		const span = el("span", "md-link-blocked");
-		span.title = "Link blocked (unsupported URL scheme)";
+		span.title = "Enlace bloqueado (esquema de URL no admitido)";
 		appendAll(span, text);
 		return span;
 	}
@@ -982,7 +982,11 @@ export function renderMarkdown(src: string, opts: MarkdownOptions = {}): HTMLEle
 		// already cleared the budget, so these few elements aren't capped.
 		const fallback = el("div", "md-root md-fallback");
 		fallback.appendChild(
-			el("p", "md-fallback-note", "This document is too complex to render — showing plain text."),
+			el(
+				"p",
+				"md-fallback-note",
+				"Este documento es demasiado complejo para mostrarlo: se muestra como texto plano.",
+			),
 		);
 		const pre = el("pre", "md-pre");
 		pre.textContent = src;

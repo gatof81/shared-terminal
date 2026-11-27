@@ -93,7 +93,7 @@ test.describe("router", () => {
 		await expect(page.locator("#files-preview")).toContainText("sample workspace");
 		await page.goBack();
 		await expect.poll(() => page.url()).toMatch(new RegExp(`#/sessions/${S}/files$`));
-		await expect(page.locator("#files-preview")).toContainText("Select a file");
+		await expect(page.locator("#files-preview")).toContainText("Elegí un archivo");
 		if (app.mobile) await expect(page.locator("#files-tree")).toBeVisible();
 	});
 
@@ -107,8 +107,8 @@ test.describe("router", () => {
 		await app.switchView("git");
 		await page.locator("#git-list .git-row", { hasText: "auth.ts" }).click();
 		await expect(page.locator("#git-diff")).toBeVisible();
-		// ‹ Changes: the list, address updated in place (no new entry).
-		await page.locator("#git-diff button", { hasText: "Changes" }).click();
+		// ‹ Cambios: the list, address updated in place (no new entry).
+		await page.locator("#git-diff button", { hasText: "Cambios" }).click();
 		await expect(page.locator("#git-list")).toBeVisible();
 		await expect.poll(() => page.url()).toMatch(new RegExp(`#/sessions/${S}/git$`));
 		// The back gesture: the entry before the diff was opened — Git's list.
