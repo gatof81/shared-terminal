@@ -33,6 +33,8 @@ import {
 import { openActionMenu } from "./components/actionMenu.js";
 import { projectName, projects } from "./projectDirectory.js";
 import { paintProjectSignals, projectSignals } from "./projectSignals.js";
+import { offered, openRecent, recentLabel } from "./recentsView.js";
+import { pruneRecents } from "./recentTopics.js";
 import { navigateProject, projectRouteHash } from "./router.js";
 import { el, syncChildren } from "./ui.js";
 
@@ -347,7 +349,18 @@ export function patchConversation(c: AcpConversation): void {
 		convs = convs.filter((x) => x.id !== c.id);
 		if (archived) archived = [c, ...archived.filter((x) => x.id !== c.id)];
 	} else convs = [c, ...convs.filter((x) => x.id !== c.id)].sort(byActivity);
+	recentsFollow(c.projectId);
 	render();
+}
+
+/**
+ * «Seguir…» / «Recientes» (recentTopics.ts) follow the project's live topics
+ * as soon as they are known — not on the next paint, which a switch of
+ * project could overtake: an archived or deleted one leaves them, a renamed
+ * one is named anew. The topic on screen stays (a new one may not be listed yet).
+ */
+function recentsFollow(p: string): void {
+	if (convsRead === "ok") pruneRecents({ pid: p, live: convs, keep: here });
 }
 
 /**
@@ -408,6 +421,7 @@ async function loadConvs(p: string, g: number): Promise<void> {
 		if (g !== gen) return;
 		convs = list;
 		convsRead = "ok";
+		recentsFollow(p);
 	} catch {
 		if (g !== gen) return;
 		// A re-read that fails keeps the list already shown.
@@ -759,14 +773,17 @@ function openSelector(): void {
 	const current = pid;
 	if (!current || !actions) return;
 	const a = actions;
+	// «Recientes» (revisión 2 §7): up to 3 other topics / Herramientas.
+	const recent = offered().slice(0, 3);
 	openActionMenu({
 		title: "Proyectos",
-		caption: "Cambiar de proyecto",
+		caption: recent.length ? "Recientes" : "Cambiar de proyecto",
 		opener: selector,
 		// Wide: under the rail's head. A phone places it under the app's header.
 		anchor: railHead,
 		items: [
-			...projects().map((p) => {
+			...recent.map((e, i) => ({ id: `r:${i}`, label: recentLabel(e) })),
+			...projects().map((p, i) => {
 				// The sidebar row's dot and pill, painted on a holder the menu adopts.
 				const holder = document.createElement("span");
 				const said = paintProjectSignals(holder, projectSignals(p.projectId));
@@ -775,6 +792,7 @@ function openSelector(): void {
 				return {
 					id: `p:${p.projectId}`,
 					label: p.name,
+					...(i === 0 && recent.length ? { sepBefore: true, heading: "Cambiar de proyecto" } : {}),
 					radio: { checked: p.projectId === current },
 					leading,
 					trailing,
@@ -790,7 +808,10 @@ function openSelector(): void {
 			if (id === "new") a.newProject();
 			else if (id === "rename") a.renameProject(current);
 			else if (id === "archive") a.archiveProject(current);
-			else if (id.startsWith("p:") && id.slice(2) !== current)
+			else if (id.startsWith("r:")) {
+				const e = recent[Number(id.slice(2))];
+				if (e) openRecent(e);
+			} else if (id.startsWith("p:") && id.slice(2) !== current)
 				navigateProject({ projectId: id.slice(2) });
 		},
 	});
