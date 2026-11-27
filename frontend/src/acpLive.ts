@@ -32,7 +32,9 @@ export type AcpLiveEvent =
 	| { type: "question"; question: AcpQuestion }
 	| { type: "activity"; agent: string; events: AcpActivity[] }
 	| { type: "agents" }
-	| { type: "conversation"; conversation: AcpConversation };
+	| { type: "conversation"; conversation: AcpConversation }
+	/** Deleted for good: a topic (`conversationId`), or one part of the Archive (`projectId` | `agent`). */
+	| { type: "deleted"; conversationId?: string; projectId?: string; agent?: string };
 
 type Listener = (ev: AcpLiveEvent) => void;
 
@@ -113,7 +115,8 @@ function connect(): void {
 			ev.type === "question" ||
 			ev.type === "activity" ||
 			ev.type === "agents" ||
-			ev.type === "conversation"
+			ev.type === "conversation" ||
+			ev.type === "deleted"
 		)
 			emit(ev as AcpLiveEvent);
 	};

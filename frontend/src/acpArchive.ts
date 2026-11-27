@@ -19,7 +19,15 @@
 import { newTopicDialog, writeInTopic } from "./acpConversation.js";
 import { openInbox } from "./acpInbox.js";
 import { AcpThread, type ThreadState } from "./acpThread.js";
-import { type AcpMessage, acpFeed, acpProjectFeed } from "./api.js";
+import {
+	type AcpMessage,
+	acpEmptyAgentArchive,
+	acpEmptyProjectArchive,
+	acpFeed,
+	acpProjectFeed,
+} from "./api.js";
+import { confirmDialog } from "./components/dialog.js";
+import { showToast } from "./components/toast.js";
 import { projectName } from "./projectDirectory.js";
 import { onRailChange, railAgents } from "./projectRail.js";
 import { depth, navigateProject, projectRouteHash } from "./router.js";
@@ -77,6 +85,7 @@ const strip = el("div", "ps-readonly");
 strip.append(
 	el("span", "ps-readonly-text", "Archivo · solo lectura"),
 	button("Continuar en una conversación nueva", "btn sm ps-continue", () => void continueHere()),
+	button("Vaciar…", "btn sm danger ps-empty", () => void emptyHere()),
 );
 
 // An agent's avatar or name opens its menu, as in a topic.
@@ -351,6 +360,58 @@ async function continueHere(): Promise<void> {
 	// An agent's chat continues with that agent in «Para:»; the Project Chat, with nobody.
 	if (k.startsWith("@")) writeInTopic(p, c.id, k.slice(1));
 	else navigateProject({ projectId: p, page: "conversation", conversationId: c.id });
+}
+
+// ── Vaciar (#13) ────────────────────────────────────────────────────────────
+
+/**
+ * Deletes this Archive chat for good, but what is still in course (a
+ * pending or running message, an open question, the rest of its chain):
+ * never one tap — the person types its name.
+ */
+async function emptyHere(): Promise<void> {
+	const p = pid;
+	const k = key;
+	if (!p || !k) return;
+	const agent = k.startsWith("@") ? k.slice(1) : null;
+	const name = agent ? `@${agent}` : (projectName(p) ?? p);
+	const ok = await confirmDialog({
+		cancelLabel: "Cancelar",
+		title: `Vaciar «${archiveTitle(k)}»`,
+		message: agent
+			? `Se borra para siempre el historial del chat individual de @${agent}: sus mensajes directos, con vos y con otros agentes (también desaparecen del chat individual del otro agente), sus preguntas y sus interrupciones sin revisar. Lo escrito en proyectos y conversaciones no se toca. Lo que sigue en curso queda. No se puede deshacer.`
+			: `Se borran para siempre los mensajes del Project Chat anterior de «${name}», sus preguntas y sus interrupciones sin revisar. Las conversaciones no se tocan. Lo que sigue en curso queda. No se puede deshacer.`,
+		confirmLabel: "Vaciar",
+		requireText: {
+			expected: name,
+			label: agent
+				? "Escribí el nombre del agente (con @) para confirmar"
+				: "Escribí el nombre del proyecto para confirmar",
+		},
+	}).catch(() => false);
+	if (!ok) return;
+	try {
+		const r = agent ? await acpEmptyAgentArchive(agent) : await acpEmptyProjectArchive(p);
+		showToast(
+			r.kept
+				? `Se borraron ${r.deleted} mensajes; quedan ${r.kept} en curso.`
+				: `Se borraron ${r.deleted} mensajes.`,
+		);
+		if (pid !== p || key !== k) return;
+		void loadList(p);
+		if (r.kept) thread.forget();
+		else navigateProject({ projectId: p, page: "archive" }, { replace: true });
+	} catch (err) {
+		const e = err as { status?: number };
+		showToast(
+			e.status === undefined
+				? "No se pudo conectar. Volvé a intentar."
+				: e.status === 404
+					? "Ya no existe."
+					: `No se pudo vaciar (${e.status}).`,
+			true,
+		);
+	}
 }
 
 // ── Going to a message from elsewhere (Pendientes) ──────────────────────────

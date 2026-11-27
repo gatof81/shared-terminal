@@ -43,7 +43,12 @@ export function startInbox(): void {
 		}
 		// A read mark arrives as a `conversation` frame: an answer just seen
 		// leaves «Resultados sin ver» (and the rail's count) without waiting for a row.
-		else if (ev.type === "message" || ev.type === "question" || ev.type === "conversation")
+		else if (
+			ev.type === "message" ||
+			ev.type === "question" ||
+			ev.type === "conversation" ||
+			ev.type === "deleted"
+		)
 			refreshInbox();
 	});
 	poll = setInterval(() => {

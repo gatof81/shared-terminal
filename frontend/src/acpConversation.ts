@@ -14,6 +14,7 @@ import {
 	type AcpConversation,
 	acpArchiveConversation,
 	acpCreateConversation,
+	acpDeleteConversation,
 	acpRenameConversation,
 } from "./api.js";
 import { openActionMenu } from "./components/actionMenu.js";
@@ -22,6 +23,7 @@ import { showToast } from "./components/toast.js";
 import { projectName, projectState } from "./projectDirectory.js";
 import {
 	agentState,
+	dropConversation,
 	onRailChange,
 	patchConversation,
 	railAgents,
@@ -388,6 +390,50 @@ async function archiveTopic(c: AcpConversation): Promise<void> {
 		if (cid === c.id && pid) upToProject(pid);
 	} catch (err) {
 		showToast(refusal(err, "No se pudo archivar"), true);
+	}
+}
+
+/** What keeps a topic from being deleted (409 `in-use`), in the person's words. */
+const IN_USE = new Map([
+	["message-active", "un mensaje pendiente o en curso"],
+	["question-open", "una pregunta sin responder"],
+	["work-open", "un trabajo sin limpiar"],
+	["task-open", "una tarea sin terminar"],
+]);
+
+/**
+ * «Eliminar definitivamente» an ARCHIVED topic (#13): never one tap — the
+ * person types its title. Nothing in course is touched: the server refuses
+ * with the reasons, said here.
+ */
+export async function deleteTopic(c: AcpConversation): Promise<void> {
+	const ok = await confirmDialog({
+		cancelLabel: "Cancelar",
+		title: `Eliminar «${c.title}» definitivamente`,
+		message:
+			"Se borran para siempre todos sus mensajes (los tuyos, las respuestas de los agentes y sus consultas entre ellos), las preguntas de esos mensajes y sus interrupciones sin revisar. No se puede deshacer. Las tareas y los trabajos que salieron de esta conversación no se borran.",
+		confirmLabel: "Eliminar definitivamente",
+		requireText: {
+			expected: c.title.trim(),
+			label: "Escribí el título de la conversación para confirmar",
+		},
+	}).catch(() => false);
+	if (!ok) return;
+	try {
+		await acpDeleteConversation(c.id);
+		dropConversation(c.id);
+		showToast("Conversación eliminada");
+		if (cid === c.id && pid) upToProject(pid);
+	} catch (err) {
+		const e = err as { status?: number; code?: string; body?: { reasons?: string[] } };
+		if (e.code === "in-use") {
+			const why = (e.body?.reasons ?? []).map((r) => IN_USE.get(r) ?? r);
+			showToast(
+				`Todavía no se puede eliminar: tiene ${why.length ? why.join(", ") : "algo en curso"}.`,
+				true,
+			);
+		} else if (e.code === "not-archived") showToast("Archivala primero.", true);
+		else showToast(refusal(err, "No se pudo eliminar"), true);
 	}
 }
 

@@ -711,6 +711,19 @@ export class MockBackend {
 			await json(404, { error: "conversation-not-found" });
 			return true;
 		}
+		if (one[2] === undefined && method === "DELETE") {
+			// Definitive deletion (#13): an archived topic with nothing in course.
+			const mine = this.acpMessages.filter((m) => m.conversation_id === c.id);
+			if (!c.archivedAt) await json(409, { error: "not-archived" });
+			else if (mine.some((m) => m.state === "pending" || m.state === "running"))
+				await json(409, { error: "in-use", reasons: ["message-active"] });
+			else {
+				this.acpMessages = this.acpMessages.filter((m) => m.conversation_id !== c.id);
+				this.acpConversations = this.acpConversations.filter((x) => x.id !== c.id);
+				await json(204, null);
+			}
+			return true;
+		}
 		if (one[2] === undefined && method === "PATCH") {
 			const title = String(
 				(JSON.parse(req.postData() ?? "{}") as { title?: string }).title ?? "",
@@ -938,6 +951,24 @@ export class MockBackend {
 		}
 		if (path === "/acp/works" && method === "GET") {
 			await json(200, this.acpWorks);
+			return true;
+		}
+		// Emptying the Archive (#13): what is in course stays (the backend keeps whole chains).
+		const empty = /^\/acp\/(agents|projects)\/([^/]+)\/archive$/.exec(path);
+		if (empty && method === "DELETE") {
+			const key = decodeURIComponent(empty[2]!);
+			const inScope = (m: MockAcpMessage) =>
+				!m.conversation_id &&
+				(empty[1] === "projects"
+					? m.project_id === key
+					: !m.project_id && (m.to_id === key || m.from_id === key));
+			const busy = (m: MockAcpMessage) => m.state === "pending" || m.state === "running";
+			const before = this.acpMessages.length;
+			this.acpMessages = this.acpMessages.filter((m) => !inScope(m) || busy(m));
+			await json(200, {
+				deleted: before - this.acpMessages.length,
+				kept: this.acpMessages.filter(inScope).length,
+			});
 			return true;
 		}
 		const feed = /^\/acp\/agents\/([^/]+)\/feed$/.exec(path);

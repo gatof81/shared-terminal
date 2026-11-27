@@ -27,6 +27,7 @@ import {
 	suspendArchive,
 } from "./acpArchive.js";
 import {
+	deleteTopic,
 	newTopicDialog,
 	onTopicWork,
 	placeTopicHeader,
@@ -666,6 +667,7 @@ function wire(): void {
 		agentMenu: (name, opener) => openAgentMenu(name, opener, { terminal: false }),
 		openWork: (w) => openTools({ agent: w.agent, work: w.id, tool: "git" }),
 		openInbox: (opener) => openInbox(opener),
+		deleteTopic: (c) => void deleteTopic(c),
 	});
 	// Pendientes and «Revisar interrupción» lead into a topic, or into the
 	// Archive's chat the message belongs to: the previous Project Chat, or the

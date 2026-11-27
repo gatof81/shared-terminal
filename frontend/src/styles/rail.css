@@ -381,6 +381,12 @@ a.rail-row:focus-visible,
   color: var(--c-text);
   background: var(--c-border-soft);
 }
+/* An archived topic's row has a ⋯ too (Eliminar definitivamente). */
+.rail-agent-item > .rail-conv {
+  flex: 1;
+  min-width: 0;
+  padding-right: 36px;
+}
 /* The state line stops before the ⋯ (it overlays the row's end). */
 .rail-agent-item > .rail-agent {
   padding-right: 36px;

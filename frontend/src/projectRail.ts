@@ -57,6 +57,8 @@ export interface RailActions {
 	openWork: (work: AcpWork) => void;
 	/** Pendientes (acpInbox.ts), from the attention row. */
 	openInbox: (opener: HTMLElement) => void;
+	/** An archived topic's ⋯ «Eliminar definitivamente» (acpConversation.ts). */
+	deleteTopic: (c: AcpConversation) => void;
 }
 
 let actions: RailActions | null = null;
@@ -350,6 +352,13 @@ export function patchConversation(c: AcpConversation): void {
 	render();
 }
 
+/** A topic deleted for good: off both lists at once. */
+export function dropConversation(id: string): void {
+	convs = convs.filter((x) => x.id !== id);
+	if (archived) archived = archived.filter((x) => x.id !== id);
+	render();
+}
+
 /**
  * `agents`: the agents' list too. It is the tab's, kept by its period
  * (acpStatusFeed.ts): a first load or another project takes the list
@@ -494,6 +503,10 @@ function onLive(ev: Parameters<Parameters<typeof subscribeAcp>[0]>[0]): void {
 			soon("convs");
 			return;
 		}
+		case "deleted":
+			if (ev.conversationId) dropConversation(ev.conversationId);
+			if (ev.projectId === pid) soon("convs", 0);
+			return;
 		case "activity":
 			return;
 	}
@@ -660,6 +673,24 @@ function convRow(p: string, c: AcpConversation, isArchived: boolean): HTMLElemen
 			navigateProject({ projectId: p, page: "conversation", conversationId: c.id });
 		});
 		li.append(a);
+		if (isArchived) {
+			// Its ⋯, a sibling of the link (as an Equipo row's): the definitive deletion.
+			li.className = "rail-agent-item";
+			const more = el("button", "rail-agent-more", "⋯");
+			more.type = "button";
+			more.setAttribute("aria-label", `Más acciones de «${c.title}»`);
+			more.setAttribute("aria-haspopup", "menu");
+			more.title = `Más acciones de «${c.title}»`;
+			more.addEventListener("click", () =>
+				openActionMenu({
+					title: c.title,
+					opener: more,
+					items: [{ id: "delete", label: "Eliminar definitivamente…", kind: "danger" }],
+					onPick: () => actions?.deleteTopic(c),
+				}),
+			);
+			li.append(more);
+		}
 		return li;
 	});
 }

@@ -2096,6 +2096,25 @@ export const acpRenameConversation = (id: string, title: string) =>
 	});
 export const acpArchiveConversation = (id: string) =>
 	acpJson<AcpConversation>(`/conversations/${encodeURIComponent(id)}/archive`, { method: "POST" });
+/**
+ * Deletes an ARCHIVED topic for good (409 `not-archived`, 409 `in-use`
+ * with `body.reasons`). 204: no body.
+ */
+export const acpDeleteConversation = (id: string) =>
+	acpJson<unknown>(`/conversations/${encodeURIComponent(id)}`, { method: "DELETE" });
+/** What emptying a part of the Archive did: what is in course stays (`kept`). */
+export interface ArchiveEmptied {
+	deleted: number;
+	kept: number;
+}
+/** Empties the project's previous Project Chat. */
+export const acpEmptyProjectArchive = (projectId: string) =>
+	acpJson<ArchiveEmptied>(`/projects/${encodeURIComponent(projectId)}/archive`, {
+		method: "DELETE",
+	});
+/** Empties an agent's individual chat history (its direct messages). */
+export const acpEmptyAgentArchive = (name: string) =>
+	acpJson<ArchiveEmptied>(`/agents/${encodeURIComponent(name)}/archive`, { method: "DELETE" });
 /** The read mark: the newest event time the reader saw (the server keeps the max). */
 export const acpReadConversation = (id: string, at: string) =>
 	acpJson<AcpConversation>(`/conversations/${encodeURIComponent(id)}/read`, {

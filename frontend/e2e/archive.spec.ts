@@ -71,7 +71,10 @@ test.describe("the Archive", () => {
 		await app.escape();
 		const strip = page.locator(`${PAGE} .ps-readonly`);
 		await expect(strip).toContainText("Archivo · solo lectura");
-		await expect(strip.getByRole("button")).toHaveText("Continuar en una conversación nueva");
+		await expect(strip.getByRole("button")).toHaveText([
+			"Continuar en una conversación nueva",
+			"Vaciar…",
+		]);
 	});
 
 	test("«Continuar en una conversación nueva»: an empty topic, its title proposed, opened", async ({

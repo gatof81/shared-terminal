@@ -619,6 +619,20 @@ export class AcpThread {
 		void this.reload();
 	}
 
+	/**
+	 * Part of what is shown was deleted for good: read it again from
+	 * nothing (a reload keeps older pages, which would keep the deleted rows).
+	 */
+	forget(): void {
+		this.gen++;
+		this.messages = [];
+		this.questions.clear();
+		this.cursor = null;
+		this.hasEarlier = false;
+		this.changed();
+		void this.reload();
+	}
+
 	/** Shows `source` (resets everything when it changes) and follows it live. */
 	open(source: ThreadSource): void {
 		const same = sameChat(this.source, source);
@@ -948,6 +962,18 @@ export class AcpThread {
 			case "agents":
 				this.refreshAgentsSoon(0);
 				return;
+			case "deleted": {
+				const src = this.source;
+				if (!src) return;
+				const mine =
+					src.kind === "conversation"
+						? ev.conversationId === src.conversationId
+						: !ev.conversationId &&
+							// An agent's direct messages are also in the other agent's chat.
+							(src.agent ? ev.agent !== undefined : ev.projectId === src.projectId);
+				if (mine) this.forget();
+				return;
+			}
 			case "conversation": {
 				const c = ev.conversation;
 				if (this.source?.kind !== "conversation" || c.id !== this.source.conversationId) return;
