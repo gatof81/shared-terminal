@@ -9,10 +9,11 @@
 // so nothing is news on the first load or after a reconnect. It watches the
 // socket's events without being a listener (no read, never holds it open).
 //
-// Only in the project's views (rail, topic): never over the terminal. Wide,
-// it floats top right; on a phone it sits right above the topic's message
-// box, or above the rail's foot, in a zero-height anchor — nothing in the
-// thread moves, so the reading place is untouched.
+// Only in the project's views (rail, topic): never over the terminal. On
+// every screen it sits right above the topic's message box (wide: aligned to
+// the thread's right edge), in a zero-height anchor — nothing in the thread
+// moves, so the reading place is untouched; with no topic open, above a
+// phone's rail foot or at the bottom of a wide main area.
 
 import { watchAcpEvents } from "./acpLive.js";
 import { agentHue, isReplyNews } from "./acpModel.js";
@@ -79,14 +80,21 @@ watchAcpEvents((ev) => {
 
 /** Where the notice goes now, or null when there is no place for it. */
 function host(): { before: Element | null; parent: Element } | null {
-	if (!phoneMq?.matches) return { before: null, parent: document.body };
+	// The same place on every screen: right above the topic's message box,
+	// where new messages land (wide: aligned to the thread's right edge).
 	const composer = document.querySelector("#project-view .ps-topic .acp-chat-composer");
 	if (composer instanceof HTMLElement && composer.offsetParent && composer.parentElement)
 		return { before: composer, parent: composer.parentElement };
-	const foot = document.querySelector("#project-view .ps-rail-slot .rail-foot");
-	if (foot instanceof HTMLElement && foot.offsetParent && foot.parentElement)
-		return { before: foot, parent: foot.parentElement };
-	return null;
+	// No topic open: a phone's project screen (above the rail's foot), or
+	// wide, the bottom of the main area (the Archive, a project without topics).
+	if (phoneMq?.matches) {
+		const foot = document.querySelector("#project-view .ps-rail-slot .rail-foot");
+		if (foot instanceof HTMLElement && foot.offsetParent && foot.parentElement)
+			return { before: foot, parent: foot.parentElement };
+		return null;
+	}
+	const main = document.querySelector("#project-view .ps-main");
+	return main instanceof HTMLElement && main.offsetParent ? { before: null, parent: main } : null;
 }
 
 function show(): void {
@@ -95,10 +103,9 @@ function show(): void {
 		hide();
 		return;
 	}
-	anchor.classList.toggle("is-floating", h.before === null);
 	if (h.before) {
 		if (anchor.nextSibling !== h.before) h.parent.insertBefore(anchor, h.before);
-	} else if (anchor.parentElement !== h.parent) h.parent.append(anchor);
+	} else if (anchor.parentElement !== h.parent || anchor.nextSibling) h.parent.append(anchor);
 	paint();
 	if (timer) clearTimeout(timer);
 	timer = setTimeout(hide, SHOW_MS);
@@ -107,9 +114,12 @@ function show(): void {
 function paint(): void {
 	const last = news[news.length - 1];
 	if (!last) return;
-	const avatar = el("span", "acp-avatar", last.agent.slice(0, 1).toUpperCase());
-	avatar.style.setProperty("--acp-hue", String(agentHue(last.agent)));
-	avatar.setAttribute("aria-hidden", "true");
+	// One agent's avatar only when every answer is that agent's: a group of
+	// several agents under one face would read as one agent answering twice.
+	const oneAgent = news.every((n) => n.agent === last.agent);
+	const avatar = oneAgent ? el("span", "acp-avatar", last.agent.slice(0, 1).toUpperCase()) : null;
+	avatar?.style.setProperty("--acp-hue", String(agentHue(last.agent)));
+	avatar?.setAttribute("aria-hidden", "true");
 	let text: string;
 	if (news.length > 1) text = `${news.length} respuestas nuevas`;
 	else {
@@ -122,7 +132,7 @@ function paint(): void {
 				: `@${last.agent} respondió en otro tema`;
 	}
 	btn.replaceChildren(
-		avatar,
+		...(avatar ? [avatar] : []),
 		el("span", "acp-reply-text", text),
 		el("span", "acp-reply-sep", "·"),
 		el("span", "acp-reply-go", "Ver"),
