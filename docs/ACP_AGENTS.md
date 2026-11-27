@@ -1,4 +1,4 @@
-# ACP agents and Project Chat
+# ACP agents, project topics and tasks
 
 > **Status:** implemented, always on. Tested with
 > Claude only (adapter `@agentclientprotocol/claude-agent-acp`). This page describes the code on `main`.
@@ -17,12 +17,12 @@
 - Inside the container, Shared Terminal's **runner** (`acp-runtime/runner.mjs`) is a direct
   [ACP](https://agentclientprotocol.com) client: JSON-RPC over the stdio of a provider **adapter**.
   No tmux, no terminal scraping.
-- All messages — person → agent and agent → agent, individual chat and Project Chat — go through
+- All messages — person → agent and agent → agent, in a project's topics or direct — go through
   **one durable message API** (`/api/acp`, table `agent_messages`).
 
 ```
 person (web) ──┐                                  ┌── runner ──ACP──▶ adapter ──▶ model
-               ├──▶ POST /api/acp/messages ──▶ D1 ┤   (session container, one message at a time)
+               ├──▶ POST /api/acp/messages ──▶ D1 ┤   (session container, one message per slot)
 agent (st send)┘      (stored before the 201)     └── results, replies, questions, activity
                                                         └──▶ /ws/acp ──▶ web
 ```
@@ -248,25 +248,31 @@ work's first message — never by the runner, which fails a message whose direct
 backend memory** (last 500 events per agent). It is the live view; history is the messages. A backend
 restart loses activity, never messages.
 
-## 4. Individual Chat and Project Chat
+## 4. Scope: projects, topics and the Archive
 
-A message's `project_id` is its **scope**:
+A message's `project_id` is its **scope**, and its `conversation_id` the **topic** it belongs to:
 
-| | Individual Chat | Project Chat |
+| | Project topic (§4b) | Archive |
 | --- | --- | --- |
-| Where | the agent's session, Chat view | `#/projects/<pid>/chat` (the rail's Archive entry; a project's topics live at `#/projects/<pid>/c/<cid>`) |
-| Shows | everything to or from that agent, any scope | only what was posted in that project |
-| Scope of a person's message | direct (`projectId` absent) | the project (`projectId`, the agent must be in it) |
-| Recipients | the agent | the `@mentions` at the start of the message, all of which must be agents of the project (one unknown name refuses the whole post); without them, the one agent mentioned or the project's only agent. The API receives one `POST` per recipient, each checked to be in the project |
+| What | `conversation_id` set (and the topic's `project_id`) | `conversation_id` NULL: everything before v27, and what an agent sends from a run with no topic (direct, or scoped by the old rule — §4b *Inheritance*) |
+| Where in the UI | `#/projects/<pid>/c/<cid>`, listed in the project's rail | `#/projects/<pid>/archive[/<k>]`, read-only: `project` (the old Project Chat feed) or `@<agent>` (that agent's old individual chat) |
+| Who posts | the person — to one agent, several, or `team: true`; consults, replies and questions inherit the topic | nobody from the UI: «Continuar en una conversación nueva» opens a topic |
+
+The individual Chat view of an agent's session was removed in 3B (#790): every post of the person goes
+into a topic, a session's views are Terminal, Files and Git, and an agent's settings and login live in
+«Ajustes del agente» (§7). So an agent **without a project** has no place in the web to receive the
+person's messages: it is reached only through its Terminal or another agent's `st send`, until it joins
+a project («Ajustes del agente» → project).
 
 - An agent takes part in at most one project (`acp_agents.project_id`), chosen at creation or with
   `PATCH /api/acp/agents/:name {projectId}` (an explicit button in the UI). It keeps its session,
   context and history when it joins or leaves.
-- An agent **never chooses** scope: a request it sends takes the scope of the message it is working
-  on when the recipient is in that project, and is direct otherwise. A consult started in Project
-  Chat stays there; a private one stays private.
+- An agent **never chooses** scope: a request it sends from a topic takes that topic, and a recipient
+  outside the project is refused (`409 recipient-other-project`, §4b *Inheritance*); from a run with no
+  topic it takes the scope of the message it is working on when the recipient is in that project, and
+  is direct otherwise. A consult started in a topic stays there; a private one stays private.
 - Projects themselves (`/api/projects`) only group agents and give
-  them Project Chat. Archiving a project makes its agents leave it.
+  them topics. Archiving a project makes its agents leave it.
 - **Live:** `/ws/acp` pushes every message row, question and activity batch to the owner's browsers.
   The client loads a page over REST (`…/feed?before=` for older pages), applies pushed rows by id,
   reloads after a reconnect, and polls slowly only while the socket is down.
@@ -276,8 +282,7 @@ A message's `project_id` is its **scope**:
 A **conversation** is a topic of a project. The project's agents are one shared team: any of them takes
 part in any topic by being addressed; there is no membership. Everything a post sets off stays in its
 conversation. Messages with `conversation_id` NULL (everything before v27, direct messages, posts with
-`projectId` and no conversation) are the **Archive**: the individual chat and the old Project Chat feeds
-show only those.
+`projectId` and no conversation) are the **Archive** (§4): its read-only chats show only those.
 
 ### Endpoints (owner cookie only; an agent token gets 403; foreign or missing = 404)
 
@@ -316,7 +321,7 @@ A conversation as the API shows it:
 | `{conversationId, to: "@a", body, clientId?}` | one row in the conversation (`project_id` = the conversation's project). Answer: the row (as before). |
 | `{conversationId, to: ["a", "b"], body, clientId}` | one row per recipient under one `clientId` (required). Answer: `{messages: [rows], replayed}`. |
 | `{conversationId, team: true, body, clientId}` | the project's agents **now** (who joins later does not get it), one row each, every row `team: 1` — for "→ Todo el equipo (N)". `to` must be absent. |
-| `{to, body, projectId?}` without `conversationId` | the Archive's paths the current UI uses (direct, or the old Project Chat): `conversation_id` NULL. They go away with the old UI. |
+| `{to, body, projectId?}` without `conversationId` | `conversation_id` NULL (Archive). The UI no longer posts them; an agent's `st send` outside a topic lands here. |
 
 Every recipient must be in the conversation's project (`400 not-in-project`); `projectId`, if sent too,
 must be the conversation's (`400 project-mismatch`); lists and `team` need a conversation
@@ -516,6 +521,9 @@ Inside an agent session, `st` is on the runner's `PATH` and calls the same API w
 ```
 st agents                  st send @name "text"       st send @name -f file.md
 st list                    st get <id>                st send @name --task <id> "text"
+st send @name --work <id> "text"                      (into a work, §3c)
+st work new @name <id> [--base <ref>]   st work list   st work close|clean <id>
+st port check <port>       (is the listener my work's process? §3c)
 st task goal|new|list|show|move|assign|prio|block|unblock|link|done|handoff …   (§4c)
 ```
 
@@ -527,9 +535,9 @@ and not to wait for it. Agent credentials are `acp1.<agentId>.<HMAC>` with a key
 
 When the agent needs a decision (Claude's `AskUserQuestion`, or an MCP form), the adapter sends an
 ACP `elicitation/create`. The runner registers it (`agent_questions`, v22) and keeps the ACP request
-open; the Chat shows the form (single/multiple choice, *Other*, text) and the agent as *esperando tu
-respuesta*. A question is attached to a message only if it is the message the agent is running, so it
-shows in that message's chat and nowhere else.
+open; the topic's thread and Pendientes show the form (single/multiple choice, *Other*, text) and the
+agent as *esperando tu respuesta*. A question is attached to a message only if it is the message the
+agent is running, so it shows in that message's topic (and in Pendientes) and nowhere else.
 
 - Only the person answers (`POST /api/acp/questions/:id/answer {action: accept|decline|cancel,
   content?}`); an agent's token is refused, and a second answer gets 409.
@@ -546,12 +554,26 @@ The agent authenticates like Claude Code in that session (the login lives in the
 `~/.claude`, shared with the Terminal), or with a `CLAUDE_CODE_OAUTH_TOKEN` secret env var on the
 session.
 
-- **From Chat:** *Conectar cuenta* opens a Terminal tab of the agent's session running the adapter's
+- **From «Ajustes del agente»** (the ⋯ of the agent's session, or the agent's menu in its project):
+  *Conectar cuenta* opens a Terminal tab of the agent's session running the adapter's
   own login command (its advertised terminal-auth method; only programs under `/opt/st-acp` or
   `/usr/(local/)bin` with plain arguments are accepted).
 - **From Terminal:** run `claude` and `/login`.
 - While not authenticated, messages stay `pending` (*esperando login*). The runner restarts its
   adapter as soon as the credentials file changes, or every 60 s otherwise.
+
+## 7b. Model and effort
+
+Both are per agent, chosen at create (`acpAgent.model` / `acpAgent.effort`) or in «Ajustes del agente»
+(`PATCH /api/acp/agents/:name {model?, effort?}`, stored in `acp_agents.model` / `.effort` (v23),
+nothing restarted). The backend sends them with every claim (`X-ST-Model`, `X-ST-Effort`; effort
+`default` = the CLI decides), written after the claim's wait from the agent's current row. The runner
+applies them with the adapter's `session/set_config_option` (`configId` `model` / `effort`) only while
+idle — a running message finishes on what it started with — and again after every adapter (re)start,
+because a resume goes back to the launch-time values. It reports what the adapter answered
+(`POST /runner/model`, `/runner/effort`, memory only → `modelApplied` / `effortApplied` in
+`GET /agents`). Effort levels are the adapter's, per model (absent when the model has none): the
+product hardcodes none, and a level the adapter does not offer is reported as an error, never replaced.
 
 ## 8. Setup
 
@@ -580,10 +602,10 @@ session.
      --entrypoint bash shared-terminal-session /src/install.sh $WORKSPACE_ROOT/.acp-runtime 0.108.0
    ```
 
-3. **Restart the backend.** Migrations v21–v25 are additive and run at boot.
+3. **Restart the backend.** Migrations v21–v29 are additive and run at boot.
 
 4. **Create an agent session:** the New session form's agent fields (name, project, runtime), or `POST /api/sessions` with
-   `acpAgent: {name, model?, runtime?, projectId?}`. The name is `[a-z][a-z0-9-]{1,31}`, unique per
+   `acpAgent: {name, model?, effort?, runtime?, projectId?}`. The name is `[a-z][a-z0-9-]{1,31}`, unique per
    owner; `owner`, `system` and `all` are reserved.
 
 5. **Log the agent in** (§7).

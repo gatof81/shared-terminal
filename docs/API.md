@@ -41,7 +41,7 @@ Auth is via the httpOnly cookie `st_token` set by `POST /api/auth/login` and `PO
 | GET    | /api/sessions/:id/exec/:execId | Exec status: `running` / `exited` / `unknown`                  |
 | POST   | /api/sessions/:id/exec/:execId/kill | Kill the exec's process group (race-free, idempotent)     |
 
-`POST /api/sessions` accepts a typed `body.config` mirroring `SessionConfigSchema` in `backend/src/sessionConfig.ts`: `envVars` (typed entries with `plain` / `secret` discriminator), `repo` + `auth`, `ports[]` + `allowPrivilegedPorts`, `gitIdentity`, `dotfiles`, `agentSeed`, `postCreateCmd`, `postStartCmd`, `cpuLimit`, `memLimit`, `idleTtlSeconds`. Every field is optional; a bare `POST` (no `config`) creates a default session. With `ACP_AGENTS_ENABLED`, a top-level `acpAgent: {name, model?, runtime?, projectId?}` makes the session an ACP agent session (without the flag the field is refused with 400 `acp-agents-disabled`) — see [ACP_AGENTS.md](./ACP_AGENTS.md).
+`POST /api/sessions` accepts a typed `body.config` mirroring `SessionConfigSchema` in `backend/src/sessionConfig.ts`: `envVars` (typed entries with `plain` / `secret` discriminator), `repo` + `auth`, `ports[]` + `allowPrivilegedPorts`, `gitIdentity`, `dotfiles`, `agentSeed`, `postCreateCmd`, `postStartCmd`, `cpuLimit`, `memLimit`, `idleTtlSeconds`. Every field is optional; a bare `POST` (no `config`) creates a default session. A top-level `acpAgent: {name, model?, effort?, runtime?, projectId?}` makes the session an ACP agent session — see [ACP_AGENTS.md](./ACP_AGENTS.md).
 
 **What can change on an existing session.** Its id, container name (`st-<sid[:12]>`) and workspace path derive from the id, so none of these edits touches them:
 
@@ -50,14 +50,16 @@ Auth is via the httpOnly cookie `st_token` set by `POST /api/auth/login` and `PO
 | Name | `PATCH /api/sessions/:id {name}` | At once. Same rules as create (trimmed, 1–64 characters, not unique); operate tier (owner or admin). An ACP agent's `@name` is a separate identity and does not change |
 | External ref | `PATCH /api/sessions/:id {externalRef}` | At once (`null` clears) |
 | Exposed ports | `PATCH /api/sessions/:id/ports` | At once on a running session (a new port `< 1024` needs `allowPrivilegedPorts` from create) |
-| CPU / memory caps | `PATCH /api/admin/sessions/:id/resources` (admin) | At once (`docker update`) |
-| ACP agent: project, model | `PATCH /api/acp/agents/:name` | At once; the model is switched by the runner while the agent is idle |
+| CPU / memory / PIDs caps | `PATCH /api/admin/sessions/:id/resources` (admin) | At once (`docker update`), and persisted for the session's next container (`pidsLimit` 256–8192, v30; unset = 1024) |
+| ACP agent: project, model, effort, slots | `PATCH /api/acp/agents/:name` | At once; model and effort are switched by the runner while the agent is idle; raising `maxConcurrency` (1–4) launches the new slots at once, lowering it lets the extra slots finish what they run |
 | Environment variables | `PATCH /api/sessions/:id/env` | Stored at once; a container gets its environment when it is **created**, so a running or stopped container keeps the old one until it is re-created (soft delete + start) |
 | Image, repository, auth, hooks, dotfiles, agent seed | — | Fixed at creation; the image changes when the container is re-created (soft delete + start); the rest needs a new session |
 
 A `PATCH /api/sessions/:id` carrying both fields writes them in one statement; an invalid field fails the whole request with 400 and writes nothing, and an unknown key is a 400 too.
 
 The Git routes are strictly read-only (no stage / commit / checkout / push exists) and run git **inside the session container**, so they answer `409 {code:"session-not-running"}` for a stopped session. `status` returns `{repo:false, candidates:[…]}` (top-level dirs holding a `.git`) when `dir` isn't a repository, otherwise `{repo:true, root, branch, detached, head, upstream, ahead, behind, changes[], truncated}` where each change is `{area: staged|unstaged|untracked|conflict, status, xy, path, oldPath, additions, deletions, binary, restricted}`. `area` on `diff` selects index-vs-HEAD (`staged`), worktree-vs-index (`unstaged`/`conflict`) or worktree-vs-`/dev/null` (`untracked`); `dir` must be the `root` reported by `status`; `oldPath` is only a hint that lets git detect a rename — the names git itself reports are what is checked and diffed. Errors carry `code`: `timeout` (504), `unsafe-repository` (409, git's `safe.directory` refusal), `git-failed` (502), `outside-workspace` (403, `dir` reaches a repository through a symlink or a redirected worktree), `restricted` (403, a path git resolved for this diff is on the credential denylist), `not-a-single-file` (400, the pathspec is a directory or matches several entries). Concurrency: at most 2 git requests in flight per user and 8 per process (429 + `Retry-After`), a slot being held until the git process has ended — not until the client disconnects.
+
+**`?work=<id>`** on the Files and Git routes reads an ACP work's worktree (`<workspace>/.st/ctx/<id>`) instead of the workspace: the work must be this session's agent's and not `cleaned`, else the same 404 as a missing session (`backend/src/routes/workRoot.ts`). The client never sends a path into `.st/`.
 
 ## Templates (cookie-authed)
 
@@ -88,6 +90,7 @@ Cross-user observability + force-actions surfaced to the admin dashboard. All ro
 | POST   | /api/admin/sessions/:id/stop    | Force-stop any session (no ownership gate). Returns 204                                      |
 | DELETE | /api/admin/sessions/:id         | Force soft-delete any session                                                                |
 | DELETE | /api/admin/sessions/:id?hard=true | Force hard-delete (also purges workspace + drops the D1 row)                               |
+| PATCH  | /api/admin/sessions/:id/resources | `{cpuLimit?, memLimit?, pidsLimit?}` — persist, then `docker update` the running container (409 when memory can't shrink below usage) |
 | GET    | /api/admin/users                | Users list with quota overrides, effective quotas, and current usage (#202)                  |
 | PATCH  | /api/admin/users/:id/quotas     | Set per-user quota overrides; `null` clears back to the deployment default (#202)            |
 
@@ -108,18 +111,36 @@ Mounted at `/api/acp`. Two callers share it: the person (cookie) and an agent's 
 
 | Method | Path | Caller | Description |
 | ------ | ---- | ------ | ----------- |
-| GET    | /api/acp/agents | both | The owner's agents: `name`, `sessionId`, `runtime`, `model`, `projectId`, `running`, `pending`, `waitingInput`, `authRequired`, `loginMethods`, `runnerSeenAt` |
-| POST   | /api/acp/messages | both | `{to: "@name", body, projectId?, clientId?}` — stored in D1 before the 201 (200 `replayed` for a retried `clientId`). Errors: 400 `empty-body` / `unknown-recipient` / `not-in-project` / `self` / `bad-client-id`, 404 `project-not-found`, 409 `depth-limit` / `client-id-reused`, 413 `too-large` |
+| GET    | /api/acp/agents | both | The owner's agents: `name`, `sessionId`, `runtime`, `model`/`modelApplied`, `effort`/`effortApplied`, `maxConcurrency`, `projectId`, `skills`, `running`, `runningIn`, `pending`, `queue`, `waitingFor`, `heldBy`, `waitingInput`, `question`, `authRequired`, `loginMethods`, `runnerSeenAt` |
+| PATCH  | /api/acp/agents/:name | person | `{projectId?, model?, effort?, maxConcurrency?}` — at least one |
+| POST   | /api/acp/agents/:name/login | person | `{methodId}` — opens a Terminal tab running the adapter's login command |
+| GET    | /api/acp/runtimes | person | `{default, available}` — installed adapter runtimes |
+| POST   | /api/acp/messages | both | `{to, body, conversationId?, team?, work?, task?, projectId?, clientId?}` — stored in D1 before the 201 (200 `replayed` for a retried `clientId`). The person posts in a topic (`conversationId`; `to` a list or `team: true` = one row per recipient); an agent's scope, topic and task come from the message it is running. Shapes and errors: [ACP_AGENTS.md §4b](./ACP_AGENTS.md#4b-conversations-v27) |
 | GET    | /api/acp/messages[?agent=&before=] | both | Messages, newest page first returned oldest-first (an agent sees its own) |
 | GET    | /api/acp/messages/:id | both | One message with its result |
-| GET    | /api/acp/runtimes | person | `{default, available}` — installed adapter runtimes |
-| PATCH  | /api/acp/agents/:name | person | `{projectId \| null}` — join or leave a project |
-| GET    | /api/acp/agents/:name/feed[?before=] | person | Individual Chat: messages (any scope), questions, activity |
-| GET    | /api/acp/projects/:pid/feed[?before=] | person | Project Chat: messages posted there, its agents, questions, activity |
 | POST   | /api/acp/messages/:id/requeue | person | `uncertain` → `pending` (409 `not-uncertain`) |
-| POST   | /api/acp/agents/:name/login | person | `{methodId}` — opens a Terminal tab running the adapter's login command |
+| POST   | /api/acp/messages/:id/review | person | «Dar por revisada»: an interruption leaves Pendientes |
+| POST   | /api/acp/conversations | person | `{projectId, title, clientRequestId}` — idempotent create of a topic |
+| GET    | /api/acp/projects/:pid/conversations[?archived=1] | person | A project's topics, most recently active first |
+| PATCH  | /api/acp/conversations/:id | person | `{title}` — rename |
+| POST   | /api/acp/conversations/:id/archive | person | Archive (idempotent; no new posts) |
+| POST   | /api/acp/conversations/:id/read | person | `{at}` — read mark, only advances |
+| GET    | /api/acp/conversations/:id/feed[?before=] | person | A topic: messages, its agents, questions, activity |
+| GET    | /api/acp/agents/:name/feed[?before=] | person | The Archive's direct chat of an agent (messages with no topic) |
+| GET    | /api/acp/projects/:pid/feed[?before=] | person | The Archive's old Project Chat (messages with no topic) |
+| GET    | /api/acp/inbox | person | Pendientes: open questions + unreviewed interruptions (+ unseen results) |
 | POST   | /api/acp/questions/:id/answer | person | `{action: accept\|decline\|cancel, content?}` — once (409 `not-open`) |
-| *      | /api/acp/runner/… | agent | Runner protocol — internal: `running`, `claim`, `system-message`, `messages/:id/result`, `messages/:id/release`, `auth-methods`, `questions`, `questions/:id`, `questions/:id/{delivered,withdrawn}`, `questions-orphan`, `activity` |
+| POST   | /api/acp/works | both | `{agent, id, base?}` — create a work (worktree `work/<id>` in the agent's container) — [ACP_AGENTS.md §3c](./ACP_AGENTS.md#3c-works-v26) |
+| GET    | /api/acp/works | both | The owner's works (an agent: its own and its project's) |
+| POST   | /api/acp/works/:id/close | both | Close (nothing pending or running) |
+| POST   | /api/acp/works/:id/clean | both | Remove the worktree, or `cleanup-pending` with every reason |
+| POST / GET | /api/acp/tasks | both | Create a goal or task / list the project's — [ACP_AGENTS.md §4c](./ACP_AGENTS.md#4c-tasks-v29) |
+| GET    | /api/acp/tasks/summary | both | open / blocked / awaitingOwner counts (the rail) |
+| GET / PATCH | /api/acp/tasks/:id | both | One task with its derived state / a write carrying `version` (409 `stale`) |
+| POST   | /api/acp/tasks/:id/links | both | `{kind: work\|pr\|dep\|external, …}` |
+| POST   | /api/acp/tasks/:id/budget | person | Raise a task's or goal's request budget |
+| POST   | /api/acp/tasks/:id/scope-approved | both | `{version, questionId?}` — a goal's scope approved by the person through a question (`st task scope-approved`) |
+| *      | /api/acp/runner/… | agent | Runner protocol — internal: `running`, `claim`, `system-message`, `messages/:id/result`, `messages/:id/release`, `model`, `effort`, `skills`, `auth-methods`, `questions`, `questions/:id`, `questions/:id/{delivered,withdrawn}`, `questions-orphan`, `activity` |
 
 ## WebSocket
 
@@ -134,6 +155,7 @@ wss://host/ws/acp                                  # ACP messages, questions and
 **Terminal — Client → Server:** `input`, `resize`
 **Terminal — Server → Client:** `output`, `status`, `error`
 **Bootstrap — Server → Client:** `output`, `done`, `fail`, `error`
+**ACP — Server → Client:** `hello` first, then every message row, question, activity batch, `agents` change, topic (`conversation`) and `task` of the owner. Nothing is replayed: a client reloads its page over REST on every (re)connect.
 
 ## Port-exposure dispatcher
 

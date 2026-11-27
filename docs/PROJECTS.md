@@ -1,10 +1,10 @@
 # Projects
 
 Status: always on. Code: `backend/src/projects/directory.ts`,
-`backend/src/routes/projects.ts`. Project Chat itself is part of the ACP message API —
-[ACP_AGENTS.md §4](./ACP_AGENTS.md#4-individual-chat-and-project-chat).
+`backend/src/routes/projects.ts`. A project's topics (conversations) and its Archive are part of the ACP
+message API — [ACP_AGENTS.md §4–§4b](./ACP_AGENTS.md#4-scope-projects-topics-and-the-archive).
 
-A project **groups ACP agents** and gives them a Project Chat. It owns nothing else: each agent keeps
+A project **groups ACP agents** and gives them topics. It owns nothing else: each agent keeps
 its own session, workspace, context and history, and takes part in at most one project
 (`acp_agents.project_id`).
 
@@ -14,6 +14,7 @@ its own session, workspace, context and history, and takes part in at most one p
 | --- | --- | --- |
 | POST | `/api/projects` | `{name, clientRequestId}` → 201 `{projectId, …, replayed}`. Idempotent by `(owner, clientRequestId)`. At most 50 live projects per owner (409 `project-limit`). |
 | GET | `/api/projects` | The owner's live projects with `agentCount`. |
+| PATCH | `/api/projects/:pid` | `{name}` — rename a live project (same rules as create; archived = 404). Agents and messages reference the id, so nothing else moves. |
 | DELETE | `/api/projects/:pid` | Archive: the project's agents leave it, the row stays (`archived_at`). |
 
 A foreign or missing project is the same 404.

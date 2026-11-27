@@ -369,11 +369,11 @@ Always available; a session is an agent only when created with `acpAgent`
 - **Message content** is stored in D1 (`agent_messages`, and the questions and answers in
   `agent_questions`) in clear text, like session metadata, and is included in backups. Do not send
   secrets in messages or answers.
-- **Scope is decided by the server.** A person chooses whether a message is direct or posted in a
-  project; an agent never does (its requests inherit the scope of the message it is working on), so
+- **Scope is decided by the server.** A person posts in a project's topic; an agent never chooses
+  scope or topic (its requests inherit them from the message it is working on), so
   an agent cannot move a private exchange into a project's chat. Live events (`/ws/acp`) go only to
   the owner's own sockets.
-- **Login from Chat** (*Conectar cuenta*) runs, in a Terminal tab of that agent's session, a command
+- **Login from «Ajustes del agente»** (*Conectar cuenta*) runs, in a Terminal tab of that agent's session, a command
   the adapter advertised. The backend accepts only a program under `/opt/st-acp` or `/usr/(local/)bin`
   with arguments from a plain alphabet (no shell syntax), and only the owner can start it. The
   credentials land in that session's own `~/.claude`.
