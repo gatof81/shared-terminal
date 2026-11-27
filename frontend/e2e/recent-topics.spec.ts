@@ -75,6 +75,23 @@ test.describe("«Seguir donde estabas» and «Recientes»", () => {
 		await expect.poll(() => new URL(page.url()).hash).toBe("");
 	});
 
+	test("a long project name is cut after the topic's title, never before it", async ({
+		app,
+		page,
+		backend,
+	}) => {
+		backend.projects[0]!.name = "Educación HZ — plataforma de cursos y evaluaciones";
+		await app.login("alice", topic(HZ, CONV_IDS.ci));
+		await expect(page.locator(THREAD)).toContainText("implementalo");
+		await goHome(page);
+		const row = resume(page, app.mobile);
+		await expect(row).toBeVisible();
+		// «Seguir en «Optimización de CI»» fits whole.
+		expect(await row.locator(".resume-text").evaluate((e) => e.scrollWidth <= e.clientWidth)).toBe(
+			true,
+		);
+	});
+
 	test("Herramientas is resumed where it was", async ({ app, page }) => {
 		const git = `${topic(HZ, CONV_IDS.ci)}/tools/dev/~/git`;
 		await app.login("alice", git);
@@ -105,7 +122,10 @@ test.describe("«Seguir donde estabas» and «Recientes»", () => {
 		await expect(menu.locator(".action-menu-caption").nth(1)).toHaveText("Cambiar de proyecto");
 		const recent = menu.locator('[data-action^="r:"]');
 		await expect(recent).toHaveCount(1);
-		await expect(recent).toHaveText("«Plan de pruebas» · Otro");
+		// The place, with its project as the quiet hint (as «Seguir…» shows it).
+		await expect(recent.locator(".actions-menu-item-title")).toHaveText("«Plan de pruebas»");
+		await expect(recent.locator(".actions-menu-item-hint")).toHaveText("Otro");
+		await expect(recent).toHaveAccessibleName("«Plan de pruebas» · Otro");
 		if (SHOTS) await page.screenshot({ path: `${SHOTS}/${info.project.name}-recientes.png` });
 		await recent.click();
 		await expect(page).toHaveURL(new RegExp(`${topic(OTRO, PLAN)}$`));

@@ -33,7 +33,7 @@ import {
 import { openActionMenu } from "./components/actionMenu.js";
 import { projectName, projects } from "./projectDirectory.js";
 import { paintProjectSignals, projectSignals } from "./projectSignals.js";
-import { offered, openRecent, recentLabel } from "./recentsView.js";
+import { offered, openRecent, recentItem } from "./recentsView.js";
 import { pruneRecents } from "./recentTopics.js";
 import { navigateProject, projectRouteHash } from "./router.js";
 import { el, syncChildren } from "./ui.js";
@@ -788,7 +788,7 @@ function openSelector(): void {
 		// Wide: under the rail's head. A phone places it under the app's header.
 		anchor: railHead,
 		items: [
-			...recent.map((e, i) => ({ id: `r:${i}`, label: recentLabel(e) })),
+			...recent.map((e, i) => ({ id: `r:${i}`, ...recentItem(e) })),
 			...projects().map((p, i) => {
 				// The sidebar row's dot and pill, painted on a holder the menu adopts.
 				const holder = document.createElement("span");
