@@ -382,6 +382,8 @@ export class MockBackend {
 	acpSockets: WebSocketRoute[] = [];
 	/** Real ms before a `/ws/acp` socket says hello (a slow handshake over the Tunnel). */
 	acpHelloDelayMs = 0;
+	/** Every new `/ws/acp` socket is closed before its hello (a sustained outage). */
+	acpRefuseSockets = false;
 	/** Real time (`Date.now()` of the test) of the first `/ws/acp` connection. */
 	acpFirstConnectAt: number | null = null;
 	private acpSeq = 0;
@@ -1172,6 +1174,10 @@ export class MockBackend {
 			return;
 		}
 		if (kind === "acp") {
+			if (this.acpRefuseSockets) {
+				void ws.close();
+				return;
+			}
 			this.acpSockets.push(ws);
 			ws.onClose(() => {
 				this.acpSockets = this.acpSockets.filter((x) => x !== ws);

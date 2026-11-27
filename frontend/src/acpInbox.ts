@@ -21,6 +21,7 @@
 // terminal under it keeps its box — opening or closing it sends no resize.
 
 import { inboxNow, onInbox, refreshInbox } from "./acpInboxStore.js";
+import { liveBanner } from "./acpLiveBanner.js";
 import {
 	agentHue,
 	agentNow,
@@ -167,7 +168,7 @@ function build(): void {
 	titles.append(title, scope);
 	header.append(titles, close);
 	listEl = el("div", "acp-inbox-body");
-	card.append(header, listEl);
+	card.append(header, liveBanner(), listEl);
 	root.append(backdrop, card);
 	document.body.append(root);
 	dialog = createDialog(root, {
