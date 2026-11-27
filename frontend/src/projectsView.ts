@@ -46,6 +46,7 @@ import {
 	resetInboxPanel,
 } from "./acpInbox.js";
 import { resetInbox, startInbox } from "./acpInboxStore.js";
+import { liveBanner } from "./acpLiveBanner.js";
 import { acpEntryByName, resetAcpAgents } from "./acpRegistry.js";
 import { configureReview } from "./acpReview.js";
 import { readAcpAgents, stopAcpStatusFeed } from "./acpStatusFeed.js";
@@ -223,6 +224,10 @@ const spaceEl = el("div", "ps-page");
 const railSlot = el("div", "ps-rail-slot");
 const mainSlot = el("div", "ps-main");
 spaceEl.append(railSlot, mainSlot);
+// «Sin conexión en vivo» (acpLiveBanner.ts) under the project's header: on
+// a phone on top of the page (the header is the app's), wide under the
+// rail's head in the sidebar.
+const banner = liveBanner();
 const railEl = el("div", "project-rail");
 railEl.id = "project-rail";
 const homeEl = el("div", "ps-home");
@@ -397,6 +402,7 @@ function placeSpace(): void {
 	if (!shown || shownPage === null) return;
 	if (phoneMq?.matches) {
 		railEl.remove();
+		if (spaceEl.firstChild !== banner) spaceEl.prepend(banner);
 		railSlot.replaceChildren(railBody);
 		if (slot) {
 			// Herramientas: the header's row is the session bar's (its tools bar).
@@ -411,7 +417,8 @@ function placeSpace(): void {
 		placeArchiveHeader(false);
 	} else {
 		railSlot.replaceChildren();
-		if (railEl.firstChild !== railHead) railEl.replaceChildren(railHead, railBody);
+		if (railEl.firstChild !== railHead || railEl.childNodes.length !== 3)
+			railEl.replaceChildren(railHead, banner, railBody);
 		if (sidebar && railEl.parentElement !== sidebar) sidebar.prepend(railEl);
 		if (slot) {
 			slot.hidden = true;
