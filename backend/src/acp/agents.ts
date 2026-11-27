@@ -991,12 +991,13 @@ export class AcpAgents {
 			where = "1";
 			params = [];
 		}
+		// Newest first and reversed here: an outer `SELECT * FROM (…) ORDER BY id`
+		// makes D1 read (and bill) every row of the page a second time.
 		const r = await d1Query<MessageRow>(
-			`SELECT * FROM (SELECT * FROM ${from} WHERE owner_user_id = ? AND ${where} AND id < ?
-			 ORDER BY id DESC LIMIT ?) ORDER BY id`,
+			`SELECT * FROM ${from} WHERE owner_user_id = ? AND ${where} AND id < ? ORDER BY id DESC LIMIT ?`,
 			[ownerUserId, ...params, before ?? Number.MAX_SAFE_INTEGER, limit],
 		);
-		return r.results;
+		return r.results.reverse();
 	}
 
 	async message(ownerUserId: string, id: number): Promise<MessageRow | null> {

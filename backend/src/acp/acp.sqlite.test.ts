@@ -2423,6 +2423,36 @@ describe("D1 reads: the hot reads go by index, never through the owner's whole h
 		expect(older.body.every((m: MessageRowT) => m.id < r.body[0].id)).toBe(true);
 	});
 
+	it("the three feeds answer their page ascending, cut at the newest 100 before `before`", async () => {
+		const ids = (where: string, params: unknown[], before: number) =>
+			(
+				db
+					.prepare(
+						`SELECT id FROM agent_messages WHERE owner_user_id = ? AND ${where} AND id < ? ORDER BY id DESC LIMIT 100`,
+					)
+					.all(OWNER, ...bindOf(params), before) as Array<{ id: number }>
+			)
+				.map((r) => r.id)
+				.reverse();
+		const feeds = [
+			[`/conversations/${convs[3]}/feed`, "conversation_id = ?", [convs[3]]],
+			[`/projects/${PD}/feed`, "conversation_id IS NULL AND project_id = ?", [PD]],
+			[
+				"/agents/solo/feed",
+				"conversation_id IS NULL AND (to_id = ? OR from_id = ?)",
+				["solo", "solo"],
+			],
+		] as const;
+		for (const [path, where, params] of feeds) {
+			const first = ids(where, params, Number.MAX_SAFE_INTEGER);
+			const got = (await call(owner, "GET", path)).body.messages.map((m: MessageRowT) => m.id);
+			expect(got).toEqual(first);
+			const before = first[Math.floor(first.length / 2)];
+			const older = (await call(owner, "GET", `${path}?before=${before}`)).body.messages;
+			expect(older.map((m: MessageRowT) => m.id)).toEqual(ids(where, params, before));
+		}
+	});
+
 	// The same plans with no statistics (D1 as deployed: nobody runs ANALYZE)
 	// and with them (were D1 to run PRAGMA optimize): neither may change them.
 	describe.each([
@@ -2445,7 +2475,7 @@ describe("D1 reads: the hot reads go by index, never through the owner's whole h
 					expect(r.body.messages.length).toBeGreaterThan(0);
 				});
 				const page = plans.find((p) =>
-					/^SELECT \* FROM \(SELECT \* FROM agent_messages/.test(p.sql),
+					/^SELECT \* FROM agent_messages INDEXED BY idx_agent_messages_conversation/.test(p.sql),
 				);
 				expect(page?.plan.join("\n")).toMatch(
 					/SEARCH agent_messages USING INDEX idx_agent_messages_conversation \(owner_user_id=\? AND conversation_id=\? AND id<\?\)/,
@@ -2460,7 +2490,7 @@ describe("D1 reads: the hot reads go by index, never through the owner's whole h
 					expect((await call(owner, "GET", path)).status).toBe(200);
 				});
 				const page = plans.find((p) =>
-					/^SELECT \* FROM \(SELECT \* FROM agent_messages/.test(p.sql),
+					/^SELECT \* FROM agent_messages INDEXED BY idx_agent_messages_conversation/.test(p.sql),
 				);
 				expect(page?.plan.join("\n")).toMatch(
 					/idx_agent_messages_conversation \(owner_user_id=\? AND conversation_id=\? AND id<\?\)/,
