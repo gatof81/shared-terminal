@@ -167,7 +167,9 @@ export function openTerminalSession(opts: {
 	const noticeFallback = (reason: string) => {
 		if (noticedFallback) return;
 		noticedFallback = true;
-		onRendererFallback?.(`GPU rendering unavailable (${reason}) — using the DOM renderer instead.`);
+		onRendererFallback?.(
+			`El dibujo por GPU no está disponible (${reason}): se usa el renderizador DOM.`,
+		);
 	};
 
 	// ── xterm.js setup ──────────────────────────────────────────────────────
@@ -760,7 +762,7 @@ export function openTerminalSession(opts: {
 			return;
 		}
 		if (ev.code !== 1000) {
-			onError(`Connection closed (${ev.code}): ${ev.reason || "unknown reason"}`);
+			onError(`Se cerró la conexión (${ev.code}): ${ev.reason || "motivo desconocido"}`);
 		}
 		onStatus("disconnected");
 	};

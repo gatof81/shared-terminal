@@ -1399,7 +1399,7 @@ export async function applyRoute(route: Route | null): Promise<void> {
 						if (s.status !== "running") {
 							// Mirrors the dashboard, which only offers Observe on
 							// running rows — the WS attach needs a live container.
-							showToast(`Session "${s.name}" is not running — nothing to observe`, true);
+							showToast(`La sesión «${s.name}» no está en marcha: no hay nada que observar`, true);
 							return;
 						}
 						// Same target shape as the dashboard's openAdminObserve
@@ -1581,7 +1581,7 @@ export function renderTabBar() {
 	// leave a phone's screen reader no way to close a tab; a toolbar of
 	// buttons says what is here, with the same ← / → roving focus.
 	tabStrip.setAttribute("role", "toolbar");
-	tabStrip.setAttribute("aria-label", "Terminal tabs");
+	tabStrip.setAttribute("aria-label", "Pestañas de la terminal");
 
 	for (const tab of currentTabs) {
 		const chip = document.createElement("div");
@@ -1618,8 +1618,8 @@ export function renderTabBar() {
 		close.type = "button";
 		close.className = "tab-close";
 		close.textContent = "×";
-		close.title = "Close tab";
-		close.setAttribute("aria-label", `Close tab ${tab.label}`);
+		close.title = "Cerrar la pestaña";
+		close.setAttribute("aria-label", `Cerrar la pestaña ${tab.label}`);
 		close.disabled = closingTabs.has(tab.tabId);
 		close.addEventListener("click", () => {
 			void closeTab(tab.tabId, close);
@@ -1632,8 +1632,8 @@ export function renderTabBar() {
 	addBtn.id = "tab-add";
 	addBtn.type = "button";
 	addBtn.textContent = "+";
-	addBtn.title = "Open a new tab (runs services independently; close to SIGHUP them)";
-	addBtn.setAttribute("aria-label", "Open a new tab");
+	addBtn.title = "Abrir una pestaña nueva (corre sus procesos aparte; al cerrarla reciben SIGHUP)";
+	addBtn.setAttribute("aria-label", "Abrir una pestaña nueva");
 	addBtn.addEventListener("click", () => void addTab(addBtn));
 	tabStrip.appendChild(addBtn);
 	if (focusedTab !== undefined) {
@@ -1886,7 +1886,7 @@ function openTab(tabId: string) {
 					// the canvas→dom notice (both tiers failing on this
 					// hardware) promising "GPU rendering" back would be
 					// over-selling what a reload can do.
-					showToast(`${msg} Reload the tab to try again.`);
+					showToast(`${msg} Recargá la página para volver a intentarlo.`);
 				},
 				onCopy: (ok: boolean) => {
 					// Identity guards mirror onStatus / onError above:
@@ -1914,7 +1914,7 @@ function openTab(tabId: string) {
 						// users wondering "did that one copy too?".
 						showCopySuccessToast();
 					} else {
-						showToast("Copy failed — clipboard permission denied?", true);
+						showToast("No se pudo copiar: ¿falta el permiso del portapapeles?", true);
 					}
 				},
 				isActive: () => activeSessionId === ownSessionId && tabId === currentActiveTabId,
@@ -1982,9 +1982,9 @@ async function addTab(triggeredBy?: HTMLButtonElement) {
 	}
 	if (triggeredBy) triggeredBy.disabled = true;
 	try {
-		// Default label: smallest "Tab N" not already in use. Using
+		// Default label: smallest "Pestaña N" not already in use. Using
 		// `currentTabs.length + 1` would collide after a middle tab
-		// was closed (e.g. [Tab 1, Tab 3] + add → another "Tab 3").
+		// was closed (e.g. [Pestaña 1, Pestaña 3] + add → another "Pestaña 3").
 		const tab = await createTab(sessionId, nextDefaultLabel());
 		if (activeSessionId !== sessionId) {
 			// User switched away before the POST resolved. The backend tab
@@ -1995,7 +1995,10 @@ async function addTab(triggeredBy?: HTMLButtonElement) {
 			// whichever session happens to be active now.
 			void deleteTab(sessionId, tab.tabId).catch((err) => {
 				console.warn(`[tabs] orphan cleanup failed for ${tab.tabId}:`, err);
-				showToast(`Orphan tab left on "${sessionName}": ${(err as Error).message}`, true);
+				showToast(
+					`Quedó una pestaña huérfana en «${sessionName}»: ${(err as Error).message}`,
+					true,
+				);
 			});
 			return;
 		}
@@ -2007,9 +2010,12 @@ async function addTab(triggeredBy?: HTMLButtonElement) {
 		if (!statusAfter || statusAfter !== "running") {
 			void deleteTab(sessionId, tab.tabId).catch((err) => {
 				console.warn(`[tabs] post-stop cleanup failed for ${tab.tabId}:`, err);
-				showToast(`Orphan tab left on "${sessionName}": ${(err as Error).message}`, true);
+				showToast(
+					`Quedó una pestaña huérfana en «${sessionName}»: ${(err as Error).message}`,
+					true,
+				);
 			});
-			showToast("Session stopped — tab discarded", true);
+			showToast("La sesión se detuvo: se descartó la pestaña", true);
 			return;
 		}
 		currentTabs.push(tab);
@@ -2022,7 +2028,10 @@ async function addTab(triggeredBy?: HTMLButtonElement) {
 			setCurrentTabs(currentTabs.filter((t) => t.tabId !== tab.tabId));
 			void deleteTab(sessionId, tab.tabId).catch((cleanupErr) => {
 				console.warn(`[tabs] rollback cleanup failed for ${tab.tabId}:`, cleanupErr);
-				showToast(`Orphan tab left on "${sessionName}": ${(cleanupErr as Error).message}`, true);
+				showToast(
+					`Quedó una pestaña huérfana en «${sessionName}»: ${(cleanupErr as Error).message}`,
+					true,
+				);
 			});
 			renderTabBar();
 			throw err;
@@ -2039,8 +2048,11 @@ async function addTab(triggeredBy?: HTMLButtonElement) {
 function nextDefaultLabel(): string {
 	const used = new Set(currentTabs.map((t) => t.label));
 	let n = 1;
-	while (used.has(`Tab ${n}`)) n++;
-	return `Tab ${n}`;
+	// Tabs created before the labels were in Spanish keep "Tab N" (the label
+	// is stored server-side), so a number either one holds is taken: a
+	// session with [Tab 1] gets "Pestaña 2", never a second "1".
+	while (used.has(`Pestaña ${n}`) || used.has(`Tab ${n}`)) n++;
+	return `Pestaña ${n}`;
 }
 
 async function closeTab(tabId: string, triggeredBy?: HTMLButtonElement) {
@@ -2049,9 +2061,9 @@ async function closeTab(tabId: string, triggeredBy?: HTMLButtonElement) {
 	if (closingTabs.has(tabId)) return; // duplicate invocation for same tab
 	const tabLabel = currentTabs.find((t) => t.tabId === tabId)?.label ?? tabId;
 	const ok = await confirmDialog({
-		title: "Close tab",
-		message: `Close tab "${tabLabel}"?\n\nAny process running in this tab is terminated (SIGHUP).`,
-		confirmLabel: "Close tab",
+		title: "Cerrar la pestaña",
+		message: `¿Cerrar la pestaña «${tabLabel}»?\n\nSe termina todo proceso que corra en esta pestaña (SIGHUP).`,
+		confirmLabel: "Cerrar la pestaña",
 		danger: true,
 	});
 	// The session may have switched while the question was open.
@@ -2114,7 +2126,7 @@ async function closeTab(tabId: string, triggeredBy?: HTMLButtonElement) {
 				} catch (err) {
 					// Spell out the connection — the user sees a blank
 					// panel otherwise with no hint why.
-					showToast(`Couldn't switch to "${next.label}": ${(err as Error).message}`, true);
+					showToast(`No se pudo pasar a «${next.label}»: ${(err as Error).message}`, true);
 					terminalContainer.style.display = "none";
 					renderTabBar();
 					return;

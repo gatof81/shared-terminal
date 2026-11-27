@@ -303,29 +303,41 @@ describe("status states", () => {
 		api.fetchGitStatus.mockReturnValueOnce(new Promise((r) => (resolve = r)));
 		selectSession("s1");
 		$("view-git-btn").click();
-		expect($("git-list").textContent).toContain("Reading git status");
+		expect($("git-list").textContent).toContain("Leyendo el estado de git");
 		resolve(CLEAN);
 		await flush();
-		expect($("git-list").textContent).toContain("Working tree clean");
+		expect($("git-list").textContent).toContain("No hay cambios en el árbol de trabajo");
 		expect($("git-summary").textContent).toContain("main");
-		expect($("git-summary").textContent).toContain("clean");
+		expect($("git-summary").textContent).toContain("sin cambios");
 		expect($("git-list").textContent).toContain("aaaaaaa");
 		expect($("git-list").textContent).toContain("feat: thing");
-		expect($("git-list").textContent).toContain("5 min ago");
+		expect($("git-list").textContent).toContain("hace 5 min");
 	});
 
 	it("groups changes by area with status badges, counts and line stats", async () => {
 		api.fetchGitStatus.mockResolvedValue(DIRTY);
 		await openGit();
 		const text = $("git-list").textContent ?? "";
-		for (const h of ["Conflicts", "Staged", "Changes", "Untracked", "Recent commits"]) {
+		for (const h of [
+			"Conflictos",
+			"En el índice",
+			"Sin agregar al índice",
+			"Sin seguimiento",
+			"Commits recientes",
+		]) {
 			expect(text).toContain(h);
 		}
 		expect($("git-summary").textContent).toContain("feat/x");
 		expect($("git-summary").textContent).toContain("↑2 ↓1");
-		expect($("git-summary").textContent).toContain("7 changed");
+		expect($("git-summary").textContent).toContain("7 con cambios");
 		const titles = [...document.querySelectorAll(".git-section-title")].map((e) => e.textContent);
-		expect(titles).toEqual(["Conflicts1", "Staged2", "Changes2", "Untracked2", "Recent commits"]);
+		expect(titles).toEqual([
+			"Conflictos1",
+			"En el índice2",
+			"Sin agregar al índice2",
+			"Sin seguimiento2",
+			"Commits recientes",
+		]);
 		expect(rowFor("staged:src/new.ts")?.textContent).toContain("+3");
 		expect(rowFor("staged:src/new.ts")?.textContent).toContain("−1");
 		expect(rowFor("unstaged:img.png")?.textContent).toContain("bin");
@@ -338,14 +350,14 @@ describe("status states", () => {
 		api.fetchGitStatus.mockResolvedValueOnce({ repo: false, candidates: ["app", "lib"] });
 		api.fetchGitLog.mockRejectedValueOnce(new api.GitApiError("no repo", 502, "git-failed"));
 		await openGit();
-		expect($("git-list").textContent).toContain("not a git repository");
-		expect($("git-list").textContent).toContain("Repositories found");
+		expect($("git-list").textContent).toContain("no es un repositorio git");
+		expect($("git-list").textContent).toContain("Repositorios encontrados");
 		api.fetchGitStatus.mockResolvedValueOnce({ ...CLEAN, root: "app" });
 		buttonNamed($("git-list"), "app")?.click();
 		await flush();
 		expect(api.fetchGitStatus).toHaveBeenLastCalledWith("s1", "app", undefined, null);
 		expect($("git-summary").textContent).toContain("app");
-		expect($("git-list").textContent).toContain("Working tree clean");
+		expect($("git-list").textContent).toContain("No hay cambios en el árbol de trabajo");
 	});
 
 	it("session not running: explains, offers Start, and reloads once the poll says running", async () => {
@@ -369,7 +381,7 @@ describe("status states", () => {
 		vs.syncSessionViews();
 		await flush();
 		expect(api.fetchGitStatus).toHaveBeenCalledTimes(2);
-		expect($("git-list").textContent).toContain("Working tree clean");
+		expect($("git-list").textContent).toContain("No hay cambios en el árbol de trabajo");
 	});
 
 	it("errors: timeout message, generic error with Retry", async () => {
@@ -377,21 +389,21 @@ describe("status states", () => {
 			new api.GitApiError("git status timed out", 504, "timeout"),
 		);
 		await openGit();
-		expect($("git-list").textContent).toContain("took too long");
+		expect($("git-list").textContent).toContain("tardó demasiado");
 		api.fetchGitStatus.mockRejectedValueOnce(new api.GitApiError("boom", 502, "git-failed"));
-		buttonNamed($("git-list"), "Retry")?.click();
+		buttonNamed($("git-list"), "Reintentar")?.click();
 		await flush();
 		expect($("git-list").textContent).toContain("boom");
-		buttonNamed($("git-list"), "Retry")?.click();
+		buttonNamed($("git-list"), "Reintentar")?.click();
 		await flush();
-		expect($("git-list").textContent).toContain("Working tree clean");
+		expect($("git-list").textContent).toContain("No hay cambios en el árbol de trabajo");
 	});
 
 	it("flags a truncated change list", async () => {
 		api.fetchGitStatus.mockResolvedValue({ ...DIRTY, truncated: true });
 		await openGit();
-		expect($("git-list").textContent).toContain("Showing the first 7 changed files");
-		expect($("git-summary").textContent).toContain("7+ changed");
+		expect($("git-list").textContent).toContain("Se muestran los primeros 7 archivos con cambios");
+		expect($("git-summary").textContent).toContain("7+ con cambios");
 	});
 });
 
@@ -399,7 +411,7 @@ describe("diff", () => {
 	it("fetches and renders the selected file's diff with line numbers", async () => {
 		api.fetchGitStatus.mockResolvedValue(DIRTY);
 		await openGit();
-		expect($("git-diff").textContent).toContain("Select a changed file");
+		expect($("git-diff").textContent).toContain("Elegí un archivo con cambios");
 		rowFor("unstaged:src/app.ts")?.click();
 		await flush();
 		expect(api.fetchGitDiff).toHaveBeenCalledWith("s1", {
@@ -480,7 +492,7 @@ describe("diff", () => {
 		rowFor("untracked:.env")?.click();
 		await flush();
 		expect(api.fetchGitDiff).not.toHaveBeenCalled();
-		expect($("git-diff").textContent).toContain("restricted");
+		expect($("git-diff").textContent).toContain("restringid");
 	});
 
 	it("renders binary, truncated and header-only diffs", async () => {
@@ -495,7 +507,7 @@ describe("diff", () => {
 		});
 		rowFor("unstaged:img.png")?.click();
 		await flush();
-		expect($("git-diff").textContent).toContain("Binary file");
+		expect($("git-diff").textContent).toContain("Archivo binario");
 		api.fetchGitDiff.mockResolvedValueOnce({
 			path: "src/app.ts",
 			area: "unstaged",
@@ -505,7 +517,7 @@ describe("diff", () => {
 		});
 		rowFor("unstaged:src/app.ts")?.click();
 		await flush();
-		expect($("git-diff").textContent).toContain("Large diff");
+		expect($("git-diff").textContent).toContain("Diff grande");
 		api.fetchGitDiff.mockResolvedValueOnce({
 			path: "docs/b.md",
 			area: "staged",
@@ -515,8 +527,8 @@ describe("diff", () => {
 		});
 		rowFor("staged:docs/b.md")?.click();
 		await flush();
-		expect($("git-diff").textContent).toContain("No content changes");
-		expect($("git-diff").textContent).toContain("renamed from docs/a.md");
+		expect($("git-diff").textContent).toContain("El contenido no cambió");
+		expect($("git-diff").textContent).toContain("renombrado desde docs/a.md");
 	});
 
 	it("explains a 403 and offers Retry on other failures", async () => {
@@ -525,13 +537,13 @@ describe("diff", () => {
 		api.fetchGitDiff.mockRejectedValueOnce(new api.GitApiError("restricted", 403, null));
 		rowFor("unstaged:src/app.ts")?.click();
 		await flush();
-		expect($("git-diff").textContent).toContain("restricted");
-		expect(buttonNamed($("git-diff"), "Retry")).toBeUndefined();
+		expect($("git-diff").textContent).toContain("restringid");
+		expect(buttonNamed($("git-diff"), "Reintentar")).toBeUndefined();
 		api.fetchGitDiff.mockRejectedValueOnce(new api.GitApiError("nope", 502, "git-failed"));
 		rowFor("staged:src/new.ts")?.click();
 		await flush();
 		expect($("git-diff").textContent).toContain("nope");
-		buttonNamed($("git-diff"), "Retry")?.click();
+		buttonNamed($("git-diff"), "Reintentar")?.click();
 		await flush();
 		expect(document.querySelectorAll(".git-diff-row").length).toBeGreaterThan(0);
 	});
@@ -554,7 +566,7 @@ describe("diff", () => {
 		// One request on the wire (the backend holds a slot until git
 		// ends, so a second one would race the per-user cap).
 		expect(pending.map((p) => p.req.path)).toEqual(["src/app.ts"]);
-		expect($("git-diff").textContent).toContain("Loading diff");
+		expect($("git-diff").textContent).toContain("Cargando el diff");
 		pending[0]?.resolve({
 			path: "src/app.ts",
 			area: "unstaged",
@@ -566,7 +578,7 @@ describe("diff", () => {
 		// The first result is stale (selection moved on) and the LATEST
 		// click, not the intermediate one, goes out next.
 		expect(pending.map((p) => p.req.path)).toEqual(["src/app.ts", "docs/b.md"]);
-		expect($("git-diff").textContent).toContain("Loading diff");
+		expect($("git-diff").textContent).toContain("Cargando el diff");
 		pending[1]?.resolve({
 			path: "docs/b.md",
 			area: "staged",
@@ -575,7 +587,7 @@ describe("diff", () => {
 			binary: false,
 		});
 		await flush();
-		expect($("git-diff").textContent).toContain("No content changes");
+		expect($("git-diff").textContent).toContain("El contenido no cambió");
 		expect($("git-diff").textContent).not.toContain("+more");
 	});
 
@@ -587,8 +599,8 @@ describe("diff", () => {
 		api.fetchGitStatus.mockResolvedValue(CLEAN);
 		$("git-refresh-btn").click();
 		await flush();
-		expect($("git-list").textContent).toContain("Working tree clean");
-		expect($("git-diff").textContent).toContain("Select a changed file");
+		expect($("git-list").textContent).toContain("No hay cambios en el árbol de trabajo");
+		expect($("git-diff").textContent).toContain("Elegí un archivo con cambios");
 	});
 
 	it("refresh re-fetches status and log first, then the open diff — never three at once", async () => {
@@ -629,7 +641,7 @@ describe("diff", () => {
 		api.fetchGitStatus.mockReturnValueOnce(new Promise((r) => (finishStatus = r)));
 		api.fetchGitLog.mockReturnValueOnce(new Promise((r) => (finishLog = r)));
 		await openGit();
-		expect($("git-list").textContent).toContain("Reading git status");
+		expect($("git-list").textContent).toContain("Leyendo el estado de git");
 		$("git-refresh-btn").click();
 		await flush();
 		// Nothing new went out: the first pair still holds the server's
@@ -641,8 +653,8 @@ describe("diff", () => {
 		await flush();
 		expect(api.fetchGitStatus).toHaveBeenCalledTimes(2);
 		expect(api.fetchGitLog).toHaveBeenCalledTimes(2);
-		expect($("git-list").textContent).toContain("Working tree clean");
-		expect($("git-list").textContent).not.toContain("Couldn't");
+		expect($("git-list").textContent).toContain("No hay cambios en el árbol de trabajo");
+		expect($("git-list").textContent).not.toContain("No se pudo");
 	});
 
 	it("a session switch with a diff pending queues the new session's load behind it", async () => {
@@ -658,7 +670,7 @@ describe("diff", () => {
 		await flush();
 		// s1's diff still holds a server slot: s2's two requests wait.
 		expect(api.fetchGitStatus).toHaveBeenCalledTimes(1);
-		expect($("git-list").textContent).toContain("Reading git status");
+		expect($("git-list").textContent).toContain("Leyendo el estado de git");
 		finishDiff({
 			path: "src/app.ts",
 			area: "unstaged",
@@ -669,10 +681,10 @@ describe("diff", () => {
 		await flush();
 		expect(api.fetchGitStatus).toHaveBeenLastCalledWith("s2", "", undefined, null);
 		expect(api.fetchGitLog).toHaveBeenLastCalledWith("s2", "", undefined, null);
-		expect($("git-list").textContent).toContain("Working tree clean");
+		expect($("git-list").textContent).toContain("No hay cambios en el árbol de trabajo");
 		expect($("git-list").textContent).toContain("feat: thing");
 		// The old diff's result was dropped, not rendered into s2.
-		expect($("git-diff").textContent).toContain("Select a changed file");
+		expect($("git-diff").textContent).toContain("Elegí un archivo con cambios");
 	});
 
 	it("a queued diff and a Refresh released by the same earlier diff run one after the other", async () => {
@@ -714,7 +726,7 @@ describe("diff", () => {
 		done(2);
 		await flush();
 		expect(rowFor("staged:src/new.ts")?.classList.contains("selected")).toBe(true);
-		expect($("git-list").textContent).not.toContain("Couldn't");
+		expect($("git-list").textContent).not.toContain("No se pudo");
 	});
 
 	it("a refresh clicked while a diff is loading waits for that diff", async () => {
@@ -765,8 +777,8 @@ describe("diff", () => {
 		rowFor("conflict:merge.ts")?.click();
 		await flush();
 		const text = $("git-diff").textContent ?? "";
-		expect(text).not.toContain("No content changes");
-		expect(text).toContain("Unresolved conflict");
+		expect(text).not.toContain("El contenido no cambió");
+		expect(text).toContain("Conflicto sin resolver");
 		expect(text).toContain("<<<<<<< HEAD");
 		expect(text).toContain("+5");
 		expect(document.querySelectorAll(".git-diff-row.kind-add").length).toBe(5);
@@ -781,7 +793,7 @@ describe("diff", () => {
 		rowFor("staged:docs/b.md")?.click();
 		await flush();
 		expect(document.querySelectorAll(".git-diff-row").length).toBe(5000);
-		expect($("git-diff").textContent).toContain("Showing the first 5000 lines");
+		expect($("git-diff").textContent).toContain("Se muestran las primeras 5000 líneas");
 	});
 
 	it("a nested repository (directory entry) explains itself instead of requesting a diff", async () => {
@@ -793,7 +805,7 @@ describe("diff", () => {
 		rowFor("untracked:vendor/lib/")?.click();
 		await flush();
 		expect(api.fetchGitDiff).not.toHaveBeenCalled();
-		expect($("git-diff").textContent).toContain("directory");
+		expect($("git-diff").textContent).toContain("directorio");
 	});
 });
 
@@ -806,7 +818,7 @@ describe("mobile", () => {
 		rowFor("unstaged:src/app.ts")?.click();
 		await flush();
 		expect($("git-body").classList.contains("show-diff")).toBe(true);
-		buttonNamed($("git-diff"), "‹ Changes")?.click();
+		buttonNamed($("git-diff"), "‹ Cambios")?.click();
 		expect($("git-body").classList.contains("show-diff")).toBe(false);
 		// Back to the list means "no diff open": the address drops the detail
 		// and the row is no longer marked (PR 5, router).
@@ -824,8 +836,8 @@ describe("sessions", () => {
 		selectSession("s2");
 		await flush();
 		expect(api.fetchGitStatus).toHaveBeenLastCalledWith("s2", "", undefined, null);
-		expect($("git-list").textContent).toContain("Working tree clean");
-		expect($("git-diff").textContent).toContain("Select a changed file");
+		expect($("git-list").textContent).toContain("No hay cambios en el árbol de trabajo");
+		expect($("git-diff").textContent).toContain("Elegí un archivo con cambios");
 		expect(rowFor("unstaged:src/app.ts")).toBeUndefined();
 	});
 
@@ -840,7 +852,7 @@ describe("sessions", () => {
 		await flush();
 		resolveOld(DIRTY);
 		await flush();
-		expect($("git-list").textContent).toContain("Working tree clean");
+		expect($("git-list").textContent).toContain("No hay cambios en el árbol de trabajo");
 		expect(rowFor("unstaged:src/app.ts")).toBeUndefined();
 	});
 
@@ -860,10 +872,10 @@ describe("relativeDate", () => {
 	it("formats recent times coarsely", () => {
 		const now = Date.parse("2026-10-22T12:00:00Z");
 		const at = (ms: number) => new Date(now - ms).toISOString();
-		expect(gv.relativeDate(at(10_000), now)).toBe("just now");
-		expect(gv.relativeDate(at(5 * 60_000), now)).toBe("5 min ago");
-		expect(gv.relativeDate(at(3 * 3_600_000), now)).toBe("3 h ago");
-		expect(gv.relativeDate(at(2 * 86_400_000), now)).toBe("2 d ago");
+		expect(gv.relativeDate(at(10_000), now)).toBe("recién");
+		expect(gv.relativeDate(at(5 * 60_000), now)).toBe("hace 5 min");
+		expect(gv.relativeDate(at(3 * 3_600_000), now)).toBe("hace 3 h");
+		expect(gv.relativeDate(at(2 * 86_400_000), now)).toBe("hace 2 d");
 		expect(gv.relativeDate("garbage", now)).toBe("garbage");
 	});
 });

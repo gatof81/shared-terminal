@@ -88,7 +88,7 @@ function renderSessionTabPlaceholders() {
 		a.href = info.issueUrl;
 		a.target = "_blank";
 		a.rel = "noopener";
-		a.textContent = "Track progress on this tab →";
+		a.textContent = "Seguir el avance de esta pestaña →";
 		wrap.appendChild(a);
 		panel.appendChild(wrap);
 	}
@@ -1598,7 +1598,7 @@ saveTemplateForm.addEventListener("submit", async (e) => {
 			config,
 		});
 		closeSaveTemplateModal();
-		showToast(`Template "${name}" saved`);
+		showToast(`Plantilla «${name}» guardada`);
 	} catch (err) {
 		showToast((err as Error).message, true);
 		saveTemplateSubmit.disabled = false;
@@ -1642,14 +1642,14 @@ function closeTemplatesModal() {
 
 async function refreshTemplatesList() {
 	templatesList.textContent = "";
-	templatesEmptyHint.textContent = "Loading templates…";
+	templatesEmptyHint.textContent = "Cargando las plantillas…";
 	templatesList.appendChild(templatesEmptyHint);
 	try {
 		const list = await listTemplates();
 		templatesList.textContent = "";
 		if (list.length === 0) {
 			templatesEmptyHint.textContent =
-				'No templates yet. Use "Save as template…" on the new-session modal to create one.';
+				"Todavía no hay plantillas. Creá una con «Guardar como plantilla…» en el diálogo «Sesión nueva».";
 			templatesList.appendChild(templatesEmptyHint);
 			return;
 		}
@@ -1657,7 +1657,7 @@ async function refreshTemplatesList() {
 			templatesList.appendChild(renderTemplateCard(t));
 		}
 	} catch (err) {
-		templatesEmptyHint.textContent = `Failed to load: ${(err as Error).message}`;
+		templatesEmptyHint.textContent = `No se pudieron cargar: ${(err as Error).message}`;
 		templatesList.appendChild(templatesEmptyHint);
 	}
 }
@@ -1685,15 +1685,15 @@ function renderTemplateCard(t: TemplateSummary): HTMLElement {
 	actions.className = "template-card-actions";
 	const useBtn = document.createElement("button");
 	useBtn.type = "button";
-	useBtn.textContent = "Use";
+	useBtn.textContent = "Usar";
 	useBtn.dataset.action = "use";
 	const editBtn = document.createElement("button");
 	editBtn.type = "button";
-	editBtn.textContent = "Edit";
+	editBtn.textContent = "Editar";
 	editBtn.dataset.action = "edit";
 	const delBtn = document.createElement("button");
 	delBtn.type = "button";
-	delBtn.textContent = "Delete";
+	delBtn.textContent = "Eliminar";
 	delBtn.dataset.action = "delete";
 	delBtn.className = "template-card-delete";
 	actions.appendChild(useBtn);
@@ -1734,17 +1734,17 @@ templatesModal.addEventListener("click", (e) => {
 });
 
 async function deleteTemplateConfirmed(id: string, card: HTMLDivElement) {
-	const name = card.querySelector("strong")?.textContent ?? "this template";
+	const name = card.querySelector("strong")?.textContent ?? "esta plantilla";
 	const ok = await confirmDialog({
-		title: "Delete template",
-		message: `Delete template "${name}"? This cannot be undone.`,
-		confirmLabel: "Delete",
+		title: "Eliminar la plantilla",
+		message: `¿Eliminar la plantilla «${name}»? No se puede deshacer.`,
+		confirmLabel: "Eliminar",
 		danger: true,
 	});
 	if (!ok) return;
 	try {
 		await deleteTemplate(id);
-		showToast(`Template "${name}" deleted`);
+		showToast(`Plantilla «${name}» eliminada`);
 		void refreshTemplatesList();
 	} catch (err) {
 		showToast((err as Error).message, true);
@@ -1762,7 +1762,9 @@ async function useTemplate(id: string) {
 		closeTemplatesModal();
 		openNewSessionModal(resolveTemplatesOpener());
 		applyTemplateToForm(t);
-		showToast(`Loaded template "${t.name}". Fill in any required secrets, then Create.`);
+		showToast(
+			`Plantilla «${t.name}» cargada. Completá los secretos que falten y después «Crear sesión».`,
+		);
 	} catch (err) {
 		showToast((err as Error).message, true);
 	}

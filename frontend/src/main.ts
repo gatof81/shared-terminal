@@ -490,16 +490,16 @@ onRoute((route) => {
 
 function updateAuthUI() {
 	if (isRegisterMode) {
-		authTitle.textContent = "Create Account";
-		authSubmitBtn.textContent = "Register";
-		authToggle.innerHTML = 'Already have an account? <a href="#" id="auth-toggle-link">Login</a>';
+		authTitle.textContent = "Crear cuenta";
+		authSubmitBtn.textContent = "Crear cuenta";
+		authToggle.innerHTML = '¿Ya tenés cuenta? <a href="#" id="auth-toggle-link">Entrar</a>';
 		// Invite code is required for every register except the bootstrap
 		// first user — show the field accordingly.
 		authInviteCode.classList.toggle("hidden", isBootstrapRegister);
 	} else {
-		authTitle.textContent = "Login";
-		authSubmitBtn.textContent = "Login";
-		authToggle.innerHTML = 'No account? <a href="#" id="auth-toggle-link">Register</a>';
+		authTitle.textContent = "Entrar";
+		authSubmitBtn.textContent = "Entrar";
+		authToggle.innerHTML = '¿No tenés cuenta? <a href="#" id="auth-toggle-link">Registrarme</a>';
 		authInviteCode.classList.add("hidden");
 	}
 	// Re-bind toggle link
@@ -532,11 +532,11 @@ authForm.addEventListener("submit", async (e) => {
 	const inviteCode = authInviteCode.value.trim();
 
 	if (!username || !password) {
-		authError.textContent = "Username and password required";
+		authError.textContent = "Escribí el usuario y la contraseña";
 		return;
 	}
 	if (isRegisterMode && !isBootstrapRegister && !inviteCode) {
-		authError.textContent = "Invite code required";
+		authError.textContent = "Falta el código de invitación";
 		return;
 	}
 
@@ -556,7 +556,8 @@ authForm.addEventListener("submit", async (e) => {
 		if (err instanceof InviteRequiredError && isBootstrapRegister) {
 			isBootstrapRegister = false;
 			updateAuthUI();
-			authError.textContent = "An account already exists — enter an invite code to register.";
+			authError.textContent =
+				"Ya existe una cuenta: escribí un código de invitación para registrarte.";
 			return;
 		}
 		// Non-403 failures during bootstrap (transient 500, network blip)
@@ -701,7 +702,7 @@ sidebarAccountBtn?.addEventListener("click", () => {
 // event fires at most once per 401 burst, so we don't need extra
 // debouncing here.
 window.addEventListener(SESSION_EXPIRED_EVENT, () => {
-	handleLogout("Your session has expired — please sign in again");
+	handleLogout("Tu acceso venció: volvé a entrar");
 });
 
 // ── First-session selection hint ────────────────────────────────────────────
@@ -1054,7 +1055,7 @@ function labelFontSizeBtn(): void {
 	fontSizeBtn.textContent = `Aa ${currentFontSize}`;
 	fontSizeBtn.setAttribute(
 		"aria-label",
-		`Aa ${currentFontSize} — terminal font size, press to change`,
+		`Aa ${currentFontSize} — tamaño de letra de la terminal; tocá para cambiarlo`,
 	);
 }
 

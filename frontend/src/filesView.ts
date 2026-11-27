@@ -32,7 +32,7 @@ import { highlightCode, languageForFile } from "./highlight.js";
 import { activeSessionId, isMobile, sessions } from "./main.js";
 import { renderMarkdown } from "./markdown.js";
 import { saveBlob } from "./saveBlob.js";
-import { inTools, onWorkChange, reportWorkGone, workFor } from "./toolsContext.js";
+import { onWorkChange, reportWorkGone, workFor } from "./toolsContext.js";
 import { button, el, stateBox } from "./ui.js";
 import {
 	getView,
@@ -322,7 +322,7 @@ async function revealPath(path: string): Promise<void> {
 	}
 	const entry = findEntry(path);
 	if (!entry) {
-		showToast(`Not found: ${path}`, true);
+		showToast(`No se encontró: ${path}`, true);
 		return;
 	}
 	if (entry.type === "dir") {
@@ -356,11 +356,11 @@ async function downloadSelected(path: string): Promise<void> {
 	const sessionId = stateSessionId;
 	if (sessionId === null) return;
 	try {
-		showToast(`Downloading ${baseName(path)}…`);
+		showToast(`Descargando ${baseName(path)}…`);
 		const { blob, filename } = await downloadSessionFile(sessionId, path, stateWork);
 		saveBlob(blob, filename);
 	} catch (err) {
-		showToast(`Download failed: ${(err as Error).message}`, true);
+		showToast(`Falló la descarga: ${(err as Error).message}`, true);
 	}
 }
 
@@ -424,7 +424,7 @@ function renderTree(): void {
 
 	const root = dirs.get("");
 	if (!root || (root.loading && !root.listing)) {
-		treeEl.appendChild(stateBox("loading", "Loading files…"));
+		treeEl.appendChild(stateBox("loading", "Cargando los archivos…"));
 		return;
 	}
 	if (
@@ -441,14 +441,14 @@ function renderTree(): void {
 		treeEl.appendChild(
 			stateBox(
 				"error",
-				`Couldn't load the workspace: ${root.error.message}`,
-				button("Retry", "files-btn", () => void loadDir("")),
+				`No se pudo cargar el workspace: ${root.error.message}`,
+				button("Reintentar", "files-btn", () => void loadDir("")),
 			),
 		);
 		return;
 	}
 	if (root.listing && root.listing.entries.length === 0) {
-		treeEl.appendChild(stateBox("empty", "This workspace is empty."));
+		treeEl.appendChild(stateBox("empty", "Este workspace está vacío."));
 		return;
 	}
 
@@ -457,7 +457,7 @@ function renderTree(): void {
 		const state = dirs.get(dirPath);
 		const pad = `${0.5 + depth * 0.9}rem`;
 		if (!state || (state.loading && !state.listing)) {
-			const row = el("div", "files-tree-note", "Loading…");
+			const row = el("div", "files-tree-note", "Cargando…");
 			row.style.paddingLeft = pad;
 			frag.appendChild(row);
 			return;
@@ -466,13 +466,13 @@ function renderTree(): void {
 			const row = el("div", "files-tree-note error");
 			row.style.paddingLeft = pad;
 			row.appendChild(el("span", undefined, state.error.message));
-			row.appendChild(button("Retry", "files-link-btn", () => void loadDir(dirPath)));
+			row.appendChild(button("Reintentar", "files-link-btn", () => void loadDir(dirPath)));
 			frag.appendChild(row);
 			return;
 		}
 		const listing = state.listing as WorkspaceListing;
 		if (listing.entries.length === 0) {
-			const row = el("div", "files-tree-note", "Empty folder");
+			const row = el("div", "files-tree-note", "Carpeta vacía");
 			row.style.paddingLeft = pad;
 			frag.appendChild(row);
 		}
@@ -496,9 +496,9 @@ function renderTree(): void {
 				row.appendChild(el("span", "files-row-size", formatBytes(entry.size)));
 			}
 			row.title = entry.restricted
-				? `${entry.name} — restricted (may contain credentials)`
+				? `${entry.name} — restringido (puede contener credenciales)`
 				: entry.type === "symlink"
-					? `${entry.name} — symbolic link (not followed)`
+					? `${entry.name} — enlace simbólico (no se sigue)`
 					: entry.name;
 			row.addEventListener("click", () => {
 				revealToken++; // the person's choice voids a reveal in flight
@@ -511,7 +511,7 @@ function renderTree(): void {
 			const row = el(
 				"div",
 				"files-tree-note",
-				`Showing the first ${listing.entries.length} entries`,
+				`Se muestran las primeras ${listing.entries.length} entradas`,
 			);
 			row.style.paddingLeft = pad;
 			frag.appendChild(row);
@@ -571,12 +571,7 @@ treeEl.addEventListener("keydown", (e) => {
 function previewHeader(name: string, meta: string, actions: HTMLElement[]): HTMLElement {
 	const header = el("div", "files-preview-header");
 	header.appendChild(
-		button(
-			inTools() ? "‹ Archivos" : "‹ Files",
-			"files-btn files-mobile-only",
-			routeBack,
-			inTools() ? "Volver a la lista de archivos" : "Back to file list",
-		),
+		button("‹ Archivos", "files-btn files-mobile-only", routeBack, "Volver a la lista de archivos"),
 	);
 	const title = el("div", "files-preview-title");
 	title.appendChild(el("span", "files-preview-name", name));
@@ -622,30 +617,35 @@ function renderPreview(): void {
 		const entry = selected?.entry ?? null;
 		const name = selected ? baseName(selected.path) || "workspace" : "";
 		if (!selected) {
-			previewEl.appendChild(stateBox("empty", "Select a file to preview it."));
+			previewEl.appendChild(stateBox("empty", "Elegí un archivo para verlo."));
 		} else if (entry?.restricted) {
-			previewEl.appendChild(previewHeader(name, "restricted", []));
+			previewEl.appendChild(previewHeader(name, "restringido", []));
 			previewEl.appendChild(
 				stateBox(
 					"info",
-					"This path is restricted because it may contain credentials (keys, tokens, .env secrets, Claude login state). It can't be previewed or downloaded here.",
+					"Esta ruta está restringida porque puede contener credenciales (claves, tokens, secretos de .env, el login de Claude). Acá no se puede ver ni descargar.",
 				),
 			);
 		} else if (entry?.type === "symlink") {
-			previewEl.appendChild(previewHeader(name, "symbolic link", []));
+			previewEl.appendChild(previewHeader(name, "enlace simbólico", []));
 			previewEl.appendChild(
-				stateBox("info", "Symbolic links aren't followed. Open the link's target directly."),
+				stateBox(
+					"info",
+					"Los enlaces simbólicos no se siguen. Abrí directamente el destino del enlace.",
+				),
 			);
 		} else if (entry?.type === "other") {
-			previewEl.appendChild(previewHeader(name, "special file", []));
+			previewEl.appendChild(previewHeader(name, "archivo especial", []));
 			previewEl.appendChild(
-				stateBox("info", "Sockets, pipes and device files can't be previewed."),
+				stateBox("info", "Los sockets, pipes y archivos de dispositivo no se pueden ver."),
 			);
 		} else {
 			const listing = dirs.get(selected.path)?.listing;
-			const count = listing ? `${listing.entries.length}${listing.truncated ? "+" : ""} items` : "";
-			previewEl.appendChild(previewHeader(name, count ? `folder · ${count}` : "folder", []));
-			previewEl.appendChild(stateBox("empty", "Select a file in this folder to preview it."));
+			const count = listing
+				? `${listing.entries.length}${listing.truncated ? "+" : ""} elementos`
+				: "";
+			previewEl.appendChild(previewHeader(name, count ? `carpeta · ${count}` : "carpeta", []));
+			previewEl.appendChild(stateBox("empty", "Elegí un archivo de esta carpeta para verlo."));
 		}
 		return;
 	}
@@ -653,47 +653,47 @@ function renderPreview(): void {
 	const name = baseName(preview.path);
 	if (preview.status === "loading") {
 		previewEl.appendChild(previewHeader(name, "", []));
-		previewEl.appendChild(stateBox("loading", "Loading preview…"));
+		previewEl.appendChild(stateBox("loading", "Cargando la vista previa…"));
 		return;
 	}
 	const path = preview.path;
 	const download = button(
-		"Download",
+		"Descargar",
 		"files-btn",
 		() => void downloadSelected(path),
-		`Download ${name}`,
+		`Descargar ${name}`,
 	);
 
 	if (preview.status === "error") {
 		previewEl.appendChild(previewHeader(name, "", []));
 		const msg =
 			preview.httpStatus === 403
-				? "This file is restricted because it may contain credentials. It can't be previewed or downloaded here."
+				? "Este archivo está restringido porque puede contener credenciales. Acá no se puede ver ni descargar."
 				: preview.httpStatus === 404
-					? "This file no longer exists. Refresh to update the tree."
-					: `Couldn't load the preview: ${preview.message}`;
+					? "Este archivo ya no existe. Actualizá para refrescar el árbol."
+					: `No se pudo cargar la vista previa: ${preview.message}`;
 		const retry =
 			preview.httpStatus === 403
 				? []
-				: [button("Retry", "files-btn", () => void openPreview(path))];
+				: [button("Reintentar", "files-btn", () => void openPreview(path))];
 		previewEl.appendChild(stateBox(preview.httpStatus === 403 ? "info" : "error", msg, ...retry));
 		return;
 	}
 
 	const data = preview.data;
-	const meta = `${formatBytes(data.size)} · modified ${new Date(data.mtime).toLocaleString()}`;
+	const meta = `${formatBytes(data.size)} · modificado ${new Date(data.mtime).toLocaleString()}`;
 
 	if (data.kind === "binary") {
 		previewEl.appendChild(previewHeader(name, meta, [download]));
 		const msg =
 			data.reason === "too-large"
-				? "This image is too large to preview inline. Download it to view."
-				: "This looks like a binary file, so it isn't rendered. Download it to open it locally.";
+				? "Esta imagen es demasiado grande para verla acá. Descargala para abrirla."
+				: "Parece un archivo binario, así que no se muestra. Descargalo para abrirlo en tu equipo.";
 		previewEl.appendChild(
 			stateBox(
 				"info",
 				msg,
-				button("Download file", "files-btn primary", () => void downloadSelected(path)),
+				button("Descargar el archivo", "files-btn primary", () => void downloadSelected(path)),
 			),
 		);
 		return;
@@ -703,19 +703,19 @@ function renderPreview(): void {
 		previewEl.appendChild(previewHeader(name, meta, [download]));
 		const body = el("div", "files-image");
 		if (preview.imageError) {
-			body.appendChild(stateBox("error", `Couldn't load the image: ${preview.imageError}`));
+			body.appendChild(stateBox("error", `No se pudo cargar la imagen: ${preview.imageError}`));
 		} else if (preview.imageUrl) {
 			const img = el("img");
 			img.alt = name;
 			img.src = preview.imageUrl;
 			img.addEventListener("error", () => {
 				img.replaceWith(
-					stateBox("info", "Your browser can't display this image format. Download it instead."),
+					stateBox("info", "Tu navegador no puede mostrar este formato de imagen. Descargala."),
 				);
 			});
 			body.appendChild(img);
 		} else {
-			body.appendChild(stateBox("loading", "Loading image…"));
+			body.appendChild(stateBox("loading", "Cargando la imagen…"));
 		}
 		previewEl.appendChild(body);
 		return;
@@ -734,9 +734,9 @@ function renderPreview(): void {
 	if (mdRenderable) {
 		const seg = el("div", "files-seg");
 		seg.setAttribute("role", "group");
-		seg.setAttribute("aria-label", "Markdown view");
+		seg.setAttribute("aria-label", "Vista del Markdown");
 		for (const mode of ["rendered", "source"] as const) {
-			const b = button(mode === "rendered" ? "Preview" : "Source", "files-seg-btn", () => {
+			const b = button(mode === "rendered" ? "Vista previa" : "Fuente", "files-seg-btn", () => {
 				markdownMode = mode;
 				renderPreview();
 			});
@@ -746,13 +746,13 @@ function renderPreview(): void {
 		actions.push(seg);
 	} else if (pretty !== null && pretty !== data.content) {
 		const b = button(
-			"Format",
+			"Formatear",
 			"files-btn",
 			() => {
 				jsonPretty = !jsonPretty;
 				renderPreview();
 			},
-			"Toggle pretty-printed JSON",
+			"Alternar el JSON formateado",
 		);
 		b.setAttribute("aria-pressed", String(jsonPretty));
 		actions.push(b);
@@ -779,17 +779,21 @@ function renderPreview(): void {
 			el(
 				"div",
 				"files-banner",
-				`Large file — showing the first ${formatBytes(content.length)}. Download it for the full contents.`,
+				`Archivo grande: se muestran los primeros ${formatBytes(content.length)}. Descargalo para verlo completo.`,
 			),
 		);
 	}
 	if (md && !mdRenderable) {
 		previewEl.appendChild(
-			el("div", "files-banner", "Too large to render as Markdown — showing the source."),
+			el(
+				"div",
+				"files-banner",
+				"Demasiado grande para mostrarlo como Markdown: se muestra la fuente.",
+			),
 		);
 	}
 	if (content.length === 0) {
-		previewEl.appendChild(stateBox("empty", "This file is empty."));
+		previewEl.appendChild(stateBox("empty", "Este archivo está vacío."));
 		return;
 	}
 	const scroller = el("div", "files-preview-scroll");
@@ -799,7 +803,7 @@ function renderPreview(): void {
 			renderMarkdown(content, {
 				onRelativeLink: (href) => {
 					const target = resolveRelativeLink(path, href);
-					if (target === null) showToast("That link points outside the workspace", true);
+					if (target === null) showToast("Ese enlace apunta fuera del workspace", true);
 					else void revealPath(target);
 				},
 			}),

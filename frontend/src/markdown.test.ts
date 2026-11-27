@@ -457,7 +457,7 @@ describe("renderMarkdown — complexity", () => {
 		const root = renderMarkdown(src);
 		expect(root.classList.contains("md-fallback")).toBe(true);
 		expect(root.querySelector("pre")?.textContent).toBe(src);
-		expect(root.textContent).toContain("too complex");
+		expect(root.textContent).toContain("demasiado complejo");
 	});
 
 	it("doesn't overflow the stack appending huge inline runs", () => {

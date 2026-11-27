@@ -104,7 +104,7 @@ function renderMyGroups(groups: LeadGroup[], sessions: ObservableSession[]): voi
 	if (groups.length === 0) {
 		const empty = document.createElement("p");
 		empty.className = "modal-hint";
-		empty.textContent = "You don't lead any groups yet.";
+		empty.textContent = "Todavía no sos líder de ningún grupo.";
 		myGroupsListEl.appendChild(empty);
 		return;
 	}
@@ -127,7 +127,7 @@ function renderMyGroups(groups: LeadGroup[], sessions: ObservableSession[]): voi
 		if (g.members.length === 0) {
 			const empty = document.createElement("p");
 			empty.className = "modal-hint";
-			empty.textContent = "No members yet.";
+			empty.textContent = "Todavía no tiene miembros.";
 			card.appendChild(empty);
 			myGroupsListEl.appendChild(card);
 			continue;
@@ -145,8 +145,8 @@ function renderMyGroups(groups: LeadGroup[], sessions: ObservableSession[]): voi
 			sub.className = "admin-session-sub";
 			sub.textContent =
 				memberSessions.length === 0
-					? "no active sessions"
-					: `${memberSessions.length} session${memberSessions.length === 1 ? "" : "s"}`;
+					? "ninguna sesión activa"
+					: `${memberSessions.length} sesi${memberSessions.length === 1 ? "ón" : "ones"}`;
 			meta.appendChild(sub);
 			memberRow.appendChild(meta);
 
@@ -161,7 +161,7 @@ function renderMyGroups(groups: LeadGroup[], sessions: ObservableSession[]): voi
 				if (s.status !== "running") continue;
 				const btn = document.createElement("button");
 				btn.type = "button";
-				btn.textContent = `Observe "${s.name}"`;
+				btn.textContent = `Observar «${s.name}»`;
 				btn.addEventListener("click", () => {
 					// Fire-and-forget — openObserveForLead delegates to the
 					// shared modal, which surfaces its own errors via showToast,

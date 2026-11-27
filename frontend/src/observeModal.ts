@@ -77,17 +77,17 @@ function renderModeChrome(): void {
 	// than the first tab we attach to — preserved from the pre-extraction
 	// observe modal.
 	const tabWhich =
-		tabCount === 1 ? `"${tabLabel}"` : `"${tabLabel}" (1 of ${tabCount} tabs — first shown)`;
+		tabCount === 1 ? `«${tabLabel}»` : `«${tabLabel}» (la primera de ${tabCount} pestañas)`;
 	if (mode === "observe") {
-		observeModalTitle.textContent = `Observing "${target.name}" (${target.ownerUsername})`;
-		observeModalHint.textContent = `Read-only view of ${tabWhich}. Input is disabled — every observe-attach is logged.`;
+		observeModalTitle.textContent = `Observando «${target.name}» (${target.ownerUsername})`;
+		observeModalHint.textContent = `Vista de solo lectura de ${tabWhich}. No se puede escribir; cada observación queda registrada.`;
 	} else {
-		observeModalTitle.textContent = `Operating "${target.name}" (${target.ownerUsername})`;
-		observeModalHint.textContent = `Full control of ${tabWhich} — you can type in ${target.ownerUsername}'s session. This is logged as an operate action.`;
+		observeModalTitle.textContent = `Operando «${target.name}» (${target.ownerUsername})`;
+		observeModalHint.textContent = `Control total de ${tabWhich}: podés escribir en la sesión de ${target.ownerUsername}. Queda registrado como operación.`;
 	}
 	if (target.canOperate) {
 		takeControlBtn.hidden = false;
-		takeControlBtn.textContent = mode === "observe" ? "Take control" : "Release control";
+		takeControlBtn.textContent = mode === "observe" ? "Tomar el control" : "Soltar el control";
 		// Accent the button while operating so the escalated state is
 		// visible at a glance (mirrors the observe-log operate pill).
 		takeControlBtn.classList.toggle("observe-take-control-btn--active", mode === "operate");
@@ -112,7 +112,7 @@ function attach(mode: ObserveMode): void {
 	}
 	observeTerminalHost.textContent = "";
 	renderModeChrome();
-	const verb = mode === "observe" ? "Observe" : "Operate";
+	const verb = mode === "observe" ? "observación" : "operación";
 	activeObserveTerm = openTerminalSession({
 		container: observeTerminalHost,
 		sessionId: target.sessionId,
@@ -127,7 +127,7 @@ function attach(mode: ObserveMode): void {
 			// owner stopped it; the audit row's `ended_at` is set server-side
 			// on ws close. Surface a toast so the viewer knows why it went dark.
 			if (status === "disconnected") {
-				showToast(`${verb} attach to "${target.name}" disconnected`);
+				showToast(`Se desconectó la ${verb} de «${target.name}»`);
 				// "disconnected" is TERMINAL (the #356 reconnect loop gave up or
 				// the close was non-retryable — transient drops emit "reconnecting"),
 				// so no live WS remains to mislead about: drop the operate chrome
@@ -139,7 +139,7 @@ function attach(mode: ObserveMode): void {
 				}
 			}
 		},
-		onError: (msg) => showToast(`${verb} error: ${msg}`, true),
+		onError: (msg) => showToast(`Error de la ${verb}: ${msg}`, true),
 		// Same renderer-degrade notice the owner-side tabs get — a silent
 		// WebGL→DOM fallback in the observed view has no other explanation.
 		onRendererFallback: (msg) => showToast(msg),
@@ -162,11 +162,14 @@ export async function openObserveModalFor(target: ObserveTarget): Promise<void> 
 		// lead can read a foreign session's tab list without owning it.
 		tabs = await listTabs(target.sessionId);
 	} catch (err) {
-		showToast(`Couldn't load tabs for "${target.name}": ${(err as Error).message}`, true);
+		showToast(
+			`No se pudieron cargar las pestañas de «${target.name}»: ${(err as Error).message}`,
+			true,
+		);
 		return;
 	}
 	if (tabs.length === 0) {
-		showToast(`"${target.name}" has no open tabs to observe`, true);
+		showToast(`«${target.name}» no tiene pestañas abiertas para observar`, true);
 		return;
 	}
 	// v1 attaches to the first tab — a session typically has one; the
@@ -192,9 +195,9 @@ takeControlBtn.addEventListener("click", async () => {
 		// De-escalation (release) needs no confirm; dropping to read-only
 		// can't harm the owner's session.
 		const ok = await confirmDialog({
-			title: "Take control",
-			message: `Take control of "${target.name}" (${target.ownerUsername})? You will be able to type in their session. This is logged as an operate action.`,
-			confirmLabel: "Take control",
+			title: "Tomar el control",
+			message: `¿Tomar el control de «${target.name}» (${target.ownerUsername})? Vas a poder escribir en su sesión. Queda registrado como operación.`,
+			confirmLabel: "Tomar el control",
 			danger: true,
 		});
 		// The observe may have been closed (or re-targeted) while the

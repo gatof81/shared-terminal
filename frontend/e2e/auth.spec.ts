@@ -54,7 +54,7 @@ test.describe("auth", () => {
 		// Both land on the same tick (the next poll's 401); the toast lives 4 s.
 		await Promise.all([
 			expect(page.locator("#auth-view")).toBeVisible({ timeout: 10_000 }),
-			expect(app.toast(/session has expired/)).toHaveCount(1, { timeout: 10_000 }),
+			expect(app.toast(/Tu acceso venció/)).toHaveCount(1, { timeout: 10_000 }),
 		]);
 	});
 });

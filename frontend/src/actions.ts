@@ -73,7 +73,7 @@ actionsSelectBtn.addEventListener("click", () => {
 	closeActionsMenu();
 	const term = getActiveTerminal();
 	if (!term) {
-		showToast("No active session", true);
+		showToast("No hay una sesión activa", true);
 		return;
 	}
 	// When a selection already exists the user's intent is "copy this" —
@@ -84,7 +84,7 @@ actionsSelectBtn.addEventListener("click", () => {
 	const copied = term.copySelection();
 	if (!copied) {
 		term.enterSelectMode();
-		showToast("Drag across the terminal to select — it copies automatically");
+		showToast("Arrastrá sobre la terminal para seleccionar: se copia solo");
 	}
 });
 
@@ -97,32 +97,32 @@ let downloadInFlight = false;
 actionsDownloadBtn.addEventListener("click", async () => {
 	closeActionsMenu();
 	if (downloadInFlight) {
-		showToast("Download in progress, try again shortly", true);
+		showToast("Ya hay una descarga en curso; probá de nuevo en un momento", true);
 		return;
 	}
 	if (!activeSessionId) {
-		showToast("No active session", true);
+		showToast("No hay una sesión activa", true);
 		return;
 	}
 	// Snapshot before the prompt/await — same session-switch guard as the
 	// attach flow above.
 	const sessionId = activeSessionId;
 	const relPath = await promptDialog({
-		title: "Download file",
-		label: "Workspace-relative path",
+		title: "Descargar un archivo",
+		label: "Ruta dentro del workspace",
 		placeholder: "dist/report.pdf",
-		confirmLabel: "Download",
-		validate: (v) => (v === "" ? "Enter a path inside the workspace." : null),
+		confirmLabel: "Descargar",
+		validate: (v) => (v === "" ? "Escribí una ruta dentro del workspace." : null),
 	});
 	if (relPath === null) return;
 	downloadInFlight = true;
 	try {
-		showToast(`Downloading ${relPath}…`);
+		showToast(`Descargando ${relPath}…`);
 		const { blob, filename } = await downloadSessionFile(sessionId, relPath);
 		saveBlob(blob, filename);
-		showToast(`Downloaded ${filename}`);
+		showToast(`Se descargó ${filename}`);
 	} catch (err) {
-		showToast(`Download failed: ${(err as Error).message}`, true);
+		showToast(`Falló la descarga: ${(err as Error).message}`, true);
 	} finally {
 		downloadInFlight = false;
 	}
@@ -146,7 +146,7 @@ fileInput.addEventListener("change", async () => {
 		// Without the toast the picker silently closes and nothing
 		// happens — the prior "Uploading…" toast may have already
 		// scrolled away, so the user has no feedback.
-		showToast("Upload in progress, try again shortly", true);
+		showToast("Ya hay una subida en curso; probá de nuevo en un momento", true);
 		return;
 	}
 	attachInFlight = true;
@@ -157,7 +157,7 @@ fileInput.addEventListener("change", async () => {
 	// release point.
 	try {
 		if (!activeSessionId) {
-			showToast("No active session", true);
+			showToast("No hay una sesión activa", true);
 			return;
 		}
 		// Snapshot the id before any await so a session-switch or
@@ -166,21 +166,21 @@ fileInput.addEventListener("change", async () => {
 		// addTab and openSession.
 		const sessionId = activeSessionId;
 		if (picked.length > MAX_ATTACH_FILES) {
-			showToast(`Too many files (${picked.length}; max ${MAX_ATTACH_FILES})`, true);
+			showToast(`Son demasiados archivos (${picked.length}; máximo ${MAX_ATTACH_FILES})`, true);
 			return;
 		}
 		const oversized = picked.find((f) => f.size > MAX_ATTACH_BYTES);
 		if (oversized) {
 			const mb = (oversized.size / (1024 * 1024)).toFixed(1);
-			showToast(`"${oversized.name}" is ${mb} MB — files must be ≤25 MB`, true);
+			showToast(`«${oversized.name}» pesa ${mb} MB: cada archivo puede pesar hasta 25 MB`, true);
 			return;
 		}
-		showToast(`Uploading ${picked.length} file${picked.length === 1 ? "" : "s"}…`);
+		showToast(picked.length === 1 ? "Subiendo 1 archivo…" : `Subiendo ${picked.length} archivos…`);
 		let result: { paths: string[] };
 		try {
 			result = await uploadSessionFiles(sessionId, picked);
 		} catch (err) {
-			showToast(`Upload failed: ${(err as Error).message}`, true);
+			showToast(`Falló la subida: ${(err as Error).message}`, true);
 			return;
 		}
 		// Re-check identity post-await: if the user switched away
@@ -192,7 +192,7 @@ fileInput.addEventListener("change", async () => {
 		// session A's workspace; the user can switch back and
 		// reference them manually.
 		if (activeSessionId !== sessionId) {
-			showToast(`Uploaded ${result.paths.length} to the previous session`);
+			showToast(`Se subieron ${result.paths.length} a la sesión anterior`);
 			return;
 		}
 		const term = getActiveTerminal();
@@ -202,12 +202,16 @@ fileInput.addEventListener("change", async () => {
 			// Trailing space lets them keep typing immediately after.
 			const inserted = `${result.paths.map((p) => (/\s/.test(p) ? `"${p}"` : p)).join(" ")} `;
 			term.paste(inserted);
-			showToast(`Attached ${result.paths.length} file${result.paths.length === 1 ? "" : "s"}`);
+			showToast(
+				result.paths.length === 1
+					? "Se adjuntó 1 archivo"
+					: `Se adjuntaron ${result.paths.length} archivos`,
+			);
 		} else {
 			// Container isn't running, so there's nothing to type into. The
 			// files still land in the workspace and survive a /start, so the
 			// user can reference them later.
-			showToast(`Uploaded ${result.paths.length}; start the session to use them`);
+			showToast(`Se subieron ${result.paths.length}; poné en marcha la sesión para usarlos`);
 		}
 	} finally {
 		attachInFlight = false;

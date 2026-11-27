@@ -64,7 +64,7 @@ test.describe("permissions", () => {
 		await app.openSidebar();
 		await page.locator("#observable-list .session-item", { hasText: "bob-api" }).click();
 		await expect(page.locator("#observe-modal")).toHaveClass(/open/);
-		await expect(page.locator("#observe-modal-title")).toContainText('Observing "bob-api"');
+		await expect(page.locator("#observe-modal-title")).toContainText("Observando «bob-api»");
 		await expect(page.locator("#observe-take-control-btn")).toBeHidden();
 		await expect.poll(() => backend.terminalSockets.length).toBe(1);
 		expect(backend.terminalSockets[0]!.observe).toBe(true);
