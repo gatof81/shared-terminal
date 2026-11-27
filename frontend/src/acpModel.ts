@@ -765,3 +765,23 @@ export function interruptSummary(
 	const said = parts.filter(([k]) => k > 0).map(([k, w]) => `${k} ${w}`);
 	return `${n} ${n === 1 ? "interrupción" : "interrupciones"}: ${said.join(", ")}.`;
 }
+
+/**
+ * A live row that is news for «@x respondió en …» (revisión 2 §8): the
+ * person's message to an agent in a topic, just finished (`prev`, the state
+ * this tab last saw of it live, was not `done`), and its topic is not the
+ * one on screen. Reloads are never news: only live rows reach this.
+ */
+export function isReplyNews(
+	m: Pick<AcpMessage, "from_id" | "state" | "conversation_id">,
+	prev: AcpMessage["state"] | undefined,
+	onScreen: string | null,
+): boolean {
+	return (
+		m.from_id === "owner" &&
+		m.state === "done" &&
+		prev !== "done" &&
+		!!m.conversation_id &&
+		m.conversation_id !== onScreen
+	);
+}

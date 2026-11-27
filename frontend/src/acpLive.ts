@@ -49,6 +49,8 @@ const listeners = new Set<Listener>();
  * never keeps the socket open (acpLiveBanner.ts).
  */
 const stateWatchers = new Set<(s: AcpLiveState) => void>();
+/** Told every event too, likewise without keeping the socket open (acpReplyNotice.ts). */
+const eventWatchers = new Set<Listener>();
 let sock: WebSocket | null = null;
 let up = false;
 /** "down" was announced for the current outage (once per outage, also before the first hello). */
@@ -72,7 +74,7 @@ function setState(st: AcpLiveState): void {
 }
 
 function emit(ev: AcpLiveEvent): void {
-	for (const fn of [...listeners]) {
+	for (const fn of [...listeners, ...eventWatchers]) {
 		try {
 			fn(ev);
 		} catch (err) {
@@ -156,6 +158,12 @@ export function acpLiveState(): AcpLiveState {
 export function watchAcpLiveState(fn: (s: AcpLiveState) => void): () => void {
 	stateWatchers.add(fn);
 	return () => stateWatchers.delete(fn);
+}
+
+/** Every event while the socket is open for someone else; never opens or holds it. */
+export function watchAcpEvents(fn: Listener): () => void {
+	eventWatchers.add(fn);
+	return () => eventWatchers.delete(fn);
 }
 
 export function subscribeAcp(fn: Listener): () => void {
