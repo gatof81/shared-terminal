@@ -823,6 +823,9 @@ export const KNOWN_HOSTS_DEFAULT = KNOWN_HOSTS_DEFAULT_SENTINEL;
 export interface SessionConfigRecord extends Omit<SessionConfig, "envVars" | "auth"> {
 	sessionId: string;
 	bootstrappedAt: Date | null;
+	// Not part of the create config: set only by the admin resources PATCH
+	// (v30). Undefined = DEFAULT_PIDS_LIMIT at spawn.
+	pidsLimit?: number;
 	// Storage-shape env vars: `secret` rows carry ciphertext + iv +
 	// tag (no plaintext value). DockerManager.spawn decrypts via
 	// `decryptStoredEntries` before handing them to `docker run`.
@@ -1228,6 +1231,7 @@ interface SessionConfigRow {
 	workspace_strategy: string | null;
 	cpu_limit: number | null;
 	mem_limit: number | null;
+	pids_limit: number | null;
 	idle_ttl_seconds: number | null;
 	post_create_cmd: string | null;
 	post_start_cmd: string | null;
@@ -1257,6 +1261,7 @@ function rowToRecord(row: SessionConfigRow): SessionConfigRecord {
 				: undefined,
 		cpuLimit: row.cpu_limit ?? undefined,
 		memLimit: row.mem_limit ?? undefined,
+		pidsLimit: row.pids_limit ?? undefined,
 		idleTtlSeconds: row.idle_ttl_seconds ?? undefined,
 		postCreateCmd: row.post_create_cmd ?? undefined,
 		postStartCmd: row.post_start_cmd ?? undefined,
@@ -1696,6 +1701,13 @@ export function isEmptyConfig(config: SessionConfig | PersistableSessionConfig):
  * (lines 635-654) so an admin edit can't smuggle a value past the
  * operator cap that a fresh create would have rejected.
  */
+// PidsLimit (#344's fork-bomb bound). 1024 fits a normal session; an agent
+// that runs builds and browsers in parallel needs more, so the admin can raise
+// it per session. The ceiling keeps it a bound, not a way to switch it off.
+export const DEFAULT_PIDS_LIMIT = 1024;
+export const PIDS_LIMIT_MIN = 256;
+export const PIDS_LIMIT_MAX = 8192;
+
 export const ResourceCapsPatchSchema = z
 	.object({
 		cpuLimit: z
@@ -1718,6 +1730,7 @@ export const ResourceCapsPatchSchema = z
 					`(operator-tunable via MAX_SESSION_MEM)`,
 			})
 			.optional(),
+		pidsLimit: z.number().int().min(PIDS_LIMIT_MIN).max(PIDS_LIMIT_MAX).optional(),
 	})
 	.strict();
 
@@ -1741,20 +1754,30 @@ export type ResourceCapsPatch = z.infer<typeof ResourceCapsPatchSchema>;
  */
 export async function listResourceCaps(
 	sessionIds: readonly string[],
-): Promise<Map<string, { cpuLimit: number | null; memLimit: number | null }>> {
-	const out = new Map<string, { cpuLimit: number | null; memLimit: number | null }>();
+): Promise<
+	Map<string, { cpuLimit: number | null; memLimit: number | null; pidsLimit: number | null }>
+> {
+	const out = new Map<
+		string,
+		{ cpuLimit: number | null; memLimit: number | null; pidsLimit: number | null }
+	>();
 	if (sessionIds.length === 0) return out;
 	const placeholders = sessionIds.map(() => "?").join(",");
 	const result = await d1Query<{
 		session_id: string;
 		cpu_limit: number | null;
 		mem_limit: number | null;
+		pids_limit: number | null;
 	}>(
-		`SELECT session_id, cpu_limit, mem_limit FROM session_configs WHERE session_id IN (${placeholders})`,
+		`SELECT session_id, cpu_limit, mem_limit, pids_limit FROM session_configs WHERE session_id IN (${placeholders})`,
 		[...sessionIds],
 	);
 	for (const row of result.results) {
-		out.set(row.session_id, { cpuLimit: row.cpu_limit, memLimit: row.mem_limit });
+		out.set(row.session_id, {
+			cpuLimit: row.cpu_limit,
+			memLimit: row.mem_limit,
+			pidsLimit: row.pids_limit ?? null,
+		});
 	}
 	return out;
 }
@@ -1803,6 +1826,10 @@ export async function updateResourceLimits(
 	if (patch.memLimit !== undefined) {
 		sets.push("mem_limit = ?");
 		params.push(patch.memLimit);
+	}
+	if (patch.pidsLimit !== undefined) {
+		sets.push("pids_limit = ?");
+		params.push(patch.pidsLimit);
 	}
 	if (sets.length === 0) {
 		// Defensive — `updateResourceLimits({})` is a programming bug
