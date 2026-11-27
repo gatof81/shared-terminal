@@ -76,7 +76,9 @@ Terminal.
 With an adapter installed in the runtime directory (see [Installation](#installation)), the New
 session form also asks for an **agent name** (lowercase, e.g. `developer`), and optionally a project,
 a model, an effort level and a runtime. Log the agent in once: *Conectar cuenta* in «Ajustes del
-agente», or `claude` → `/login` in its Terminal. Over the API:
+agente», or `claude` → `/login` in its Terminal. Without a project, the web has nowhere to write to
+the agent — it is reached only through its Terminal or another agent's `st send`; add it to a project
+to talk to it from its topics. Over the API:
 
 ```http
 POST /api/sessions

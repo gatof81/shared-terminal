@@ -260,14 +260,17 @@ A message's `project_id` is its **scope**, and its `conversation_id` the **topic
 
 The individual Chat view of an agent's session was removed in 3B (#790): every post of the person goes
 into a topic, a session's views are Terminal, Files and Git, and an agent's settings and login live in
-«Ajustes del agente» (§7).
+«Ajustes del agente» (§7). So an agent **without a project** has no place in the web to receive the
+person's messages: it is reached only through its Terminal or another agent's `st send`, until it joins
+a project («Ajustes del agente» → project).
 
 - An agent takes part in at most one project (`acp_agents.project_id`), chosen at creation or with
   `PATCH /api/acp/agents/:name {projectId}` (an explicit button in the UI). It keeps its session,
   context and history when it joins or leaves.
-- An agent **never chooses** scope: a request it sends takes the scope of the message it is working
-  on when the recipient is in that project, and is direct otherwise. A consult started in a topic
-  stays there; a private one stays private.
+- An agent **never chooses** scope: a request it sends from a topic takes that topic, and a recipient
+  outside the project is refused (`409 recipient-other-project`, §4b *Inheritance*); from a run with no
+  topic it takes the scope of the message it is working on when the recipient is in that project, and
+  is direct otherwise. A consult started in a topic stays there; a private one stays private.
 - Projects themselves (`/api/projects`) only group agents and give
   them topics. Archiving a project makes its agents leave it.
 - **Live:** `/ws/acp` pushes every message row, question and activity batch to the owner's browsers.

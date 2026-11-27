@@ -1,6 +1,6 @@
 # Conversación de proyecto por el Composer (D1–D3)
 
-> **RETIRADO (2026-11-18, #678).** Esta conversación de proyecto por el Composer (D1–D3: registro `.projects`, fan-out, artefactos, consultas entre agentes, cola) ya no existe en el código: ni rutas, ni `/ws/project`, ni banderas. Este documento es **histórico**, no un contrato. Su reemplazo es Project Chat sobre la API de mensajes ACP ([ACP_AGENTS.md §4](./ACP_AGENTS.md#4-individual-chat-and-project-chat)). Los datos `<WORKSPACE_ROOT>/.projects` siguen en disco sin uso hasta el paso de datos aprobado por el responsable; los backups nuevos ya no los incluyen.
+> **RETIRADO (2026-11-18, #678).** Esta conversación de proyecto por el Composer (D1–D3: registro `.projects`, fan-out, artefactos, consultas entre agentes, cola) ya no existe en el código: ni rutas, ni `/ws/project`, ni banderas. Este documento es **histórico**, no un contrato. Su reemplazo son los temas de proyecto sobre la API de mensajes ACP ([ACP_AGENTS.md §4](./ACP_AGENTS.md#4-scope-projects-topics-and-the-archive)). Los datos `<WORKSPACE_ROOT>/.projects` siguen en disco sin uso hasta el paso de datos aprobado por el responsable; los backups nuevos ya no los incluyen.
 
 Estado: **contrato vinculante, v0.3** (aprobado por el responsable el 2026-11-12), con las
 precisiones de v0.3.1 (D1-b) y v0.3.2 (D2, propuestas en su PR), y la enmienda **v0.3.3** (D2, fix F4)

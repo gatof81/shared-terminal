@@ -50,7 +50,7 @@ Auth is via the httpOnly cookie `st_token` set by `POST /api/auth/login` and `PO
 | Name | `PATCH /api/sessions/:id {name}` | At once. Same rules as create (trimmed, 1–64 characters, not unique); operate tier (owner or admin). An ACP agent's `@name` is a separate identity and does not change |
 | External ref | `PATCH /api/sessions/:id {externalRef}` | At once (`null` clears) |
 | Exposed ports | `PATCH /api/sessions/:id/ports` | At once on a running session (a new port `< 1024` needs `allowPrivilegedPorts` from create) |
-| CPU / memory / PIDs caps | `PATCH /api/admin/sessions/:id/resources` (admin) | At once (`docker update`), and persisted for the next create (`pidsLimit` 256–8192, v30; unset = 1024) |
+| CPU / memory / PIDs caps | `PATCH /api/admin/sessions/:id/resources` (admin) | At once (`docker update`), and persisted for the session's next container (`pidsLimit` 256–8192, v30; unset = 1024) |
 | ACP agent: project, model, effort, slots | `PATCH /api/acp/agents/:name` | At once; model and effort are switched by the runner while the agent is idle; raising `maxConcurrency` (1–4) launches the new slots at once, lowering it lets the extra slots finish what they run |
 | Environment variables | `PATCH /api/sessions/:id/env` | Stored at once; a container gets its environment when it is **created**, so a running or stopped container keeps the old one until it is re-created (soft delete + start) |
 | Image, repository, auth, hooks, dotfiles, agent seed | — | Fixed at creation; the image changes when the container is re-created (soft delete + start); the rest needs a new session |
