@@ -991,12 +991,13 @@ export class AcpAgents {
 			where = "1";
 			params = [];
 		}
+		// Newest first and reversed here: an outer `SELECT * FROM (…) ORDER BY id`
+		// makes D1 read (and bill) every row of the page a second time.
 		const r = await d1Query<MessageRow>(
-			`SELECT * FROM (SELECT * FROM ${from} WHERE owner_user_id = ? AND ${where} AND id < ?
-			 ORDER BY id DESC LIMIT ?) ORDER BY id`,
+			`SELECT * FROM ${from} WHERE owner_user_id = ? AND ${where} AND id < ? ORDER BY id DESC LIMIT ?`,
 			[ownerUserId, ...params, before ?? Number.MAX_SAFE_INTEGER, limit],
 		);
-		return r.results;
+		return r.results.reverse();
 	}
 
 	async message(ownerUserId: string, id: number): Promise<MessageRow | null> {
@@ -1378,6 +1379,23 @@ export class AcpAgents {
 			[ownerUserId, JSON.stringify(messageIds), JSON.stringify(agents)],
 		);
 		return r.results;
+	}
+
+	/**
+	 * The questions asked while working on a page of messages (ascending ids),
+	 * by the page's id range on idx_agent_questions_message, kept to the page
+	 * here: `message_id IN json_each(ids)` bills each id twice (the json_each
+	 * row and its probe), the range only the questions in it — those of other
+	 * conversations whose messages fall in the range included.
+	 */
+	async questionsOfPage(ownerUserId: string, messageIds: number[]): Promise<QuestionRow[]> {
+		if (!messageIds.length) return [];
+		const r = await d1Query<QuestionRow>(
+			"SELECT * FROM agent_questions WHERE owner_user_id = ? AND message_id BETWEEN ? AND ? ORDER BY id",
+			[ownerUserId, messageIds[0], messageIds[messageIds.length - 1]],
+		);
+		const page = new Set<number | null>(messageIds);
+		return r.results.filter((q) => page.has(q.message_id));
 	}
 
 	/** The person's answer. One conditional UPDATE: only an open question takes one, once. */
