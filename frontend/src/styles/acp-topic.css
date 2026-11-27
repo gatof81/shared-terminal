@@ -933,3 +933,63 @@ button.rail-attention:hover {
 	color: var(--c-muted);
 	opacity: 0.8;
 }
+
+/* «@dev respondió en «…» · Ver» (acpReplyNotice.ts). A phone: a zero-height
+   anchor right above the message box (or the rail's foot) — the notice
+   overlays the thread's bottom, nothing in it moves. Wide: top right. */
+.acp-reply-anchor {
+	position: relative;
+	flex: none;
+	height: 0;
+	z-index: 20;
+}
+.acp-reply-anchor.is-floating {
+	position: fixed;
+	/* Under the topic's header row: its ⋯ stays reachable. */
+	top: 120px;
+	right: 16px;
+	height: auto;
+	z-index: 900;
+}
+.acp-reply-notice {
+	position: absolute;
+	left: 8px;
+	right: 8px;
+	bottom: 8px;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	min-height: 44px;
+	padding: 0 14px 0 10px;
+	font: inherit;
+	font-size: 0.85rem;
+	text-align: left;
+	color: var(--c-text);
+	background: var(--c-surface-2);
+	border: 1px solid var(--c-border);
+	border-radius: 10px;
+	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+	cursor: pointer;
+}
+.is-floating .acp-reply-notice {
+	position: static;
+	max-width: 380px;
+}
+.acp-reply-notice:hover,
+.acp-reply-notice:focus-visible {
+	border-color: var(--c-accent);
+}
+.acp-reply-text {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+.acp-reply-sep {
+	color: var(--c-faint);
+}
+.acp-reply-go {
+	color: var(--c-accent);
+	font-weight: 600;
+}

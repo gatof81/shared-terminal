@@ -48,6 +48,7 @@ import {
 import { resetInbox, startInbox } from "./acpInboxStore.js";
 import { liveBanner } from "./acpLiveBanner.js";
 import { acpEntryByName, resetAcpAgents } from "./acpRegistry.js";
+import { resetReplyNotice, setReplyNoticeScreen } from "./acpReplyNotice.js";
 import { configureReview } from "./acpReview.js";
 import { readAcpAgents, stopAcpStatusFeed } from "./acpStatusFeed.js";
 import {
@@ -296,6 +297,7 @@ function syncSpace(r: ProjectRoute, prevPid: string | null, prevPage: ProjectPag
 		pageEl.replaceChildren(spaceEl);
 	placeSpace();
 	paintSpace();
+	setReplyNoticeScreen(page !== "tools", page === "conversation" ? topic : null);
 	if (page === "tools") {
 		// The topic under Herramientas only waits (its place is kept by the DOM).
 		suspendTopic();
@@ -431,6 +433,7 @@ function placeSpace(): void {
 
 /** Leaving the space (another kind of page, or no page): rail and topic stop following. */
 function leaveSpace(): void {
+	setReplyNoticeScreen(false, null);
 	leaveTools();
 	hideRail();
 	suspendTopic();
@@ -792,6 +795,7 @@ export function resetProjects(): void {
 	resetTools();
 	resetInboxPanel();
 	resetInbox();
+	resetReplyNotice();
 	entryDepth = null;
 	homeFocus = null;
 	hidePage();
