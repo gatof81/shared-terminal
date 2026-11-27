@@ -79,7 +79,7 @@ test.describe("«Seguir donde estabas» and «Recientes»", () => {
 		app,
 		page,
 		backend,
-	}) => {
+	}, info) => {
 		backend.projects[0]!.name = "Educación HZ — plataforma de cursos y evaluaciones";
 		await app.login("alice", topic(HZ, CONV_IDS.ci));
 		await expect(page.locator(THREAD)).toContainText("implementalo");
@@ -87,9 +87,14 @@ test.describe("«Seguir donde estabas» and «Recientes»", () => {
 		const row = resume(page, app.mobile);
 		await expect(row).toBeVisible();
 		// «Seguir en «Optimización de CI»» fits whole.
-		expect(await row.locator(".resume-text").evaluate((e) => e.scrollWidth <= e.clientWidth)).toBe(
-			true,
-		);
+		// Measured unrounded: a fraction of a pixel is enough for the «…».
+		const fits = await row.locator(".resume-text").evaluate((e) => {
+			const r = document.createRange();
+			r.selectNodeContents(e);
+			return r.getBoundingClientRect().width <= e.getBoundingClientRect().width + 0.01;
+		});
+		expect(fits).toBe(true);
+		if (SHOTS) await page.screenshot({ path: `${SHOTS}/${info.project.name}-resume-long.png` });
 	});
 
 	test("Herramientas is resumed where it was", async ({ app, page }) => {
