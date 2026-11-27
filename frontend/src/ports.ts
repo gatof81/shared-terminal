@@ -99,7 +99,7 @@ function renderPortsModalRows(): void {
 		const td = document.createElement("td");
 		td.colSpan = 5;
 		td.className = "modal-hint";
-		td.textContent = "No ports exposed. Add one to make it reachable.";
+		td.textContent = "No hay puertos expuestos. Agregá uno para poder llegar a él.";
 		tr.appendChild(td);
 		portsModalTableBody.appendChild(tr);
 		return;
@@ -114,7 +114,7 @@ function renderPortsModalRows(): void {
 		input.type = "number";
 		input.min = "1";
 		input.max = "65535";
-		input.placeholder = "e.g. 3000";
+		input.placeholder = "p. ej. 3000";
 		input.className = "ports-modal-port-input";
 		input.value = row.container;
 		portTd.appendChild(input);
@@ -124,7 +124,7 @@ function renderPortsModalRows(): void {
 		checkbox.type = "checkbox";
 		checkbox.className = "ports-modal-public-input";
 		checkbox.checked = row.public;
-		checkbox.setAttribute("aria-label", "Public (no authentication)");
+		checkbox.setAttribute("aria-label", "Público (sin autenticación)");
 		publicTd.appendChild(checkbox);
 
 		// #198 — optional readiness probe inputs. Compact widths (see
@@ -137,7 +137,7 @@ function renderPortsModalRows(): void {
 		pathInput.autocomplete = "off";
 		pathInput.className = "ports-modal-readiness-path-input";
 		pathInput.value = row.readinessPath;
-		pathInput.setAttribute("aria-label", "Readiness path (optional)");
+		pathInput.setAttribute("aria-label", "Ruta de disponibilidad (opcional)");
 		readinessPathTd.appendChild(pathInput);
 
 		const readinessTimeoutTd = document.createElement("td");
@@ -148,14 +148,14 @@ function renderPortsModalRows(): void {
 		timeoutInput.placeholder = String(READINESS_TIMEOUT_DEFAULT_S);
 		timeoutInput.className = "ports-modal-readiness-timeout-input";
 		timeoutInput.value = row.readinessTimeout;
-		timeoutInput.setAttribute("aria-label", "Readiness timeout in seconds");
+		timeoutInput.setAttribute("aria-label", "Tiempo de espera de disponibilidad, en segundos");
 		readinessTimeoutTd.appendChild(timeoutInput);
 
 		const removeTd = document.createElement("td");
 		const removeBtn = document.createElement("button");
 		removeBtn.type = "button";
 		removeBtn.className = "ports-modal-remove";
-		removeBtn.setAttribute("aria-label", "Remove port");
+		removeBtn.setAttribute("aria-label", "Quitar el puerto");
 		removeBtn.dataset.rowId = row.id;
 		removeBtn.textContent = "×";
 		removeTd.appendChild(removeBtn);
@@ -189,7 +189,7 @@ export function openPortsModalFor(sessionId: string): void {
 	const loadingCell = document.createElement("td");
 	loadingCell.colSpan = 5;
 	loadingCell.className = "modal-hint";
-	loadingCell.textContent = "Loading…";
+	loadingCell.textContent = "Cargando…";
 	loading.appendChild(loadingCell);
 	portsModalTableBody.appendChild(loading);
 	portsDialog.open(document.activeElement);
@@ -249,21 +249,21 @@ async function savePortsModal(): Promise<void> {
 	for (const row of portsModalRows) {
 		const trimmed = row.container.trim();
 		if (trimmed === "") {
-			setPortsModalError("Every row needs a port number (or remove the empty row).");
+			setPortsModalError("Cada fila necesita un número de puerto (o quitá la fila vacía).");
 			return;
 		}
 		const n = Number(trimmed);
 		if (!Number.isInteger(n) || n < 1 || n > 65535) {
-			setPortsModalError(`"${trimmed}" is not a valid port (1–65535).`);
+			setPortsModalError(`«${trimmed}» no es un puerto válido (1–65535).`);
 			return;
 		}
 		if (seen.has(n)) {
-			setPortsModalError(`Port ${n} is listed more than once.`);
+			setPortsModalError(`El puerto ${n} está más de una vez.`);
 			return;
 		}
 		if (n < 1024 && !portsModalPrivilegedAllowed) {
 			setPortsModalError(
-				`Port ${n} is privileged (< 1024). Recreate the session with privileged ports enabled to expose it.`,
+				`El puerto ${n} es privilegiado (< 1024). Para exponerlo, creá la sesión de nuevo con los puertos privilegiados permitidos.`,
 			);
 			return;
 		}
@@ -280,7 +280,7 @@ async function savePortsModal(): Promise<void> {
 			// biome-ignore lint/suspicious/noControlCharactersInRegex: mirrors the backend schema — control bytes would corrupt the probe request line.
 			if (path.length > 512 || !/^\/[^\s\x00-\x1f]*$/.test(path)) {
 				setPortsModalError(
-					`Readiness path for port ${n} must start with "/" and contain no spaces (max 512 chars).`,
+					`La ruta de disponibilidad del puerto ${n} tiene que empezar con «/» y no tener espacios (máximo 512 caracteres).`,
 				);
 				return;
 			}
@@ -288,14 +288,14 @@ async function savePortsModal(): Promise<void> {
 			const timeoutSec = rawTimeout === "" ? READINESS_TIMEOUT_DEFAULT_S : Number(rawTimeout);
 			if (!Number.isInteger(timeoutSec) || timeoutSec < 1 || timeoutSec > 600) {
 				setPortsModalError(
-					`Readiness timeout for port ${n} must be a whole number of seconds (1–600).`,
+					`El tiempo de espera del puerto ${n} tiene que ser un número entero de segundos (1–600).`,
 				);
 				return;
 			}
 			readiness = { path, timeoutSec };
 		} else if (row.readinessTimeout.trim() !== "") {
 			setPortsModalError(
-				`Port ${n} has a readiness timeout but no path. Add a path (e.g. /health) or clear the timeout.`,
+				`El puerto ${n} tiene tiempo de espera pero no ruta. Agregá una ruta (p. ej. /health) o borrá el tiempo de espera.`,
 			);
 			return;
 		}
@@ -307,7 +307,7 @@ async function savePortsModal(): Promise<void> {
 	portsModalSaveBtn.disabled = true;
 	try {
 		await updateSessionPorts(sessionId, ports);
-		showToast("Ports updated");
+		showToast("Puertos actualizados");
 		closePortsModal();
 	} catch (err) {
 		// Surface the backend message inline (e.g. the privileged-port

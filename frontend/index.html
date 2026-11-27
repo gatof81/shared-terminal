@@ -34,33 +34,33 @@
     <!-- Auth view -->
     <div id="auth-view">
       <div class="auth-card">
-        <h2 id="auth-title">Login</h2>
+        <h2 id="auth-title">Entrar</h2>
         <form id="auth-form">
           <input
             id="auth-username"
             type="text"
-            placeholder="Username"
+            placeholder="Usuario"
             autocomplete="username"
           />
           <input
             id="auth-password"
             type="password"
-            placeholder="Password"
+            placeholder="Contraseña"
             autocomplete="current-password"
           />
           <input
             id="auth-invite-code"
             class="hidden"
             type="text"
-            placeholder="Invite code"
+            placeholder="Código de invitación"
             autocomplete="off"
             spellcheck="false"
           />
           <div id="auth-error"></div>
-          <button type="submit" id="auth-submit">Login</button>
+          <button type="submit" id="auth-submit">Entrar</button>
         </form>
         <p id="auth-toggle">
-          No account? <a href="#" id="auth-toggle-link">Register</a>
+          ¿No tenés cuenta? <a href="#" id="auth-toggle-link">Registrarme</a>
         </p>
       </div>
     </div>
@@ -216,34 +216,34 @@
               <input
                 id="terminal-search-input"
                 type="text"
-                placeholder="Search history"
+                placeholder="Buscar en el historial"
                 maxlength="256"
                 spellcheck="false"
                 autocomplete="off"
-                aria-label="Search terminal history"
+                aria-label="Buscar en el historial de la terminal"
                 hidden
               />
               <button
                 id="terminal-search-btn"
                 type="button"
-                title="Search terminal history (Ctrl+Shift+F)"
-                aria-label="Search terminal history"
+                title="Buscar en el historial de la terminal (Ctrl+Shift+F)"
+                aria-label="Buscar en el historial de la terminal"
               >
                 ⌕
               </button>
               <button
                 id="font-size-btn"
                 type="button"
-                title="Cycle terminal font size"
-                aria-label="Aa — terminal font size, press to change"
+                title="Cambiar el tamaño de letra de la terminal"
+                aria-label="Aa — tamaño de letra de la terminal; tocá para cambiarlo"
               >
                 Aa
               </button>
               <button
                 id="actions-btn"
                 type="button"
-                title="Insert into terminal"
-                aria-label="Insert into terminal"
+                title="Insertar en la terminal"
+                aria-label="Insertar en la terminal"
                 aria-haspopup="menu"
                 aria-expanded="false"
                 hidden
@@ -275,34 +275,34 @@
               data-key="ctrl"
               id="key-bar-ctrl"
               aria-pressed="false"
-              title="Sticky Ctrl — applies to the next key"
+              title="Ctrl fijo: se aplica a la próxima tecla"
             >
               ctrl
             </button>
-            <button type="button" data-key="ctrl-c" aria-label="Control C (interrupt)">^C</button>
-            <button type="button" data-key="up" data-repeat aria-label="Arrow up">↑</button>
-            <button type="button" data-key="down" data-repeat aria-label="Arrow down">↓</button>
-            <button type="button" data-key="left" data-repeat aria-label="Arrow left">←</button>
-            <button type="button" data-key="right" data-repeat aria-label="Arrow right">→</button>
+            <button type="button" data-key="ctrl-c" aria-label="Control C (interrumpir)">^C</button>
+            <button type="button" data-key="up" data-repeat aria-label="Flecha arriba">↑</button>
+            <button type="button" data-key="down" data-repeat aria-label="Flecha abajo">↓</button>
+            <button type="button" data-key="left" data-repeat aria-label="Flecha izquierda">←</button>
+            <button type="button" data-key="right" data-repeat aria-label="Flecha derecha">→</button>
           </div>
           <!-- Workspace Explorer (read-only). Absolutely positioned over
                the tabs / terminal / key bar; `top` tracks the toolbar's
                bottom edge (see filesView.ts). Content is built in TS. -->
           <div id="files-view" hidden>
             <div id="files-header">
-              <nav id="files-breadcrumbs" aria-label="Current path"></nav>
+              <nav id="files-breadcrumbs" aria-label="Ruta actual"></nav>
               <button
                 id="files-refresh-btn"
                 class="btn btn-icon sm"
                 type="button"
-                title="Refresh"
-                aria-label="Refresh file tree and preview"
+                title="Actualizar"
+                aria-label="Actualizar el árbol de archivos y la vista previa"
               >
                 ↻
               </button>
             </div>
             <div id="files-body">
-              <div id="files-tree" role="tree" aria-label="Workspace files"></div>
+              <div id="files-tree" role="tree" aria-label="Archivos del workspace"></div>
               <div id="files-preview"></div>
             </div>
           </div>
@@ -317,14 +317,14 @@
                 id="git-refresh-btn"
                 class="btn btn-icon sm"
                 type="button"
-                title="Refresh"
-                aria-label="Refresh git status"
+                title="Actualizar"
+                aria-label="Actualizar el estado de git"
               >
                 ↻
               </button>
             </div>
             <div id="git-body">
-              <div id="git-list" aria-label="Changed files and recent commits"></div>
+              <div id="git-list" aria-label="Archivos modificados y commits recientes"></div>
               <div id="git-diff"></div>
             </div>
           </div>
@@ -921,22 +921,22 @@
         aria-labelledby="invites-modal-title"
       >
         <div class="modal-header">
-          <h2 id="invites-modal-title">Invite codes</h2>
+          <h2 id="invites-modal-title">Códigos de invitación</h2>
           <button
             class="modal-close"
             type="button"
-            aria-label="Close"
+            aria-label="Cerrar"
             data-close-modal
           >
             ×
           </button>
         </div>
         <p class="modal-hint">
-          Share an invite code with someone to let them register an account.
-          Each code can only be used once.
+          Compartí un código de invitación para que alguien pueda crear una
+          cuenta. Cada código se usa una sola vez.
         </p>
         <button id="invite-create-btn" type="button">
-          + Generate new invite
+          + Generar una invitación
         </button>
         <div id="invite-list" class="invite-list"></div>
       </div>
@@ -957,23 +957,23 @@
         aria-labelledby="templates-modal-title"
       >
         <div class="modal-header">
-          <h2 id="templates-modal-title">Templates</h2>
+          <h2 id="templates-modal-title">Plantillas</h2>
           <button
             class="modal-close"
             type="button"
-            aria-label="Close"
+            aria-label="Cerrar"
             data-close-modal
           >
             ×
           </button>
         </div>
         <p class="modal-hint">
-          Reusable session-config presets. Use to pre-fill a new
-          session; secret values are stripped on save and re-prompted
-          on use.
+          Configuraciones de sesión reutilizables. Usá una para completar
+          una sesión nueva; los valores secretos no se guardan y se
+          vuelven a pedir al usarla.
         </p>
         <div id="templates-list">
-          <p class="modal-hint" id="templates-empty-hint">Loading templates…</p>
+          <p class="modal-hint" id="templates-empty-hint">Cargando las plantillas…</p>
         </div>
       </div>
     </div>
@@ -991,42 +991,42 @@
         aria-labelledby="admin-modal-title"
       >
         <div class="modal-header">
-          <h2 id="admin-modal-title">Admin dashboard</h2>
+          <h2 id="admin-modal-title">Panel de administración</h2>
           <button
             class="modal-close"
             type="button"
-            aria-label="Close"
+            aria-label="Cerrar"
             data-close-modal
           >
             ×
           </button>
         </div>
         <p class="modal-hint">
-          Process-local counters since the last backend restart. Refresh
-          manually after running force-actions — the dashboard doesn't
-          poll on its own (to keep the shared admin rate-limit headroom).
+          Contadores del proceso desde el último reinicio del backend.
+          Actualizá a mano después de una acción forzada: el panel no se
+          refresca solo (para no gastar el límite de pedidos del admin).
         </p>
         <div class="admin-controls">
-          <button id="admin-refresh-btn" type="button">Refresh</button>
+          <button id="admin-refresh-btn" type="button">Actualizar</button>
           <span id="admin-uptime" class="admin-uptime"></span>
         </div>
         <div id="admin-scroll-area">
           <section class="admin-stats" id="admin-stats">
-            <p class="modal-hint">Loading stats…</p>
+            <p class="modal-hint">Cargando las estadísticas…</p>
           </section>
           <section class="admin-sessions">
-            <h3 class="admin-section-title">Sessions (all users)</h3>
+            <h3 class="admin-section-title">Sesiones (todos los usuarios)</h3>
             <div id="admin-sessions-list">
-              <p class="modal-hint">Loading sessions…</p>
+              <p class="modal-hint">Cargando las sesiones…</p>
             </div>
           </section>
           <!-- #202: per-user quotas panel. Overrides + effective values
                + current usage, with an inline editor per row. Endpoints
                are requireAdmin-gated server-side. -->
           <section class="admin-sessions">
-            <h3 class="admin-section-title">Users &amp; quotas</h3>
+            <h3 class="admin-section-title">Usuarios y cuotas</h3>
             <div id="admin-users-list">
-              <p class="modal-hint">Loading users…</p>
+              <p class="modal-hint">Cargando los usuarios…</p>
             </div>
           </section>
           <!-- #201e-2: admin Groups CRUD section. List + create + edit
@@ -1035,19 +1035,19 @@
                inside the admin-only modal. -->
           <section class="admin-sessions">
             <div class="admin-section-header">
-              <h3 class="admin-section-title">Groups</h3>
-              <button id="admin-group-create-btn" type="button">+ New group</button>
+              <h3 class="admin-section-title">Grupos</h3>
+              <button id="admin-group-create-btn" type="button">+ Grupo nuevo</button>
             </div>
             <div id="admin-groups-list">
-              <p class="modal-hint">Loading groups…</p>
+              <p class="modal-hint">Cargando los grupos…</p>
             </div>
           </section>
           <!-- #201e-2: cross-user observe-log. Shows who watched whose
                session, when. Read-only — actions live elsewhere. -->
           <section class="admin-sessions">
-            <h3 class="admin-section-title">Observe log (all users)</h3>
+            <h3 class="admin-section-title">Registro de observación (todos los usuarios)</h3>
             <div id="admin-observe-log">
-              <p class="modal-hint">Loading observe log…</p>
+              <p class="modal-hint">Cargando el registro de observación…</p>
             </div>
           </section>
         </div>
@@ -1069,28 +1069,28 @@
         aria-labelledby="my-groups-modal-title"
       >
         <div class="modal-header">
-          <h2 id="my-groups-modal-title">My groups</h2>
+          <h2 id="my-groups-modal-title">Mis grupos</h2>
           <button
             class="modal-close"
             type="button"
-            aria-label="Close"
+            aria-label="Cerrar"
             data-close-modal
           >
             ×
           </button>
         </div>
         <p class="modal-hint">
-          Groups you lead. Click <strong>Observe</strong> on any
-          member's session to open a read-only view of their terminal
-          — input is disabled, every observe is recorded in the
-          session's audit log.
+          Los grupos que liderás. Tocá <strong>Observar</strong> en la
+          sesión de un miembro para ver su terminal en modo de solo
+          lectura: la entrada está desactivada y cada observación queda
+          en el registro de auditoría de la sesión.
         </p>
         <div class="admin-controls">
-          <button id="my-groups-refresh-btn" type="button">Refresh</button>
+          <button id="my-groups-refresh-btn" type="button">Actualizar</button>
         </div>
         <div id="admin-scroll-area">
           <section id="my-groups-list">
-            <p class="modal-hint">Loading…</p>
+            <p class="modal-hint">Cargando…</p>
           </section>
         </div>
       </div>
@@ -1111,7 +1111,7 @@
         aria-labelledby="observe-modal-title"
       >
         <div class="modal-header">
-          <h2 id="observe-modal-title">Observing</h2>
+          <h2 id="observe-modal-title">Observando</h2>
           <div class="observe-modal-header-actions">
             <!-- Shown only when opened from the admin dashboard
                  (observeModal.ts toggles `hidden` on `canOperate`);
@@ -1122,12 +1122,12 @@
               type="button"
               hidden
             >
-              Take control
+              Tomar el control
             </button>
             <button
               class="modal-close"
               type="button"
-              aria-label="Close"
+              aria-label="Cerrar"
               data-close-modal
             >
               ×
@@ -1135,8 +1135,8 @@
           </div>
         </div>
         <p class="modal-hint" id="observe-modal-hint">
-          Read-only view. Input is disabled — every observe-attach is
-          logged.
+          Vista de solo lectura. La entrada está desactivada y cada
+          observación queda registrada.
         </p>
         <div id="observe-terminal-host"></div>
       </div>
@@ -1156,23 +1156,23 @@
         aria-labelledby="observers-modal-title"
       >
         <div class="modal-header">
-          <h2 id="observers-modal-title">Observers</h2>
+          <h2 id="observers-modal-title">Observadores</h2>
           <button
             class="modal-close"
             type="button"
-            aria-label="Close"
+            aria-label="Cerrar"
             data-close-modal
           >
             ×
           </button>
         </div>
         <p class="modal-hint" id="observers-modal-hint">
-          Read-only attaches to this session. Each row is one open →
-          close cycle; an unset end time means the observer is still
-          watching.
+          Conexiones de solo lectura a esta sesión. Cada fila va de que
+          se abrió a que se cerró; sin hora de fin, el observador sigue
+          mirando.
         </p>
         <div id="observers-modal-list">
-          <p class="modal-hint">Loading…</p>
+          <p class="modal-hint">Cargando…</p>
         </div>
       </div>
     </div>
@@ -1190,50 +1190,51 @@
         aria-labelledby="ports-modal-title"
       >
         <div class="modal-header">
-          <h2 id="ports-modal-title">Exposed ports</h2>
+          <h2 id="ports-modal-title">Puertos expuestos</h2>
           <button
             class="modal-close"
             type="button"
-            aria-label="Close"
+            aria-label="Cerrar"
             data-close-modal
           >
             ×
           </button>
         </div>
         <p class="modal-hint">
-          Expose a port your session is listening on. Changes take effect
-          immediately — no need to restart the session. Public ports skip
-          authentication (anyone with the URL can reach them); use only for
-          webhooks / OAuth callbacks. Readiness path (optional) is probed
-          during session bootstrap to report when the port answers — it is
-          advisory and never fails the session.
+          Exponé un puerto en el que escucha tu sesión. Los cambios se
+          aplican enseguida, sin reiniciar la sesión. Los puertos públicos
+          no piden autenticación (cualquiera con la URL llega); usalos solo
+          para webhooks o callbacks de OAuth. La ruta de disponibilidad
+          (opcional) se consulta durante el bootstrap para avisar cuándo
+          responde el puerto: es informativa y nunca hace fallar la sesión.
         </p>
         <table class="ports-table" id="ports-modal-table">
           <thead>
             <tr>
-              <th scope="col">Container port</th>
-              <th scope="col">Public</th>
-              <th scope="col">Readiness path</th>
-              <th scope="col">Timeout (s)</th>
-              <th scope="col" aria-label="Remove"></th>
+              <th scope="col">Puerto del contenedor</th>
+              <th scope="col">Público</th>
+              <th scope="col">Ruta de disponibilidad</th>
+              <th scope="col">Espera (s)</th>
+              <th scope="col" aria-label="Quitar"></th>
             </tr>
           </thead>
           <tbody id="ports-modal-table-body"></tbody>
         </table>
         <button type="button" id="ports-modal-add-row" class="env-add-row">
-          + Add port
+          + Agregar puerto
         </button>
         <p class="modal-hint" id="ports-modal-privileged-hint" hidden>
-          Privileged ports (&lt; 1024) need the session to have been created
-          with privileged ports enabled. Recreate the session to add one.
+          Los puertos privilegiados (&lt; 1024) necesitan que la sesión se
+          haya creado con los puertos privilegiados permitidos. Creá la
+          sesión de nuevo para agregar uno.
         </p>
         <p class="modal-field-error" id="ports-modal-error" role="alert" hidden></p>
         <div class="modal-actions">
           <button type="button" id="ports-modal-cancel" data-close-modal>
-            Cancel
+            Cancelar
           </button>
           <button type="button" id="ports-modal-save" class="modal-primary-action">
-            Save
+            Guardar
           </button>
         </div>
       </div>
@@ -1253,24 +1254,24 @@
         aria-labelledby="admin-group-modal-title"
       >
         <div class="modal-header">
-          <h2 id="admin-group-modal-title">New group</h2>
+          <h2 id="admin-group-modal-title">Grupo nuevo</h2>
           <button
             class="modal-close"
             type="button"
-            aria-label="Close"
+            aria-label="Cerrar"
             data-close-modal
           >
             ×
           </button>
         </div>
         <p class="modal-hint">
-          The lead is implicitly added as a member. Members can be
-          added via the row actions on the Groups list after the
-          group is created.
+          El líder queda como miembro sin agregarlo. Los demás miembros se
+          agregan desde las acciones de la fila en la lista de Grupos,
+          después de crear el grupo.
         </p>
         <form id="admin-group-form" novalidate>
           <label class="modal-field">
-            <span>Name</span>
+            <span>Nombre</span>
             <input
               id="admin-group-name"
               type="text"
@@ -1280,7 +1281,7 @@
             />
           </label>
           <label class="modal-field">
-            <span>Description (optional)</span>
+            <span>Descripción (opcional)</span>
             <input
               id="admin-group-description"
               type="text"
@@ -1289,19 +1290,19 @@
             />
           </label>
           <label class="modal-field">
-            <span>Lead user id</span>
+            <span>Id del usuario líder</span>
             <input
               id="admin-group-lead-user-id"
               type="text"
               maxlength="128"
               autocomplete="off"
-              placeholder="UUID of the lead user"
+              placeholder="UUID del usuario líder"
               required
             />
           </label>
           <div class="modal-actions">
-            <button type="button" data-close-modal>Cancel</button>
-            <button type="submit" id="admin-group-submit-btn">Save</button>
+            <button type="button" data-close-modal>Cancelar</button>
+            <button type="submit" id="admin-group-submit-btn">Guardar</button>
           </div>
         </form>
       </div>
@@ -1320,38 +1321,38 @@
         aria-labelledby="admin-group-members-modal-title"
       >
         <div class="modal-header">
-          <h2 id="admin-group-members-modal-title">Members</h2>
+          <h2 id="admin-group-members-modal-title">Miembros</h2>
           <button
             class="modal-close"
             type="button"
-            aria-label="Close"
+            aria-label="Cerrar"
             data-close-modal
           >
             ×
           </button>
         </div>
         <p class="modal-hint" id="admin-group-members-modal-hint">
-          The lead is shown with a badge and cannot be removed —
-          reassign the lead via Edit first.
+          El líder aparece con una insignia y no se puede quitar: primero
+          asigná otro líder con Editar.
         </p>
         <form id="admin-group-add-member-form" novalidate>
           <label class="modal-field">
-            <span>Add member by user id</span>
+            <span>Agregar un miembro por id de usuario</span>
             <input
               id="admin-group-add-member-input"
               type="text"
               maxlength="128"
               autocomplete="off"
-              placeholder="UUID of the user to add"
+              placeholder="UUID del usuario a agregar"
               required
             />
           </label>
           <div class="modal-actions">
-            <button type="submit">Add</button>
+            <button type="submit">Agregar</button>
           </div>
         </form>
         <div id="admin-group-members-list">
-          <p class="modal-hint">Loading members…</p>
+          <p class="modal-hint">Cargando los miembros…</p>
         </div>
       </div>
     </div>
@@ -1369,47 +1370,47 @@
         aria-labelledby="save-template-modal-title"
       >
         <div class="modal-header">
-          <h2 id="save-template-modal-title">Save as template</h2>
+          <h2 id="save-template-modal-title">Guardar como plantilla</h2>
           <button
             class="modal-close"
             type="button"
-            aria-label="Close"
+            aria-label="Cerrar"
             data-close-modal
           >
             ×
           </button>
         </div>
         <p class="modal-hint">
-          Saves the current form as a reusable preset. Secret values
-          (env vars marked secret, PAT, SSH private key) are stripped
-          before storage; the recipient re-supplies them when using
-          the template.
+          Guarda el formulario actual como una configuración reutilizable.
+          Los valores secretos (variables marcadas secretas, el token y la
+          clave privada SSH) no se guardan: se vuelven a pedir al usar la
+          plantilla.
         </p>
         <form id="save-template-form" novalidate>
           <label class="modal-field">
-            <span>Template name</span>
+            <span>Nombre de la plantilla</span>
             <input
               id="save-template-name"
               type="text"
-              placeholder="my-stack"
+              placeholder="mi-stack"
               maxlength="64"
               autocomplete="off"
               required
             />
           </label>
           <label class="modal-field">
-            <span>Description (optional)</span>
+            <span>Descripción (opcional)</span>
             <input
               id="save-template-description"
               type="text"
-              placeholder="What this template configures"
+              placeholder="Qué configura esta plantilla"
               maxlength="512"
               autocomplete="off"
             />
           </label>
           <div class="session-modal-actions">
-            <button type="button" data-close-modal>Cancel</button>
-            <button type="submit" id="save-template-submit">Save template</button>
+            <button type="button" data-close-modal>Cancelar</button>
+            <button type="submit" id="save-template-submit">Guardar plantilla</button>
           </div>
         </form>
       </div>
@@ -1425,25 +1426,26 @@
         aria-labelledby="paste-modal-title"
       >
         <div class="modal-header">
-          <h2 id="paste-modal-title">Paste into terminal</h2>
+          <h2 id="paste-modal-title">Pegar en la terminal</h2>
           <button
             class="modal-close"
             type="button"
-            aria-label="Close"
+            aria-label="Cerrar"
             data-close-modal
           >
             ×
           </button>
         </div>
         <p class="modal-hint">
-          Long-press to paste from your clipboard, then tap Send. Multi-line
-          content is bracketed so it won't auto-execute on paste.
+          Mantené apretado para pegar desde el portapapeles y tocá Enviar.
+          El texto de varias líneas se pega entre corchetes para que no se
+          ejecute solo.
         </p>
         <textarea
           id="paste-textarea"
           rows="6"
           maxlength="65536"
-          placeholder="Paste here…"
+          placeholder="Pegá acá…"
           autocomplete="off"
           autocorrect="off"
           autocapitalize="off"
@@ -1451,9 +1453,9 @@
         ></textarea>
         <div class="paste-modal-actions">
           <button id="paste-clipboard-btn" type="button">
-            Paste from clipboard
+            Pegar del portapapeles
           </button>
-          <button id="paste-send-btn" type="button" disabled>Send</button>
+          <button id="paste-send-btn" type="button" disabled>Enviar</button>
         </div>
       </div>
     </div>
@@ -1467,31 +1469,31 @@
         aria-labelledby="actions-menu-title"
       >
         <div class="modal-header">
-          <h2 id="actions-menu-title">Insert</h2>
+          <h2 id="actions-menu-title">Insertar</h2>
           <button
             class="modal-close"
             type="button"
-            aria-label="Close"
+            aria-label="Cerrar"
             data-close-modal
           >
             ×
           </button>
         </div>
         <button class="actions-menu-item" id="actions-paste-btn" type="button" role="menuitem">
-          <span class="actions-menu-item-title">Paste text</span>
-          <span class="actions-menu-item-hint">Send clipboard or typed text into the terminal</span>
+          <span class="actions-menu-item-title">Pegar texto</span>
+          <span class="actions-menu-item-hint">Enviar a la terminal el portapapeles o un texto escrito</span>
         </button>
         <button class="actions-menu-item" id="actions-attach-btn" type="button" role="menuitem">
-          <span class="actions-menu-item-title">Attach file</span>
-          <span class="actions-menu-item-hint">Upload an image, PDF, or any file Claude CLI can read</span>
+          <span class="actions-menu-item-title">Adjuntar un archivo</span>
+          <span class="actions-menu-item-hint">Subir una imagen, un PDF o cualquier archivo que pueda leer la CLI de Claude</span>
         </button>
         <button class="actions-menu-item" id="actions-download-btn" type="button" role="menuitem">
-          <span class="actions-menu-item-title">Download file…</span>
-          <span class="actions-menu-item-hint">Save a workspace file to this device (path relative to the workspace)</span>
+          <span class="actions-menu-item-title">Descargar un archivo…</span>
+          <span class="actions-menu-item-hint">Guardar en este dispositivo un archivo del workspace (ruta relativa al workspace)</span>
         </button>
         <button class="actions-menu-item" id="actions-select-btn" type="button" role="menuitem">
-          <span class="actions-menu-item-title">Select &amp; copy</span>
-          <span class="actions-menu-item-hint">Copy the current selection; on touch, drag to select — it copies automatically</span>
+          <span class="actions-menu-item-title">Seleccionar y copiar</span>
+          <span class="actions-menu-item-hint">Copiar la selección actual; en pantalla táctil, arrastrá para seleccionar y se copia sola</span>
         </button>
       </div>
     </div>

@@ -23,17 +23,17 @@ export function formatBytes(b: number): string {
 	return `${(b / 1024 / 1024 / 1024).toFixed(2)} GiB`;
 }
 
-/** "just now" / "5 min ago" / "3 h ago" / "2 d ago" / a date past a month. */
+/** "recién" / "hace 5 min" / "hace 3 h" / "hace 2 d" / a date past a month. */
 export function relativeDate(iso: string, now = Date.now()): string {
 	const t = new Date(iso).getTime();
 	if (Number.isNaN(t)) return iso;
 	const s = Math.max(0, Math.round((now - t) / 1000));
-	if (s < 60) return "just now";
+	if (s < 60) return "recién";
 	const m = Math.round(s / 60);
-	if (m < 60) return `${m} min ago`;
+	if (m < 60) return `hace ${m} min`;
 	const h = Math.round(m / 60);
-	if (h < 24) return `${h} h ago`;
+	if (h < 24) return `hace ${h} h`;
 	const d = Math.round(h / 24);
-	if (d < 31) return `${d} d ago`;
+	if (d < 31) return `hace ${d} d`;
 	return new Date(t).toLocaleDateString();
 }

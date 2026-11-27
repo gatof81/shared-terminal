@@ -16,7 +16,11 @@ export function appendDiffRows(scroller: HTMLElement, rows: readonly DiffRow[]):
 	scroller.appendChild(diffTable(rows.slice(0, MAX_DIFF_ROWS)));
 	if (rows.length > MAX_DIFF_ROWS) {
 		scroller.appendChild(
-			el("div", "files-tree-note", `Showing the first ${MAX_DIFF_ROWS} lines of this diff.`),
+			el(
+				"div",
+				"files-tree-note",
+				`Se muestran las primeras ${MAX_DIFF_ROWS} líneas de este diff.`,
+			),
 		);
 	}
 }

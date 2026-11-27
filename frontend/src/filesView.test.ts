@@ -262,7 +262,7 @@ describe("tree", () => {
 		expect(rowFor(".env")?.classList.contains("restricted")).toBe(true);
 		// Restricted dirs are not expandable.
 		expect(rowFor(".st")?.hasAttribute("aria-expanded")).toBe(false);
-		expect(rowFor("link")?.title).toContain("not followed");
+		expect(rowFor("link")?.title).toContain("no se sigue");
 	});
 
 	it("expands folders lazily", async () => {
@@ -288,7 +288,7 @@ describe("tree", () => {
 		await flush();
 		expect($("files-tree").textContent).toContain("boom");
 		const retry = [...$("files-tree").querySelectorAll("button")].find(
-			(b) => b.textContent === "Retry",
+			(b) => b.textContent === "Reintentar",
 		);
 		retry?.click();
 		await flush();
@@ -300,7 +300,7 @@ describe("tree", () => {
 		selectSession("s1");
 		$("view-files-btn").click();
 		await flush();
-		expect($("files-tree").textContent).toContain("empty");
+		expect($("files-tree").textContent).toContain("vacío");
 	});
 
 	it("never requests a preview for restricted entries", async () => {
@@ -310,7 +310,7 @@ describe("tree", () => {
 		rowFor(".env")?.click();
 		await flush();
 		expect(api.previewWorkspaceFile).not.toHaveBeenCalled();
-		expect($("files-preview").textContent).toContain("restricted");
+		expect($("files-preview").textContent).toContain("restringid");
 	});
 
 	it("drops the previous session's tree on session switch", async () => {
@@ -370,13 +370,15 @@ describe("preview", () => {
 		expect(previewEl.querySelector("h1")?.textContent).toBe("Title");
 		expect(previewEl.querySelector("script")).toBeNull();
 		const source = [...previewEl.querySelectorAll("button")].find(
-			(b) => b.textContent === "Source",
+			(b) => b.textContent === "Fuente",
 		);
 		source?.click();
 		expect(previewEl.querySelector("h1")).toBeNull();
 		expect(previewEl.querySelector(".files-code-body")?.textContent).toContain("# Title");
 		// Restore the default for later tests (mode persists per page load).
-		[...previewEl.querySelectorAll("button")].find((b) => b.textContent === "Preview")?.click();
+		[...previewEl.querySelectorAll("button")]
+			.find((b) => b.textContent === "Vista previa")
+			?.click();
 		// Breadcrumbs reflect the selection.
 		expect($("files-breadcrumbs").textContent).toBe("workspace/README.md");
 	});
@@ -403,9 +405,9 @@ describe("preview", () => {
 			reason: "binary",
 		});
 		const previewEl = $("files-preview");
-		expect(previewEl.textContent).toContain("binary");
+		expect(previewEl.textContent).toContain("binario");
 		[...previewEl.querySelectorAll("button")]
-			.find((b) => b.textContent === "Download file")
+			.find((b) => b.textContent === "Descargar el archivo")
 			?.click();
 		await flush();
 		expect(api.downloadSessionFile).toHaveBeenCalledWith("s1", "blob.bin", null);
@@ -447,10 +449,10 @@ describe("preview", () => {
 		});
 		const previewEl = $("files-preview");
 		expect(previewEl.querySelector("h1")).toBeNull();
-		expect(previewEl.textContent).toContain("Too large to render as Markdown");
-		expect([...previewEl.querySelectorAll("button")].some((b) => b.textContent === "Preview")).toBe(
-			false,
-		);
+		expect(previewEl.textContent).toContain("Demasiado grande para mostrarlo como Markdown");
+		expect(
+			[...previewEl.querySelectorAll("button")].some((b) => b.textContent === "Vista previa"),
+		).toBe(false);
 		expect(previewEl.querySelector(".files-code-body")?.textContent).toContain("# Big");
 	});
 
@@ -461,6 +463,6 @@ describe("preview", () => {
 		await flush();
 		rowFor("README.md")?.click();
 		await flush();
-		expect($("files-preview").textContent).toContain("restricted");
+		expect($("files-preview").textContent).toContain("restringid");
 	});
 });
