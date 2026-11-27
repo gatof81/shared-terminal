@@ -1,4 +1,6 @@
-import { expect, test } from "./fixtures.js";
+import type { Page } from "@playwright/test";
+import { type App, expect, test } from "./fixtures.js";
+import { CONV_IDS, PROJECT_IDS, PROJECT_SESSION_IDS } from "./mockBackend.js";
 
 /**
  * The terminal invariant (docs/design/ui-unificada.md §5.1): switching
@@ -47,6 +49,439 @@ test.describe("terminal invariant", () => {
 		backend.pushTerminalOutput(sock.sessionId, "\r\nstill here\r\n");
 		await app.switchView("terminal");
 		await expect(page.locator(".tab-pane.active")).toContainText("still here");
+	});
+
+	test("rail ⇄ topic ⇄ Pendientes ⇄ menus ⇄ terminal: nothing touches the terminal", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.enableConversations();
+		await app.login("alice");
+		await app.openSession("my-project");
+		await app.expectTerminalReady();
+		await page.waitForTimeout(400);
+		const sockets = backend.terminalSockets.length;
+		const sock = backend.terminalSockets[0]!;
+		const framesBefore = sock.sent.length;
+		const rowsBefore = await page.locator(".tab-pane.active .xterm-rows > div").count();
+		const topicRow = (title: string) => page.locator(".rail-body .rail-conv", { hasText: title });
+
+		// The project from its row in the sidebar: its rail.
+		await app.openSidebar();
+		await page.locator(`a.project-row[data-project-id="${PROJECT_IDS.hz}"]`).click();
+		await expect(page.locator(".rail-body")).toBeVisible();
+		// Topic, another topic, back to the rail.
+		await topicRow("Optimización de CI").click();
+		await expect(page.locator("#ps-topic-title")).toHaveText("Optimización de CI");
+		if (app.mobile) await page.locator(".ps-back").click();
+		await topicRow("Rediseño de UI/UX").click();
+		await expect(page.locator("#ps-topic-title")).toHaveText("Rediseño de UI/UX");
+		// Pendientes and the topic's menu over the topic.
+		const inbox = page.locator(".acp-inbox-card");
+		await page.locator("#inbox-btn").click();
+		await expect(inbox).toBeVisible();
+		await page.keyboard.press("Escape");
+		await expect(inbox).toBeHidden();
+		await page.locator(".ps-topic-head .pv-menu-btn").click();
+		await expect(page.locator('[role="menu"].action-menu')).toBeVisible();
+		await page.keyboard.press("Escape");
+		await expect(page.locator('[role="menu"].action-menu')).toBeHidden();
+		await page.goBack();
+		await expect(page.locator(".rail-body")).toBeVisible();
+		// The rail's ‹ to the main level: the terminal again. Wide it goes back
+		// to the entry the project was entered from (Forward returns to the
+		// rail); on a phone it is a new entry for the home (the list as the
+		// screen), whose row is one more.
+		await page.locator(".rail-back").click();
+		if (app.mobile) {
+			await expect(page.locator("body")).toHaveClass(/\bhome-on\b/);
+			await app.sessionRow("my-project").locator(".session-select").click();
+		}
+		await expect(page.locator("#project-view")).toBeHidden();
+		if (app.mobile) {
+			await page.goBack();
+			await page.goBack();
+		} else await page.goForward();
+		await expect(page.locator(".rail-body")).toBeVisible();
+		if (app.mobile) {
+			await page.goForward();
+			await page.goForward();
+		} else await page.goBack();
+		await expect(page.locator("#project-view")).toBeHidden();
+		// Pendientes and the account's menu with the terminal on screen.
+		await page.locator("#inbox-btn").click();
+		await expect(inbox).toBeVisible();
+		await inbox.getByRole("button", { name: "Cerrar Pendientes" }).click();
+		await expect(inbox).toBeHidden();
+		await app.openUserMenu();
+		await page.keyboard.press("Escape");
+		await page.waitForTimeout(400);
+
+		expect(backend.terminalSockets.length, "no new terminal socket").toBe(sockets);
+		expect(sock.closed, "the attach stayed open").toBe(false);
+		expect(sock.sent.length - framesBefore, "no frame of any kind (no resize)").toBe(0);
+		expect(await page.locator(".tab-pane.active .xterm-rows > div").count()).toBe(rowsBefore);
+		expect(app.errors).toEqual([]);
+	});
+
+	test("Archive ⇄ an archived chat ⇄ «Continuar…» ⇄ back: nothing touches the terminal", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.enableConversations();
+		await app.login("alice");
+		await app.openSession("my-project");
+		await app.expectTerminalReady();
+		await page.waitForTimeout(400);
+		const sockets = backend.terminalSockets.length;
+		const sock = backend.terminalSockets[0]!;
+		const framesBefore = sock.sent.length;
+		const rowsBefore = await page.locator(".tab-pane.active .xterm-rows > div").count();
+
+		// The project, its Archive, the previous Project Chat.
+		await app.openSidebar();
+		await page.locator(`a.project-row[data-project-id="${PROJECT_IDS.hz}"]`).click();
+		await page.locator(".rail-body .rail-archive-row").click();
+		await page.locator(".ps-archive-row", { hasText: "Project Chat anterior" }).click();
+		await expect(page.locator("#ps-archive-title")).toHaveText("Project Chat anterior");
+		// «Continuar en una conversación nueva»: a topic, created and opened.
+		await page.getByRole("button", { name: "Continuar en una conversación nueva" }).click();
+		await page.locator(".dialog-card .modal-primary-action").click();
+		await expect(page.locator("#ps-topic-title")).toHaveText(
+			"Continuación de Project Chat anterior",
+		);
+		// Back to the archived chat, to the list, and out to the session.
+		await page.goBack();
+		await expect(page.locator("#ps-archive-title")).toHaveText("Project Chat anterior");
+		await page.goBack();
+		await expect(page.locator("#ps-archive-title")).toHaveText("Archivo · solo lectura");
+		// A phone's stack: the project's screen (the rail, with its ‹) is one more Back.
+		if (app.mobile) await page.goBack();
+		await page.locator(".rail-back").click();
+		if (app.mobile) await app.sessionRow("my-project").locator(".session-select").click();
+		await expect(page.locator("#project-view")).toBeHidden();
+		await page.waitForTimeout(400);
+
+		expect(backend.terminalSockets.length, "no new terminal socket").toBe(sockets);
+		expect(sock.closed, "the attach stayed open").toBe(false);
+		expect(sock.sent.length - framesBefore, "no frame of any kind (no resize)").toBe(0);
+		expect(await page.locator(".tab-pane.active .xterm-rows > div").count()).toBe(rowsBefore);
+		expect(app.errors).toEqual([]);
+	});
+
+	// The two Herramientas walks again with a 300-px sidebar (test-only
+	// CSS): at 1280 px it leaves the terminal a 958-px box, on a cell edge
+	// of the CI font, where a legitimate refit flipped a column before
+	// terminalFit.ts.
+	for (const sidebar of [null, 300] as const) {
+		const variant = sidebar ? ` (sidebar ${sidebar} px)` : "";
+		const forceSidebar = async (app: App, page: Page) => {
+			if (!sidebar) return;
+			test.skip(app.mobile, "a phone has no sidebar column");
+			await page.addInitScript((px: number) => {
+				const style = document.createElement("style");
+				style.textContent = `main.sidebar-open { grid-template-columns: ${px}px 1fr !important; }`;
+				document.addEventListener("DOMContentLoaded", () => document.head.appendChild(style));
+			}, sidebar);
+		};
+
+		test(`topic ⇄ Herramientas ⇄ menus: no resize, no new socket; another agent is another attach${variant}`, async ({
+			app,
+			backend,
+			page,
+		}) => {
+			await forceSidebar(app, page);
+			backend.enableConversations();
+			backend.enableWorks();
+			const topicHash = `#/projects/${PROJECT_IDS.hz}/c/${CONV_IDS.ci}`;
+			await app.login("alice", topicHash);
+			await expect(page.locator("#ps-topic-title")).toHaveText("Optimización de CI");
+			const menu = page.locator('[role="menu"].action-menu');
+			const agentMenu = async () => {
+				await page.locator('#project-view .acp-agent-id[data-agent="dev"]').first().click();
+				await expect(menu).toBeVisible();
+			};
+			// Herramientas of @dev, Terminal: its session attaches — once.
+			await agentMenu();
+			await menu.getByRole("menuitem", { name: /^Terminal de la sesión/ }).click();
+			await app.expectTerminalReady();
+			await page.waitForTimeout(400);
+			const sockets = backend.terminalSockets.length;
+			const sock = backend.terminalSockets.find(
+				(s) => s.sessionId === PROJECT_SESSION_IDS.developer2 && !s.closed,
+			)!;
+			expect(sock).toBeTruthy();
+			const framesBefore = sock.sent.length;
+			const rowsBefore = await page.locator(".tab-pane.active .xterm-rows > div").count();
+
+			// «‹ Tema» and Forward; Back and Forward.
+			await page.locator(".tools-back").click();
+			await expect(page.locator("#ps-topic-title")).toBeVisible();
+			await page.goForward();
+			await expect(page.locator(".tools-bar")).toBeVisible();
+			await page.goBack();
+			await expect(page.locator("#ps-topic-title")).toBeVisible();
+			// The agent's menu over the topic, dismissed; then its Files, Git, Terminal.
+			await agentMenu();
+			await app.escape();
+			await expect(menu).toBeHidden();
+			await agentMenu();
+			await menu.getByRole("menuitem", { name: /^Files · principal/ }).click();
+			await app.expectView("files");
+			await page.click("#view-git-btn");
+			await app.expectView("git");
+			await page.locator(".tools-ws").selectOption("ci-cache");
+			await expect(page.locator("#git-list")).toContainText("ci.yml");
+			await page.click("#view-terminal-btn");
+			await app.expectView("terminal");
+			// The session's ⋯ over the tools.
+			await page.click("#session-menu-btn");
+			await expect(menu).toBeVisible();
+			await app.escape();
+			await page.locator(".tools-back").click();
+			await expect(page.locator("#ps-topic-title")).toBeVisible();
+			await page.goForward();
+			await expect(page.locator(".tools-bar")).toBeVisible();
+			await page.waitForTimeout(400);
+
+			expect(backend.terminalSockets.length, "no new terminal socket").toBe(sockets);
+			expect(sock.closed, "the attach stayed open").toBe(false);
+			expect(sock.sent.length - framesBefore, "no frame of any kind (no resize)").toBe(0);
+			expect(await page.locator(".tab-pane.active .xterm-rows > div").count()).toBe(rowsBefore);
+
+			// Another AGENT: its session attaches — a new socket, never a resize of this one.
+			await page.locator(".tools-agent").selectOption("arq");
+			await expect
+				.poll(() =>
+					backend.terminalSockets.some(
+						(s) => s.sessionId === PROJECT_SESSION_IDS.architect && !s.closed,
+					),
+				)
+				.toBe(true);
+			expect(sock.sent.filter((f) => f.type === "resize").length).toBe(0);
+			expect(app.errors).toEqual([]);
+		});
+
+		test(`Herramientas ⇄ Pendientes (criterion 7): no resize, no new socket; a review's tools are another attach${variant}`, async ({
+			app,
+			backend,
+			page,
+		}) => {
+			await forceSidebar(app, page);
+			backend.enableConversations();
+			backend.enableWorks();
+			// An interruption of @arq waiting in Pendientes.
+			backend.addAcpMessage({
+				to_id: "arq",
+				body: "@arq medí también la variante sin shards.",
+				project_id: PROJECT_IDS.hz,
+				conversation_id: CONV_IDS.ci,
+				state: "uncertain",
+				note: "se reinició el runner de @arq",
+			});
+			await app.login("alice", `#/projects/${PROJECT_IDS.hz}/c/${CONV_IDS.ci}`);
+			await expect(page.locator("#ps-topic-title")).toHaveText("Optimización de CI");
+			const menu = page.locator('[role="menu"].action-menu');
+			await page.locator('#project-view .acp-agent-id[data-agent="dev"]').first().click();
+			await menu.getByRole("menuitem", { name: /^Terminal de la sesión/ }).click();
+			await app.expectTerminalReady();
+			await page.waitForTimeout(400);
+			const sockets = backend.terminalSockets.length;
+			const sock = backend.terminalSockets.find(
+				(s) => s.sessionId === PROJECT_SESSION_IDS.developer2 && !s.closed,
+			)!;
+			expect(sock).toBeTruthy();
+			const framesBefore = sock.sent.length;
+			const rowsBefore = await page.locator(".tab-pane.active .xterm-rows > div").count();
+
+			// Pendientes over each of the tools' views, opened from the header and dismissed.
+			const inbox = page.locator("#inbox-btn");
+			const panel = page.locator(".acp-inbox-card");
+			for (const view of ["terminal", "files", "git"] as const) {
+				if (view !== "terminal") await page.click(`#view-${view}-btn`);
+				await app.expectView(view);
+				await expect(page.locator(".tools-bar")).toBeVisible();
+				await inbox.click();
+				await expect(panel).toBeVisible();
+				await app.escape();
+				await expect(panel).toBeHidden();
+			}
+			await page.click("#view-terminal-btn");
+			await app.expectView("terminal");
+			await page.waitForTimeout(400);
+			expect(backend.terminalSockets.length, "no new terminal socket").toBe(sockets);
+			expect(sock.closed, "the attach stayed open").toBe(false);
+			expect(sock.sent.length - framesBefore, "no frame of any kind (no resize)").toBe(0);
+			expect(await page.locator(".tab-pane.active .xterm-rows > div").count()).toBe(rowsBefore);
+
+			// From Pendientes, an interruption of @arq: «Ver cambios en Git» opens
+			// @arq's Herramientas — its session attaches; @dev's gets no resize.
+			await inbox.click();
+			await panel
+				.locator(".acp-ib-item.is-interrupted", { hasText: "variante sin shards" })
+				.getByRole("button", { name: "Revisar", exact: true })
+				.click();
+			const review = page.locator(".acp-review-card");
+			await expect(review).toBeVisible();
+			await review.getByRole("button", { name: "Ver cambios en Git" }).click();
+			await expect(review).toBeHidden();
+			await app.expectView("git");
+			await expect(page.locator(".tools-agent")).toHaveValue("arq");
+			await page.click("#view-terminal-btn");
+			await expect
+				.poll(() =>
+					backend.terminalSockets.some(
+						(s) => s.sessionId === PROJECT_SESSION_IDS.architect && !s.closed,
+					),
+				)
+				.toBe(true);
+			expect(
+				sock.sent.filter((f) => f.type === "resize").length,
+				"no resize to @dev's session",
+			).toBe(0);
+			expect(app.errors).toEqual([]);
+		});
+	}
+
+	// A view switch reuses the previous fit, and a real change refits to a
+	// grid that depends only on the box: FitAddon's fit, whose cell depends
+	// on the current column count, flipped one column per fit on a box at a
+	// cell edge (terminalFit.ts). One width passing proves nothing, so sweep
+	// 1 px around the project's width (desktop crosses several cell edges
+	// in ±12 px; the phone's two widths sit on one with the CI font).
+	test("every window width: a view switch sends no resize and opens no socket", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		test.setTimeout(240_000);
+		backend.enableConversations();
+		backend.enableWorks();
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/c/${CONV_IDS.ci}`);
+		await expect(page.locator("#ps-topic-title")).toHaveText("Optimización de CI");
+		const menu = page.locator('[role="menu"].action-menu');
+		await page.locator('#project-view .acp-agent-id[data-agent="dev"]').first().click();
+		await menu.getByRole("menuitem", { name: /^Terminal de la sesión/ }).click();
+		await app.expectTerminalReady();
+		const sock = backend.terminalSockets.find(
+			(s) => s.sessionId === PROJECT_SESSION_IDS.developer2 && !s.closed,
+		)!;
+		expect(sock).toBeTruthy();
+		const base = page.viewportSize()!;
+		const widths = app.mobile
+			? [501, 518]
+			: Array.from({ length: 25 }, (_, i) => base.width - 12 + i);
+		// The terminal's grid: the last resize it sent (each one is sent,
+		// debounced 100 ms).
+		const grid = () => {
+			const last = sock.sent.filter((f) => f.type === "resize").at(-1);
+			return { cols: Number(last?.cols), rows: Number(last?.rows) };
+		};
+		const show = (g: { cols: number; rows: number }) => `${g.cols}×${g.rows}`;
+		const failed: string[] = [];
+		const resizesBefore = sock.sent.filter((f) => f.type === "resize").length;
+		for (const width of widths) {
+			// The window itself changing is a real change: it may resize.
+			await page.setViewportSize({ width, height: base.height });
+			await page.waitForTimeout(300);
+			const sockets = backend.terminalSockets.length;
+			const frames = sock.sent.length;
+			await app.switchView("files");
+			await app.switchView("terminal");
+			await app.switchView("git");
+			// «‹ Tema» and Forward: the topic and back to the tools. On the
+			// topic the window shrinks and comes back (a phone's keyboard for
+			// the composer): the terminal's box ends where it was.
+			await page.locator(".tools-back").click();
+			await expect(page.locator("#ps-topic-title")).toBeVisible();
+			await page.setViewportSize({ width, height: base.height - 300 });
+			await page.waitForTimeout(150);
+			await page.setViewportSize({ width, height: base.height });
+			await page.waitForTimeout(150);
+			await page.goForward();
+			await expect(page.locator(".tools-bar")).toBeVisible();
+			await app.switchView("terminal");
+			await page.waitForTimeout(250);
+			const resizes = sock.sent.slice(frames).filter((f) => f.type === "resize").length;
+			const opened = backend.terminalSockets.length - sockets;
+			if (resizes || opened || sock.sent.length !== frames)
+				failed.push(`${width}px: ${resizes} resize, ${opened} socket`);
+
+			// With the Terminal on screen, real changes. The keyboard (height
+			// only): the rows follow, the columns never move. Another width and
+			// back (another column count first): the same grid as before.
+			const before = grid();
+			await page.setViewportSize({ width, height: base.height - 300 });
+			await page.waitForTimeout(300);
+			const keyboard = grid();
+			if (keyboard.cols !== before.cols || keyboard.rows >= before.rows)
+				failed.push(`${width}px keyboard: ${show(before)} → ${show(keyboard)}`);
+			await page.setViewportSize({ width, height: base.height });
+			await page.waitForTimeout(300);
+			if (show(grid()) !== show(before))
+				failed.push(`${width}px keyboard closed: ${show(before)} → ${show(grid())}`);
+			await page.setViewportSize({ width: width + 40, height: base.height });
+			await page.waitForTimeout(300);
+			if (grid().cols <= before.cols) failed.push(`${width + 40}px: no refit`);
+			await page.setViewportSize({ width, height: base.height });
+			await page.waitForTimeout(300);
+			if (show(grid()) !== show(before))
+				failed.push(`${width}px after ${width + 40}px: ${show(before)} → ${show(grid())}`);
+		}
+		expect(sock.closed, "the attach stayed open").toBe(false);
+		// The window's own changes still refit: the grid followed the sweep.
+		expect(sock.sent.filter((f) => f.type === "resize").length).toBeGreaterThan(resizesBefore);
+		expect(failed, "widths where a view switch touched the terminal").toEqual([]);
+		expect(app.errors).toEqual([]);
+	});
+
+	// The tab row's + appears only once the terminal exists, i.e. right
+	// after its first fit: without a reserved height the row grew 3 px then
+	// and the box the first fit measured was not the box the terminal kept.
+	test("opening a session: the first fit's box is the final one, and the attach is the only size sent", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		await page.addInitScript(() => {
+			// The first height the app reads for a tab pane (its first fit).
+			const w = window as unknown as { __firstPaneHeight?: string };
+			const original = window.getComputedStyle;
+			window.getComputedStyle = function (el: Element, pseudo?: string | null) {
+				const style = original.call(window, el, pseudo);
+				if (w.__firstPaneHeight === undefined && el.classList.contains("tab-pane"))
+					w.__firstPaneHeight = style.height;
+				return style;
+			} as typeof window.getComputedStyle;
+		});
+		backend.enableConversations();
+		backend.enableWorks();
+		await app.login("alice", `#/projects/${PROJECT_IDS.hz}/c/${CONV_IDS.ci}`);
+		await page.locator('#project-view .acp-agent-id[data-agent="dev"]').first().click();
+		await page
+			.locator('[role="menu"].action-menu')
+			.getByRole("menuitem", { name: /^Terminal de la sesión/ })
+			.click();
+		await app.expectTerminalReady();
+		await page.waitForTimeout(400);
+		const [first, final] = await page.evaluate(() => [
+			(window as unknown as { __firstPaneHeight?: string }).__firstPaneHeight,
+			getComputedStyle(document.querySelector(".tab-pane.active")!).height,
+		]);
+		expect(Number.parseInt(String(first), 10), `first fit ${first}, final ${final}`).toBe(
+			Number.parseInt(final, 10),
+		);
+		const sock = backend.terminalSockets.find(
+			(s) => s.sessionId === PROJECT_SESSION_IDS.developer2 && !s.closed,
+		)!;
+		expect(sock.attach.cols).toBeGreaterThan(0);
+		expect(
+			sock.sent.filter((f) => f.type === "resize"),
+			"no resize after the attach",
+		).toEqual([]);
+		expect(app.errors).toEqual([]);
 	});
 
 	test("typing reaches the session and the echo renders", async ({ app, backend, page }) => {

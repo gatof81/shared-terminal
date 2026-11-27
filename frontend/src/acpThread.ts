@@ -1,7 +1,11 @@
-// acpThread.ts — the thread + composer of an ACP chat, shared by the
-// individual chat of an agent (acpChat.ts) and Project Chat
-// (acpProjectChat.ts). Same API, same store, same delivery; what differs is
-// the SOURCE: an agent's whole inbox, or only what was posted in a project.
+// acpThread.ts — the thread + composer of a project's topic
+// (acpConversation.ts), also the read-only thread of the Archive
+// (acpArchive.ts): what was written before topics, read where it is — the
+// previous Project Chat (`project_id` = the project, no conversation) or an
+// agent's previous direct messages (no project, no conversation). Same
+// timeline either way; an Archive chat has no composer and adds nothing to
+// its thread (an interruption is reviewed with the same dialog as in a
+// topic; an open question is answered in Pendientes).
 //
 // Data: one page over REST, then live rows and activity from /ws/acp
 // (acpLive.ts), applied by id; a (re)connect reloads the page; while the
@@ -11,55 +15,65 @@
 
 import { acpLiveUp, subscribeAcp } from "./acpLive.js";
 import {
-	ACTIVITY_STATE,
 	activityRows,
 	agentHue,
-	agentStatus,
-	answerText,
-	applyEdits,
 	authFromActivity,
-	groupThread,
-	mapThroughEdits,
+	busyElsewhere,
+	type Chips,
+	chipsOf,
+	eventTime,
+	isTeamPost,
+	isUnread,
+	itemMessages,
+	mentionQuery,
 	messagePlace,
-	questionForm,
-	recipientRow,
+	recipientState,
 	recipientsOf,
-	STATE_LABEL,
-	setRecipient,
-	type ThreadItem,
+	type TopicItem,
+	teamState,
+	topicTimeline,
 	upsert,
-	who,
 } from "./acpModel.js";
-import { acpReadTicket, setAcpAgents } from "./acpRegistry.js";
+import { questionCard } from "./acpQuestionCard.js";
+import { openReview } from "./acpReview.js";
+import { onAcpAgentsRead, requestAcpAgentsRead, watchAcpAgents } from "./acpStatusFeed.js";
 import {
 	type AcpActivity,
 	type AcpAgentInfo,
+	type AcpConversation,
 	type AcpFeed,
 	type AcpMessage,
 	type AcpQuestion,
-	acpAnswer,
+	acpConversationFeed,
 	acpFeed,
-	acpListAgents,
+	acpPost,
 	acpProjectFeed,
-	acpRequeue,
+	acpReadConversation,
 	acpSend,
 	uploadSessionFiles,
 } from "./api.js";
 import { markdownBlock } from "./chatMarkdown.js";
 import { ChatEndButton, END_SLACK, firstRowInView } from "./chatScroll.js";
-import { fromHistory } from "./router.js";
 import { el, syncChildren } from "./ui.js";
 
-export type ThreadSource = { kind: "agent"; name: string } | { kind: "project"; projectId: string };
+/**
+ * What a thread shows: a topic, or an Archive chat of project `projectId` —
+ * its previous Project Chat (`agent` null) or the previous direct messages
+ * of `agent`, one of its agents.
+ */
+export type ThreadSource =
+	| { kind: "conversation"; conversationId: string; projectId: string }
+	| { kind: "archive"; projectId: string; agent: string | null };
 
 const PAGE = 100;
 const FALLBACK_POLL_MS = 10_000;
-const STATUS_MS = 15_000;
 
 export interface ThreadState {
 	agents: AcpAgentInfo[];
 	auth: Map<string, boolean>;
 	project: { id: string; name: string } | null;
+	/** A topic's own row (title, archived, read mark) as its feed and live frames say. */
+	conversation: AcpConversation | null;
 	error: string;
 	/**
 	 * This chat's first-page reads: none answered yet, answered, 404, failed
@@ -87,20 +101,16 @@ export class AcpThread {
 	readonly input = el("textarea", "acp-chat-input");
 	/** The arrow, the surface's last cell; a spinner while a send is out and the field is empty. */
 	private readonly sendBtn = el("button", "acp-chat-send acp-cbtn");
-	/** Project Chat with more than one agent: "+" opens the recipients menu. */
+	/** «Para:»'s "+": the recipients menu. */
 	private readonly pickBtn = el("button", "acp-pick-btn acp-cbtn");
 	/**
-	 * One line above the surface, only when it has something to say: who a
-	 * Project Chat message goes to ("Para @a · @b": what recipientsOf will
-	 * send — the leading mentions may be out of view in a long text) and the
-	 * notices (sending, the queue, the size). Never two rows.
+	 * One line above the surface, only when it has something to say: the
+	 * notices (sending, the size). Never two rows.
 	 */
 	private readonly toLine = el("div", "acp-chat-hint");
 	/** The menu's box (positioned over the thread): a note, then the menu itself. */
 	private readonly pickMenu = el("div", "acp-pick-menu");
 	private readonly pickList = el("div", "acp-pick-list");
-	/** Why nobody is checked: an unknown leading mention (recipientsOf's error). */
-	private readonly pickNote = el("p", "acp-pick-note");
 	/** Read by a screen reader: "Enviando…", then "Enviado a @a, @b" (not the queue line). */
 	private readonly sendStatus = el("div", "visually-hidden");
 	/**
@@ -111,12 +121,16 @@ export class AcpThread {
 	private readonly endBtn = new ChatEndButton({
 		scroller: () => this.threadEl,
 		name: (n) => (n === 0 ? "Ir al final" : `Ir al final, ${newText(n)}`),
+		// The fixed words: «↓ N nuevos».
+		count: (n) => `${n} nuevos`,
 		onJumped: () => {
 			this.atBottom = true;
 			this.newIds.clear();
 		},
-		// A question's options are the person's to tap: never under the button.
-		avoid: () => this.threadEl.querySelectorAll(".acp-question-open"),
+		// A question's options and a message's buttons («Revisar interrupción»)
+		// are the person's to tap: never under the button.
+		avoid: () =>
+			this.threadEl.querySelectorAll(".acp-question-open, .acp-rs-list .btn, .acp-post .btn"),
 	});
 	/** Says it to a screen reader too (the button itself appears and goes). */
 	private readonly newAnnounce = el("div", "visually-hidden");
@@ -145,33 +159,52 @@ export class AcpThread {
 	 * reader, whatever `atBottom` still says.
 	 */
 	private pinnedTop = 0;
+	/**
+	 * What a reader further up is reading (its row and that row's offset) and
+	 * the scrollTop it was seen at. The thread keeps that row in place by
+	 * itself when rows change height (`keepHeld`): the browser's scroll
+	 * anchoring is off on it (`overflow-anchor: none`) — Safari has none at
+	 * all, so one way for every engine.
+	 */
+	private held: { place: ReadingPlace; top: number } | null = null;
 
 	private source: ThreadSource | null = null;
 	/**
-	 * A chat was (re)opened: once its feed is read it shows its end, or — when
-	 * the opening was Back / Forward (`placeFromHistory`) — its reading place.
+	 * A chat was (re)opened: once its feed is read it shows its reading
+	 * place (PROPUESTA §3: only a reader who was at the end comes back to
+	 * the end), else — a topic — its news, else its end.
 	 */
 	private placePending = false;
-	private placeFromHistory = false;
 	private gen = 0;
 	private messages: AcpMessage[] = [];
 	private hasEarlier = false;
+	/**
+	 * The oldest id of any page read: the next "Cargar anteriores" starts
+	 * there. Not `messages[0]`: an agent's Archive keeps only its direct
+	 * rows of a page, and a page with none of them must not be asked again.
+	 */
+	private cursor: number | null = null;
 	private maxBytes = 256 * 1024;
 	private readonly activity = new Map<number, AcpActivity[]>();
-	private readonly liveText = new Map<number, string>();
 	private readonly openDetails = new Set<string>();
 	private agents = new Map<string, AcpAgentInfo>();
 	private readonly auth = new Map<string, boolean>();
 	private project: { id: string; name: string } | null = null;
+	private conversation: AcpConversation | null = null;
+	/**
+	 * A topic's read mark as it was when the topic was opened: the divider
+	 * «Nuevos desde tu última visita» goes before the first row newer than
+	 * it, and stays there while the topic is on screen (what the reader's own
+	 * reading posts is `readSent`).
+	 */
+	private dividerAt: string | null | undefined = undefined;
+	/** The newest event time already posted as read (or being posted). */
+	private readSent = "";
+	private readTimer: ReturnType<typeof setTimeout> | null = null;
+	private readonly divider = dividerEl();
 	private error = "";
 	/** A one-off notice in the composer's line (a message looked for and not found). */
 	private notice = "";
-	/**
-	 * `error` is the feed's own read failure (not an earlier page or a send).
-	 * Project Chat's page header already says it, with Reintentar
-	 * (projectsView statusNote): the message box does not repeat it there.
-	 */
-	private errorIsFeed = false;
 	private feed: FeedStatus = "loading";
 	/** A first page of the current chat was read at least once. */
 	private readOnce = false;
@@ -200,8 +233,12 @@ export class AcpThread {
 	private readonly recoverBtn = el("button", "btn sm acp-recover", "Recuperar el texto");
 	private unsubscribe: (() => void) | null = null;
 	private poll: ReturnType<typeof setInterval> | null = null;
-	private statusTimer: ReturnType<typeof setInterval> | null = null;
-	private agentsTimer: ReturnType<typeof setTimeout> | null = null;
+	/** Releases the 15 s agents period and the list listener (acpStatusFeed.ts). */
+	private unwatch: (() => void) | null = null;
+	/** The first load of this subscription was made (by its first signal, acpLive.ts). */
+	private loadedSinceSub = false;
+	/** A reload fell due while the tab was hidden: made once it shows. */
+	private reloadOnShow = false;
 	private renderQueued = false;
 	private questions = new Map<number, AcpQuestion>();
 	/** Question cards kept across renders (keyed by id + state): typed answers and focus survive. */
@@ -213,10 +250,13 @@ export class AcpThread {
 	 * and closed nothing but cost a full rebuild on every activity batch.
 	 */
 	private readonly items = new Map<string, { sig: string; el: HTMLElement }>();
+	/** Watches the thread's box and every row in it (see the constructor). */
+	private resizeObs: ResizeObserver | null = null;
+	private readonly observedRows = new Set<Element>();
 	private readonly errorEl = el("div", "acp-chat-error");
 	private readonly emptyEl = el("div", "acp-chat-empty");
 	private readonly moreBtn = el("button", "btn sm acp-more", "Cargar anteriores");
-	/** Unsent text per chat (agent or project): a draft never follows the person into another chat. */
+	/** Unsent text per topic: a draft never follows the person into another topic. */
 	private readonly drafts = new Map<string, string>();
 	/** The person just sent: show the bottom of the thread whatever the scroll position. */
 	private toBottom = false;
@@ -234,13 +274,59 @@ export class AcpThread {
 	/** Called after every change of agents / auth / project / error (headers use it). */
 	onState: (s: ThreadState) => void = () => {};
 
+	// ── A topic's recipients (3B F2) ────────────────────────────────────
+	/**
+	 * A topic's recipients as edited here and not sent yet, by conversation
+	 * id. Without an entry the composer shows the topic's own (the server's
+	 * `recipients`: what its last post went to — the same on every device);
+	 * a new topic has none and starts empty.
+	 */
+	private readonly chips = new Map<string, Chips>();
+	/** «Para:» — the chips and "+" (a topic's composer only). */
+	private readonly toRow = el("div", "acp-to-row");
+	private readonly chipBox = el("div", "acp-to-chips");
+	/** Under the field: «Llega a …, a cada uno por separado.» and who will queue it. */
+	private readonly toNotes = el("div", "acp-to-notes");
+	/**
+	 * A touch screen: the notes folded into one line (`toSum`) that unfolds
+	 * them (`toLines`) on a tap; elsewhere `toSum` is not shown (CSS).
+	 */
+	private readonly toSum = el("button", "acp-to-sum");
+	private readonly toLines = el("div", "acp-to-lines");
+	/** The `@` menu over the field: the team and its agents, filtered by what is typed. */
+	private readonly mentionList = el("div", "acp-mention-menu");
+	private mention: { start: number; query: string; active: number } | null = null;
+	/** A topic's title by id, for «ocupado en «X»» (the rail knows the project's). */
+	titleOf: (id: string) => string | null = () => null;
+	/** «Revisar interrupción» on an interrupted message (acpReview.ts). */
+	onReview: (m: AcpMessage) => void = (m) =>
+		openReview(m, {
+			where: this.conversation?.title ?? null,
+			activity: this.lastActivity(m.id),
+			report: this.messages.find((x) => x.recovery_of === m.id) ?? null,
+			liveMark: () => this.liveTick,
+			onChanged: (row, mark) => this.applyRow(row, mark),
+		});
+	/**
+	 * Where `⎇ <work>` leads (Herramientas, 3B F4). Until something is
+	 * plugged in here the chip only says which work a message runs in.
+	 */
+	onOpenWork: ((agent: string, work: string) => void) | null = null;
+	/** Pendientes (acpInbox.ts), from an Archive chat's open question («Responder en Pendientes»). */
+	onOpenInbox: (opener: HTMLElement) => void = () => {};
+
 	constructor() {
+		document.addEventListener("visibilitychange", () => {
+			if (document.hidden || !this.reloadOnShow) return;
+			this.reloadOnShow = false;
+			void this.reload();
+		});
 		// One line at rest; CSS (field-sizing) grows it with the text up to a cap.
 		this.input.rows = 1;
 		this.input.setAttribute("aria-label", "Mensaje");
 		this.sendBtn.type = "submit";
 		this.sendBtn.setAttribute("aria-label", "Enviar");
-		this.sendBtn.title = "Enviar (Ctrl+Enter)";
+		this.syncEnterMode();
 		// Each button is its 44-px cell; what is seen is a 30-px circle inside.
 		this.sendBtn.append(el("span", "acp-cbtn-face"));
 		this.sendBtn.firstElementChild!.append(sendIcon(), el("span", "acp-send-spin"));
@@ -259,7 +345,9 @@ export class AcpThread {
 		});
 		this.toLine.hidden = true;
 		// The menu opens upward from the surface (positioned on it, out of the grid).
-		this.surface.append(this.pickBtn, this.input, this.sendBtn, this.pickMenu);
+		// "+" is «Para:»'s (buildToRow): the surface has no "+" column.
+		this.surface.classList.add("no-plus");
+		this.surface.append(this.input, this.sendBtn, this.pickMenu, this.mentionList);
 		// Errors sit by the field, not at the top of the thread: a refused send
 		// must be seen where the person is looking, however long the thread.
 		// Under the surface, with "Recuperar el texto" next to the words.
@@ -269,17 +357,30 @@ export class AcpThread {
 		errorLine.append(this.errorEl, this.recoverBtn);
 		this.sendStatus.setAttribute("role", "status");
 		this.sendStatus.setAttribute("aria-live", "polite");
-		this.composer.append(this.toLine, this.surface, errorLine, this.sendStatus);
+		this.buildToRow();
+		this.composer.append(
+			this.toLine,
+			this.toRow,
+			this.surface,
+			this.toNotes,
+			errorLine,
+			this.sendStatus,
+		);
 		// A tap on Enviar, a mention or "↓ N nuevos" must not take the focus from the field:
 		// on a phone that blur closes the keyboard, the layout grows back (the
 		// bottom bar returns) and the button moves away under the finger before
 		// the tap lands. Keyboard activation does not go through these events.
-		for (const b of [this.sendBtn, this.pickBtn, this.pickMenu, this.endBtn.el])
+		for (const b of [this.sendBtn, this.pickBtn, this.pickMenu, this.mentionList, this.endBtn.el])
 			for (const type of ["pointerdown", "mousedown"] as const)
 				b.addEventListener(type, (e) => {
 					if (document.activeElement === this.input) e.preventDefault();
 				});
 		this.input.addEventListener("input", () => {
+			// «Para:» shows who this text reaches as it is typed (a leading
+			// mention included), from the same rule the send applies — after
+			// the menu, which says whether a trailing mention is still being typed.
+			this.syncMention();
+			this.syncChips();
 			this.renderHint();
 			this.syncSendBtn();
 			// What is written by hand shows in the menu as it is typed.
@@ -301,7 +402,7 @@ export class AcpThread {
 				// reader at the end is pinned there, not reclassified as "above".
 				if (t.clientHeight !== this.box) {
 					this.box = t.clientHeight;
-					if (this.atBottom) {
+					if (this.atBottom && !this.readerLeftEnd()) {
 						t.scrollTop = t.scrollHeight;
 						this.pinnedTop = t.scrollTop;
 						return;
@@ -311,43 +412,66 @@ export class AcpThread {
 				// "Ir al final" scrolling smoothly: its own steps are not the reader moving up.
 				if (this.endBtn.jumping) {
 					this.atBottom = true;
-					if (away < END_SLACK) this.renderPill();
+					// Arrived: what the end shows is seen. The arrival can be the
+					// jump's last scroll event (WebKit sends none after it).
+					if (away < END_SLACK) {
+						this.renderPill();
+						this.noteSeenSoon();
+					}
+					return;
+				}
+				// A reader at the end can only leave it upwards. A scroll event
+				// that did not go above where the end was pinned is not theirs:
+				// it is the late event of the thread's own pin, dispatched after
+				// rows grew below and before the ResizeObserver's report. The end
+				// stays pinned.
+				if (this.atBottom && away >= END_SLACK && t.scrollTop >= this.pinnedTop) {
+					t.scrollTop = t.scrollHeight;
+					this.pinnedTop = t.scrollTop;
 					return;
 				}
 				this.atBottom = away < END_SLACK;
-				if (this.atBottom) this.clearNew();
-				else this.renderPill();
+				if (this.atBottom) {
+					// The reader's own place at the end: what the rules above and
+					// `readerLeftEnd` compare with is never older than this scroll.
+					this.pinnedTop = t.scrollTop;
+					this.clearNew();
+				} else this.renderPill();
 				// At once, not on the next frame: a link followed right after the
 				// scroll hides the thread before that frame, and Back would find no
 				// place to return to (a one-row binary search: cheap per event).
 				this.noteAnchor();
+				this.noteSeenSoon();
 			},
 			{ passive: true },
 		);
 		// The thread's box changes without a scroll event too: a reader at the
 		// end stays at the end; one reading further up keeps scrollTop, i.e.
-		// the same text in view.
-		if (typeof ResizeObserver !== "undefined")
-			new ResizeObserver(() => {
+		// the same text in view. Its rows are watched as well: a row can grow
+		// after the render that placed it (a font that finishes loading
+		// re-wraps its text) with no scroll and no box change, and a reader
+		// pinned to the end was left that many pixels short of it, for good.
+		if (typeof ResizeObserver !== "undefined") {
+			this.resizeObs = new ResizeObserver(() => {
 				const t = this.threadEl;
 				const wasHidden = this.box === 0;
 				this.box = t.clientHeight;
 				if (t.clientHeight === 0) return;
 				// Shown again: the box was rebuilt, its scroll offset is not to be
-				// trusted. Back / Forward (from a followed link to the same chat)
-				// puts the reading place back; any other way in shows the end.
-				if (wasHidden && !this.placePending) {
-					if (fromHistory()) this.restorePlace();
-					else this.scrollToEnd();
+				// trusted: the reading place goes back (none: the end).
+				if (wasHidden && !this.placePending) this.restorePlace();
+				else if (this.atBottom && this.readerLeftEnd() && !this.endBtn.jumping) {
+					// The reader scrolled up before its event came: theirs, not re-pinned.
+					this.atBottom = false;
+					this.noteAnchor();
 				} else if (this.atBottom) {
 					t.scrollTop = t.scrollHeight;
 					this.pinnedTop = t.scrollTop;
-				}
+				} else this.keepHeld();
 				this.renderPill();
-			}).observe(this.threadEl);
-		// The placeholder is one line at rest: its text follows the width.
-		for (const q of ["(max-width: 640px)", "(max-width: 360px)"])
-			window.matchMedia?.(q).addEventListener("change", () => this.setPlaceholder());
+			});
+			this.resizeObs.observe(this.threadEl);
+		}
 		this.moreBtn.type = "button";
 		this.moreBtn.addEventListener("click", () => {
 			this.moreBtn.disabled = true;
@@ -358,11 +482,29 @@ export class AcpThread {
 			e.preventDefault();
 			void this.send();
 		});
+		this.input.addEventListener("focus", () => this.syncEnterMode());
 		this.input.addEventListener("keydown", (e) => {
-			if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+			// The mention menu takes Enter first: it confirms the mention.
+			if (this.mentionKey(e)) return;
+			// Shift+Enter stays the textarea's own line break.
+			if (e.key !== "Enter" || e.shiftKey || e.altKey) return;
+			// An IME composing (Japanese, Chinese…) confirms its candidate with
+			// Enter: that key is the IME's, never a send. Some browsers report
+			// only keyCode 229 for it.
+			if (e.isComposing || e.keyCode === 229) return;
+			const touch = this.syncEnterMode();
+			if (this.composerMode !== "on" || this.input.value.trim() === "") {
+				e.preventDefault();
+				return;
+			}
+			if (e.ctrlKey || e.metaKey) {
+				e.preventDefault();
+				this.insertLineBreak();
+			} else if (!touch) {
 				e.preventDefault();
 				void this.send();
 			}
+			// A virtual keyboard: Enter is a line break (native); the arrow sends.
 		});
 	}
 
@@ -371,15 +513,21 @@ export class AcpThread {
 			agents: [...this.agents.values()],
 			auth: this.auth,
 			project: this.project,
+			conversation: this.conversation,
 			error: this.error,
 			feed: this.feed,
 		};
 	}
 
+	/** An Archive chat: read only, nothing on it writes. */
+	private get readOnly(): boolean {
+		return this.source?.kind === "archive";
+	}
+
 	/**
 	 * Lock or hide the message box (the project page keeps it locked until the
 	 * project is confirmed live). Nothing leaves while it is not "on" — not by
-	 * the button, Ctrl+Enter or a restored draft — and the draft stays in the
+	 * the button, Enter or a restored draft — and the draft stays in the
 	 * field. Errors (e.g. "Cargar anteriores") stay visible either way.
 	 */
 	setComposer(mode: ComposerMode): void {
@@ -412,13 +560,20 @@ export class AcpThread {
 	 * unbounded history. "shown": in view; "earlier": still further back
 	 * after those pages; "missing": not in this chat, or the load stopped.
 	 */
-	async revealMessage(id: number): Promise<"shown" | "earlier" | "missing"> {
+	async revealMessage(
+		id: number,
+		opts: { result?: boolean } = {},
+	): Promise<"shown" | "earlier" | "missing"> {
 		const gen = this.gen;
 		try {
 			for (let pages = 0; ; pages++) {
 				if (gen !== this.gen) return "missing";
 				this.render();
-				const row = this.threadEl.querySelector<HTMLElement>(`[data-ids~="${id}"]`);
+				// A result has a row of its own in a topic; else the message's row.
+				const row =
+					(opts.result
+						? this.threadEl.querySelector<HTMLElement>(`:scope > [data-result="${id}"]`)
+						: null) ?? this.threadEl.querySelector<HTMLElement>(`[data-ids~="${id}"]`);
 				if (row) {
 					this.goToRow(row);
 					return "shown";
@@ -433,17 +588,18 @@ export class AcpThread {
 		}
 	}
 
-	private goToRow(row: HTMLElement): void {
+	private goToRow(row: HTMLElement, inner?: HTMLElement): void {
 		const t = this.threadEl;
 		const anchor = row.dataset.anchor;
 		if (!anchor) return;
 		// "esperando tu respuesta": the destination is the open question's card.
-		const card = row.querySelector<HTMLElement>(".acp-question-open");
-		const target = card ?? row;
+		const card = inner ? null : row.querySelector<HTMLElement>(".acp-question-open");
+		const target = inner ?? card ?? row;
 		const lead = target.getBoundingClientRect().top - row.getBoundingClientRect().top;
 		this.putRow({ anchor, offset: Math.round(t.clientHeight * 0.25) - lead });
 		this.box = t.clientHeight;
 		this.atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < END_SLACK;
+		this.held = null;
 		this.noteAnchor();
 		this.renderPill();
 		const ids = row.dataset.ids ?? "";
@@ -465,15 +621,15 @@ export class AcpThread {
 
 	/** Shows `source` (resets everything when it changes) and follows it live. */
 	open(source: ThreadSource): void {
-		const same =
-			this.source !== null &&
-			source.kind === this.source.kind &&
-			(source.kind === "agent"
-				? source.name === (this.source as { name: string }).name
-				: source.projectId === (this.source as { projectId: string }).projectId);
+		const same = sameChat(this.source, source);
 		if (!same) {
+			// The topic being left: its place and what was in view count before
+			// anything resets.
+			this.notePlaceAtLeave();
+			this.flushSeen();
 			this.gen++;
 			this.closePicker(false);
+			this.foldNotes();
 			if (this.source) this.saveDraft(this.source, this.input.value);
 			this.source = source;
 			this.input.value = this.drafts.get(sourceKey(source)) ?? "";
@@ -483,22 +639,26 @@ export class AcpThread {
 			this.messages = [];
 			this.hasEarlier = false;
 			this.activity.clear();
-			this.liveText.clear();
 			this.openDetails.clear();
 			this.questions.clear();
 			this.cards.clear();
 			this.agents.clear();
 			this.auth.clear();
 			this.project = null;
+			this.conversation = null;
+			this.dividerAt = undefined;
+			this.readSent = "";
+			if (this.readTimer) clearTimeout(this.readTimer);
+			this.readTimer = null;
+			this.cursor = null;
 			this.error = "";
 			this.notice = "";
-			this.errorIsFeed = false;
 			this.feed = "loading";
 			this.readOnce = false;
 			this.atBottom = true;
-			// Its end, or (Back / Forward) where it was being read, once its feed is in.
+			this.held = null;
+			// Where it was being read (else its news or its end), once its feed is in.
 			this.placePending = true;
-			this.placeFromHistory = fromHistory();
 			this.shownMax = 0;
 			this.shownOutcome.clear();
 			this.newIds.clear();
@@ -507,14 +667,45 @@ export class AcpThread {
 			this.threadEl.replaceChildren(el("div", "acp-chat-empty", "Cargando…"));
 			this.setPlaceholder();
 		}
-		if (!this.unsubscribe) this.unsubscribe = subscribeAcp((ev) => this.onLive(ev));
-		// Runner liveness and queue sizes are not pushed: re-read every 15 s while shown.
-		if (!this.statusTimer)
-			this.statusTimer = setInterval(() => {
-				if (!document.hidden) this.refreshAgentsSoon(0);
-			}, STATUS_MS);
+		if (!this.unwatch) {
+			// Runner liveness and queue sizes are not pushed: the shared list is
+			// re-read every 15 s while a thread is shown (one clock for the tab).
+			const release = watchAcpAgents();
+			const off = onAcpAgentsRead((all) => this.takeAgents(all));
+			this.unwatch = () => {
+				release();
+				off();
+			};
+		}
+		if (!this.unsubscribe) {
+			// The socket's first signal (open, down, or slow after ~1 s without
+			// a hello) makes the first load: one read per opening when the
+			// socket is quick.
+			this.loadedSinceSub = false;
+			this.unsubscribe = subscribeAcp((ev) => this.onLive(ev));
+			// A first connection that hangs (no hello, no close): `slow` loads, then the fallback poll.
+			if (!acpLiveUp()) this.startPoll();
+			return;
+		}
 		if (same) return;
 		void this.reload();
+	}
+
+	/**
+	 * A message row as a write just answered it (a review, a requeue), its
+	 * request sent at `mark` (`liveTick` then): shown at once, unless that
+	 * row already came live after `mark` — that frame is newer (layAnswer).
+	 */
+	applyRow(row: AcpMessage, mark: number): void {
+		if (!this.relevant(row)) return;
+		this.layAnswer(mark, { row });
+		this.changed();
+	}
+
+	/** The latest activity this page saw for message `id` (tool and detail), if any. */
+	lastActivity(id: number): string | null {
+		const last = activityRows(this.activity.get(id) ?? []).at(-1);
+		return last ? `${last.label || "herramienta"}${last.detail ? ` ${last.detail}` : ""}` : null;
 	}
 
 	/** An agent's row as a write just answered it (e.g. its project changed here). */
@@ -525,22 +716,39 @@ export class AcpThread {
 		this.changed();
 	}
 
+	/**
+	 * What `titleOf` answers changed (the rail read the project's topics):
+	 * repainted, since «ocupado en «X»» is said with it.
+	 */
+	titlesChanged(): void {
+		if (this.source && this.unsubscribe) this.changed();
+	}
+
 	/** Stops following (the DOM and state stay for a quick return). */
 	close(): void {
-		// The place being read, from the geometry as it is now (the last scroll
-		// event may not have been dispatched yet), while the thread still shows:
-		// what Back returns to.
+		this.notePlaceAtLeave();
+		this.closePicker(false);
+		this.flushSeen();
+		this.unsubscribe?.();
+		this.unsubscribe = null;
+		this.stopPoll();
+		this.unwatch?.();
+		this.unwatch = null;
+		this.reloadOnShow = false;
+	}
+
+	/**
+	 * The place being read, from the geometry as it is now (the last scroll
+	 * event may not have been dispatched yet), while the thread still shows
+	 * it: what Back returns to. Every way out takes it — a close, and a switch
+	 * to another topic in the same thread (a link from one topic to another).
+	 */
+	private notePlaceAtLeave(): void {
 		const t = this.threadEl;
 		if (t.clientHeight > 0 && !this.placePending && !this.endBtn.jumping) {
 			this.atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < END_SLACK;
 			this.noteAnchor();
 		}
-		this.closePicker(false);
-		this.unsubscribe?.();
-		this.unsubscribe = null;
-		this.stopPoll();
-		if (this.statusTimer) clearInterval(this.statusTimer);
-		this.statusTimer = null;
 	}
 
 	private saveDraft(src: ThreadSource, text: string): void {
@@ -554,15 +762,14 @@ export class AcpThread {
 		const src = this.source;
 		const gen = this.gen;
 		if (!src) return;
+		this.loadedSinceSub = true;
 		const mark = this.liveTick;
 		try {
-			const feed =
-				src.kind === "agent" ? await acpFeed(src.name) : await acpProjectFeed(src.projectId);
+			const feed = await feedOf(src);
 			if (gen !== this.gen) return;
 			this.applyFeed(feed, false);
 			this.replayLive(mark);
 			this.error = "";
-			this.errorIsFeed = false;
 			this.feed = "ok";
 			this.readOnce = true;
 			if (this.placePending) {
@@ -572,8 +779,9 @@ export class AcpThread {
 				// return from ANOTHER chat left this one with only "Cargando…").
 				// Placed in that same task: no frame shows the thread elsewhere.
 				this.render();
-				if (this.placeFromHistory) this.restorePlace();
-				else this.scrollToEnd();
+				if (this.hasPlace()) this.restorePlace();
+				else if (!this.toDivider()) this.scrollToEnd();
+				this.noteSeen();
 			}
 		} catch (err) {
 			if (gen !== this.gen) return;
@@ -582,12 +790,13 @@ export class AcpThread {
 			// A re-read that fails (a reconnect, the fallback poll, a flaky
 			// link) must not take away a history already read: `stale`.
 			this.feed = e.status === 404 ? "not-found" : this.readOnce ? "stale" : "error";
-			this.errorIsFeed = true;
 			this.error =
 				e.status === 404
-					? src.kind === "agent"
-						? "Este agente ya no existe."
-						: "Proyecto no encontrado."
+					? src.kind === "conversation"
+						? "Conversación no encontrada."
+						: src.agent
+							? "Este agente ya no existe."
+							: "Proyecto no encontrado."
 					: // Fixed text: the server's message is a code ("internal"), not words for a person.
 						"No se pudo actualizar el chat.";
 		}
@@ -596,14 +805,18 @@ export class AcpThread {
 
 	private applyFeed(feed: AcpFeed, earlier: boolean): void {
 		this.maxBytes = feed.maxMessageBytes;
+		// An agent's feed is everything it got outside topics, in any scope:
+		// its Archive is the direct part (the project's is the other chat).
+		const rows = feed.messages.filter((m) => this.relevant(m));
+		const first = feed.messages[0]?.id;
+		if (first !== undefined) this.cursor = Math.min(this.cursor ?? first, first);
 		if (earlier) {
 			const ids = new Set(this.messages.map((m) => m.id));
-			this.messages = [...feed.messages.filter((m) => !ids.has(m.id)), ...this.messages];
+			this.messages = [...rows.filter((m) => !ids.has(m.id)), ...this.messages];
 		} else {
 			// A reload keeps older pages already shown.
-			const first = feed.messages[0]?.id ?? Number.POSITIVE_INFINITY;
-			const older = this.messages.filter((m) => m.id < first);
-			this.messages = [...older, ...feed.messages];
+			const older = this.messages.filter((m) => m.id < (first ?? Number.POSITIVE_INFINITY));
+			this.messages = [...older, ...rows];
 			if (!older.length) this.hasEarlier = feed.messages.length >= PAGE;
 		}
 		if (earlier) this.hasEarlier = feed.messages.length >= PAGE;
@@ -612,31 +825,31 @@ export class AcpThread {
 			this.agents = new Map(list.map((a) => [a.name, a]));
 			for (const a of list) this.auth.set(a.name, a.authRequired === true);
 			this.activity.clear();
-			this.liveText.clear();
 			for (const [name, evs] of Object.entries(feed.activity ?? {})) this.addActivity(name, evs);
 		}
 		if (feed.project) this.project = feed.project;
+		if (feed.conversation) {
+			this.conversation = feed.conversation;
+			// The mark as it was when the topic was opened (once per opening).
+			if (this.dividerAt === undefined) this.dividerAt = feed.conversation.readAt;
+		}
 		for (const q of feed.questions ?? []) this.questions.set(q.id, q);
 	}
 
 	private async loadEarlier(): Promise<void> {
 		const src = this.source;
 		const gen = this.gen;
-		const first = this.messages[0]?.id;
+		const first = this.cursor;
 		if (!src || !first) return;
 		const mark = this.liveTick;
 		try {
-			const feed =
-				src.kind === "agent"
-					? await acpFeed(src.name, first)
-					: await acpProjectFeed(src.projectId, first);
+			const feed = await feedOf(src, first);
 			if (gen !== this.gen) return;
 			this.applyFeed(feed, true);
 			this.replayLive(mark);
 		} catch {
 			if (gen !== this.gen) return;
 			this.error = "No se pudieron cargar los anteriores.";
-			this.errorIsFeed = false;
 		}
 		this.changed();
 	}
@@ -661,11 +874,35 @@ export class AcpThread {
 			if (tick > mark) this.questions.set(q.id, q);
 	}
 
+	/**
+	 * A write's answer (a send, a review, a requeue, an answer to a question)
+	 * whose request left at `mark`: the same rule as a page (replayLive), for
+	 * one row. The answer is the row as the write left it; a frame of that row
+	 * that came after `mark` is at least as new — the runner's claim, woken in
+	 * the backend by the write itself, can push `running` before the send's 201
+	 * reaches the page — so then the answer is dropped, and not noted as live
+	 * either (it would be laid back over the next page).
+	 */
+	private layAnswer(mark: number, x: { row?: AcpMessage; q?: AcpQuestion }): void {
+		const newer = (seen: { tick: number } | undefined) => seen !== undefined && seen.tick > mark;
+		if (x.row && !newer(this.liveRows.get(x.row.id))) {
+			this.noteLive({ row: x.row });
+			this.messages = upsert(this.messages, x.row);
+		}
+		if (x.q && !newer(this.liveQuestions.get(x.q.id))) {
+			this.noteLive({ q: x.q });
+			this.questions.set(x.q.id, x.q);
+		}
+	}
+
 	private relevant(m: AcpMessage): boolean {
 		const src = this.source;
 		if (!src) return false;
-		return src.kind === "agent"
-			? m.to_id === src.name || m.from_id === src.name
+		if (src.kind === "conversation") return m.conversation_id === src.conversationId;
+		// The Archive is what has no topic (docs/ACP_AGENTS.md §4b).
+		if (m.conversation_id) return false;
+		return src.agent
+			? !m.project_id && (m.to_id === src.agent || m.from_id === src.agent)
 			: m.project_id === src.projectId;
 	}
 
@@ -673,10 +910,18 @@ export class AcpThread {
 		switch (ev.type) {
 			case "open":
 				this.stopPoll();
-				void this.reload();
+				// Hidden: one read when it shows (nothing on screen to keep current).
+				if (document.hidden && this.loadedSinceSub) this.reloadOnShow = true;
+				else void this.reload();
 				return;
 			case "down":
 				this.startPoll();
+				// Subscribed during an outage (or the first connection failed): its first load.
+				if (!this.loadedSinceSub) void this.reload();
+				return;
+			case "slow":
+				// The first connection is slow (its poll already runs): load now, its hello reads again.
+				if (!this.loadedSinceSub) void this.reload();
 				return;
 			case "message":
 				if (!this.relevant(ev.message)) return;
@@ -688,11 +933,7 @@ export class AcpThread {
 				return;
 			case "question": {
 				const q = ev.question;
-				const src = this.source;
-				const inScope =
-					(q.message_id !== null && this.messages.some((m) => m.id === q.message_id)) ||
-					(src?.kind === "agent" && q.agent === src.name);
-				if (!inScope) return;
+				if (q.message_id === null || !this.messages.some((m) => m.id === q.message_id)) return;
 				this.noteLive({ q });
 				this.questions.set(q.id, q);
 				this.refreshAgentsSoon(0);
@@ -707,6 +948,14 @@ export class AcpThread {
 			case "agents":
 				this.refreshAgentsSoon(0);
 				return;
+			case "conversation": {
+				const c = ev.conversation;
+				if (this.source?.kind !== "conversation" || c.id !== this.source.conversationId) return;
+				// A frame may lack the counts the feed computed: keep what it does not say.
+				this.conversation = { ...this.conversation, ...c } as AcpConversation;
+				this.changed();
+				return;
+			}
 		}
 	}
 
@@ -715,44 +964,35 @@ export class AcpThread {
 			const a = this.agents.get(agent);
 			if (a) a.runnerSeenAt = e.at;
 			if (e.messageId === null) continue;
-			if (e.kind === "text") this.liveText.set(e.messageId, String(e.text ?? ""));
-			else {
-				const list = this.activity.get(e.messageId) ?? [];
-				list.push(e);
-				this.activity.set(e.messageId, list.slice(-200));
-			}
+			// The partial text of an answer is not shown: its result is.
+			if (e.kind === "text") continue;
+			const list = this.activity.get(e.messageId) ?? [];
+			list.push(e);
+			this.activity.set(e.messageId, list.slice(-200));
 		}
 		this.auth.set(agent, authFromActivity(events, this.auth.get(agent) ?? false));
 	}
 
-	/** Agent status (running / queue / project membership): one list read, debounced. */
+	/**
+	 * Agent status (running / queue / project membership): a read of the
+	 * shared list that starts after now (acpStatusFeed.ts: one request for
+	 * every view that asks meanwhile, the rail's included).
+	 */
 	private refreshAgentsSoon(delay = 800): void {
-		if (this.agentsTimer) return;
-		this.agentsTimer = setTimeout(() => {
-			this.agentsTimer = null;
-			const gen = this.gen;
-			const src = this.source;
-			const ticket = acpReadTicket();
-			void acpListAgents()
-				.then((all) => {
-					// Every read of the list keeps the one registry current (sidebar).
-					setAcpAgents(all, ticket);
-					if (gen !== this.gen || !src) return;
-					const mine =
-						src.kind === "agent"
-							? all.filter((a) => a.name === src.name)
-							: all.filter((a) => a.projectId === src.projectId);
-					const before = [...this.agents.keys()].join(" ");
-					this.agents = new Map(mine.map((a) => [a.name, a]));
-					for (const a of mine)
-						if (a.authRequired !== undefined) this.auth.set(a.name, a.authRequired);
-					// Someone joined or left Project Chat: its page changes too.
-					if (src.kind === "project" && before !== mine.map((a) => a.name).join(" "))
-						void this.reload();
-					this.changed();
-				})
-				.catch(() => {});
-		}, delay);
+		requestAcpAgentsRead(delay);
+	}
+
+	/** A read of the agents list landed (whoever asked): this chat's agents from it. */
+	private takeAgents(all: AcpAgentInfo[]): void {
+		const src = this.source;
+		if (!src) return;
+		const mine =
+			src.kind === "archive" && src.agent
+				? all.filter((a) => a.name === src.agent)
+				: all.filter((a) => a.projectId === src.projectId);
+		this.agents = new Map(mine.map((a) => [a.name, a]));
+		for (const a of mine) if (a.authRequired !== undefined) this.auth.set(a.name, a.authRequired);
+		this.changed();
 	}
 
 	private startPoll(): void {
@@ -788,9 +1028,7 @@ export class AcpThread {
 			this.atBottom &&
 			// "Ir al final" scrolling smoothly is on its way down, not the reader up.
 			!this.endBtn.jumping &&
-			t.clientHeight > 0 &&
-			t.clientHeight === this.box &&
-			t.scrollTop < this.pinnedTop - END_SLACK
+			this.readerLeftEnd()
 		)
 			this.atBottom = false;
 		const atBottom = this.atBottom;
@@ -798,7 +1036,12 @@ export class AcpThread {
 		// A reader further up keeps the row they are looking at where it is,
 		// whatever changes above or below it (an earlier page, an answer, a
 		// question card): by that row, never by scrollTop or the distance to the end.
-		const keep = atBottom || this.toBottom ? null : this.rowInView();
+		// The row held since the reader last scrolled, not the one in view now:
+		// rows can have changed height since (a font that arrived) with the
+		// ResizeObserver's report still pending — this frame's render runs
+		// first, and the geometry it reads is already shifted.
+		const held = this.held && Math.abs(t.scrollTop - this.held.top) < 1 ? this.held : null;
+		const keep = atBottom || this.toBottom ? null : (held?.place ?? this.rowInView());
 		const nodes: HTMLElement[] = [];
 		if (this.hasEarlier) {
 			this.moreBtn.disabled = false;
@@ -806,43 +1049,64 @@ export class AcpThread {
 		}
 		if (this.messages.length === 0) {
 			this.emptyEl.textContent =
-				this.source?.kind === "project"
-					? "Sin mensajes en este proyecto todavía. Mencioná a un agente para empezar; cada agente procesa sus mensajes de a uno, en orden."
-					: "Sin mensajes todavía. El agente procesa uno por vez, en orden.";
+				this.source?.kind === "archive"
+					? "Sin mensajes en este archivo."
+					: "Sin mensajes en esta conversación todavía. Mencioná a un agente con @ para empezar.";
 			nodes.push(this.emptyEl);
 		}
 		const used = new Set<string>();
-		for (const item of groupThread(this.messages)) {
-			const first = item.kind === "post" ? item.messages[0]! : item.message;
-			const key = `${item.kind}:${first.id}`;
-			const sig = this.itemSig(item);
+		// «Nuevos desde tu última visita»: before the first item with news
+		// since the mark this topic had when it was opened.
+		let dividerPlaced = this.dividerAt === undefined;
+		const rows = topicTimeline(this.messages).map((it) => ({
+			key: it.key,
+			ms: itemMessages(it),
+			sig: () => this.topicSig(it),
+			build: () => this.topicItemEl(it),
+			// The person's post is never news by itself: its answers are, where they land.
+			news: it.kind !== "post" && isUnread(it.message, this.dividerAt ?? null),
+			result: it.kind === "result" ? it.message.id : null,
+		}));
+		for (const row of rows) {
+			const { key, ms } = row;
+			const sig = row.sig();
 			let cached = this.items.get(key);
 			if (cached?.sig !== sig) {
-				cached = { sig, el: this.itemEl(item) };
+				cached = { sig, el: row.build() };
 				this.items.set(key, cached);
 			}
 			used.add(key);
 			// The reading anchor's handle (noteAnchor / restorePlace), and the
 			// messages the row shows (revealMessage finds a message's row by them).
 			cached.el.dataset.anchor = key;
-			cached.el.dataset.ids = (item.kind === "post" ? item.messages : [item.message])
-				.map((m) => m.id)
-				.join(" ");
+			cached.el.dataset.ids = ms.map((m) => m.id).join(" ");
+			if (row.result !== null) cached.el.dataset.result = String(row.result);
+			if (!dividerPlaced && row.news) {
+				dividerPlaced = true;
+				nodes.push(this.divider);
+			}
 			nodes.push(cached.el);
 		}
 		for (const key of [...this.items.keys()]) if (!used.has(key)) this.items.delete(key);
-		// Questions whose message is not on this page (an older page, or none).
-		const shown = new Set(this.messages.map((m) => m.id));
+		// A question shows inside its message. One with no message at all is
+		// shown at the end; one whose message is not on this page is not: an
+		// agent's feed carries every open question of the agent, its topics'
+		// included, and here it would have no context (Pendientes has it).
 		for (const q of this.questions.values())
-			if ((q.message_id === null || !shown.has(q.message_id)) && q.state === "open")
-				nodes.push(this.questionEl(q));
+			if (q.message_id === null && q.state === "open") nodes.push(this.questionEl(q));
 		syncChildren(t, nodes);
+		this.observeRows(nodes);
 		if (keepFocus?.isConnected) keepFocus.focus({ preventScroll: true });
 		const end = atBottom || this.toBottom;
+		const placed = !end && keep !== null && this.putRow(keep);
 		if (end) {
 			t.scrollTop = t.scrollHeight;
 			this.pinnedTop = t.scrollTop;
-		} else if (!keep || !this.putRow(keep)) t.scrollTop = prevTop;
+		} else if (!placed) t.scrollTop = prevTop;
+		// The held row is still the reader's (it was put back): only where
+		// scrollTop now is changes. Anything else is taken afresh.
+		if (placed && held && keep === held.place) held.top = t.scrollTop;
+		else this.holdPlace(!end);
 		this.toBottom = false;
 		// News below a reader who is further up: a new row (an id above what
 		// was shown — an earlier page has lower ids), or a row already shown
@@ -865,6 +1129,105 @@ export class AcpThread {
 		this.renderPill();
 		if (this.newIds.size > before) this.newAnnounce.textContent = `${this.pillText()} más abajo`;
 		this.renderComposer();
+		this.noteSeenSoon();
+	}
+
+	// ── Read mark (topics) ──────────────────────────────────────────────
+	//
+	// What the reader really saw: a row counts once its top edge is above the
+	// thread's bottom edge (in view, or scrolled past) while the thread is
+	// shown and the page visible — a person's message counts by its answer's
+	// edge, since what is news there is the result. The mark is the newest
+	// event time among those (a time: older rows are covered by it), posted
+	// debounced and only forward. Nothing else marks a topic read.
+
+	private noteSeenSoon(): void {
+		if (this.source?.kind !== "conversation" || this.readTimer) return;
+		this.readTimer = setTimeout(() => {
+			this.readTimer = null;
+			this.noteSeen();
+		}, 400);
+	}
+
+	private noteSeen(): void {
+		const src = this.source;
+		const t = this.threadEl;
+		if (src?.kind !== "conversation" || this.placePending || t.clientHeight === 0) return;
+		if (document.visibilityState === "hidden") return;
+		const bottom = t.getBoundingClientRect().bottom;
+		const byId = new Map(this.messages.map((m) => [m.id, m]));
+		let newest = "";
+		for (const row of t.querySelectorAll<HTMLElement>(":scope > [data-ids]")) {
+			if (row.getBoundingClientRect().top >= bottom) break;
+			for (const id of (row.dataset.ids ?? "").split(" ")) {
+				const m = byId.get(Number(id));
+				if (!m || !isUnread(m, null)) continue;
+				// A person's message is news by its answer: that bubble must be in
+				// view (in a topic, the answer is an item of its own).
+				if (m.from_id === "owner") {
+					if (row.dataset.result === undefined && row.dataset.anchor?.startsWith("post:")) continue;
+					const sub = row.querySelector<HTMLElement>(`[data-mid="${m.id}"]`);
+					if (sub && sub.getBoundingClientRect().top >= bottom) continue;
+				}
+				const at = eventTime(m);
+				if (at > newest) newest = at;
+			}
+		}
+		const mark = this.conversation?.readAt ?? null;
+		if (!newest || newest <= this.readSent) return;
+		if (mark !== null && Date.parse(newest) <= Date.parse(mark)) return;
+		this.readSent = newest;
+		const gen = this.gen;
+		void acpReadConversation(src.conversationId, newest)
+			.then((c) => {
+				if (gen !== this.gen) return;
+				this.conversation = { ...this.conversation, ...c } as AcpConversation;
+				this.onState(this.state);
+			})
+			.catch(() => {
+				// Not marked: the next look tries again.
+				if (gen === this.gen && this.readSent === newest) this.readSent = "";
+			});
+	}
+
+	/** Leaving the topic: what was in view when it was left counts. */
+	private flushSeen(): void {
+		if (this.readTimer) clearTimeout(this.readTimer);
+		this.readTimer = null;
+		this.noteSeen();
+	}
+
+	/** A saved reading place for this chat (a reader who left at the end has none). */
+	private hasPlace(): boolean {
+		return this.source !== null && readingPlaces.has(sourceKey(this.source));
+	}
+
+	/**
+	 * A topic opened with news and no reading place: the divider near the top
+	 * of the view (what is new reads downward from it), the news still below
+	 * counted on the pill. False when there is no divider on screen.
+	 */
+	private toDivider(): boolean {
+		const t = this.threadEl;
+		if (!this.divider.isConnected || t.clientHeight === 0) return false;
+		t.scrollTop += this.divider.getBoundingClientRect().top - t.getBoundingClientRect().top - 12;
+		this.box = t.clientHeight;
+		this.atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < END_SLACK;
+		this.pinnedTop = this.atBottom ? t.scrollTop : this.pinnedTop;
+		if (!this.atBottom) {
+			const bottom = t.getBoundingClientRect().bottom;
+			const byId = new Map(this.messages.map((m) => [m.id, m]));
+			for (const row of t.querySelectorAll<HTMLElement>(":scope > [data-ids]"))
+				if (row.getBoundingClientRect().top >= bottom)
+					for (const id of (row.dataset.ids ?? "").split(" ")) {
+						const m = byId.get(Number(id));
+						if (m && isUnread(m, this.dividerAt ?? null)) this.newIds.add(m.id);
+					}
+		}
+		this.held = null;
+		this.noteAnchor();
+		this.renderPill();
+		return true;
 	}
 
 	private pillText(): string {
@@ -892,10 +1255,55 @@ export class AcpThread {
 		const key = sourceKey(this.source);
 		if (this.atBottom) {
 			readingPlaces.delete(key);
+			this.holdPlace(false);
 			return;
 		}
 		const place = this.rowInView();
 		if (place) readingPlaces.set(key, place);
+		// Not taken afresh when scrollTop has not moved: a scroll event can be
+		// the late one of the thread's own placement, dispatched after rows
+		// changed height — the geometry then is the shifted one.
+		this.holdPlace(true, false);
+	}
+
+	/**
+	 * The row held is the first one that STARTS in view, not the reading
+	 * anchor (the first one partly in view): a row cut at the top that grows
+	 * inside would push everything under it — the text being read, the
+	 * «Nuevos» divider — while its own top stayed put.
+	 */
+	private holdPlace(on: boolean, fresh = true): void {
+		const t = this.threadEl;
+		if (on && !fresh && this.held && Math.abs(t.scrollTop - this.held.top) < 1) return;
+		this.held = null;
+		if (!on || t.clientHeight === 0) return;
+		const hit = firstRowInView(t, (c) => c.dataset.anchor !== undefined);
+		if (!hit) return;
+		let row: Element | null = hit.row;
+		if (hit.offset < 0)
+			for (let n = row.nextElementSibling; n; n = n.nextElementSibling)
+				if ((n as HTMLElement).dataset.anchor !== undefined) {
+					row = n;
+					break;
+				}
+		const offset = row.getBoundingClientRect().top - t.getBoundingClientRect().top;
+		this.held = {
+			place: { anchor: (row as HTMLElement).dataset.anchor!, offset },
+			top: t.scrollTop,
+		};
+	}
+
+	/**
+	 * Rows changed height around a reader further up (a font, a re-wrap, a
+	 * card): their row goes back to where it was on screen. Not when
+	 * scrollTop moved since the place was taken — that is the reader's own
+	 * scroll whose event has not come yet, and it is theirs.
+	 */
+	private keepHeld(): void {
+		const t = this.threadEl;
+		const h = this.held;
+		if (!h || Math.abs(t.scrollTop - h.top) >= 1) return;
+		if (this.putRow(h.place)) h.top = t.scrollTop;
 	}
 
 	/** The first row at least partly in view, and its top edge's offset from the thread's. */
@@ -915,6 +1323,41 @@ export class AcpThread {
 		return true;
 	}
 
+	/**
+	 * Only the rows not watched yet: observe() on a watched element starts it
+	 * over, and its first report would come again on every render.
+	 */
+	private observeRows(nodes: readonly Element[]): void {
+		const obs = this.resizeObs;
+		if (!obs) return;
+		const now = new Set(nodes);
+		for (const n of this.observedRows)
+			if (!now.has(n)) {
+				obs.unobserve(n);
+				this.observedRows.delete(n);
+			}
+		for (const n of nodes)
+			if (!this.observedRows.has(n)) {
+				obs.observe(n);
+				this.observedRows.add(n);
+			}
+	}
+
+	/**
+	 * The thread was pinned to its end and is now well above it by the
+	 * reader's own scroll, whose event has not come yet (it comes with the
+	 * next frame; a render, a ResizeObserver or a box change can run first).
+	 * The layout never does that: a box or content that shrinks clamps
+	 * scrollTop to the new end (nothing below it), one that grows leaves
+	 * scrollTop where it was or — scroll anchoring — moves it down.
+	 */
+	private readerLeftEnd(): boolean {
+		const t = this.threadEl;
+		if (t.clientHeight === 0) return false;
+		const away = t.scrollHeight - t.scrollTop - t.clientHeight;
+		return away > 1 && t.scrollTop < this.pinnedTop - END_SLACK;
+	}
+
 	/** Back to this chat's anchor; with none (or its row no longer shown), the end. */
 	private restorePlace(): void {
 		const t = this.threadEl;
@@ -925,12 +1368,14 @@ export class AcpThread {
 		}
 		this.box = t.clientHeight;
 		this.atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < END_SLACK;
+		this.holdPlace(!this.atBottom);
 		this.renderPill();
 	}
 
 	private scrollToEnd(): void {
 		const t = this.threadEl;
 		this.atBottom = true;
+		this.held = null;
 		t.scrollTop = t.scrollHeight;
 		this.pinnedTop = t.scrollTop;
 		// The box it was placed in, now: the scroll handler takes a scroll in a
@@ -940,58 +1385,286 @@ export class AcpThread {
 		this.clearNew();
 	}
 
-	/** Everything an item shows: equal ⇒ the element on screen is still right. */
-	private itemSig(item: ThreadItem): string {
-		const ms = item.kind === "post" ? item.messages : [item.message];
+	// ── A topic's items (3B F2) ─────────────────────────────────────────
+
+	/** Recipient `m.to_id`'s row under a message, from the backend's facts only. */
+	private rowState(m: AcpMessage) {
+		return recipientState(m, {
+			agent: this.agents.get(m.to_id),
+			titleOf: this.titleOf,
+			asking: this.openQuestionOf(m.id),
+			login: this.auth.get(m.to_id) === true,
+			activity: this.lastActivity(m.id),
+		});
+	}
+
+	private topicSig(it: TopicItem): string {
 		return JSON.stringify([
-			item.kind === "post" ? item.body : null,
-			ms.map((m) => [
+			it.kind,
+			itemMessages(it).map((m) => [
 				m.id,
 				m.state,
-				m.kind,
 				m.from_id,
 				m.to_id,
-				m.reply_to,
-				m.project_id ?? null,
 				m.body,
 				m.result_text,
 				m.note,
-				this.auth.get(m.to_id) === true,
+				m.reviewed_at ?? null,
+				m.context ?? null,
+				m.team ?? null,
+				m.created_at,
+				m.finished_at,
+				m.recovery_of ?? null,
+				this.rowState(m).label,
+				this.messages.find((x) => x.recovery_of === m.id)?.result_text ? "r" : "",
 				[...this.questions.values()]
 					.filter((q) => q.message_id === m.id)
 					.map((q) => `${q.id}:${q.state}`),
-				m.state === "running" || m.state === "pending"
-					? activityRows(this.activity.get(m.id) ?? [])
-					: null,
-				m.state === "running" ? (this.liveText.get(m.id) ?? "") : null,
-				m.finished_at,
-				m.kind === "reply" && this.messages.some((x) => x.id === m.reply_to),
 			]),
-			this.source?.kind ?? null,
+			it.kind === "reply" ? (it.consult?.id ?? null) : null,
+			this.onOpenWork !== null,
 		]);
+	}
+
+	private topicItemEl(it: TopicItem): HTMLElement {
+		switch (it.kind) {
+			case "post":
+				return this.postEl(it.messages);
+			case "consult":
+				return this.consultEl(it.message);
+			case "system":
+				return this.noteEl(it.message);
+			case "reply":
+				return this.replyEl(it.message, it.consult);
+			case "result":
+				return this.resultEl(it.message);
+		}
+	}
+
+	/** The person's message: «Vos → …», what was said, one state row per recipient. */
+	private postEl(ms: AcpMessage[]): HTMLElement {
+		const first = ms[0]!;
+		const art = el("article", "acp-msg acp-turn acp-mine acp-post");
+		art.dataset.state = first.state;
+		const said = el("div", "acp-bubble acp-out");
+		const head = el("div", "acp-msg-head");
+		const who = el("span", "acp-msg-who");
+		const names = ms.map((m) => `@${m.to_id}`).join(", ");
+		who.append("Vos ");
+		if (isTeamPost(ms)) {
+			const team = el("span", "acp-team-to", `→ Todo el equipo (${ms.length})`);
+			team.title = names;
+			team.setAttribute("aria-label", `→ Todo el equipo: ${names}`);
+			who.append(team);
+		} else who.append(`→ ${names}`);
+		head.append(who);
+		for (const m of ms) {
+			const w = this.workChip(m);
+			if (w) head.append(w);
+		}
+		head.append(el("span", "acp-msg-time", time(first.created_at)));
+		said.append(head, el("pre", "acp-msg-body", first.body), this.statusEl(ms));
+		art.append(said);
+		for (const m of ms)
+			for (const q of this.questions.values())
+				if (q.message_id === m.id) art.append(this.questionEl(q));
+		return art;
+	}
+
+	/**
+	 * One row per recipient — trabajando · en cola (why) · respondió · interrumpida;
+	 * no aggregate progress. Everyone answered: «✓ @a ✓ @b», each to its answer.
+	 */
+	private statusEl(ms: AcpMessage[]): HTMLElement {
+		const states = ms.map((m) => ({ m, st: this.rowState(m) }));
+		if (states.every(({ st }) => st.kind === "done")) {
+			const line = el("div", "acp-rs-all");
+			line.setAttribute("aria-label", "Respondieron todos");
+			for (const { m } of states) {
+				const mark = el(m.result_text ? "button" : "span", "acp-rs-check", `✓ @${m.to_id}`);
+				if (mark instanceof HTMLButtonElement) {
+					mark.type = "button";
+					mark.title = `Ir a la respuesta de @${m.to_id}`;
+					mark.addEventListener("click", () => this.goToResult(m.id));
+				}
+				line.append(mark);
+			}
+			return line;
+		}
+		const ul = el("ul", "acp-rs-list");
+		ul.setAttribute("aria-label", "Estado por destinatario");
+		for (const { m, st } of states) {
+			const li = el("li", `acp-rs acp-rs-${st.kind}`);
+			li.dataset.agent = m.to_id;
+			li.style.setProperty("--acp-hue", String(agentHue(m.to_id)));
+			const state = el("span", "acp-rs-state");
+			state.append(el("span", "acp-rs-dot"), el("span", "acp-rs-label", st.label));
+			li.append(avatarOf(m.to_id), el("span", "acp-rs-name", `@${m.to_id}`), state);
+			if (st.kind === "done" && m.result_text) {
+				const ver = el("button", "acp-link", "ver");
+				ver.type = "button";
+				ver.setAttribute("aria-label", `Ver la respuesta de @${m.to_id}`);
+				ver.addEventListener("click", () => this.goToResult(m.id));
+				state.append(" · ", ver);
+			}
+			if (st.kind === "interrupted" || st.kind === "reviewed") {
+				const report = this.messages.find((x) => x.recovery_of === m.id);
+				if (report && !report.result_text)
+					state.append(" · ", el("span", "acp-rs-muted", "informe pedido"));
+			}
+			// The same review in a topic and in the Archive: it writes nothing to the thread.
+			if (st.kind === "interrupted") {
+				const review = el("button", "btn sm acp-review-btn", "Revisar interrupción");
+				review.type = "button";
+				review.addEventListener("click", () => this.onReview(m));
+				state.append(" · ", review);
+			}
+			if (st.kind === "failed" && m.note) li.append(el("span", "acp-rs-note", m.note));
+			ul.append(li);
+		}
+		return ul;
+	}
+
+	/** «@a consulta a @b», its answer nested in it (`reply_to`). */
+	private consultEl(m: AcpMessage): HTMLElement {
+		const art = el("article", "acp-msg acp-consult acp-topic-consult");
+		art.dataset.state = m.state;
+		const said = el("div", "acp-bubble acp-in");
+		agentVoice(said, m.from_id);
+		const head = el("div", "acp-msg-head");
+		head.append(agentId(m.from_id), el("span", "acp-msg-to", `consulta a @${m.to_id}`));
+		const w = this.workChip(m);
+		if (w) head.append(w);
+		head.append(el("span", "acp-msg-time", time(m.created_at)));
+		said.append(head, agentText(m.body));
+		if (m.result_text) {
+			const nested = el("div", "acp-nested acp-voice");
+			nested.style.setProperty("--acp-hue", String(agentHue(m.to_id)));
+			nested.dataset.answer = String(m.id);
+			const h = el("div", "acp-msg-head");
+			h.append(
+				el("span", "acp-nested-mark", "↳"),
+				agentId(m.to_id),
+				el("span", "acp-msg-to", "respondió"),
+				el("span", "acp-msg-time", time(m.finished_at ?? m.created_at)),
+			);
+			nested.append(h, agentText(m.result_text));
+			said.append(nested);
+		} else said.append(this.statusEl([m]));
+		art.append(said);
+		for (const q of this.questions.values())
+			if (q.message_id === m.id) art.append(this.questionEl(q));
+		return art;
+	}
+
+	/** A Shared Terminal note to an agent (its recovery report request, a check): one quiet line. */
+	private noteEl(m: AcpMessage): HTMLElement {
+		const art = el("article", "acp-msg acp-system acp-topic-note");
+		art.dataset.state = m.state;
+		const line = el("div", "acp-note-line");
+		line.append(
+			el(
+				"span",
+				undefined,
+				m.recovery_of
+					? `Shared Terminal pidió a @${m.to_id} un informe de solo lectura de la ejecución interrumpida #${m.recovery_of}`
+					: `Shared Terminal → @${m.to_id}`,
+			),
+			el("span", "acp-msg-time", time(m.created_at)),
+		);
+		art.append(line, this.collapsible(`b${m.id}`, "Ver el texto", agentText(m.body)));
+		if (!(m.state === "done" && m.result_text)) art.append(this.statusEl([m]));
+		return art;
+	}
+
+	/**
+	 * A consult's answer delivered to the agent that asked. Its consult in
+	 * the thread: only «↳ @x respondió la consulta de @y (hh:mm) · Ir a la
+	 * respuesta», never the text again. Without it (an earlier page): the
+	 * only place to read it.
+	 */
+	private replyEl(m: AcpMessage, consult: AcpMessage | null): HTMLElement {
+		const art = el("article", "acp-msg acp-reply");
+		art.dataset.state = m.state;
+		if (consult) {
+			const line = el("div", "acp-late");
+			const go = el("button", "acp-link", "Ir a la respuesta");
+			go.type = "button";
+			go.addEventListener("click", () => this.goToAnswer(consult.id));
+			line.append(
+				`↳ @${m.from_id} respondió la consulta de @${m.to_id} (${time(consult.created_at)}) · `,
+				go,
+			);
+			art.append(line);
+			return art;
+		}
+		const said = el("div", "acp-bubble acp-in");
+		agentVoice(said, m.from_id);
+		const head = el("div", "acp-msg-head");
+		head.append(
+			agentId(m.from_id),
+			el("span", "acp-msg-to", `→ @${m.to_id} · respuesta a #${m.reply_to}`),
+			el("span", "acp-msg-time", time(m.created_at)),
+		);
+		said.append(head, agentText(m.body));
+		art.append(said);
+		return art;
+	}
+
+	/** What an agent answered, where it landed in time. */
+	private resultEl(m: AcpMessage): HTMLElement {
+		const art = el("article", "acp-msg acp-result");
+		art.dataset.state = m.state;
+		const said = el("div", "acp-bubble acp-in");
+		agentVoice(said, m.to_id);
+		said.dataset.mid = String(m.id);
+		const head = el("div", "acp-msg-head");
+		head.append(agentId(m.to_id));
+		if (m.recovery_of) head.append(el("span", "acp-tag", "informe de interrupción"));
+		const w = this.workChip(m);
+		if (w) head.append(w);
+		head.append(el("span", "acp-msg-time", time(m.finished_at ?? m.created_at)));
+		const res = el("div", "acp-msg-result");
+		res.append(markdownBlock(m.result_text ?? ""));
+		said.append(head, res);
+		art.append(said);
+		return art;
+	}
+
+	/** `⎇ <work>`: the work a message runs in (its Herramientas: onOpenWork, 3B F4). */
+	private workChip(m: AcpMessage): HTMLElement | null {
+		const work = m.context;
+		if (!work) return null;
+		const open = this.onOpenWork;
+		const chip = el(open ? "button" : "span", "acp-work-chip", `⎇ ${work}`);
+		chip.title = `Trabajo ${work} de @${m.to_id}`;
+		if (open && chip instanceof HTMLButtonElement) {
+			chip.type = "button";
+			chip.addEventListener("click", () => open(m.to_id, work));
+		}
+		return chip;
+	}
+
+	/** «ver» / «✓ @a»: the answer's own item, in view and highlighted. */
+	private goToResult(id: number): void {
+		const row = this.threadEl.querySelector<HTMLElement>(`:scope > [data-result="${id}"]`);
+		if (row) this.goToRow(row);
+		else void this.revealMessage(id, { result: true });
+	}
+
+	/** «Ir a la respuesta»: the consult's nested answer, in view and highlighted. */
+	private goToAnswer(consultId: number): void {
+		const row = this.threadEl.querySelector<HTMLElement>(
+			`:scope > [data-anchor="consult:${consultId}"]`,
+		);
+		const inner = row?.querySelector<HTMLElement>(`[data-answer="${consultId}"]`) ?? undefined;
+		if (row) this.goToRow(row, inner);
 	}
 
 	private openQuestionOf(id: number): boolean {
 		for (const q of this.questions.values())
 			if (q.message_id === id && q.state === "open") return true;
 		return false;
-	}
-
-	private badge(m: AcpMessage): HTMLElement {
-		if (m.state === "running" && this.openQuestionOf(m.id))
-			return el("span", "acp-badge acp-badge-waiting", "esperando tu respuesta");
-		const waitingLogin =
-			this.auth.get(m.to_id) === true && (m.state === "pending" || m.state === "running");
-		return el(
-			"span",
-			`acp-badge acp-badge-${waitingLogin ? "uncertain" : m.state}`,
-			waitingLogin ? "esperando login" : (STATE_LABEL[m.state] ?? m.state),
-		);
-	}
-
-	private scopeTag(m: AcpMessage): string {
-		if (this.source?.kind !== "agent") return "";
-		return m.project_id ? " · en el proyecto" : " · directo";
 	}
 
 	private collapsible(key: string, summary: string, content: HTMLElement): HTMLElement {
@@ -1005,310 +1678,32 @@ export class AcpThread {
 		return d;
 	}
 
-	// A thread item is one TURN of the conversation (`article.acp-msg`, the keyed
-	// element): what was said (the person's text on the right, an agent's consult
-	// or a Shared Terminal note on the left), then one answer bubble per
-	// recipient (`.acp-sub`) on the left, under the agent's name. The answer is
-	// the message's own outcome (result, questions, live text), so the
-	// correlation is structural: an answer always sits right under what it
-	// answers, whatever arrives later in the thread.
-	private itemEl(item: ThreadItem): HTMLElement {
-		const ms = item.kind === "post" ? item.messages : [item.message];
-		const first = ms[0]!;
-		if (first.kind === "reply") return this.handoffEl(first);
-		const mine = first.from_id === "owner";
-		const sys = first.from_id === "system";
-		const art = el(
-			"article",
-			`acp-msg acp-turn ${mine ? "acp-mine" : sys ? "acp-system" : "acp-consult"}`,
-		);
-		art.dataset.state = first.state;
-		const said = el("div", `acp-bubble ${mine ? "acp-out" : "acp-in"}`);
-		const head = el("div", "acp-msg-head");
-		const to = ms.map((m) => who(m.to_id)).join(", ");
-		if (mine || sys) {
-			// In an agent's own chat its name on the person's bubble is noise; in
-			// a project, or for a note, it says who was addressed.
-			const showTo = !mine || this.source?.kind === "project" || ms.length > 1;
-			head.append(
-				el("span", "acp-msg-who", mine ? (showTo ? `Para ${to}` : "") : `Shared Terminal → ${to}`),
-			);
-		} else {
-			// One agent writing to another speaks with its own face, like an
-			// answer does: the author's identity, the addressee discreet.
-			agentVoice(said, first.from_id);
-			head.append(agentId(first.from_id), el("span", "acp-msg-to", `→ ${to}`));
-		}
-		head.append(el("span", "acp-msg-time", `${time(first.created_at)}${this.scopeTag(first)}`));
-		said.append(head);
-		said.append(mine ? el("pre", "acp-msg-body", first.body) : agentText(first.body));
-		art.append(said);
-		for (const m of ms) art.append(this.answerEl(m));
-		return art;
-	}
-
-	/** The recipient's side of a message: its name, a discreet state, what it said. */
-	private answerEl(m: AcpMessage): HTMLElement {
-		const sub = el("div", `acp-sub acp-bubble acp-in acp-${m.state}`);
-		agentVoice(sub, m.to_id);
-		const head = el("div", "acp-msg-head");
-		const name = agentId(m.to_id);
-		const meta = el("span", "acp-msg-time", `#${m.id}`);
-		meta.title = `Mensaje #${m.id}${m.finished_at ? ` · terminó ${time(m.finished_at)}` : ""}`;
-		head.append(name, this.badge(m), meta);
-		sub.append(head, ...this.outcome(m));
-		return sub;
-	}
-
-	// The reply an agent RECEIVES to its consult repeats, word for word, the
-	// answer already shown under the consult. When that consult is in the
-	// thread, the delivery is one discreet line (the text one click away);
-	// otherwise (an older page, another scope) it is the only place to read
-	// it, so it is a bubble in the voice of the agent that answered.
-	private handoffEl(m: AcpMessage): HTMLElement {
-		const shown = m.reply_to !== null && this.messages.some((x) => x.id === m.reply_to);
-		const art = el("article", "acp-msg acp-reply");
-		art.dataset.state = m.state;
-		if (shown) {
-			const line = el("div", "acp-handoff");
-			line.append(
-				el(
-					"div",
-					"acp-msg-head",
-					`↳ ${who(m.to_id)} recibe la respuesta de ${who(m.from_id)} a #${m.reply_to}`,
-				),
-				this.collapsible(`b${m.id}`, "Ver el texto entregado", agentText(m.body)),
-			);
-			art.append(line);
-		} else {
-			const said = el("div", "acp-bubble acp-in");
-			agentVoice(said, m.from_id);
-			const head = el("div", "acp-msg-head");
-			head.append(
-				agentId(m.from_id),
-				el("span", "acp-msg-to", `→ ${who(m.to_id)} · respuesta a #${m.reply_to}`),
-			);
-			said.append(head, agentText(m.body));
-			art.append(said);
-		}
-		// What the recipient makes of the reply is its own voice (m.to_id), in
-		// its own answer bubble — never inside the folded line or the bubble of
-		// the agent that answered.
-		art.append(this.answerEl(m));
-		return art;
-	}
-
-	/** Live activity while running, the result, the note, the requeue decision. */
-	private outcome(m: AcpMessage): HTMLElement[] {
-		const out: HTMLElement[] = [];
-		for (const q of this.questions.values())
-			if (q.message_id === m.id) out.push(this.questionEl(q));
-		if (m.state === "running" || m.state === "pending") {
-			const rows = activityRows(this.activity.get(m.id) ?? []);
-			if (rows.length) {
-				// Technical activity is folded: one line says what is going on now;
-				// the list opens on demand (and stays open across live updates).
-				const ul = el("ul", "acp-activity");
-				for (const r of rows)
-					ul.append(
-						el(
-							"li",
-							`acp-act acp-act-${r.state || "pending"}`,
-							`${r.label || "herramienta"}${r.detail ? ` · ${r.detail}` : ""} — ${ACTIVITY_STATE[r.state] ?? r.state ?? "…"}`,
-						),
-					);
-				const last = rows[rows.length - 1]!;
-				out.push(
-					this.collapsible(
-						`a${m.id}`,
-						`Actividad (${rows.length}) · ${last.label || "herramienta"}`,
-						ul,
-					),
-				);
-			}
-			const live = this.liveText.get(m.id);
-			if (live && m.state === "running") out.push(el("pre", "acp-msg-result acp-live", live));
-			else if (!rows.length && !m.result_text && !this.openQuestionOf(m.id))
-				out.push(
-					el(
-						"div",
-						"acp-typing",
-						m.state === "pending" ? "En cola: lo toma cuando termine lo anterior." : "Trabajando…",
-					),
-				);
-		}
-		if (m.result_text) {
-			const res = el("div", "acp-msg-result");
-			res.append(markdownBlock(m.result_text));
-			out.push(res);
-		}
-		if (m.note && (m.state === "uncertain" || m.state === "failed"))
-			out.push(el("div", "acp-msg-note", m.note));
-		if (m.state === "uncertain") {
-			const again = el("button", "btn sm", "Volver a encolar");
-			again.type = "button";
-			again.title =
-				"La ejecución se interrumpió y no se repite sola: puede haber tenido efectos. Reencolar es decisión tuya.";
-			again.addEventListener("click", () => {
-				again.disabled = true;
-				// The answer may land after the person moved to another chat: it
-				// belongs to the chat it was asked from, never to the one on screen then.
-				const gen = this.gen;
-				void acpRequeue(m.id)
-					.then((row) => {
-						if (gen !== this.gen || !this.relevant(row)) return;
-						this.noteLive({ row });
-						this.messages = upsert(this.messages, row);
-						this.changed();
-					})
-					.catch((err) => {
-						if (gen !== this.gen) return;
-						again.disabled = false;
-						this.error = (err as Error).message;
-						this.errorIsFeed = false;
-						this.changed();
-					});
-			});
-			out.push(
-				el(
-					"div",
-					"acp-msg-note",
-					"Incierto: la ejecución se interrumpió. No se repite automáticamente.",
-				),
-				again,
-			);
-		}
-		return out;
-	}
-
 	private questionEl(q: AcpQuestion): HTMLElement {
 		const cached = this.cards.get(q.id);
 		if (cached && cached.state === q.state) return cached.el;
-		const form = questionForm(q.request);
-		const card = el("section", `acp-question acp-question-${q.state}`);
-		card.setAttribute("aria-label", `Pregunta de @${q.agent}`);
-		card.append(el("div", "acp-question-head", `@${q.agent} pregunta`));
-		if (form.message) card.append(el("p", "acp-question-text", form.message));
-		if (q.state === "open") card.append(this.questionForm(q, form));
-		else {
-			const said = answerText(form, q.answer);
-			const line =
-				q.state === "answered"
-					? `Tu respuesta: ${said} · entregándola al agente…`
-					: q.state === "delivered"
-						? `Tu respuesta: ${said}`
-						: q.state === "withdrawn"
-							? "El agente retiró la pregunta (ya no la necesita)."
-							: `Sin entregar: ${q.note ?? "el agente se reinició"}.${said ? ` Tu respuesta (${said}) no se usó.` : ""}`;
-			card.append(el("div", "acp-question-state", line));
-			if (q.state === "orphaned") {
-				// Continue safely: the person decides whether the agent gets the decision
-				// again, as an ordinary message in its queue.
-				const again = el("button", "btn sm", "Enviar la decisión como mensaje");
-				again.type = "button";
-				again.addEventListener("click", () => {
-					const prefix = this.source?.kind === "project" ? `@${q.agent} ` : "";
-					this.input.value = `${prefix}Sobre tu pregunta «${form.message}»: ${said && !said.startsWith("(") ? said : ""}`;
-					this.input.focus();
-				});
-				card.append(again);
-			}
-		}
+		const gen = this.gen;
+		// The Archive writes nothing: an open question there is answered in
+		// Pendientes, and an orphaned one is not offered to the message box.
+		const card = questionCard(q, {
+			stillHere: () => gen === this.gen,
+			readOnly: this.readOnly,
+			onOpenInbox: (opener) => this.onOpenInbox(opener),
+			liveMark: () => this.liveTick,
+			onAnswered: (row, mark) => {
+				this.layAnswer(mark, { q: row });
+				this.changed();
+			},
+			onResend: this.readOnly
+				? undefined
+				: (text) => {
+						this.addChip(q.agent);
+						this.input.value = text;
+						this.input.focus();
+						this.changed();
+					},
+		});
 		this.cards.set(q.id, { state: q.state, el: card });
 		return card;
-	}
-
-	private questionForm(q: AcpQuestion, form: ReturnType<typeof questionForm>): HTMLElement {
-		const f = el("form", "acp-question-form");
-		const read: Array<() => [string, unknown] | null> = [];
-		form.fields.forEach((field, i) => {
-			const box = el("fieldset", "acp-question-field");
-			if (field.label) box.append(el("legend", undefined, field.label));
-			const name = `q${q.id}-${i}`;
-			if (field.kind === "single" || field.kind === "multi") {
-				const inputs: HTMLInputElement[] = [];
-				for (const o of field.options) {
-					const lab = el("label", "acp-option");
-					const inp = el("input");
-					inp.type = field.kind === "single" ? "radio" : "checkbox";
-					inp.name = name;
-					inp.value = o.value;
-					inputs.push(inp);
-					lab.append(inp, el("span", undefined, o.label));
-					if (o.description) lab.append(el("small", undefined, ` — ${o.description}`));
-					box.append(lab);
-				}
-				read.push(() => {
-					const picked = inputs.filter((x) => x.checked).map((x) => x.value);
-					if (field.kind === "multi") return picked.length ? [field.key, picked] : null;
-					return picked[0] !== undefined ? [field.key, picked[0]] : null;
-				});
-			} else if (field.kind === "boolean") {
-				const lab = el("label", "acp-option");
-				const inp = el("input");
-				inp.type = "checkbox";
-				lab.append(inp, el("span", undefined, "Sí"));
-				box.append(lab);
-				read.push(() => [field.key, inp.checked]);
-			} else {
-				const inp = el("textarea", "acp-question-input");
-				inp.rows = 2;
-				inp.setAttribute("aria-label", field.label || form.message || "Respuesta");
-				box.append(inp);
-				read.push(() => {
-					const v = inp.value.trim();
-					if (!v) return null;
-					return [field.key, field.kind === "number" ? Number(v) : v];
-				});
-			}
-			if (field.custom) {
-				const other = el("input", "acp-question-other");
-				other.type = "text";
-				other.placeholder = "Otra respuesta o nota (opcional)";
-				other.setAttribute("aria-label", "Otra respuesta");
-				box.append(other);
-				const key = field.custom;
-				read.push(() => (other.value.trim() ? [key, other.value.trim()] : null));
-			}
-			f.append(box);
-		});
-		const actions = el("div", "acp-question-actions");
-		const send = el("button", "btn sm acp-question-send", "Responder");
-		send.type = "submit";
-		const skip = el("button", "btn sm", "Omitir");
-		skip.type = "button";
-		const status = el("span", "acp-chat-hint");
-		actions.append(send, skip, status);
-		f.append(actions);
-		const submit = (body: { action: "accept" | "decline"; content?: Record<string, unknown> }) => {
-			send.disabled = skip.disabled = true;
-			status.textContent = "Enviando…";
-			const gen = this.gen;
-			void acpAnswer(q.id, body)
-				.then((row) => {
-					if (gen !== this.gen) return;
-					this.noteLive({ q: row });
-					this.questions.set(row.id, row);
-					this.changed();
-				})
-				.catch((err: Error & { status?: number }) => {
-					// 409: someone (another tab) answered first, or the agent restarted.
-					status.textContent =
-						err.status === 409
-							? "Ya no está abierta; se actualiza sola."
-							: `No se envió: ${err.message}`;
-					send.disabled = skip.disabled = err.status === 409;
-				});
-		};
-		f.addEventListener("submit", (e) => {
-			e.preventDefault();
-			const content = Object.fromEntries(
-				read.map((g) => g()).filter((x): x is [string, unknown] => x !== null),
-			);
-			submit({ action: "accept", content });
-		});
-		skip.addEventListener("click", () => submit({ action: "decline" }));
-		return f;
 	}
 
 	/** This chat's unsent text goes back into the field, if the field is empty. */
@@ -1321,8 +1716,7 @@ export class AcpThread {
 
 	private renderComposer(): void {
 		const u = this.source ? this.unsent.get(sourceKey(this.source)) : undefined;
-		const own = this.errorIsFeed && this.source?.kind === "project" ? "" : this.error;
-		const shown = [own, u?.error ?? "", this.notice].filter(Boolean).join(" ");
+		const shown = [this.error, u?.error ?? "", this.notice].filter(Boolean).join(" ");
 		this.errorEl.textContent = shown;
 		this.errorEl.hidden = shown === "";
 		this.recoverBtn.hidden = !u || u.restored || this.composerMode !== "on";
@@ -1330,16 +1724,46 @@ export class AcpThread {
 		this.input.disabled = !writable;
 		this.syncSendBtn();
 		this.composer.classList.toggle("acp-composer-off", this.composerMode === "off");
-		const picks = writable && this.source?.kind === "project" && this.agents.size > 1;
+		const topic = this.source?.kind === "conversation";
+		this.toRow.hidden = !topic || this.composerMode === "off";
+		if (topic) this.renderChips();
+		else this.toNotes.hidden = true;
+		if (!topic || !writable) this.closeMention();
+		const picks = topic && writable && this.agents.size > 0;
 		this.pickBtn.hidden = !picks;
-		// The surface's states (acp-chat.css): no "+" column, a refused send, locked.
-		this.surface.classList.toggle("no-plus", !picks);
+		// The surface's states (acp-chat.css): a refused send, locked.
 		this.surface.classList.toggle("is-error", Boolean(u?.error));
 		this.surface.classList.toggle("is-disabled", !writable);
 		if (!picks) this.closePicker(false);
 		else if (this.pickOpen) this.renderPicker();
 		this.renderHint();
 		this.setPlaceholder();
+	}
+
+	/**
+	 * A touch screen without a mouse (`pointer: coarse`) is taken as a
+	 * virtual keyboard: Enter breaks the line and only the arrow sends, so a
+	 * phone never sends by accident. Read on every focus/key, not once: a
+	 * tablet can gain or lose a pointer. Returns whether it is in that mode.
+	 */
+	private syncEnterMode(): boolean {
+		const touch = typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches;
+		this.sendBtn.title = touch ? "Enviar" : "Enviar (Enter)";
+		if (touch) this.input.setAttribute("enterkeyhint", "enter");
+		else this.input.removeAttribute("enterkeyhint");
+		return touch;
+	}
+
+	/**
+	 * Ctrl/Cmd+Enter: a line break at the caret, replacing the selection.
+	 * `insertText` goes through the browser's editing, so Ctrl+Z undoes it
+	 * and it fires `input` like typing (height, draft, arrow); setRangeText
+	 * is the fallback where execCommand is gone, and does neither by itself.
+	 */
+	private insertLineBreak(): void {
+		if (document.execCommand?.("insertText", false, "\n")) return;
+		this.input.setRangeText("\n", this.input.selectionStart, this.input.selectionEnd, "end");
+		this.input.dispatchEvent(new Event("input", { bubbles: true }));
 	}
 
 	/** The arrow: off when nothing can be sent (still on while another send is out). */
@@ -1366,9 +1790,7 @@ export class AcpThread {
 		this.pickList.id = id;
 		this.pickList.setAttribute("role", "menu");
 		this.pickList.setAttribute("aria-label", "Destinatarios");
-		this.pickNote.id = `${id}-note`;
-		this.pickNote.hidden = true;
-		this.pickMenu.append(this.pickNote, this.pickList);
+		this.pickMenu.append(this.pickList);
 		this.pickMenu.hidden = true;
 		// Not from the click's `detail`: a real touch tap arrives with detail 0
 		// too, and moving the focus off the field closes a phone's keyboard.
@@ -1380,8 +1802,8 @@ export class AcpThread {
 		});
 		this.pickBtn.type = "button";
 		this.pickBtn.hidden = true;
-		this.pickBtn.setAttribute("aria-label", "Elegir destinatarios");
-		this.pickBtn.title = "Elegir destinatarios";
+		this.pickBtn.setAttribute("aria-label", "Agregar destinatario");
+		this.pickBtn.title = "Agregar destinatario";
 		this.pickBtn.setAttribute("aria-haspopup", "menu");
 		this.pickBtn.setAttribute("aria-expanded", "false");
 		this.pickBtn.setAttribute("aria-controls", id);
@@ -1454,115 +1876,29 @@ export class AcpThread {
 	}
 
 	private renderPicker(): void {
-		const names = [...this.agents.keys()];
-		const text = this.input.value;
 		const focused = (document.activeElement as HTMLElement | null)?.dataset?.agent;
-		const now = Date.now();
-		const rows = names.map((n) => {
-			const { checked, implicit } = recipientRow(text, names, n);
-			const a = this.agents.get(n)!;
-			const st = agentStatus(a, now, this.auth.get(n) === true);
-			const b = el("button", `acp-pick-row${checked ? " checked" : ""}`);
-			b.type = "button";
-			b.tabIndex = -1;
-			b.dataset.agent = n;
-			b.setAttribute("role", "menuitemcheckbox");
-			b.setAttribute("aria-checked", String(checked));
-			const mark = el("span", "acp-pick-mark", checked ? "✓" : "");
-			mark.setAttribute("aria-hidden", "true");
-			const info = el("span", "acp-pick-info");
-			info.append(agentAvatar(n), el("span", `acp-pick-state acp-status-${st.tone}`, st.label));
-			if (implicit) {
-				// Checked by a mention inside the message: only editing the text unchecks it.
-				info.append(el("span", "acp-pick-why", "mencionado en el mensaje"));
-				b.setAttribute("aria-disabled", "true");
-			}
-			b.append(mark, info);
-			b.addEventListener("click", () => this.toggleRecipient(n));
-			return b;
-		});
+		const rows = this.topicPickRows();
 		this.pickList.replaceChildren(...rows);
-		// A leading mention that is no agent: nobody is checked and nothing
-		// would be sent — said here, not only when sending.
-		const r = recipientsOf(text, names);
-		const unknownLead = r.error !== null && /^\s*@[A-Za-z0-9_-]/.test(text);
-		this.pickNote.hidden = !unknownLead;
-		this.pickNote.textContent = unknownLead ? (r.error ?? "") : "";
-		if (unknownLead) this.pickList.setAttribute("aria-describedby", this.pickNote.id);
-		else this.pickList.removeAttribute("aria-describedby");
 		if (focused) rows.find((r) => r.dataset.agent === focused)?.focus();
 	}
 
-	/** Checks / unchecks `name` by editing the leading mentions; the caret keeps its place. */
-	private toggleRecipient(name: string): void {
-		const names = [...this.agents.keys()];
-		const i = this.input;
-		const text = i.value;
-		const row = recipientRow(text, names, name);
-		const edits = setRecipient(text, names, name, !row.checked);
-		if (edits.length === 0) return;
-		const [a, b, dir] = [i.selectionStart, i.selectionEnd, i.selectionDirection];
-		i.value = applyEdits(text, edits);
-		i.setSelectionRange(mapThroughEdits(a, edits), mapThroughEdits(b, edits), dir ?? "none");
-		this.renderHint();
-		this.syncSendBtn();
-		this.renderPicker();
-	}
-
-	/**
-	 * Who reads what is written here (a direct message is private; in a
-	 * project, start with the agent): the headers no longer say it. The full
-	 * text where the field rests on two wide lines; on a phone the field is
-	 * one line, so only what fits in it — the privacy first, since a long
-	 * name cuts the end off.
-	 */
+	/** One line at rest: what does not fit is cut (CSS ellipsis). */
 	private setPlaceholder(): void {
-		const src = this.source;
-		if (!src) return;
-		const narrow = window.matchMedia?.("(max-width: 640px)").matches === true;
-		// 320–360 px: "+" and the arrow leave the field ~180 px of text.
-		const tiny = window.matchMedia?.("(max-width: 360px)").matches === true;
-		// One line at rest everywhere: what does not fit is cut (CSS ellipsis).
 		const text =
 			this.composerMode === "disabled"
-				? "Cargando el proyecto…"
-				: src.kind === "agent"
-					? narrow
-						? `Privado · a @${src.name}`
-						: `Mensaje privado a @${src.name} · Ctrl+Enter envía`
-					: tiny
-						? "Con @agente…"
-						: narrow
-							? "Empezá con @agente…"
-							: "Empezá con @agente (uno o varios) · Ctrl+Enter envía";
+				? "Cargando la conversación…"
+				: "Escribí un mensaje · @ para mencionar";
 		if (this.input.placeholder !== text) this.input.placeholder = text;
 	}
 
 	/**
-	 * The line above the surface, only when there is something to say: in
-	 * Project Chat who the text goes to (recipientsOf: exactly what a send
-	 * would do), then the notices: sending,
-	 * this chat's queue, and the size limit once the text gets near it (past
-	 * it, it goes as an attachment). Read-only: the text stays the source.
+	 * The line above the surface, only when there is something to say:
+	 * sending, and the size limit once the text gets near it (past it, it
+	 * goes as an attachment). A topic says the rest per recipient, under each message.
 	 */
 	private renderHint(): void {
-		const queued = this.messages.filter((m) => m.state === "pending").length;
-		const running = this.messages.filter((m) => m.state === "running").length;
-		const line: Array<string | HTMLElement> = [];
-		if (this.source?.kind === "project" && this.composerMode === "on") {
-			const to = recipientsOf(this.input.value, [...this.agents.keys()]).to;
-			if (to.length) {
-				line.push("Para ");
-				for (const [i, n] of to.entries()) {
-					if (i) line.push(" · ");
-					line.push(el("b", "", `@${n}`));
-				}
-			}
-		}
 		const parts: string[] = [];
 		if (this.sending) parts.push(this.sending > 1 ? `Enviando (${this.sending})…` : "Enviando…");
-		if (running) parts.push(`${running} en curso`);
-		if (queued) parts.push(`${queued} en espera`);
 		// UTF-8 takes at most 3 bytes per UTF-16 unit: below that bound nothing
 		// can be near the limit, and typing does not encode the text each key.
 		const text = this.input.value;
@@ -1573,10 +1909,462 @@ export class AcpThread {
 				parts.push(`${kib(bytes)}: supera ${kib(this.maxBytes)}, se envía como adjunto`);
 			else if (bytes >= this.maxBytes * 0.8) parts.push(`${kib(bytes)} de ${kib(this.maxBytes)}`);
 		}
-		if (parts.length) line.push(line.length ? ` — ${parts.join(" · ")}` : parts.join(" · "));
-		this.toLine.replaceChildren(...line);
-		this.toLine.hidden = line.length === 0;
+		this.toLine.textContent = parts.join(" · ");
+		this.toLine.hidden = parts.length === 0;
 		this.surface.classList.toggle("is-sending", this.sending > 0);
+	}
+
+	/**
+	 * Who a text goes to. A topic never routes invisibly (PROPUESTA §3): the
+	 * leading mentions, or the one agent mentioned in the text — never "the
+	 * project's only agent" — and with nobody, «Elegí a quién con + o @».
+	 */
+	private recipients(text: string): {
+		to: string[];
+		team: boolean;
+		unknown: string[];
+		error: string | null;
+	} {
+		const names = [...this.agents.keys()];
+		// The chips, plus the agents named at the start of the text
+		// (typed without the menu) — never one named inside the instruction.
+		const c = this.currentChips();
+		if (c.team) return { to: names, team: true, unknown: [], error: null };
+		const lead = /^\s*@[A-Za-z0-9_-]/.test(text) ? recipientsOf(text, names) : null;
+		if (lead?.error) return { to: [], team: false, unknown: lead.unknown, error: lead.error };
+		const to = [...new Set([...c.agents, ...(lead?.to ?? [])])];
+		return to.length
+			? { to, team: false, unknown: [], error: null }
+			: { to: [], team: false, unknown: [], error: "Elegí a quién con + o @" };
+	}
+
+	/**
+	 * The field's text as «Para:» judges it: a mention still being typed at
+	 * the end (`@de`, the `@` menu open on it) is not judged yet — it is not
+	 * "not an agent", it is not finished. Only while the menu is open: a
+	 * finished one at the end («@dev @arq», menu closed) is judged, as the
+	 * send judges it.
+	 */
+	private typedSoFar(): string {
+		const v = this.input.value;
+		const m = this.mention;
+		if (m && /^@[A-Za-z0-9_-]*$/.test(v.slice(m.start))) return v.slice(0, m.start);
+		return v;
+	}
+
+	/** What `recipients` answers for the field now, as a key: «Para:» re-renders only when it changes. */
+	private shownTo = "";
+	private toKey(): string {
+		const r = this.recipients(this.typedSoFar());
+		return JSON.stringify([r.team, r.to, r.unknown]);
+	}
+
+	// ── A topic's recipients: chips, "+", the `@` menu (3B F2) ───────────
+	//
+	// In a topic the recipients are explicit (PROPUESTA §3, §11.2): the
+	// chips of «Para:», added with "+" or `@`, never guessed from the text
+	// alone. «Todo el equipo» is a chip of its own, resolved by the server
+	// when the message is sent (who joins later does not get it).
+
+	private topicId(): string | null {
+		return this.source?.kind === "conversation" ? this.source.conversationId : null;
+	}
+
+	/** The topic's chips now: edited here, else the topic's own. */
+	private currentChips(): Chips {
+		const cid = this.topicId();
+		if (!cid) return { team: false, agents: [] };
+		return this.chips.get(cid) ?? chipsOf(this.conversation?.recipients);
+	}
+
+	private setChips(c: Chips): void {
+		const cid = this.topicId();
+		if (!cid) return;
+		this.chips.set(cid, { team: c.team, agents: [...new Set(c.agents)] });
+		this.renderComposer();
+		if (this.pickOpen) this.renderPicker();
+	}
+
+	private addChip(name: string): void {
+		const c = this.currentChips();
+		if (name === "*") this.setChips({ team: true, agents: [] });
+		else if (!c.team && !c.agents.includes(name))
+			this.setChips({ team: false, agents: [...c.agents, name] });
+	}
+
+	/**
+	 * «Escribirle un mensaje nuevo» (a reviewed interruption): topic `cid`
+	 * opens with `agent` as its only recipient.
+	 */
+	presetRecipients(cid: string, agents: string[]): void {
+		this.chips.set(cid, { team: false, agents: [...agents] });
+		if (this.topicId() === cid) this.renderComposer();
+	}
+
+	private teamNames(): string[] {
+		return [...this.agents.keys()];
+	}
+
+	private buildToRow(): void {
+		this.toRow.hidden = true;
+		const label = el("span", "acp-to-label", "Para");
+		label.setAttribute("aria-hidden", "true");
+		this.toRow.append(label, this.chipBox, this.pickBtn);
+		this.toNotes.hidden = true;
+		this.toNotes.setAttribute("aria-live", "polite");
+		this.toSum.type = "button";
+		this.toLines.id = `acp-to-lines-${++pickerSeq}`;
+		this.toSum.setAttribute("aria-controls", this.toLines.id);
+		this.toSum.setAttribute("aria-expanded", "false");
+		// Unfolding the notes while typing keeps the keyboard up (no blur).
+		this.toSum.addEventListener("pointerdown", (e) => {
+			if (document.activeElement === this.input) e.preventDefault();
+		});
+		this.toSum.addEventListener("click", () =>
+			this.foldNotes(!this.toNotes.classList.contains("is-open")),
+		);
+		this.toNotes.append(this.toSum, this.toLines);
+		this.mentionList.hidden = true;
+		this.mentionList.id = `acp-mention-${++pickerSeq}`;
+		this.mentionList.setAttribute("role", "listbox");
+		this.mentionList.setAttribute("aria-label", "Mencionar");
+		this.input.addEventListener("click", () => this.syncMention());
+		this.input.addEventListener("blur", () => this.closeMention());
+	}
+
+	/** The chips, the "+" next to them and the notes under the field. */
+	private renderChips(): void {
+		const c = this.currentChips();
+		const names = this.teamNames();
+		// Who the field's text reaches if sent now — the send's own rule
+		// (`recipients`): the chips plus the agents named at its start.
+		const r = this.recipients(this.typedSoFar());
+		this.shownTo = this.toKey();
+		const typed = r.team ? [] : r.to.filter((n) => !c.agents.includes(n));
+		const nodes: HTMLElement[] = [];
+		if (c.team) {
+			const chip = el("span", "acp-chip acp-chip-team");
+			chip.setAttribute("role", "listitem");
+			chip.title = "Los agentes del proyecto al enviar; quien se sume después no lo recibe";
+			const stack = el("span", "acp-chip-stack");
+			for (const n of names.slice(0, 4)) stack.append(avatarOf(n));
+			chip.append(stack, el("span", "acp-chip-name", `Todo el equipo · ${names.length}`));
+			chip.append(
+				this.chipX("Quitar a todo el equipo", () => this.setChips({ team: false, agents: [] })),
+			);
+			nodes.push(chip);
+		} else
+			for (const n of c.agents) {
+				const chip = el("span", "acp-chip");
+				chip.setAttribute("role", "listitem");
+				chip.style.setProperty("--acp-hue", String(agentHue(n)));
+				const busy = busyElsewhere(this.agents.get(n), this.topicId(), this.titleOf);
+				chip.append(avatarOf(n), el("span", "acp-chip-name", `@${n}`));
+				if (busy) {
+					const b = el("span", "acp-chip-busy", busy.startsWith("ocupado") ? "ocupado" : "espera");
+					b.title = busy;
+					chip.append(b);
+				}
+				chip.append(
+					this.chipX(`Quitar a @${n}`, () =>
+						this.setChips({ team: false, agents: c.agents.filter((x) => x !== n) }),
+					),
+				);
+				nodes.push(chip);
+			}
+		// Named at the start of the text: the same chip, without × — it goes
+		// away by editing the text, which is where it comes from.
+		for (const n of typed) {
+			const chip = el("span", "acp-chip acp-chip-typed");
+			chip.setAttribute("role", "listitem");
+			chip.title = "Mencionado al principio del mensaje";
+			chip.style.setProperty("--acp-hue", String(agentHue(n)));
+			chip.append(avatarOf(n), el("span", "acp-chip-name", `@${n}`));
+			const busy = busyElsewhere(this.agents.get(n), this.topicId(), this.titleOf);
+			if (busy) {
+				const b = el("span", "acp-chip-busy", busy.startsWith("ocupado") ? "ocupado" : "espera");
+				b.title = busy;
+				chip.append(b);
+			}
+			nodes.push(chip);
+		}
+		// A leading mention that is not an agent of the project: the send
+		// refuses the whole text, and the row says so before it is sent.
+		const chips = nodes.length;
+		if (r.unknown.length) {
+			const who = r.unknown.map((n) => `@${n}`).join(", ");
+			nodes.push(
+				el(
+					"span",
+					"acp-to-error",
+					`${who} no ${r.unknown.length === 1 ? "es un agente" : "son agentes"} del proyecto`,
+				),
+			);
+		}
+		// A list only when there are chips: the empty line is not an item.
+		if (chips && !r.unknown.length) {
+			this.chipBox.setAttribute("role", "list");
+			this.chipBox.setAttribute("aria-label", "Destinatarios");
+		} else {
+			this.chipBox.removeAttribute("role");
+			this.chipBox.removeAttribute("aria-label");
+			if (!r.unknown.length) nodes.push(el("span", "acp-to-empty", "Elegí a quién con + o @"));
+		}
+		this.chipBox.replaceChildren(...nodes);
+		// Under the field: who it reaches, and who will queue it (dato real: /agents).
+		// At most two lines (one each; CSS cuts the end — a topic's title — on a phone).
+		// With a phone's keyboard up (`html[data-kb=open]`, acp-topic.css) only a
+		// short queue line shows — names, no topic — and the reach line goes: both
+		// variants are in the DOM and CSS picks one, so the keyboard opening or
+		// closing renders nothing (the thread's box change alone moves nothing).
+		const lines: HTMLElement[] = [];
+		const to = r.error ? [] : r.to;
+		if (c.team && names.length)
+			lines.push(
+				el(
+					"div",
+					"acp-to-note acp-to-reach",
+					`Llega a ${names.map((n) => `@${n}`).join(", ")}, a cada uno por separado.`,
+				),
+			);
+		const queued = to.flatMap((n) => {
+			const busy = busyElsewhere(this.agents.get(n), this.topicId(), this.titleOf);
+			return busy ? [{ n: `@${n}`, full: `@${n} (${busy})` }] : [];
+		});
+		if (queued.length) {
+			const lead = queued.length > 1 ? "Les" : "Le";
+			const full = queued.map((q) => q.full);
+			lines.push(
+				el(
+					"div",
+					"acp-to-note acp-to-queue",
+					`${lead} queda en cola a ${
+						full.length > 1 ? `${full.slice(0, -1).join(", ")} y ${full.at(-1)}` : full[0]
+					}.`,
+				),
+				el(
+					"div",
+					"acp-to-note acp-to-queue-short",
+					`${lead} queda en cola a ${queueShort(queued.map((q) => q.n))}.`,
+				),
+			);
+		}
+		this.toLines.replaceChildren(...lines);
+		// The folded line: the same facts, short («A cada uno por separado · @dev en cola»).
+		const sum: string[] = [];
+		if (c.team && names.length) sum.push("A cada uno por separado");
+		if (queued.length) sum.push(`${queueShort(queued.map((q) => q.n))} en cola`);
+		const said = sum.join(" · ");
+		if (this.toSum.textContent !== said) this.toSum.textContent = said;
+		this.toNotes.hidden = lines.length === 0;
+		// Notes that come back (another recipient, another topic) start folded.
+		if (lines.length === 0) this.foldNotes();
+	}
+
+	/** Folds (or unfolds) the notes' one line on a touch screen. */
+	private foldNotes(open = false): void {
+		this.toNotes.classList.toggle("is-open", open);
+		this.toSum.setAttribute("aria-expanded", String(open));
+	}
+
+	private chipX(label: string, onClick: () => void): HTMLElement {
+		const x = el("button", "acp-chip-x", "×");
+		x.type = "button";
+		x.setAttribute("aria-label", label);
+		x.title = label;
+		// Removing a chip while typing keeps the keyboard up (no blur).
+		x.addEventListener("pointerdown", (e) => {
+			if (document.activeElement === this.input) e.preventDefault();
+		});
+		x.addEventListener("click", onClick);
+		return x;
+	}
+
+	/** The `@` menu follows the caret: open while an `@query` is being typed. */
+	private syncMention(): void {
+		if (this.source?.kind !== "conversation" || this.composerMode !== "on") {
+			this.closeMention();
+			return;
+		}
+		const q = mentionQuery(this.input.value, this.input.selectionStart ?? 0);
+		if (!q) {
+			this.closeMention();
+			return;
+		}
+		const sameQuery = this.mention?.query === q.query;
+		this.mention = { start: q.start, query: q.query, active: sameQuery ? this.mention!.active : 0 };
+		this.renderMention();
+	}
+
+	private mentionOptions(): Array<{ key: string; label: string; sub: string }> {
+		const q = this.mention?.query.toLowerCase() ?? "";
+		const names = this.teamNames();
+		const here = this.topicId();
+		const out: Array<{ key: string; label: string; sub: string }> = [];
+		if (
+			names.length > 1 &&
+			("todo el equipo".includes(q) || "equipo".startsWith(q) || "todos".startsWith(q))
+		)
+			out.push({ key: "*", label: "Todo el equipo", sub: `${names.length} agentes` });
+		for (const n of names)
+			if (n.toLowerCase().includes(q)) {
+				const a = this.agents.get(n)!;
+				const st = teamState(a, { here, titleOf: this.titleOf, interrupted: false });
+				out.push({ key: n, label: `@${n}`, sub: st.label });
+			}
+		return out;
+	}
+
+	private renderMention(): void {
+		const opts = this.mentionOptions();
+		if (!this.mention || opts.length === 0) {
+			this.closeMention();
+			return;
+		}
+		const active = Math.min(this.mention.active, opts.length - 1);
+		this.mention.active = active;
+		const rows = opts.map((o, i) => {
+			const r = el("div", "acp-mention-row");
+			r.id = `${this.mentionList.id}-${i}`;
+			r.setAttribute("role", "option");
+			r.setAttribute("aria-selected", String(i === active));
+			r.dataset.pick = o.key;
+			const face = o.key === "*" ? el("span", "acp-avatar acp-avatar-team", "∗") : avatarOf(o.key);
+			if (o.key !== "*") r.style.setProperty("--acp-hue", String(agentHue(o.key)));
+			const text = el("span", "acp-mention-text");
+			text.append(el("span", "acp-mention-name", o.label), el("span", "acp-mention-sub", o.sub));
+			r.append(face, text);
+			r.addEventListener("pointerdown", (e) => e.preventDefault());
+			r.addEventListener("click", () => this.pickMention(o.key));
+			return r;
+		});
+		this.mentionList.replaceChildren(...rows);
+		this.mentionList.hidden = false;
+		this.closePicker(false);
+		this.input.setAttribute("aria-controls", this.mentionList.id);
+		this.input.setAttribute("aria-expanded", "true");
+		this.input.setAttribute("aria-activedescendant", rows[active]!.id);
+	}
+
+	private closeMention(): void {
+		if (!this.mention && this.mentionList.hidden) return;
+		this.mention = null;
+		this.mentionList.hidden = true;
+		this.mentionList.replaceChildren();
+		this.input.removeAttribute("aria-activedescendant");
+		this.input.removeAttribute("aria-expanded");
+		// A trailing mention left unfinished (Escape, blur) is judged now.
+		this.syncChips();
+	}
+
+	private syncChips(): void {
+		if (this.source?.kind === "conversation" && this.toKey() !== this.shownTo) this.renderChips();
+	}
+
+	/** The `@query` typed leaves the text and becomes a chip. */
+	private pickMention(key: string): void {
+		const m = this.mention;
+		if (!m) return;
+		const i = this.input;
+		const end = m.start + 1 + m.query.length;
+		const rest = i.value.slice(end).replace(/^ /, "");
+		i.value = i.value.slice(0, m.start) + rest;
+		i.setSelectionRange(m.start, m.start);
+		this.closeMention();
+		this.addChip(key);
+		this.renderHint();
+		this.syncSendBtn();
+	}
+
+	/** The `@` menu's keys while it is open; true when the key was its. */
+	private mentionKey(e: KeyboardEvent): boolean {
+		if (!this.mention || this.mentionList.hidden) return false;
+		const n = this.mentionList.childElementCount;
+		if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+			e.preventDefault();
+			this.mention.active = (this.mention.active + (e.key === "ArrowDown" ? 1 : n - 1)) % n;
+			this.renderMention();
+			return true;
+		}
+		if (e.key === "Enter" || e.key === "Tab") {
+			e.preventDefault();
+			const row = this.mentionList.children[this.mention.active] as HTMLElement | undefined;
+			if (row?.dataset.pick) this.pickMention(row.dataset.pick);
+			return true;
+		}
+		if (e.key === "Escape") {
+			e.preventDefault();
+			e.stopPropagation();
+			this.closeMention();
+			return true;
+		}
+		return false;
+	}
+
+	/** "+" in a topic: Todo el equipo and each agent, checked as the chips say. */
+	private topicPickRows(): HTMLElement[] {
+		const c = this.currentChips();
+		const names = this.teamNames();
+		const here = this.topicId();
+		const row = (
+			key: string,
+			checked: boolean,
+			face: HTMLElement,
+			name: string,
+			sub: string,
+			locked = false,
+		) => {
+			const b = el("button", `acp-pick-row${checked ? " checked" : ""}`);
+			b.type = "button";
+			b.tabIndex = -1;
+			b.dataset.agent = key;
+			b.setAttribute("role", "menuitemcheckbox");
+			b.setAttribute("aria-checked", String(checked));
+			const mark = el("span", "acp-pick-mark", checked ? "✓" : "");
+			mark.setAttribute("aria-hidden", "true");
+			const info = el("span", "acp-pick-info");
+			info.append(face, el("span", "acp-pick-name", name), el("span", "acp-pick-state", sub));
+			if (locked) b.setAttribute("aria-disabled", "true");
+			b.append(mark, info);
+			b.addEventListener("click", () => {
+				if (locked) return;
+				if (key === "*") this.setChips({ team: !c.team, agents: [] });
+				else if (checked) this.setChips({ team: false, agents: c.agents.filter((x) => x !== key) });
+				else this.addChip(key);
+			});
+			return b;
+		};
+		const out: HTMLElement[] = [];
+		if (names.length > 1)
+			out.push(
+				row(
+					"*",
+					c.team,
+					el("span", "acp-avatar acp-avatar-team", "∗"),
+					`Todo el equipo · ${names.length}`,
+					"a cada uno por separado",
+				),
+			);
+		for (const n of names) {
+			const st = teamState(this.agents.get(n)!, {
+				here,
+				titleOf: this.titleOf,
+				interrupted: false,
+			});
+			const face = avatarOf(n);
+			face.style.setProperty("--acp-hue", String(agentHue(n)));
+			out.push(
+				row(
+					n,
+					c.team || c.agents.includes(n),
+					face,
+					`@${n}`,
+					c.team ? "en Todo el equipo" : st.label,
+					c.team,
+				),
+			);
+		}
+		return out;
 	}
 
 	// ── Sending ─────────────────────────────────────────────────────────
@@ -1585,10 +2373,21 @@ export class AcpThread {
 		const src = this.source;
 		const text = this.input.value;
 		// Checked before the reservation below: a locked box keeps its draft.
-		if (this.composerMode !== "on" || !src || text.trim() === "") return;
+		// Only a topic is written to (an Archive chat has no message box).
+		if (this.composerMode !== "on" || src?.kind !== "conversation" || text.trim() === "") return;
 		this.notice = "";
+		// A topic without recipients sends nothing — and keeps the text where it is.
+		if (this.agents.size > 0) {
+			const r = this.recipients(text);
+			if (r.error) {
+				this.notice = r.error;
+				this.renderComposer();
+				if (!this.pickBtn.hidden) flash(this.toRow, false);
+				return;
+			}
+		}
 		// Reserve this send BEFORE any await: the text leaves the field and gets
-		// its client id now, so a second click (or Ctrl+Enter) on the same draft
+		// its client id now, so a second click (or Enter) on the same draft
 		// finds an empty field and sends nothing. A new message typed meanwhile is
 		// a new send, as always. Same text again after a failure ⇒ same id:
 		// recipients that already got it are not sent twice.
@@ -1599,6 +2398,7 @@ export class AcpThread {
 		const bodies = retry?.bodies ?? new Map<string, string>();
 		this.input.value = "";
 		this.syncSendBtn();
+		this.renderChips();
 		this.closePicker(false);
 		this.drafts.delete(sourceKey(src));
 		// A send that did not go out gives its text back to ITS chat: into the
@@ -1621,8 +2421,7 @@ export class AcpThread {
 			this.changed();
 			return;
 		}
-		const names = [...this.agents.keys()];
-		const to = src.kind === "agent" ? { to: [src.name], error: null } : recipientsOf(text, names);
+		const to = this.recipients(text);
 		if (to.error) {
 			giveBack(to.error);
 			this.changed();
@@ -1635,7 +2434,31 @@ export class AcpThread {
 		const failed: string[] = [];
 		try {
 			const tooBig = new TextEncoder().encode(text).length > this.maxBytes;
-			for (const name of to.to) {
+			// A topic: one post, one row per recipient under one client id (the
+			// topic keeps who it went to). An attachment is per recipient (each
+			// agent reads it from its own session): those go one by one.
+			const asPost = !tooBig;
+			if (asPost) {
+				try {
+					const mark = this.liveTick;
+					const r = await acpPost(src.conversationId, to.team ? "team" : to.to, text, clientId);
+					// What the topic keeps now (the server stored the same): the
+					// chips go back to being the topic's own.
+					if (this.topicId() === src.conversationId && this.conversation) {
+						this.conversation = {
+							...this.conversation,
+							recipients: to.team ? { team: true } : { agents: to.to },
+						};
+						this.chips.delete(src.conversationId);
+					}
+					if (sameChat(this.source, src))
+						for (const row of r.messages) if (this.relevant(row)) this.layAnswer(mark, { row });
+				} catch (err) {
+					const why = SEND_REFUSED.get((err as { code?: string }).code ?? "");
+					failed.push(...to.to.map((n) => (why ? `@${n} (${why})` : `@${n}`)));
+				}
+			}
+			for (const name of asPost ? [] : to.to) {
 				try {
 					let body = bodies.get(name) ?? text;
 					if (tooBig && !bodies.has(name)) {
@@ -1646,14 +2469,12 @@ export class AcpThread {
 						body = `Te envío un mensaje largo como adjunto (${file.size} bytes): ${paths[0]}\nLeelo completo y tratalo como el contenido de este mensaje.`;
 						bodies.set(name, body);
 					}
+					const mark = this.liveTick;
 					const row = await acpSend(name, body, {
-						...(src.kind === "project" ? { projectId: src.projectId } : {}),
+						conversationId: src.conversationId,
 						clientId,
 					});
-					if (sameChat(this.source, src) && this.relevant(row)) {
-						this.noteLive({ row });
-						this.messages = upsert(this.messages, row);
-					}
+					if (sameChat(this.source, src) && this.relevant(row)) this.layAnswer(mark, { row });
 				} catch (err) {
 					const why = SEND_REFUSED.get((err as { code?: string }).code ?? "");
 					failed.push(why ? `@${name} (${why})` : `@${name}`);
@@ -1692,6 +2513,8 @@ const SEND_REFUSED = new Map([
 	["not-in-project", "ya no está en este proyecto"],
 	["unknown-recipient", "ese agente ya no existe"],
 	["project-not-found", "el proyecto ya no existe"],
+	["conversation-archived", "la conversación está archivada"],
+	["conversation-not-found", "la conversación ya no existe"],
 ]);
 
 /**
@@ -1738,22 +2561,24 @@ function time(iso: string): string {
 	const d = new Date(iso);
 	return Number.isNaN(d.getTime())
 		? ""
-		: d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+		: d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
 }
-
-/** An agent's avatar + @name, in its colour (also the Project Chat header's). */
-function agentAvatar(name: string): HTMLElement {
-	return agentId(name);
-}
-
-/** The hue of an agent's colour (avatars elsewhere: the header's group). */
-export { agentHue };
 
 function agentId(name: string): HTMLElement {
 	const id = el("span", "acp-msg-who acp-agent-id");
+	// The hook of an agent's menu in a topic (acpConversation.ts).
+	id.dataset.agent = name;
 	id.append(el("span", "acp-avatar", name.slice(0, 1).toUpperCase()), `@${name}`);
 	id.style.setProperty("--acp-hue", String(agentHue(name)));
 	return id;
+}
+
+/** An agent's round initial in its colour (decorative: its @name is next to it). */
+function avatarOf(name: string): HTMLElement {
+	const a = el("span", "acp-avatar", name.slice(0, 1).toUpperCase());
+	a.style.setProperty("--acp-hue", String(agentHue(name)));
+	a.setAttribute("aria-hidden", "true");
+	return a;
 }
 
 /** Marks a bubble as said by that agent (its colour accent, see .acp-voice). */
@@ -1774,12 +2599,39 @@ interface ReadingPlace {
 }
 
 /** "3 mensajes nuevos": the count of the end button and its announcement. */
+/** «@dev», «@dev y @qa», «@dev, @qa y 1 más»: the keyboard-up queue line's names. */
+function queueShort(names: readonly string[]): string {
+	if (names.length === 1) return names[0]!;
+	if (names.length === 2) return `${names[0]} y ${names[1]}`;
+	return `${names[0]}, ${names[1]} y ${names.length - 2} más`;
+}
+
 function newText(n: number): string {
 	return `${n} ${n === 1 ? "mensaje nuevo" : "mensajes nuevos"}`;
 }
 
 function sourceKey(src: ThreadSource): string {
-	return src.kind === "agent" ? `a:${src.name}` : `p:${src.projectId}`;
+	return src.kind === "conversation"
+		? `c:${src.conversationId}`
+		: src.agent
+			? `a:${src.projectId}:${src.agent}`
+			: `p:${src.projectId}`;
+}
+
+function feedOf(src: ThreadSource, before?: number) {
+	return src.kind === "conversation"
+		? acpConversationFeed(src.conversationId, before)
+		: src.agent
+			? acpFeed(src.agent, before)
+			: acpProjectFeed(src.projectId, before);
+}
+
+/** «Nuevos desde tu última visita»: a line across the thread, not a row (no anchor). */
+function dividerEl(): HTMLElement {
+	const d = el("div", "acp-divider");
+	d.setAttribute("role", "separator");
+	d.append(el("span", "acp-divider-text", "Nuevos desde tu última visita"));
+	return d;
 }
 
 /** An agent's text (its answer, a consult, a system note): Markdown. */

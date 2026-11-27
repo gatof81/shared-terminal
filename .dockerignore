@@ -16,3 +16,4 @@
 !acp-runtime/bin/st
 !acp-runtime/package.json
 !acp-runtime/test-agent.mjs
+!acp-runtime/skills/

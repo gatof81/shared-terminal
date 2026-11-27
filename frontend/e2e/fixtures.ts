@@ -16,7 +16,7 @@ import { MockBackend, type USERS } from "./mockBackend.js";
 /** The seed data is stamped around 2026-10-31T10:00Z; the page's clock sits 30 min later. */
 export const FIXED_NOW = "2026-10-31T10:30:00Z";
 
-export type View = "terminal" | "files" | "git" | "chat";
+export type View = "terminal" | "files" | "git";
 
 const FONTS_DIR = fileURLToPath(new URL("./fonts/", import.meta.url));
 const FONT_CSS = `
@@ -59,7 +59,7 @@ export class App {
 		page.on("pageerror", (err) => this.errors.push(String(err)));
 	}
 
-	/** Open the user menu: the avatar, or under 400 px the drawer's "Account" row. */
+	/** Open the user menu: the avatar, or under 400 px the drawer's «Cuenta» row. */
 	async openUserMenu(): Promise<void> {
 		if (await this.page.locator("#user-menu-btn").isVisible()) {
 			await this.page.click("#user-menu-btn");
@@ -73,7 +73,7 @@ export class App {
 	/**
 	 * Pick an entry of the user menu by its id (templates, invites,
 	 * my-groups, admin, notifications, logout): from the avatar, or under
-	 * 400 px from the drawer's "Account" row.
+	 * 400 px from the drawer's «Cuenta» row.
 	 */
 	async appMenu(id: string): Promise<void> {
 		await this.openUserMenu();
@@ -122,6 +122,8 @@ export class App {
 
 	async openSidebar(): Promise<void> {
 		if (!this.mobile) return;
+		// The phone's home (an address that names nothing): the list is the screen.
+		if (await this.page.locator("body").evaluate((b) => b.classList.contains("home-on"))) return;
 		const main = this.page.locator("main");
 		if (!(await main.evaluate((el) => el.classList.contains("sidebar-open")))) {
 			await this.page.click("#sidebar-toggle");
@@ -134,16 +136,16 @@ export class App {
 	/** The Sessions section's ⋯ (the sidebar tree): Show/Hide terminated. */
 	async showTerminated(): Promise<void> {
 		await this.openSidebar();
-		await this.page.locator(".ssection-sessions .ssection-menu").click();
-		await this.page.getByRole("menuitem", { name: /^Show terminated/ }).click();
+		await this.page.locator(".sgroup-sessions .ssection-menu").click();
+		await this.page.getByRole("menuitem", { name: /^Mostrar terminadas/ }).click();
 		await expect(this.page.locator("#show-terminated-toggle")).toBeChecked();
 	}
 
 	/** The Sessions section's ⋯ → Refresh: re-reads the session list. */
 	async refreshSessions(): Promise<void> {
 		await this.openSidebar();
-		await this.page.locator(".ssection-sessions .ssection-menu").click();
-		await this.page.getByRole("menuitem", { name: /^Refresh/ }).click();
+		await this.page.locator(".sgroup-sessions .ssection-menu").click();
+		await this.page.getByRole("menuitem", { name: /^Actualizar/ }).click();
 	}
 
 	async sidebarOpen(): Promise<boolean> {
@@ -162,8 +164,8 @@ export class App {
 	}
 
 	/**
-	 * An ACP agent's settings panel, from the bar's ⋯ ("Ajustes del agente",
-	 * UX iter3 E). Returns the ⋯ (Escape gives the focus back to it).
+	 * An ACP agent's settings dialog, from the bar's ⋯ ("Ajustes del agente",
+	 * acpSettings.ts). Returns the ⋯ (Escape gives the focus back to it).
 	 */
 	async openAgentSettings(): Promise<Locator> {
 		const more = this.page.locator("#session-menu-btn");
@@ -185,7 +187,7 @@ export class App {
 	}
 
 	async currentView(): Promise<View> {
-		for (const v of ["files", "git", "chat"] as const) {
+		for (const v of ["files", "git"] as const) {
 			if (await this.page.locator(`#${v}-view`).isVisible()) return v;
 		}
 		return "terminal";
@@ -200,7 +202,7 @@ export class App {
 	}
 
 	async expectView(view: View): Promise<void> {
-		for (const v of ["files", "git", "chat"] as const) {
+		for (const v of ["files", "git"] as const) {
 			const overlay = this.page.locator(`#${v}-view`);
 			if (v === view) await expect(overlay).toBeVisible();
 			else await expect(overlay).toBeHidden();

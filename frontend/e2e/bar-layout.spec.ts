@@ -51,7 +51,6 @@ test.describe("the bar layout", () => {
 		const name = await box("#terminal-session-name");
 		expect(name.width, "the session name keeps room to read").toBeGreaterThanOrEqual(72);
 		await expect(page.locator("#terminal-session-name")).toHaveText("my-project");
-		await expect(page.locator("#view-chat-btn"), "a traditional session has no Chat").toBeHidden();
 		for (const v of ["terminal", "files", "git"] as const) {
 			const b = await box(`#view-${v}-btn`);
 			expect(b.width, `${v} tab is a touch target`).toBeGreaterThanOrEqual(34);
@@ -120,9 +119,9 @@ test.describe("the bar layout", () => {
 		await expect(page.locator("#terminal-toolbar")).toBeVisible();
 		await expect(page.locator("#session-menu-btn")).toBeVisible();
 		await expect(page.locator("#terminal-tabs")).toBeHidden();
-		await expect(page.locator("#terminal-state")).toContainText("stopped");
+		await expect(page.locator("#terminal-state")).toContainText("detenida");
 		await expect(
-			page.locator("#terminal-state").getByRole("button", { name: "Start session" }),
+			page.locator("#terminal-state").getByRole("button", { name: "Poner en marcha" }),
 		).toBeEnabled();
 	});
 
@@ -143,7 +142,7 @@ test.describe("the bar layout", () => {
 		const r0 = resizes();
 		const h0 = await termH();
 		await page.click("#session-menu-btn");
-		await expect(firstItem).toHaveText(/^Hide tabs/);
+		await expect(firstItem).toHaveText(/^Ocultar las pestañas/);
 		await firstItem.click();
 		await expect(page.locator("#terminal-tabs")).toBeHidden();
 		await expect.poll(resizes, "one resize").toBe(r0 + 1);
@@ -169,7 +168,7 @@ test.describe("the bar layout", () => {
 		const resizes2 = () => sock2.sent.filter((f) => f.type === "resize").length;
 		const r1 = resizes2();
 		await page.click("#session-menu-btn");
-		await expect(firstItem).toHaveText(/^Show tabs/);
+		await expect(firstItem).toHaveText(/^Mostrar las pestañas/);
 		await firstItem.click();
 		await expect(page.locator("#terminal-tabs")).toBeVisible();
 		await expect.poll(resizes2, "one resize back").toBe(r1 + 1);
@@ -177,7 +176,7 @@ test.describe("the bar layout", () => {
 		expect(resizes2()).toBe(r1 + 1);
 		// On a wide screen the row shows and the item is not offered, whatever is stored.
 		await page.click("#session-menu-btn");
-		await page.getByRole("menuitem", { name: /^Hide tabs/ }).click();
+		await page.getByRole("menuitem", { name: /^Ocultar las pestañas/ }).click();
 		await page.setViewportSize({ width: 1280, height: 800 });
 		await expect(page.locator("#terminal-tabs")).toBeVisible();
 		await page.click("#session-menu-btn");
@@ -192,19 +191,20 @@ test.describe("the bar layout", () => {
 		await app.openUserMenu();
 		const menu = page.locator('[role="menu"].action-menu');
 		await expect(menu.locator('[role="menuitem"]')).toHaveText([
-			/Templates/,
-			/Invites/,
+			/Plantillas/,
+			/Invitaciones/,
 			/Admin/,
-			/Logout/,
+			/Salir/,
 		]);
 		await expect(menu.locator('[data-action="logout"]')).toHaveCSS("border-top-style", "solid");
 		await menu.locator('[data-action="admin"]').click();
 		await expect(page.locator("#admin-modal")).toHaveClass(/open/);
 		await app.escape();
-		// Back to the opener: the avatar, or under 400 px the ☰ (the drawer row's drawer is closed).
+		// Back to the opener: the avatar, or under 400 px the list's «Cuenta» row
+		// (on the phone's home the list is the screen; in a drawer, closed, the ☰).
 		const avatar = page.locator("#user-menu-btn");
 		await expect(
-			(await avatar.isVisible()) ? avatar : page.locator("#sidebar-toggle"),
+			(await avatar.isVisible()) ? avatar : page.locator("#sidebar-account-btn"),
 		).toBeFocused();
 		// No copy of the old buttons left.
 		await expect(
@@ -236,8 +236,7 @@ test.describe("the bar layout", () => {
 		await app.openSession("docs");
 		await app.expectView("files");
 		await app.switchView("terminal");
-		await expect(page.locator("#terminal-state")).toContainText("stopped");
+		await expect(page.locator("#terminal-state")).toContainText("detenida");
 		await app.switchView("git");
-		await expect(page.locator("#view-chat-btn")).toBeHidden();
 	});
 });

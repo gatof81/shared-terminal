@@ -1,8 +1,15 @@
 /**
- * projectsView.ts — Projects: the sidebar's Projects section (its "+"), the
- * project page (`#/projects/<pid>`: ACP Project Chat, acpProjectChat.ts) and
- * the new-project dialog. A project only groups ACP agents and gives them a
- * shared conversation; each agent keeps its own session.
+ * projectsView.ts — Projects: the project's pages and the new-project
+ * dialog (opened from the sidebar's Proyectos "+", sessionCore.ts). A project groups ACP agents
+ * and gives them topics; each agent keeps its own session.
+ *
+ *   #/projects/<pid>          the project: its rail (projectRail.ts) — in the
+ *                             sidebar on a wide screen, the whole screen on a phone
+ *   #/projects/<pid>/c/<cid>  a topic (acpConversation.ts), the rail beside it
+ *   #/projects/<pid>/archive[/<k>]  the Archive (acpArchive.ts): its list, or
+ *                             one of its read-only chats, the rail beside it
+ *   #/projects/<pid>[/c/<cid>]/tools/…  Herramientas (toolsView.ts), over the
+ *                             topic it was opened from
  *
  * The page is shown OVER the session workbench, never instead of it: the
  * terminal area's other children only turn `visibility: hidden` (layout
@@ -11,19 +18,37 @@
  */
 
 import {
-	acpProjectPage,
-	onProjectFeed,
-	type ProjectPageMode,
-	projectFeed,
-	refreshAcpAgents,
-	resetAcpProject,
-	retryProjectFeed,
-	setProjectPageMode,
-	suspendAcpProject,
-} from "./acpProjectChat.js";
-import { resetAcpAgents } from "./acpRegistry.js";
-import { stopAcpStatusFeed } from "./acpStatusFeed.js";
-import type { FeedStatus } from "./acpThread.js";
+	archiveHeader,
+	archivePage,
+	onArchiveWork,
+	placeArchiveHeader,
+	resetArchive,
+	revealInArchive,
+	suspendArchive,
+} from "./acpArchive.js";
+import {
+	newTopicDialog,
+	onTopicWork,
+	placeTopicHeader,
+	repaintTopic,
+	resetTopic,
+	revealInTopic,
+	suspendTopic,
+	topicHeader,
+	topicPage,
+	writeInTopic,
+} from "./acpConversation.js";
+import {
+	closeInbox,
+	configureInbox,
+	mountInboxButton,
+	openInbox,
+	resetInboxPanel,
+} from "./acpInbox.js";
+import { resetInbox, startInbox } from "./acpInboxStore.js";
+import { acpEntryByName, resetAcpAgents } from "./acpRegistry.js";
+import { configureReview } from "./acpReview.js";
+import { readAcpAgents, stopAcpStatusFeed } from "./acpStatusFeed.js";
 import {
 	archiveProject,
 	createProject,
@@ -32,7 +57,6 @@ import {
 	type ProjectSummary,
 	renameProject,
 } from "./api.js";
-import { openActionMenu } from "./components/actionMenu.js";
 import { confirmDialog, promptDialog } from "./components/dialog.js";
 import { showToast } from "./components/toast.js";
 import {
@@ -43,23 +67,48 @@ import {
 	projectsLoaded,
 	setCurrentProject,
 	setProjects,
+	setProjectsStatus,
 } from "./projectDirectory.js";
 import {
+	configureRail,
+	hideRail,
+	onRailChange,
+	railBody,
+	railConversations,
+	railHead,
+	railTeamEmpty,
+	repaintRail,
+	resetRail,
+	showRail,
+	topicTitle,
+} from "./projectRail.js";
+import {
+	depth,
 	disableProjectRoutes,
 	enableProjectRoutes,
+	fromHistory,
+	lastPushFromHome,
 	navigateProject,
 	onAddressWrite,
+	type ProjectPage,
+	type ProjectRoute,
 	projectRouteHash,
+	pushHome,
 	pushSessionAddress,
 	readProjectRoute,
 } from "./router.js";
 import { renderSessionList, sessionListLoaded } from "./sessionCore.js";
 import { setTitlePage } from "./tabTitle.js";
+import {
+	hideTools,
+	leaveTools,
+	openAgentMenu,
+	openTools,
+	resetTools,
+	showTools,
+} from "./toolsView.js";
 import { button, el } from "./ui.js";
 
-const section = document.getElementById("project-section");
-const projectList = document.getElementById("project-list");
-const newProjectBtn = document.getElementById("new-project-btn") as HTMLButtonElement | null;
 const pageEl = document.getElementById("project-view");
 const terminalArea = document.getElementById("terminal-area");
 
@@ -68,135 +117,36 @@ const PROJECT_NAME_MAX = 80;
 
 let active = false; // signed in + app shown
 let shown: string | null = null; // the project id on screen
+let shownPage: ProjectPage | null = null; // which of its pages
+let shownTopic: string | null = null;
+/** The Archive's chat on screen (`page: "archive"`; null: its list). */
+let shownArchive: string | null = null;
 let gen = 0; // bumped by every reset (logout): a load started before applies nothing
-let loadError = false;
-let canCreate = true;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
-
-// ── The shown project's state ───────────────────────────────────────────────
-// Active, archived, not found or failed — decided from the project's feed AND
-// the project list, never from "not in the list" alone: the feed carries no
-// `archived` flag (an archived project's feed still answers 200, and this
-// frontend-only change does not touch the backend), so ARCHIVED is concluded
-// only from a feed that answered plus a list that was fetched successfully,
-// in this auth generation, AFTER the absence was noticed, and still lacks it.
-// Until then — and on any error — the page stays locked (fail-closed).
-type PageState = "loading" | "active" | "archived" | "missing" | "error";
-let pageState: PageState = "loading";
-let feedStatus: FeedStatus = "loading";
-let feedName: string | null = null;
-let absentConfirmed: string | null = null; // the pid a post-absence list confirmed absent
-let confirming: string | null = null;
-let confirmFailed = false;
-
-const MODE: Record<PageState, ProjectPageMode> = {
-	loading: "loading",
-	active: "active",
-	archived: "archived",
-	missing: "unavailable",
-	error: "unavailable",
-};
-
-function evaluate(): void {
-	const pid = shown;
-	if (!pid) return;
-	let next: PageState;
-	if (feedStatus === "loading") next = "loading";
-	else if (feedStatus === "not-found") next = "missing";
-	else if (feedStatus === "error" || feedStatus === "stale") next = "error";
-	else if (projectName(pid) !== null) next = "active";
-	else if (absentConfirmed === pid) next = "archived";
-	else if (confirmFailed) next = "error";
-	else {
-		next = "loading";
-		void confirmAbsence(pid);
-	}
-	pageState = next;
-	// The history stays readable (box locked) when it was read once and only a
-	// re-read or the list check failed; only a project never read is hidden.
-	const readable = feedStatus === "ok" || feedStatus === "stale";
-	setProjectPageMode(
-		next === "error" && readable ? (absentConfirmed === pid ? "archived" : "loading") : MODE[next],
-	);
-	renderPage();
-}
-
-/** The feed answered but the list lacks the project: ask for the list once more before concluding. */
-async function confirmAbsence(pid: string): Promise<void> {
-	if (confirming === pid) return;
-	confirming = pid;
-	const myGen = gen;
-	const a = await fetchProjects().catch(() => null);
-	if (confirming === pid) confirming = null;
-	if (myGen !== gen || !active || shown !== pid || (a && !a.ok && a.code === "stale")) return;
-	if (a?.ok) {
-		loadError = false;
-		canCreate = a.body.can.createProject.allowed;
-		if (setProjects(a.body.projects) && sessionListLoaded()) renderSessionList();
-		if (!a.body.projects.some((p) => p.projectId === pid)) absentConfirmed = pid;
-	} else confirmFailed = true;
-	renderSection();
-	evaluate();
-}
-
-function onFeed(pid: string, feed: FeedStatus, name: string | null): void {
-	if (pid !== shown) return;
-	if (feed === feedStatus && name === feedName) return;
-	feedStatus = feed;
-	feedName = name;
-	evaluate();
-}
-
-function retryPage(): void {
-	confirmFailed = false;
-	if (feedStatus !== "ok") retryProjectFeed();
-	evaluate();
-}
 
 async function loadProjects(): Promise<void> {
 	const myGen = gen;
 	const a = await fetchProjects().catch(() => null);
 	if (myGen !== gen || !active) return;
+	let changed = false;
 	if (a?.ok) {
-		loadError = false;
-		canCreate = a.body.can.createProject.allowed;
-		if (setProjects(a.body.projects) && sessionListLoaded()) renderSessionList();
-	} else if (a?.code !== "stale") loadError = true;
+		changed = setProjectsStatus({
+			loadFailed: false,
+			canCreate: a.body.can.createProject.allowed,
+		});
+		changed = setProjects(a.body.projects) || changed;
+	} else if (a?.code !== "stale") changed = setProjectsStatus({ loadFailed: true });
+	if (changed && sessionListLoaded()) renderSessionList();
 	renderSection();
-	if (shown) evaluate();
+	paintSpace();
+	repaintRail();
+	repaintTopic();
 }
 
-// ── Sidebar section ─────────────────────────────────────────────────────────
+// ── Sidebar ─────────────────────────────────────────────────────────────────
 
+/** The sidebar's Proyectos (sessionCore.ts) marks the project on screen. */
 function renderSection(): void {
-	if (!section || !projectList) return;
-	section.hidden = !active;
-	projectList.replaceChildren();
-	if (!active) return;
-	if (newProjectBtn) {
-		newProjectBtn.disabled = !canCreate;
-		newProjectBtn.title = canCreate
-			? "Crear un proyecto para tus agentes"
-			: "Llegaste al límite de proyectos";
-	}
-	// The projects themselves are the headings of the sidebar tree
-	// (sessionCore.ts): this section says what the tree can't.
-	if (!projectsLoaded())
-		projectList.appendChild(
-			el(
-				"p",
-				"project-list-note",
-				loadError ? "No se pudieron cargar los proyectos; reintentando." : "Cargando proyectos…",
-			),
-		);
-	else if (projects().length === 0)
-		projectList.appendChild(
-			el(
-				"p",
-				"project-list-note",
-				"Sin proyectos. Un proyecto agrupa agentes ACP y les da un Project Chat.",
-			),
-		);
 	if (currentProject() !== shown) {
 		setCurrentProject(shown);
 		if (sessionListLoaded()) renderSessionList();
@@ -208,27 +158,47 @@ function renderSection(): void {
 function sync(): void {
 	const r = active ? readProjectRoute() : null;
 	if (r === null) {
+		const left = shown;
 		hidePage();
+		if (left !== null && homeFocus === left) focusProjectRow(left);
+		homeFocus = null;
 		return;
 	}
-	// The address is the page's canonical one (…/chat), also when it was
-	// entered by the bare form: written in place, not a history entry; the
-	// write comes back here (onAddressWrite).
+	// The address in its canonical form (an encoding written differently):
+	// in place, not a history entry; the write comes back here (onAddressWrite).
 	if (window.location.hash !== projectRouteHash(r)) {
 		navigateProject(r, { replace: true });
 		return;
 	}
-	const changed = shown !== r.projectId;
-	shown = r.projectId;
-	if (changed) {
-		pageState = "loading";
-		absentConfirmed = null;
-		confirming = null;
-		confirmFailed = false;
+	if (shown === null) {
+		// Into the project from the main level: by a choice, a new entry —
+		// the one ‹ goes back from; by Back / Forward, the same entry as when
+		// it was pushed, or no known way back.
+		if (!fromHistory()) {
+			entryDepth = depth();
+			entryFromHome = lastPushFromHome();
+		} else if (entryDepth !== depth()) entryDepth = null;
 	}
+	syncSpace(r, shown, shownPage);
+	renderSection();
+}
+
+/**
+ * Herramientas: the session's workbench comes out from under the page, which
+ * stays mounted — invisible (`visibility`, layout and scroll kept) and inert.
+ */
+function liftPageEl(): void {
+	if (!pageEl) return;
+	document.body.classList.remove("project-page-on");
+	pageEl.hidden = false;
+	pageEl.inert = true;
+}
+
+function showPageEl(): void {
 	if (!pageEl) return;
 	document.body.classList.add("project-page-on");
 	pageEl.hidden = false;
+	pageEl.inert = false;
 	// Keystrokes must not keep going to a terminal the page now covers.
 	const focused = document.activeElement;
 	if (
@@ -237,31 +207,310 @@ function sync(): void {
 		!pageEl.contains(focused)
 	)
 		focused.blur();
-	renderPage();
-	if (changed) {
-		const f = projectFeed(r.projectId);
-		feedStatus = f.feed;
-		feedName = f.name;
-		evaluate();
+}
+
+// ── The project's space: rail + topic ───────────────────────────────────────
+//
+// One page element (`.ps-page`): a slot for the rail's body (a phone's
+// project screen) and the main area (a topic, or on a wide screen with no
+// topic, a line saying what to do). Where the rail goes follows the width
+// (placeSpace): wide, head and body in the sidebar (#project-rail, the
+// sidebar's other children hidden); on a phone, the head in the app's header
+// and the body in the page — the header keeps its height either way, and
+// the terminal under the page keeps its box (no resize).
+
+const spaceEl = el("div", "ps-page");
+const railSlot = el("div", "ps-rail-slot");
+const mainSlot = el("div", "ps-main");
+spaceEl.append(railSlot, mainSlot);
+const railEl = el("div", "project-rail");
+railEl.id = "project-rail";
+const homeEl = el("div", "ps-home");
+const homeTitle = el("h2", "ps-home-title", "Elegí una conversación");
+homeTitle.tabIndex = -1;
+const homeNote = el("p", "ps-home-note");
+const homeNew = button("Nueva conversación", "btn sm primary", () => {
+	if (shown) void newConversationFlow(shown);
+});
+// No agent in the project: a conversation would reach no one — the first
+// step is an agent (the same form as Equipo's +).
+const homeAddAgent = button("Agregar agente", "btn sm primary", () => {
+	if (shown)
+		window.dispatchEvent(
+			new CustomEvent("st:new-acp-session", {
+				detail: { projectId: shown, opener: homeAddAgent },
+			}),
+		);
+});
+homeEl.append(homeTitle, homeNote, homeNew, homeAddAgent);
+const phoneMq = typeof window !== "undefined" ? window.matchMedia?.("(max-width: 768px)") : null;
+phoneMq?.addEventListener?.("change", () => placeSpace());
+
+function syncSpace(r: ProjectRoute, prevPid: string | null, prevPage: ProjectPage | null): void {
+	const page = r.page ?? "home";
+	// Herramientas keeps the topic it was opened from mounted under it.
+	const topic = page === "conversation" || page === "tools" ? (r.conversationId ?? null) : null;
+	const archive = page === "archive" ? (r.archive ?? null) : null;
+	const topicChanged = topic !== shownTopic || archive !== shownArchive || prevPid !== r.projectId;
+	const prevArchive = shownArchive;
+	shown = r.projectId;
+	shownPage = page;
+	shownTopic = topic;
+	shownArchive = archive;
+	if (!pageEl) return;
+	if (page === "tools") liftPageEl();
+	else {
+		hideTools({ fromHistory: fromHistory() });
+		showPageEl();
 	}
-	renderSection();
-	if (changed) {
-		pageEl.querySelector<HTMLElement>(".pv-title")?.focus({ preventScroll: true });
+	document.body.classList.add("project-space-on");
+	// A phone's stack: the project's screen (the rail) → a topic / the Archive.
+	document.body.classList.toggle("ps-on-topic", topic !== null || page === "archive");
+	showRail(r.projectId, topic, page === "archive");
+	if (topic) rememberTopic(r.projectId, topic);
+	if (page !== "archive") suspendArchive();
+	if (topic) {
+		// From the rail (a phone's project screen, or the sidebar) by a tap,
+		// not Back / Forward: ‹ is then the browser's Back.
+		const opener =
+			prevPid === r.projectId && prevPage === "home" && !fromHistory() ? "rail" : "other";
+		place(mainSlot, topicPage(r.projectId, topic, opener));
+	} else if (page === "archive") {
+		suspendTopic();
+		// A chat picked from the Archive's list by a tap: its ‹ is Back.
+		const opener =
+			prevPid === r.projectId && prevPage === "archive" && prevArchive === null && !fromHistory()
+				? "list"
+				: "other";
+		place(mainSlot, archivePage(r.projectId, archive, opener));
+	} else {
+		suspendTopic();
+		place(mainSlot, homeEl);
+	}
+	if (pageEl.firstChild !== spaceEl || pageEl.childNodes.length !== 1)
+		pageEl.replaceChildren(spaceEl);
+	placeSpace();
+	paintSpace();
+	if (page === "tools") {
+		// The topic under Herramientas only waits (its place is kept by the DOM).
+		suspendTopic();
+		showTools(r);
+		if (!projectsLoaded()) void loadProjects();
+		return;
+	}
+	openTopicIfWide();
+	if (topicChanged || prevPage !== page) {
+		// The page's heading, for a screen reader (a phone's project screen has
+		// none of its own: the rail's head is the app's header there).
+		const target = topic
+			? topicHeader.querySelector<HTMLElement>(".pv-title")
+			: page === "archive"
+				? archiveHeader.querySelector<HTMLElement>(".pv-title")
+				: homeTitle;
+		if (target?.offsetParent) target.focus({ preventScroll: true });
 		if (!projectsLoaded()) void loadProjects();
 	}
 }
 
+/**
+ * `node` as `slot`'s only child — left where it is when it already is: taking
+ * the thread out of the document and back loses its scroll (Herramientas ⇄
+ * its topic must find the reader where they were).
+ */
+function place(slot: HTMLElement, node: HTMLElement): void {
+	if (slot.firstChild !== node || slot.childNodes.length !== 1) slot.replaceChildren(node);
+}
+
+// ── The topic a wide screen opens ──────────────────────────────────────────
+// Wide, the rail is beside the topic: entering a project opens its last
+// topic visited in this browser, else its most recently active one (in the
+// project's place, not a new entry, so Back leaves the project as it came).
+// The empty main area is only for a project without topics. A phone's
+// project screen IS the rail: nothing opens by itself there.
+
+const LAST_TOPIC_KEY = "st.lastTopic";
+
+function lastTopics(): Record<string, string> {
+	try {
+		const v = JSON.parse(localStorage.getItem(LAST_TOPIC_KEY) ?? "{}");
+		return v && typeof v === "object" ? (v as Record<string, string>) : {};
+	} catch {
+		return {};
+	}
+}
+
+function rememberTopic(pid: string, cid: string): void {
+	try {
+		localStorage.setItem(LAST_TOPIC_KEY, JSON.stringify({ ...lastTopics(), [pid]: cid }));
+	} catch {
+		/* storage off: the most recent topic opens instead */
+	}
+}
+
+function openTopicIfWide(): void {
+	if (shownPage !== "home" || !shown || phoneMq?.matches) return;
+	const list = railConversations();
+	if (!list?.length) return;
+	const last = lastTopics()[shown];
+	const pick = list.find((c) => c.id === last) ?? list[0]!;
+	navigateProject(
+		{ projectId: shown, page: "conversation", conversationId: pick.id },
+		{ replace: true },
+	);
+}
+
+/** What the space says about the project itself, and the tab's title. */
+function paintSpace(): void {
+	if (!shown || shownPage === null) return;
+	const name = projectName(shown);
+	const gone = projectsLoaded() && name === null;
+	const list = railConversations();
+	const empty = !gone && list?.length === 0;
+	const noTeam = empty && railTeamEmpty() === true;
+	homeTitle.textContent = gone
+		? "Proyecto no encontrado"
+		: noTeam
+			? "Este proyecto todavía no tiene agentes"
+			: empty
+				? "Sin conversaciones todavía"
+				: "";
+	homeNote.textContent = gone
+		? "No existe o fue archivado."
+		: noTeam
+			? "Las conversaciones son con los agentes del proyecto: agregá uno para empezar."
+			: empty
+				? "Cada tema es una conversación con el equipo del proyecto."
+				: "";
+	// «Nueva conversación» once there is someone to talk to.
+	homeNew.hidden = !empty || railTeamEmpty() !== false;
+	homeAddAgent.hidden = !noTeam;
+	// Nothing of a rail for a project that is not there: the sidebar keeps its
+	// sessions, and a phone shows this line instead of an empty project screen.
+	document.body.classList.toggle("ps-gone", gone);
+	// A topic's or the Archive's title is its own page's.
+	if (!shownTopic && shownPage !== "archive") setTitlePage(name ?? "Proyecto");
+}
+
+function placeSpace(): void {
+	const slot = document.getElementById("header-project");
+	const sidebar = document.getElementById("sidebar");
+	if (!shown || shownPage === null) return;
+	if (phoneMq?.matches) {
+		railEl.remove();
+		railSlot.replaceChildren(railBody);
+		if (slot) {
+			// Herramientas: the header's row is the session bar's (its tools bar).
+			if (shownPage === "tools") slot.replaceChildren();
+			else
+				slot.replaceChildren(
+					shownPage === "archive" ? archiveHeader : shownTopic ? topicHeader : railHead,
+				);
+			slot.hidden = shownPage === "tools";
+		}
+		placeTopicHeader(false);
+		placeArchiveHeader(false);
+	} else {
+		railSlot.replaceChildren();
+		if (railEl.firstChild !== railHead) railEl.replaceChildren(railHead, railBody);
+		if (sidebar && railEl.parentElement !== sidebar) sidebar.prepend(railEl);
+		if (slot) {
+			slot.hidden = true;
+			slot.replaceChildren();
+		}
+		placeTopicHeader(true);
+		placeArchiveHeader(true);
+	}
+}
+
+/** Leaving the space (another kind of page, or no page): rail and topic stop following. */
+function leaveSpace(): void {
+	leaveTools();
+	hideRail();
+	suspendTopic();
+	suspendArchive();
+	railEl.remove();
+	railSlot.replaceChildren();
+	topicHeader.remove();
+	archiveHeader.remove();
+	document.body.classList.remove("project-space-on", "ps-on-topic", "ps-gone");
+	// The header's project slot is only this space's: emptied AND hidden — an
+	// empty slot left shown covers the session bar's ⋯ on a phone. (Checking
+	// what it holds came too late: the headers above were already removed.)
+	const slot = document.getElementById("header-project");
+	if (slot) {
+		slot.hidden = true;
+		slot.replaceChildren();
+	}
+	shownTopic = null;
+	shownArchive = null;
+}
+
+/** "+" of Conversaciones (and the space's own button): a new topic, then into it. */
+async function newConversationFlow(pid: string): Promise<void> {
+	const c = await newTopicDialog(pid);
+	if (c && shown === pid)
+		navigateProject({ projectId: pid, page: "conversation", conversationId: c.id });
+}
+
 function hidePage(): void {
+	leaveTools();
 	if (shown === null && pageEl?.hidden !== false) return;
+	if (shownPage !== null) leaveSpace();
 	shown = null;
-	suspendAcpProject();
+	shownPage = null;
 	document.body.classList.remove("project-page-on");
 	if (pageEl) {
 		pageEl.hidden = true;
+		pageEl.inert = false;
 		pageEl.replaceChildren();
 	}
 	setTitlePage(null);
 	renderSection();
+}
+
+// ── ‹: back to the main level ───────────────────────────────────────────────
+
+/** The depth of the entry the project was entered by from the main level (null: none known). */
+let entryDepth: number | null = null;
+/** ‹ was used: the project's row in the sidebar takes the focus once it shows. */
+let homeFocus: string | null = null;
+/** That entry was pushed from the phone's home (the list as the screen). */
+let entryFromHome = false;
+
+/**
+ * The rail's ‹: the page gives way to the main level (on a phone, the home:
+ * the list as the screen). Wider: when the project was entered from it by a new entry, Back to
+ * that entry — so the browser's Back after ‹ does not land on the project
+ * again, and Forward still does; otherwise (a deep link, an address typed)
+ * a new entry for the session underneath, which Back undoes. Neither
+ * touches a session, an agent or tmux.
+ */
+function goHome(): void {
+	if (shown === null) return;
+	homeFocus = shown;
+	const d = depth();
+	const back = entryDepth !== null && entryDepth > 0 && d >= entryDepth;
+	// A phone's main level is its home, the list as the screen — never the
+	// drawer over the project (one list, revision-ui §8): Back to the entry
+	// the project was entered from when that was the home, else a new entry
+	// for it (Back returns to the project).
+	if (phoneMq?.matches) {
+		if (back && entryFromHome) history.go(entryDepth! - 1 - d);
+		else pushHome();
+		return;
+	}
+	if (back) history.go(entryDepth! - 1 - d);
+	else leaveForSession();
+}
+
+function focusProjectRow(pid: string): void {
+	requestAnimationFrame(() =>
+		document
+			.querySelector<HTMLElement>(
+				`#session-list a.project-row[data-project-id="${CSS.escape(pid)}"]`,
+			)
+			?.focus(),
+	);
 }
 
 /**
@@ -275,92 +524,13 @@ function leaveForSession(): void {
 	sync();
 }
 
-let headerFor: { key: string; el: HTMLElement } | null = null;
-function header(pid: string, name: string | null, st: PageState): HTMLElement {
-	const key = JSON.stringify([pid, name, st]);
-	if (headerFor?.key === key) return headerFor.el;
-	const h = el("div", "pv-header");
-	const title = el("h2", "pv-title", name ?? "Proyecto");
-	title.id = "pv-title";
-	title.tabIndex = -1;
-	const tools = el("div", "pv-tools");
-	// Writes only on a project confirmed live (fail-closed: see evaluate).
-	// One row: the title, the agents' group (acpProjectChat) and a ⋯ menu
-	// (the app's action menu: Escape, focus back to the button, arrows). No
-	// ×: the way out is the sidebar (☰ on a phone) or Back (U-2 N1/N2).
-	if (st === "active") {
-		const menu = button(
-			"⋯",
-			"btn btn-icon pv-menu-btn",
-			() =>
-				openActionMenu({
-					title: name ?? "Proyecto",
-					opener: menu,
-					items: [
-						{ id: "rename", label: "Renombrar" },
-						{
-							id: "archive",
-							label: "Archivar",
-							kind: "danger",
-							hint: "No se puede deshacer desde la app; el historial sigue legible.",
-						},
-					],
-					onPick: (id) => {
-						if (id === "rename") void renameFlow(pid, name ?? "");
-						else if (id === "archive") void archiveFlow(pid, name ?? "este proyecto");
-					},
-				}),
-			"Acciones del proyecto",
-		);
-		menu.setAttribute("aria-haspopup", "menu");
-		tools.append(menu);
-	}
-	h.append(title, tools);
-	headerFor = { key, el: h };
-	return h;
-}
-
-let noteCache: { key: string; el: HTMLElement | null } | null = null;
-/** The state line, kept across re-renders while the state is the same. */
-function noteFor(st: PageState): HTMLElement | null {
-	const key = `${st}:${feedStatus}`;
-	if (noteCache?.key !== key) noteCache = { key, el: statusNote(st) };
-	return noteCache.el;
-}
-
-function statusNote(st: PageState): HTMLElement | null {
-	if (st === "archived")
-		return el("p", "pv-status pv-status-archived", "Proyecto archivado · solo lectura");
-	if (st === "missing") return el("p", "pv-status pv-status-error", "Proyecto no encontrado.");
-	if (st !== "error") return null;
-	const p = el("p", "pv-status pv-status-error");
-	p.setAttribute("role", "alert");
-	p.append(
-		feedStatus === "ok"
-			? "No se pudo confirmar el estado del proyecto. "
-			: feedStatus === "stale"
-				? "No se pudo actualizar el proyecto. "
-				: "No se pudo cargar el proyecto. ",
-		button("Reintentar", "pv-btn", retryPage),
-	);
-	return p;
-}
-
-function renderPage(): void {
-	if (!pageEl || !shown) return;
-	// The live list's name first (a rename lands there); the feed's for an archived one.
-	const name = projectName(shown) ?? (pageState === "missing" ? null : feedName);
-	setTitlePage(name ?? "Proyecto");
-	const page = acpProjectPage(shown, header(shown, name, pageState), noteFor(pageState));
-	if (pageEl.childNodes.length !== 1 || pageEl.firstChild !== page) pageEl.replaceChildren(page);
-}
-
 async function archiveFlow(pid: string, name: string): Promise<void> {
 	const ok = await confirmDialog({
 		title: `Archivar ${name}`,
 		message:
-			"Deja de aparecer en la lista y no se puede deshacer desde la app. Sus agentes quedan sin proyecto; sus sesiones y su contexto no cambian. El historial sigue legible en el chat de cada agente y en la URL de este proyecto (solo lectura).",
+			"Deja de aparecer en la lista y no se puede deshacer desde la app. Sus agentes quedan sin proyecto; sus sesiones y su contexto no cambian.",
 		confirmLabel: "Archivar",
+		cancelLabel: "Cancelar",
 	}).catch(() => false);
 	if (!ok) return;
 	const r = await archiveProject(pid);
@@ -368,10 +538,8 @@ async function archiveFlow(pid: string, name: string): Promise<void> {
 		showToast(`No se pudo archivar (${r.code})`, true);
 		return;
 	}
-	await refreshAcpAgents();
-	// The page stays, archived and read-only, at the same address (U-2 N4).
+	await readAcpAgents();
 	await loadProjects();
-	if (shown === pid) evaluate();
 }
 
 // ── Rename ──────────────────────────────────────────────────────────────────
@@ -388,6 +556,7 @@ async function renameFlow(pid: string, current: string): Promise<void> {
 	const myGen = gen;
 	let renamed: ProjectSummary | null = null;
 	await promptDialog({
+		cancelLabel: "Cancelar",
 		title: "Renombrar proyecto",
 		label: "Nombre",
 		initialValue: current,
@@ -421,7 +590,8 @@ async function renameFlow(pid: string, current: string): Promise<void> {
 	)
 		renderSessionList();
 	renderSection();
-	if (shown === pid) evaluate();
+	paintSpace();
+	repaintRail();
 	showToast("Proyecto renombrado");
 }
 
@@ -432,6 +602,7 @@ async function openCreateProjectDialog(): Promise<void> {
 	const clientRequestId = crypto.randomUUID();
 	let created: string | null = null;
 	const name = await promptDialog({
+		cancelLabel: "Cancelar",
 		title: "Nuevo proyecto",
 		label: "Nombre",
 		confirmLabel: "Crear",
@@ -464,9 +635,79 @@ function wire(): void {
 	window.addEventListener("popstate", () => sync());
 	window.addEventListener("hashchange", () => sync());
 	window.addEventListener("st:projects-changed", () => void loadProjects());
-	onProjectFeed(onFeed);
 	onAddressWrite(() => sync());
-	newProjectBtn?.addEventListener("click", () => void openCreateProjectDialog());
+	onRailChange(() => {
+		paintSpace();
+		openTopicIfWide();
+	});
+	configureRail({
+		newProject: () => void openCreateProjectDialog(),
+		renameProject: (pid) => void renameFlow(pid, projectName(pid) ?? ""),
+		archiveProject: (pid) => void archiveFlow(pid, projectName(pid) ?? "este proyecto"),
+		newConversation: (pid) => void newConversationFlow(pid),
+		newAgent: (pid, opener) =>
+			window.dispatchEvent(
+				new CustomEvent("st:new-acp-session", { detail: { projectId: pid, opener } }),
+			),
+		home: () => goHome(),
+		openTerminal: (name) => openTools({ agent: name, work: null, tool: "terminal" }),
+		settings: (opener) =>
+			window.dispatchEvent(new CustomEvent("st:open-user-menu", { detail: { opener } })),
+		agentMenu: (name, opener) => openAgentMenu(name, opener, { terminal: false }),
+		openWork: (w) => openTools({ agent: w.agent, work: w.id, tool: "git" }),
+		openInbox: (opener) => openInbox(opener),
+	});
+	// Pendientes and «Revisar interrupción» lead into a topic, or into the
+	// Archive's chat the message belongs to: the previous Project Chat, or the
+	// direct messages of an agent — listed in its project's Archive.
+	configureInbox({
+		titleOf: topicTitle,
+		goTo: (t, opts) => {
+			if (t.conversationId && t.projectId)
+				revealInTopic(t.projectId, t.conversationId, t.id, opts.result);
+			else {
+				const where = archiveOf(t.projectId, t.agent);
+				if (where) revealInArchive(where.projectId, where.key, t.id, opts.result);
+				else noProjectToast(t.agent);
+			}
+		},
+		canGo: (t) => Boolean(t.conversationId || archiveOf(t.projectId, t.agent)),
+	});
+	// A review's way out leaves Pendientes too when it was opened from there:
+	// left open, the panel stays modal over the view it led to (everything
+	// underneath `inert`; the whole screen on a phone). The panel's own
+	// «Ver en el tema» closes it the same way.
+	configureReview({
+		writeNew: (m) => {
+			closeInbox();
+			if (m.conversation_id && m.project_id) writeInTopic(m.project_id, m.conversation_id, m.to_id);
+			else {
+				// Out of a topic: a new one, in the project it belongs to.
+				const pid = archiveOf(m.project_id ?? null, m.to_id)?.projectId;
+				if (pid) void newTopicWith(pid, m.to_id);
+				else noProjectToast(m.to_id);
+			}
+		},
+		tools: (agent, tool) => {
+			closeInbox();
+			if (!openTools({ agent, work: null, tool })) return false;
+			// Closing handed the focus back to the header's Pendientes button:
+			// it goes to the view the person asked for — its tab — unless that
+			// view took it already (the terminal does on a desktop).
+			requestAnimationFrame(() => {
+				const a = document.activeElement;
+				if (!a || a === document.body || a.id === "inbox-btn")
+					document.getElementById(`view-${tool}-btn`)?.focus();
+			});
+			return true;
+		},
+	});
+	const work = (agent: string, w: string) => openTools({ agent, work: w, tool: "git" });
+	onTopicWork(work);
+	onArchiveWork(work);
+	mountInboxButton();
+	// Proyectos' "+" in the sidebar (sessionCore.ts).
+	window.addEventListener("st:new-project", () => void openCreateProjectDialog());
 	// A session row or the session bar used while the page is up: the page
 	// gives way to the session (and Back returns to it).
 	for (const id of ["session-list", "terminal-toolbar"]) {
@@ -474,6 +715,8 @@ function wire(): void {
 			"click",
 			(e) => {
 				if (shown === null) return;
+				// Herramientas IS the session bar's page: its controls stay in it.
+				if (id === "terminal-toolbar" && shownPage === "tools") return;
 				const t = e.target;
 				if (t instanceof Element && t.closest(".session-actions")) return;
 				leaveForSession();
@@ -483,6 +726,33 @@ function wire(): void {
 	}
 }
 
+/**
+ * The Archive chat a message out of any topic is read in: the previous
+ * Project Chat of its project, or the direct messages of `agent` in the
+ * Archive of the project the agent is in now (none: no Archive shows them).
+ */
+function archiveOf(
+	projectId: string | null,
+	agent: string,
+): { projectId: string; key: string } | null {
+	if (projectId) return { projectId, key: "project" };
+	const p = acpEntryByName(agent)?.projectId;
+	return p ? { projectId: p, key: `@${agent}` } : null;
+}
+
+function noProjectToast(agent: string): void {
+	showToast(
+		`@${agent} no está en ningún proyecto: asignale uno desde «Ajustes del agente» (⋯ de su sesión).`,
+		true,
+	);
+}
+
+/** «Escribirle un mensaje nuevo» from the Archive: a new topic of `pid`, `agent` its recipient. */
+async function newTopicWith(pid: string, agent: string): Promise<void> {
+	const c = await newTopicDialog(pid);
+	if (c) writeInTopic(pid, c.id, agent);
+}
+
 /** The app is shown for a signed-in account. */
 export function startProjects(): void {
 	wire();
@@ -490,7 +760,8 @@ export function startProjects(): void {
 	enableProjectRoutes(() => shown !== null && readProjectRoute() !== null);
 	renderSection();
 	void loadProjects();
-	void refreshAcpAgents();
+	void readAcpAgents();
+	startInbox();
 	sync();
 	if (pollTimer) clearInterval(pollTimer);
 	pollTimer = setInterval(() => {
@@ -508,16 +779,14 @@ export function resetProjects(): void {
 	pollTimer = null;
 	disableProjectRoutes();
 	clearProjects();
-	resetAcpProject();
-	loadError = false;
-	canCreate = true;
-	headerFor = null;
-	pageState = "loading";
-	feedStatus = "loading";
-	feedName = null;
-	absentConfirmed = null;
-	confirming = null;
-	confirmFailed = false;
+	resetRail();
+	resetTopic();
+	resetArchive();
+	resetTools();
+	resetInboxPanel();
+	resetInbox();
+	entryDepth = null;
+	homeFocus = null;
 	hidePage();
 	renderSection();
 }

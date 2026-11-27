@@ -1,5 +1,5 @@
 import { expect, FIXED_NOW, test } from "./fixtures.js";
-import { PROJECT_IDS, PROJECT_SESSION_IDS } from "./mockBackend.js";
+import { PROJECT_SESSION_IDS } from "./mockBackend.js";
 
 const FRESH = "2026-10-31T10:29:58Z";
 
@@ -9,16 +9,19 @@ const FRESH = "2026-10-31T10:29:58Z";
  * current): in the tree an agent's row is its face, "@name" and ONE chip —
  * the agent's state word — with the session's name and the full label in the
  * tooltip and the accessible name; the two states that ask something of the
- * person show on the project's heading too ("●N"), folded or not.
- * Traditional rows are unchanged.
+ * person show on the section's heading too ("●N"), folded or not.
+ * Traditional rows are unchanged. The tree lists only the agents WITHOUT a
+ * project (a project's are reached from its Equipo), so here every agent
+ * takes part in none.
  */
 test.describe("sidebar: agents and their state", () => {
 	test.beforeEach(({ backend }) => {
 		backend.enableAcp();
+		for (const a of backend.acpAgents) a.projectId = null;
 		const set = (name: string, p: Record<string, unknown>) =>
 			Object.assign(backend.acpAgents.find((a) => a.name === name)!, { runnerSeenAt: FRESH }, p);
 		set("arq", {});
-		set("dev", { running: 12 });
+		set("dev", { running: [12] });
 		set("solo", { waitingInput: true });
 		const base = backend.acpAgents[0]!;
 		backend.acpAgents.push({
@@ -37,7 +40,7 @@ test.describe("sidebar: agents and their state", () => {
 		await app.openSidebar();
 		const state = (name: string) => app.sessionRow(name).locator(".session-agent-status");
 		await expect(app.sessionRow("hz-architect").locator(".session-agent-tag")).toHaveText("@arq");
-		await expect(state("hz-architect")).toHaveText("libre");
+		await expect(state("hz-architect")).toHaveText("disponible");
 		await expect(state("hz-dev-2")).toHaveText("trabajando");
 		await expect(state("hz-design")).toHaveText("login");
 		await expect(state("scratch")).toHaveText("te espera");
@@ -49,7 +52,7 @@ test.describe("sidebar: agents and their state", () => {
 		await expect(select).toHaveAttribute("title", /^hz-dev-2\n[\s\S]*Agente: trabajando en #12/);
 		await expect(select).toHaveAttribute(
 			"aria-label",
-			/^@dev trabajando, session hz-dev-2 running, agente: trabajando en #12$/,
+			/^@dev trabajando, sesión hz-dev-2 en marcha, agente: trabajando en #12$/,
 		);
 		await expect(app.sessionRow("hz-dev-2").locator(".session-name")).toHaveText("@dev");
 		// One indicator per agent row: its face and the agent's chip, no session dot.
@@ -63,11 +66,11 @@ test.describe("sidebar: agents and their state", () => {
 		await expect(app.sessionRow("my-project").locator(".session-agent-line")).toHaveCount(0);
 		await expect(app.sessionRow("my-project").locator(".session-select")).toHaveAttribute(
 			"aria-label",
-			"my-project, session running",
+			"my-project, sesión en marcha",
 		);
 	});
 
-	test("a live event moves a row's state without opening its chat; a waiting agent shows on its folded project", async ({
+	test("a live event moves a row's state without opening anything; a waiting agent shows on its folded section", async ({
 		app,
 		backend,
 		page,
@@ -75,29 +78,28 @@ test.describe("sidebar: agents and their state", () => {
 		await app.login("alice");
 		await app.openSidebar();
 		const arq = app.sessionRow("hz-architect").locator(".session-agent-status");
-		await expect(arq).toHaveText("libre");
+		await expect(arq).toHaveText("disponible");
 		const row = backend.addAcpMessage({ to_id: "arq", body: "@arq revisá", state: "running" });
-		backend.acpAgents.find((a) => a.name === "arq")!.running = row.id;
+		backend.acpAgents.find((a) => a.name === "arq")!.running = [row.id];
 		backend.pushAcp({ type: "message", message: row });
 		await expect(arq).toHaveText("trabajando");
-		await expect(page.locator("#chat-view")).toBeHidden();
+		await expect(page.locator("#project-view")).toBeHidden();
 
-		// A question opens: "te espera", on the row and on the project's heading.
+		// A question opens: "te espera", on the row and on the section's heading.
 		const q = { id: 9, agent: "arq", message_id: row.id, state: "open" };
 		backend.acpAgents.find((a) => a.name === "arq")!.waitingInput = true;
 		backend.pushAcp({ type: "question", question: q });
 		await expect(arq).toHaveText("te espera");
-		const head = page.locator(`.sgroup[data-group="${PROJECT_IDS.hz}"] .sgroup-head`);
+		const head = page.locator(`.sgroup[data-group="~agents"] .sgroup-head`);
 		await head.locator(".sgroup-toggle").click();
 		await expect(app.sessionRow("hz-architect")).toBeHidden();
 		const flag = head.locator(".sgroup-asks");
 		// How many wait, then who (for a screen reader, through aria-describedby).
-		await expect(flag).toHaveText(/^●2 — 2 agentes te esperan: .*@arq: esperando tu respuesta/);
-		// The folded heading's controls say it to a screen reader (Tab through headings).
-		for (const control of [head.locator(".sgroup-toggle"), head.locator("a.sgroup-title")])
-			await expect(control).toHaveAccessibleDescription(
-				/agentes te esperan: .*@arq: esperando tu respuesta/,
-			);
+		await expect(flag).toHaveText(/^●3 — 3 agentes te esperan: .*@arq: esperando tu respuesta/);
+		// The folded heading's chevron says it to a screen reader (Tab through headings).
+		await expect(head.locator(".sgroup-toggle")).toHaveAccessibleDescription(
+			/agentes te esperan: .*@arq: esperando tu respuesta/,
+		);
 	});
 
 	test("a just-started session whose runner has not connected says 'iniciando', not 'sin señal'", async ({
@@ -140,7 +142,7 @@ test.describe("sidebar: agents and their state", () => {
 		await app.login("alice");
 		await app.openSidebar();
 		const row = app.sessionRow("scratch");
-		await expect(row.locator(".session-state")).toHaveText("Stopped");
+		await expect(row.locator(".session-state")).toHaveText("Detenida");
 		await expect(row.locator(".session-agent-tag")).toHaveText("@solo");
 		await expect(row.locator(".session-agent-status")).toHaveCount(0);
 	});
@@ -154,13 +156,17 @@ test.describe("sidebar: agents and their state", () => {
 test.describe("sidebar: agent state re-reads (clock running)", { tag: "@any-viewport" }, () => {
 	test.beforeEach(async ({ backend, page }) => {
 		backend.enableAcp();
-		for (const a of backend.acpAgents) a.runnerSeenAt = FRESH;
+		// Rows in the tree: agents without a project.
+		for (const a of backend.acpAgents) Object.assign(a, { runnerSeenAt: FRESH, projectId: null });
 		await page.clock.install({ time: new Date(FIXED_NOW) });
 	});
 	const reads = (backend: { requests: Array<{ path: string }> }) =>
 		backend.requests.filter((r) => r.path === "/acp/agents").length;
 
-	test("a question answered right after a read: 'libre' within 4 s", async ({ app, backend }) => {
+	test("a question answered right after a read: 'disponible' within 4 s", async ({
+		app,
+		backend,
+	}) => {
 		backend.acpAgents.find((a) => a.name === "arq")!.waitingInput = true;
 		await app.login("alice");
 		await app.openSidebar();
@@ -171,7 +177,7 @@ test.describe("sidebar: agent state re-reads (clock running)", { tag: "@any-view
 		// (re)connect re-read still pending): only a read after it can say so.
 		backend.acpAgents.find((a) => a.name === "arq")!.waitingInput = false;
 		backend.pushAcp({ type: "question", question: { id: 9, agent: "arq", state: "answered" } });
-		await expect(arq).toHaveText("libre", { timeout: 4_000 });
+		await expect(arq).toHaveText("disponible", { timeout: 4_000 });
 	});
 
 	test("a read in flight when the question closes does not count: one more read follows", async ({
@@ -203,16 +209,16 @@ test.describe("sidebar: agent state re-reads (clock running)", { tag: "@any-view
 		backend.pushAcp({ type: "question", question: { id: 9, agent: "arq", state: "answered" } });
 		await page.waitForTimeout(300);
 		release!();
-		await expect(arq).toHaveText("libre", { timeout: 4_000 });
+		await expect(arq).toHaveText("disponible", { timeout: 4_000 });
 		expect(reads(backend)).toBe(before + 2);
 	});
 
-	test("the budget: idle ≤ 2 reads/min, a burst of events = 1 read, hidden = 0, a chat open ≤ 4", async ({
+	test("the budget: idle ≤ 2 reads/min, a burst of events = 1 read, hidden = 0", async ({
 		app,
 		backend,
 		page,
 	}) => {
-		backend.acpAgents.find((a) => a.name === "dev")!.running = 12;
+		backend.acpAgents.find((a) => a.name === "dev")!.running = [12];
 		await app.login("alice");
 		await app.openSidebar();
 		await expect(app.sessionRow("hz-dev-2").locator(".session-agent-status")).toHaveText(
@@ -256,15 +262,5 @@ test.describe("sidebar: agent state re-reads (clock running)", { tag: "@any-view
 		await expect.poll(() => reads(backend)).toBe(at + 1);
 		await page.waitForTimeout(300);
 		expect(reads(backend), "one read on showing").toBe(at + 1);
-
-		// A chat open: its own status poll, and the feed adds nothing.
-		await page.evaluate(
-			(sid) => (location.hash = `#/sessions/${sid}/chat`),
-			PROJECT_SESSION_IDS.scratch,
-		);
-		await expect(page.locator("#acp-chat")).toBeVisible();
-		await page.clock.runFor(2_000);
-		await page.waitForTimeout(200);
-		expect(await minute(), "a chat open").toBeLessThanOrEqual(4);
 	});
 });

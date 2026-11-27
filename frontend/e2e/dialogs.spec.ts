@@ -42,7 +42,8 @@ test.describe("dialogs", () => {
 		page,
 	}) => {
 		test.skip(!app.mobile, "the drawer only exists on mobile");
-		await app.login("alice");
+		// Over a session: with no address the list is the screen, not a drawer.
+		await app.login("alice", `#/sessions/${SESSION_IDS.running}`);
 		await app.openSidebar();
 		await page.click("#new-session-btn");
 		await expect(page.locator("#new-session-modal")).toHaveClass(/open/);
@@ -82,7 +83,7 @@ test.describe("dialogs", () => {
 		await page.locator('[role="menuitem"][data-action="delete"]').click();
 		const dialog = page.locator('[role="alertdialog"]');
 		await expect(dialog).toBeVisible();
-		await expect(dialog).toContainText("Delete permanently");
+		await expect(dialog).toContainText("Eliminar definitivamente");
 		const confirm = dialog.locator(".modal-danger-action");
 		await expect(confirm).toBeDisabled();
 		await dialog.locator("input").fill("old-po");
@@ -106,7 +107,7 @@ test.describe("dialogs", () => {
 		await app.sessionRow("my-project").locator(".session-menu-btn").click();
 		await page.locator('[role="menuitem"][data-action="terminate"]').click();
 		const dialog = page.locator('[role="alertdialog"]');
-		await expect(dialog).toContainText("Terminate");
+		await expect(dialog).toContainText("Terminar la sesión");
 		await expect(dialog.locator("input")).toHaveCount(0);
 		await expect(dialog.locator(".dialog-cancel")).toBeFocused();
 		await dialog.locator(".dialog-cancel").click();

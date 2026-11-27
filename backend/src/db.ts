@@ -10,6 +10,7 @@
  *   D1_DATABASE_ID
  */
 
+import { createHash } from "node:crypto";
 import { logger } from "./logger.js";
 
 const ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID ?? "";
@@ -23,7 +24,7 @@ const D1_API_BASE = (process.env.D1_API_BASE ?? "https://api.cloudflare.com").re
 interface D1QueryResult<T = Record<string, unknown>> {
 	results: T[];
 	success: boolean;
-	meta: { changes: number; duration: number; last_row_id: number };
+	meta: { changes: number; duration: number; last_row_id: number; rows_read?: number };
 }
 
 interface D1ApiResponse<T = Record<string, unknown>> {
@@ -61,6 +62,48 @@ export function getD1CallsSinceBoot(): number {
  *  other. Production code never calls this. */
 export function __resetD1CallsForTests(): void {
 	d1CallsSinceBoot = 0;
+	rowsReadSinceBoot = 0;
+	readsByStatement.clear();
+}
+
+// Rows read, as D1 reports them in each answer's `meta.rows_read` — the unit
+// Cloudflare's daily read limit counts, not the number of calls. The total and
+// a per-statement breakdown, process-local like the call counter, are what
+// tell which query spends the quota. Statements are keyed by their normalised
+// text (never params: those can carry secrets): an ~80-char readable prefix
+// plus a short hash of the whole text, since many statements share a prefix
+// (`SELECT c.*, (SELECT COUNT(*) …` is both a topic and the topic list). The
+// map is bounded: past READS_MAX_KEYS a new statement lands in one "(other)"
+// bucket, so a caller building SQL dynamically cannot grow it without limit.
+let rowsReadSinceBoot = 0;
+const READS_MAX_KEYS = 200;
+const READS_OTHER = "(other)";
+const readsByStatement = new Map<string, { queries: number; rowsRead: number }>();
+
+function recordRowsRead(sql: string, rowsRead: unknown): void {
+	if (typeof rowsRead !== "number" || !Number.isFinite(rowsRead) || rowsRead < 0) return;
+	rowsReadSinceBoot += rowsRead;
+	const norm = sql.replace(/\s+/g, " ").trim();
+	let key = `${norm.slice(0, 80)} #${createHash("sha1").update(norm).digest("hex").slice(0, 8)}`;
+	if (!readsByStatement.has(key) && readsByStatement.size >= READS_MAX_KEYS) key = READS_OTHER;
+	const e = readsByStatement.get(key) ?? { queries: 0, rowsRead: 0 };
+	e.queries++;
+	e.rowsRead += rowsRead;
+	readsByStatement.set(key, e);
+}
+
+/** Rows read since boot and the `top` statements by rows read, for the admin stats endpoint. */
+export function getD1RowsRead(top = 10): {
+	rowsReadSinceBoot: number;
+	topStatements: Array<{ statement: string; queries: number; rowsRead: number }>;
+} {
+	return {
+		rowsReadSinceBoot,
+		topStatements: [...readsByStatement]
+			.map(([statement, e]) => ({ statement, ...e }))
+			.sort((a, b) => b.rowsRead - a.rowsRead)
+			.slice(0, top),
+	};
 }
 
 // Hard ceiling on every D1 round-trip (#343). Without a signal, a
@@ -153,6 +196,7 @@ export async function d1Query<T = Record<string, unknown>>(
 	if (first === undefined) {
 		throw new Error(`D1 returned no result set for: ${sql}`);
 	}
+	recordRowsRead(sql, first.meta?.rows_read);
 	return first;
 }
 
@@ -875,6 +919,434 @@ export const MIGRATIONS: readonly Migration[] = [
 		description: "acp_agents.effort — per-agent reasoning effort (applied by the runner)",
 		apply: () => addColumnIfMissing("acp_agents", "effort TEXT"),
 	},
+	{
+		// Additive: NULL context = the default one (the workspace checkout, the
+		// only one there was), max_concurrency 1 = one slot (what every agent ran).
+		// A message running across the upgrade was taken by the only runner there
+		// was: slot 1, so that runner's restart judges it as its own.
+		version: 24,
+		description: "ACP slots — execution context per message, the slot that took it, per-agent cap",
+		apply: async () => {
+			await addColumnIfMissing("acp_agents", "max_concurrency INTEGER NOT NULL DEFAULT 1");
+			await addColumnIfMissing("agent_messages", "context TEXT");
+			await addColumnIfMissing("agent_messages", "from_context TEXT");
+			await addColumnIfMissing("agent_messages", "slot INTEGER");
+			await d1Batch([...ACP_SLOTS_DDL]);
+		},
+	},
+	{
+		// Additive: NULL root_id = the message is its own root (every row before
+		// it was a chain of its own for the new budget, which only counts rows
+		// that carry a root).
+		version: 25,
+		description:
+			"ACP chains — root message of an agent chain; a reply returns to the asker's depth",
+		apply: async () => {
+			await addColumnIfMissing("agent_messages", "root_id INTEGER");
+			await d1Batch([...ACP_CHAIN_DDL]);
+		},
+	},
+	{
+		version: 26,
+		description: "agent_works — a named execution context is a work: worktree, branch, ports",
+		apply: () => d1Batch([...ACP_WORKS_DDL]),
+	},
+	{
+		// Additive: NULL conversation_id = what every message was before (the
+		// Archive: direct chats and the old Project Chat), team 0, not reviewed.
+		version: 27,
+		description: "ACP conversations — topics per project; a message's conversation, team, review",
+		apply: async () => {
+			await addColumnIfMissing("agent_messages", "conversation_id TEXT");
+			await addColumnIfMissing("agent_messages", "team INTEGER NOT NULL DEFAULT 0");
+			await addColumnIfMissing("agent_messages", "reviewed_at TEXT");
+			await addColumnIfMissing("agent_messages", "recovery_of INTEGER");
+			await addColumnIfMissing("agent_works", "conversation_id TEXT");
+			await d1Batch([...ACP_CONVERSATIONS_DDL]);
+		},
+	},
+	{
+		version: 28,
+		description:
+			"ACP read indexes — unread, needs-action and open questions without the owner's history",
+		apply: () => d1Batch([...ACP_READ_INDEXES_DDL]),
+	},
+	{
+		// Additive: three new tables; NULL task_id = what every message was before.
+		version: 29,
+		description: "ACP tasks — goals, tasks, links and their history; a message's task",
+		apply: async () => {
+			await addColumnIfMissing("agent_messages", "task_id INTEGER");
+			await d1Batch([...ACP_TASKS_DDL]);
+		},
+	},
+	{
+		version: 30,
+		description: "session_configs.pids_limit — a session's PidsLimit (NULL = default)",
+		apply: async () => {
+			await addColumnIfMissing("session_configs", "pids_limit INTEGER");
+		},
+	},
+];
+
+/**
+ * v29. TASKS (acp/tasks.ts, issue #794 §2–§4): what a project's agents are
+ * working on, declared by them or by the person. A root (`parent_id` NULL) is
+ * a goal or a loose task and carries the `coordinator`; a child has one level
+ * only (its parent is a root — enforced by the creating statement) and uses
+ * its root's coordinator. `status` is only what was DECLARED; what is really
+ * happening is derived on read from the messages (`agent_messages.task_id`),
+ * questions and linked works, and never written over it.
+ *
+ * - `origin_key`: the person's request a goal was created for (`c:<client_id>`
+ *   of the person's root message, or `m:<id>` without one), computed by the
+ *   backend from the message the agent is running — never an argument. Unique
+ *   per owner: two agents given the same team request get ONE goal.
+ * - `version`: every write is `UPDATE … WHERE version = ?` (409 stale).
+ * - Budgets (§5): a root's `budget_limit`/`budget_used` count the agent →
+ *   agent requests of the whole goal, `requests_limit` (NULL = ACP_TASK_BUDGET)
+ *   /`requests_used` those of one task; only the person raises a limit.
+ * - `updated_by`: the actor of the last write — what the history trigger records.
+ * - `task_events` is append-only and written ONLY by these triggers, in the
+ *   statement that made the change (D1 over HTTP has no transaction across
+ *   calls). It has no FK and restores BEFORE `tasks` (backup.ts): the triggers
+ *   skip a creation or link whose event already exists, so replaying a backup
+ *   (INSERTs, which fire no UPDATE trigger) neither duplicates history nor
+ *   bumps a restored version. A new task id never has events (AUTOINCREMENT).
+ * - A link is added by `INSERT … SELECT … WHERE version = ?`: its trigger bumps
+ *   the task's version, so two concurrent writes on one version cannot both land.
+ */
+export const ACP_TASKS_DDL: readonly string[] = [
+	`CREATE TABLE IF NOT EXISTS tasks (
+		id                INTEGER PRIMARY KEY AUTOINCREMENT,
+		owner_user_id     TEXT NOT NULL REFERENCES users(id),
+		project_id        TEXT NOT NULL REFERENCES projects(project_id),
+		parent_id         INTEGER REFERENCES tasks(id),
+		title             TEXT NOT NULL,
+		description       TEXT NOT NULL DEFAULT '',
+		assignee          TEXT,
+		reviewer          TEXT,
+		coordinator       TEXT,
+		priority          TEXT NOT NULL DEFAULT 'normal' CHECK (priority IN ('low', 'normal', 'high')),
+		status            TEXT NOT NULL DEFAULT 'todo' CHECK (status IN ('todo', 'doing', 'review', 'done')),
+		blocked_reason    TEXT,
+		version           INTEGER NOT NULL DEFAULT 1,
+		origin_key        TEXT,
+		origin_message_id INTEGER,
+		conversation_id   TEXT,
+		budget_limit      INTEGER,
+		budget_used       INTEGER NOT NULL DEFAULT 0,
+		requests_used     INTEGER NOT NULL DEFAULT 0,
+		requests_limit    INTEGER,
+		created_by        TEXT NOT NULL,
+		updated_by        TEXT NOT NULL,
+		created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+		updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+		done_at           TEXT,
+		done_by           TEXT,
+		CHECK (parent_id IS NULL OR (coordinator IS NULL AND origin_key IS NULL AND budget_limit IS NULL))
+	)`,
+	"CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_origin ON tasks(owner_user_id, origin_key) WHERE origin_key IS NOT NULL",
+	"CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(owner_user_id, parent_id)",
+	// The board: open tasks of a project by id, done ones newest first.
+	"CREATE INDEX IF NOT EXISTS idx_tasks_open ON tasks(owner_user_id, project_id, id) WHERE status != 'done'",
+	"CREATE INDEX IF NOT EXISTS idx_tasks_done ON tasks(owner_user_id, project_id, done_at, id) WHERE status = 'done'",
+	`CREATE TABLE IF NOT EXISTS task_links (
+		owner_user_id TEXT NOT NULL,
+		task_id       INTEGER NOT NULL REFERENCES tasks(id),
+		kind          TEXT NOT NULL CHECK (kind IN ('work', 'pr', 'dep', 'external')),
+		ref           TEXT NOT NULL,
+		created_by    TEXT NOT NULL,
+		created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+		PRIMARY KEY (task_id, kind, ref)
+	)`,
+	// Which tasks name a work / depend on a task. Owner LAST: with it first the
+	// planner took this index for a task's links (an owner-wide range).
+	"CREATE INDEX IF NOT EXISTS idx_task_links_ref ON task_links(kind, ref, owner_user_id)",
+	`CREATE TABLE IF NOT EXISTS task_events (
+		id            INTEGER PRIMARY KEY AUTOINCREMENT,
+		owner_user_id TEXT NOT NULL,
+		task_id       INTEGER NOT NULL,
+		actor         TEXT NOT NULL,
+		kind          TEXT NOT NULL,
+		data          TEXT,
+		created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+	)`,
+	"CREATE INDEX IF NOT EXISTS idx_task_events_task ON task_events(owner_user_id, task_id, id)",
+	// A task's messages (PR 3's derived state): what is active, interrupted and
+	// unreviewed, and its whole activity — each bounded by the task.
+	"CREATE INDEX IF NOT EXISTS idx_agent_messages_task ON agent_messages(owner_user_id, task_id, id) WHERE task_id IS NOT NULL",
+	`CREATE INDEX IF NOT EXISTS idx_agent_messages_task_active ON agent_messages(owner_user_id, task_id)
+		WHERE task_id IS NOT NULL AND state IN ('pending', 'running')`,
+	`CREATE INDEX IF NOT EXISTS idx_agent_messages_task_unreviewed ON agent_messages(owner_user_id, task_id)
+		WHERE task_id IS NOT NULL AND state = 'uncertain' AND reviewed_at IS NULL`,
+	// R21's pending reads (released with v29): an agent's messages page
+	// (`GET /messages?agent=`, what `st list` reads) is two bounded ranges —
+	// to it and from it, each newest first by id — instead of every message
+	// to or from it; a request's reply is found by `reply_to` (settle, the
+	// unfinished notice) instead of the owner's whole history.
+	"CREATE INDEX IF NOT EXISTS idx_agent_messages_to ON agent_messages(owner_user_id, to_id, id)",
+	"CREATE INDEX IF NOT EXISTS idx_agent_messages_reply ON agent_messages(owner_user_id, reply_to) WHERE reply_to IS NOT NULL",
+	`CREATE TRIGGER IF NOT EXISTS trg_task_created
+	AFTER INSERT ON tasks
+	WHEN NOT EXISTS (SELECT 1 FROM task_events e WHERE e.owner_user_id = NEW.owner_user_id AND e.task_id = NEW.id AND e.kind = 'created')
+	BEGIN
+		INSERT INTO task_events (owner_user_id, task_id, actor, kind, data, created_at)
+		VALUES (NEW.owner_user_id, NEW.id, NEW.created_by, 'created',
+			json_object('title', NEW.title, 'parentId', NEW.parent_id, 'assignee', NEW.assignee, 'reviewer', NEW.reviewer,
+				'coordinator', NEW.coordinator, 'priority', NEW.priority, 'status', NEW.status, 'originKey', NEW.origin_key),
+			NEW.created_at);
+	END`,
+	// One event per write that changed something tracked: its headline kind and
+	// every changed field as [old, new]. A bare version bump (a link) adds none.
+	// The changed fields come from json_each over [field, old, new] triples, not
+	// from a UNION ALL of one SELECT per field: D1 refuses a compound SELECT of
+	// more than 5 terms (SQLite allows 500 — d1Limits.ts), and that UNION ALL
+	// of 10 once stopped the backend at boot on real D1.
+	`CREATE TRIGGER IF NOT EXISTS trg_task_updated
+	AFTER UPDATE ON tasks
+	WHEN OLD.title IS NOT NEW.title OR OLD.description IS NOT NEW.description OR OLD.assignee IS NOT NEW.assignee
+		OR OLD.reviewer IS NOT NEW.reviewer OR OLD.coordinator IS NOT NEW.coordinator OR OLD.priority IS NOT NEW.priority
+		OR OLD.status IS NOT NEW.status OR OLD.blocked_reason IS NOT NEW.blocked_reason OR OLD.budget_limit IS NOT NEW.budget_limit
+		OR OLD.requests_limit IS NOT NEW.requests_limit
+	BEGIN
+		INSERT INTO task_events (owner_user_id, task_id, actor, kind, data, created_at)
+		VALUES (NEW.owner_user_id, NEW.id, NEW.updated_by,
+			CASE
+				WHEN NEW.status = 'done' AND OLD.status != 'done' THEN 'approved'
+				WHEN OLD.status = 'done' AND NEW.status != 'done' THEN 'reopened'
+				WHEN NEW.coordinator IS NOT OLD.coordinator THEN 'coordinator'
+				WHEN NEW.assignee IS NOT OLD.assignee THEN 'assigned'
+				WHEN NEW.status != OLD.status THEN 'status'
+				WHEN NEW.blocked_reason IS NOT OLD.blocked_reason THEN CASE WHEN NEW.blocked_reason IS NULL THEN 'unblocked' ELSE 'blocked' END
+				WHEN NEW.budget_limit IS NOT OLD.budget_limit OR NEW.requests_limit IS NOT OLD.requests_limit THEN 'budget'
+				ELSE 'updated'
+			END,
+			(SELECT json_group_object(f, json_array(o, n)) FROM (
+				SELECT json_extract(value, '$[0]') AS f, json_extract(value, '$[1]') AS o, json_extract(value, '$[2]') AS n
+				FROM json_each(json_array(
+					json_array('title', OLD.title, NEW.title),
+					json_array('description', OLD.description, NEW.description),
+					json_array('assignee', OLD.assignee, NEW.assignee),
+					json_array('reviewer', OLD.reviewer, NEW.reviewer),
+					json_array('coordinator', OLD.coordinator, NEW.coordinator),
+					json_array('priority', OLD.priority, NEW.priority),
+					json_array('status', OLD.status, NEW.status),
+					json_array('blockedReason', OLD.blocked_reason, NEW.blocked_reason),
+					json_array('budgetLimit', OLD.budget_limit, NEW.budget_limit),
+					json_array('requestsLimit', OLD.requests_limit, NEW.requests_limit)
+				))
+			) WHERE o IS NOT n),
+			NEW.updated_at);
+	END`,
+	`CREATE TRIGGER IF NOT EXISTS trg_task_link_added
+	AFTER INSERT ON task_links
+	WHEN NOT EXISTS (SELECT 1 FROM task_events e WHERE e.owner_user_id = NEW.owner_user_id AND e.task_id = NEW.task_id
+		AND e.kind = 'link' AND json_extract(e.data, '$.kind') = NEW.kind AND json_extract(e.data, '$.ref') = NEW.ref)
+	BEGIN
+		UPDATE tasks SET version = version + 1, updated_at = NEW.created_at, updated_by = NEW.created_by
+		WHERE id = NEW.task_id AND owner_user_id = NEW.owner_user_id;
+		INSERT INTO task_events (owner_user_id, task_id, actor, kind, data, created_at)
+		VALUES (NEW.owner_user_id, NEW.task_id, NEW.created_by, 'link', json_object('kind', NEW.kind, 'ref', NEW.ref), NEW.created_at);
+	END`,
+	// The budgets (§5): an agent's request in a task counts against that task
+	// (`requests_used`) and its root (`budget_used`), in the INSERT itself. The
+	// person's and the system's messages, and replies, count nothing. Counters
+	// are not declared state: no version bump, no event. A restore replays the
+	// messages BEFORE the tasks (backup.ts), which then land with their own counts.
+	`CREATE TRIGGER IF NOT EXISTS trg_task_request_counted
+	AFTER INSERT ON agent_messages
+	WHEN NEW.task_id IS NOT NULL AND NEW.kind = 'request' AND NEW.from_id NOT IN ('owner', 'system')
+	BEGIN
+		UPDATE tasks SET requests_used = requests_used + 1 WHERE id = NEW.task_id AND owner_user_id = NEW.owner_user_id;
+		UPDATE tasks SET budget_used = budget_used + 1
+		WHERE owner_user_id = NEW.owner_user_id
+			AND id = (SELECT COALESCE(t.parent_id, t.id) FROM tasks t WHERE t.id = NEW.task_id AND t.owner_user_id = NEW.owner_user_id);
+	END`,
+	// v27's reply trigger, plus the task: the reply to a request in a task is in it.
+	"DROP TRIGGER IF EXISTS trg_agent_message_reply",
+	`CREATE TRIGGER IF NOT EXISTS trg_agent_message_reply
+	AFTER UPDATE OF state ON agent_messages
+	WHEN OLD.state = 'running' AND NEW.state = 'done' AND NEW.kind = 'request'
+		AND EXISTS (SELECT 1 FROM acp_agents WHERE owner_user_id = NEW.owner_user_id AND name = NEW.from_id)
+	BEGIN
+		INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, reply_to, body, state, project_id, depth, context, root_id, conversation_id, task_id)
+		VALUES (NEW.owner_user_id, NEW.to_id, NEW.from_id, 'reply', NEW.id,
+			'Respuesta de @' || NEW.to_id || ' a tu mensaje #' || NEW.id || ':' || char(10) || char(10) || COALESCE(NEW.result_text, '(sin texto)'),
+			'pending', NEW.project_id, MAX(NEW.depth - 1, 0), NEW.from_context, NEW.root_id, NEW.conversation_id, NEW.task_id);
+	END`,
+];
+
+/**
+ * v28. Indexes only (D1 bills rows READ, and the hot reads walked whole
+ * histories). Each serves a read that runs on every change of a message:
+ *
+ * - `(owner, conversation, created_at)` / `(owner, conversation, finished_at)`:
+ *   a topic's unread count (conversations.ts `UNREAD`) is two counts, each a
+ *   range after `read_at` — a topic already read reads ≈ 0 rows instead of
+ *   all of its messages. The second one also drives the inbox's results.
+ * - the partial `uncertain` index: `needsAction`'s first EXISTS and the
+ *   inbox's interrupted runs read only runs nobody reviewed yet.
+ * - `agent_questions(owner, state)`: the open questions (`/agents`, inbox,
+ *   `needsAction`) without every question the owner ever got.
+ */
+export const ACP_READ_INDEXES_DDL: readonly string[] = [
+	"CREATE INDEX IF NOT EXISTS idx_agent_messages_conv_created ON agent_messages(owner_user_id, conversation_id, created_at)",
+	"CREATE INDEX IF NOT EXISTS idx_agent_messages_conv_finished ON agent_messages(owner_user_id, conversation_id, finished_at)",
+	`CREATE INDEX IF NOT EXISTS idx_agent_messages_unreviewed ON agent_messages(owner_user_id, conversation_id)
+		WHERE state = 'uncertain' AND reviewed_at IS NULL`,
+	"CREATE INDEX IF NOT EXISTS idx_agent_questions_state ON agent_questions(owner_user_id, state)",
+];
+
+/**
+ * v27. A CONVERSATION is a topic of a project (acp/conversations.ts): the
+ * person's messages are posted in one, and everything they set off — the
+ * agents' consults, the replies, the notices of an unfinished request, the
+ * questions to the person (through their message) and the recovery report
+ * after an interrupted run — stays in it. `agent_messages.conversation_id`
+ * NULL = the Archive (direct chats and the old Project Chat), read-only.
+ *
+ * - The reply trigger copies the request's conversation, as it copies its scope.
+ * - `last_activity_at` is moved by triggers on every row written in the
+ *   conversation and every terminal state, so no write path can forget it.
+ * - `read_at`: the newest thing the person has seen in it (an ISO time, see
+ *   conversations.ts for why a time and not a message id); it only advances.
+ * - `recipients`: the recipients of the person's last post in it (JSON
+ *   `{"agents":[…]}` or `{"team":true}`), shown again as the next post's.
+ * - `team` on a message: it was sent to "the whole team", resolved at send
+ *   into one row per agent of the project.
+ * - `reviewed_at`: the person reviewed an `uncertain` run and chose NOT to
+ *   requeue it (a requeue clears it). `recovery_of`: on the runner's system
+ *   message after a restart, the interrupted message it reports on.
+ */
+export const ACP_CONVERSATIONS_DDL: readonly string[] = [
+	`CREATE TABLE IF NOT EXISTS conversations (
+		id                TEXT PRIMARY KEY,
+		owner_user_id     TEXT NOT NULL REFERENCES users(id),
+		project_id        TEXT NOT NULL REFERENCES projects(project_id),
+		title             TEXT NOT NULL,
+		client_request_id TEXT NOT NULL,
+		request_hash      TEXT NOT NULL,
+		created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+		last_activity_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+		archived_at       TEXT,
+		read_at           TEXT,
+		recipients        TEXT,
+		UNIQUE (owner_user_id, client_request_id)
+	)`,
+	"CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(owner_user_id, project_id, last_activity_at)",
+	"CREATE INDEX IF NOT EXISTS idx_agent_messages_conversation ON agent_messages(owner_user_id, conversation_id, id)",
+	"CREATE INDEX IF NOT EXISTS idx_agent_messages_recovery ON agent_messages(owner_user_id, recovery_of)",
+	`CREATE TRIGGER IF NOT EXISTS trg_conversation_activity_insert
+	AFTER INSERT ON agent_messages WHEN NEW.conversation_id IS NOT NULL
+	BEGIN
+		UPDATE conversations SET last_activity_at = MAX(last_activity_at, NEW.created_at)
+		WHERE id = NEW.conversation_id AND owner_user_id = NEW.owner_user_id;
+	END`,
+	`CREATE TRIGGER IF NOT EXISTS trg_conversation_activity_state
+	AFTER UPDATE OF state ON agent_messages
+	WHEN NEW.conversation_id IS NOT NULL AND OLD.state != NEW.state AND NEW.state IN ('done', 'failed', 'uncertain')
+	BEGIN
+		UPDATE conversations SET last_activity_at = MAX(last_activity_at, COALESCE(NEW.finished_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))
+		WHERE id = NEW.conversation_id AND owner_user_id = NEW.owner_user_id;
+	END`,
+	"DROP TRIGGER IF EXISTS trg_agent_message_reply",
+	`CREATE TRIGGER IF NOT EXISTS trg_agent_message_reply
+	AFTER UPDATE OF state ON agent_messages
+	WHEN OLD.state = 'running' AND NEW.state = 'done' AND NEW.kind = 'request'
+		AND EXISTS (SELECT 1 FROM acp_agents WHERE owner_user_id = NEW.owner_user_id AND name = NEW.from_id)
+	BEGIN
+		INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, reply_to, body, state, project_id, depth, context, root_id, conversation_id)
+		VALUES (NEW.owner_user_id, NEW.to_id, NEW.from_id, 'reply', NEW.id,
+			'Respuesta de @' || NEW.to_id || ' a tu mensaje #' || NEW.id || ':' || char(10) || char(10) || COALESCE(NEW.result_text, '(sin texto)'),
+			'pending', NEW.project_id, MAX(NEW.depth - 1, 0), NEW.from_context, NEW.root_id, NEW.conversation_id);
+	END`,
+];
+
+/**
+ * v25. Depth measures NESTING only: a request an agent sends while working on
+ * a message of depth d has depth d + 1, and the reply brings the asker back to
+ * d (request.depth − 1) — so rounds of consult and answer between two agents
+ * never pile up depth, while a chain where each consult starts another still
+ * stops at ACP_MAX_DEPTH.
+ *
+ * `root_id` is the person's message a chain started from (copied to every
+ * request and reply of the chain; NULL on the root itself and on system
+ * messages). It bounds the ROUNDS: past ACP_MAX_CHAIN agent requests under one
+ * root, an agent's send is refused (acp/agents.ts). A new message from the
+ * person is a new root.
+ */
+/**
+ * v26. A named execution context exists only as a WORK (acp/works.ts): the
+ * backend creates its git worktree `.st/ctx/<id>` on branch `work/<id>` in the
+ * agent's container before its first message. Rows are never deleted — an id
+ * is never reused, not even after `cleaned`, so no old ACP session of that
+ * context (`.st/acp/ctx/<id>.json`) is ever picked up again. `port_base`: the
+ * work's 100 ports (20000 + 100·k), unique among the agent's works that are
+ * not `cleaned` (the partial index is what makes the allocation atomic).
+ */
+export const ACP_WORKS_DDL: readonly string[] = [
+	`CREATE TABLE IF NOT EXISTS agent_works (
+		owner_user_id TEXT NOT NULL REFERENCES users(id),
+		id            TEXT NOT NULL,
+		agent_id      TEXT NOT NULL REFERENCES acp_agents(agent_id) ON DELETE CASCADE,
+		project_id    TEXT,
+		branch        TEXT NOT NULL,
+		base_sha      TEXT,
+		port_base     INTEGER NOT NULL,
+		state         TEXT NOT NULL CHECK (state IN ('creating', 'active', 'closed', 'cleanup-pending', 'cleaned')),
+		note          TEXT,
+		created_by    TEXT NOT NULL,
+		created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+		closed_at     TEXT,
+		cleaned_at    TEXT,
+		PRIMARY KEY (owner_user_id, id)
+	)`,
+	"CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_works_port ON agent_works(agent_id, port_base) WHERE state != 'cleaned'",
+];
+
+export const ACP_CHAIN_DDL: readonly string[] = [
+	"CREATE INDEX IF NOT EXISTS idx_agent_messages_root ON agent_messages(owner_user_id, root_id)",
+	"DROP TRIGGER IF EXISTS trg_agent_message_reply",
+	`CREATE TRIGGER IF NOT EXISTS trg_agent_message_reply
+	AFTER UPDATE OF state ON agent_messages
+	WHEN OLD.state = 'running' AND NEW.state = 'done' AND NEW.kind = 'request'
+		AND EXISTS (SELECT 1 FROM acp_agents WHERE owner_user_id = NEW.owner_user_id AND name = NEW.from_id)
+	BEGIN
+		INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, reply_to, body, state, project_id, depth, context, root_id)
+		VALUES (NEW.owner_user_id, NEW.to_id, NEW.from_id, 'reply', NEW.id,
+			'Respuesta de @' || NEW.to_id || ' a tu mensaje #' || NEW.id || ':' || char(10) || char(10) || COALESCE(NEW.result_text, '(sin texto)'),
+			'pending', NEW.project_id, MAX(NEW.depth - 1, 0), NEW.from_context, NEW.root_id);
+	END`,
+];
+
+/**
+ * v24. An agent runs up to `max_concurrency` messages at once, one per SLOT
+ * (a copy of the runner loop with its own adapter). A message's `context`
+ * says where it runs: NULL = the default context (the workspace checkout, the
+ * agent's ACP session of always, slot 1 only); a name = its own directory
+ * `.st/ctx/<name>/` and its own ACP session (slots ≥ 2). The claim keeps one
+ * running message per (agent, context), so two runs never share a checkout.
+ *
+ * `from_context` is the context an agent's request was sent FROM (taken from
+ * its credential, never from the body): the reply goes back there, so the
+ * continuation lands in the ACP session that asked. The recipient gets the
+ * request in its default context.
+ */
+export const ACP_SLOTS_DDL: readonly string[] = [
+	"UPDATE agent_messages SET slot = 1 WHERE state = 'running' AND slot IS NULL",
+	"CREATE INDEX IF NOT EXISTS idx_agent_messages_running ON agent_messages(state, owner_user_id, to_id)",
+	"DROP TRIGGER IF EXISTS trg_agent_message_reply",
+	`CREATE TRIGGER IF NOT EXISTS trg_agent_message_reply
+	AFTER UPDATE OF state ON agent_messages
+	WHEN OLD.state = 'running' AND NEW.state = 'done' AND NEW.kind = 'request'
+		AND EXISTS (SELECT 1 FROM acp_agents WHERE owner_user_id = NEW.owner_user_id AND name = NEW.from_id)
+	BEGIN
+		INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, reply_to, body, state, project_id, depth, context)
+		VALUES (NEW.owner_user_id, NEW.to_id, NEW.from_id, 'reply', NEW.id,
+			'Respuesta de @' || NEW.to_id || ' a tu mensaje #' || NEW.id || ':' || char(10) || char(10) || COALESCE(NEW.result_text, '(sin texto)'),
+			'pending', NEW.project_id, NEW.depth, NEW.from_context);
+	END`,
 ];
 
 /**

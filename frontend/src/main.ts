@@ -30,7 +30,7 @@ import {
 } from "./api.js";
 // Overlay views register themselves with viewSwitch on load; nothing
 // else imports them by name, so the side-effect imports keep them in.
-import "./acpChat.js";
+import "./acpSettings.js";
 import "./filesView.js";
 import "./gitView.js";
 import { type MenuItem, openActionMenu } from "./components/actionMenu.js";
@@ -56,7 +56,7 @@ import {
 	type PushToggleState,
 	registerServiceWorker,
 } from "./push.js";
-import { onRoute, readRoute, start as startRouter } from "./router.js";
+import { homeShown, onAddressWrite, onRoute, readRoute, start as startRouter } from "./router.js";
 import { initTerminalSearch } from "./searchBar.js";
 import {
 	applyRoute,
@@ -320,12 +320,14 @@ function showAuth() {
 export function setServerReachable(ok: boolean): void {
 	for (const elx of [userDisplay, sidebarUserDisplay]) {
 		elx.classList.toggle("unreachable", !ok);
-		elx.title = ok ? "Connected to the server" : "Can't refresh from the server — retrying";
+		elx.title = ok
+			? "Conectado al servidor"
+			: "No se puede actualizar desde el servidor; reintentando";
 	}
 	userDisplay.setAttribute("role", "img");
 	userDisplay.setAttribute(
 		"aria-label",
-		ok ? "Connected to the server" : "Can't refresh from the server — retrying",
+		ok ? "Conectado al servidor" : "No se puede actualizar desde el servidor; reintentando",
 	);
 }
 
@@ -387,14 +389,20 @@ function notificationsItem(): MenuItem | null {
 	if (s === "unsupported") return null;
 	const [label, hint] =
 		s === "on"
-			? ["Disable notifications", "Disable browser notifications for this device"]
+			? [
+					"Desactivar las notificaciones",
+					"Dejar de recibir notificaciones del navegador en este dispositivo",
+				]
 			: s === "off"
-				? ["Enable notifications", "Get notified when a session needs attention"]
+				? ["Activar las notificaciones", "Recibir un aviso cuando una sesión necesita atención"]
 				: s === "blocked"
-					? ["Notifications blocked", "Notifications are blocked in your browser settings"]
+					? [
+							"Notificaciones bloqueadas",
+							"Las notificaciones están bloqueadas en la configuración del navegador",
+						]
 					: [
-							"Install to enable notifications",
-							"Add this app to your home screen to enable notifications",
+							"Instalá la app para activar las notificaciones",
+							"Agregá esta app a la pantalla de inicio para activar las notificaciones",
 						];
 	const enabled = s !== "blocked" && !pushToggleBusy;
 	return { id: "notifications", label, hint, enabled, reason: enabled ? undefined : hint };
@@ -420,16 +428,16 @@ async function onNotificationsClick() {
 		// iOS-not-installed is a hint, not an action: clicking can't install
 		// the PWA, so surface the guidance and bail before touching the push API.
 		if (current === "ios-needs-install") {
-			showToast("Add this app to your home screen to enable notifications");
+			showToast("Agregá esta app a la pantalla de inicio para activar las notificaciones");
 			return;
 		}
 		renderNotificationsToggle(current);
 		if (current === "on") {
 			await disablePush();
-			showToast("Notifications disabled");
+			showToast("Notificaciones desactivadas");
 		} else {
 			await enablePush();
-			showToast("Notifications enabled");
+			showToast("Notificaciones activadas");
 		}
 	} catch (err) {
 		showToast((err as Error).message, true);
@@ -645,15 +653,17 @@ function handleLogout(toastMessage?: string): void {
 function openUserMenu(opener: HTMLElement): void {
 	const notifications = notificationsItem();
 	const items: MenuItem[] = [
-		{ id: "templates", label: "Templates", hint: "Session templates" },
-		...(isAdmin() ? [{ id: "invites", label: "Invites", hint: "Manage invite codes" }] : []),
-		...(isLead() ? [{ id: "my-groups", label: "My groups", hint: "Groups you lead" }] : []),
-		...(isAdmin() ? [{ id: "admin", label: "Admin", hint: "Admin dashboard" }] : []),
+		{ id: "templates", label: "Plantillas", hint: "Plantillas de sesión" },
+		...(isAdmin()
+			? [{ id: "invites", label: "Invitaciones", hint: "Administrar los códigos de invitación" }]
+			: []),
+		...(isLead() ? [{ id: "my-groups", label: "Mis grupos", hint: "Los grupos que liderás" }] : []),
+		...(isAdmin() ? [{ id: "admin", label: "Admin", hint: "Panel de administración" }] : []),
 		...(notifications ? [notifications] : []),
-		{ id: "logout", label: "Logout", kind: "danger" },
+		{ id: "logout", label: "Salir", kind: "danger" },
 	];
 	openActionMenu({
-		title: "Account",
+		title: "Cuenta",
 		opener,
 		items,
 		onPick: (id) => {
@@ -668,7 +678,14 @@ function openUserMenu(opener: HTMLElement): void {
 }
 const userMenuBtn = document.getElementById("user-menu-btn") as HTMLButtonElement;
 userMenuBtn.addEventListener("click", () => openUserMenu(userMenuBtn));
-document.getElementById("sidebar-account-btn")?.addEventListener("click", () => {
+const sidebarAccountBtn = document.getElementById("sidebar-account-btn");
+sidebarAccountBtn?.addEventListener("click", () => {
+	// On the phone's home the list is the screen, not a drawer: it stays,
+	// and so does the row the menu was opened from.
+	if (document.body.classList.contains("home-on")) {
+		openUserMenu(sidebarAccountBtn);
+		return;
+	}
 	setSidebarOpen(false);
 	openUserMenu(sidebarToggleBtn);
 });
@@ -728,11 +745,11 @@ export function maybeInjectSelectionHint(pane: HTMLElement) {
 	// no user input flows in. Using innerHTML rather than three
 	// createElements keeps the markup readable.
 	label.innerHTML = isMac
-		? "Hold <kbd>⌥ Option</kbd> + drag to select text"
-		: "Hold <kbd>Shift</kbd> + drag to select text";
+		? "Mantené <kbd>⌥ Option</kbd> y arrastrá para seleccionar"
+		: "Mantené <kbd>Shift</kbd> y arrastrá para seleccionar";
 	const close = document.createElement("button");
 	close.type = "button";
-	close.setAttribute("aria-label", "Dismiss selection hint");
+	close.setAttribute("aria-label", "Cerrar la pista de selección");
 	close.textContent = "×";
 	close.addEventListener("click", () => {
 		try {
@@ -792,7 +809,22 @@ let autoPollTickCount = 0;
 let autoPollInFlight = false;
 // Ticks skipped because the previous refresh is still waiting on the server.
 let autoPollStalled = 0;
-async function autoPollTick(): Promise<void> {
+// With every session and the session list covered — a project's space on
+// screen, not its Herramientas — the list is read on every 3rd tick (15 s):
+// nothing on screen shows it but the reachability light, which then reacts
+// that much later (accepted). Each read is a D1 query. Uncovering the list or
+// a session reads at once (watchSessionsInSight).
+const OUT_OF_SIGHT_EVERY_N_TICKS = 3;
+// Timer ticks skipped out of sight since the last read.
+let autoPollSlowSkipped = 0;
+function sessionsOutOfSight(): boolean {
+	const b = document.body.classList;
+	if (!b.contains("project-space-on") || b.contains("tools-on") || b.contains("ps-gone"))
+		return false;
+	// A phone's drawer shows the session list over the project's screen.
+	return !(isMobile() && mainEl.classList.contains("sidebar-open"));
+}
+async function autoPollTick(fromTimer = false): Promise<void> {
 	if (autoPollInFlight) {
 		// A request the server accepted but never answers would keep the
 		// light green until the browser/Tunnel gives up (~100 s). After three
@@ -809,6 +841,9 @@ async function autoPollTick(): Promise<void> {
 	// throws, refreshSessions toasts). Matches the pre-existing 15 s
 	// timer's gate that this poller replaces.
 	if (!isLoggedIn()) return;
+	if (fromTimer && sessionsOutOfSight() && ++autoPollSlowSkipped < OUT_OF_SIGHT_EVERY_N_TICKS)
+		return;
+	autoPollSlowSkipped = 0;
 	autoPollInFlight = true;
 	try {
 		// `refreshSessions` owns its own error path (catch → toast),
@@ -828,8 +863,17 @@ async function autoPollTick(): Promise<void> {
 	}
 }
 setInterval(() => {
-	void autoPollTick();
+	void autoPollTick(true);
 }, AUTO_POLL_INTERVAL_MS);
+// Back to the list or to a session after a slowed tick: read now, not up to 10 s later.
+let sessionsWereOutOfSight = false;
+const watchSessionsInSight = new MutationObserver(() => {
+	const out = sessionsOutOfSight();
+	if (sessionsWereOutOfSight && !out && autoPollSlowSkipped > 0) void autoPollTick();
+	sessionsWereOutOfSight = out;
+});
+watchSessionsInSight.observe(document.body, { attributes: true, attributeFilter: ["class"] });
+watchSessionsInSight.observe(mainEl, { attributes: true, attributeFilter: ["class"] });
 // Re-fire immediately when the tab regains focus so the user
 // doesn't have to wait up to 5 s for the first refresh after
 // switching back. Use `visibilitychange` rather than `focus`
@@ -849,10 +893,23 @@ const MOBILE_BREAKPOINT_PX = 768;
 const mobileMql = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT_PX}px)`);
 export const isMobile = () => mobileMql.matches;
 
+// A phone's closed drawer sits off screen but stays in the DOM: without
+// inert, Tab walks its ~20 invisible controls (Enter on an unseen «Detener»).
+// Not on the phone's home (the list IS the screen) nor on a wide screen (a
+// column of the layout). Recomputed on every input it reads — open/closed,
+// home-on, the breakpoint — so a resize never leaves it hanging.
+function syncSidebarInert(): void {
+	sidebarEl.inert =
+		isMobile() &&
+		!mainEl.classList.contains("sidebar-open") &&
+		!document.body.classList.contains("home-on");
+}
+
 function setSidebarOpen(open: boolean) {
 	const wasOpen = mainEl.classList.contains("sidebar-open");
 	mainEl.classList.toggle("sidebar-open", open);
 	sidebarToggleBtn.setAttribute("aria-expanded", String(open));
+	syncSidebarInert();
 
 	// Focus management is only meaningful on mobile, where the sidebar
 	// is a modal-style drawer — keyboard users opening it expect focus
@@ -883,6 +940,13 @@ sidebarToggleBtn.addEventListener("click", () => {
 });
 
 sidebarBackdrop.addEventListener("click", () => setSidebarOpen(false));
+// The project rail's foot (projectRail.ts): "Sesiones" on a phone opens the
+// drawer over the project's screen; "Ajustes" is the account's menu.
+window.addEventListener("st:open-sidebar", () => setSidebarOpen(true));
+window.addEventListener("st:open-user-menu", (e) => {
+	const opener = (e as CustomEvent<{ opener?: HTMLElement }>).detail?.opener ?? userMenuBtn;
+	openUserMenu(opener);
+});
 
 // Escape closes the mobile drawer, matching the WAI-ARIA modal-dialog
 // expectation. Desktop ignores this — the sidebar is always part of the
@@ -906,16 +970,9 @@ sessionList.addEventListener("click", (e) => {
 	// switch the active session, so dismissing the drawer is jarring.
 	const target = e.target as HTMLElement;
 	if (target.closest(".session-actions")) return;
-	// A project's heading in the tree opens its page (its chevron only folds
-	// the group, so the drawer stays for that).
-	if (target.closest(".session-item, .project-item")) setSidebarOpen(false);
-});
-
-// Same for a project (P3a) picked from the drawer: the page is what they want to see.
-document.getElementById("project-section")?.addEventListener("click", (e) => {
-	if (!isMobile()) return;
-	const target = e.target as HTMLElement;
-	if (target.closest("#new-project-btn")) setSidebarOpen(false);
+	// A project's row opens its page, Proyectos' "+" its dialog (a section's
+	// chevron only folds it, so the drawer stays for that).
+	if (target.closest(".session-item, .project-row, #new-project-btn")) setSidebarOpen(false);
 });
 
 // Crossing the breakpoint resets to the default state for that mode —
@@ -935,6 +992,34 @@ mobileMql.addEventListener("change", () => {
 // styles/sidebar.css `main { ... }`.)
 setSidebarOpen(!isMobile());
 mainEl.setAttribute("data-sidebar-ready", "");
+
+// ── The phone's home: the main list ─────────────────────────────────────────
+// On a phone, an address that names nothing (router.homeShown) shows the
+// sidebar — the same element the ☰ and the project's ‹ open, so one list —
+// as the screen (mobile.css `body.home-on`). The session underneath, if any,
+// stays open and keeps its box: the list is drawn over it like the drawer,
+// never by hiding the terminal (no fit, no resize, no socket).
+const terminalAreaEl = document.getElementById("terminal-area")!;
+function syncHome(): void {
+	const on = homeShown();
+	const was = document.body.classList.contains("home-on");
+	document.body.classList.toggle("home-on", on);
+	syncSidebarInert();
+	// Out of the keyboard's and the screen reader's reach while covered.
+	terminalAreaEl.inert = on;
+	if (on && !was) {
+		// The drawer is the screen now; leaving the home must not uncover it.
+		setSidebarOpen(false);
+		// Keystrokes must not keep going to a terminal the list now covers.
+		const focused = document.activeElement;
+		if (focused instanceof HTMLElement && terminalAreaEl.contains(focused)) focused.blur();
+	}
+}
+onAddressWrite(syncHome);
+window.addEventListener("popstate", syncHome);
+window.addEventListener("hashchange", syncHome);
+mobileMql.addEventListener("change", syncHome);
+syncHome();
 
 // ── Terminal-only controls ──────────────────────────────────────────────────
 // The Insert (+) menu (paste / attach / select) writes into the terminal:

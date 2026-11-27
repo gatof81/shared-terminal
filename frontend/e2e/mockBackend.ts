@@ -92,11 +92,22 @@ export interface MockAcpAgent {
 	model: string | null;
 	projectId: string | null;
 	runnerSeenAt: string | null;
-	running: number | null;
+	running: number[];
 	pending: number;
 	authRequired?: boolean;
 	loginMethods?: Array<{ id: string; name: string; description: string }>;
 	waitingInput?: boolean;
+	/** v27: what it runs / has queued / waits for, with each message's topic (never slots). */
+	runningIn?: Array<{ id: number; conversationId: string | null; work: string | null }>;
+	queue?: Array<{ id: number; conversationId: string | null; work: string | null }>;
+	waitingFor?: Array<{
+		id: number;
+		agent: string;
+		conversationId: string | null;
+		work: string | null;
+	}>;
+	question?: { id: number; messageId: number | null; conversationId: string | null } | null;
+	heldBy?: Array<{ conversationId: string | null; work: string | null; since: string }>;
 	modelApplied?: { requested: string; current: string | null; error: string | null } | null;
 	effort?: string | null;
 	effortApplied?: {
@@ -126,7 +137,32 @@ export interface MockAcpMessage {
 	project_id: string | null;
 	depth: number;
 	client_id: string | null;
+	/** v27: the topic (null: the Archive). */
+	conversation_id: string | null;
+	/** The work it runs in (`st send --work`), if any. */
+	context?: string | null;
+	team?: number | null;
+	reviewed_at?: string | null;
+	recovery_of?: number | null;
 }
+
+/** A topic of a project (v27, docs/ACP_AGENTS.md §4b). */
+export interface MockConversation {
+	id: string;
+	projectId: string;
+	title: string;
+	createdAt: string;
+	archivedAt: string | null;
+	readAt: string | null;
+	recipients: { agents: string[] } | { team: true } | null;
+}
+
+/** The topics `enableConversations()` seeds in "Educación HZ". */
+export const CONV_IDS = {
+	ci: "c0000000-0000-4000-8000-0000000000c1",
+	ui: "c0000000-0000-4000-8000-0000000000c2",
+	backend: "c0000000-0000-4000-8000-0000000000c3",
+};
 
 export interface MockProject {
 	projectId: string;
@@ -205,6 +241,55 @@ function seedFs(): FsDir {
 	};
 }
 
+/** A work's worktree: the workspace's files plus what the work changed. */
+function seedWorkFs(id: string): FsDir {
+	const root = seedFs();
+	root.entries[".github"] = {
+		type: "dir",
+		entries: {
+			workflows: {
+				type: "dir",
+				entries: {
+					"ci.yml": {
+						type: "file",
+						content: `# ${id}\nname: ci\njobs:\n  e2e:\n    steps:\n      - uses: actions/cache@v4\n`,
+					},
+				},
+			},
+		},
+	};
+	return root;
+}
+
+/** The work «ci-cache»'s change: the «+12 −3» its status lists. */
+const WORK_PATCH = `diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 3bda155..9c41e2d 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -1,9 +1,18 @@
+ name: ci
+ jobs:
+   e2e:
+-    runs-on: ubuntu-latest
+-    steps:
+-      - run: npm ci
++    runs-on: ubuntu-24.04
++    steps:
++      - uses: actions/checkout@v4
++      - uses: actions/cache@v4
++        with:
++          path: |
++            ~/.npm
++            ~/.cache/ms-playwright
++          key: e2e-\${{ hashFiles('frontend/package-lock.json') }}
++          restore-keys: e2e-
++      - run: npm ci --prefer-offline
++      - run: npx playwright install chromium
+       - run: npm run build
+       - run: npm run test:e2e
+   lint:
+`;
+
 const GIT_PATCH = `diff --git a/src/auth.ts b/src/auth.ts
 index 1111111..2222222 100644
 --- a/src/auth.ts
@@ -245,6 +330,8 @@ export interface TerminalSocket {
 	sessionId: string;
 	tabId: string | null;
 	observe: boolean;
+	/** The grid the attach asked for (its URL's cols/rows). */
+	attach: { cols: number; rows: number };
 	/** Every frame the app sent, parsed. */
 	sent: Array<Record<string, unknown>>;
 	route: WebSocketRoute;
@@ -293,7 +380,22 @@ export class MockBackend {
 	/** Activity events per message id the feeds return. */
 	acpActivity: Record<string, Array<Record<string, unknown>>> = {};
 	acpSockets: WebSocketRoute[] = [];
+	/** Real ms before a `/ws/acp` socket says hello (a slow handshake over the Tunnel). */
+	acpHelloDelayMs = 0;
+	/** Real time (`Date.now()` of the test) of the first `/ws/acp` connection. */
+	acpFirstConnectAt: number | null = null;
 	private acpSeq = 0;
+	/** v27 topics (none until `enableConversations()`). */
+	acpConversations: MockConversation[] = [];
+	/** Every review / requeue the app posted, in order. */
+	reviewCalls: Array<{ id: number; verb: "review" | "requeue" }> = [];
+	/** Every `POST /acp/conversations/:id/read` body's `at`, by topic, in order. */
+	readMarks: Record<string, string[]> = {};
+	acpWorks: Array<Record<string, unknown>> = [];
+	/** Every Files / Git request that named a work (`<rest>?work=<id>`), in order. */
+	workReads: string[] = [];
+	private convCreations = new Map<string, string>();
+	private convSeq = 10;
 
 	constructor() {
 		this.enableAcp();
@@ -318,9 +420,9 @@ export class MockBackend {
 			runtime: "claude-acp-0.108.0",
 			model: null,
 			projectId,
-			// Just before the page clock (FIXED_NOW): the status reads "libre", not "sin señal".
+			// Just before the page clock (FIXED_NOW): the status reads "disponible", not "sin señal".
 			runnerSeenAt: iso(1790),
-			running: null,
+			running: [],
 			pending: 0,
 			// As its runner reports after the first claim: the CLI's default effort.
 			effort: null,
@@ -372,6 +474,7 @@ export class MockBackend {
 			project_id: null,
 			depth: 0,
 			client_id: null,
+			conversation_id: null,
 			...m,
 		};
 		this.acpMessages.push(row);
@@ -395,6 +498,250 @@ export class MockBackend {
 		Object.assign(m, patch);
 		this.pushAcp({ type: "message", message: m });
 		return m;
+	}
+
+	/**
+	 * Three topics in "Educación HZ" (3B): «Optimización de CI», where @dev is
+	 * working now; «Rediseño de UI/UX», with an answer of @arq the person has
+	 * not seen (1 unread); «Mejoras del backend», empty. @dev also has a
+	 * message queued in «Rediseño de UI/UX» (busy in another topic).
+	 */
+	enableConversations(): void {
+		const conv = (id: string, title: string, readAt: string | null): MockConversation => ({
+			id,
+			projectId: PROJECT_IDS.hz,
+			title,
+			createdAt: iso(400),
+			archivedAt: null,
+			readAt,
+			recipients: null,
+		});
+		this.acpConversations = [
+			conv(CONV_IDS.ci, "Optimización de CI", iso(2000)),
+			conv(CONV_IDS.ui, "Rediseño de UI/UX", iso(600)),
+			conv(CONV_IDS.backend, "Mejoras del backend", null),
+		];
+		const ci = this.addAcpMessage({
+			to_id: "dev",
+			body: "@dev el job de e2e tarda 14 minutos: bajalo sin perder cobertura.",
+			state: "done",
+			result_text: "Medí 5 corridas: 6 min son instalación de navegadores. Propongo caché.",
+			project_id: PROJECT_IDS.hz,
+			conversation_id: CONV_IDS.ci,
+			finished_at: iso(500),
+		});
+		const run = this.addAcpMessage({
+			to_id: "dev",
+			body: "@dev implementalo en un trabajo aparte.",
+			state: "running",
+			project_id: PROJECT_IDS.hz,
+			conversation_id: CONV_IDS.ci,
+			started_at: iso(700),
+		});
+		this.addAcpMessage({
+			to_id: "arq",
+			body: "@arq ¿qué falta del prototipo?",
+			state: "done",
+			result_text: "Faltan los estados del equipo y el divisor de no leídos.",
+			project_id: PROJECT_IDS.hz,
+			conversation_id: CONV_IDS.ui,
+			finished_at: iso(900),
+		});
+		const queued = this.addAcpMessage({
+			to_id: "dev",
+			body: "@dev cuando puedas, revisá los tokens.",
+			state: "pending",
+			project_id: PROJECT_IDS.hz,
+			conversation_id: CONV_IDS.ui,
+		});
+		const dev = this.acpAgents.find((a) => a.name === "dev")!;
+		dev.running = [run.id];
+		dev.runningIn = [{ id: run.id, conversationId: CONV_IDS.ci, work: null }];
+		dev.pending = 1;
+		dev.queue = [{ id: queued.id, conversationId: CONV_IDS.ui, work: null }];
+		void ci;
+	}
+
+	/**
+	 * The Archive (3B F5): what was written before topics. The previous
+	 * Project Chat already has enableAcp's «@arq revisá el diseño»; this adds
+	 * @arq's previous direct messages (no project, no topic). @dev has none:
+	 * its Archive entry is not listed. @solo's are not in any project's.
+	 */
+	enableArchive(): void {
+		this.addAcpMessage({
+			to_id: "arq",
+			body: "¿Tenés un minuto para el login?",
+			state: "done",
+			result_text: "Sí: **OAuth con PKCE**, y el refresh en una cookie httpOnly.",
+			created_at: iso(300),
+			finished_at: iso(320),
+		});
+		this.addAcpMessage({
+			to_id: "arq",
+			body: "Revisá la migración de sesiones",
+			state: "failed",
+			note: "Error del adaptador.",
+			created_at: iso(340),
+			finished_at: iso(350),
+		});
+	}
+
+	/**
+	 * Works (3B F4): @dev's «ci-cache», active, from «Optimización de CI» (it
+	 * works there now), and «old-try», cleaned (its worktree is gone: Files and
+	 * Git answer 404 for it).
+	 */
+	enableWorks(): void {
+		const work = (id: string, state: string, extra: Record<string, unknown> = {}) => ({
+			id,
+			agent: "dev",
+			projectId: PROJECT_IDS.hz,
+			conversationId: null,
+			branch: `work/${id}`,
+			dir: `/home/developer/workspace/.st/ctx/${id}`,
+			baseSha: "3bda155e0c1d2a4b",
+			portBase: 20000,
+			state,
+			note: null,
+			createdBy: "dev",
+			createdAt: iso(700),
+			closedAt: null,
+			cleanedAt: null,
+			...extra,
+		});
+		this.acpWorks = [
+			work("ci-cache", "active", { conversationId: CONV_IDS.ci }),
+			work("old-try", "cleaned", {
+				portBase: 20100,
+				closedAt: iso(300),
+				cleanedAt: iso(350),
+			}),
+		];
+		const dev = this.acpAgents.find((a) => a.name === "dev")!;
+		dev.runningIn = (dev.runningIn ?? []).map((r) =>
+			r.conversationId === CONV_IDS.ci ? { ...r, work: "ci-cache" } : r,
+		);
+		for (const m of this.acpMessages)
+			if (m.conversation_id === CONV_IDS.ci && m.state === "running") m.context = "ci-cache";
+	}
+
+	private convView(c: MockConversation) {
+		const rows = this.acpMessages.filter((m) => m.conversation_id === c.id);
+		const times = [c.createdAt, ...rows.flatMap((m) => [m.created_at, m.finished_at ?? ""])];
+		const after = (t: string | null) =>
+			c.readAt === null || (t !== null && Date.parse(t) > Date.parse(c.readAt));
+		const unread =
+			rows.filter((m) => m.from_id !== "owner" && after(m.created_at)).length +
+			rows.filter(
+				(m) => m.from_id === "owner" && m.state === "done" && m.result_text && after(m.finished_at),
+			).length;
+		return {
+			...c,
+			lastActivityAt: times.filter(Boolean).sort().at(-1)!,
+			unread,
+			needsAction: false,
+		};
+	}
+
+	/** Push a topic's view live (as the backend does on create / rename / archive / read / post). */
+	pushConversation(id: string): void {
+		const c = this.acpConversations.find((x) => x.id === id);
+		if (c) this.pushAcp({ type: "conversation", conversation: this.convView(c) });
+	}
+
+	private async handleConversations(
+		method: string,
+		path: string,
+		req: ReturnType<Route["request"]>,
+		json: (status: number, body: unknown) => Promise<void>,
+		page: (msgs: MockAcpMessage[]) => MockAcpMessage[],
+	): Promise<boolean> {
+		const list = /^\/acp\/projects\/([^/]+)\/conversations$/.exec(path);
+		if (list && method === "GET") {
+			const pid = decodeURIComponent(list[1]!);
+			const archived = new URL(req.url()).searchParams.get("archived") === "1";
+			await json(
+				200,
+				this.acpConversations
+					.filter((c) => c.projectId === pid && Boolean(c.archivedAt) === archived)
+					.map((c) => this.convView(c))
+					.sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt)),
+			);
+			return true;
+		}
+		if (path === "/acp/conversations" && method === "POST") {
+			const b = JSON.parse(req.postData() ?? "{}") as {
+				projectId?: string;
+				title?: string;
+				clientRequestId?: string;
+			};
+			const title = (b.title ?? "").trim();
+			if (!title || [...title].length > 120) {
+				await json(400, { error: "invalid-title" });
+				return true;
+			}
+			const prior = this.convCreations.get(String(b.clientRequestId));
+			if (prior) {
+				const c = this.acpConversations.find((x) => x.id === prior)!;
+				await json(200, { ...this.convView(c), replayed: true });
+				return true;
+			}
+			const c: MockConversation = {
+				id: `c0000000-0000-4000-8000-0000000000${String(++this.convSeq).padStart(2, "0")}`,
+				projectId: String(b.projectId),
+				title,
+				createdAt: iso(1750 + this.convSeq),
+				archivedAt: null,
+				readAt: null,
+				recipients: null,
+			};
+			this.acpConversations.push(c);
+			this.convCreations.set(String(b.clientRequestId), c.id);
+			this.pushConversation(c.id);
+			await json(201, { ...this.convView(c), replayed: false });
+			return true;
+		}
+		const one = /^\/acp\/conversations\/([^/]+)(?:\/(archive|read|feed))?$/.exec(path);
+		if (!one) return false;
+		const c = this.acpConversations.find((x) => x.id === decodeURIComponent(one[1]!));
+		if (!c) {
+			await json(404, { error: "conversation-not-found" });
+			return true;
+		}
+		if (one[2] === undefined && method === "PATCH") {
+			const title = String(
+				(JSON.parse(req.postData() ?? "{}") as { title?: string }).title ?? "",
+			).trim();
+			if (!title || [...title].length > 120) {
+				await json(400, { error: "invalid-title" });
+				return true;
+			}
+			c.title = title;
+		} else if (one[2] === "archive" && method === "POST") {
+			c.archivedAt ??= iso(1795);
+		} else if (one[2] === "read" && method === "POST") {
+			const at = String((JSON.parse(req.postData() ?? "{}") as { at?: string }).at ?? "");
+			this.readMarks[c.id] = [...(this.readMarks[c.id] ?? []), at];
+			if (c.readAt === null || Date.parse(at) > Date.parse(c.readAt)) c.readAt = at;
+		} else if (one[2] === "feed" && method === "GET") {
+			await json(200, {
+				conversation: this.convView(c),
+				agents: this.acpAgents.filter((a) => a.projectId === c.projectId),
+				maxMessageBytes: 262144,
+				messages: page(this.acpMessages.filter((m) => m.conversation_id === c.id)),
+				// Like the backend: only the questions asked on this topic's messages.
+				questions: this.acpQuestions.filter((q) =>
+					this.acpMessages.some((m) => m.id === q.message_id && m.conversation_id === c.id),
+				),
+				activity: this.acpActivity,
+				activitySeq: 0,
+			});
+			return true;
+		} else return false;
+		this.pushConversation(c.id);
+		await json(200, this.convView(c));
+		return true;
 	}
 
 	/** Turn projects on: one project and a few more sessions of alice's. */
@@ -527,6 +874,70 @@ export class MockBackend {
 			await json(200, { default: "claude-acp-0.108.0", available: ["claude-acp-0.108.0"] });
 			return true;
 		}
+		if (await this.handleConversations(method, path, req, json, page)) return true;
+		if (path === "/acp/inbox" && method === "GET") {
+			// Like the backend: a question carries its message's topic and project.
+			const questions = this.acpQuestions
+				.filter((q) => q.state === "open")
+				.map((q) => {
+					const m = this.acpMessages.find((x) => x.id === q.message_id);
+					return {
+						...q,
+						conversation_id: m?.conversation_id ?? null,
+						project_id: m?.project_id ?? null,
+					};
+				});
+			const interrupted = this.acpMessages.filter((m) => m.state === "uncertain" && !m.reviewed_at);
+			// The person's messages answered after their topic's read mark (live topics only).
+			const results = this.acpMessages.filter((m) => {
+				if (m.from_id !== "owner" || m.state !== "done" || !m.result_text) return false;
+				const c = this.acpConversations.find((x) => x.id === m.conversation_id);
+				if (!c || c.archivedAt) return false;
+				return c.readAt === null || Date.parse(m.finished_at ?? "") > Date.parse(c.readAt);
+			});
+			const ids = new Set(interrupted.map((m) => m.id));
+			await json(200, {
+				count: questions.length + interrupted.length,
+				action: { questions, interrupted },
+				results,
+				reports: this.acpMessages.filter((m) => m.recovery_of && ids.has(m.recovery_of)),
+			});
+			return true;
+		}
+		const verb = /^\/acp\/messages\/(\d+)\/(review|requeue)$/.exec(path);
+		if (verb && method === "POST") {
+			const m = this.acpMessages.find((x) => x.id === Number(verb[1]));
+			if (!m) {
+				await json(404, { error: "not-found" });
+				return true;
+			}
+			if (m.state !== "uncertain") {
+				await json(409, { error: "not-uncertain", state: m.state });
+				return true;
+			}
+			this.reviewCalls.push({ id: m.id, verb: verb[2] as "review" | "requeue" });
+			if (verb[2] === "review") m.reviewed_at ??= iso(1798);
+			else Object.assign(m, { state: "pending", reviewed_at: null, finished_at: null });
+			this.pushAcp({ type: "message", message: m });
+			await json(200, m);
+			return true;
+		}
+		const answer = /^\/acp\/questions\/(\d+)\/answer$/.exec(path);
+		if (answer && method === "POST") {
+			const q = this.acpQuestions.find((x) => x.id === Number(answer[1]));
+			if (!q || q.state !== "open") {
+				await json(409, { error: "not-open" });
+				return true;
+			}
+			Object.assign(q, { state: "answered", answer: req.postData(), answered_at: iso(1798) });
+			this.pushAcp({ type: "question", question: q });
+			await json(200, q);
+			return true;
+		}
+		if (path === "/acp/works" && method === "GET") {
+			await json(200, this.acpWorks);
+			return true;
+		}
 		const feed = /^\/acp\/agents\/([^/]+)\/feed$/.exec(path);
 		if (feed && method === "GET") {
 			const a = this.acpAgents.find((x) => x.name === decodeURIComponent(feed[1]!));
@@ -537,7 +948,13 @@ export class MockBackend {
 			await json(200, {
 				agent: a,
 				maxMessageBytes: 262144,
-				messages: page(this.acpMessages.filter((m) => m.to_id === a.name || m.from_id === a.name)),
+				// The Archive's (backend `archive: true`): everything to or from the
+				// agent outside any topic, in any scope.
+				messages: page(
+					this.acpMessages.filter(
+						(m) => !m.conversation_id && (m.to_id === a.name || m.from_id === a.name),
+					),
+				),
 				questions: this.acpQuestions.filter((q) => q.agent === a.name),
 				activity: this.acpActivity,
 				activitySeq: 0,
@@ -560,7 +977,8 @@ export class MockBackend {
 				project: { id: p.projectId, name: p.name },
 				agents: this.acpAgents.filter((a) => a.projectId === pid),
 				maxMessageBytes: 262144,
-				messages: page(this.acpMessages.filter((m) => m.project_id === pid)),
+				// The previous Project Chat: the project's scope, outside any topic.
+				messages: page(this.acpMessages.filter((m) => m.project_id === pid && !m.conversation_id)),
 				questions: this.acpQuestions,
 				activity: this.acpActivity,
 				activitySeq: 0,
@@ -569,23 +987,73 @@ export class MockBackend {
 		}
 		if (path === "/acp/messages" && method === "POST") {
 			const b = JSON.parse(req.postData() ?? "{}") as {
-				to: string;
+				to?: string | string[];
+				team?: boolean;
 				body: string;
 				projectId?: string;
 				clientId?: string;
+				conversationId?: string;
 			};
-			if (!this.acpAgents.some((a) => a.name === b.to)) {
+			if (b.conversationId) {
+				const c = this.acpConversations.find((x) => x.id === b.conversationId);
+				if (!c) {
+					await json(404, { error: "conversation-not-found" });
+					return true;
+				}
+				if (c.archivedAt) {
+					await json(409, { error: "conversation-archived" });
+					return true;
+				}
+				// «Todo el equipo»: the project's agents now, one row each, marked `team`.
+				const names = b.team
+					? this.acpAgents.filter((a) => a.projectId === c.projectId).map((a) => a.name)
+					: (Array.isArray(b.to) ? b.to : [b.to ?? ""]).map((n) => n.replace(/^@/, ""));
+				const bad = names.find(
+					(n) => this.acpAgents.find((a) => a.name === n)?.projectId !== c.projectId,
+				);
+				if (bad) {
+					await json(400, { error: "not-in-project", agent: bad });
+					return true;
+				}
+				const rows = names.map((n) =>
+					this.addAcpMessage({
+						to_id: n,
+						body: b.body,
+						project_id: c.projectId,
+						conversation_id: c.id,
+						client_id: b.clientId ?? null,
+						created_at: iso(1780 + this.acpSeq),
+						team: b.team ? 1 : null,
+					}),
+				);
+				c.recipients = b.team ? { team: true } : { agents: names };
+				for (const row of rows) this.pushAcp({ type: "message", message: row });
+				this.pushConversation(c.id);
+				await json(
+					201,
+					Array.isArray(b.to) || b.team ? { messages: rows, replayed: false } : rows[0],
+				);
+				return true;
+			}
+			if (typeof b.to !== "string" || !this.acpAgents.some((a) => a.name === b.to)) {
 				await json(404, { error: "agent-not-found" });
 				return true;
 			}
 			const row = this.addAcpMessage({
-				to_id: b.to,
+				to_id: b.to as string,
 				body: b.body,
 				project_id: b.projectId ?? null,
 				client_id: b.clientId ?? null,
 			});
 			this.pushAcp({ type: "message", message: row });
 			await json(201, row);
+			return true;
+		}
+		// «Conectar cuenta»: the login runs in a new terminal tab of the agent's session.
+		const login = /^\/acp\/agents\/([^/]+)\/login$/.exec(path);
+		if (login && method === "POST") {
+			const a = this.acpAgents.find((x) => x.name === decodeURIComponent(login[1]!));
+			await json(a ? 200 : 404, a ? { sessionId: a.sessionId, tabId: "tab-1" } : {});
 			return true;
 		}
 		const agentPatch = /^\/acp\/agents\/([^/]+)$/.exec(path);
@@ -670,6 +1138,10 @@ export class MockBackend {
 				sessionId,
 				tabId: url.searchParams.get("tab"),
 				observe,
+				attach: {
+					cols: Number(url.searchParams.get("cols")),
+					rows: Number(url.searchParams.get("rows")),
+				},
 				sent: [],
 				route: ws,
 				closed: false,
@@ -704,7 +1176,10 @@ export class MockBackend {
 			ws.onClose(() => {
 				this.acpSockets = this.acpSockets.filter((x) => x !== ws);
 			});
-			ws.send(JSON.stringify({ type: "hello" }));
+			this.acpFirstConnectAt ??= Date.now();
+			const hello = () => ws.send(JSON.stringify({ type: "hello" }));
+			if (this.acpHelloDelayMs > 0) setTimeout(hello, this.acpHelloDelayMs);
+			else hello();
 			return;
 		}
 		ws.close({ code: 1008, reason: "Unknown route" });
@@ -888,11 +1363,28 @@ export class MockBackend {
 			if (rest === "/bootstrap-log") return json(200, { log: null });
 			if (!own) return json(404, { error: "Session not found" });
 
+			// ── a work (`work=<id>`, 3B F4): its worktree is the root, and only
+			// for a work of THIS session's agent that is not cleaned — else the
+			// same 404 as a missing session (the real backend's workRoot.ts).
+			const workId = url.searchParams.get("work");
+			let workRoot: FsDir | null = null;
+			let workRow: Record<string, unknown> | null = null;
+			if (workId !== null && (rest.startsWith("/fs/") || rest.startsWith("/git/"))) {
+				const agent = this.acpAgents.find((a) => a.sessionId === id);
+				workRow =
+					this.acpWorks.find(
+						(w) => w.id === workId && w.agent === agent?.name && w.state !== "cleaned",
+					) ?? null;
+				this.workReads.push(`${rest}?work=${workId}`);
+				if (!workRow) return json(404, { error: "Session not found" });
+				workRoot = seedWorkFs(workId);
+			}
+
 			// ── files ──
 			const fs = /^\/fs\/(list|preview|raw)$/.exec(rest);
 			if (fs) {
 				const rel = url.searchParams.get("path") ?? "";
-				const node = this.resolve(rel);
+				const node = this.resolve(rel, workRoot ?? undefined);
 				if (!node) return json(404, { error: "Not found" });
 				if (node.restricted) return json(403, { error: "Restricted path" });
 				if (fs[1] === "list") {
@@ -927,6 +1419,33 @@ export class MockBackend {
 			if (rest.startsWith("/git/")) {
 				if (s.status !== "running") {
 					return json(409, { error: "Session is not running", code: "session-not-running" });
+				}
+				if (rest === "/git/status" && workRow) {
+					return json(200, {
+						repo: true,
+						root: "",
+						truncated: false,
+						branch: workRow.branch,
+						detached: false,
+						head: "9c41e2d000",
+						upstream: null,
+						ahead: null,
+						behind: null,
+						changes: [
+							{
+								area: "unstaged",
+								status: "M",
+								xy: " M",
+								path: ".github/workflows/ci.yml",
+								oldPath: null,
+								additions: 12,
+								deletions: 3,
+								binary: false,
+								restricted: false,
+							},
+						],
+						work: workRow,
+					});
 				}
 				if (rest === "/git/status") {
 					return json(200, {
@@ -990,7 +1509,13 @@ export class MockBackend {
 					return json(200, {
 						path: p,
 						area: url.searchParams.get("area") ?? "unstaged",
-						patch: p === "src/auth.ts" ? GIT_PATCH : "",
+						patch: workRow
+							? p === ".github/workflows/ci.yml"
+								? WORK_PATCH
+								: ""
+							: p === "src/auth.ts"
+								? GIT_PATCH
+								: "",
 						truncated: false,
 						binary: false,
 					});
@@ -1084,8 +1609,8 @@ export class MockBackend {
 		};
 	}
 
-	private resolve(rel: string): FsNode | null {
-		let node: FsNode = this.fs;
+	private resolve(rel: string, root: FsDir = this.fs): FsNode | null {
+		let node: FsNode = root;
 		for (const part of rel.split("/").filter(Boolean)) {
 			if (node.type !== "dir") return null;
 			const next: FsNode | undefined = node.entries[part];

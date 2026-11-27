@@ -71,13 +71,17 @@ BAZ=qux
 			{ name: "FOO", value: "bar" },
 			{ name: "BAZ", value: "qux" },
 		]);
-		expect(r.skipped).toEqual([{ line: 2, reason: "missing '=' separator (or empty name)" }]);
+		expect(r.skipped).toEqual([
+			{ line: 2, reason: "falta el separador '=' (o el nombre está vacío)" },
+		]);
 	});
 
 	it("skips lines with `=` at position 0 (no name)", () => {
 		const r = parseDotEnv("=value\n");
 		expect(r.parsed).toEqual([]);
-		expect(r.skipped).toEqual([{ line: 1, reason: "missing '=' separator (or empty name)" }]);
+		expect(r.skipped).toEqual([
+			{ line: 1, reason: "falta el separador '=' (o el nombre está vacío)" },
+		]);
 	});
 
 	it("rejects names that fail the POSIX regex", () => {
@@ -86,7 +90,7 @@ BAZ=qux
 		// All three skip with the regex-rejection reason.
 		expect(r.skipped).toHaveLength(3);
 		for (const s of r.skipped) {
-			expect(s.reason).toMatch(/must match/);
+			expect(s.reason).toMatch(/tiene que cumplir/);
 		}
 	});
 
@@ -94,7 +98,7 @@ BAZ=qux
 		const r = parseDotEnv(`FOO="hello\nBAR=ok\n`);
 		expect(r.parsed).toEqual([{ name: "BAR", value: "ok" }]);
 		expect(r.skipped).toEqual([
-			{ line: 1, reason: "unterminated double-quote (multi-line values not supported)" },
+			{ line: 1, reason: "comilla doble sin cerrar (no se admiten valores de varias líneas)" },
 		]);
 	});
 
@@ -135,7 +139,7 @@ BAZ=qux
 		expect(r.skipped).toEqual([
 			{
 				line: 1,
-				reason: "embedded single-quote in value (use the other quote char or remove the quote)",
+				reason: "comilla simple dentro del valor (usá la otra comilla o quitala)",
 			},
 		]);
 	});
@@ -146,7 +150,7 @@ BAZ=qux
 		const r = parseDotEnv(`FOO="bar" baz\n`);
 		expect(r.parsed).toEqual([]);
 		expect(r.skipped).toHaveLength(1);
-		expect(r.skipped[0]?.reason).toMatch(/embedded double-quote/);
+		expect(r.skipped[0]?.reason).toMatch(/comilla doble dentro del valor/);
 	});
 
 	it("returns counts of parsed + skipped so the modal can summarise", () => {

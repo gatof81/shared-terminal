@@ -2,7 +2,7 @@ import type { Request, Response, Router } from "express";
 import { requireAdmin } from "../auth.js";
 import { invalidateStatsCache } from "../containerStats.js";
 import { parseD1Utc } from "../d1Time.js";
-import { getD1CallsSinceBoot } from "../db.js";
+import { getD1CallsSinceBoot, getD1RowsRead } from "../db.js";
 import type { DockerManager } from "../dockerManager.js";
 import { DEFAULT_MEMORY_BYTES, DEFAULT_NANO_CPUS } from "../dockerManager.js";
 import { logger } from "../logger.js";
@@ -34,6 +34,16 @@ import {
 	TeardownFailedError,
 } from "./shared.js";
 
+/** `?top=` of /admin/stats: how many statements of the rows-read breakdown (every key db.ts keeps, at most). */
+const STATS_TOP_DEFAULT = 10;
+// = db.ts READS_MAX_KEYS (the keys it keeps; one more is its "(other)" bucket).
+const STATS_TOP_MAX = 200;
+function topOf(raw: unknown): number | null {
+	if (raw === undefined) return STATS_TOP_DEFAULT;
+	const n = typeof raw === "string" && /^\d{1,3}$/.test(raw) ? Number(raw) : Number.NaN;
+	return n >= 1 && n <= STATS_TOP_MAX ? n : null;
+}
+
 export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 	const { sessions, docker, idleSweeper } = ctx;
 	const { adminStatsIp, adminActionIp } = ctx.limiters;
@@ -52,7 +62,14 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 	// SHARES `adminStatsIp` (keyed per-IP) with `GET /admin/sessions`
 	// — see the comment on that route below + `RateLimitConfig.adminStats`
 	// for the budget rationale.
-	router.get("/admin/stats", adminStatsIp, requireAdmin, async (_req: Request, res: Response) => {
+	router.get("/admin/stats", adminStatsIp, requireAdmin, async (req: Request, res: Response) => {
+		// The default 10 hides statements that read few rows (what an acceptance run
+		// looks for: a task statement at rest, one INSERT's rows): `?top=200` lists all.
+		const top = topOf(req.query.top);
+		if (top === null) {
+			res.status(400).json({ error: `top must be an integer 1–${STATS_TOP_MAX}` });
+			return;
+		}
 		try {
 			const byStatus = await sessions.countByStatus();
 			// `process.uptime()` returns seconds since process start
@@ -95,7 +112,7 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 				idleSweeper: idleSweeperStats,
 				reconcile: reconcileStats,
 				dispatcher: getDispatcherStats(),
-				d1: { callsSinceBoot: getD1CallsSinceBoot() },
+				d1: { callsSinceBoot: getD1CallsSinceBoot(), ...getD1RowsRead(top) },
 				resources: resourceSnapshot,
 			});
 		} catch (err) {
@@ -157,6 +174,7 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 						ownerUsername: row.ownerUsername,
 						cpuLimit: sCaps?.cpuLimit ?? null,
 						memLimit: sCaps?.memLimit ?? null,
+						pidsLimit: sCaps?.pidsLimit ?? null,
 						usage,
 					};
 				}),
@@ -192,8 +210,14 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 				return;
 			}
 			const patch = parsed.data;
-			if (patch.cpuLimit === undefined && patch.memLimit === undefined) {
-				res.status(400).json({ error: "At least one of cpuLimit or memLimit must be provided" });
+			if (
+				patch.cpuLimit === undefined &&
+				patch.memLimit === undefined &&
+				patch.pidsLimit === undefined
+			) {
+				res
+					.status(400)
+					.json({ error: "At least one of cpuLimit, memLimit or pidsLimit must be provided" });
 				return;
 			}
 			try {

@@ -62,7 +62,7 @@ test.describe("auth and load races", () => {
 		await expect(app.sessionRow("bob-api")).toBeVisible();
 	});
 
-	test("D: a deep link survives a failed first session list (not 'Session not found', address kept)", async ({
+	test("D: a deep link survives a failed first session list (not «No se encontró la sesión», address kept)", async ({
 		app,
 		backend,
 		page,
@@ -87,6 +87,6 @@ test.describe("auth and load races", () => {
 		expect(page.url(), "the deep link was cleared although the session may well exist").toContain(
 			hash,
 		);
-		await expect(app.toast(/Session not found/)).toHaveCount(0);
+		await expect(app.toast(/No se encontró la sesión/)).toHaveCount(0);
 	});
 });

@@ -1,6 +1,6 @@
 import type { Route } from "@playwright/test";
 import { expect, test } from "./fixtures.js";
-import { PROJECT_IDS } from "./mockBackend.js";
+import { PROJECT_IDS, SESSION_IDS } from "./mockBackend.js";
 
 /**
  * "+ Nueva sesión con agente" opens the new-session dialog in agent mode
@@ -48,21 +48,21 @@ test.describe("new agent form", () => {
 		};
 	});
 
-	async function openFromProjectChat(page: import("@playwright/test").Page): Promise<void> {
-		const create = page.getByRole("button", { name: "+ Nueva sesión con agente" });
-		// The button is in the "Agentes" panel's foot (closed on a project with
-		// agents): opened from the agents' group first, unless it already is.
-		if (!(await create.isVisible())) await page.locator(".acp-agents-group").click();
-		await create.click();
+	/** The rail's Equipo "+" (projectRail.ts). */
+	const teamAdd = (page: import("@playwright/test").Page) =>
+		page.locator(".rail-body").getByRole("button", { name: "Nueva sesión con agente" });
+
+	async function openFromRail(page: import("@playwright/test").Page): Promise<void> {
+		await teamAdd(page).click();
 		await expect(page.locator("#new-session-modal-title")).toBeVisible();
 	}
 
-	test("from Project Chat: one field and one click create the agent in that project", async ({
+	test("from the project's rail: one field and one click create the agent in that project", async ({
 		app,
 		page,
 	}) => {
 		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
-		await openFromProjectChat(page);
+		await openFromRail(page);
 		await expect(page.locator("#new-session-modal-title")).toHaveText(
 			"Nuevo agente en Educación HZ",
 		);
@@ -87,7 +87,7 @@ test.describe("new agent form", () => {
 
 	test("a session name written by hand stops following the agent's", async ({ app, page }) => {
 		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
-		await openFromProjectChat(page);
+		await openFromRail(page);
 		const agent = page.locator("#new-session-acp-agent");
 		const session = page.locator("#new-session-input");
 		await agent.fill("dev");
@@ -102,7 +102,7 @@ test.describe("new agent form", () => {
 		page,
 	}) => {
 		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
-		await openFromProjectChat(page);
+		await openFromRail(page);
 		const agent = page.locator("#new-session-acp-agent");
 		await agent.fill("Dev_1");
 		await page.click("#new-session-submit");
@@ -132,14 +132,16 @@ test.describe("new agent form", () => {
 		page,
 	}) => {
 		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
-		await openFromProjectChat(page);
+		await openFromRail(page);
 		await expect(page.locator("#new-session-modal-title")).toHaveText(/Nuevo agente/);
 		await page.keyboard.press("Escape");
 		await expect(page.locator("#new-session-modal-title")).toBeHidden();
+		// The sidebar's tree (a wide project page puts its rail there): a session's.
+		await page.goto(`/#/sessions/${SESSION_IDS.running}`);
 		await app.openSidebar();
 		await page.click("#new-session-btn");
-		await expect(page.locator("#new-session-modal-title")).toHaveText("New session");
-		await expect(page.locator("#new-session-submit")).toHaveText("Create session");
+		await expect(page.locator("#new-session-modal-title")).toHaveText("Sesión nueva");
+		await expect(page.locator("#new-session-submit")).toHaveText("Crear sesión");
 		const session = page.locator("#new-session-input");
 		await expect(session).toBeFocused();
 		const agent = page.locator("#new-session-acp-agent");
@@ -148,7 +150,9 @@ test.describe("new agent form", () => {
 		expect((await session.boundingBox())!.y).toBeLessThan((await agent.boundingBox())!.y);
 		// Empty name: said next to the field, nothing sent.
 		await page.click("#new-session-submit");
-		await expect(page.locator("#new-session-input-error")).toHaveText("Enter a session name.");
+		await expect(page.locator("#new-session-input-error")).toHaveText(
+			"Escribí un nombre para la sesión.",
+		);
 		await expect(session).toHaveAttribute("aria-invalid", "true");
 		await expect(session).toBeFocused();
 		// An optional agent name is still checked when written.
@@ -162,7 +166,7 @@ test.describe("new agent form", () => {
 		await page.click("#new-session-submit");
 		await expect.poll(() => posts.length).toBe(1);
 		expect(posts[0]).toEqual({ name: "plain" });
-		await expect(app.toast('Session "plain" created')).toBeVisible();
+		await expect(app.toast("Sesión «plain» creada")).toBeVisible();
 	});
 
 	test("a name already taken is said next to the field; what was written stays", async ({
@@ -170,7 +174,7 @@ test.describe("new agent form", () => {
 		page,
 	}) => {
 		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
-		await openFromProjectChat(page);
+		await openFromRail(page);
 		// Agent mode in Spanish: the session's label and the progress toast.
 		await expect(page.locator("#new-session-input-label")).toHaveText("Nombre de la sesión");
 		const agent = page.locator("#new-session-acp-agent");
@@ -188,27 +192,24 @@ test.describe("new agent form", () => {
 		await expect(page.locator("#new-session-submit")).toBeEnabled();
 	});
 
-	test("closing gives the focus back to the agents' group (the panel closed on the way in)", async ({
-		app,
-		page,
-	}) => {
+	test("closing gives the focus back to the rail's + that opened it", async ({ app, page }) => {
 		await app.login("alice", `#/projects/${PROJECT_IDS.hz}`);
-		const group = page.locator(".acp-agents-group");
+		const group = teamAdd(page);
 		for (const close of ["Escape", "cancel", "x"] as const) {
-			await openFromProjectChat(page);
-			await expect(page.locator("#acp-agents")).toBeHidden();
+			await openFromRail(page);
 			if (close === "Escape") await page.keyboard.press("Escape");
 			else if (close === "cancel")
 				await page
-					.locator("#new-session-modal button[data-close-modal]", { hasText: "Cancel" })
+					.locator("#new-session-modal button[data-close-modal]", { hasText: "Cancelar" })
 					.click();
 			else await page.locator("#new-session-modal .modal-close").click();
 			await expect(page.locator("#new-session-modal-title")).toBeHidden();
 			await expect(group, `after ${close}`).toBeFocused();
 		}
-		// The sidebar's dialog keeps its English label.
+		// The sidebar's dialog is the ordinary one again.
+		await page.goto(`/#/sessions/${SESSION_IDS.running}`);
 		await app.openSidebar();
 		await page.click("#new-session-btn");
-		await expect(page.locator("#new-session-input-label")).toHaveText("Session name");
+		await expect(page.locator("#new-session-input-label")).toHaveText("Nombre de la sesión");
 	});
 });

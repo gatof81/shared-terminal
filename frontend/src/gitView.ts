@@ -34,6 +34,7 @@ import { appendDiffRows } from "./diffTable.js";
 import { relativeDate } from "./format.js";
 import { activeSessionId, isMobile, sessions } from "./main.js";
 import { runSessionAction } from "./sessionCore.js";
+import { onWorkChange, reportWorkGone, workFor } from "./toolsContext.js";
 import { button, el, stateBox } from "./ui.js";
 import {
 	getView,
@@ -55,6 +56,8 @@ const diffEl = document.getElementById("git-diff")!;
 
 /** Session the state below belongs to. */
 let stateSessionId: string | null = null;
+/** …and its workspace: null = the principal one, else a work (toolsContext.ts). */
+let stateWork: string | null = null;
 // Bumped on every session switch; async results carrying an older value
 // are dropped so a slow fetch for session A never renders into B.
 let generation = 0;
@@ -195,13 +198,16 @@ onViewChange((next) => {
 	renderAll();
 });
 
-onSessionSync(() => {
+onSessionSync(syncGitView);
+onWorkChange(syncGitView);
+
+function syncGitView(): void {
 	const s = sessions.find((x) => x.sessionId === activeSessionId);
 	if (!s) {
 		resetState(null);
 		return;
 	}
-	if (s.sessionId !== stateSessionId) {
+	if (s.sessionId !== stateSessionId || workFor(s.sessionId) !== stateWork) {
 		resetState(s.sessionId);
 		if (isGitViewActive()) {
 			void load();
@@ -221,7 +227,7 @@ onSessionSync(() => {
 	) {
 		void load();
 	}
-});
+}
 
 function resetState(sessionId: string | null): void {
 	// No abort: the requests in flight keep their server-side slots
@@ -230,12 +236,42 @@ function resetState(sessionId: string | null): void {
 	generation++;
 	pendingDetail = null;
 	stateSessionId = sessionId;
+	stateWork = workFor(sessionId);
 	dir = "";
 	status = { status: "idle" };
 	log = { status: "idle" };
 	selected = null;
 	clearDiff();
 	mobilePane = "list";
+	notifyStatus();
+}
+
+// ── What Herramientas' strip reads (toolsView.ts) ───────────────────────────
+
+const statusListeners: Array<() => void> = [];
+
+/** Fires whenever the status of the active session's workspace changes. */
+export function onGitStatus(listener: () => void): void {
+	statusListeners.push(listener);
+}
+
+function notifyStatus(): void {
+	for (const l of statusListeners) l();
+}
+
+/**
+ * The branch of the workspace Git reads now: a name, `null` while unknown
+ * (loading, a failure, not a repository), or "detached".
+ */
+export function gitBranch(): { known: boolean; branch: string | null; detached: boolean } {
+	if (status.status !== "loaded" || !status.data.repo)
+		return { known: false, branch: null, detached: false };
+	return { known: true, branch: status.data.branch, detached: status.data.detached };
+}
+
+/** The status, read through the view's own queue when not read yet (the strip's branch). */
+export function requestGitStatus(): void {
+	if (stateSessionId !== null && status.status === "idle") void load();
 }
 
 // ── Data loading ────────────────────────────────────────────────────────────
@@ -244,8 +280,10 @@ async function load(): Promise<void> {
 	const sessionId = stateSessionId;
 	if (sessionId === null) return;
 	const gen = generation;
+	const work = stateWork;
 	const stale = () => gen !== generation;
 	status = { status: "loading" };
+	notifyStatus();
 	log = { status: "loading" };
 	renderAll();
 	await enqueue(async () => {
@@ -253,10 +291,11 @@ async function load(): Promise<void> {
 		// Status and log are independent reads: fire both, render each as
 		// it lands. A log failure on a non-repo is expected and never shown.
 		// The turn ends only when BOTH have settled.
-		const statusDone = fetchGitStatus(sessionId, dir).then(
+		const statusDone = fetchGitStatus(sessionId, dir, undefined, work).then(
 			(data) => {
 				if (stale()) return;
 				status = { status: "loaded", data };
+				notifyStatus();
 				// Keep the open diff only if its file is still in the list;
 				// otherwise it describes a change that no longer exists.
 				if (selected !== null && !(data.repo && findChange(data, selected))) {
@@ -274,16 +313,21 @@ async function load(): Promise<void> {
 			},
 			(err: unknown) => {
 				if (stale()) return;
+				const httpStatus = err instanceof GitApiError ? err.status : 0;
+				// The work is gone: one state over the whole view (toolsView.ts).
+				if (work !== null && (httpStatus === 404 || httpStatus === 403))
+					reportWorkGone(sessionId, work);
 				status = {
 					status: "error",
 					message: (err as Error).message,
-					httpStatus: err instanceof GitApiError ? err.status : 0,
+					httpStatus,
 					code: err instanceof GitApiError ? err.code : null,
 				};
+				notifyStatus();
 				renderAll();
 			},
 		);
-		const logDone = fetchGitLog(sessionId, dir).then(
+		const logDone = fetchGitLog(sessionId, dir, undefined, work).then(
 			(commits) => {
 				if (stale()) return;
 				log = { status: "loaded", commits };
@@ -326,6 +370,7 @@ async function openDiff(sel: Selected): Promise<void> {
 				area: sel.area,
 				oldPath: sel.oldPath,
 				dir,
+				work: stateWork,
 			});
 			if (stale()) return;
 			diff = { status: "loaded", data };
@@ -628,15 +673,20 @@ function commitsSection(): HTMLElement {
 }
 
 function errorBox(err: { message: string; httpStatus: number; code: string | null }): HTMLElement {
+	if (stateWork !== null && (err.httpStatus === 404 || err.httpStatus === 403)) {
+		// The work is gone (cleaned) or not this session's: a state, never a
+		// retry with another path — the client has no other way into it.
+		return stateBox("info", "Este trabajo ya no está disponible.");
+	}
 	if (err.code === "session-not-running") {
 		const s = sessions.find((x) => x.sessionId === stateSessionId);
 		const actions: HTMLElement[] = [];
 		if (s?.status === "stopped") {
-			actions.push(button("Start session", "files-btn primary", () => void startThisSession()));
+			actions.push(button("Poner en marcha", "files-btn primary", () => void startThisSession()));
 		}
 		return stateBox(
 			"info",
-			"This session isn't running. Git runs inside the session container, so start it to see changes.",
+			"Esta sesión no está en marcha. Git corre dentro del contenedor de la sesión: ponela en marcha para ver los cambios.",
 			...actions,
 		);
 	}

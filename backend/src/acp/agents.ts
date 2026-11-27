@@ -27,6 +27,13 @@ import type { AgentLifecycleHooks, DockerManager } from "../dockerManager.js";
 import { logger } from "../logger.js";
 import { deriveSubkey } from "../secrets.js";
 
+/** Slots an agent runs: 1..max_concurrency (bounded, whatever the row says). */
+const slotsOf = (agent: AgentRow) =>
+	Array.from(
+		{ length: Math.min(Math.max(agent.max_concurrency ?? 1, 1), MAX_SLOTS) },
+		(_, i) => i + 1,
+	);
+
 // ── Configuration ─────────────────────────────────────────────────────────
 
 export interface AcpConfig {
@@ -45,6 +52,16 @@ export interface AcpConfig {
 	watchdogMs: number;
 	/** Loop guard: the deepest agent → agent request a person's message may start. */
 	maxDepth: number;
+	/** Messages running at once on this backend, all agents together (ACP_MAX_RUNNING). */
+	maxRunning: number;
+	/** Round budget: agent → agent requests allowed under one person's message (ACP_MAX_CHAIN). */
+	maxChain: number;
+	/** Free space the agent's workspace must have to create a work (ACP_WORK_MIN_FREE_MB). */
+	workMinFreeMb: number;
+	/** Agent → agent requests a goal (root task) starts with (ACP_GOAL_BUDGET); only the person raises it. */
+	goalBudget: number;
+	/** Agent → agent requests one task allows (ACP_TASK_BUDGET), unless the person raised its own. */
+	taskBudget: number;
 	/** Install the deterministic test adapter as runtime `st-test-agent` (ACP_TEST_RUNTIME=1). */
 	testRuntime: boolean;
 }
@@ -58,6 +75,14 @@ export function acpConfigFromEnv(workspaceRoot: string, port: number): AcpConfig
 		maxMessageBytes: Number(env.ACP_MESSAGE_MAX_BYTES ?? 256 * 1024),
 		watchdogMs: Number(env.ACP_WATCHDOG_MS ?? 30_000),
 		maxDepth: Number(env.ACP_MAX_DEPTH ?? DEFAULT_MAX_DEPTH),
+		maxRunning: Number(env.ACP_MAX_RUNNING ?? 6),
+		maxChain: Number(env.ACP_MAX_CHAIN ?? 40),
+		goalBudget: Number(env.ACP_GOAL_BUDGET ?? 150),
+		taskBudget: Number(env.ACP_TASK_BUDGET ?? 40),
+		// 20 GiB: the workspace shares its filesystem with everything else, and the
+		// nightly backup refuses to run under 15 GiB free — a lower floor would let
+		// works be created long after the host stopped getting backups.
+		workMinFreeMb: Number(env.ACP_WORK_MIN_FREE_MB ?? 20480),
 		testRuntime: env.ACP_TEST_RUNTIME === "1",
 		backendUrl: env.ACP_BACKEND_URL ?? `http://st-backend:${port}`,
 		// src/acp (tsx) and dist/acp (image, which copies it to /acp-runtime)
@@ -68,26 +93,41 @@ export function acpConfigFromEnv(workspaceRoot: string, port: number): AcpConfig
 
 const RUNTIME_MOUNT = "/opt/st-acp";
 export const TEST_RUNTIME = "st-test-agent";
-const RUNNER_LOOP_NAME = "st-acp-runner-loop";
-const RUNNER_LOCK = "/tmp/st-acp-runner.lock";
-// Liveness from the processes themselves (never from silence, never by taking
-// the lock — a probe holding it would make a concurrent launch give up):
-// exit 0: the restart loop is there (alive);
-// exit 3: no loop, but a runner (or a holder of the launch lock) still lives —
-//         unsupervised, NOT dead: launching would make a second runner on the
-//         same ACP session, so nothing is launched; when it exits, the next
-//         probe sees 1;
+// Slot 1 keeps exactly the names it had before there were slots (lock, log,
+// process command line), so a one-slot agent is the runner of always. Slot k ≥ 2
+// carries k in every name and as the runner's argument.
+const sfx = (slot: number) => (slot === 1 ? "" : `-${slot}`);
+const runnerLock = (slot: number) => `/tmp/st-acp-runner${sfx(slot)}.lock`;
+const runnerLog = (slot: number) => `/tmp/st-acp-runner${sfx(slot)}.log`;
+const runnerCmd = (slot: number) =>
+	`node --no-warnings ${RUNTIME_MOUNT}/st/runner.mjs${slot === 1 ? "" : ` ${slot}`}`;
+/** Upper bound of `max_concurrency` (PATCH /agents/:name). */
+export const MAX_SLOTS = 4;
+// Liveness of ONE slot from the processes themselves (never from silence, never
+// by taking the lock — a probe holding it would make a concurrent launch give up):
+// exit 0: the slot's restart loop is there (alive);
+// exit 3: no loop, but the slot's runner (or a holder of its launch lock) still
+//         lives — unsupervised, NOT dead: launching would make a second runner
+//         on the same ACP session, so nothing is launched; when it exits, the
+//         next probe sees 1;
 // exit 1: nothing (dead — safe to launch, still under `flock -n`).
-// Patterns are anchored so they never match this probe's own `sh -c`.
-export const RUNNER_PROBE = [
-	"pgrep -f '^sh -c while true; do node' >/dev/null && exit 0",
-	"pgrep -f '^node --no-warnings /opt/st-acp/st/runner.mjs' >/dev/null && exit 3",
-	`i=$(stat -c %i ${RUNNER_LOCK} 2>/dev/null) && grep -q ":$i " /proc/locks && exit 3`,
-	"exit 1",
-].join("\n");
+// Patterns are anchored at both ends of the slot's own command (its log file
+// for the loop, its argument for the runner), so slots never match each other
+// and never this probe's own `sh -c`.
+export function runnerProbe(slot: number): string {
+	const cmd = runnerCmd(slot).replace(/\./g, "\\.");
+	return [
+		`pgrep -f '^sh -c while true; do ${cmd} >> ${runnerLog(slot).replace(/\./g, "\\.")} ' >/dev/null && exit 0`,
+		`pgrep -f '^${cmd}$' >/dev/null && exit 3`,
+		`i=$(stat -c %i ${runnerLock(slot)} 2>/dev/null) && grep -q ":$i " /proc/locks && exit 3`,
+		"exit 1",
+	].join("\n");
+}
 // Names an agent can be addressed by (`st send @name`). `owner` and `system`
 // are the person and Shared Terminal itself.
 export const AGENT_NAME_RE = /^[a-z][a-z0-9-]{1,31}$/;
+/** An execution context name; it becomes a directory `.st/ctx/<name>/` in the workspace. */
+export const CONTEXT_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const RESERVED_NAMES = new Set(["owner", "system", "all"]);
 
 export function agentNameError(name: unknown): string | null {
@@ -111,6 +151,8 @@ export interface AgentRow {
 	project_id: string | null;
 	/** Reasoning effort the runner asks its adapter for (v23); NULL = "default" (the CLI decides). */
 	effort: string | null;
+	/** Slots (messages at once) this agent runs, 1..MAX_SLOTS (v24). */
+	max_concurrency: number;
 }
 
 export type MessageState = "pending" | "running" | "done" | "failed" | "uncertain";
@@ -136,6 +178,24 @@ export interface MessageRow {
 	/** Hops from the person's message (loop guard); 0 = sent by a person. */
 	depth: number;
 	client_id: string | null;
+	/** Execution context (v24): NULL = the default one (workspace checkout, slot 1). */
+	context: string | null;
+	/** The sender's context of an agent's request: where its reply goes back (v24). */
+	from_context: string | null;
+	/** Slot that took it while running (v24); kept afterwards as a record. */
+	slot: number | null;
+	/** The person's message this agent chain started from (v25); NULL = this is a root. */
+	root_id: number | null;
+	/** The conversation (v27) it belongs to; NULL = the Archive (before conversations). */
+	conversation_id: string | null;
+	/** 1 = the person sent it to "the whole team" (one row per agent, resolved at send). */
+	team: number;
+	/** The person reviewed this `uncertain` run without requeueing it (v27). */
+	reviewed_at: string | null;
+	/** On the runner's recovery message: the interrupted message it reports on (v27). */
+	recovery_of: number | null;
+	/** The task (v29) it is part of; NULL = none. */
+	task_id: number | null;
 }
 
 export type QuestionState = "open" | "answered" | "delivered" | "withdrawn" | "orphaned";
@@ -161,12 +221,46 @@ export type AcpEvent =
 	| { type: "message"; message: MessageRow }
 	| { type: "question"; question: QuestionRow }
 	| { type: "activity"; agent: string; events: ActivityEvent[] }
-	| { type: "agents" };
+	| { type: "agents" }
+	| { type: "conversation"; conversation: Record<string, unknown> }
+	| { type: "task"; task: Record<string, unknown> };
+
+/** A message as an agent's state names it: where it is (conversation, work). */
+export interface MessageRef {
+	id: number;
+	conversationId: string | null;
+	/** The work it runs in; null = the agent's main checkout. */
+	work: string | null;
+}
 
 export interface AgentLoad {
-	/** Id of the message the agent is working on, if any. */
-	running: number | null;
+	/** Ids of the messages the agent is working on, oldest first (one per slot it runs). */
+	running: number[];
 	pending: number;
+	/** The same running messages, with their conversation and work. */
+	runningIn: MessageRef[];
+	/** Its queue in id order (the claim's order within a context). */
+	queue: MessageRef[];
+	/** Its requests to other agents not answered yet: what it waits for. */
+	waitingFor: Array<MessageRef & { agent: string }>;
+}
+
+/** A slot kept in a conversation (or work) by a process left running there: «proceso en curso». */
+export interface HeldBy {
+	conversationId: string | null;
+	work: string | null;
+	/** When the slot was first seen held there. */
+	since: string;
+}
+const HELD_TTL_MS = 60_000;
+const sameHeld = (a: HeldBy, b: HeldBy) =>
+	a.conversationId === b.conversationId && a.work === b.work;
+
+/** An open question to the person: the agent stands still until it is answered. */
+export interface OpenQuestion {
+	id: number;
+	messageId: number | null;
+	conversationId: string | null;
 }
 
 export interface LoginMethod {
@@ -186,6 +280,17 @@ export interface ActivityEvent {
 }
 
 /** What a runner reported after asking its adapter for a model. */
+/** What the runner reported after installing the shared skills into ~/.claude/skills. */
+export interface SkillsApplied {
+	/** Hash of the packaged skills (12 hex), null if the install failed. */
+	hash: string | null;
+	/** The skills it installed (one with an own skill of the same name is not). */
+	names: string[];
+	/** Why some or all were not installed, if so. */
+	error: string | null;
+	at: string;
+}
+
 export interface ModelApplied {
 	/** The model id the runner asked for. */
 	requested: string;
@@ -224,6 +329,19 @@ export function effortOf(v: unknown): string | null | undefined {
 	return typeof v === "string" && /^[a-z][a-z0-9_-]{0,31}$/.test(v) ? v : undefined;
 }
 
+/** An agent's request refused because its task or its goal used up its budget (§5). */
+export class BudgetError extends Error {
+	constructor(
+		readonly budget: "goal" | "task",
+		readonly taskId: number,
+		readonly goalId: number,
+		readonly limit: number,
+		readonly used: number,
+	) {
+		super(`${budget}-budget`);
+	}
+}
+
 /** A `clientId` already used for a different message to the same recipient. */
 export class ClientIdConflictError extends Error {
 	constructor(readonly existingId: number) {
@@ -232,6 +350,17 @@ export class ClientIdConflictError extends Error {
 }
 
 const NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
+// The claim's and the system message's shared guard (?1 owner, ?2 agent, ?3
+// slot, ?5 global cap): the slot is free and exists, the agent is under its
+// cap and the backend under ACP_MAX_RUNNING — all in the writing statement.
+const RUN_GUARD = `NOT EXISTS (SELECT 1 FROM agent_messages y WHERE y.owner_user_id = ?1 AND y.to_id = ?2 AND y.state = 'running' AND y.slot = ?3)
+	AND ?3 <= (SELECT max_concurrency FROM acp_agents WHERE owner_user_id = ?1 AND name = ?2)
+	AND (SELECT COUNT(*) FROM agent_messages y WHERE y.owner_user_id = ?1 AND y.to_id = ?2 AND y.state = 'running')
+		< (SELECT max_concurrency FROM acp_agents WHERE owner_user_id = ?1 AND name = ?2)
+	AND (SELECT COUNT(*) FROM agent_messages y WHERE y.state = 'running') < ?5`;
+// The slot that last started a message of the claim's candidate `m`'s context.
+const LAST_SLOT = `(SELECT x.slot FROM agent_messages x WHERE x.owner_user_id = ?1 AND x.to_id = ?2
+	AND x.context = m.context AND x.slot IS NOT NULL ORDER BY x.started_at DESC, x.id DESC LIMIT 1)`;
 const ACTIVITY_MAX = 500;
 /** Agent → agent hops allowed below one person's message (ACP_MAX_DEPTH). */
 export const DEFAULT_MAX_DEPTH = 6;
@@ -256,7 +385,13 @@ export class AcpAgents {
 		return () => this.listeners.delete(fn);
 	}
 
+	/** For the other ACP modules (conversations): the same live channel. */
+	emit(ownerUserId: string, ev: AcpEvent): void {
+		this.publish(ownerUserId, ev);
+	}
+
 	private publish(ownerUserId: string, ev: AcpEvent): void {
+		if (ev.type === "message" || ev.type === "agents") this.wakeWaiters(ownerUserId, ev);
 		for (const fn of this.listeners) {
 			try {
 				fn(ownerUserId, ev);
@@ -277,6 +412,15 @@ export class AcpAgents {
 	async installRunnerFiles(): Promise<void> {
 		const dest = path.join(this.config.runtimeDir, "st");
 		await fs.mkdir(path.join(dest, "bin"), { recursive: true });
+		// The shared skills (acp-runtime/skills/<name>/) BEFORE the runner: a
+		// runner restarts itself when its file changes, and installs into the
+		// agent's ~/.claude/skills whatever skills/ holds at that moment. Swapped
+		// as a whole directory, so a skill removed from the package goes too.
+		const skillsTmp = path.join(dest, "skills.tmp");
+		await fs.rm(skillsTmp, { recursive: true, force: true });
+		await fs.cp(path.join(this.config.runnerSrc, "skills"), skillsTmp, { recursive: true });
+		await fs.rm(path.join(dest, "skills"), { recursive: true, force: true });
+		await fs.rename(skillsTmp, path.join(dest, "skills"));
 		for (const f of ["runner.mjs", "bin/st", "package.json"]) {
 			const tmp = path.join(dest, `${f}.tmp`);
 			await fs.copyFile(path.join(this.config.runnerSrc, f), tmp);
@@ -382,6 +526,13 @@ export class AcpAgents {
 		return row;
 	}
 
+	/** The agent's row as this process last wrote or read it (setModel and the
+	 *  other setters keep it), without a D1 read: a long-held request (the
+	 *  claim's wait) answers with what is true now, not when it arrived. */
+	current(agent: AgentRow): AgentRow {
+		return this.byId.get(agent.agent_id) ?? agent;
+	}
+
 	/**
 	 * Changes the model the agent's runner asks its adapter for. Nothing is
 	 * restarted here: the runner reads the requested model with every claim and
@@ -448,6 +599,61 @@ export class AcpAgents {
 		this.publish(agent.owner_user_id, { type: "agents" });
 	}
 
+	/**
+	 * Where a slot is held by a process the agent left running (memory only):
+	 * a slot whose session has an open task cannot switch sessions, and says so
+	 * with every claim (`conversation` / `context`, the claim's own
+	 * restriction). A claim without it clears it. While the slot runs a message
+	 * it does not claim, so an entry older than HELD_TTL_MS is not shown.
+	 */
+	private readonly held = new Map<string, Map<number, HeldBy & { atMs: number }>>();
+
+	setHeld(agent: AgentRow, slot: number, h: HeldBy | null): void {
+		const bySlot = this.held.get(agent.agent_id) ?? new Map();
+		const prev = bySlot.get(slot);
+		if (h)
+			bySlot.set(slot, {
+				...h,
+				since: prev && sameHeld(prev, h) ? prev.since : new Date().toISOString(),
+				atMs: Date.now(),
+			});
+		else bySlot.delete(slot);
+		this.held.set(agent.agent_id, bySlot);
+		if (!prev !== !h || (prev && h && !sameHeld(prev, h)))
+			this.publish(agent.owner_user_id, { type: "agents" });
+	}
+
+	heldOf(agentId: string): HeldBy[] {
+		const now = Date.now();
+		return [...(this.held.get(agentId)?.values() ?? [])]
+			.filter((h) => now - h.atMs <= HELD_TTL_MS)
+			.map(({ conversationId, work, since }) => ({ conversationId, work, since }));
+	}
+
+	/** The shared skills the runner installed at its last start (memory only, like modelApplied). */
+	private readonly skillsApplied = new Map<string, SkillsApplied>();
+
+	setSkillsApplied(agent: AgentRow, body: unknown): void {
+		const b = (body ?? {}) as { hash?: unknown; names?: unknown; error?: unknown };
+		const str = (v: unknown, max: number) => (typeof v === "string" && v.length <= max ? v : null);
+		const names = Array.isArray(b.names)
+			? b.names
+					.filter((n): n is string => typeof n === "string" && /^[a-z0-9][a-z0-9-]{0,63}$/.test(n))
+					.slice(0, 32)
+			: [];
+		this.skillsApplied.set(agent.agent_id, {
+			hash: typeof b.hash === "string" && /^[0-9a-f]{12}$/.test(b.hash) ? b.hash : null,
+			names,
+			error: str(b.error, 300),
+			at: new Date().toISOString(),
+		});
+		this.publish(agent.owner_user_id, { type: "agents" });
+	}
+
+	skillsAppliedOf(agentId: string): SkillsApplied | null {
+		return this.skillsApplied.get(agentId) ?? null;
+	}
+
 	modelAppliedOf(agentId: string): ModelApplied | null {
 		return this.modelApplied.get(agentId) ?? null;
 	}
@@ -487,17 +693,45 @@ export class AcpAgents {
 		return this.effortApplied.get(agentId) ?? null;
 	}
 
-	/** Running message and queue length per agent name (one query). */
+	/**
+	 * Every agent's running messages, queue and unanswered requests, with their
+	 * conversation and work (one query: the open rows are few).
+	 */
 	async loads(ownerUserId: string): Promise<Map<string, AgentLoad>> {
-		const r = await d1Query<{ to_id: string; running: number | null; pending: number }>(
-			`SELECT to_id, MAX(CASE WHEN state = 'running' THEN id END) AS running,
-				SUM(CASE WHEN state = 'pending' THEN 1 ELSE 0 END) AS pending
-			 FROM agent_messages WHERE owner_user_id = ? AND state IN ('pending', 'running') GROUP BY to_id`,
+		const r = await d1Query<
+			Pick<
+				MessageRow,
+				"id" | "from_id" | "to_id" | "kind" | "state" | "conversation_id" | "context"
+			>
+		>(
+			`SELECT id, from_id, to_id, kind, state, conversation_id, context FROM agent_messages
+			 WHERE owner_user_id = ? AND state IN ('pending', 'running') ORDER BY id`,
 			[ownerUserId],
 		);
-		return new Map(
-			r.results.map((x) => [x.to_id, { running: x.running ?? null, pending: Number(x.pending) }]),
-		);
+		const out = new Map<string, AgentLoad>();
+		const of = (name: string) => {
+			let l = out.get(name);
+			if (!l) {
+				l = { running: [], pending: 0, runningIn: [], queue: [], waitingFor: [] };
+				out.set(name, l);
+			}
+			return l;
+		};
+		for (const m of r.results) {
+			const ref = { id: m.id, conversationId: m.conversation_id ?? null, work: m.context ?? null };
+			const to = of(m.to_id);
+			if (m.state === "running") {
+				to.running.push(m.id);
+				to.runningIn.push(ref);
+			} else {
+				to.pending++;
+				to.queue.push(ref);
+			}
+			// An agent's request not finished yet: its sender waits for the answer.
+			if (m.kind === "request" && m.from_id !== "owner" && m.from_id !== "system")
+				of(m.from_id).waitingFor.push({ ...ref, agent: m.to_id });
+		}
+		return out;
 	}
 
 	async nameTaken(ownerUserId: string, name: string): Promise<boolean> {
@@ -541,30 +775,51 @@ export class AcpAgents {
 	}
 
 	runnerSeenAt(agentId: string): string | null {
+		// A runner waiting in a claim is there right now.
+		for (const w of this.waiters) if (w.agentId === agentId) return new Date().toISOString();
 		const a = this.activity.get(agentId);
 		return a?.seenAt ? new Date(a.seenAt).toISOString() : null;
 	}
 
 	// ── Agent tokens ───────────────────────────────────────────────────────
-	// `acp1.<agentId>.<hmac>`: recomputable from the agent id, so nothing is
-	// stored and re-launching a runner never invalidates a live one.
+	// Recomputable, nothing stored, so re-launching a runner never invalidates a
+	// live one:
+	// - `acp1.<agentId>.<hmac>`: the runner's (every slot's) and the default
+	//   context's — slot 1's adapter, hence its Bash and `st`, inherits it from
+	//   the environment as it always did;
+	// - `acp1.<agentId>.<context>.<hmac>`: a named context's. A slot ≥ 2 hands it
+	//   to the ACP session of that context (`_meta.claudeCode.options.env`, on
+	//   new AND resume: verified against claude-agent-acp 0.108.0, a resume
+	//   without it falls back to the adapter's own environment), so everything
+	//   that session runs — Bash in background, subagents, a resumed session —
+	//   says which context it comes from. It is not per message: renewing a
+	//   session's environment means restarting its Claude process, which kills
+	//   the processes the agent left running (verified). It cannot reach the
+	//   runner routes.
 
-	tokenFor(agentId: string): string {
-		return `acp1.${agentId}.${createHmac("sha256", this.tokenKey).update(agentId).digest("base64url")}`;
+	tokenFor(agentId: string, context: string | null = null): string {
+		const subject = context === null ? agentId : `${agentId}.${context}`;
+		return `acp1.${subject}.${createHmac("sha256", this.tokenKey).update(subject).digest("base64url")}`;
 	}
 
-	async verifyToken(token: string): Promise<AgentRow | null> {
-		const m = /^acp1\.([0-9a-f-]{36})\.([A-Za-z0-9_-]{43})$/.exec(token);
+	async verifyToken(
+		token: string,
+	): Promise<{ agent: AgentRow; context: string | null; runner: boolean } | null> {
+		const m = /^acp1\.([0-9a-f-]{36})(?:\.([a-z0-9][a-z0-9-]{0,39}))?\.([A-Za-z0-9_-]{43})$/.exec(
+			token,
+		);
 		if (!m) return null;
-		const want = Buffer.from(this.tokenFor(m[1]).split(".")[2]);
-		const got = Buffer.from(m[2]);
+		const context = m[2] ?? null;
+		const want = Buffer.from(this.tokenFor(m[1], context).split(".").at(-1) as string);
+		const got = Buffer.from(m[3]);
 		if (want.length !== got.length || !timingSafeEqual(want, got)) return null;
-		const cached = this.byId.get(m[1]);
-		if (cached) return cached;
-		const r = await d1Query<AgentRow>("SELECT * FROM acp_agents WHERE agent_id = ?", [m[1]]);
-		const row = r.results[0] ?? null;
-		if (row) this.byId.set(row.agent_id, row);
-		return row;
+		let row = this.byId.get(m[1]) ?? null;
+		if (!row) {
+			const r = await d1Query<AgentRow>("SELECT * FROM acp_agents WHERE agent_id = ?", [m[1]]);
+			row = r.results[0] ?? null;
+			if (row) this.byId.set(row.agent_id, row);
+		}
+		return row ? { agent: row, context, runner: context === null } : null;
 	}
 
 	// ── Messages ───────────────────────────────────────────────────────────
@@ -582,6 +837,18 @@ export class AcpAgents {
 		projectId?: string | null;
 		depth?: number;
 		clientId?: string | null;
+		/** Where the recipient runs it (only the person sets it); NULL = its default context. */
+		context?: string | null;
+		/** An agent sender's context (from its credential): where the reply goes back. */
+		fromContext?: string | null;
+		/** The chain's root (an agent's request); NULL = a person's message, a root itself. */
+		rootId?: number | null;
+		/** The conversation it is posted in (v27); NULL = the Archive's direct/Project Chat. */
+		conversationId?: string | null;
+		/** Sent by the person to the whole team (one row per agent). */
+		team?: boolean;
+		/** The task it is part of (v29). */
+		taskId?: number | null;
 	}): Promise<{ message: MessageRow; replayed: boolean }> {
 		const params = [
 			m.ownerUserId,
@@ -591,49 +858,146 @@ export class AcpAgents {
 			m.projectId ?? null,
 			m.depth ?? 0,
 			m.clientId ?? null,
+			m.context ?? null,
+			m.fromContext ?? null,
+			m.rootId ?? null,
+			m.conversationId ?? null,
+			m.team ? 1 : 0,
+			m.taskId ?? null,
 		];
+		// An agent's request in a task is written only while the task and its
+		// goal are under their budgets — checked in the INSERT, so concurrent
+		// sends cannot overshoot; v29's trigger counts it in the same statement.
 		const r = await d1Query<MessageRow>(
-			"INSERT OR IGNORE INTO agent_messages (owner_user_id, from_id, to_id, kind, body, state, project_id, depth, client_id) VALUES (?, ?, ?, 'request', ?, 'pending', ?, ?, ?) RETURNING *",
-			params,
+			`INSERT OR IGNORE INTO agent_messages (owner_user_id, from_id, to_id, kind, body, state, project_id, depth, client_id, context, from_context, root_id, conversation_id, team, task_id)
+			 SELECT ?1, ?2, ?3, 'request', ?4, 'pending', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
+			 WHERE ?13 IS NULL OR ?2 IN ('owner', 'system') OR (
+				(SELECT t.requests_used < COALESCE(t.requests_limit, ?14) FROM tasks t WHERE t.id = ?13 AND t.owner_user_id = ?1)
+				AND (SELECT g.budget_used < COALESCE(g.budget_limit, ?15) FROM tasks t JOIN tasks g ON g.id = COALESCE(t.parent_id, t.id)
+					WHERE t.id = ?13 AND t.owner_user_id = ?1 AND g.owner_user_id = ?1))
+			 RETURNING *`,
+			[...params, this.config.taskBudget, this.config.goalBudget],
 		);
 		if (r.results[0])
 			return { message: this.published(r.results[0]) as MessageRow, replayed: false };
-		const prior = await d1Query<MessageRow>(
-			"SELECT * FROM agent_messages WHERE owner_user_id = ? AND client_id = ? AND to_id = ?",
-			[m.ownerUserId, m.clientId ?? null, m.to],
-		);
-		const p = prior.results[0];
+		const prior = m.clientId
+			? await d1Query<MessageRow>(
+					"SELECT * FROM agent_messages WHERE owner_user_id = ? AND client_id = ? AND to_id = ?",
+					[m.ownerUserId, m.clientId, m.to],
+				)
+			: null;
+		const p = prior?.results[0];
+		if (!p && m.taskId != null) throw await this.budgetRefusal(m.ownerUserId, m.taskId);
 		if (!p) throw new Error("message insert returned nothing");
 		// A replay is the SAME send retried: same sender, text and scope. The key
 		// space is per owner, shared by the person and that owner's agents, so a
 		// reused id with anything else is refused rather than answered with
 		// someone else's row — which would report a new message as sent while
 		// dropping it. Exact comparison only: no similarity-based deduplication.
-		if (p.from_id !== m.from || p.body !== m.body || p.project_id !== (m.projectId ?? null))
+		if (
+			p.from_id !== m.from ||
+			p.body !== m.body ||
+			p.project_id !== (m.projectId ?? null) ||
+			p.context !== (m.context ?? null) ||
+			p.conversation_id !== (m.conversationId ?? null) ||
+			Boolean(p.team) !== Boolean(m.team) ||
+			p.task_id !== (m.taskId ?? null)
+		)
 			throw new ClientIdConflictError(p.id);
 		return { message: p, replayed: true };
 	}
 
+	/** Which budget refused a send in task `taskId` (the goal's first). */
+	private async budgetRefusal(ownerUserId: string, taskId: number): Promise<BudgetError | Error> {
+		const r = await d1Query<{
+			goal: number;
+			g_used: number;
+			g_limit: number | null;
+			t_used: number;
+			t_limit: number | null;
+		}>(
+			`SELECT g.id AS goal, g.budget_used AS g_used, g.budget_limit AS g_limit, t.requests_used AS t_used, t.requests_limit AS t_limit
+			 FROM tasks t JOIN tasks g ON g.id = COALESCE(t.parent_id, t.id) WHERE t.id = ? AND t.owner_user_id = ?`,
+			[taskId, ownerUserId],
+		);
+		const x = r.results[0];
+		if (!x) return new Error("message insert returned nothing (task gone)");
+		const gLimit = x.g_limit ?? this.config.goalBudget;
+		if (x.g_used >= gLimit) return new BudgetError("goal", taskId, x.goal, gLimit, x.g_used);
+		return new BudgetError("task", taskId, x.goal, x.t_limit ?? this.config.taskBudget, x.t_used);
+	}
+
 	/**
 	 * A page of messages, newest `limit` before `before` (exclusive), oldest
-	 * first. `agent`: everything to or from that agent, any scope (its
-	 * individual chat — the owner's view of the agent's whole inbox).
-	 * `projectId`: only what was posted in that project.
+	 * first, of one of four sources:
+	 * - `conversation`: that conversation;
+	 * - `projectArchive`: what was posted in the project in no conversation
+	 *   (the old Project Chat, now the Archive);
+	 * - `agentArchive`: everything to or from the agent in no conversation, any
+	 *   scope (the old individual chat, now the Archive);
+	 * - `agent`: everything to or from the agent, any scope or conversation
+	 *   (`GET /messages`, what `st` reads); `null` = all of the owner's.
+	 *
+	 * One statement per source, every column compared directly and `id < ?`
+	 * always (no `before` = no bound): D1 bills rows READ, and an optional
+	 * filter (`?2 IS NULL OR col = ?2`) cannot use an index, so the old single
+	 * statement read every message of the owner. The first three go by
+	 * `idx_agent_messages_conversation` (owner, conversation_id — NULL for the
+	 * Archive —, id), pinned: a page reads about `limit` rows of its own source.
 	 */
 	async messages(
 		ownerUserId: string,
-		filter: { agent?: string | null; projectId?: string | null; before?: number | null },
+		source:
+			| { conversation: string }
+			| { projectArchive: string }
+			| { agentArchive: string }
+			| { agent: string | null },
+		before: number | null,
 		limit = 100,
 	): Promise<MessageRow[]> {
+		let where: string;
+		let params: unknown[];
+		// The conversation and Archive pages pin their index in the text, not in
+		// the statistics: without `sqlite_stat1` (D1 as deployed) the planner
+		// took idx_agent_messages_project for the project Archive and walked
+		// every topic message of the project, newest first, to reach the
+		// Archive (the oldest). v27 always creates the index; were it missing,
+		// the read fails instead of degrading silently.
+		let from = "agent_messages INDEXED BY idx_agent_messages_conversation";
+		if ("conversation" in source) {
+			where = "conversation_id = ?";
+			params = [source.conversation];
+		} else if ("projectArchive" in source) {
+			where = "conversation_id IS NULL AND project_id = ?";
+			params = [source.projectArchive];
+		} else if ("agentArchive" in source) {
+			where = "conversation_id IS NULL AND (to_id = ? OR from_id = ?)";
+			params = [source.agentArchive, source.agentArchive];
+		} else if (source.agent !== null) {
+			// To it and from it: two ranges, each newest first by its own index and
+			// cut at `limit`, merged — never every message the agent ever had.
+			const page = (col: "to_id" | "from_id", idx: string) =>
+				`SELECT * FROM (SELECT * FROM agent_messages INDEXED BY ${idx}
+					WHERE owner_user_id = ? AND ${col} = ? AND id < ? ORDER BY id DESC LIMIT ?)`;
+			const b = before ?? Number.MAX_SAFE_INTEGER;
+			const r = await d1Query<MessageRow>(
+				`SELECT * FROM (${page("to_id", "idx_agent_messages_to")} UNION ${page("from_id", "idx_agent_messages_from")}
+				 ORDER BY id DESC LIMIT ?) ORDER BY id`,
+				[ownerUserId, source.agent, b, limit, ownerUserId, source.agent, b, limit, limit],
+			);
+			return r.results;
+		} else {
+			from = "agent_messages";
+			where = "1";
+			params = [];
+		}
+		// Newest first and reversed here: an outer `SELECT * FROM (…) ORDER BY id`
+		// makes D1 read (and bill) every row of the page a second time.
 		const r = await d1Query<MessageRow>(
-			`SELECT * FROM (SELECT * FROM agent_messages WHERE owner_user_id = ?1
-				AND (?2 IS NULL OR to_id = ?2 OR from_id = ?2)
-				AND (?3 IS NULL OR project_id = ?3)
-				AND (?4 IS NULL OR id < ?4)
-			 ORDER BY id DESC LIMIT ?5) ORDER BY id`,
-			[ownerUserId, filter.agent ?? null, filter.projectId ?? null, filter.before ?? null, limit],
+			`SELECT * FROM ${from} WHERE owner_user_id = ? AND ${where} AND id < ? ORDER BY id DESC LIMIT ?`,
+			[ownerUserId, ...params, before ?? Number.MAX_SAFE_INTEGER, limit],
 		);
-		return r.results;
+		return r.results.reverse();
 	}
 
 	async message(ownerUserId: string, id: number): Promise<MessageRow | null> {
@@ -673,41 +1037,139 @@ export class AcpAgents {
 		return r.results.length > 0;
 	}
 
-	async running(agent: AgentRow): Promise<MessageRow | null> {
+	/** The message running in one context of this agent (at most one: the claim's guard). */
+	async runningIn(agent: AgentRow, context: string | null): Promise<MessageRow | null> {
 		const r = await d1Query<MessageRow>(
-			"SELECT * FROM agent_messages WHERE owner_user_id = ? AND to_id = ? AND state = 'running'",
-			[agent.owner_user_id, agent.name],
+			"SELECT * FROM agent_messages WHERE owner_user_id = ? AND to_id = ? AND state = 'running' AND context IS ?",
+			[agent.owner_user_id, agent.name, context],
 		);
 		return r.results[0] ?? null;
 	}
 
-	/** One statement: the oldest pending, only if nothing of this agent is running. */
-	async claim(agent: AgentRow): Promise<MessageRow | null> {
+	/** Agent → agent requests already sent under one root (the round budget). */
+	async chainRequests(ownerUserId: string, rootId: number): Promise<number> {
+		const r = await d1Query<{ n: number }>(
+			"SELECT COUNT(*) AS n FROM agent_messages WHERE owner_user_id = ? AND root_id = ? AND kind = 'request'",
+			[ownerUserId, rootId],
+		);
+		return Number(r.results[0]?.n ?? 0);
+	}
+
+	/** The message one slot of this agent took and has not settled (at most one). */
+	async runningInSlot(agent: AgentRow, slot: number): Promise<MessageRow | null> {
+		const r = await d1Query<MessageRow>(
+			"SELECT * FROM agent_messages WHERE owner_user_id = ? AND to_id = ? AND state = 'running' AND slot = ?",
+			[agent.owner_user_id, agent.name, slot],
+		);
+		return r.results[0] ?? null;
+	}
+
+	/**
+	 * One statement (the whole distribution: there is no scheduler). Slot `slot`
+	 * takes the oldest pending message it may run, recording itself, only if:
+	 * - the slot runs nothing now and exists (slot ≤ the agent's max_concurrency);
+	 * - the message's context has nothing running (one per agent and context:
+	 *   two runs never share a checkout or an ACP session);
+	 * - slot 1 takes only the default context (NULL), slots ≥ 2 only named ones —
+	 *   so the default ACP session is only ever open in slot 1, as before slots;
+	 * - `onlyContext`: a slot holding a context it cannot close (processes the
+	 *   agent left running there) takes only that context's messages;
+	 * - `onlyConversation` (slot 1, v27): the same for the conversation whose
+	 *   ACP session slot 1 holds open with processes in it — given (a string,
+	 *   or null for the session of no conversation), only that conversation's
+	 *   messages; undefined = any;
+	 * - AFFINITY (named contexts): a context's message goes to the slot L that
+	 *   last started one of that context while L may still hold its ACP session
+	 *   — L's latest message is of that context and L ≤ max_concurrency. A slot
+	 *   keeps a context's session open after the message (it closes it only on
+	 *   taking another context), so without this a second slot would open the
+	 *   same session again: two adapters on one transcript, and L's copy, stale,
+	 *   used for the next message L takes. L is free when it is not running C
+	 *   (C runs one at a time) or will be; a restarted L holds nothing and still
+	 *   takes it. Any other slot takes C when C never ran, L moved on to another
+	 *   context, or L is past the cap (it claims nothing more);
+	 * - the agent's running count < max_concurrency and the backend's < maxRunning.
+	 */
+	async claim(
+		agent: AgentRow,
+		slot = 1,
+		onlyContext: string | null = null,
+		onlyConversation?: string | null,
+	): Promise<MessageRow | null> {
 		this.touch(agent.agent_id);
 		const r = await d1Query<MessageRow>(
-			`UPDATE agent_messages SET state = 'running', attempts = attempts + 1, started_at = ${NOW}
-			 WHERE id = (SELECT id FROM agent_messages WHERE owner_user_id = ?1 AND to_id = ?2 AND state = 'pending' ORDER BY id LIMIT 1)
-			 AND NOT EXISTS (SELECT 1 FROM agent_messages WHERE owner_user_id = ?1 AND to_id = ?2 AND state = 'running')
+			`UPDATE agent_messages SET state = 'running', attempts = attempts + 1, started_at = ${NOW}, slot = ?3
+			 WHERE id = (SELECT m.id FROM agent_messages m WHERE m.owner_user_id = ?1 AND m.to_id = ?2 AND m.state = 'pending'
+				AND (CASE WHEN ?3 = 1 THEN m.context IS NULL ELSE m.context IS NOT NULL END)
+				AND (?4 IS NULL OR m.context = ?4)
+				AND (?6 = 0 OR m.conversation_id IS ?7)
+				AND NOT EXISTS (SELECT 1 FROM agent_messages x WHERE x.owner_user_id = ?1 AND x.to_id = ?2 AND x.state = 'running' AND x.context IS m.context)
+				AND (m.context IS NULL OR ${LAST_SLOT} IS NULL OR ${LAST_SLOT} = ?3
+					OR ${LAST_SLOT} > (SELECT max_concurrency FROM acp_agents WHERE owner_user_id = ?1 AND name = ?2)
+					OR (SELECT y.context FROM agent_messages y WHERE y.owner_user_id = ?1 AND y.to_id = ?2 AND y.slot = ${LAST_SLOT}
+						ORDER BY y.started_at DESC, y.id DESC LIMIT 1) IS NOT m.context)
+				ORDER BY m.id LIMIT 1)
+			 AND ${RUN_GUARD}
 			 RETURNING *`,
-			[agent.owner_user_id, agent.name],
+			[
+				agent.owner_user_id,
+				agent.name,
+				slot,
+				onlyContext,
+				this.config.maxRunning,
+				onlyConversation === undefined ? 0 : 1,
+				onlyConversation ?? null,
+			],
 		);
 		return this.published(r.results[0]);
 	}
 
 	/**
-	 * A message from Shared Terminal itself, already `running` (the runner sends it
-	 * right away): the controlled continuation after an interrupted run. Same
-	 * guard as a claim — never a second running message.
+	 * A message from Shared Terminal itself, already `running` in `slot` and
+	 * `context` (the runner sends it right away): the controlled continuation
+	 * after an interrupted run, in the ACP session of the interrupted message's
+	 * context. Same guards as a claim — never a second running message in the
+	 * slot or the context, caps respected.
+	 *
+	 * `recoveryOf`: the interrupted message it reports on — this agent's own
+	 * (anything else is not linked). The report is linked to it (`recovery_of`,
+	 * what "Revisar interrupción" shows) and lives in its conversation and scope.
 	 */
-	async startSystemMessage(agent: AgentRow, body: string): Promise<MessageRow | null> {
+	async startSystemMessage(
+		agent: AgentRow,
+		body: string,
+		slot = 1,
+		context: string | null = null,
+		recoveryOf: number | null = null,
+	): Promise<MessageRow | null> {
 		const r = await d1Query<MessageRow>(
-			`INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, body, state, attempts, started_at)
-			 SELECT ?1, 'system', ?2, 'request', ?3, 'running', 1, ${NOW}
-			 WHERE NOT EXISTS (SELECT 1 FROM agent_messages WHERE owner_user_id = ?1 AND to_id = ?2 AND state = 'running')
+			`INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, body, state, attempts, started_at, slot, context, recovery_of, conversation_id, project_id, task_id)
+			 SELECT ?1, 'system', ?2, 'request', ?6, 'running', 1, ${NOW}, ?3, ?4, o.id, o.conversation_id, o.project_id, o.task_id
+			 FROM (SELECT 1) LEFT JOIN agent_messages o ON o.owner_user_id = ?1 AND o.to_id = ?2 AND o.id = ?7
+			 WHERE NOT EXISTS (SELECT 1 FROM agent_messages x WHERE x.owner_user_id = ?1 AND x.to_id = ?2 AND x.state = 'running' AND x.context IS ?4)
+			 AND ${RUN_GUARD}
 			 RETURNING *`,
-			[agent.owner_user_id, agent.name, body],
+			[agent.owner_user_id, agent.name, slot, context, this.config.maxRunning, body, recoveryOf],
 		);
 		return this.published(r.results[0]);
+	}
+
+	/** Changes how many slots (messages at once) the agent runs; a new slot is launched at once. */
+	async setMaxConcurrency(ownerUserId: string, name: string, n: number): Promise<AgentRow | null> {
+		const r = await d1Query<AgentRow>(
+			"UPDATE acp_agents SET max_concurrency = ? WHERE owner_user_id = ? AND name = ? RETURNING *",
+			[n, ownerUserId, name],
+		);
+		const row = r.results[0] ?? null;
+		if (row) {
+			this.byId.set(row.agent_id, row);
+			this.publish(ownerUserId, { type: "agents" });
+			logger.info(`[acp] @${name} max_concurrency → ${n}`);
+			// Raising it launches the new slots now (the probe never doubles one);
+			// lowering it lets the extra slots finish what they run and claim nothing.
+			void this.checkRunner(row);
+		}
+		return row;
 	}
 
 	/** Records the run's result; the reply to an agent's request is the v21 trigger's, same statement. */
@@ -769,14 +1231,14 @@ export class AcpAgents {
 	 */
 	private async noticeUnfinished(ownerUserId: string, id: number): Promise<void> {
 		const r = await d1Query<MessageRow>(
-			`INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, reply_to, body, state, project_id, depth, note)
+			`INSERT INTO agent_messages (owner_user_id, from_id, to_id, kind, reply_to, body, state, project_id, depth, note, context, root_id, conversation_id, task_id)
 			 SELECT m.owner_user_id, m.to_id, m.from_id, 'reply', m.id,
 				'Tu mensaje #' || m.id || ' a @' || m.to_id || ' no terminó: ' ||
 				CASE m.state WHEN 'failed' THEN 'falló' ELSE 'se interrumpió y su estado es incierto: pudo haber hecho parte del trabajo' END ||
 				COALESCE(' — ' || m.note, '') || '. No hay respuesta de @' || m.to_id || ' para ese pedido. ' ||
 				'No lo repitas ni lo reenvíes por tu cuenta: puede haber tenido efectos, y si se reintenta lo decide la persona. ' ||
 				'Decí en tu respuesta que ese pedido no terminó y seguí solo con lo que no dependa de él.',
-				'pending', m.project_id, m.depth, 'unfinished:' || m.state
+				'pending', m.project_id, MAX(m.depth - 1, 0), 'unfinished:' || m.state, m.from_context, m.root_id, m.conversation_id, m.task_id
 			 FROM agent_messages m
 			 WHERE m.owner_user_id = ?1 AND m.id = ?2 AND m.kind = 'request' AND m.state IN ('failed', 'uncertain')
 			 AND EXISTS (SELECT 1 FROM acp_agents a WHERE a.owner_user_id = m.owner_user_id AND a.name = m.from_id)
@@ -824,6 +1286,8 @@ export class AcpAgents {
 		this.loginMethods.delete(agent.agent_id);
 		this.modelApplied.delete(agent.agent_id);
 		this.effortApplied.delete(agent.agent_id);
+		this.skillsApplied.delete(agent.agent_id);
+		this.held.delete(agent.agent_id);
 		this.publish(agent.owner_user_id, { type: "agents" });
 	}
 
@@ -836,10 +1300,27 @@ export class AcpAgents {
 		return this.published(r.results[0]);
 	}
 
-	/** A person's decision, never automatic. */
+	/**
+	 * A person's decision, never automatic. A requeued message is no longer a
+	 * reviewed interruption: if it is interrupted again, it needs a new review.
+	 */
 	async requeue(ownerUserId: string, id: number): Promise<MessageRow | null> {
 		const r = await d1Query<MessageRow>(
-			"UPDATE agent_messages SET state = 'pending', note = 'requeued by owner' WHERE id = ? AND owner_user_id = ? AND state = 'uncertain' RETURNING *",
+			"UPDATE agent_messages SET state = 'pending', note = 'requeued by owner', reviewed_at = NULL WHERE id = ? AND owner_user_id = ? AND state = 'uncertain' RETURNING *",
+			[id, ownerUserId],
+		);
+		return this.published(r.results[0]);
+	}
+
+	/**
+	 * The person reviewed an interrupted run and does NOT requeue it: it leaves
+	 * the inbox. Only `uncertain`; the state stays, nothing is created or sent.
+	 * Repeating it keeps the first review's time.
+	 */
+	async review(ownerUserId: string, id: number): Promise<MessageRow | null> {
+		const r = await d1Query<MessageRow>(
+			`UPDATE agent_messages SET reviewed_at = COALESCE(reviewed_at, ${NOW})
+			 WHERE id = ? AND owner_user_id = ? AND state = 'uncertain' RETURNING *`,
 			[id, ownerUserId],
 		);
 		return this.published(r.results[0]);
@@ -888,13 +1369,33 @@ export class AcpAgents {
 		agents: string[],
 	): Promise<QuestionRow[]> {
 		if (!messageIds.length && !agents.length) return [];
+		// UNION, not OR: each half goes by its own index (message / agent+state);
+		// with OR the planner read every question of the owner.
 		const r = await d1Query<QuestionRow>(
-			`SELECT * FROM agent_questions WHERE owner_user_id = ?1
-			 AND (message_id IN (SELECT value FROM json_each(?2)) OR (state = 'open' AND agent IN (SELECT value FROM json_each(?3))))
+			`SELECT * FROM agent_questions WHERE owner_user_id = ?1 AND message_id IN (SELECT value FROM json_each(?2))
+			 UNION
+			 SELECT * FROM agent_questions WHERE owner_user_id = ?1 AND state = 'open' AND agent IN (SELECT value FROM json_each(?3))
 			 ORDER BY id`,
 			[ownerUserId, JSON.stringify(messageIds), JSON.stringify(agents)],
 		);
 		return r.results;
+	}
+
+	/**
+	 * The questions asked while working on a page of messages (ascending ids),
+	 * by the page's id range on idx_agent_questions_message, kept to the page
+	 * here: `message_id IN json_each(ids)` bills each id twice (the json_each
+	 * row and its probe), the range only the questions in it — those of other
+	 * conversations whose messages fall in the range included.
+	 */
+	async questionsOfPage(ownerUserId: string, messageIds: number[]): Promise<QuestionRow[]> {
+		if (!messageIds.length) return [];
+		const r = await d1Query<QuestionRow>(
+			"SELECT * FROM agent_questions WHERE owner_user_id = ? AND message_id BETWEEN ? AND ? ORDER BY id",
+			[ownerUserId, messageIds[0], messageIds[messageIds.length - 1]],
+		);
+		const page = new Set<number | null>(messageIds);
+		return r.results.filter((q) => page.has(q.message_id));
 	}
 
 	/** The person's answer. One conditional UPDATE: only an open question takes one, once. */
@@ -934,24 +1435,45 @@ export class AcpAgents {
 		return this.publishedQuestion(r.results[0]);
 	}
 
-	/** Runner start: the ACP requests of its previous run are gone. Nothing becomes answered. */
-	async orphanQuestions(agent: AgentRow, note: string): Promise<QuestionRow[]> {
+	/**
+	 * Runner start: the ACP requests of its previous run are gone. Nothing
+	 * becomes answered. With a slot, only that slot's: the questions of messages
+	 * it took (slot 1 also those tied to no message) — another slot's runner,
+	 * alive, still waits on its own. Without one (agent deleted): all of them.
+	 */
+	async orphanQuestions(agent: AgentRow, note: string, slot?: number): Promise<QuestionRow[]> {
 		const r = await d1Query<QuestionRow>(
-			`UPDATE agent_questions SET state = 'orphaned', note = ?
-			 WHERE owner_user_id = ? AND agent = ? AND state IN ('open', 'answered') RETURNING *`,
-			[note, agent.owner_user_id, agent.name],
+			`UPDATE agent_questions SET state = 'orphaned', note = ?1
+			 WHERE owner_user_id = ?2 AND agent = ?3 AND state IN ('open', 'answered')
+			 AND (?4 IS NULL OR (?4 = 1 AND message_id IS NULL)
+				OR message_id IN (SELECT id FROM agent_messages WHERE owner_user_id = ?2 AND to_id = ?3 AND slot = ?4))
+			 RETURNING *`,
+			[note, agent.owner_user_id, agent.name, slot ?? null],
 		);
 		for (const q of r.results) this.publishedQuestion(q);
 		return r.results;
 	}
 
-	/** Agents (of this owner) waiting for the person right now. */
-	async waitingAgents(ownerUserId: string): Promise<Set<string>> {
-		const r = await d1Query<{ agent: string }>(
-			"SELECT DISTINCT agent FROM agent_questions WHERE owner_user_id = ? AND state = 'open'",
+	/** Agents (of this owner) waiting for the person right now: their open questions, oldest first. */
+	async waitingAgents(ownerUserId: string): Promise<Map<string, OpenQuestion[]>> {
+		const r = await d1Query<{
+			id: number;
+			agent: string;
+			message_id: number | null;
+			conversation_id: string | null;
+		}>(
+			`SELECT q.id, q.agent, q.message_id, m.conversation_id FROM agent_questions q
+			 LEFT JOIN agent_messages m ON m.id = q.message_id AND m.owner_user_id = q.owner_user_id
+			 WHERE q.owner_user_id = ? AND q.state = 'open' ORDER BY q.id`,
 			[ownerUserId],
 		);
-		return new Set(r.results.map((x) => x.agent));
+		const out = new Map<string, OpenQuestion[]>();
+		for (const q of r.results) {
+			const list = out.get(q.agent) ?? [];
+			list.push({ id: q.id, messageId: q.message_id, conversationId: q.conversation_id ?? null });
+			out.set(q.agent, list);
+		}
+		return out;
 	}
 
 	// ── Login (the adapter's terminal-auth methods) ─────────────────────────
@@ -971,14 +1493,16 @@ export class AcpAgents {
 			const id = (m as { id?: unknown })?.id;
 			if (typeof id !== "string" || !/^[a-z0-9-]{1,40}$/.test(id) || !t) continue;
 			// Only a program under the runtime mount or a system path, args from a
-			// safe alphabet: this becomes a shell line in the tab.
+			// safe alphabet: this becomes a shell line in the tab, each arg inside
+			// single quotes. "@" is in it because the adapter's own script lives
+			// under its scoped package (node_modules/@agentclientprotocol/…).
 			if (
 				typeof t.command !== "string" ||
 				!/^\/(opt\/st-acp|usr\/(local\/)?bin)\/[A-Za-z0-9._/-]+$/.test(t.command)
 			)
 				continue;
 			const args = Array.isArray(t.args) ? t.args : [];
-			if (!args.every((a) => typeof a === "string" && /^[A-Za-z0-9._/=-]{1,200}$/.test(a)))
+			if (!args.every((a) => typeof a === "string" && /^[A-Za-z0-9._/=@-]{1,200}$/.test(a)))
 				continue;
 			ok.push({
 				id,
@@ -1002,6 +1526,55 @@ export class AcpAgents {
 		const line = `${m.command.map((a) => `'${a}'`).join(" ")}; echo; echo 'Listo. Si el login terminó bien, el agente se reactiva solo en unos segundos. Podés cerrar esta pestaña.'; exec bash -l`;
 		const tab = await this.docker.createTab(agent.session_id, "Conectar cuenta", line);
 		return { tabId: tab.tabId };
+	}
+
+	// ── Idle runners: the claim waits for work ─────────────────────────────
+	// An idle slot used to claim every 2 s: one UPDATE (with its subqueries)
+	// read from D1 each time, per slot, all day. Now a claim that finds nothing
+	// waits here (≤ CLAIM_WAIT_MS) and claims once more when something that can
+	// make a message claimable happens. Every write goes through this object,
+	// so its events are complete: any message row of the same owner written or
+	// changed (a new one, a release, a requeue, a run that ends and frees the
+	// agent's cap) or an agent change (its slots); a run of ANY owner that ends
+	// frees the backend-wide cap (ACP_MAX_RUNNING). A missed wake costs at
+	// most CLAIM_WAIT_MS, never a message.
+
+	private readonly waiters = new Set<{ agentId: string; owner: string; wake: () => void }>();
+	private waitingClosed = false;
+
+	waitForWork(agent: AgentRow, ms: number, signal?: AbortSignal): Promise<void> {
+		if (this.waitingClosed || signal?.aborted) return Promise.resolve();
+		return new Promise((resolve) => {
+			const w = {
+				agentId: agent.agent_id,
+				owner: agent.owner_user_id,
+				wake: () => {
+					clearTimeout(timer);
+					this.waiters.delete(w);
+					signal?.removeEventListener("abort", w.wake);
+					resolve();
+				},
+			};
+			const timer = setTimeout(w.wake, ms);
+			signal?.addEventListener("abort", w.wake, { once: true });
+			this.waiters.add(w);
+		});
+	}
+
+	private wakeWaiters(ownerUserId: string, ev: AcpEvent): void {
+		const freesGlobal =
+			ev.type === "message" && ev.message.state !== "pending" && ev.message.state !== "running";
+		for (const w of [...this.waiters]) if (w.owner === ownerUserId || freesGlobal) w.wake();
+	}
+
+	/** Shutdown: every waiting claim answers now (and nothing new waits). */
+	stopWaiting(): void {
+		this.waitingClosed = true;
+		for (const w of [...this.waiters]) w.wake();
+	}
+
+	get waitingClaims(): number {
+		return this.waiters.size;
 	}
 
 	// ── Activity (memory only) ─────────────────────────────────────────────
@@ -1070,12 +1643,13 @@ export class AcpAgents {
 	}
 
 	/**
-	 * Launches the runner in the container. Idempotent: `flock -n` on a lock in
-	 * the container's /tmp makes a second launch exit at once while one runs, and
-	 * the lock dies with the container. The shell loop restarts a runner that
-	 * exits (by design on an adapter crash) — the only supervision there is.
+	 * Launches the runner's slots in the container (all of 1..max_concurrency,
+	 * or just `slots`). Idempotent per slot: `flock -n` on the slot's lock in the
+	 * container's /tmp makes a second launch exit at once while one runs, and
+	 * the lock dies with the container. Each slot's shell loop restarts a runner
+	 * that exits (by design on an adapter crash) — the only supervision there is.
 	 */
-	async ensureRunner(sessionId: string, containerId: string): Promise<boolean> {
+	async ensureRunner(sessionId: string, containerId: string, slots?: number[]): Promise<boolean> {
 		// The creation bootstrap is still shaping the workspace and ~/.claude;
 		// the session the runner creates would never see it (bootstrapHold.ts).
 		// `onBootstrapped` launches it once the bootstrap is done.
@@ -1086,30 +1660,33 @@ export class AcpAgents {
 		const agent = await this.bySession(sessionId);
 		if (!agent) return false;
 		const runtimeRoot = `${RUNTIME_MOUNT}/${agent.runtime}`;
-		await this.docker.execDetached(
-			containerId,
-			[
-				"flock",
-				"-n",
-				RUNNER_LOCK,
-				"sh",
-				"-c",
-				`while true; do node --no-warnings ${RUNTIME_MOUNT}/st/runner.mjs >> /tmp/st-acp-runner.log 2>&1; sleep 3; done`,
-				RUNNER_LOOP_NAME,
-			],
-			{
-				ST_URL: this.config.backendUrl,
-				ST_TOKEN: this.tokenFor(agent.agent_id),
-				ST_AGENT: agent.name,
-				ACP_AGENT_CMD: `${runtimeRoot}/agent`,
-				AGENT_CWD: "/home/developer/workspace",
-				RUNNER_STATE: "/home/developer/workspace/.st/acp",
-				ANTHROPIC_MODEL: agent.model ?? this.config.defaultModel,
-				DISABLE_AUTOUPDATER: "1",
-				PATH: `${RUNTIME_MOUNT}/st/bin:/home/developer/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
-			},
+		for (const slot of slots ?? slotsOf(agent))
+			await this.docker.execDetached(
+				containerId,
+				[
+					"flock",
+					"-n",
+					runnerLock(slot),
+					"sh",
+					"-c",
+					`while true; do ${runnerCmd(slot)} >> ${runnerLog(slot)} 2>&1; sleep 3; done`,
+					`st-acp-runner-loop${sfx(slot)}`,
+				],
+				{
+					ST_URL: this.config.backendUrl,
+					ST_TOKEN: this.tokenFor(agent.agent_id),
+					ST_AGENT: agent.name,
+					ACP_AGENT_CMD: `${runtimeRoot}/agent`,
+					AGENT_CWD: "/home/developer/workspace",
+					RUNNER_STATE: "/home/developer/workspace/.st/acp",
+					ANTHROPIC_MODEL: agent.model ?? this.config.defaultModel,
+					DISABLE_AUTOUPDATER: "1",
+					PATH: `${RUNTIME_MOUNT}/st/bin:/home/developer/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
+				},
+			);
+		logger.info(
+			`[acp] runner ensured for @${agent.name} (${sessionId}) on ${agent.runtime}, slots ${(slots ?? slotsOf(agent)).join(",")}`,
 		);
-		logger.info(`[acp] runner ensured for @${agent.name} (${sessionId}) on ${agent.runtime}`);
 		return true;
 	}
 
@@ -1143,13 +1720,14 @@ export class AcpAgents {
 		await Promise.all([...this.byId.values()].map((a) => this.checkRunner(a)));
 	}
 
-	/** The runner loop's state in this container, from RUNNER_PROBE's exit code. */
+	/** One slot's runner loop state in this container, from runnerProbe's exit code. */
 	async probeRunner(
 		sessionId: string,
 		containerId: string,
+		slot = 1,
 	): Promise<"alive" | "dead" | "orphaned" | "unknown"> {
 		try {
-			const r = await this.docker.execCapture(sessionId, ["sh", "-c", RUNNER_PROBE], {
+			const r = await this.docker.execCapture(sessionId, ["sh", "-c", runnerProbe(slot)], {
 				containerId,
 				maxBytes: 256,
 				timeoutMs: 10_000,
@@ -1175,18 +1753,24 @@ export class AcpAgents {
 				`st-${agent.session_id.slice(0, 12)}`,
 			);
 			if (!containerId) return;
-			const state = await this.probeRunner(agent.session_id, containerId);
-			if (state === "orphaned" && !this.orphanReported.has(agent.agent_id)) {
-				// warn once per episode: the agent still works, it just has no restart loop
-				this.orphanReported.add(agent.agent_id);
+			// Each slot on its own: a busy slot is alive, only a dead one is launched.
+			for (const slot of slotsOf(agent)) {
+				const key = `${agent.agent_id}:${slot}`;
+				const state = await this.probeRunner(agent.session_id, containerId, slot);
+				if (state === "orphaned" && !this.orphanReported.has(key)) {
+					// warn once per episode: the slot still works, it just has no restart loop
+					this.orphanReported.add(key);
+					logger.warn(
+						`[acp] @${agent.name} slot ${slot}: runner alive without its restart loop; not launching a second one (it is relaunched once it exits)`,
+					);
+				}
+				if (state !== "orphaned") this.orphanReported.delete(key);
+				if (state !== "dead") continue;
 				logger.warn(
-					`[acp] @${agent.name}: runner alive without its restart loop; not launching a second one (it is relaunched once it exits)`,
+					`[acp] runner loop of @${agent.name} slot ${slot} is not running; launching it`,
 				);
+				await this.ensureRunner(agent.session_id, containerId, [slot]);
 			}
-			if (state !== "orphaned") this.orphanReported.delete(agent.agent_id);
-			if (state !== "dead") return;
-			logger.warn(`[acp] runner loop of @${agent.name} is not running; launching it`);
-			await this.ensureRunner(agent.session_id, containerId);
 		} catch (err) {
 			logger.warn(`[acp] watchdog for @${agent.name}: ${(err as Error).message}`);
 		} finally {

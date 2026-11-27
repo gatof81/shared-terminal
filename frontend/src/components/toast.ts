@@ -111,7 +111,7 @@ export function showToast(message: string, isError = false): void {
  * real error that follows it.
  */
 export function showCopySuccessToast(): void {
-	showToastEx({ message: "✓ Copied", kind: "success", durationMs: COPY_MS });
+	showToastEx({ message: "✓ Copiado", kind: "success", durationMs: COPY_MS });
 }
 
 /** Test seam: drop every item immediately. */

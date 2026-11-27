@@ -148,17 +148,11 @@ test.describe("router", () => {
 		expect(since[since.length - 1]).toBe("tab-2");
 	});
 
-	test("a stopped session's deep link to the terminal shows its state; to chat lands on Files (no Chat)", async ({
-		app,
-		page,
-	}) => {
+	test("a stopped session's deep link to the terminal shows its state", async ({ app, page }) => {
 		await app.login("alice", `#/sessions/${SESSION_IDS.stopped}/terminal`);
 		await expect(page.locator("#terminal-session-name")).toHaveText("docs");
 		await app.expectView("terminal");
-		await expect(page.locator("#terminal-state")).toContainText("stopped");
-		await page.goto(`/#/sessions/${SESSION_IDS.stopped}/chat`);
-		await app.expectView("files");
-		await expect(page.locator("#view-chat-btn")).toBeHidden();
+		await expect(page.locator("#terminal-state")).toContainText("detenida");
 	});
 
 	test("an unknown or foreign session: one toast, the address cleared, no request for it", async ({
@@ -167,11 +161,13 @@ test.describe("router", () => {
 		page,
 	}) => {
 		await app.login("alice", `#/sessions/${SESSION_IDS.bob}/files/README.md`);
-		await expect(app.toast("Session not found")).toBeVisible();
+		await expect(app.toast("No se encontró la sesión")).toBeVisible();
 		await expect.poll(() => page.url()).not.toContain(SESSION_IDS.bob);
 		expect(backend.requests.filter((r) => r.path.includes(SESSION_IDS.bob))).toEqual([]);
-		// A malformed route is simply ignored.
+		// A malformed route is «not found» too: said, and out of the bar.
 		await page.goto(`/#/sessions/${S}/settings`);
+		await expect(app.toast("No se encontró la dirección")).toBeVisible();
+		await expect.poll(() => new URL(page.url()).hash).toBe("");
 		await expect(page.locator("#empty-state")).toBeVisible();
 	});
 

@@ -1,27 +1,6 @@
-/* ── Chat view (an ACP agent's, acpChat.ts) ─────────────────────────
-   Same overlay shape as Files/Git (#files-view), plus what the ACP chats
-   (acpThread.ts) share: the "go to the end" button (chatScroll.ts) and
-   the Markdown of an agent's text (chatMarkdown.ts). */
-#chat-view {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  top: 0;
-  z-index: var(--z-overlay);
-  display: flex;
-  flex-direction: column;
-  background: var(--c-bg);
-  min-height: 0;
-  color: var(--c-text);
-}
-#chat-view[hidden] {
-  display: none;
-}
-#chat-view :focus-visible {
-  outline: 2px solid var(--c-accent);
-  outline-offset: 1px;
-}
+/* ── What the ACP threads share (acpThread.ts) ───────────────────────
+   The "go to the end" button (chatScroll.ts) and the Markdown of an
+   agent's text (chatMarkdown.ts). */
 .chat-float {
   position: absolute;
   left: 50%;
@@ -44,17 +23,21 @@
   display: none;
 }
 /* "Ir al final" / "Jump to latest" (chatScroll.ts, the ACP chats; UX
-   iter3 §4): a 32-px pill on the surface, the arrow in accent, the count as
-   a small accent badge; the arrow alone is a 36-px circle. Centred on the
-   reading column, 12 px above what is under the thread (the message box,
-   the read-only note), so it rises with it and with the keyboard. */
+   iter3 §4): a 40-px pill on the surface, the arrow in accent, the count as
+   a small accent badge; the arrow alone is a 40-px circle. At the reading
+   column's right (centred it covered a message's buttons), 12 px above what
+   is under the thread (the message box, the read-only note), so it rises
+   with it and with the keyboard. */
 .chat-float.chat-end {
+  left: auto;
+  right: 12px;
+  transform: none;
   bottom: 12px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  height: 32px;
+  height: 40px;
   padding: 0 12px 0 10px;
   background: var(--c-surface-2);
   color: var(--c-text);
@@ -68,19 +51,15 @@
     display 160ms allow-discrete;
 }
 .chat-end.solo {
-  width: 36px;
-  height: 36px;
+  width: 40px;
   padding: 0;
 }
 /* A 44-px touch target around the visible pill. `inset` counts from the
-   padding box (inside the 1-px border): 30 + 2 × 7 and 34 + 2 × 5. */
+   padding box (inside the 1-px border): 38 + 2 × 3. */
 .chat-end::before {
   content: "";
   position: absolute;
-  inset: -7px;
-}
-.chat-end.solo::before {
-  inset: -5px;
+  inset: -3px;
 }
 .chat-float.chat-end[hidden] {
   display: none;

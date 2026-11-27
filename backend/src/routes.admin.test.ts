@@ -67,6 +67,10 @@ const dbStubs = vi.hoisted(() => ({
 	// test pins JSON shape, not specific counter values; per-call
 	// counter behaviour is exercised in `db.test.ts`.
 	getD1CallsSinceBoot: vi.fn(() => 0),
+	getD1RowsRead: vi.fn(() => ({
+		rowsReadSinceBoot: 1234,
+		topStatements: [{ statement: "SELECT 1 #abcdef01", queries: 2, rowsRead: 1234 }],
+	})),
 	__resetD1CallsForTests: vi.fn(),
 }));
 vi.mock("./db.js", () => dbStubs);
@@ -203,7 +207,11 @@ describe("GET /api/admin/stats (#241a)", () => {
 				responses4xxSinceBoot: number;
 				responses5xxSinceBoot: number;
 			};
-			d1: { callsSinceBoot: number };
+			d1: {
+				callsSinceBoot: number;
+				rowsReadSinceBoot: number;
+				topStatements: Array<{ statement: string; queries: number; rowsRead: number }>;
+			};
 			resources: {
 				runningCount: number;
 				statsAvailable: number;
@@ -257,7 +265,11 @@ describe("GET /api/admin/stats (#241a)", () => {
 			responses4xxSinceBoot: 0,
 			responses5xxSinceBoot: 0,
 		});
-		expect(body.d1).toEqual({ callsSinceBoot: 0 });
+		expect(body.d1).toEqual({
+			callsSinceBoot: 0,
+			rowsReadSinceBoot: 1234,
+			topStatements: [{ statement: "SELECT 1 #abcdef01", queries: 2, rowsRead: 1234 }],
+		});
 		// #270: resources block is always present. Empty list of running
 		// sessions → all totals zero, but the `limits` block still
 		// surfaces the per-session min/max/default the form needs.
@@ -309,6 +321,37 @@ describe("GET /api/admin/stats (#241a)", () => {
 		const body = (await res.json()) as { error: string };
 		expect(body.error).toBe("Internal server error");
 		expect(body.error).not.toContain("D1 transient");
+	});
+
+	it("?top= sizes the rows-read breakdown: 10 by default, 1–200, anything else 400", async () => {
+		const countByStatus = vi.fn(async () => ({ running: 0, stopped: 0, terminated: 0, failed: 0 }));
+		await spinUp(countByStatus);
+		dbStubs.getD1RowsRead.mockClear();
+		for (const [q, top] of [
+			["", 10],
+			["?top=1", 1],
+			["?top=200", 200],
+		] as const) {
+			const res = await fetch(`${baseUrl}/api/admin/stats${q}`);
+			expect(res.status).toBe(200);
+			expect(dbStubs.getD1RowsRead).toHaveBeenLastCalledWith(top);
+		}
+		const calls = dbStubs.getD1RowsRead.mock.calls.length;
+		for (const q of [
+			"top=0",
+			"top=201",
+			"top=1.5",
+			"top=-1",
+			"top=abc",
+			"top=1000",
+			"top=5&top=6",
+		]) {
+			const res = await fetch(`${baseUrl}/api/admin/stats?${q}`);
+			expect(res.status, q).toBe(400);
+		}
+		// Refused before any D1 read.
+		expect(dbStubs.getD1RowsRead.mock.calls.length).toBe(calls);
+		expect(countByStatus).toHaveBeenCalledTimes(3);
 	});
 });
 
@@ -788,7 +831,12 @@ describe("GET /admin/sessions per-row caps + usage (#270)", () => {
 		dbStubs.d1Query.mockImplementation(async (sql: string) => ({
 			results: /FROM session_configs/i.test(sql)
 				? [
-						{ session_id: "sA", cpu_limit: 1_000_000_000, mem_limit: 512 * 1024 * 1024 },
+						{
+							session_id: "sA",
+							cpu_limit: 1_000_000_000,
+							mem_limit: 512 * 1024 * 1024,
+							pids_limit: 4096,
+						},
 						// sB has no session_configs row at all
 					]
 				: [],
@@ -802,12 +850,14 @@ describe("GET /admin/sessions per-row caps + usage (#270)", () => {
 			sessionId: string;
 			cpuLimit: number | null;
 			memLimit: number | null;
+			pidsLimit: number | null;
 			usage: { cpuPercent: number; memBytes: number; memPercent: number } | null;
 		}>;
 		const a = body.find((r) => r.sessionId === "sA");
 		const b = body.find((r) => r.sessionId === "sB");
 		expect(a?.cpuLimit).toBe(1_000_000_000);
 		expect(a?.memLimit).toBe(512 * 1024 * 1024);
+		expect(a?.pidsLimit).toBe(4096);
 		// Rounded to 1 decimal place by serializeUsage — the cgroup
 		// samples are too noisy for finer precision to be honest.
 		expect(a?.usage?.cpuPercent).toBe(12.3);
@@ -815,6 +865,7 @@ describe("GET /admin/sessions per-row caps + usage (#270)", () => {
 		// Non-running row: no caps configured, no live usage. Both null.
 		expect(b?.cpuLimit).toBeNull();
 		expect(b?.memLimit).toBeNull();
+		expect(b?.pidsLimit).toBeNull();
 		expect(b?.usage).toBeNull();
 		// gatherStats was called with the RUNNING subset only — sB
 		// (stopped) must not have been sampled.
@@ -955,6 +1006,67 @@ describe("PATCH /admin/sessions/:id/resources (#270)", () => {
 		expect(res.status).toBe(409);
 		const body = (await res.json()) as { error: string };
 		expect(body.error).toMatch(/free memory/i);
+	});
+
+	it("pidsLimit: 256–8192 integers only", async () => {
+		await spinUp(vi.fn());
+		for (const bad of [255, 8193, 1024.5, "4096"]) {
+			const res = await call({ pidsLimit: bad });
+			expect(res.status).toBe(400);
+			expect(((await res.json()) as { error: string }).error).toContain("pidsLimit");
+		}
+	});
+
+	it("pidsLimit alone: persists pids_limit, then applies it to the running container", async () => {
+		const get = vi.fn(async () => meta());
+		const order: string[] = [];
+		const updateResources = vi.fn(async () => {
+			order.push("docker");
+		});
+		await spinUp(vi.fn(), {
+			sessions: { get } as unknown as Partial<SessionManager>,
+			docker: { updateResources } as unknown as Partial<DockerManager>,
+		});
+		// After spinUp — its default would clobber this.
+		dbStubs.d1Query.mockImplementation(async (sql: string) => {
+			if (/^UPDATE session_configs/.test(sql)) order.push(sql);
+			return { results: [], success: true, meta: { changes: 1, duration: 0, last_row_id: 0 } };
+		});
+
+		const res = await call({ pidsLimit: 4096 });
+		expect(res.status).toBe(204);
+		expect(order).toEqual([
+			"UPDATE session_configs SET pids_limit = ? WHERE session_id = ?",
+			"docker",
+		]);
+		expect(dbStubs.d1Query).toHaveBeenCalledWith(expect.stringMatching(/pids_limit = \?/), [
+			4096,
+			"s-any",
+		]);
+		expect(updateResources).toHaveBeenCalledWith("c1", { pidsLimit: 4096 });
+	});
+
+	it("pidsLimit: a docker rejection leaves the persisted value (persist-before-apply) and answers 500", async () => {
+		const get = vi.fn(async () => meta());
+		const updateResources = vi.fn(async () => {
+			throw new Error("daemon said no");
+		});
+		dbStubs.d1Query.mockResolvedValue({
+			results: [],
+			success: true,
+			meta: { changes: 1, duration: 0, last_row_id: 0 },
+		});
+		await spinUp(vi.fn(), {
+			sessions: { get } as unknown as Partial<SessionManager>,
+			docker: { updateResources } as unknown as Partial<DockerManager>,
+		});
+
+		const res = await call({ pidsLimit: 8192 });
+		expect(res.status).toBe(500);
+		expect(dbStubs.d1Query).toHaveBeenCalledWith(expect.stringMatching(/pids_limit = \?/), [
+			8192,
+			"s-any",
+		]);
 	});
 
 	it("returns 403 when requireAdmin denies (no admin-only bypass for non-admins)", async () => {

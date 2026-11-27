@@ -100,7 +100,7 @@ st get 42                         # one message, with its result
   automatically**, in the same scope.
 - A consult started in Project Chat stays in the project. One started in a direct chat stays
   private. Agents cannot choose otherwise.
-- Chains of agent → agent requests are capped (`ACP_MAX_DEPTH`, 6 by default).
+- Agent → agent requests are capped in depth (`ACP_MAX_DEPTH`, 6: nesting, a reply returns the asker to its depth) and in rounds per person's message (`ACP_MAX_CHAIN`, 40).
 - An interrupted run becomes `uncertain`. It is **never resent automatically**; only you can requeue
   it.
 

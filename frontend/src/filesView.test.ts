@@ -235,7 +235,7 @@ describe("view switching", () => {
 		expect(fv.isFilesViewActive()).toBe(true);
 		// Selectable: the Terminal view shows the stopped state and a Start action.
 		expect(($("view-terminal-btn") as HTMLButtonElement).disabled).toBe(false);
-		expect(api.listWorkspaceDir).toHaveBeenCalledWith("s1", "");
+		expect(api.listWorkspaceDir).toHaveBeenCalledWith("s1", "", null);
 
 		// Session started → terminal available again → snaps back.
 		mainState.sessions = [{ sessionId: "s1", name: "s1", status: "running" }];
@@ -276,7 +276,7 @@ describe("tree", () => {
 		await flush();
 		rowFor("src")?.click();
 		await flush();
-		expect(api.listWorkspaceDir).toHaveBeenCalledWith("s1", "src");
+		expect(api.listWorkspaceDir).toHaveBeenCalledWith("s1", "src", null);
 		expect(rowFor("src")?.getAttribute("aria-expanded")).toBe("true");
 		expect(rowFor("src/index.ts")).toBeDefined();
 	});
@@ -324,7 +324,7 @@ describe("tree", () => {
 		});
 		selectSession("s2");
 		await flush();
-		expect(api.listWorkspaceDir).toHaveBeenLastCalledWith("s2", "");
+		expect(api.listWorkspaceDir).toHaveBeenLastCalledWith("s2", "", null);
 		expect(rowFor("README.md")).toBeUndefined();
 		expect(rowFor("other.txt")).toBeDefined();
 	});
@@ -341,7 +341,7 @@ describe("tree", () => {
 		selectSession("s3");
 		$("view-files-btn").click();
 		await flush();
-		expect(api.listWorkspaceDir).toHaveBeenLastCalledWith("s3", "");
+		expect(api.listWorkspaceDir).toHaveBeenLastCalledWith("s3", "", null);
 	});
 });
 
@@ -408,7 +408,7 @@ describe("preview", () => {
 			.find((b) => b.textContent === "Download file")
 			?.click();
 		await flush();
-		expect(api.downloadSessionFile).toHaveBeenCalledWith("s1", "blob.bin");
+		expect(api.downloadSessionFile).toHaveBeenCalledWith("s1", "blob.bin", null);
 		expect(saveBlob).toHaveBeenCalled();
 	});
 

@@ -209,13 +209,34 @@ export function validateRelPathParam(
 interface Resolved {
 	/** `<WORKSPACE_ROOT>/<sessionId>`, lexical. */
 	sessionRoot: string;
+	/** The root of this read, lexical: the session root, or a work's worktree. */
+	root: string;
+	/** The work id when `root` is a worktree. */
+	work: string | null;
 	/** Lexically-resolved absolute target. */
 	joined: string;
-	/** Workspace-relative, POSIX, normalised ("" = root). */
+	/** Root-relative, POSIX, normalised ("" = root). */
 	rel: string;
 }
 
-function resolveLexically(sessionId: string, rawRel: string): Resolved | WorkspaceFsError {
+/**
+ * Where a read is rooted. Absent `work`: the session workspace. With
+ * `work`: that work's git worktree `<workspace>/.st/ctx/<work>` and
+ * NOTHING else — the rest of `.st/` (credentials, `.st/acp`, the other
+ * works) stays out of reach because every containment check below runs
+ * against this root, not the workspace. The caller has already proved the
+ * work is a registered, non-cleaned work of this session's agent
+ * (routes/workRoot.ts); the id is never a client-built path.
+ */
+export interface FsRootOpts {
+	work?: string;
+}
+
+function resolveLexically(
+	sessionId: string,
+	rawRel: string,
+	work?: string,
+): Resolved | WorkspaceFsError {
 	const rootAbs = nodePath.resolve(WORKSPACE_ROOT);
 	const sessionRoot = nodePath.resolve(rootAbs, sessionId);
 	// Defence-in-depth: the session id comes from a D1 row the caller
@@ -224,15 +245,72 @@ function resolveLexically(sessionId: string, rawRel: string): Resolved | Workspa
 	if (nodePath.dirname(sessionRoot) !== rootAbs || nodePath.basename(sessionRoot).startsWith(".")) {
 		return NOT_FOUND;
 	}
+	let root = sessionRoot;
+	if (work !== undefined) {
+		// Same defence for the work id (the route already matched WORK_ID_RE):
+		// exactly one plain segment under `.st/ctx`, never `..` or a dot dir.
+		const ctxDir = nodePath.join(sessionRoot, ".st", "ctx");
+		root = nodePath.resolve(ctxDir, work);
+		if (
+			nodePath.dirname(root) !== ctxDir ||
+			work.startsWith(".") ||
+			nodePath.basename(root) !== work
+		) {
+			return NOT_FOUND;
+		}
+	}
 	// `path.resolve` collapses `../` segments lexically, so a traversal
 	// either lands outside the root (caught by the prefix check) or is
 	// harmlessly normalised back inside.
-	const joined = nodePath.resolve(sessionRoot, rawRel);
-	if (joined !== sessionRoot && !joined.startsWith(sessionRoot + nodePath.sep)) {
+	const joined = nodePath.resolve(root, rawRel);
+	if (joined !== root && !joined.startsWith(root + nodePath.sep)) {
 		return { ok: false, status: 400, error: "path escapes the session workspace" };
 	}
-	const rel = nodePath.relative(sessionRoot, joined).split(nodePath.sep).join("/");
-	return { sessionRoot, joined, rel };
+	const rel = nodePath.relative(root, joined).split(nodePath.sep).join("/");
+	return { sessionRoot, root, work: work ?? null, joined, rel };
+}
+
+/**
+ * The canonical root every containment check compares against, or null
+ * when a work's root is not a real directory at exactly
+ * `<real session root>/.st/ctx/<id>`. Realpath'ing the worktree root alone
+ * is not enough: code in the container can replace `.st`, `.st/ctx` or the
+ * worktree itself with a symlink (to `/`, to the main checkout, to another
+ * work), and a realRoot that followed it would make everything beneath
+ * the link pass as "inside". Requiring the realpath to equal the expected
+ * string means the root names that exact place; the `/proc/self/fd` proof
+ * after each open then compares against it, so a swap after this check
+ * still can't get an outside object served.
+ */
+async function canonicalRoot(r: Resolved): Promise<string | null> {
+	const realSession = await fs.realpath(r.sessionRoot);
+	if (r.work === null) return realSession;
+	let realRoot: string;
+	try {
+		realRoot = await fs.realpath(r.root);
+	} catch (err) {
+		if (isErrno(err, "ENOENT", "ENOTDIR")) return null;
+		throw err;
+	}
+	return realRoot === nodePath.join(realSession, ".st", "ctx", r.work) ? realRoot : null;
+}
+
+/**
+ * True when work `work`'s worktree root exists as a real directory at its
+ * exact place in the session's workspace (see canonicalRoot). For the
+ * routes' "a `creating` work counts only once its worktree exists" rule;
+ * the reads themselves re-check on every request.
+ */
+export async function workRootExists(sessionId: string, work: string): Promise<boolean> {
+	const resolved = resolveLexically(sessionId, "", work);
+	if ("ok" in resolved) return false;
+	try {
+		const real = await canonicalRoot(resolved);
+		return real !== null && (await fs.lstat(real)).isDirectory();
+	} catch (err) {
+		if (isErrno(err, "ENOENT", "ENOTDIR")) return false;
+		throw err;
+	}
 }
 
 /** Workspace-relative form of `abs` under `realRoot`, or null if outside. */
@@ -305,12 +383,12 @@ export async function openWorkspaceFile(
 		 * never set from a request. Containment and the /proc proof still apply.
 		 */
 		allowRestricted?: boolean;
-	} = {},
+	} & FsRootOpts = {},
 ): Promise<OpenedWorkspaceFile | WorkspaceFsError> {
 	const restricted = opts.allowRestricted ? () => false : isRestrictedPath;
-	const resolved = resolveLexically(sessionId, rawRel);
+	const resolved = resolveLexically(sessionId, rawRel, opts.work);
 	if ("ok" in resolved) return resolved;
-	const { sessionRoot, joined } = resolved;
+	const { joined } = resolved;
 	if (resolved.rel === "") {
 		return { ok: false, status: 400, error: "path is a directory, not a file" };
 	}
@@ -321,10 +399,11 @@ export async function openWorkspaceFile(
 	// the containing directory and re-verify against the realpath'd root —
 	// both sides canonicalised so a legitimately-symlinked WORKSPACE_ROOT
 	// (e.g. /var → /private/var) doesn't false-positive every request.
-	let realRoot: string;
+	let realRoot: string | null;
 	let realDir: string;
 	try {
-		realRoot = await fs.realpath(sessionRoot);
+		realRoot = await canonicalRoot(resolved);
+		if (realRoot === null) return NOT_FOUND;
 		realDir = await fs.realpath(nodePath.dirname(joined));
 	} catch (err) {
 		if (isErrno(err, "ENOENT")) return ABSENT;
@@ -493,17 +572,18 @@ export interface WorkspaceListing {
 export async function listWorkspaceDir(
 	sessionId: string,
 	rawRel: string,
-	opts: { maxEntries: number },
+	opts: { maxEntries: number } & FsRootOpts,
 ): Promise<WorkspaceListing | WorkspaceFsError> {
-	const resolved = resolveLexically(sessionId, rawRel);
+	const resolved = resolveLexically(sessionId, rawRel, opts.work);
 	if ("ok" in resolved) return resolved;
-	const { sessionRoot, joined } = resolved;
+	const { joined } = resolved;
 	if (isRestrictedPath(resolved.rel, "dir")) return RESTRICTED;
 
-	let realRoot: string;
+	let realRoot: string | null;
 	let realTarget: string;
 	try {
-		realRoot = await fs.realpath(sessionRoot);
+		realRoot = await canonicalRoot(resolved);
+		if (realRoot === null) return { ok: false, status: 404, error: "Directory not found" };
 		realTarget = await fs.realpath(joined);
 	} catch (err) {
 		if (isErrno(err, "ENOENT", "ENOTDIR")) {

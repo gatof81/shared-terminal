@@ -5,6 +5,10 @@
  *   GET /sessions/:id/fs/preview?path=<file>  bounded text preview / kind sniff (JSON)
  *   GET /sessions/:id/fs/raw?path=<image>     image bytes for inline preview
  *
+ * Each takes an optional `work=<id>`: the root is then that work's
+ * worktree and nothing else (routes/workRoot.ts); `list` answers the
+ * work's view (branch, dir, base, ports, state) alongside the entries.
+ *
  * Full-file download stays on the existing `GET /sessions/:id/files`
  * route (#358, routes/sessions.ts); both go through workspaceFiles.ts.
  *
@@ -36,6 +40,7 @@ import {
 	type WorkspaceFsError,
 } from "../workspaceFiles.js";
 import { assertOwnedByOr404, handleSessionError, type RouteContext } from "./shared.js";
+import { resolveWorkParam } from "./workRoot.js";
 
 // Max entries returned for one directory level. Big enough for any
 // directory a human browses; a 100k-entry cache dir gets the first 2000
@@ -214,19 +219,26 @@ export function registerFileRoutes(router: Router, ctx: RouteContext): void {
 				// missing (see assertOwnedByOr404): a probe learns nothing
 				// about another workspace, not even that the session exists.
 				await assertOwnedByOr404(sessions, req.params.id, userId);
+				const work = await resolveWorkParam(req.query.work, req.params.id, userId);
 				// A listing is up to MAX_DIR_ENTRIES lstats plus a JSON body
 				// that, like a preview, sits in memory until the client
 				// drains it — same slot discipline, own pool.
 				if (!takeSlot(listSlots, userId, res)) return;
 				const result = await listWorkspaceDir(req.params.id, rel, {
 					maxEntries: MAX_DIR_ENTRIES,
+					work: work?.id,
 				});
 				if (!result.ok) {
 					sendFsError(res, result);
 					return;
 				}
 				noStore(res);
-				res.json({ path: result.path, entries: result.entries, truncated: result.truncated });
+				res.json({
+					path: result.path,
+					entries: result.entries,
+					truncated: result.truncated,
+					...(work ? { work: work.view } : {}),
+				});
 			} catch (err) {
 				handleSessionError(err, res);
 			}
@@ -246,8 +258,9 @@ export function registerFileRoutes(router: Router, ctx: RouteContext): void {
 			}
 			try {
 				await assertOwnedByOr404(sessions, req.params.id, userId);
+				const work = await resolveWorkParam(req.query.work, req.params.id, userId);
 				if (!takeSlot(previewSlots, userId, res)) return;
-				const opened = await openWorkspaceFile(req.params.id, rel);
+				const opened = await openWorkspaceFile(req.params.id, rel, { work: work?.id });
 				if (!opened.ok) {
 					sendFsError(res, opened);
 					return;
@@ -308,10 +321,12 @@ export function registerFileRoutes(router: Router, ctx: RouteContext): void {
 			}
 			try {
 				await assertOwnedByOr404(sessions, req.params.id, userId);
+				const work = await resolveWorkParam(req.query.work, req.params.id, userId);
 				// Slot BEFORE the open so a burst can't even hold fds.
 				if (!takeSlot(rawSlots, userId, res)) return;
 				const opened = await openWorkspaceFile(req.params.id, rel, {
 					maxBytes: IMAGE_PREVIEW_MAX_BYTES,
+					work: work?.id,
 				});
 				if (!opened.ok) {
 					sendFsError(res, opened);

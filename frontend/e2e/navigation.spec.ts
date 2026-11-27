@@ -10,7 +10,7 @@ test.describe("navigation", () => {
 		await app.openSession("my-project");
 		await app.expectTerminalReady();
 		expect(page.url()).toContain(`#/sessions/${SESSION_IDS.running}`);
-		await expect(page.locator("#terminal-status-badge")).toHaveText("running");
+		await expect(page.locator("#terminal-status-badge")).toHaveText("en marcha");
 		await expect(page.locator("#terminal-tabs .tab-chip")).toHaveCount(2);
 	});
 
@@ -36,8 +36,6 @@ test.describe("navigation", () => {
 		await expect(page.locator("#git-summary")).toContainText("main");
 		await expect(page.locator("#git-list .git-row")).toHaveCount(2);
 
-		await expect(page.locator("#view-chat-btn")).toBeHidden();
-
 		await app.switchView("terminal");
 		await expect(page.locator("#terminal-session-name")).toHaveText("my-project");
 		await expect(page.locator("#terminal-container .tab-pane.active")).toContainText("Welcome");
@@ -55,11 +53,11 @@ test.describe("navigation", () => {
 		await app.switchView("terminal");
 		const panel = page.locator("#terminal-state");
 		await expect(panel).toBeVisible();
-		await expect(panel).toContainText("This session is stopped");
-		await expect(panel.locator("button", { hasText: "Start session" })).toBeEnabled();
+		await expect(panel).toContainText("Esta sesión está detenida");
+		await expect(panel.locator("button", { hasText: "Poner en marcha" })).toBeEnabled();
 		await app.switchView("git");
-		await expect(page.locator("#git-list")).toContainText("isn't running");
-		await expect(page.locator("#git-list button", { hasText: "Start session" })).toBeVisible();
+		await expect(page.locator("#git-list")).toContainText("no está en marcha");
+		await expect(page.locator("#git-list button", { hasText: "Poner en marcha" })).toBeVisible();
 	});
 
 	test("Files: open a file, preview it, breadcrumbs follow; a restricted file is refused", async ({

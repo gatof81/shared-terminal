@@ -59,7 +59,7 @@ describe("sessionActions — permissions never widen the backend's", () => {
 		expect(canDo(c, "observers").enabled).toBe(true);
 		expect(canDo(ctx("running", { isOwner: false, isAdmin: true }), "stop")).toEqual({
 			enabled: false,
-			reason: "Only the owner can stop this session.",
+			reason: "Solo el dueño puede detenerla.",
 		});
 		expect(canDo(c, "terminate").enabled).toBe(false);
 		expect(canDo(c, "delete").enabled).toBe(false);
@@ -84,7 +84,9 @@ describe("terminalState", () => {
 	it("stopped → Start; terminated → Restore + Delete; failed → log + Delete", () => {
 		expect(terminalState(ctx("stopped"))?.actions.map((a) => a.id)).toEqual(["start"]);
 		// Chat history stays readable on a stopped session: the copy must not say otherwise.
-		expect(terminalState(ctx("stopped"))?.detail).toContain("Chat history stay available");
+		expect(terminalState(ctx("stopped"))?.detail).toContain(
+			"historial del Chat siguen disponibles",
+		);
 		expect(terminalState(ctx("terminated"))?.actions.map((a) => a.id)).toEqual([
 			"restore",
 			"delete",

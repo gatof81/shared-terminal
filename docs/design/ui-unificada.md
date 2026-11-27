@@ -109,7 +109,7 @@ sobre S12/S14).
 | Key bar (mobile, pointer coarse) | esc, tab, ctrl (sticky), ^C, ↑↓←→ (repeat) |
 | Files | `‹ Terminal`, breadcrumbs, ↻, árbol (teclado ok), preview: `‹ Files`, Preview/Source, Format JSON, Copy, Download |
 | Git | `‹ Terminal`, resumen rama, ↻, lista (teclado ok), Start session (si stopped), candidatos de repo, diff: `‹ Changes` |
-| Chat | `‹ Terminal`, `‹` back, ↻, lista (teclado ok), hilo: Load earlier, Copy Markdown/report/code, Agents, pill ↓N new / Jump to latest, composer (Send, Ctrl+Enter), "Open terminal", "I checked the Terminal" |
+| Chat | `‹ Terminal`, `‹` back, ↻, lista (teclado ok), hilo: Load earlier, Copy Markdown/report/code, Agents, pill ↓N new / Jump to latest, composer (Send, Enter; táctil: botón), "Open terminal", "I checked the Terminal" |
 | Insert (+) | Paste text, Attach file, Download file… (`prompt()` nativo), Select & copy |
 | Admin | Refresh, por sesión: Observe, Stop, Delete, Edit caps; usuarios: Edit quotas; grupos: New/Edit/Members/Delete |
 | My groups | Refresh, Observe "<name>" por sesión running |
@@ -558,7 +558,7 @@ decision", sin audit trail de lectura) y queda fuera de esta propuesta.
 │              │   idle · 1h        │  ✓ 3 tool calls  Edit src/auth.ts ▸       │
 │ + New session│                    │ ───────────────────────────────────────── │
 │──────────────│                    │ [ Message Claude…               ] [Send]  │
-│ Templates    │                    │ Ctrl+Enter sends · / and ! → Terminal     │
+│ Templates    │                    │ Enter sends · / and ! → Terminal          │
 └──────────────┴────────────────────┴───────────────────────────────────────────┘
 ```
 

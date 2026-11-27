@@ -1,5 +1,9 @@
 import { expect, test } from "./fixtures.js";
-import { PROJECT_IDS, PROJECT_SESSION_IDS } from "./mockBackend.js";
+import { CONV_IDS, PROJECT_IDS } from "./mockBackend.js";
+
+/** A topic: its message box is the one a soft keyboard comes up for. */
+const TOPIC = `#/projects/${PROJECT_IDS.hz}/c/${CONV_IDS.backend}`;
+const ROOT = "#project-view .ps-topic";
 
 /**
  * The mobile soft keyboard, as far as Chromium can reproduce it. Playwright
@@ -10,7 +14,7 @@ import { PROJECT_IDS, PROJECT_SESSION_IDS } from "./mockBackend.js";
  * to the focused field. What this proves: the app follows the height
  * (layout in the visible band, no safe-area strip, the keyboard flag read
  * against the layout viewport), a scrolled document is put back at 0, and
- * the covered terminal sends nothing to tmux while Chat is shown. What only
+ * the covered terminal sends nothing to tmux while an overlay is shown. What only
  * the device proves: Safari's own scroll and its timing (validated on an
  * iPhone, Safari 27.2, #767).
  */
@@ -57,13 +61,14 @@ async function keyboard(page: import("@playwright/test").Page, height: number, o
 
 test.describe("soft keyboard (simulated visual viewport)", () => {
 	test.skip(({ isMobile }) => !isMobile, "mobile layouts");
+	test.beforeEach(({ backend }) => backend.enableConversations());
 
 	test("keyboard up: the app is as tall as the visible band, the message box stays inside it, no bottom safe-area strip", async ({
 		app,
 		page,
 	}) => {
-		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
-		const ta = page.locator("#acp-chat .acp-chat-composer");
+		await app.login("alice", TOPIC);
+		const ta = page.locator(`${ROOT} .acp-chat-composer`);
 		await expect(ta).toBeVisible();
 		const viewport = page.viewportSize()!;
 		const visible = viewport.height - 380;
@@ -94,8 +99,8 @@ test.describe("soft keyboard (simulated visual viewport)", () => {
 		app,
 		page,
 	}) => {
-		await app.login("alice", `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`);
-		await app.expectView("chat");
+		await app.login("alice", TOPIC);
+		await expect(page.locator(`${ROOT} .acp-chat-composer`)).toBeVisible();
 		await keyboard(page, page.viewportSize()!.height - 380, 0);
 		// Chromium has nothing to scroll: give the document the extent Safari's
 		// full-height layout viewport gives it, then scroll it like Safari does.
@@ -143,15 +148,10 @@ test.describe("soft keyboard (simulated visual viewport)", () => {
 		expect(backend.terminalSockets, "no new socket").toHaveLength(1);
 	});
 
-	for (const chat of [
-		{
-			name: "the agent's chat",
-			hash: `#/sessions/${PROJECT_SESSION_IDS.scratch}/chat`,
-			root: "#acp-chat",
-		},
-		{ name: "Project Chat", hash: `#/projects/${PROJECT_IDS.hz}`, root: "#project-view" },
-	])
-		test(`${chat.name}: with 150 px visible the layout fits its box — the thread gives way, the message box is whole`, async ({
+	// 160 px, not the retired chat's 150: a topic's box carries its «Para:» row
+	// (3B F2), and header + box measure 156 px — the band below that is open (F5 report).
+	for (const chat of [{ name: "a topic", hash: TOPIC, root: ROOT }])
+		test(`${chat.name}: with 160 px visible the layout fits its box — the thread gives way, the message box is whole`, async ({
 			app,
 			page,
 		}) => {
@@ -159,8 +159,8 @@ test.describe("soft keyboard (simulated visual viewport)", () => {
 			const input = page.locator(`${chat.root} .acp-chat-input`);
 			await expect(input).toBeVisible();
 			await input.focus();
-			await keyboard(page, 150, 0);
-			const vh = 150;
+			await keyboard(page, 160, 0);
+			const vh = 160;
 			const composer = (await page.locator(`${chat.root} .acp-chat-composer`).boundingBox())!;
 			expect(composer.y, "the message box starts inside the band").toBeGreaterThanOrEqual(0);
 			expect(composer.y + composer.height, "and ends inside it").toBeLessThanOrEqual(vh + 1);

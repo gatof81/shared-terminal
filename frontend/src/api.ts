@@ -1563,8 +1563,11 @@ export async function uploadSessionFiles(
 export async function downloadSessionFile(
 	sessionId: string,
 	relPath: string,
+	work: string | null = null,
 ): Promise<{ blob: Blob; filename: string }> {
-	const res = await apiFetch(`/sessions/${sessionId}/files?path=${encodeURIComponent(relPath)}`);
+	const res = await apiFetch(
+		`/sessions/${sessionId}/files?path=${encodeURIComponent(relPath)}${workQuery(work)}`,
+	);
 	if (!res.ok) {
 		const body = await res.json().catch(() => ({}));
 		throw new Error(body.error ?? `Download failed (${res.status})`);
@@ -1614,14 +1617,24 @@ export class WorkspaceFsError extends Error {
 	}
 }
 
+/**
+ * `&work=<id>` (3B F4): the request reads that work's worktree. Only the id
+ * travels — never a path under `.st/`; the backend proves the work is this
+ * session's and builds the root itself (routes/workRoot.ts).
+ */
+function workQuery(work: string | null): string {
+	return work === null ? "" : `&work=${encodeURIComponent(work)}`;
+}
+
 async function workspaceFsFetch(
 	sessionId: string,
 	endpoint: string,
 	relPath: string,
 	signal?: AbortSignal,
+	work: string | null = null,
 ): Promise<Response> {
 	const res = await apiFetch(
-		`/sessions/${encodeURIComponent(sessionId)}/fs/${endpoint}?path=${encodeURIComponent(relPath)}`,
+		`/sessions/${encodeURIComponent(sessionId)}/fs/${endpoint}?path=${encodeURIComponent(relPath)}${workQuery(work)}`,
 		{ signal },
 	);
 	if (!res.ok) {
@@ -1634,16 +1647,18 @@ async function workspaceFsFetch(
 export async function listWorkspaceDir(
 	sessionId: string,
 	relPath: string,
+	work: string | null = null,
 ): Promise<WorkspaceListing> {
-	return (await workspaceFsFetch(sessionId, "list", relPath)).json();
+	return (await workspaceFsFetch(sessionId, "list", relPath, undefined, work)).json();
 }
 
 export async function previewWorkspaceFile(
 	sessionId: string,
 	relPath: string,
 	signal?: AbortSignal,
+	work: string | null = null,
 ): Promise<WorkspacePreview> {
-	return (await workspaceFsFetch(sessionId, "preview", relPath, signal)).json();
+	return (await workspaceFsFetch(sessionId, "preview", relPath, signal, work)).json();
 }
 
 /** Image bytes for an inline preview. The Blob is re-typed with the mime
@@ -1653,8 +1668,9 @@ export async function fetchWorkspaceImage(
 	relPath: string,
 	mime: string,
 	signal?: AbortSignal,
+	work: string | null = null,
 ): Promise<Blob> {
-	const res = await workspaceFsFetch(sessionId, "raw", relPath, signal);
+	const res = await workspaceFsFetch(sessionId, "raw", relPath, signal, work);
 	return new Blob([await res.arrayBuffer()], { type: mime });
 }
 
@@ -1743,22 +1759,31 @@ async function gitFetch(
 	return res;
 }
 
+/** `dir` and `work` are exclusive on the backend: with a work, its worktree is the root. */
+function gitWhere(dir: string, work: string | null): Record<string, string> {
+	return work !== null ? { work } : dir ? { dir } : {};
+}
+
 export async function fetchGitStatus(
 	sessionId: string,
 	dir: string,
 	signal?: AbortSignal,
+	work: string | null = null,
 ): Promise<GitStatus> {
-	return (await gitFetch(sessionId, "status", dir ? { dir } : {}, signal)).json();
+	return (await gitFetch(sessionId, "status", gitWhere(dir, work), signal)).json();
 }
 
 export async function fetchGitDiff(
 	sessionId: string,
-	req: { path: string; area: GitArea; oldPath: string | null; dir: string },
+	req: { path: string; area: GitArea; oldPath: string | null; dir: string; work?: string | null },
 	signal?: AbortSignal,
 ): Promise<GitDiff> {
-	const params: Record<string, string> = { path: req.path, area: req.area };
+	const params: Record<string, string> = {
+		path: req.path,
+		area: req.area,
+		...gitWhere(req.dir, req.work ?? null),
+	};
 	if (req.oldPath !== null) params.oldPath = req.oldPath;
-	if (req.dir) params.dir = req.dir;
 	return (await gitFetch(sessionId, "diff", params, signal)).json();
 }
 
@@ -1766,8 +1791,9 @@ export async function fetchGitLog(
 	sessionId: string,
 	dir: string,
 	signal?: AbortSignal,
+	work: string | null = null,
 ): Promise<GitCommit[]> {
-	const body = await (await gitFetch(sessionId, "log", dir ? { dir } : {}, signal)).json();
+	const body = await (await gitFetch(sessionId, "log", gitWhere(dir, work), signal)).json();
 	return body.commits;
 }
 
@@ -1847,6 +1873,16 @@ export interface AcpMessage {
 	project_id?: string | null;
 	depth?: number;
 	client_id?: string | null;
+	/** Execution context: null = the agent's default one; else the work (`st work`) it runs in. */
+	context?: string | null;
+	/** The topic (v27): null = the Archive (direct, or the old Project Chat). */
+	conversation_id?: string | null;
+	/** Sent to the whole team ("Todo el equipo"): 1 on each row of that post. */
+	team?: number | null;
+	/** An `uncertain` run the person marked reviewed ("Dar por revisada"). */
+	reviewed_at?: string | null;
+	/** A runner's recovery report: the interrupted message it reports on. */
+	recovery_of?: number | null;
 }
 
 export interface AcpAgentInfo {
@@ -1877,14 +1913,34 @@ export interface AcpAgentInfo {
 	} | null;
 	projectId?: string | null;
 	runnerSeenAt: string | null;
-	/** Message being worked on, if any. */
-	running?: number | null;
+	/** Messages being worked on, oldest first (an agent with slots runs several at once). */
+	running?: number[];
 	pending?: number;
 	authRequired?: boolean;
 	/** An open question of this agent waits for the person. */
 	waitingInput?: boolean;
+	/** v27: what it runs, in which topic (never slots). */
+	runningIn?: AcpMessageRef[];
+	/** v27: its queue, in the order it takes it. */
+	queue?: AcpMessageRef[];
+	/** v27: its requests to other agents not answered yet. */
+	waitingFor?: Array<AcpMessageRef & { agent: string }>;
+	/**
+	 * A slot kept in a topic (or a work) by a process the agent left running
+	 * there (#761): it cannot take another topic until that process ends.
+	 */
+	heldBy?: Array<{ conversationId: string | null; work: string | null; since: string }>;
+	/** v27: its open question to the person, if any. */
+	question?: { id: number; messageId: number | null; conversationId: string | null } | null;
 	/** Login methods its adapter advertises (terminal-auth), for "Conectar cuenta". */
 	loginMethods?: Array<{ id: string; name: string; description: string }>;
+}
+
+/** A message an agent runs or has queued, with its topic and work (v27). */
+export interface AcpMessageRef {
+	id: number;
+	conversationId: string | null;
+	work: string | null;
 }
 
 export type AcpQuestionState = "open" | "answered" | "delivered" | "withdrawn" | "orphaned";
@@ -1913,7 +1969,7 @@ export interface AcpActivity {
 	[key: string]: unknown;
 }
 
-/** One page of a chat: the individual chat of an agent or a Project Chat. */
+/** One page of a thread: a topic, or an Archive chat (the previous Project Chat, an agent's direct messages). */
 export interface AcpFeed {
 	agent?: AcpAgentInfo;
 	project?: { id: string; name: string };
@@ -1924,6 +1980,50 @@ export interface AcpFeed {
 	/** Retained live activity per agent name. */
 	activity: Record<string, AcpActivity[]>;
 	activitySeq: number;
+	/** A topic's feed (v27): the topic itself, with its read mark. */
+	conversation?: AcpConversation;
+}
+
+/** A topic of a project (docs/ACP_AGENTS.md §4b). */
+export interface AcpConversation {
+	id: string;
+	projectId: string;
+	title: string;
+	createdAt: string;
+	lastActivityAt: string;
+	archivedAt: string | null;
+	readAt: string | null;
+	recipients: { agents: string[] } | { team: true } | null;
+	unread?: number;
+	needsAction?: boolean;
+}
+
+/** GET /api/acp/inbox: the global attention (§4b Inbox). */
+export interface AcpInbox {
+	count: number;
+	action: {
+		questions: Array<AcpQuestion & { conversation_id: string | null; project_id: string | null }>;
+		interrupted: AcpMessage[];
+	};
+	results: AcpMessage[];
+	reports: AcpMessage[];
+}
+
+/** A work (`st work`) as GET /api/acp/works shows it. */
+export interface AcpWork {
+	id: string;
+	agent: string;
+	projectId: string | null;
+	conversationId: string | null;
+	branch: string;
+	/** In the container: `/home/developer/workspace/.st/ctx/<id>`. */
+	dir?: string;
+	baseSha?: string | null;
+	/** Its ports: portBase … portBase+99. */
+	portBase?: number | null;
+	state: string;
+	createdAt: string;
+	closedAt: string | null;
 }
 
 async function acpJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -1938,43 +2038,108 @@ async function acpJson<T>(path: string, init?: RequestInit): Promise<T> {
 	return body;
 }
 
+/**
+ * `running` as a list of ids. The frontend (Pages) goes live at merge, the
+ * backend at its deploy: until then the backend answers one id or null
+ * (before slots), and a number reaching `.find`/`.includes` would throw.
+ */
+export function runningIds(r: unknown): number[] {
+	if (Array.isArray(r)) return r.filter((x): x is number => typeof x === "number");
+	return typeof r === "number" ? [r] : [];
+}
+const agentIn = (a: AcpAgentInfo): AcpAgentInfo => ({ ...a, running: runningIds(a.running) });
+const feedIn = (f: AcpFeed): AcpFeed => ({
+	...f,
+	...(f.agent ? { agent: agentIn(f.agent) } : {}),
+	...(f.agents ? { agents: f.agents.map(agentIn) } : {}),
+});
+
 const beforeQ = (before?: number | null) => (before ? `?before=${before}` : "");
-export const acpListAgents = () => acpJson<AcpAgentInfo[]>("/agents");
-export const acpFeed = (name: string, before?: number | null) =>
-	acpJson<AcpFeed>(`/agents/${encodeURIComponent(name)}/feed${beforeQ(before)}`);
-export const acpProjectFeed = (projectId: string, before?: number | null) =>
-	acpJson<AcpFeed>(`/projects/${encodeURIComponent(projectId)}/feed${beforeQ(before)}`);
+export const acpListAgents = async () => (await acpJson<AcpAgentInfo[]>("/agents")).map(agentIn);
+export const acpFeed = async (name: string, before?: number | null) =>
+	feedIn(await acpJson<AcpFeed>(`/agents/${encodeURIComponent(name)}/feed${beforeQ(before)}`));
+export const acpProjectFeed = async (projectId: string, before?: number | null) =>
+	feedIn(
+		await acpJson<AcpFeed>(`/projects/${encodeURIComponent(projectId)}/feed${beforeQ(before)}`),
+	);
+/** One message to agent `to` in topic `conversationId` (every message is in a topic). */
 export const acpSend = (
 	to: string,
 	body: string,
-	opts: { projectId?: string | null; clientId?: string } = {},
+	opts: { conversationId: string; clientId?: string },
 ) =>
 	acpJson<AcpMessage>("/messages", {
 		method: "POST",
 		body: JSON.stringify({
 			to,
 			body,
-			...(opts.projectId ? { projectId: opts.projectId } : {}),
+			conversationId: opts.conversationId,
 			...(opts.clientId ? { clientId: opts.clientId } : {}),
 		}),
 	});
+export const acpConversationFeed = async (id: string, before?: number | null) =>
+	feedIn(await acpJson<AcpFeed>(`/conversations/${encodeURIComponent(id)}/feed${beforeQ(before)}`));
+export const acpConversations = (projectId: string, archived = false) =>
+	acpJson<AcpConversation[]>(
+		`/projects/${encodeURIComponent(projectId)}/conversations${archived ? "?archived=1" : ""}`,
+	);
+/** Idempotent by `clientRequestId`: a retry after an unknown outcome is the same topic. */
+export const acpCreateConversation = (projectId: string, title: string, clientRequestId: string) =>
+	acpJson<AcpConversation>("/conversations", {
+		method: "POST",
+		body: JSON.stringify({ projectId, title, clientRequestId }),
+	});
+export const acpRenameConversation = (id: string, title: string) =>
+	acpJson<AcpConversation>(`/conversations/${encodeURIComponent(id)}`, {
+		method: "PATCH",
+		body: JSON.stringify({ title }),
+	});
+export const acpArchiveConversation = (id: string) =>
+	acpJson<AcpConversation>(`/conversations/${encodeURIComponent(id)}/archive`, { method: "POST" });
+/** The read mark: the newest event time the reader saw (the server keeps the max). */
+export const acpReadConversation = (id: string, at: string) =>
+	acpJson<AcpConversation>(`/conversations/${encodeURIComponent(id)}/read`, {
+		method: "POST",
+		body: JSON.stringify({ at }),
+	});
+/**
+ * A post in a topic: one row per recipient under one client id. `team`:
+ * the project's agents as of now («Todo el equipo»), resolved by the server.
+ */
+export const acpPost = (
+	conversationId: string,
+	to: string[] | "team",
+	body: string,
+	clientId: string,
+) =>
+	acpJson<{ messages: AcpMessage[]; replayed?: boolean }>("/messages", {
+		method: "POST",
+		body: JSON.stringify({
+			conversationId,
+			...(to === "team" ? { team: true } : { to }),
+			body,
+			clientId,
+		}),
+	});
+export const acpInbox = () => acpJson<AcpInbox>("/inbox");
+export const acpWorks = () => acpJson<AcpWork[]>("/works");
 export const acpSetProject = (name: string, projectId: string | null) =>
 	acpJson<AcpAgentInfo>(`/agents/${encodeURIComponent(name)}`, {
 		method: "PATCH",
 		body: JSON.stringify({ projectId }),
-	});
+	}).then(agentIn);
 /** Change an agent's model: applied by its runner while idle, without restarting anything. */
 export const acpSetModel = (name: string, model: string) =>
 	acpJson<AcpAgentInfo>(`/agents/${encodeURIComponent(name)}`, {
 		method: "PATCH",
 		body: JSON.stringify({ model }),
-	});
+	}).then(agentIn);
 /** Change an agent's reasoning effort (null: default): applied by its runner while idle. */
 export const acpSetEffort = (name: string, effort: string | null) =>
 	acpJson<AcpAgentInfo>(`/agents/${encodeURIComponent(name)}`, {
 		method: "PATCH",
 		body: JSON.stringify({ effort }),
-	});
+	}).then(agentIn);
 export const acpAnswer = (
 	id: number,
 	body: { action: "accept" | "decline"; content?: Record<string, unknown> },
@@ -1993,3 +2158,6 @@ export function openAcpSocket(): WebSocket {
 }
 export const acpRequeue = (id: number) =>
 	acpJson<AcpMessage>(`/messages/${id}/requeue`, { method: "POST" });
+/** «Dar por revisada, sin reencolar»: the interrupted message leaves Pendientes; nothing is sent. */
+export const acpReview = (id: number) =>
+	acpJson<AcpMessage>(`/messages/${id}/review`, { method: "POST" });

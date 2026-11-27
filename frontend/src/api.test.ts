@@ -576,3 +576,28 @@ describe("deleteSession", () => {
 		await expect(api.deleteSession("s1", true)).resolves.toBeUndefined();
 	});
 });
+
+describe("ACP agents: running ids", () => {
+	it("accepts the backend before slots (one id or null) and after (a list)", async () => {
+		const { runningIds } = await import("./api.js");
+		expect(runningIds(7)).toEqual([7]);
+		expect(runningIds(null)).toEqual([]);
+		expect(runningIds(undefined)).toEqual([]);
+		expect(runningIds([7, 9])).toEqual([7, 9]);
+		expect(runningIds([7, "x", 9])).toEqual([7, 9]);
+	});
+
+	it("/agents rows come out with a list whatever shape the backend sent", async () => {
+		const { acpListAgents } = await import("./api.js");
+		fetchSpy.mockResolvedValueOnce(
+			mockFetchResponse({
+				json: [
+					{ name: "viejo", running: 7 },
+					{ name: "libre", running: null },
+					{ name: "nuevo", running: [7, 9] },
+				],
+			}),
+		);
+		expect((await acpListAgents()).map((a) => a.running)).toEqual([[7], [], [7, 9]]);
+	});
+});

@@ -13,6 +13,7 @@ import express from "express";
 import rateLimit from "express-rate-limit";
 import { WebSocketServer } from "ws";
 import { AcpAgents, acpConfigFromEnv } from "./acp/agents.js";
+import { AcpWorks } from "./acp/works.js";
 import { AcpWsHub } from "./acp/ws.js";
 import {
 	ensureAuthReady,
@@ -332,7 +333,7 @@ app.use((_req, res, next) => {
 // (not optional) on buildRouter so a future caller that omits it
 // surfaces as a TypeScript error rather than a silently-dropped
 // postCreate hook (PR #208 round 1 review).
-app.use("/api/acp", buildAcpRouter(acpAgents));
+app.use("/api/acp", buildAcpRouter(acpAgents, new AcpWorks(acpAgents.config, docker)));
 app.use(
 	"/api",
 	buildRouter(sessions, docker, bootstrapBroadcaster, undefined, idleSweeper, {
@@ -517,6 +518,9 @@ function shutdown() {
 		}
 	}
 	wss.close();
+	// Idle runners' claims held open (long-poll): answer them now, or
+	// server.close() would wait up to their 20 s.
+	acpAgents.stopWaiting();
 
 	// #348 — abort in-flight bootstraps and await their failure teardown
 	// (status → failed, log persisted with the abort reason, container

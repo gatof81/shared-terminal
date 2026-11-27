@@ -63,7 +63,7 @@ export function parseDotEnv(text: string): EnvParseResult {
 			// malformed; record + skip.
 			skipped.push({
 				line: lineNo,
-				reason: "missing '=' separator (or empty name)",
+				reason: "falta el separador '=' (o el nombre está vacío)",
 			});
 			continue;
 		}
@@ -80,7 +80,7 @@ export function parseDotEnv(text: string): EnvParseResult {
 			const displayName = name.length > 40 ? `${name.slice(0, 40)}…` : name;
 			skipped.push({
 				line: lineNo,
-				reason: `name '${displayName}' must match ${ENV_NAME_PATTERN.source}`,
+				reason: `el nombre '${displayName}' tiene que cumplir ${ENV_NAME_PATTERN.source}`,
 			});
 			continue;
 		}
@@ -127,7 +127,7 @@ function stripQuotes(
 	if (closeIdx === -1) {
 		skipped.push({
 			line: lineNo,
-			reason: `unterminated ${firstCh === '"' ? "double" : "single"}-quote (multi-line values not supported)`,
+			reason: `comilla ${firstCh === '"' ? "doble" : "simple"} sin cerrar (no se admiten valores de varias líneas)`,
 		});
 		return null;
 	}
@@ -143,7 +143,7 @@ function stripQuotes(
 	if (tail !== "" && !tail.startsWith("#")) {
 		skipped.push({
 			line: lineNo,
-			reason: `embedded ${firstCh === '"' ? "double" : "single"}-quote in value (use the other quote char or remove the quote)`,
+			reason: `comilla ${firstCh === '"' ? "doble" : "simple"} dentro del valor (usá la otra comilla o quitala)`,
 		});
 		return null;
 	}

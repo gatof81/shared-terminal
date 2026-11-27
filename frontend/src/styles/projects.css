@@ -1,68 +1,94 @@
 /* ── Projects & Agents (projectsView.ts) ─────────────────────────── */
 
-/* ── Sidebar: Projects section (above the sessions) ── */
-#project-section {
-  flex-shrink: 0;
-  max-height: 35%;
-  overflow-y: auto;
-  border-bottom: 1px solid var(--c-border);
-  padding: 0 0.5rem 0.5rem;
-}
-#project-section[hidden] {
-  display: none;
-}
-#project-section-header {
+/* ── Sidebar: a project's row (sessionCore.buildProjectRow) ──
+   A link like a session's row: [activity dot][name][one pill | «sin
+   agentes»] (projectSignals.ts). The dot keeps its place when off, so the
+   names line up. */
+.project-row {
+  position: relative;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 0.75rem 0.5rem 0.4rem;
-}
-#project-section-header h2 {
-  font-size: 0.75rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--c-muted);
-}
-/* #new-project-btn: .btn.btn-icon.sm (base.css). */
-.project-item {
-  display: flex;
-  align-items: baseline;
-  gap: 0.5rem;
-  padding: 0.45rem 0.6rem;
+  gap: 8px;
+  min-height: 32px;
+  margin-bottom: 1px;
+  padding: 0 8px;
   border-radius: var(--radius-s);
   color: var(--c-text);
   text-decoration: none;
-  font-size: 0.82rem;
 }
-.project-item:hover {
-  background: var(--c-border-soft);
+.project-row:hover {
+  background: var(--c-surface-2);
 }
-.project-item[aria-current="page"] {
-  background: var(--c-accent-bg);
-}
-.project-item:focus-visible {
+.project-row:focus-visible {
   outline: 2px solid var(--c-accent);
   outline-offset: -2px;
 }
-.project-item-name {
+.project-row[aria-current="page"] {
+  background: var(--c-accent-bg);
+  color: var(--c-white);
+}
+.project-row[aria-current="page"]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--c-accent);
+}
+.project-row-name {
   flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 0.85rem;
+  font-weight: 500;
 }
-.project-list-note {
+/* Shared with the project selector's rows (actions.css). */
+.psig-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.psig-dot.on {
+  background: var(--c-accent);
+}
+.psig-end[hidden] {
+  display: none;
+}
+.psig-pill {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  min-width: 18px;
+  box-sizing: border-box;
+  justify-content: center;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+}
+.psig-waits {
+  background: rgba(var(--c-warn-rgb), 0.16);
+  color: var(--c-warn);
+}
+.psig-results {
+  background: var(--c-accent-bg);
+  color: var(--c-accent);
+}
+.psig-none {
+  flex: none;
   font-size: 0.72rem;
   color: var(--c-muted);
-  padding: 0.25rem 0.6rem;
 }
-
 /* ── Sidebar tree (sessionCore.ts renderGroupedSessions) ──
-   Project → its sessions → each one's agent, plus "Unassigned". What tells
-   a project from a session is not colour: the heading is sans, semibold,
-   with a chevron and a count; a session is monospace, indented behind a
-   guide line, with a status glyph. */
+   Three foldable sections — Proyectos, Agentes sin proyecto, Sesiones —
+   each a heading (sans, semibold, chevron, count, maybe a + or ⋯) over its
+   rows, indented behind a guide line. */
 .sgroup {
   margin-top: 2px;
 }
@@ -109,10 +135,8 @@ button.sgroup-title:focus-visible {
   outline: 2px solid var(--c-accent);
   outline-offset: -2px;
 }
-/* The heading text: a link for a project (it is also `.project-item`),
-   a button for the groups with no page. Same box either way. */
-.sgroup-title,
-.sgroup-title.project-item {
+/* The heading's text: a button that folds the section, like the chevron. */
+.sgroup-title {
   display: flex;
   align-items: center;
   flex: 1;
@@ -130,13 +154,10 @@ button.sgroup-title:focus-visible {
   text-decoration: none;
   cursor: pointer;
 }
-.sgroup-title.project-item:hover {
-  background: transparent;
-  text-decoration: underline;
-}
-.sgroup-title.project-item[aria-current="page"] {
-  background: transparent;
-  color: var(--c-accent);
+/* Proyectos' + and Sesiones' ⋯, at the heading's end. */
+.sgroup-action {
+  flex: none;
+  margin-right: 2px;
 }
 .sgroup-count {
   flex-shrink: 0;
@@ -153,6 +174,13 @@ button.sgroup-title:focus-visible {
 }
 .sgroup-rows[hidden] {
   display: none;
+}
+/* Proyectos while its list has not been read: two rows' worth of space, no words that jump. */
+.sgroup-skeleton {
+  height: 32px;
+  margin: 2px 0;
+  border-radius: var(--radius-s);
+  background: var(--c-border-soft);
 }
 .sgroup-empty {
   font-size: 0.72rem;
@@ -258,11 +286,6 @@ body.project-page-on #actions-btn {
 #project-view[hidden] {
   display: none;
 }
-.pv-page {
-  max-width: 60rem;
-  margin: 0 auto;
-  padding: var(--s-4) var(--s-5) var(--s-6);
-}
 .pv-header {
   display: flex;
   align-items: center;
@@ -305,11 +328,6 @@ body.project-page-on #actions-btn {
 .pv-status-error {
   color: var(--c-err);
 }
-.pv-tools {
-  display: flex;
-  align-items: center;
-  gap: var(--s-2);
-}
 .pv-btn {
   display: inline-flex;
   align-items: center;
@@ -335,16 +353,11 @@ body.project-page-on #actions-btn {
 @media (max-width: 768px) {
   /* Touch targets: 44px (the app's narrow-screen rule, mobile.css).
      Height comes from min-height/line-height, never from a bigger font. */
-  #new-project-btn {
+  .sgroup-action {
     min-width: 2.75rem;
     min-height: 2.75rem;
   }
-  .project-item {
-    align-items: center;
-    min-height: 2.75rem;
-  }
-  /* The tree's headings: both halves (fold / open the project) are 44-px
-     targets, and the name is a size up — it is the phone's main landmark. */
+  /* The tree's headings: 44-px targets, the name a size up. */
   .sgroup-head {
     min-height: 2.75rem;
   }
@@ -356,18 +369,12 @@ body.project-page-on #actions-btn {
     width: 16px;
     height: 16px;
   }
-  .sgroup-title,
-  .sgroup-title.project-item {
+  .sgroup-title {
     min-height: 2.75rem;
     font-size: 0.92rem;
   }
   .sgroup-rows {
     margin-left: 1.3rem;
-  }
-  /* One row for the two actions: on a 320-px phone the list started
-     330 px down (UX audit N3). */
-  #project-section:not([hidden]) #project-section-header {
-    padding-block: 0.25rem 0;
   }
   #sidebar.sidebar-tree #sidebar-actions {
     display: flex;
@@ -388,17 +395,12 @@ body.project-page-on #actions-btn {
   .pv-btn {
     min-height: 2.75rem;
   }
-  .pv-page {
-    padding: var(--s-3) var(--s-4) var(--s-6);
-  }
 }
 
 /* ── Sidebar tree, UX iter3 §1 (alternative A) ─────────────────
-   #sidebar.sidebar-tree (sessionCore.placeSidebarActions): "+ New session"
-   first, then Projects (each folds; its agents under it), then the agents
-   without a project, then the sessions worked from their Terminal — whose
-   ⋯ holds "Show terminated" and Refresh, so the old bar above the list
-   goes. Rows are one line; an agent's row is its face, "@name" and ONE
+   #sidebar.sidebar-tree: "+ New session" first, then the three sections;
+   Sesiones' ⋯ holds "Show terminated" and Refresh, so the old bar above
+   the list goes. Rows are one line; an agent's row is its face, "@name" and ONE
    chip (base.css) with its state; a session's row its dot and its name. */
 #sidebar.sidebar-tree #sidebar-header {
   display: none;
@@ -418,36 +420,6 @@ body.project-page-on #actions-btn {
   border-radius: var(--radius-s);
   font-size: 12.5px;
   text-align: center;
-}
-#sidebar.sidebar-tree #project-section {
-  border-bottom: 0;
-  padding: 0 0.5rem;
-}
-/* The section headings: Projects [+], Agentes sin proyecto, Sessions [⋯]. */
-#sidebar.sidebar-tree #project-section-header,
-.ssection-head {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  min-height: 28px;
-  padding: 8px 4px 0 8px;
-}
-#sidebar.sidebar-tree #project-section-header h2,
-.ssection-head h3 {
-  flex: 1;
-  margin: 0;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--c-muted);
-}
-.ssection {
-  margin-top: 10px;
-}
-.ssection-rows {
-  display: flex;
-  flex-direction: column;
 }
 /* Rows: 32 px, one line; the name gives way (ellipsis), never the chip. */
 .sidebar-tree .session-list-grouped .session-item {
@@ -509,17 +481,14 @@ body.project-page-on #actions-btn {
   font-weight: 600;
 }
 /* Selection: the accent background and a 3-px bar on the left. */
-.sidebar-tree .session-list-grouped .session-item.active,
-.sidebar-tree .sgroup-head:has(a[aria-current="page"]) {
+.sidebar-tree .session-list-grouped .session-item.active {
   position: relative;
   background: var(--c-accent-bg);
 }
-.sidebar-tree .session-list-grouped .session-item.active .session-name,
-.sidebar-tree .sgroup-head:has(a[aria-current="page"]) .sgroup-name {
+.sidebar-tree .session-list-grouped .session-item.active .session-name {
   color: var(--c-white);
 }
-.sidebar-tree .session-list-grouped .session-item.active::before,
-.sidebar-tree .sgroup-head:has(a[aria-current="page"])::before {
+.sidebar-tree .session-list-grouped .session-item.active::before {
   content: "";
   position: absolute;
   left: 0;
@@ -528,9 +497,6 @@ body.project-page-on #actions-btn {
   width: 3px;
   border-radius: 0 3px 3px 0;
   background: var(--c-accent);
-}
-.sidebar-tree .sgroup-title.project-item[aria-current="page"] {
-  color: var(--c-white);
 }
 .sidebar-tree .sgroup-head {
   position: relative;
@@ -560,7 +526,7 @@ body.project-page-on #actions-btn {
     opacity: 1;
   }
 }
-/* A folded (or not) project with agents waiting: "●N" instead of the count. */
+/* A section with something waiting (Proyectos: folded): "●N" instead of the count. */
 .sgroup-head:has(.sgroup-asks) .sgroup-count {
   display: none;
 }
@@ -582,6 +548,7 @@ body.project-page-on #actions-btn {
 @media (max-width: 768px) {
   .sidebar-tree .session-list-grouped .session-item,
   .sidebar-tree .session-list-grouped .session-select,
+  .sidebar-tree .project-row,
   .sidebar-tree .sgroup-head {
     min-height: 48px;
   }

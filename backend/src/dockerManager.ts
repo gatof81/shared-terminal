@@ -52,6 +52,7 @@ export interface AgentLifecycleHooks {
 
 import { isNotFound, isNotModified } from "./dockerErrors.js";
 import {
+	DEFAULT_PIDS_LIMIT,
 	decryptStoredEntries,
 	EFFECTIVE_CPU_NANO_MAX,
 	EFFECTIVE_MEM_BYTES_MAX,
@@ -913,7 +914,8 @@ export class DockerManager {
 				// nproc ulimit would let one session's process count exhaust
 				// a SIBLING session's budget. PidsLimit is per-cgroup, so
 				// sessions stay isolated from each other.
-				PidsLimit: 1024,
+				// Per session since v30 (admin resources PATCH); NULL = 1024.
+				PidsLimit: config?.pidsLimit ?? DEFAULT_PIDS_LIMIT,
 				// docker-init (tini) as PID 1. The entrypoint's PID 1 is
 				// `exec tail -f /dev/null`, which never wait()s — any
 				// orphaned child reparented to it stays a zombie FOREVER,
@@ -2167,9 +2169,14 @@ export class DockerManager {
 	 */
 	async updateResources(
 		containerId: string,
-		caps: { cpuLimit?: number; memLimit?: number },
+		caps: { cpuLimit?: number; memLimit?: number; pidsLimit?: number },
 	): Promise<void> {
-		const update: { NanoCpus?: number; Memory?: number; MemorySwap?: number } = {};
+		const update: {
+			NanoCpus?: number;
+			Memory?: number;
+			MemorySwap?: number;
+			PidsLimit?: number;
+		} = {};
 		if (caps.cpuLimit !== undefined) {
 			// #384 — same host clamp as spawn, same rationale: the admin
 			// schema validates against the static 8-core ceiling, so on a
@@ -2196,6 +2203,7 @@ export class DockerManager {
 			// comment above for the rationale.
 			update.MemorySwap = caps.memLimit;
 		}
+		if (caps.pidsLimit !== undefined) update.PidsLimit = caps.pidsLimit;
 		await this.docker.getContainer(containerId).update(update);
 	}
 

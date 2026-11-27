@@ -1,24 +1,27 @@
 // acpRegistry.ts — the ACP agents as last read from /api/acp/agents, by
 // session: who is an agent, in which project, and its state (running,
 // queue, login, a question waiting, runner liveness). The one store every
-// view reads agents from (the sidebar's rows and group headings); every
-// read of the list writes it (the ACP chats, the project page, the session
-// form, and acpStatusFeed.ts, which keeps it current on a budget). A leaf
-// module (no imports), so the sidebar (sessionCore.ts) can use it without
-// importing the chat modules.
+// view reads agents from (the sidebar's agent rows, a project row's
+// activity dot, which agents have no project); every
+// read of the list writes it (acpStatusFeed.ts — the one read a topic's
+// thread and the project's rail share, kept current on a budget — the
+// agent's settings and the session form). A leaf module (no imports), so the sidebar
+// (sessionCore.ts) can use it without importing the ACP modules.
 //
 // Announced changes: `st:acp-agents` when who is an agent or their project
-// changed (the sidebar regroups), `st:acp-status` when only a state changed
+// changed (the sidebar rebuilds), `st:acp-status` when only a state changed
 // (the sidebar repaints its rows in place).
 
 export interface AcpSessionEntry {
 	name: string;
 	projectId: string | null;
 	runnerSeenAt: string | null;
-	running: number | null;
+	running: number[];
 	pending: number;
 	authRequired: boolean;
 	waitingInput: boolean;
+	/** Slots kept by a process the agent left running (#761). */
+	heldBy: Array<{ conversationId: string | null; work: string | null; since: string }>;
 }
 
 /** The fields of an /api/acp/agents row the registry keeps (structural: no import). */
@@ -27,10 +30,11 @@ export interface AcpAgentRowLike {
 	name: string;
 	projectId?: string | null;
 	runnerSeenAt?: string | null;
-	running?: number | null;
+	running?: number[];
 	pending?: number;
 	authRequired?: boolean;
 	waitingInput?: boolean;
+	heldBy?: Array<{ conversationId: string | null; work: string | null; since: string }>;
 }
 
 let bySession = new Map<string, AcpSessionEntry>();
@@ -53,10 +57,15 @@ function entry(a: AcpAgentRowLike): AcpSessionEntry {
 		name: a.name,
 		projectId: a.projectId ?? null,
 		runnerSeenAt: a.runnerSeenAt ?? null,
-		running: a.running ?? null,
+		running: a.running ?? [],
 		pending: a.pending ?? 0,
 		authRequired: a.authRequired === true,
 		waitingInput: a.waitingInput === true,
+		heldBy: (a.heldBy ?? []).map((h) => ({
+			conversationId: h.conversationId,
+			work: h.work,
+			since: h.since,
+		})),
 	};
 }
 
@@ -113,6 +122,26 @@ export function acpEntry(sessionId: string): AcpSessionEntry | null {
 
 export function acpEntryByName(name: string): AcpSessionEntry | null {
 	for (const e of bySession.values()) if (e.name === name) return e;
+	return null;
+}
+
+/**
+ * Agent `name` no longer exists: the list was read and has no agent by that
+ * name (its session was deleted). Before the first read: false — unknown is
+ * never «gone».
+ */
+export function acpAgentGone(name: string): boolean {
+	return loaded && acpEntryByName(name) === null;
+}
+
+/** The agents taking part in project `projectId`, as last read. */
+export function acpAgentsIn(projectId: string): AcpSessionEntry[] {
+	return [...bySession.values()].filter((e) => e.projectId === projectId);
+}
+
+/** The session agent `name` runs in, if the list has it. */
+export function acpSessionOf(name: string): string | null {
+	for (const [sid, e] of bySession) if (e.name === name) return sid;
 	return null;
 }
 

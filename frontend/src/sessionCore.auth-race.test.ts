@@ -6,7 +6,7 @@
  *      account's list already landed, must not render the old account's
  *      sessions;
  *   D. a deep link on a load whose first GET /sessions FAILS must not be
- *      concluded "Session not found" and cleared from the address.
+ *      concluded «No se encontró la sesión» and cleared from the address.
  *
  * Controlled promises only — no timers, no sleeps.
  */
@@ -244,7 +244,7 @@ describe("A: refreshSessions across logout / another login", () => {
 });
 
 describe("D: deep link while the first session list fails", () => {
-	it("keeps the address and does not report 'Session not found' when the list never loaded", async () => {
+	it("keeps the address and does not report «No se encontró la sesión» when the list never loaded", async () => {
 		const hash = "#/sessions/s1/files";
 		history.replaceState(null, "", `/${hash}`);
 		api.listSessions.mockRejectedValueOnce(new Error("Failed to list sessions"));
@@ -258,6 +258,6 @@ describe("D: deep link while the first session list fails", () => {
 			window.location.hash,
 			"a valid deep link was cleared because the list failed to load",
 		).toBe(hash);
-		expect(mainState.showToast).not.toHaveBeenCalledWith("Session not found", true);
+		expect(mainState.showToast).not.toHaveBeenCalledWith("No se encontró la sesión", true);
 	});
 });

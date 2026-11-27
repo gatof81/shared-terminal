@@ -67,47 +67,49 @@ function gate(
 	const operate = isOwner || isAdmin;
 	switch (id) {
 		case "open":
-			return s.status === "failed" ? no("A failed session has no workspace to open.") : yes;
+			return s.status === "failed" ? no("Una sesión que falló no tiene archivos para abrir.") : yes;
 		case "start":
-			if (!operate) return no("Only the owner or an admin can start this session.");
-			if (s.status === "running") return no("The session is already running.");
-			if (s.status === "failed") return no("A failed session cannot be started; create a new one.");
-			if (s.status === "terminated") return no("A terminated session is restored, not started.");
+			if (!operate) return no("Solo el dueño o un admin puede ponerla en marcha.");
+			if (s.status === "running") return no("La sesión ya está en marcha.");
+			if (s.status === "failed")
+				return no("Una sesión que falló no se puede poner en marcha; creá una nueva.");
+			if (s.status === "terminated")
+				return no("Una sesión terminada se restaura, no se pone en marcha.");
 			return yes;
 		case "restore":
-			if (!operate) return no("Only the owner or an admin can restore this session.");
-			if (s.status !== "terminated") return no("Only a terminated session can be restored.");
+			if (!operate) return no("Solo el dueño o un admin puede restaurarla.");
+			if (s.status !== "terminated") return no("Solo se puede restaurar una sesión terminada.");
 			return yes;
 		case "stop":
-			if (!isOwner) return no("Only the owner can stop this session.");
-			if (s.status !== "running") return no("The session is not running.");
+			if (!isOwner) return no("Solo el dueño puede detenerla.");
+			if (s.status !== "running") return no("La sesión no está en marcha.");
 			return yes;
 		case "newTab":
-			if (!operate) return no("Only the owner or an admin can open a tab.");
-			if (s.status !== "running") return no("Start the session to open a tab.");
+			if (!operate) return no("Solo el dueño o un admin puede abrir una pestaña.");
+			if (s.status !== "running") return no("Poné en marcha la sesión para abrir una pestaña.");
 			return yes;
 		case "reconnect":
-			if (!operate) return no("Only the owner or an admin can attach to this session.");
-			if (s.status !== "running") return no("The session is not running.");
-			if (ctx.connection !== "disconnected") return no("The terminal is connected.");
+			if (!operate) return no("Solo el dueño o un admin puede conectarse a esta sesión.");
+			if (s.status !== "running") return no("La sesión no está en marcha.");
+			if (ctx.connection !== "disconnected") return no("La terminal está conectada.");
 			return yes;
 		case "viewLog":
-			if (!isOwner) return no("Only the owner can read the bootstrap log.");
+			if (!isOwner) return no("Solo el dueño puede leer el registro del bootstrap.");
 			return yes;
 		case "ports":
-			if (!operate) return no("Only the owner or an admin can edit exposed ports.");
+			if (!operate) return no("Solo el dueño o un admin puede editar los puertos expuestos.");
 			return yes;
 		case "observers":
 			if (!(isOwner || isAdmin || isLead))
-				return no("Not authorised to see who observed this session.");
+				return no("No tenés permiso para ver quién observó esta sesión.");
 			return yes;
 		case "terminate":
-			if (!isOwner) return no("Only the owner can terminate this session.");
-			if (s.status === "terminated") return no("The session is already terminated.");
-			if (s.status === "failed") return no("A failed session is deleted, not terminated.");
+			if (!isOwner) return no("Solo el dueño puede terminarla.");
+			if (s.status === "terminated") return no("La sesión ya está terminada.");
+			if (s.status === "failed") return no("Una sesión que falló se elimina, no se termina.");
 			return yes;
 		case "delete":
-			if (!isOwner) return no("Only the owner can delete this session.");
+			if (!isOwner) return no("Solo el dueño puede eliminarla.");
 			return yes;
 	}
 }
@@ -124,39 +126,55 @@ const LABELS: Record<
 	SessionActionId,
 	{ label: string; hint: string; kind: SessionAction["kind"] }
 > = {
-	open: { label: "Open", hint: "Show this session", kind: "normal" },
+	open: { label: "Abrir", hint: "Mostrar esta sesión", kind: "normal" },
 	start: {
-		label: "Start session",
-		hint: "Start the container; the workspace is kept",
+		label: "Poner en marcha",
+		hint: "Arranca el contenedor; los archivos del workspace se conservan",
 		kind: "primary",
 	},
 	restore: {
-		label: "Restore session",
-		hint: "Respawn the container with the existing workspace files",
+		label: "Restaurar",
+		hint: "Crea un contenedor nuevo sobre los archivos del workspace que quedaron",
 		kind: "primary",
 	},
-	stop: { label: "Stop session", hint: "Stop the container; files are kept", kind: "normal" },
-	newTab: { label: "Open a tab", hint: "A new tmux window in this session", kind: "primary" },
-	reconnect: { label: "Reconnect", hint: "Attach the terminal again", kind: "primary" },
-	viewLog: {
-		label: "View bootstrap log",
-		hint: "The captured output of the last bootstrap",
+	stop: {
+		label: "Detener",
+		hint: "Detiene el contenedor; los archivos se conservan",
 		kind: "normal",
 	},
-	ports: { label: "Exposed ports…", hint: "Edit the ports reachable from outside", kind: "normal" },
+	newTab: {
+		label: "Abrir una pestaña",
+		hint: "Una ventana nueva de tmux en esta sesión",
+		kind: "primary",
+	},
+	reconnect: {
+		label: "Reconectar",
+		hint: "Volver a conectar la terminal",
+		kind: "primary",
+	},
+	viewLog: {
+		label: "Ver el registro del bootstrap",
+		hint: "La salida capturada del último bootstrap",
+		kind: "normal",
+	},
+	ports: {
+		label: "Puertos expuestos…",
+		hint: "Editar los puertos accesibles desde afuera",
+		kind: "normal",
+	},
 	observers: {
-		label: "Observers…",
-		hint: "Who has watched or driven this session",
+		label: "Observadores…",
+		hint: "Quién miró o manejó esta sesión",
 		kind: "normal",
 	},
 	terminate: {
-		label: "Terminate session",
-		hint: "Stop and remove the container; the workspace is kept and the session can be restored",
+		label: "Terminar",
+		hint: "Detiene y elimina el contenedor; los archivos del workspace se conservan y la sesión se puede restaurar",
 		kind: "danger",
 	},
 	delete: {
-		label: "Delete permanently",
-		hint: "Remove the container, the workspace files and the session record",
+		label: "Eliminar definitivamente",
+		hint: "Elimina el contenedor, los archivos del workspace y los datos de la sesión",
 		kind: "danger",
 	},
 };
@@ -190,35 +208,36 @@ export function terminalState(ctx: SessionActionContext): {
 	switch (s.status) {
 		case "failed":
 			return {
-				title: "Bootstrap failed",
-				detail: "The container was removed. The captured output explains why.",
+				title: "Falló el bootstrap",
+				detail: "El contenedor se eliminó. La salida capturada explica por qué.",
 				actions: pick("viewLog", "delete"),
 			};
 		case "stopped":
 			return {
-				title: "This session is stopped",
+				title: "Esta sesión está detenida",
 				detail:
-					"Files and Chat history stay available. Start it to use the terminal and Git; to send from Chat, resume Claude in the terminal.",
+					"Files y el historial del Chat siguen disponibles. Ponela en marcha para usar la terminal y Git.",
 				actions: pick("start"),
 			};
 		case "terminated":
 			return {
-				title: "This session was terminated",
-				detail: "Workspace files are kept. Restore it to get a fresh container on them.",
+				title: "Esta sesión está terminada",
+				detail:
+					"Los archivos del workspace se conservan. Restaurala para tener un contenedor nuevo sobre ellos.",
 				actions: pick("restore", "delete"),
 			};
 		case "running":
 			if (ctx.connection === "disconnected") {
 				return {
-					title: "Connection lost",
-					detail: "The terminal could not reach this tab any more. The session itself is running.",
+					title: "Se perdió la conexión",
+					detail: "La terminal ya no llega a esta pestaña. La sesión sigue en marcha.",
 					actions: pick("reconnect"),
 				};
 			}
 			if (ctx.tabs === 0) {
 				return {
-					title: "No tabs yet",
-					detail: "A tab is a tmux window with its own shell.",
+					title: "Todavía no hay pestañas",
+					detail: "Una pestaña es una ventana de tmux con su propia shell.",
 					actions: pick("newTab"),
 				};
 			}

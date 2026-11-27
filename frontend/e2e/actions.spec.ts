@@ -11,10 +11,10 @@ test.describe("session actions", () => {
 	test("session rows are buttons: arrow keys move, Enter opens", async ({ app, page }) => {
 		await app.login("alice");
 		await app.openSidebar();
-		const rows = page.locator("#session-list .ssection-sessions .session-select");
+		const rows = page.locator("#session-list .sgroup-sessions .session-select");
 		await expect(rows).toHaveCount(3);
 		await rows.first().focus();
-		await expect(rows.first()).toHaveAttribute("aria-label", /^my-project.*, session running/);
+		await expect(rows.first()).toHaveAttribute("aria-label", /^my-project.*, sesión en marcha/);
 		await page.keyboard.press("ArrowDown");
 		await expect(rows.nth(1)).toBeFocused();
 		await page.keyboard.press("Enter");
@@ -71,11 +71,11 @@ test.describe("session actions", () => {
 		await expect(menu).toBeVisible();
 		const items = menu.locator('[role="menuitem"]');
 		await expect(items).toHaveText([
-			/Stop session/,
-			/Exposed ports/,
-			/Observers/,
-			/Terminate session/,
-			/Delete permanently/,
+			/Detener/,
+			/Puertos expuestos/,
+			/Observadores/,
+			/Terminar/,
+			/Eliminar definitivamente/,
 		]);
 		await expect(items.first()).toBeFocused();
 		await page.keyboard.press("ArrowDown");
@@ -96,8 +96,8 @@ test.describe("session actions", () => {
 		await page.locator('[role="menuitem"][data-action="stop"]').click();
 		// Stop interrupts a running Claude: it is confirmed first.
 		const dialog = page.locator(".dialog-card");
-		await expect(dialog).toContainText("Stop session");
-		await expect(dialog).toContainText("interrupted");
+		await expect(dialog).toContainText("Detener la sesión");
+		await expect(dialog).toContainText("se interrumpe");
 		await dialog.locator(".modal-danger-action").click();
 		await expect
 			.poll(() => backend.requests.some((r) => r.method === "POST" && r.path.endsWith("/stop")))
@@ -130,7 +130,7 @@ test.describe("session actions", () => {
 		const row = app.sessionRow("my-project");
 		await row.hover();
 		await row.locator('.session-action-btn[data-action="stop"]').click();
-		await expect(page.locator(".dialog-card")).toContainText("Stop session");
+		await expect(page.locator(".dialog-card")).toContainText("Detener la sesión");
 		await page.locator(".dialog-card .dialog-cancel").click();
 		await expect(page.locator(".dialog-card")).toHaveCount(0);
 		expect(backend.requests.some((r) => r.method === "POST" && r.path.endsWith("/stop"))).toBe(
@@ -170,7 +170,9 @@ test.describe("session actions", () => {
 			.toBe(true);
 		// The poll sees it running → tabs listed → a tab is opened, or the
 		// "no tabs yet" state offers one.
-		await expect(page.locator("#terminal-state")).toContainText("No tabs yet", { timeout: 10_000 });
+		await expect(page.locator("#terminal-state")).toContainText("Todavía no hay pestañas", {
+			timeout: 10_000,
+		});
 		await page.locator('#terminal-state button[data-action="newTab"]').click();
 		await app.expectTerminalReady();
 		await expect(page.locator("#terminal-state")).toBeHidden();
@@ -183,10 +185,20 @@ test.describe("session actions", () => {
 		await app.login("alice");
 		await app.openSidebar();
 		await app.showTerminated();
+		// One short word on the row, never at the cost of the name; the rest is
+		// in the tooltip and the accessible name.
+		const row = app.sessionRow("old-poc");
+		await expect(row.locator(".session-state")).toHaveText("Terminada");
+		await expect(row.locator(".session-name")).toHaveText("old-poc");
+		await expect(row.locator(".session-select")).toHaveAttribute(
+			"aria-label",
+			/, sesión terminada — archivos conservados$/,
+		);
+		await expect(row.locator(".session-select")).toHaveAttribute("title", /archivos se conservan/);
 		await app.openSession("old-poc");
 		await app.switchView("terminal");
 		const panel = page.locator("#terminal-state");
-		await expect(panel).toContainText("terminated");
+		await expect(panel).toContainText("terminada");
 		await expect(panel.locator('button[data-action="restore"]')).toBeEnabled();
 		await expect(panel.locator('button[data-action="delete"]')).toBeEnabled();
 	});
@@ -201,15 +213,15 @@ test.describe("session actions", () => {
 		await app.expectTerminalReady();
 		backend.dropTerminalSockets(SESSION_IDS.running);
 		const panel = page.locator("#terminal-state");
-		await expect(panel).toContainText("Connection lost");
-		await expect(page.locator("#terminal-status-badge")).toHaveText("disconnected");
+		await expect(panel).toContainText("Se perdió la conexión");
+		await expect(page.locator("#terminal-status-badge")).toHaveText("desconectada");
 		await expect(page.locator("#terminal-container")).toBeHidden();
 		await panel.locator('button[data-action="reconnect"]').click();
 		await expect(panel).toBeHidden();
 		await expect.poll(() => backend.terminalSockets.filter((s) => !s.closed).length).toBe(1);
 		await expect(backend.terminalSockets.at(-1)?.tabId ?? "").toBe("tab-1");
 		await app.expectTerminalReady();
-		await expect(page.locator("#terminal-status-badge")).toHaveText("running");
+		await expect(page.locator("#terminal-status-badge")).toHaveText("en marcha");
 	});
 
 	test("the state panel never shares the box with a live terminal", async ({
@@ -247,7 +259,7 @@ test.describe("server reachability", () => {
 		await app.openSidebar();
 		await app.refreshSessions();
 		await expect(dot).toHaveClass(/unreachable/);
-		await expect(dot).toHaveAttribute("aria-label", /Can't refresh from the server/);
+		await expect(dot).toHaveAttribute("aria-label", /No se puede actualizar desde el servidor/);
 		backend.override = null;
 		await app.refreshSessions();
 		await expect(dot).not.toHaveClass(/unreachable/);
@@ -258,7 +270,7 @@ test.describe("sidebar status text", () => {
 	test("a stopped session says so in words, not only by its dot's colour", async ({ app }) => {
 		await app.login("alice");
 		await app.openSidebar();
-		await expect(app.sessionRow("docs").locator(".session-state")).toHaveText("Stopped");
+		await expect(app.sessionRow("docs").locator(".session-state")).toHaveText("Detenida");
 		await expect(app.sessionRow("my-project").locator(".session-state")).toHaveCount(0);
 	});
 });

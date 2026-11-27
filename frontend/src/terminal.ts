@@ -8,6 +8,7 @@ import { type IDisposable, type ILink, type ILinkProvider, Terminal } from "@xte
 import "@xterm/xterm/css/xterm.css";
 import { type SpecialKey, specialKeySequence } from "./keys.js";
 import { isRetryableCloseCode, MAX_RECONNECT_ATTEMPTS, reconnectDelayMs } from "./reconnect.js";
+import { deviceCellKey, fitTerminal } from "./terminalFit.js";
 import { deferFit, isGeometryFrozen } from "./terminalGeometry.js";
 import { readXtermTheme } from "./theme.js";
 
@@ -244,12 +245,17 @@ export function openTerminalSession(opts: {
 	// addon's activation swaps xterm's render service, so the restore path
 	// below must never construct a second live addon.
 	let webgl: WebglAddon | null = null;
+	// A renderer swap changes the device cell (WebGL floors it, DOM does
+	// not) with the same box: refit. Bound to scheduleFit once it exists —
+	// the init-time fallback below runs before it and before the first fit.
+	let onRendererChange = () => {};
 	const dropToDomFallback = (reason: string) => {
 		// Dispose-only: with no renderer addon loaded, xterm is already on
 		// the DOM renderer the moment the WebGL addon goes away.
 		webgl?.dispose();
 		webgl = null;
 		noticeFallback(reason);
+		onRendererChange();
 	};
 	try {
 		webgl = new WebglAddon();
@@ -310,6 +316,7 @@ export function openTerminalSession(opts: {
 			addon.onContextLoss(() => {
 				addon.dispose();
 				webgl = null;
+				onRendererChange();
 				// The notice gate already fired on the first loss, so a
 				// re-loss after a successful restore is silent — the user
 				// was told once; a flapping driver shouldn't toast per cycle.
@@ -317,6 +324,7 @@ export function openTerminalSession(opts: {
 			});
 			term.loadAddon(addon);
 			webgl = addon;
+			onRendererChange();
 			console.debug("[terminal] WebGL context restored, re-enabled GPU renderer");
 		} catch (err) {
 			restoredAddon?.dispose();
@@ -343,7 +351,26 @@ export function openTerminalSession(opts: {
 	// unconditional, so the symmetry is now properly established.
 	container.addEventListener("webglcontextlost", onContextLost);
 
-	fitAddon.fit();
+	// What the grid depends on: the container's box as FitAddon reads it
+	// (parseInt of the computed width/height), the font size, the
+	// devicePixelRatio and the renderer's device cell. A fit with the same
+	// signature as the last one is skipped: a view switch that merely
+	// thawed a deferred fit (terminalGeometry.ts) has nothing to do. The
+	// fit itself is idempotent (terminalFit.ts — FitAddon's is not, which
+	// once made each such fit flip a column at a cell edge). Recorded only
+	// when the fit could measure (a terminal opened hidden has no cell yet
+	// and must fit later).
+	let lastFitSignature: string | null = null;
+	const fitSignature = () => {
+		const style = getComputedStyle(container);
+		return `${Number.parseInt(style.width, 10)}x${Number.parseInt(style.height, 10)}@${term.options.fontSize}/${window.devicePixelRatio}/${deviceCellKey(term)}`;
+	};
+	const fitIfChanged = () => {
+		const signature = fitSignature();
+		if (signature === lastFitSignature) return;
+		if (fitTerminal(term, fitAddon)) lastFitSignature = signature;
+	};
+	fitIfChanged();
 
 	// Helper: write to clipboard and surface success/failure to the
 	// caller. Used by both the Cmd-C handler (explicit user gesture)
@@ -1059,7 +1086,7 @@ export function openTerminalSession(opts: {
 		requestAnimationFrame(() => {
 			fitScheduled = false;
 			try {
-				fitAddon.fit();
+				fitIfChanged();
 			} catch {
 				/* container detached mid-resize */
 			}
@@ -1105,6 +1132,7 @@ export function openTerminalSession(opts: {
 			}
 		});
 	};
+	onRendererChange = scheduleFit;
 	const ro = new ResizeObserver(scheduleFit);
 	ro.observe(container);
 
