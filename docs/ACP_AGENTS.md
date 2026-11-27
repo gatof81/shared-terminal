@@ -410,6 +410,9 @@ transaction across calls, and a requeue or a runner's write can land between two
 - `/ws/acp` sends `{type: "deleted", conversationId, projectId}` or `{type: "deleted", projectId}` /
   `{type: "deleted", agent}`; open tabs reload.
 - **A backup taken before the deletion brings it back on restore** (backup format unchanged).
+- **An archived project** is out of reach: the three verbs answer 404 for it (`ownsProject` and the topic
+  read require `archived_at IS NULL`), so neither its topics nor its Archive can be deleted — archived projects
+  are not touched (#13's approved scope).
 
 ### Agents' state
 
