@@ -174,6 +174,7 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 						ownerUsername: row.ownerUsername,
 						cpuLimit: sCaps?.cpuLimit ?? null,
 						memLimit: sCaps?.memLimit ?? null,
+						pidsLimit: sCaps?.pidsLimit ?? null,
 						usage,
 					};
 				}),
@@ -209,8 +210,14 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 				return;
 			}
 			const patch = parsed.data;
-			if (patch.cpuLimit === undefined && patch.memLimit === undefined) {
-				res.status(400).json({ error: "At least one of cpuLimit or memLimit must be provided" });
+			if (
+				patch.cpuLimit === undefined &&
+				patch.memLimit === undefined &&
+				patch.pidsLimit === undefined
+			) {
+				res
+					.status(400)
+					.json({ error: "At least one of cpuLimit, memLimit or pidsLimit must be provided" });
 				return;
 			}
 			try {

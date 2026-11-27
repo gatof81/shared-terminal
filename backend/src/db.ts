@@ -980,6 +980,13 @@ export const MIGRATIONS: readonly Migration[] = [
 			await d1Batch([...ACP_TASKS_DDL]);
 		},
 	},
+	{
+		version: 30,
+		description: "session_configs.pids_limit — a session's PidsLimit (NULL = default)",
+		apply: async () => {
+			await addColumnIfMissing("session_configs", "pids_limit INTEGER");
+		},
+	},
 ];
 
 /**

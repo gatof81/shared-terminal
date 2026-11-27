@@ -285,6 +285,21 @@ describe("DockerManager.spawn config-applied", () => {
 		});
 	});
 
+	// v30 — PidsLimit is per session: the stored value, NULL on a row = 1024.
+	it.each([
+		[4096, 4096],
+		[null, 1024],
+	])("sets PidsLimit from session_configs.pids_limit (%s → %s)", async (stored, expected) => {
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [{ session_id: "sess-1", cpu_limit: null, mem_limit: null, pids_limit: stored }],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		});
+		const { dm, captured } = makeDmWithCreateCapture();
+		await dm.spawn("sess-1");
+		expect((captured.opts.HostConfig as { PidsLimit: number }).PidsLimit).toBe(expected);
+	});
+
 	it("applies cpu_limit / mem_limit from the session_configs row", async () => {
 		dbStubs.d1Query.mockResolvedValueOnce({
 			results: [
@@ -681,6 +696,12 @@ describe("DockerManager.updateResources", () => {
 			Memory: 1024 * 1024 * 1024,
 			MemorySwap: 1024 * 1024 * 1024,
 		});
+	});
+
+	it("forwards PidsLimit when pidsLimit is set", async () => {
+		const { dm, captured } = makeDmWithUpdateCapture();
+		await dm.updateResources("c1", { pidsLimit: 4096 });
+		expect(captured.opts).toEqual({ PidsLimit: 4096 });
 	});
 
 	it("forwards both when both are set", async () => {
