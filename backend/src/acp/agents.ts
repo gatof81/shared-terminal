@@ -526,6 +526,13 @@ export class AcpAgents {
 		return row;
 	}
 
+	/** The agent's row as this process last wrote or read it (setModel and the
+	 *  other setters keep it), without a D1 read: a long-held request (the
+	 *  claim's wait) answers with what is true now, not when it arrived. */
+	current(agent: AgentRow): AgentRow {
+		return this.byId.get(agent.agent_id) ?? agent;
+	}
+
 	/**
 	 * Changes the model the agent's runner asks its adapter for. Nothing is
 	 * restarted here: the runner reads the requested model with every claim and
@@ -535,13 +542,6 @@ export class AcpAgents {
 	 * back to the launch-time ANTHROPIC_MODEL. What the adapter confirmed comes
 	 * back through `setModelApplied`.
 	 */
-	/** The agent's row as this process last wrote or read it (setModel and the
-	 *  other setters keep it), without a D1 read: a long-held request (the
-	 *  claim's wait) answers with what is true now, not when it arrived. */
-	current(agent: AgentRow): AgentRow {
-		return this.byId.get(agent.agent_id) ?? agent;
-	}
-
 	async setModel(ownerUserId: string, name: string, model: string): Promise<AgentRow | null> {
 		const r = await d1Query<AgentRow>(
 			"UPDATE acp_agents SET model = ? WHERE owner_user_id = ? AND name = ? RETURNING *",
@@ -1475,14 +1475,16 @@ export class AcpAgents {
 			const id = (m as { id?: unknown })?.id;
 			if (typeof id !== "string" || !/^[a-z0-9-]{1,40}$/.test(id) || !t) continue;
 			// Only a program under the runtime mount or a system path, args from a
-			// safe alphabet: this becomes a shell line in the tab.
+			// safe alphabet: this becomes a shell line in the tab, each arg inside
+			// single quotes. "@" is in it because the adapter's own script lives
+			// under its scoped package (node_modules/@agentclientprotocol/…).
 			if (
 				typeof t.command !== "string" ||
 				!/^\/(opt\/st-acp|usr\/(local\/)?bin)\/[A-Za-z0-9._/-]+$/.test(t.command)
 			)
 				continue;
 			const args = Array.isArray(t.args) ? t.args : [];
-			if (!args.every((a) => typeof a === "string" && /^[A-Za-z0-9._/=-]{1,200}$/.test(a)))
+			if (!args.every((a) => typeof a === "string" && /^[A-Za-z0-9._/=@-]{1,200}$/.test(a)))
 				continue;
 			ok.push({
 				id,

@@ -608,24 +608,33 @@ describe("ACP messages: scope, replies, loop guard (v22)", () => {
 	});
 
 	it("Conectar cuenta: only the adapter's safe terminal-auth commands, run in a tab of the agent's session", async () => {
+		const ADAPTER_SCRIPT =
+			"/opt/st-acp/claude-acp-0.108.0/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js";
 		const createTab = vi.fn(async (_sid: string, _label?: string, _cmd?: string) => ({
 			tabId: "tab-login",
 		}));
 		(acp as unknown as { docker: unknown }).docker = { createTab };
 		const reported = await call(as("arquitecto"), "POST", "/runner/auth-methods", {
 			methods: [
+				// What claude-agent-acp 0.108.0 really advertises (dist/auth-methods.js:
+				// `[process.execPath, script, ...method.args]`); its script path sits
+				// under the scoped package, so it carries an "@".
 				{
 					id: "claude-ai-login",
 					name: "Claude Subscription",
 					terminal: {
-						command: "/usr/local/bin/node",
-						args: [
-							"/opt/st-acp/claude-acp-0.108.0/node_modules/x/index.js",
-							"--cli",
-							"auth",
-							"login",
-							"--claudeai",
-						],
+						command: "/usr/bin/node",
+						args: [ADAPTER_SCRIPT, "--cli", "auth", "login", "--claudeai"],
+						label: "Claude Login",
+					},
+				},
+				{
+					id: "console-login",
+					name: "Anthropic Console",
+					terminal: {
+						command: "/usr/bin/node",
+						args: [ADAPTER_SCRIPT, "--cli", "auth", "login", "--console"],
+						label: "Anthropic Console Login",
 					},
 				},
 				{
@@ -642,6 +651,7 @@ describe("ACP messages: scope, replies, loop guard (v22)", () => {
 		);
 		expect(ag.loginMethods).toEqual([
 			{ id: "claude-ai-login", name: "Claude Subscription", description: "" },
+			{ id: "console-login", name: "Anthropic Console", description: "" },
 		]);
 		expect(
 			(await call(owner, "POST", "/agents/arquitecto/login", { methodId: "evil" })).status,
@@ -660,9 +670,9 @@ describe("ACP messages: scope, replies, loop guard (v22)", () => {
 		expect(r.body).toEqual({ sessionId: SID.arq, tabId: "tab-login" });
 		const [sid, label, line] = createTab.mock.calls[0]!;
 		expect([sid, label]).toEqual([SID.arq, "Conectar cuenta"]);
-		expect(line).toMatch(
-			/^'\/usr\/local\/bin\/node' '\/opt\/st-acp\/[^']+' '--cli' 'auth' 'login' '--claudeai'; /,
-		);
+		expect(
+			line?.startsWith(`'/usr/bin/node' '${ADAPTER_SCRIPT}' '--cli' 'auth' 'login' '--claudeai'; `),
+		).toBe(true);
 	});
 
 	/** Claims and finishes everything queued for these agents (replies included). */
