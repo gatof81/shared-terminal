@@ -228,12 +228,14 @@ foot.append(settingsBtn);
 const teamSection = section(teamHead, teamList, teamNote);
 teamSection.classList.add("rail-section-team");
 
+const worksSection = section(worksHead, worksList, worksNote, closedToggle);
+
 const scroll = el("div", "rail-scroll");
 scroll.append(
 	attention,
 	section(convHead, convList, convNote, archivedToggle),
 	teamSection,
-	section(worksHead, worksList, worksNote, closedToggle),
+	worksSection,
 	section(archiveHead, archiveList),
 );
 railBody.append(scroll, foot);
@@ -598,7 +600,11 @@ function paint(): void {
 	teamNote.textContent = agentsRead ? "Sin agentes en este proyecto." : "Cargando…";
 
 	// Trabajos
-	const mine = works.filter((w) => w.projectId === p);
+	// A cleaned work is gone for good (its worktree removed): the rail stops
+	// listing it, and with nothing left the section is not drawn. Its
+	// Herramientas address still says it is no longer there (toolsView.ts).
+	const mine = works.filter((w) => w.projectId === p && w.state !== "cleaned");
+	worksSection.hidden = mine.length === 0;
 	const open = mine.filter((w) => OPEN_WORK.has(w.state));
 	const closed = mine.filter((w) => !OPEN_WORK.has(w.state));
 	const shownWorks = showClosed ? [...open, ...closed] : open;
@@ -640,7 +646,7 @@ const OPEN_WORK = new Set(["creating", "active", "closing"]);
 
 function workWords(w: AcpWork): string {
 	if (w.state === "creating") return "creándose";
-	if (w.state !== "active") return w.state === "cleaned" ? "limpiado" : "cerrado";
+	if (w.state !== "active") return "cerrado";
 	const runs = agents.find((a) => a.name === w.agent)?.runningIn?.some((r) => r.work === w.id);
 	return runs ? "en curso" : "activo";
 }
